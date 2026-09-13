@@ -1,0 +1,29 @@
+# Gitleaks configuration: the default ruleset (provider keys, private keys,
+# JWTs, connection strings) plus two heuristic rules. Allowlists may only name
+# documented placeholder values; nothing here weakens detection of a real secret.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "postgres-connection-string-with-password"
+description = "Postgres connection string carrying a non-placeholder password"
+# RE2 has no lookahead; placeholders are excluded by the rule allowlist below.
+regex = '''postgres(?:ql)?://[a-zA-Z0-9_.-]+:[^@\s:/\[\]]{8,}@'''
+tags = ["database", "credentials"]
+[rules.allowlist]
+regexes = [
+  '''(?i)(postgres:postgres@|user:password@|ci:ci@|changeme|placeholder|example|your[_-]?password|\[password\])''',
+]
+
+[[rules]]
+id = "generic-secret-assignment"
+description = "Secret-looking assignment with a long literal value"
+regex = '''(?i)\b(secret|token|api[_-]?key|private[_-]?key|passwd|password)\b\s*[:=]\s*['"][^'"\s]{16,}['"]'''
+tags = ["generic"]
+[rules.allowlist]
+# "match" tests the allowlist against the keyword and the value together.
+regexTarget = "match"
+regexes = [
+  '''(?i)(example|placeholder|fixture|redacted|dummy|fake|changeme|your[_-]?)''',
+]

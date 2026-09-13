@@ -1,0 +1,8 @@
+# Everything is owned by the maintainer. Security-critical paths are listed
+# explicitly so they stay visible as the tree grows.
+*                 @shahbaz242630
+/.github/         @shahbaz242630
+/scripts/         @shahbaz242630
+/.gitleaks.toml   @shahbaz242630
+/.gitignore       @shahbaz242630
+/SECURITY.md      @shahbaz242630

@@ -1,0 +1,19 @@
+# Dependabot version updates. Alerts and security updates are enabled in the
+# repository settings; this file keeps the SHA-pinned GitHub Actions current.
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    open-pull-requests-limit: 5
+    # Wait a week before adopting a fresh release (supply-chain hygiene).
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: 'chore(ci)'
