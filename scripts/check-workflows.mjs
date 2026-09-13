@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 // Workflow hygiene gate for .github/workflows/*.yml, run by the CI
 // "Workflow policy" job. A workflow fails this check when it:
-//   - uses `pull_request_target` (trusted context running untrusted PR code)
-//   - grants `permissions: write-all`, or lacks a top-level `permissions:`
-//     block with `contents: read` (or `permissions: {}`)
+//   - mentions `pull_request_target` anywhere outside a comment
+//   - mentions `write-all` anywhere outside a comment
+//   - has a top-level `permissions:` that is missing, grants any write scope,
+//     or lacks `contents: read` (`permissions: {}` is allowed); writes belong
+//     on individual jobs
 //   - uses an action that is not pinned to a full 40-character commit SHA
 //   - uses an action outside ALLOWED_ACTIONS (extend the list deliberately)
 //   - runs on `pull_request` and references any secret other than GITHUB_TOKEN
 //   - has a job without `timeout-minutes`
 //   - checks out code without `persist-credentials: false`
+//   - quotes a mapping key (the checks are line-based, so quoted keys such as
+//     `"uses":` could hide a step from them; this fails closed instead)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,17 +33,25 @@ const STEP_START = /^\s*-\s/;
 export function checkWorkflow(relativePath, contents) {
   const violations = [];
   const add = (rule, message) => violations.push({ rule, message, path: relativePath });
+  const code = stripComments(contents);
 
-  if (/^\s*pull_request_target\s*:/m.test(contents)) {
+  if (/^\s*-?\s*["'][A-Za-z0-9_-]+["']\s*:/m.test(code)) {
+    add('unquoted-keys', 'Mapping keys must not be quoted; the policy checks rely on unquoted keys.');
+  }
+
+  if (/\bpull_request_target\b/.test(code)) {
     add('no-pull-request-target', 'pull_request_target exposes trusted context to untrusted PR code.');
   }
 
-  if (/^\s*permissions\s*:\s*write-all\s*$/m.test(contents)) {
-    add('no-write-all', 'permissions: write-all is never acceptable.');
+  if (/\bwrite-all\b/.test(code)) {
+    add('no-write-all', 'write-all is never acceptable.');
   }
 
-  if (!hasMinimalTopLevelPermissions(contents)) {
-    add('minimal-permissions', 'Declare a top-level `permissions:` block with `contents: read` (or `permissions: {}`).');
+  if (!hasMinimalTopLevelPermissions(code)) {
+    add(
+      'minimal-permissions',
+      'Top-level `permissions:` must grant only read scopes, including `contents: read` (or be `{}`); grant writes per job.',
+    );
   }
 
   for (const match of contents.matchAll(/^\s*-?\s*uses\s*:\s*['"]?([^\s'"#]+)['"]?/gm)) {
@@ -57,7 +69,7 @@ export function checkWorkflow(relativePath, contents) {
     }
   }
 
-  if (/^\s*pull_request\s*:/m.test(contents)) {
+  if (/\bpull_request\b/.test(code)) {
     for (const match of contents.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)/g)) {
       if (match[1] === 'GITHUB_TOKEN') continue;
       add('no-secrets-on-pull-request', `secrets.${match[1]} is referenced in a workflow that runs on pull_request.`);
@@ -77,11 +89,42 @@ export function checkWorkflow(relativePath, contents) {
   return violations;
 }
 
-function hasMinimalTopLevelPermissions(contents) {
-  if (/^permissions\s*:\s*\{\s*\}\s*$/m.test(contents)) return true;
-  const block = contents.match(/^permissions\s*:\s*\r?\n((?:[ \t]+\S.*\r?\n?)+)/m);
-  if (!block) return false;
-  return /^[ \t]+contents\s*:\s*read\s*$/m.test(block[1]);
+// Removes YAML comments: a `#` at the start of a line or after whitespace.
+export function stripComments(contents) {
+  return contents
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(^|\s)#.*$/, ''))
+    .join('\n');
+}
+
+// Accepts block style or flow style (`{ contents: read }`, `{}`). Every entry
+// must be `scope: read|none`, and `contents: read` must be present unless the
+// map is empty. Anything unrecognised fails closed.
+export function hasMinimalTopLevelPermissions(code) {
+  const lines = code.split('\n');
+  const start = lines.findIndex((line) => /^permissions\s*:/.test(line));
+  if (start < 0) return false;
+
+  let entries;
+  const inline = lines[start].replace(/^permissions\s*:/, '').trim();
+  if (inline === '') {
+    entries = [];
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim() !== '' && !/^[ \t]/.test(line)) break; // next top-level key
+      entries.push(line);
+    }
+  } else {
+    const flow = inline.match(/^\{([^}]*)\}$/);
+    if (!flow) return false; // a scalar such as read-all
+    entries = flow[1].split(',');
+  }
+
+  const scopes = entries.map((entry) => entry.trim()).filter(Boolean);
+  if (scopes.length === 0) return inline !== ''; // `{}` is fine; a bare `permissions:` is not
+
+  const parsed = scopes.map((entry) => entry.match(/^([a-z-]+)\s*:\s*(read|none)$/));
+  if (parsed.some((scope) => scope === null)) return false;
+  return parsed.some((scope) => scope[1] === 'contents' && scope[2] === 'read');
 }
 
 export function collectJobs(contents) {

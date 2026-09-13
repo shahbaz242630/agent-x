@@ -4,7 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { checkWorkflow, checkoutStepsKeepingCredentials, collectJobs, main, runCheck } from './check-workflows.mjs';
+import {
+  checkWorkflow,
+  checkoutStepsKeepingCredentials,
+  collectJobs,
+  main,
+  runCheck,
+  stripComments,
+} from './check-workflows.mjs';
 
 const SHA = '3d3c42e5aac5ba805825da76410c181273ba90b1';
 
@@ -75,6 +82,66 @@ test('a top-level permissions block without contents: read is rejected', () => {
   assert.deepEqual(rules(GOOD.replace('contents: read', 'contents: write')), ['minimal-permissions']);
 });
 
+test('a top-level write scope next to contents: read is rejected', () => {
+  assert.deepEqual(rules(GOOD.replace('  contents: read', '  contents: read\n  id-token: write')), ['minimal-permissions']);
+});
+
+test('extra top-level read scopes are allowed', () => {
+  assert.deepEqual(rules(GOOD.replace('  contents: read', '  contents: read\n  actions: read')), []);
+});
+
+test('a comment inside the top-level permissions block is allowed', () => {
+  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', 'permissions:\n  # read only\n  contents: read')), []);
+});
+
+test('flow-style top-level permissions are parsed', () => {
+  const flow = (value) => GOOD.replace('permissions:\n  contents: read', `permissions: ${value}`);
+  assert.deepEqual(rules(flow('{ contents: read }')), []);
+  assert.deepEqual(rules(flow('{ contents: read, id-token: write }')), ['minimal-permissions']);
+});
+
+test('read-all and a bare permissions key are rejected', () => {
+  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', 'permissions: read-all')), ['minimal-permissions']);
+  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read\n', 'permissions:\n')), ['minimal-permissions']);
+});
+
+const BLOCK_TRIGGERS = 'on:\n  pull_request:\n  push:\n    branches: [main]\n';
+
+test('pull_request_target in a flow-style trigger list is rejected', () => {
+  assert.deepEqual(rules(GOOD.replace(BLOCK_TRIGGERS, 'on: [pull_request_target, push]\n')), ['no-pull-request-target']);
+});
+
+test('a quoted pull_request_target key is rejected', () => {
+  assert.deepEqual(rules(GOOD.replace('  pull_request:', "  'pull_request_target':")), ['unquoted-keys', 'no-pull-request-target']);
+});
+
+test('pull_request_target mentioned only in a comment is not flagged', () => {
+  assert.deepEqual(rules(GOOD.replace('name: CI', 'name: CI # never use pull_request_target here')), []);
+});
+
+test('secrets are rejected for flow-style and scalar pull_request triggers', () => {
+  const withSecret = (triggers) =>
+    GOOD.replace(BLOCK_TRIGGERS, triggers).replace('secrets.GITHUB_TOKEN', 'secrets.PARTNER_API_KEY');
+  assert.deepEqual(rules(withSecret('on: [pull_request, push]\n')), ['no-secrets-on-pull-request']);
+  assert.deepEqual(rules(withSecret('on: pull_request\n')), ['no-secrets-on-pull-request']);
+});
+
+test('a quoted uses key fails closed instead of hiding an unpinned action', () => {
+  assert.deepEqual(rules(GOOD.replace('      - run: echo ok', '      - "uses": someone/evil@main\n      - run: echo ok')), ['unquoted-keys']);
+});
+
+test('a quoted permissions key with write-all is rejected', () => {
+  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', "'permissions': write-all")), [
+    'unquoted-keys',
+    'no-write-all',
+    'minimal-permissions',
+  ]);
+});
+
+test('stripComments removes comments but keeps a # inside a word', () => {
+  assert.equal(stripComments('run: echo a#b # note\n# whole line'), 'run: echo a#b\n');
+});
+
 test('a repository secret in a pull_request workflow is rejected', () => {
   assert.deepEqual(rules(GOOD.replace('secrets.GITHUB_TOKEN', 'secrets.PARTNER_API_KEY')), ['no-secrets-on-pull-request']);
 });
@@ -109,6 +176,10 @@ test('checkout under a named step is checked', () => {
       - run: echo done
 `;
   assert.deepEqual(checkoutStepsKeepingCredentials(named), [7]);
+});
+
+test('a checkout line with no step marker above it is still checked', () => {
+  assert.deepEqual(checkoutStepsKeepingCredentials(`    uses: actions/checkout@${SHA}\n`), [1]);
 });
 
 test('persist-credentials on a later step does not cover an earlier checkout', () => {
