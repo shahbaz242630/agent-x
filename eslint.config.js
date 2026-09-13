@@ -53,6 +53,95 @@ const wallClock = [
   },
 ];
 
+/**
+ * SEC-PTR-07 (ADR-012 §6): product code never turns off TLS certificate checks.
+ * The start-up config check covers the environment variable; these cover code.
+ */
+const tlsChecksOff = [
+  {
+    selector:
+      "ObjectExpression > Property[key.name='rejectUnauthorized']:not([value.value=true]), " +
+      "ObjectExpression > Property[key.value='rejectUnauthorized']:not([value.value=true]), " +
+      "PropertyDefinition[key.name='rejectUnauthorized']:not([value.value=true])",
+    message: 'SEC-PTR-07: TLS certificate checks stay on. Leave rejectUnauthorized out, or set it to true.',
+  },
+  {
+    selector:
+      "AssignmentExpression > MemberExpression.left[property.name='rejectUnauthorized'], " +
+      "AssignmentExpression > MemberExpression.left[property.value='rejectUnauthorized']",
+    message: 'SEC-PTR-07: TLS certificate checks stay on. Never assign rejectUnauthorized.',
+  },
+  {
+    selector:
+      "ObjectExpression > Property[key.name='checkServerIdentity'], " +
+      "ObjectExpression > Property[key.value='checkServerIdentity'], " +
+      "PropertyDefinition[key.name='checkServerIdentity'], " +
+      "AssignmentExpression > MemberExpression.left[property.name='checkServerIdentity'], " +
+      "AssignmentExpression > MemberExpression.left[property.value='checkServerIdentity']",
+    message: 'SEC-PTR-07: a custom checkServerIdentity can skip the host name check. Keep the default.',
+  },
+];
+
+/**
+ * SEC-EVD-06: a reason code is a registered one, checked by the compiler. A
+ * type assertion into a reason-code type (one code, a list of codes, or
+ * `keyof typeof REASON_CODES`) would let an unregistered code through. Types
+ * that merely mention a code, such as `Record<ReasonCode, number>`, are fine.
+ */
+const assertion = ':matches(TSAsExpression, TSTypeAssertion)';
+const reasonCodeAssertions = [
+  {
+    selector: [
+      `${assertion} > TSTypeReference.typeAnnotation[typeName.name='ReasonCode']`,
+      `${assertion} > TSArrayType.typeAnnotation > TSTypeReference[typeName.name='ReasonCode']`,
+      `${assertion} > TSTypeOperator.typeAnnotation > TSArrayType > TSTypeReference[typeName.name='ReasonCode']`,
+      `${assertion} > TSTypeOperator.typeAnnotation[operator='keyof'] > TSTypeQuery[exprName.name='REASON_CODES']`,
+    ].join(', '),
+    message: 'SEC-EVD-06: never assert a value into a reason code. Use a code from REASON_CODES, or register one.',
+  },
+];
+
+/** Rule Book §4, §5: settings come only from the checked config, read once at start-up. */
+const configOnly = 'Read settings through loadConfig in @agentx/platform/config, which checks them at start-up.';
+
+/** SEC-WEB-05: outbound HTTP goes only through the allowlisted client. */
+const outboundOnly = 'SEC-WEB-05: make outbound requests with createOutboundFetch from @agentx/platform/outbound.';
+
+/** The network globals Node provides (fetch and WebSocket), taken out of the global object by destructuring. */
+const networkDestructuring = [
+  {
+    selector:
+      'VariableDeclarator[init.name=/^(?:globalThis|global)$/] > ObjectPattern > Property[key.name=/^(?:fetch|WebSocket)$/]',
+    message: outboundOnly,
+  },
+];
+
+/** `process.env` reached through the global object, which the property rule below can't see. */
+const environmentThroughGlobal = [
+  { selector: "MemberExpression[property.name='env'][object.property.name='process']", message: configOnly },
+];
+
+const productSyntax = [
+  ...rawHtmlInjection,
+  ...tlsChecksOff,
+  ...reasonCodeAssertions,
+  ...networkDestructuring,
+  ...environmentThroughGlobal,
+];
+
+/** Randomness must be unpredictable. */
+const mathRandom = { object: 'Math', property: 'random', message: 'Math.random is predictable. Use node:crypto.' };
+
+/**
+ * Import bans for product code. Only config may import node:process (for the
+ * environment); everything else uses the global `process` for signals and exit.
+ */
+const processModule = ['node:process', 'process'].map((name) => ({ name, message: configOnly }));
+const productImportBans = [...processModule];
+
+/** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
+const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
+
 export default defineConfig([
   globalIgnores([
     '**/node_modules/',
@@ -110,21 +199,44 @@ export default defineConfig([
     rules: {
       'no-console': 'error',
       'agentx/no-string-built-sql': 'error',
-      'no-restricted-syntax': ['error', ...rawHtmlInjection],
-      'no-restricted-properties': [
+      'no-restricted-syntax': ['error', ...productSyntax],
+      'no-restricted-properties': ['error', mathRandom, { object: 'process', property: 'env', message: configOnly }],
+      'no-restricted-imports': ['error', { paths: productImportBans }],
+    },
+  },
+
+  // The config module is the one place that reads the environment. Flat config
+  // replaces a rule's options per block, so the other entries are repeated.
+  {
+    files: ['packages/platform/src/config/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-properties': ['error', mathRandom],
+      'no-restricted-imports': ['error', { paths: productImportBans.filter((ban) => !processModule.includes(ban)) }],
+    },
+  },
+
+  // Server code reaches the network only through the allowlisted client. The
+  // console is browser code that calls its own origin, so it is left out.
+  // Node's `global` is declared here, or the rule can't see `global.fetch` in
+  // TypeScript files (the type-aware parser only knows the standard globals).
+  {
+    files: ['packages/**/*.{ts,tsx}', 'apps/**/*.{ts,tsx}'],
+    ignores: ['apps/console/**', 'packages/platform/src/outbound/**'],
+    languageOptions: { globals: { global: 'readonly' } },
+    rules: {
+      'no-restricted-globals': [
         'error',
-        { object: 'Math', property: 'random', message: 'Math.random is predictable. Use node:crypto.' },
+        { globals: networkGlobals, checkGlobalObject: true, globalObjects: ['global'] },
       ],
     },
   },
 
   // Business code in core also takes its time from the Clock (ADR-006 §3).
-  // Flat config replaces a rule's options per block, so the list is repeated.
   {
     files: ['packages/core/**/*.{ts,tsx}'],
     ignores: ['packages/core/src/shared-kernel/clock.ts'],
     rules: {
-      'no-restricted-syntax': ['error', ...rawHtmlInjection, ...wallClock],
+      'no-restricted-syntax': ['error', ...productSyntax, ...wallClock],
     },
   },
 ]);

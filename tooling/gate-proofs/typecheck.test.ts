@@ -1,6 +1,7 @@
 // Gate proof for the strict TypeScript settings (Rule Book §5): each snippet
 // breaks one compiler setting from tsconfig.base.json, and the compiler, run
-// with the root tsconfig.json, must report exactly that setting's error.
+// with the root tsconfig.json, must report exactly that setting's error. The
+// same check proves the compiler refuses an unregistered reason code (SEC-EVD-06).
 import path from 'node:path';
 
 import ts from 'typescript';
@@ -91,6 +92,22 @@ const CASES: { setting: string; files: Record<string, string>; code: number | nu
   {
     setting: 'none: well-typed code compiles cleanly',
     files: { 'clean.ts': 'export const double = (value: number): number => value * 2;\n' },
+    code: null,
+  },
+  {
+    setting: 'SEC-EVD-06: a reason code must be in the registry',
+    files: {
+      'reason-unregistered.ts':
+        "import type { ReasonCode } from '../shared-kernel/index.ts';\nexport const code: ReasonCode = 'MADE_UP_CODE';\n",
+    },
+    code: 2322,
+  },
+  {
+    setting: 'SEC-EVD-06: a registered reason code compiles cleanly',
+    files: {
+      'reason-registered.ts':
+        "import type { ReasonCode } from '../shared-kernel/index.ts';\nexport const code: ReasonCode = 'ORG_FROZEN';\n",
+    },
     code: null,
   },
 ];
