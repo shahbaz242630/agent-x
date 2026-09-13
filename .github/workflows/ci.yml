@@ -78,6 +78,57 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
           GITLEAKS_ENABLE_COMMENTS: false
 
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Corepack must not read a .corepack.env file from the repository, which
+      # could turn off its signature checks or point it at another registry.
+      COREPACK_ENV_FILE: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          # The newest Node 24, so it always meets package.json engines (>=24.19.0).
+          check-latest: true
+          package-manager-cache: false
+
+      # Corepack ships with Node 24. It fetches the pnpm package pinned in
+      # package.json's packageManager field and checks it against the sha512
+      # there. That package then downloads pnpm's native binary and checks it
+      # against npm's registry signature, using keys inside the pinned package.
+      - name: Enable pnpm through Corepack
+        run: corepack enable pnpm
+
+      # pnpm re-applies the release-age and trust checks to the lockfile here.
+      # New advisories are caught by Dependency review (packages this PR adds)
+      # and the weekly full audit, which never blocks a PR.
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Module boundaries
+        run: pnpm boundaries
+
+      - name: Dead code (knip)
+        run: pnpm knip
+
+      - name: Tests, gate proofs and coverage
+        run: pnpm test:coverage
+
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
@@ -88,7 +139,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Blocks a PR that introduces a dependency with a high or critical advisory.
+      # Blocks a PR that introduces a dependency with a high or critical advisory,
+      # including development tools, which run in CI and on our machines.
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown

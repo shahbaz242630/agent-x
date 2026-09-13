@@ -1,0 +1,12 @@
+{
+  "name": "@agentx/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./shared-kernel": "./src/shared-kernel/index.ts"
+  },
+  "dependencies": {
+    "uuid": "14.0.2"
+  }
+}

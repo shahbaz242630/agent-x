@@ -1,0 +1,5 @@
+{
+  "name": "gate-proof-dev-dependency",
+  "private": true,
+  "devDependencies": { "vitest": "4.1.11" }
+}

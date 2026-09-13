@@ -1,7 +1,25 @@
 # Dependabot version updates. Alerts and security updates are enabled in the
-# repository settings; this file keeps the SHA-pinned GitHub Actions current.
+# repository settings; this file keeps the SHA-pinned GitHub Actions and the
+# exact-pinned npm packages current.
 version: 2
 updates:
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    open-pull-requests-limit: 5
+    # At least pnpm's minimumReleaseAge (3 days), or the proposed version fails
+    # to install; SEC-SC-01 checks the two stay in step.
+    cooldown:
+      default-days: 7
+    groups:
+      npm-dependencies:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: 'chore(deps)'
+
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:

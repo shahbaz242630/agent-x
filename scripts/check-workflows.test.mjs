@@ -83,7 +83,9 @@ test('a top-level permissions block without contents: read is rejected', () => {
 });
 
 test('a top-level write scope next to contents: read is rejected', () => {
-  assert.deepEqual(rules(GOOD.replace('  contents: read', '  contents: read\n  id-token: write')), ['minimal-permissions']);
+  assert.deepEqual(rules(GOOD.replace('  contents: read', '  contents: read\n  id-token: write')), [
+    'minimal-permissions',
+  ]);
 });
 
 test('extra top-level read scopes are allowed', () => {
@@ -91,7 +93,10 @@ test('extra top-level read scopes are allowed', () => {
 });
 
 test('a comment inside the top-level permissions block is allowed', () => {
-  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', 'permissions:\n  # read only\n  contents: read')), []);
+  assert.deepEqual(
+    rules(GOOD.replace('permissions:\n  contents: read', 'permissions:\n  # read only\n  contents: read')),
+    [],
+  );
 });
 
 test('flow-style top-level permissions are parsed', () => {
@@ -101,18 +106,25 @@ test('flow-style top-level permissions are parsed', () => {
 });
 
 test('read-all and a bare permissions key are rejected', () => {
-  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', 'permissions: read-all')), ['minimal-permissions']);
+  assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read', 'permissions: read-all')), [
+    'minimal-permissions',
+  ]);
   assert.deepEqual(rules(GOOD.replace('permissions:\n  contents: read\n', 'permissions:\n')), ['minimal-permissions']);
 });
 
 const BLOCK_TRIGGERS = 'on:\n  pull_request:\n  push:\n    branches: [main]\n';
 
 test('pull_request_target in a flow-style trigger list is rejected', () => {
-  assert.deepEqual(rules(GOOD.replace(BLOCK_TRIGGERS, 'on: [pull_request_target, push]\n')), ['no-pull-request-target']);
+  assert.deepEqual(rules(GOOD.replace(BLOCK_TRIGGERS, 'on: [pull_request_target, push]\n')), [
+    'no-pull-request-target',
+  ]);
 });
 
 test('a quoted pull_request_target key is rejected', () => {
-  assert.deepEqual(rules(GOOD.replace('  pull_request:', "  'pull_request_target':")), ['unquoted-keys', 'no-pull-request-target']);
+  assert.deepEqual(rules(GOOD.replace('  pull_request:', "  'pull_request_target':")), [
+    'unquoted-keys',
+    'no-pull-request-target',
+  ]);
 });
 
 test('pull_request_target mentioned only in a comment is not flagged', () => {
@@ -127,7 +139,10 @@ test('secrets are rejected for flow-style and scalar pull_request triggers', () 
 });
 
 test('a quoted uses key fails closed instead of hiding an unpinned action', () => {
-  assert.deepEqual(rules(GOOD.replace('      - run: echo ok', '      - "uses": someone/evil@main\n      - run: echo ok')), ['unquoted-keys']);
+  assert.deepEqual(
+    rules(GOOD.replace('      - run: echo ok', '      - "uses": someone/evil@main\n      - run: echo ok')),
+    ['unquoted-keys'],
+  );
 });
 
 test('a quoted permissions key with write-all is rejected', () => {
@@ -143,7 +158,9 @@ test('stripComments removes comments but keeps a # inside a word', () => {
 });
 
 test('a repository secret in a pull_request workflow is rejected', () => {
-  assert.deepEqual(rules(GOOD.replace('secrets.GITHUB_TOKEN', 'secrets.PARTNER_API_KEY')), ['no-secrets-on-pull-request']);
+  assert.deepEqual(rules(GOOD.replace('secrets.GITHUB_TOKEN', 'secrets.PARTNER_API_KEY')), [
+    'no-secrets-on-pull-request',
+  ]);
 });
 
 test('a repository secret is allowed when the workflow does not run on pull_request', () => {
@@ -157,12 +174,17 @@ test('a job without timeout-minutes is rejected', () => {
 
 test('checkout without persist-credentials: false is rejected', () => {
   const found = checkWorkflow('wf.yml', GOOD.replace('        with:\n          persist-credentials: false\n', ''));
-  assert.deepEqual(found.map((violation) => violation.rule), ['checkout-credentials']);
+  assert.deepEqual(
+    found.map((violation) => violation.rule),
+    ['checkout-credentials'],
+  );
   assert.match(found[0].message, /line 14/);
 });
 
 test('checkout with persist-credentials: true is rejected', () => {
-  assert.deepEqual(rules(GOOD.replace('persist-credentials: false', 'persist-credentials: true')), ['checkout-credentials']);
+  assert.deepEqual(rules(GOOD.replace('persist-credentials: false', 'persist-credentials: true')), [
+    'checkout-credentials',
+  ]);
 });
 
 test('checkout under a named step is checked', () => {
@@ -195,7 +217,10 @@ test('persist-credentials on a later step does not cover an earlier checkout', (
 test('collectJobs stops at the next top-level key and handles no jobs', () => {
   assert.deepEqual(collectJobs('name: x\non: push\n'), []);
   const jobs = collectJobs('jobs:\n  a:\n    timeout-minutes: 1\n  b:\n    runs-on: x\nenv:\n  c: 1\n');
-  assert.deepEqual(jobs.map((job) => job.name), ['a', 'b']);
+  assert.deepEqual(
+    jobs.map((job) => job.name),
+    ['a', 'b'],
+  );
 });
 
 function withWorkflows(files, run) {
