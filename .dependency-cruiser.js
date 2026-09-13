@@ -5,6 +5,7 @@
 // the start or a `/`, so the gate-proof fixtures (which mirror this layout
 // under tooling/gate-proofs/fixtures/boundaries/) are judged by the same rules.
 // Groups are non-capturing except a module's name, which the rules reuse as $1.
+import { CLOUD_SDKS, HTTP_CLIENTS, NETWORK_CORE_MODULES } from './tooling/banned-modules.ts';
 import { AUDIT_MODULE, MODULE_MAP } from './tooling/module-map.ts';
 
 const ROOT = '(?:^|/)';
@@ -20,21 +21,6 @@ const npm = (namePattern) => `(?:^|/node_modules/)(?:${namePattern})(?:/|$)`;
 
 /** A module folder whose name is not in the map. */
 const UNKNOWN_MODULE = `${MODULES}(?!(?:${Object.keys(MODULE_MAP).join('|')})/)[^/]+/`;
-
-/** Cloud-vendor SDKs never appear in product code (ADR-010 §2). */
-const CLOUD_SDKS = [
-  '@azure',
-  '@azure-rest',
-  '@aws-sdk',
-  'aws-sdk',
-  '@google-cloud',
-  'googleapis',
-  '@googleapis',
-  'firebase-admin',
-  'oci-[a-z-]+',
-  'ibm-cloud-sdk-core',
-  '@alicloud',
-].join('|');
 
 /** Vendor libraries confined to one adapter folder (ADR-004 §8). */
 const CONFINED = [
@@ -158,7 +144,21 @@ export default {
       comment: 'ADR-010: product code runs on any cloud or a bank server, so it imports no cloud SDK.',
       severity: 'error',
       from: { path: `${ROOT}(?:packages|apps)/` },
-      to: { path: npm(CLOUD_SDKS) },
+      to: { path: npm(CLOUD_SDKS.join('|')) },
+    },
+    // Tests outside the outbound folder are covered too. Importing only a
+    // module's types is fine: types do no I/O. The console is not exempt: it
+    // calls its own origin with the browser's fetch (allowed by lint) and needs
+    // no HTTP library.
+    {
+      name: 'network-only-through-platform-outbound',
+      comment: 'SEC-WEB-05: outbound HTTP goes through @agentx/platform/outbound, which enforces the allowlist.',
+      severity: 'error',
+      from: { path: `${ROOT}(?:packages|apps)/`, pathNot: `${ROOT}packages/platform/src/outbound/` },
+      to: {
+        path: [`^(?:${NETWORK_CORE_MODULES.join('|')})$`, npm(HTTP_CLIENTS.join('|'))],
+        dependencyTypesNot: ['type-only'],
+      },
     },
     ...CONFINED.map(({ name, packages, allowedIn }) => ({
       name,

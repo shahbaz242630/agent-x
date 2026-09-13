@@ -1,26 +1,12 @@
-// Gate proof for the lint rules (Rule Book §5, §8; SEC-WEB-03, SEC-TEN-07;
+// Gate proof for the code rules (Rule Book §5, §8; SEC-WEB-03, SEC-TEN-07;
 // ADR-006): each snippet breaks one rule and the real eslint.config.js must
-// report it; each "allowed" snippet must pass that rule. Snippets are linted as
-// if they sat at the given path, so path-scoped rules apply as they would there.
-import { ESLint, type Linter } from 'eslint';
-import { beforeAll, describe, expect, it } from 'vitest';
+// report it; each "allowed" snippet must pass that rule. The config, network,
+// TLS and reason-code rules are proven in lint-platform.test.ts.
+import { CONSOLE, CORE, type LintCase, PLATFORM, proveLintRules } from './lint-harness.ts';
 
-interface Case {
-  name: string;
-  filePath: string;
-  code: string;
-  /** The rule that must report; null for ESLint's own reports (unused directives and inline configs). */
-  rule: string | null;
-  /** Text the message must contain, to tell apart checks that share a rule. */
-  says?: string;
-}
-
-const CORE = 'packages/core/src/modules/gate-proof/domain';
-const PLATFORM = 'packages/platform/src/gate-proof';
-const CONSOLE = 'apps/console/src/gate-proof';
 const SQL_RULE = 'agentx/no-string-built-sql';
 
-const REJECTED: Case[] = [
+const REJECTED: LintCase[] = [
   // Rule Book §5: strict, honest TypeScript.
   {
     name: 'any',
@@ -95,6 +81,7 @@ const REJECTED: Case[] = [
     filePath: `${PLATFORM}/random.ts`,
     code: 'export const roll = Math.random();\n',
     rule: 'no-restricted-properties',
+    says: 'Math.random',
   },
 
   // ADR-006 §3: business time comes from the Clock.
@@ -238,7 +225,7 @@ const REJECTED: Case[] = [
   })),
 ];
 
-const ALLOWED: Case[] = [
+const ALLOWED: LintCase[] = [
   {
     name: "Kysely's sql tag, which binds values as parameters",
     filePath: `${CORE}/sql-tag.ts`,
@@ -312,56 +299,4 @@ const ALLOWED: Case[] = [
   },
 ];
 
-const eslint = new ESLint({
-  // The snippets are not on disk, so the TypeScript project service opens them
-  // in a default project built from the root tsconfig.json.
-  overrideConfig: {
-    files: ['**/*.{ts,tsx}'],
-    languageOptions: {
-      parserOptions: {
-        projectService: {
-          allowDefaultProject: [`${CORE}/*.ts`, `${PLATFORM}/*.ts`, `${CONSOLE}/*.ts`, `${CONSOLE}/*.tsx`],
-          defaultProject: 'tsconfig.json',
-          // The limit guards editor performance; here every snippet shares the default project.
-          maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 100,
-        },
-      },
-    },
-  },
-});
-
-const results = new Map<string, Linter.LintMessage[]>();
-
-beforeAll(async () => {
-  for (const { name, filePath, code } of [...REJECTED, ...ALLOWED]) {
-    const [result] = await eslint.lintText(code, { filePath });
-    results.set(name, result?.messages ?? []);
-  }
-});
-
-function reports(testCase: Case): boolean {
-  const messages = results.get(testCase.name) ?? [];
-  return messages.some(
-    (message) =>
-      message.ruleId === testCase.rule && (testCase.says === undefined || message.message.includes(testCase.says)),
-  );
-}
-
-describe('lint: every rule rejects its broken snippet', () => {
-  it('gives every snippet its own file', () => {
-    const paths = [...REJECTED, ...ALLOWED].map((testCase) => testCase.filePath);
-    expect(new Set(paths).size).toBe(paths.length);
-  });
-
-  it.each(REJECTED.map((testCase) => [testCase.name, testCase] as const))('%s', (_name, testCase) => {
-    expect(results.get(testCase.name)?.filter((message) => message.fatal === true)).toEqual([]);
-    expect(reports(testCase)).toBe(true);
-  });
-});
-
-describe('lint: the rules leave safe code alone', () => {
-  it.each(ALLOWED.map((testCase) => [testCase.name, testCase] as const))('%s', (_name, testCase) => {
-    expect(results.get(testCase.name)?.filter((message) => message.fatal === true)).toEqual([]);
-    expect(reports(testCase)).toBe(false);
-  });
-});
+proveLintRules(REJECTED, ALLOWED);

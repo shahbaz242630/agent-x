@@ -54,6 +54,12 @@ importers:
         specifier: 14.0.2
         version: 14.0.2
 
+  packages/platform:
+    dependencies:
+      zod:
+        specifier: 4.6.1
+        version: 4.6.1
+
   packages/testing:
     dependencies:
       '@agentx/core':

@@ -1,0 +1,13 @@
+{
+  "name": "@agentx/platform",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./config": "./src/config/index.ts",
+    "./outbound": "./src/outbound/index.ts"
+  },
+  "dependencies": {
+    "zod": "4.6.1"
+  }
+}
