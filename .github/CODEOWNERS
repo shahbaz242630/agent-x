@@ -6,3 +6,17 @@
 /.gitleaks.toml   @shahbaz242630
 /.gitignore       @shahbaz242630
 /SECURITY.md      @shahbaz242630
+# The verify gate: supply-chain settings, compiler, lint and boundary rules,
+# coverage floors and the proofs that each one still fails when broken.
+/package.json             @shahbaz242630
+/pnpm-workspace.yaml      @shahbaz242630
+/pnpm-lock.yaml           @shahbaz242630
+/.npmrc                   @shahbaz242630
+/.corepack.env            @shahbaz242630
+/.pnpmfile.*              @shahbaz242630
+/tsconfig.base.json       @shahbaz242630
+/eslint.config.js         @shahbaz242630
+/.dependency-cruiser.js   @shahbaz242630
+/knip.json                @shahbaz242630
+/vitest.config.ts         @shahbaz242630
+/tooling/                 @shahbaz242630

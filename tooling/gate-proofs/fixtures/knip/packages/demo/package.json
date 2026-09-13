@@ -1,0 +1,7 @@
+{
+  "name": "gate-proof-knip-demo",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "left-pad": "1.3.0" }
+}

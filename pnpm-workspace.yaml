@@ -1,0 +1,42 @@
+# Workspace layout and supply-chain settings (ADR-001, SEC-SC-01).
+# pnpm 12 reads its settings only from this file; .npmrc holds registry and
+# auth settings only. pnpm 12 also refuses unknown keys here, so a misspelt
+# setting fails the install instead of being silently ignored.
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# Install a version only once it has been public for 3 days, and fail rather
+# than fall back to another version when none in the range is old enough, or
+# when the registry can't say when a version was published.
+minimumReleaseAge: 4320
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+
+# Fail when a package's publishing trust drops compared with its earlier
+# releases (for example, a release without provenance after releases with it).
+trustPolicy: no-downgrade
+
+# Only direct dependencies may come from git or tarball URLs; everything
+# transitive must resolve from the registry.
+blockExoticSubdeps: true
+
+# Dependency build scripts never run unless reviewed and listed in allowBuilds.
+strictDepBuilds: true
+
+# Refuse packages whose engines field rejects our Node version.
+engineStrict: true
+
+# `pnpm lint` runs exactly the lint script: no hidden prelint or postlint.
+enablePrePostScripts: false
+
+# Record exact versions, so a manifest change is always a reviewed diff.
+savePrefix: ''
+
+# pnpm doesn't check its own version: Corepack already runs exactly the pnpm
+# pinned, with its sha512, in package.json (run `corepack pnpm` locally).
+# Without this, pnpm 12 writes its own version into a first lockfile document,
+# and GitHub's dependency graph, which reads only that document, then sees no
+# dependencies at all, silencing Dependabot alerts and Dependency review
+# (pnpm/pnpm#13805). SEC-SC-01 checks the lockfile stays one document.
+pmOnFail: ignore

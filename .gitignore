@@ -1,5 +1,6 @@
-# Internal documentation: never committed
-/Documents/
+# Internal documentation: never committed. No trailing slash, so the rule also
+# covers Documents when it is a symlink rather than a folder.
+/Documents
 
 # Secrets and local environment
 .env
@@ -13,6 +14,8 @@
 
 # Dependencies and build output
 node_modules/
+# A two-file stand-in package that a module-boundary gate proof must see as installed.
+!/tooling/gate-proofs/fixtures/boundaries/installed-cloud-sdk/node_modules/
 dist/
 build/
 coverage/

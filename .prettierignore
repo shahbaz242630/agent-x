@@ -1,0 +1,7 @@
+pnpm-lock.yaml
+coverage/
+dist/
+Documents/
+.playwright-mcp/
+# Deliberately broken files that the gate proofs check are rejected.
+tooling/gate-proofs/fixtures/
