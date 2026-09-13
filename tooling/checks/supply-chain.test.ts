@@ -216,18 +216,24 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
     });
   });
 
-  it('lets Dependabot propose only versions old enough to install', () => {
+  it('lets Dependabot propose only npm versions old enough to install', () => {
+    // npm updates are paused until Dependabot supports pnpm 12 (see dependabot.yml).
+    // Whenever they are on, every cooldown must be at least the release age:
+    // Dependabot reads a missing semver-*-days as 0, so all four are required.
     const dependabot = readYaml('.github/dependabot.yml');
-    const npm = (dependabot.updates as Json[]).find((update) => update['package-ecosystem'] === 'npm');
-    const cooldown = (npm?.cooldown ?? {}) as Record<string, unknown>;
+    const npmUpdates = (dependabot.updates as Json[]).filter((update) => update['package-ecosystem'] === 'npm');
     const minimumDays = Number(effective.minimumReleaseAge) / 1440;
-
-    expect(cooldown['default-days']).toBeGreaterThanOrEqual(minimumDays);
-    for (const [key, days] of Object.entries(cooldown).filter(([key]) => key.endsWith('-days'))) {
-      expect({ [key]: days }).toEqual({ [key]: Math.max(Number(days), minimumDays) });
-    }
-    // A package excluded from the cooldown would be proposed too fresh to install.
-    expect(cooldown.exclude ?? []).toEqual([]);
+    const tooFresh = npmUpdates.flatMap((update) => {
+      const cooldown = (update.cooldown ?? {}) as Record<string, unknown>;
+      const short = ['default-days', 'semver-major-days', 'semver-minor-days', 'semver-patch-days']
+        .filter((key) => !(Number(cooldown[key]) >= minimumDays))
+        .map((key) => `${key} is under ${minimumDays} days`);
+      // A package excluded from the cooldown would be proposed too fresh to install.
+      const excluded =
+        Array.isArray(cooldown.exclude) && cooldown.exclude.length > 0 ? ['cooldown.exclude is set'] : [];
+      return [...short, ...excluded];
+    });
+    expect(tooFresh).toEqual([]);
   });
 
   describe('every relaxation is registered, justified and unexpired', () => {

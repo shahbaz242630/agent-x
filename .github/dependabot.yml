@@ -1,25 +1,22 @@
 # Dependabot version updates. Alerts and security updates are enabled in the
-# repository settings; this file keeps the SHA-pinned GitHub Actions and the
-# exact-pinned npm packages current.
+# repository settings; this file keeps the SHA-pinned GitHub Actions current.
+#
+# npm updates are paused: Dependabot can't run pnpm 12 yet. Its updater can't
+# download pnpm 12's native binary through its proxy (dependabot-core#16170;
+# its docs list pnpm v7-v10). Dependabot alerts still work, because the
+# lockfile is one YAML document that GitHub's dependency graph reads, and the
+# weekly sweep runs `pnpm audit`. Package updates are checked by hand at the
+# weekly review until Dependabot supports pnpm 12. Then add this back:
+#
+#   - package-ecosystem: 'npm'
+#     directory: '/'
+#     schedule: { interval: 'weekly', day: 'monday' }
+#     open-pull-requests-limit: 5
+#     cooldown: { default-days: 7, semver-major-days: 7, semver-minor-days: 7, semver-patch-days: 7 }
+#     groups: { npm-dependencies: { patterns: ['*'] } }
+#     commit-message: { prefix: 'chore(deps)' }
 version: 2
 updates:
-  - package-ecosystem: 'npm'
-    directory: '/'
-    schedule:
-      interval: 'weekly'
-      day: 'monday'
-    open-pull-requests-limit: 5
-    # At least pnpm's minimumReleaseAge (3 days), or the proposed version fails
-    # to install; SEC-SC-01 checks the two stay in step.
-    cooldown:
-      default-days: 7
-    groups:
-      npm-dependencies:
-        patterns:
-          - '*'
-    commit-message:
-      prefix: 'chore(deps)'
-
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
