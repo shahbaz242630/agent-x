@@ -135,17 +135,28 @@ export async function createTestDatabase(
 /** Opens a connection of its own. */
 async function openClient(connection: TestConnection): Promise<TestClient> {
   const client = new pg.Client({ ...connection, ssl: false });
-  // A connection the server ends reports it as an 'error' event, which would
-  // stop the test process if nothing listened. The next query then fails with
-  // pg's own error, so nothing is hidden.
-  client.on('error', () => undefined);
+  // A connection the server ends while idle reports why as an 'error' event,
+  // which would stop the test process if nothing listened. pg then reports the
+  // closed socket as a second one; the first, the server's reason, is kept and
+  // given as the cause of the next query's failure.
+  let lost: Error | undefined;
+  client.on('error', (error) => {
+    lost ??= error;
+  });
   await client.connect();
-  const { rows } = await client.query<{ pid: number }>('select pg_catalog.pg_backend_pid() as pid');
-  const pid = rows[0]?.pid;
-  if (pid === undefined) throw new Error('The new test connection reported no server process ID');
+  let pid: number | undefined;
+  try {
+    const { rows } = await client.query<{ pid: number }>('select pg_catalog.pg_backend_pid() as pid');
+    pid = rows[0]?.pid;
+    if (pid === undefined) throw new Error('The new test connection reported no server process ID');
+  } catch (error) {
+    await client.end();
+    throw error;
+  }
   return {
     pid,
     query: async <Row extends object>(text: string, values: readonly unknown[] = []) => {
+      if (lost !== undefined) throw new Error('The test connection was lost', { cause: lost });
       // eslint-disable-next-line agentx/no-string-built-sql -- This passes on the caller's text; the rule checks it where the caller writes `.query(...)`.
       const result = await client.query<Row>(text, [...values]);
       return result.rows;

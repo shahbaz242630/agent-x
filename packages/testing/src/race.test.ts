@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Barrier, BarrierBroken, race } from './race.ts';
+import { Barrier, BarrierBroken, failures, race, successes } from './race.ts';
 
 afterEach(() => {
   vi.useRealTimers();
 });
+
+const WHY =
+  'A party may be waiting for a lock that one at the barrier holds, or for a pooled connection that one at the barrier has';
 
 /** What a promise has done so far, read without waiting for it. */
 function track(promise: Promise<unknown>): { state: () => 'pending' | 'resolved' | 'rejected'; reason: () => unknown } {
@@ -53,7 +56,7 @@ describe('Barrier', () => {
     expect([first.state(), second.state()]).toEqual(['rejected', 'rejected']);
     expect(first.reason()).toBeInstanceOf(BarrierBroken);
     expect((first.reason() as Error).message).toBe(
-      'The barrier timed out after 1000 ms with 2 of 3 parties arrived. A party may be waiting for a lock that one at the barrier holds',
+      `The barrier timed out after 1000 ms with 2 of 3 parties arrived. ${WHY}`,
     );
     expect(second.reason()).toBe(first.reason());
     await expect(barrier.arrive()).rejects.toBe(first.reason());
@@ -212,12 +215,18 @@ describe('race', () => {
     expect(first).toBe('waiting');
     await vi.advanceTimersByTimeAsync(1);
     expect(first).toEqual(
-      new BarrierBroken(
-        `The barrier timed out after ${expected} ms with 1 of 2 parties arrived. A party may be waiting for a lock that one at the barrier holds`,
-      ),
+      new BarrierBroken(`The barrier timed out after ${expected} ms with 1 of 2 parties arrived. ${WHY}`),
     );
     unstick();
     await running;
+  });
+
+  it('sorts the outcomes into the values of the runs that succeeded and the errors of those that failed', async () => {
+    const outcomes = await race(4, (party) =>
+      party % 2 === 0 ? Promise.resolve(party) : Promise.reject(new Error(`party ${party}`)),
+    );
+    expect(successes(outcomes)).toEqual([0, 2]);
+    expect(failures(outcomes)).toEqual([new Error('party 1'), new Error('party 3')]);
   });
 
   it.each([1, 0, 2.5])('refuses %s parties', async (parties) => {

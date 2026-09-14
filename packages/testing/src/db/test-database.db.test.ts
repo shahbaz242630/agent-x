@@ -91,15 +91,14 @@ describe(`createTestDatabase (Postgres ${server.version})`, () => {
     await expect(left.query('select 1')).rejects.toThrow('Client was closed and is not queryable');
   });
 
-  it('turns a connection the server ends into a failed query, not a crash', async () => {
+  it('turns a connection the server ends into a failed query, not a crash, and keeps the server’s reason', async () => {
     const client = await first.connect('app');
     try {
+      // With a timeout, this returns once the process has gone; the idle connection has heard by then.
       await first.as('admin').query('select pg_catalog.pg_terminate_backend($1, 5000)', [client.pid]);
-      // Give the idle connection time to hear it was ended, as it would between two queries.
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      await expect(client.query('select 1')).rejects.toThrow(
-        'Client has encountered a connection error and is not queryable',
-      );
+      const failure = (await client.query('select 1').catch((error: unknown) => error)) as Error;
+      expect(failure.message).toBe('The test connection was lost');
+      expect(String(failure.cause)).toMatch(/terminating connection due to administrator command/);
     } finally {
       await client.end();
     }

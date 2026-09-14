@@ -1,8 +1,12 @@
 // Proofs for the CI-06 checks (schema-checks.ts): each rule fails on a broken
 // fixture, and the shapes ADR-005 asks for pass. Each fixture gets its own
-// copy of the migrated database. A fixture that needs a role of its own lets
-// it connect to its own database only, so the other test files, running at
-// the same time on the same server, never see it.
+// copy of the migrated database.
+//
+// Roles and their memberships belong to the whole server, which every test
+// file shares while it runs. So a fixture that needs a role makes one of its
+// own and lets it connect to its own database only, and no test anywhere
+// changes the memberships or attributes of the shared agentx_* roles: the
+// checks, which read those, would see it from every other database.
 import { afterEach, describe, expect, inject, it } from 'vitest';
 
 import { type SchemaPolicy, schemaProblems } from './schema-checks.ts';
@@ -10,9 +14,14 @@ import { createTenantProbe } from './tenant-probe.ts';
 import { createTestDatabase, type TestDatabase, type TestRole } from './test-database.ts';
 
 const server = inject('postgres');
+const major = Number(server.version.split('.')[0]);
 
 const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'] };
-const POLICY: SchemaPolicy = { globalTables: { 'migrations.applied': LEDGER }, appendOnlySchemas: ['audit'] };
+const POLICY: SchemaPolicy = {
+  globalTables: { 'migrations.applied': LEDGER },
+  appendOnlySchemas: ['audit'],
+  appendOnlyExceptions: {},
+};
 
 const TENANT_POLICY =
   "using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid) with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)";
@@ -45,19 +54,32 @@ type Statement = string | readonly [TestRole, string];
 let database: TestDatabase | undefined;
 let fixtureRoles: string[] = [];
 
+// The state is taken and cleared first, and the database is dropped whatever
+// happens, so one broken fixture can't leave anything for the next test.
 afterEach(async () => {
-  if (database === undefined) return;
-  for (const role of fixtureRoles) {
-    // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup: the role names are fixed in the tests below, and DROP ROLE can't take a parameter.
-    await database.as('admin').query(`drop owned by ${role}`);
-  }
-  for (const role of fixtureRoles) {
-    // eslint-disable-next-line agentx/no-string-built-sql -- As above.
-    await database.as('admin').query(`drop role ${role}`);
-  }
-  fixtureRoles = [];
-  await database.drop();
+  const [current, roles] = [database, fixtureRoles];
   database = undefined;
+  fixtureRoles = [];
+  if (current === undefined) return;
+  try {
+    const admin = current.as('admin');
+    const found = await admin.query<{ name: string }>(
+      'select rolname::text as name from pg_catalog.pg_roles where rolname = any($1)',
+      [roles],
+    );
+    // In the test's order: dropping a member first removes the memberships another role granted it.
+    const existing = roles.filter((role) => found.some((row) => row.name === role));
+    for (const role of existing) {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup: the role names are fixed in the tests below, and DROP OWNED can't take a parameter.
+      await admin.query(`drop owned by ${role}`);
+    }
+    for (const role of existing) {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above, for DROP ROLE.
+      await admin.query(`drop role ${role}`);
+    }
+  } finally {
+    await current.drop();
+  }
 });
 
 /** A fresh copy of the migrated database with the fixture applied, one statement at a time. */
@@ -264,6 +286,20 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(problems[1]).toMatch(/^t\.texty: policy tenant_isolation is not the tenant policy .*its USING is /);
       expect(problems).toHaveLength(2);
     });
+
+    it('fails an org_id NOT NULL added NOT VALID, which leaves old rows unchecked (Postgres 18; 16 has no such form)', async () => {
+      const statements = [
+        'create schema t',
+        'create table t.late (org_id uuid, id uuid not null, unique (org_id, id))',
+        'alter table t.late add constraint late_org_id_not_null not null org_id not valid',
+        ...walls('t.late'),
+      ];
+      if (major >= 18) {
+        expect(await problemsAfter(statements)).toEqual(['t.late: org_id must be uuid NOT NULL (ADR-005 §1)']);
+      } else {
+        await expect(problemsAfter(statements)).rejects.toThrow(/syntax error/);
+      }
+    });
   });
 
   describe('ADR-005 §2: exactly one policy, the tenant policy', () => {
@@ -342,8 +378,73 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('SEC-TEN-05: org_id in every unique index and every foreign key to a tenant table', () => {
-    const LEAKS = "leaves out org_id, so it could reveal another organisation's rows (SEC-TEN-05)";
+  describe('ADR-005: nothing acts for the app with the owner’s rights', () => {
+    // Found by the security review (S8): two functions a migration could add.
+    const OWNER_FUNCTIONS = [
+      `create function t.unwall() returns void language plpgsql security definer
+         as $$ begin execute 'alter table t.items no force row level security'; end $$`,
+      'create function t.read_all() returns setof t.items language sql security definer as $$ select * from t.items $$',
+    ];
+
+    it('shows the attack: functions that run as the owner let the app switch the walls off and read every organisation', async () => {
+      const attacked = await fixture([
+        ...TENANT_TABLE,
+        // One row for each of two organisations. Each statement runs in one transaction, so the local setting holds for its insert.
+        "select pg_catalog.set_config('app.org_id', '0199a000-0000-7000-8000-00000000000a', true); insert into t.items values ('0199a000-0000-7000-8000-00000000000a', gen_random_uuid(), 'a')",
+        "select pg_catalog.set_config('app.org_id', '0199b000-0000-7000-8000-00000000000b', true); insert into t.items values ('0199b000-0000-7000-8000-00000000000b', gen_random_uuid(), 'b')",
+        ...OWNER_FUNCTIONS,
+        'grant usage on schema t to agentx_app',
+        'grant execute on function t.unwall(), t.read_all() to agentx_app',
+      ]);
+      const app = await attacked.connect('app');
+      await app.query("select pg_catalog.set_config('app.org_id', '0199a000-0000-7000-8000-00000000000a', false)");
+      const labels = async (): Promise<string[]> =>
+        (await app.query<{ label: string }>('select label from t.read_all() order by label')).map((row) => row.label);
+      // While row-level security is forced, even the owner's function sees one organisation.
+      expect(await labels()).toEqual(['a']);
+      await app.query('select t.unwall()');
+      expect(await labels()).toEqual(['a', 'b']);
+    });
+
+    it('fails a SECURITY DEFINER function, whoever may run it', async () => {
+      const definer =
+        "runs with its owner's rights (SECURITY DEFINER), which would let its callers act as the owner and reach past the tenant walls (ADR-005)";
+      expect(await problemsAfter([...TENANT_TABLE, ...OWNER_FUNCTIONS])).toEqual([
+        `function t.read_all(): ${definer}`,
+        `function t.unwall(): ${definer}`,
+      ]);
+    });
+
+    it('fails rewrite rules on a table, global or tenant', async () => {
+      const policy: SchemaPolicy = {
+        ...POLICY,
+        globalTables: { ...POLICY.globalTables, 'g.people': { reason: 'A test person', columns: ['id'] } },
+      };
+      const statements = [
+        ...TENANT_TABLE,
+        'create rule items_keep as on delete to t.items do instead nothing',
+        'create schema g',
+        'create table g.people (id uuid primary key)',
+        'create rule people_keep as on delete to g.people do instead nothing',
+      ];
+      const rules =
+        "has rewrite rules, which change what a statement does and act with the table owner's rights (ADR-005)";
+      expect(await problemsAfter(statements, policy)).toEqual([`g.people: ${rules}`, `t.items: ${rules}`]);
+    });
+
+    it('needn’t look where a migration can’t reach: a pg_ schema, or an event trigger', async () => {
+      const owner = (await fixture(['create schema t'])).as('owner');
+      await expect(owner.query('create schema pg_hidden')).rejects.toThrow(/unacceptable schema name/);
+      await owner.query('create function t.on_ddl() returns event_trigger language plpgsql as $$ begin end $$');
+      await expect(
+        owner.query('create event trigger ci06_watch on ddl_command_start execute function t.on_ddl()'),
+      ).rejects.toThrow(/permission denied to create event trigger/);
+    });
+  });
+
+  describe('SEC-TEN-05: org_id in every unique key and every foreign key to a tenant table', () => {
+    const REVEALS = "so it could reveal another organisation's rows (SEC-TEN-05)";
+    const LEAKS = `leaves out org_id, ${REVEALS}`;
 
     it('fails a unique constraint without org_id', async () => {
       expect(
@@ -374,7 +475,27 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         ...walls('t.bookings'),
       ];
       expect(await problemsAfter(statements)).toEqual([
-        `t.bookings: exclusion constraint bookings_no_overlap ${LEAKS}`,
+        `t.bookings: exclusion constraint bookings_no_overlap doesn't require org_id to be equal, ${REVEALS}`,
+      ]);
+    });
+
+    it('fails an exclusion constraint that names org_id with another operator, and passes one with =', async () => {
+      // btree_gist lets a gist index compare uuids. Its functions land in the
+      // schema ext with Postgres's default PUBLIC EXECUTE, which the checks
+      // report too; only the table's lines matter here.
+      const statements = [
+        'create schema ext',
+        'create extension btree_gist schema ext',
+        'create schema t',
+        `create table t.bookings (
+           org_id uuid not null, id uuid not null, during tstzrange not null, primary key (org_id, id),
+           constraint bookings_across exclude using gist (org_id with <>, during with &&),
+           constraint bookings_within exclude using gist (org_id with =, during with &&))`,
+        ...walls('t.bookings'),
+      ];
+      const problems = await problemsAfter(statements);
+      expect(problems.filter((problem) => problem.startsWith('t.'))).toEqual([
+        `t.bookings: exclusion constraint bookings_across doesn't require org_id to be equal, ${REVEALS}`,
       ]);
     });
 
@@ -392,23 +513,24 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ]);
     });
 
-    it('fails a foreign key from a global table into a tenant table without org_id', async () => {
+    it('fails a foreign key from a global table into a tenant table, even one that pairs org_id', async () => {
+      // A global row's org_id is whatever its writer put there: no policy checks it.
       const policy: SchemaPolicy = {
         ...POLICY,
         globalTables: {
           ...POLICY.globalTables,
-          'g.links': { reason: 'A test link', columns: ['id', 'item_org', 'item_id'] },
+          'g.links': { reason: 'A test link', columns: ['id', 'org_id', 'item_id'] },
         },
       };
       const statements = [
         ...TENANT_TABLE,
         'create schema g',
         `create table g.links (
-           id uuid primary key, item_org uuid not null, item_id uuid not null,
-           constraint links_item foreign key (item_org, item_id) references t.items (org_id, id))`,
+           id uuid primary key, org_id uuid not null, item_id uuid not null,
+           constraint links_item foreign key (org_id, item_id) references t.items (org_id, id))`,
       ];
       expect(await problemsAfter(statements, policy)).toEqual([
-        'g.links: foreign key links_item points at the tenant table t.items without pairing org_id with its org_id (SEC-TEN-05)',
+        'g.links: foreign key links_item runs from a table without row-level security to the tenant table t.items (SEC-TEN-05)',
       ]);
     });
   });
@@ -441,7 +563,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         globalTables: { 'migrations.applied': { ...LEDGER, columns: ['name', 'checksum', 'applied_on'] } },
       };
       expect(await problemsAfter([], policy)).toEqual([
-        'migrations.applied: column applied_at is not on the global-table list (SEC-TEN-08)',
+        'migrations.applied: column applied_at is not on the global-table list, so no one has reviewed it (SEC-TEN-08)',
         "migrations.applied: the global-table list names column applied_on, which the table doesn't have",
       ]);
     });
@@ -532,13 +654,17 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ]);
     });
 
-    it('fails a role that can connect being a member of another role', async () => {
-      fixtureRoles = ['ci06_member', 'ci06_group'];
+    it('fails a role that can connect being a member of another role, once however many granted it', async () => {
+      fixtureRoles = ['ci06_member', 'ci06_group', 'ci06_granter'];
       const statements = [
         ['admin', 'create role ci06_member nologin'] as const,
         ['admin', 'create role ci06_group nologin'] as const,
+        ['admin', 'create role ci06_granter nologin'] as const,
         letConnect('ci06_member'),
         ['admin', 'grant ci06_group to ci06_member'] as const,
+        // Postgres keeps a second row for the same membership from a second grantor.
+        ['admin', 'grant ci06_group to ci06_granter with admin option'] as const,
+        ['admin', 'grant ci06_group to ci06_member granted by ci06_granter'] as const,
       ];
       expect(await problemsAfter(statements)).toEqual([
         "role ci06_member is a member of ci06_group; the database's roles take part in no role memberships (ADR-005 §3)",
@@ -596,6 +722,38 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         `table audit.events: agentx_app has DELETE ${appends}`,
         `table audit.events: agentx_app has TRUNCATE ${appends}`,
         `table audit.events: agentx_app has UPDATE ${appends}`,
+      ]);
+    });
+
+    const CHAIN_HEADS = [
+      'create schema audit',
+      'grant usage on schema audit to agentx_app',
+      'create table audit.heads (org_id uuid not null, sequence bigint not null, primary key (org_id))',
+      ...walls('audit.heads'),
+      // The app locks the head FOR NO KEY UPDATE and moves it on (ADR-006 §6), which needs UPDATE.
+      'grant select, insert, update on audit.heads to agentx_app',
+    ];
+
+    it('lets the app change a table on the exception list, with its reason', async () => {
+      const policy = { ...POLICY, appendOnlyExceptions: { 'audit.heads': 'One chain head per organisation' } };
+      expect(await problemsAfter(CHAIN_HEADS, policy)).toEqual([]);
+    });
+
+    it('fails the same table off the exception list', async () => {
+      expect(await problemsAfter(CHAIN_HEADS)).toEqual([
+        'table audit.heads: agentx_app has UPDATE on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)',
+      ]);
+    });
+
+    it('fails an exception with no reason, for a missing table, or outside an append-only schema', async () => {
+      const policy = {
+        ...POLICY,
+        appendOnlyExceptions: { 'audit.heads': ' ', 'audit.gone': 'Removed', 'migrations.applied': 'Not audit' },
+      };
+      expect(await problemsAfter(CHAIN_HEADS, policy)).toEqual([
+        'audit.heads: the append-only exception list gives no reason for it',
+        'audit.gone: is on the append-only exception list, but no such table exists',
+        "migrations.applied: is on the append-only exception list, but its schema isn't append-only",
       ]);
     });
   });

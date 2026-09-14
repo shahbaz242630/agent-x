@@ -8,14 +8,26 @@
 // bypass it, and it gives some rights to every role (PUBLIC) unless they are
 // taken back. So every table is one of two kinds:
 // - a tenant table: org_id uuid NOT NULL, row-level security enabled and
-//   forced, exactly the tenant policy, and org_id in every unique index and in
-//   every foreign key that points at a tenant table (SEC-TEN-05);
+//   forced, exactly the tenant policy, org_id in every unique key (and equal,
+//   in every exclusion constraint), and org_id paired with org_id in every
+//   foreign key to another tenant table (SEC-TEN-05);
 // - a global table: on the global-table list, with a reason and exactly its
-//   columns (SEC-TEN-08).
-// Across the database: no PUBLIC grants; of the roles that may connect, none
-// but the backup role has BYPASSRLS, and none is a member of a role or has
-// members; the backup role only reads; the app role only adds to and reads
-// append-only tables (SEC-EVD-01).
+//   columns, so each column is a reviewed entry (SEC-TEN-08). No foreign key
+//   runs from a global table to a tenant table.
+// No table has rewrite rules, and no function runs with its owner's rights
+// (SECURITY DEFINER): both would act for the app with the owner's rights.
+// No PUBLIC grant on a table, column, sequence, schema or function in our
+// schemas, on the database, or in default privileges. Of the roles that may
+// connect, none but the backup role has BYPASSRLS, and none is a member of a
+// role or has members. The backup role only reads. The app role only adds to
+// and reads the tables of append-only schemas, apart from listed exceptions
+// (SEC-EVD-01).
+//
+// Not read: types (every table's row type is usable by PUBLIC by default, and
+// using a type reaches no row); languages (PUBLIC may write plpgsql and SQL,
+// which run with the writer's own rights); foreign-data wrappers and servers
+// (only a superuser creates them, and a foreign table fails the table rules);
+// large objects (nothing of ours uses them).
 //
 // The checks read only the system catalogues, as the migration role, the one
 // that applied the migrations. The tenant policy is compared with a reference
@@ -43,6 +55,11 @@ export interface SchemaPolicy {
   readonly globalTables: Readonly<Record<string, GlobalTable>>;
   /** Schemas whose tables the app role may only add to and read, such as the audit trail (SEC-EVD-01). */
   readonly appendOnlySchemas: readonly string[];
+  /**
+   * Tables in those schemas that the app may also change, by name, each with
+   * its reason: a row the app locks and moves on, such as a chain head.
+   */
+  readonly appendOnlyExceptions: Readonly<Record<string, string>>;
 }
 
 /** The name every tenant table's one policy has. */
@@ -65,7 +82,10 @@ const REFERENCE_EXPRESSIONS = `
   where p.polrelid = 'pg_temp.ci06_reference'::pg_catalog.regclass
 `;
 
-/** Our schemas: every one but Postgres's own. */
+/**
+ * Our schemas: every one but Postgres's own. Postgres refuses a name starting
+ * with pg_ to anyone but a superuser, so no migration can hide a table there.
+ */
 const SCHEMAS = `
   select n.oid from pg_catalog.pg_namespace n
   where n.nspname not in ('pg_catalog', 'information_schema') and not pg_catalog.starts_with(n.nspname, 'pg_')
@@ -74,16 +94,25 @@ const SCHEMAS = `
 /** Tables and the other relations that hold or show rows. */
 const RELATIONS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as name, c.relkind::text as kind,
-         c.relrowsecurity as rls, c.relforcerowsecurity as forced
+         c.relrowsecurity as rls, c.relforcerowsecurity as forced, c.relhasrules as has_rules
   from pg_catalog.pg_class c
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
   where c.relnamespace = any($1::pg_catalog.oid[]) and c.relkind in ('r', 'p', 'v', 'm', 'f')
   order by n.nspname, c.relname
 `;
 
+/**
+ * Columns, and whether each is uuid and NOT NULL. Postgres 18 can add a NOT
+ * NULL constraint NOT VALID, which marks the column NOT NULL while old rows
+ * may still be null, so an unvalidated one doesn't count.
+ */
 const COLUMNS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
-         a.atttypid = 'pg_catalog.uuid'::pg_catalog.regtype as is_uuid, a.attnotnull as not_null
+         a.atttypid = 'pg_catalog.uuid'::pg_catalog.regtype as is_uuid,
+         a.attnotnull and not exists (
+           select 1 from pg_catalog.pg_constraint k
+           where k.conrelid = a.attrelid and k.contype = 'n' and not k.convalidated and k.conkey = array[a.attnum]
+         ) as not_null
   from pg_catalog.pg_attribute a
   join pg_catalog.pg_class c on c.oid = a.attrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -108,10 +137,12 @@ const POLICIES = `
 `;
 
 /**
- * Unique and exclusion indexes whose key columns leave out org_id. Included
- * columns (INCLUDE) come after the key columns and don't count.
+ * Unique indexes whose key columns leave out org_id, and exclusion
+ * constraints that don't compare org_id with uuid equality (org_id WITH <>
+ * would make rows of different organisations conflict). Included columns
+ * (INCLUDE) come after the key columns and don't count.
  */
-const UNIQUE_WITHOUT_ORG = `
+const KEYS_WITHOUT_ORG = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, ic.relname::text as index,
          i.indisexclusion as exclusion
   from pg_catalog.pg_index i
@@ -124,6 +155,11 @@ const UNIQUE_WITHOUT_ORG = `
       from pg_catalog.unnest(i.indkey::pg_catalog.int2[]) with ordinality as k(attnum, position)
       join pg_catalog.pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
       where k.position <= i.indnkeyatts and a.attname = 'org_id'
+        and (not i.indisexclusion or exists (
+          select 1 from pg_catalog.pg_constraint x
+          where x.conindid = i.indexrelid and x.contype = 'x'
+            and x.conexclop[k.position] = 'pg_catalog.=(pg_catalog.uuid, pg_catalog.uuid)'::pg_catalog.regoperator
+        ))
     )
   order by n.nspname, c.relname, ic.relname
 `;
@@ -153,53 +189,64 @@ const FOREIGN_KEYS = `
   order by sn.nspname, s.relname, con.conname
 `;
 
+/** Functions and procedures that run with their owner's rights, whoever calls them. */
+const DEFINER_ROUTINES = `
+  select p.oid::pg_catalog.regprocedure::text as routine
+  from pg_catalog.pg_proc p
+  where p.pronamespace = any($1::pg_catalog.oid[]) and p.prosecdef
+  order by p.oid::pg_catalog.regprocedure::text collate "C"
+`;
+
 /**
  * Every right granted on the database and on what is in our schemas, one row
  * per grantee and privilege. A null ACL means Postgres's built-in defaults.
- * For a table, sequence or schema those give rights to its owner only, and the
- * owner is the migration role: a migration can't hand an object to another
- * role, because the migration role is a member of none. For a function they
- * include EXECUTE for PUBLIC, and for the database CONNECT and TEMPORARY for
- * PUBLIC, so those two are spelled out with acldefault. Types are left out:
- * every table's row type is usable by PUBLIC by default, and using a type
- * gives no access to any row. A default privilege for every schema has no
- * schema: quote_ident passes the null on, where format('%I') would fail.
+ * For a table, sequence or schema those give rights to its owner only, and a
+ * migration can make the owner only itself or pg_database_owner, whose one
+ * member is the database's owner: the migration role again. For a function
+ * they include EXECUTE for PUBLIC, and for the database CONNECT and TEMPORARY
+ * for PUBLIC, so those two are spelled out with acldefault. A default
+ * privilege for every schema has no schema: quote_ident passes the null on,
+ * where format('%I') would fail.
  */
 const GRANTS = `
-  select g.object, g.kind, g.schema, g.grantee = 0 as to_public,
+  select g.object, g.kind, g.schema, g.relation, g.grantee = 0 as to_public,
          case when g.grantee = 0 then null else pg_catalog.pg_get_userbyid(g.grantee)::text end as grantee,
          g.privilege
   from (
     select case c.relkind when 'S' then 'sequence ' else 'table ' end
              || pg_catalog.format('%I.%I', n.nspname, c.relname) as object,
-           case c.relkind when 'S' then 'sequence' else 'table' end as kind,
-           n.nspname::text as schema, acl.grantee, acl.privilege_type as privilege
+           'relation' as kind,
+           n.nspname::text as schema,
+           case c.relkind when 'S' then '' else pg_catalog.format('%I.%I', n.nspname, c.relname) end as relation,
+           acl.grantee, acl.privilege_type as privilege
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(c.relacl) acl
     where c.relnamespace = any($1::pg_catalog.oid[]) and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
     union all
     select 'column ' || pg_catalog.format('%I.%I.%I', n.nspname, c.relname, a.attname), 'column',
-           n.nspname::text, acl.grantee, acl.privilege_type
+           n.nspname::text, pg_catalog.format('%I.%I', n.nspname, c.relname), acl.grantee, acl.privilege_type
     from pg_catalog.pg_attribute a
     join pg_catalog.pg_class c on c.oid = a.attrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(a.attacl) acl
     where c.relnamespace = any($1::pg_catalog.oid[]) and a.attnum > 0 and not a.attisdropped
     union all
-    select 'schema ' || pg_catalog.format('%I', n.nspname), 'schema', n.nspname::text, acl.grantee, acl.privilege_type
+    select 'schema ' || pg_catalog.format('%I', n.nspname), 'schema', n.nspname::text, '',
+           acl.grantee, acl.privilege_type
     from pg_catalog.pg_namespace n,
     pg_catalog.aclexplode(n.nspacl) acl
     where n.oid = any($1::pg_catalog.oid[])
     union all
-    select 'function ' || p.oid::pg_catalog.regprocedure::text, 'function', n.nspname::text,
+    select 'function ' || p.oid::pg_catalog.regprocedure::text, 'function', n.nspname::text, '',
            acl.grantee, acl.privilege_type
     from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace,
     pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
     where p.pronamespace = any($1::pg_catalog.oid[])
     union all
-    select 'database ' || pg_catalog.format('%I', d.datname), 'database', null, acl.grantee, acl.privilege_type
+    select 'database ' || pg_catalog.format('%I', d.datname), 'database', '', '',
+           acl.grantee, acl.privilege_type
     from pg_catalog.pg_database d,
     pg_catalog.aclexplode(coalesce(d.datacl, pg_catalog.acldefault('d', d.datdba))) acl
     where d.datname = pg_catalog.current_database()
@@ -208,7 +255,7 @@ const GRANTS = `
              case da.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions'
                when 'n' then 'schemas' when 'L' then 'large objects' else da.defaclobjtype::text end)
              || coalesce(' in schema ' || pg_catalog.quote_ident(dn.nspname), ''),
-           'default', dn.nspname::text, acl.grantee, acl.privilege_type
+           'default', coalesce(dn.nspname::text, ''), '', acl.grantee, acl.privilege_type
     from pg_catalog.pg_default_acl da
     left join pg_catalog.pg_namespace dn on dn.oid = da.defaclnamespace,
     pg_catalog.aclexplode(da.defaclacl) acl
@@ -229,13 +276,13 @@ const ROLES = `
   order by r.rolname
 `;
 
-/** Explicit role grants to or from those roles. */
+/** Explicit role grants to or from those roles, once each: Postgres keeps one row per grantor. */
 const MEMBERSHIPS = `
-  select pg_catalog.pg_get_userbyid(m.member)::text as member, pg_catalog.pg_get_userbyid(m.roleid)::text as role
+  select distinct pg_catalog.pg_get_userbyid(m.member) as member, pg_catalog.pg_get_userbyid(m.roleid) as role
   from pg_catalog.pg_auth_members m
   where pg_catalog.pg_get_userbyid(m.member) = any($1::pg_catalog.text[])
      or pg_catalog.pg_get_userbyid(m.roleid) = any($1::pg_catalog.text[])
-  order by pg_catalog.pg_get_userbyid(m.member), pg_catalog.pg_get_userbyid(m.roleid)
+  order by 1, 2
 `;
 
 interface Relation {
@@ -243,6 +290,7 @@ interface Relation {
   kind: string;
   rls: boolean;
   forced: boolean;
+  has_rules: boolean;
 }
 
 interface Column {
@@ -265,7 +313,7 @@ interface Policy extends PolicyExpressions {
   to_public: boolean;
 }
 
-interface UniqueIndex {
+interface KeyWithoutOrg {
   table: string;
   index: string;
   exclusion: boolean;
@@ -280,8 +328,12 @@ interface ForeignKey {
 
 interface Grant {
   object: string;
-  kind: 'table' | 'sequence' | 'column' | 'schema' | 'function' | 'database' | 'default';
-  schema: string | null;
+  /** A relation is a table, view or sequence; the object's name says which. */
+  kind: 'relation' | 'column' | 'schema' | 'function' | 'database' | 'default';
+  /** The schema the object is in, or '' for the database and default privileges for every schema. */
+  schema: string;
+  /** The table a table or column grant is on, or '' for anything else, sequences included. */
+  relation: string;
   to_public: boolean;
   grantee: string | null;
   privilege: string;
@@ -302,8 +354,9 @@ interface Facts {
   columns: Column[];
   reference: PolicyExpressions;
   policies: Policy[];
-  uniqueIndexes: UniqueIndex[];
+  keysWithoutOrg: KeyWithoutOrg[];
   foreignKeys: ForeignKey[];
+  definerRoutines: string[];
   grants: Grant[];
   roles: Role[];
   memberships: Membership[];
@@ -361,8 +414,9 @@ async function readFacts(client: pg.Client): Promise<Facts> {
     columns: await rows<Column>(client, COLUMNS, [schemas]),
     reference,
     policies: await rows<Policy>(client, POLICIES, [schemas]),
-    uniqueIndexes: await rows<UniqueIndex>(client, UNIQUE_WITHOUT_ORG, [schemas]),
+    keysWithoutOrg: await rows<KeyWithoutOrg>(client, KEYS_WITHOUT_ORG, [schemas]),
     foreignKeys: await rows<ForeignKey>(client, FOREIGN_KEYS, [schemas]),
+    definerRoutines: (await rows<{ routine: string }>(client, DEFINER_ROUTINES, [schemas])).map((row) => row.routine),
     grants: await rows<Grant>(client, GRANTS, [schemas]),
     roles: inScope,
     memberships: await rows<Membership>(client, MEMBERSHIPS, [inScope.map((role) => role.name)]),
@@ -374,8 +428,7 @@ const OTHER_KINDS: Readonly<Record<string, string>> = { v: 'view', m: 'materiali
 
 /** What the backup role may hold on each kind of object: reading only (ADR-005 §3). */
 const BACKUP_MAY: Readonly<Record<Exclude<Grant['kind'], 'default'>, readonly string[]>> = {
-  table: ['SELECT'],
-  sequence: ['SELECT'],
+  relation: ['SELECT'],
   column: ['SELECT'],
   schema: ['USAGE'],
   database: ['CONNECT'],
@@ -384,6 +437,8 @@ const BACKUP_MAY: Readonly<Record<Exclude<Grant['kind'], 'default'>, readonly st
 
 /** What the app role may hold on an append-only table or its columns (ADR-005 §9). */
 const APPEND_ONLY_APP_MAY = ['INSERT', 'SELECT'];
+
+const LEAKS = "so it could reveal another organisation's rows (SEC-TEN-05)";
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
   const isGlobal = (name: string): boolean => Object.hasOwn(policy.globalTables, name);
@@ -394,7 +449,8 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
 
   return [
     ...globalListProblems(policy, facts),
-    ...facts.relations.flatMap((relation) => (isGlobal(relation.name) ? [] : relationProblems(relation))),
+    ...appendOnlyListProblems(policy, facts),
+    ...facts.relations.flatMap((relation) => relationProblems(relation, isGlobal(relation.name))),
     ...tenantTables.flatMap((table) => [
       ...orgIdProblems(
         table,
@@ -406,18 +462,18 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
         facts.reference,
       ),
     ]),
-    ...facts.uniqueIndexes
-      .filter((index) => isTenant.has(index.table))
-      .map(
-        (index) =>
-          `${index.table}: ${index.exclusion ? 'exclusion constraint' : 'unique index'} ${index.index} leaves out org_id, so it could reveal another organisation's rows (SEC-TEN-05)`,
+    ...facts.keysWithoutOrg
+      .filter((key) => isTenant.has(key.table))
+      .map((key) =>
+        key.exclusion
+          ? `${key.table}: exclusion constraint ${key.index} doesn't require org_id to be equal, ${LEAKS}`
+          : `${key.table}: unique index ${key.index} leaves out org_id, ${LEAKS}`,
       ),
-    ...facts.foreignKeys
-      .filter((key) => isTenant.has(key.target) && !key.pairs_org_id)
-      .map(
-        (key) =>
-          `${key.table}: foreign key ${key.name} points at the tenant table ${key.target} without pairing org_id with its org_id (SEC-TEN-05)`,
-      ),
+    ...facts.foreignKeys.flatMap((key) => foreignKeyProblems(key, isTenant)),
+    ...facts.definerRoutines.map(
+      (routine) =>
+        `function ${routine}: runs with its owner's rights (SECURITY DEFINER), which would let its callers act as the owner and reach past the tenant walls (ADR-005)`,
+    ),
     ...facts.grants.flatMap((grant) => grantProblems(grant, policy, roles)),
     ...facts.roles
       .filter((role) => role.bypass_rls && role.name !== roles.backup)
@@ -443,7 +499,9 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     }
     const actual = facts.columns.filter((column) => column.table === name).map((column) => column.column);
     for (const column of actual.filter((column) => !table.columns.includes(column))) {
-      problems.push(`${name}: column ${column} is not on the global-table list (SEC-TEN-08)`);
+      problems.push(
+        `${name}: column ${column} is not on the global-table list, so no one has reviewed it (SEC-TEN-08)`,
+      );
     }
     for (const column of table.columns.filter((column) => !actual.includes(column))) {
       problems.push(`${name}: the global-table list names column ${column}, which the table doesn't have`);
@@ -452,21 +510,45 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
   });
 }
 
-/** A relation that isn't on the global-table list must be a tenant table with its walls up. */
-function relationProblems(relation: Relation): string[] {
+/** Every append-only exception has a reason, and names a table that exists in an append-only schema. */
+function appendOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
+  return Object.entries(policy.appendOnlyExceptions).flatMap(([name, reason]) => {
+    const problems: string[] = [];
+    if (reason.trim() === '') problems.push(`${name}: the append-only exception list gives no reason for it`);
+    if (!facts.relations.some((relation) => relation.name === name)) {
+      problems.push(`${name}: is on the append-only exception list, but no such table exists`);
+    } else if (!policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
+      problems.push(`${name}: is on the append-only exception list, but its schema isn't append-only`);
+    }
+    return problems;
+  });
+}
+
+/**
+ * A relation off the global-table list must be a tenant table with its walls
+ * up. No table, global or not, may have rewrite rules.
+ */
+function relationProblems(relation: Relation, isGlobal: boolean): string[] {
+  const problems: string[] = [];
+  if (TABLE_KINDS.has(relation.kind) && relation.has_rules) {
+    problems.push(
+      `${relation.name}: has rewrite rules, which change what a statement does and act with the table owner's rights (ADR-005)`,
+    );
+  }
+  if (isGlobal) return problems;
   const other = OTHER_KINDS[relation.kind];
   if (other !== undefined) {
-    return [
+    problems.push(
       `${relation.name}: a ${other} can't have forced row-level security, so it must be on the global-table list (ADR-005 §2)`,
-    ];
-  }
-  if (!relation.rls) return [`${relation.name}: row-level security is off (ADR-005 §2)`];
-  if (!relation.forced) {
-    return [
+    );
+  } else if (!relation.rls) {
+    problems.push(`${relation.name}: row-level security is off (ADR-005 §2)`);
+  } else if (!relation.forced) {
+    problems.push(
       `${relation.name}: row-level security is enabled but not forced, so the table's owner bypasses it (ADR-005 §2)`,
-    ];
+    );
   }
-  return [];
+  return problems;
 }
 
 function orgIdProblems(table: string, orgId: Column | undefined): string[] {
@@ -500,6 +582,26 @@ function tenantPolicyProblems(table: string, policies: readonly Policy[], refere
 }
 
 /**
+ * A foreign key to a tenant table must come from another tenant table and
+ * pair org_id with org_id. A global table has no row-level security, so
+ * nothing would tie its org_id to the organisation that wrote the row.
+ */
+function foreignKeyProblems(key: ForeignKey, isTenant: ReadonlySet<string>): string[] {
+  if (!isTenant.has(key.target)) return [];
+  if (!isTenant.has(key.table)) {
+    return [
+      `${key.table}: foreign key ${key.name} runs from a table without row-level security to the tenant table ${key.target} (SEC-TEN-05)`,
+    ];
+  }
+  if (!key.pairs_org_id) {
+    return [
+      `${key.table}: foreign key ${key.name} points at the tenant table ${key.target} without pairing org_id with its org_id (SEC-TEN-05)`,
+    ];
+  }
+  return [];
+}
+
+/**
  * Default privileges are checked for PUBLIC only: what they give the backup or
  * app role shows up on each object once it is created, and is checked there.
  */
@@ -508,10 +610,11 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
   if (grant.grantee === roles.backup && grant.kind !== 'default' && !BACKUP_MAY[grant.kind].includes(grant.privilege)) {
     return [`${grant.object}: ${roles.backup} has ${grant.privilege}; it may only read (ADR-005 §3)`];
   }
+  // A sequence in an append-only schema is fine: drawing a number changes no row.
   const appendOnly =
-    (grant.kind === 'table' || grant.kind === 'column') &&
-    grant.schema !== null &&
-    policy.appendOnlySchemas.includes(grant.schema);
+    grant.relation !== '' &&
+    policy.appendOnlySchemas.includes(grant.schema) &&
+    !Object.hasOwn(policy.appendOnlyExceptions, grant.relation);
   if (appendOnly && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)`,

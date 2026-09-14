@@ -10,9 +10,14 @@
 // party that waits at the barrier while holding a lock another party needs to
 // get there would wait for ever, so the barrier times out, says why, and
 // releases every party; their transactions then roll back.
+//
+// Code under test that can't call the barrier (a service running its own
+// transactions) is lined up in the database instead: the test holds the lock
+// every party takes first, waits until all of them queue behind it
+// (waitUntilQueued, in db/lock-wait.ts), then lets go.
 
-/** How long a party waits at the barrier for the others, unless a race says otherwise. */
-const DEFAULT_TIMEOUT_MS = 10_000;
+/** How long the harness waits for parties to line up or queue, unless a test says otherwise. */
+export const DEFAULT_WAIT_MS = 10_000;
 
 /** The barrier can't line the parties up: it timed out, or a party ended without reaching it. */
 export class BarrierBroken extends Error {
@@ -63,7 +68,7 @@ export class Barrier {
     this.#timer ??= setTimeout(() => {
       this.break(
         new BarrierBroken(
-          `The barrier timed out after ${this.#timeoutMs} ms with ${this.#arrived} of ${this.parties} parties arrived. A party may be waiting for a lock that one at the barrier holds`,
+          `The barrier timed out after ${this.#timeoutMs} ms with ${this.#arrived} of ${this.parties} parties arrived. A party may be waiting for a lock that one at the barrier holds, or for a pooled connection that one at the barrier has`,
         ),
       );
     }, this.#timeoutMs);
@@ -91,8 +96,10 @@ export interface RaceOptions {
  * Each run gets its number (0 upward) and `sync`, which waits at the shared
  * barrier. If any run calls `sync`, every run must, once. A run that ends
  * without reaching the barrier breaks it, so the others don't wait for the
- * timeout. The outcomes come back in run order, as Promise.allSettled gives
- * them: a race is expected to have losers.
+ * timeout. The timeout covers only the wait at the barrier: a run that hangs
+ * anywhere else holds the race up until the test's own timeout. The outcomes
+ * come back in run order, as Promise.allSettled gives them: a race is
+ * expected to have losers.
  */
 export async function race<T>(
   parties: number,
@@ -102,8 +109,8 @@ export async function race<T>(
   if (!Number.isSafeInteger(parties) || parties < 2) {
     throw new RangeError(`A race needs a whole number of parties, at least 2; got ${parties}`);
   }
-  const barrier = new Barrier(parties, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  // Array.from calls each run in turn, in this tick, so they all start before any of them awaits.
+  const barrier = new Barrier(parties, options.timeoutMs ?? DEFAULT_WAIT_MS);
+  // Array.from calls each run in turn, in this tick, so every run has started before any continues past its first await.
   const runs = Array.from({ length: parties }, async (_, party) => {
     // An object, not a let: sync changes it, which the compiler can't see from here.
     const run = { arrived: false };
@@ -124,4 +131,14 @@ export async function race<T>(
     }
   });
   return Promise.allSettled(runs);
+}
+
+/** The values of the runs that succeeded, in run order. */
+export function successes<T>(outcomes: readonly PromiseSettledResult<T>[]): T[] {
+  return outcomes.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value] : []));
+}
+
+/** The errors of the runs that failed, in run order. */
+export function failures(outcomes: readonly PromiseSettledResult<unknown>[]): unknown[] {
+  return outcomes.flatMap((outcome): unknown[] => (outcome.status === 'rejected' ? [outcome.reason as unknown] : []));
 }
