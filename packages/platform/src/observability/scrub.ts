@@ -62,14 +62,24 @@ export function isPlainConstant(value: string): boolean {
 /** A JWT, or any base64url-encoded JSON object (they all start `eyJ`), whole or cut short. */
 const ENCODED_JSON = /eyJ[A-Za-z0-9_-]{8,4096}(?:\.[A-Za-z0-9_-]{0,4096}){0,2}/g;
 
-/** An absolute URL, with a scheme and `//`. */
-const URL_CANDIDATE = /\b[a-z][a-z0-9+.-]{0,40}:\/\/[^\s"'<>`]{1,4096}/gi;
+/**
+ * An absolute URL, with a scheme and `//`. Its host and path end at a quote, as
+ * when the URL is quoted in a message. Its query and fragment run past a single
+ * quote, which a query can hold (`?a='…`), and end at a space, `"`, `<` or `>`,
+ * so a URL inside JSON text leaves the fields after it. (A raw `"` in an
+ * incoming request's query only reaches a log in Fastify's messages, and the
+ * API's framework logger takes those addresses out whole.)
+ */
+const URL_CANDIDATE = /\b[a-z][a-z0-9+.-]{0,40}:\/\/[^\s"'<>`?#]{1,4096}(?:[?#][^\s"<>]{0,4096})?/gi;
 const TRAILING_PUNCTUATION = new Set([')', '.', ',', ';', ':', '!', '?', ']']);
 const URL_CREDENTIALS = /\/\/[^\s]{0,512}@/;
 const URL_QUERY_OR_FRAGMENT = /[?#].*$/s;
 
-/** A path with a query or fragment (`/callback?code=…`), as a web framework logs a request: the path stays. */
-const PATH_QUERY = /(^|[\s"'(=,])(\/[^\s?#"'<>]{0,2048})[?#][^\s"'<>]{0,4096}/g;
+/**
+ * A path with a query or fragment (`/callback?code=…`), as a web framework logs
+ * a request: the path stays. The query ends like a URL's (URL_CANDIDATE).
+ */
+const PATH_QUERY = /(^|[\s"'(=,])(\/[^\s?#"'<>]{0,2048})[?#][^\s"<>]{0,4096}/g;
 
 /**
  * HTTP authorisation values: Bearer tokens (even run into the word before, so

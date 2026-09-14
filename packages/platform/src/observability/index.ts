@@ -1,5 +1,6 @@
 export {
   createLogger,
+  createStartupLogger,
   type EventName,
   type LogBindings,
   type LogFields,

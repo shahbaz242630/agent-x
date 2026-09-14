@@ -41,10 +41,17 @@ describe('CI-05 verify gate', () => {
     expect(scripts).toEqual({ ...CHECKS, ...OTHER_SCRIPTS });
   });
 
-  it('gives no workspace package a script that runs on install', () => {
-    const packageFolders = readdirSync('packages', { withFileTypes: true }).filter((entry) => entry.isDirectory());
-    const installScripts = packageFolders.flatMap((folder) => {
-      const manifest = path.join('packages', folder.name, 'package.json');
+  it('gives no workspace package or app a script that runs on install', () => {
+    const folders = ['apps', 'packages']
+      .filter((parent) => existsSync(parent))
+      .flatMap((parent) =>
+        readdirSync(parent, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(parent, entry.name)),
+      );
+    expect(folders).toEqual(expect.arrayContaining([path.join('apps', 'api'), path.join('packages', 'platform')]));
+    const installScripts = folders.flatMap((folder) => {
+      const manifest = path.join(folder, 'package.json');
       if (!existsSync(manifest)) return [];
       const packageScripts = (JSON.parse(readFileSync(manifest, 'utf8')) as { scripts?: Record<string, string> })
         .scripts;

@@ -5,7 +5,14 @@ import { ConfigError, loadConfig } from './config.ts';
 type Env = Record<string, string | undefined>;
 
 const RELEASE = '2026.09.14-a1b2c3d';
-const MINIMAL: Env = { AGENTX_ENV: 'production', AGENTX_RELEASE: RELEASE };
+const PUBLIC_ORIGIN = 'https://app.agentx.example';
+const PROXIES = '10.0.0.0/23';
+const MINIMAL: Env = {
+  AGENTX_ENV: 'production',
+  AGENTX_RELEASE: RELEASE,
+  AGENTX_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
+  AGENTX_TRUSTED_PROXIES: PROXIES,
+};
 
 /** The problems loadConfig reports, or [] when it accepts the config. */
 function problemsWith(env: Env): readonly string[] {
@@ -19,26 +26,38 @@ function problemsWith(env: Env): readonly string[] {
 }
 
 describe('config: a correct config loads', () => {
-  it('needs only the environment and the release, and fills in the defaults', () => {
+  it('needs only the environment, the release and the public origin, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
       environment: 'production',
       release: RELEASE,
       log: { level: 'info', eventCapPerMinute: 600 },
+      http: {
+        host: '127.0.0.1',
+        port: 8080,
+        publicOrigin: PUBLIC_ORIGIN,
+        trustedProxies: [PROXIES],
+        rateLimitPerMinute: 300,
+      },
       outbound: { allowedOrigins: [] },
       payees: { coolingOffHours: 24 },
     });
   });
 
   it.each(['development', 'test', 'staging', 'production'])('accepts the %s environment', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment, AGENTX_RELEASE: RELEASE }).environment).toBe(environment);
+    expect(loadConfig({ ...MINIMAL, AGENTX_ENV: environment }).environment).toBe(environment);
   });
 
-  it('reads every setting, sorting the allowlist and dropping repeats', () => {
+  it('reads every setting, sorting the lists and dropping repeats', () => {
     const config = loadConfig({
       AGENTX_ENV: 'staging',
       AGENTX_RELEASE: RELEASE,
       AGENTX_LOG_LEVEL: 'warn',
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: '1200',
+      AGENTX_HTTP_HOST: '0.0.0.0',
+      AGENTX_HTTP_PORT: '3000',
+      AGENTX_PUBLIC_ORIGIN: 'https://staging.agentx.example',
+      AGENTX_TRUSTED_PROXIES: '10.0.0.0/23,100.100.0.1,10.0.0.0/23',
+      AGENTX_RATE_LIMIT_PER_MINUTE: '120',
       AGENTX_OUTBOUND_ALLOWED_ORIGINS:
         'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
@@ -47,6 +66,13 @@ describe('config: a correct config loads', () => {
       environment: 'staging',
       release: RELEASE,
       log: { level: 'warn', eventCapPerMinute: 1200 },
+      http: {
+        host: '0.0.0.0',
+        port: 3000,
+        publicOrigin: 'https://staging.agentx.example',
+        trustedProxies: ['10.0.0.0/23', '100.100.0.1'],
+        rateLimitPerMinute: 120,
+      },
       outbound: { allowedOrigins: ['https://api.partner.example:8443', 'https://telemetry.example'] },
       payees: { coolingOffHours: 48 },
     });
@@ -57,13 +83,20 @@ describe('config: a correct config loads', () => {
   });
 
   it('returns a config nothing can change afterwards', () => {
-    const config = loadConfig({ ...MINIMAL, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example' });
+    const config = loadConfig({
+      ...MINIMAL,
+      AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example',
+      AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
+    });
     expect(Object.isFrozen(config)).toBe(true);
     expect(Object.isFrozen(config.log)).toBe(true);
+    expect(Object.isFrozen(config.http)).toBe(true);
+    expect(Object.isFrozen(config.http.trustedProxies)).toBe(true);
     expect(Object.isFrozen(config.outbound)).toBe(true);
     expect(Object.isFrozen(config.outbound.allowedOrigins)).toBe(true);
     expect(Object.isFrozen(config.payees)).toBe(true);
     expect(() => (config.outbound.allowedOrigins as string[]).push('https://evil.example')).toThrow(TypeError);
+    expect(() => (config.http.trustedProxies as string[]).push('0.0.0.0/0')).toThrow(TypeError);
   });
 });
 
@@ -83,6 +116,11 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_RELEASE',
     'AGENTX_LOG_LEVEL',
     'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+    'AGENTX_HTTP_HOST',
+    'AGENTX_HTTP_PORT',
+    'AGENTX_PUBLIC_ORIGIN',
+    'AGENTX_TRUSTED_PROXIES',
+    'AGENTX_RATE_LIMIT_PER_MINUTE',
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
   ])('refuses %s set to an empty value', (name) => {
@@ -227,6 +265,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: plain http/),
       expect.stringMatching(/^AGENTX_RELEASE: is required in production/),
       expect.stringMatching(/^AGENTX_LOG_LEVEL: debug is off in production/),
+      expect.stringMatching(/^AGENTX_PUBLIC_ORIGIN: is required in production/),
+      expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: is required in production/),
     ]);
   });
 
@@ -246,20 +286,25 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       AGENTX_RELEASE: misplaced,
       AGENTX_LOG_LEVEL: misplaced,
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: misplaced,
+      AGENTX_HTTP_HOST: misplaced,
+      AGENTX_HTTP_PORT: misplaced,
+      AGENTX_PUBLIC_ORIGIN: misplaced,
+      AGENTX_TRUSTED_PROXIES: `10.0.0.1,${misplaced}`,
+      AGENTX_RATE_LIMIT_PER_MINUTE: misplaced,
       AGENTX_OUTBOUND_ALLOWED_ORIGINS: `https://api.partner.example,${misplaced}`,
       AGENTX_PAYEE_COOLING_OFF_HOURS: misplaced,
       AGENTX_MISSPELT: misplaced,
       NODE_TLS_REJECT_UNAUTHORIZED: misplaced,
     };
     const problems = problemsWith(env);
-    expect(problems).toHaveLength(8);
+    expect(problems).toHaveLength(13);
     expect(problems.filter((problem) => problem.toLowerCase().includes(misplaced))).toEqual([]);
   });
 });
 
 describe('SEC-AV-03 release: every deployed build is named', () => {
   it.each(['staging', 'production'])('refuses %s without a release', (environment) => {
-    expect(problemsWith({ AGENTX_ENV: environment })).toEqual([
+    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_RELEASE: undefined })).toEqual([
       `AGENTX_RELEASE: is required in ${environment}, so every log line and error names the build that ran`,
     ]);
   });
@@ -294,9 +339,7 @@ describe('SEC-AV-03 logging settings', () => {
   });
 
   it.each(['development', 'test', 'staging'])('accepts debug in %s', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment, AGENTX_RELEASE: RELEASE, AGENTX_LOG_LEVEL: 'debug' }).log.level).toBe(
-      'debug',
-    );
+    expect(loadConfig({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_LOG_LEVEL: 'debug' }).log.level).toBe('debug');
   });
 
   it('refuses debug in production, where lines could carry more detail than needed', () => {
@@ -312,11 +355,13 @@ describe('SEC-AV-03 logging settings', () => {
   });
 
   it.each([
-    ['10', 10],
+    // The smallest pair that works: the rate limit's minimum is 10, and it must be at most half the cap.
+    ['20', 20],
     ['600', 600],
     ['1000000', 1_000_000],
   ])('accepts an event cap of %s lines a minute', (cap, expected) => {
-    expect(loadConfig({ ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap }).log.eventCapPerMinute).toBe(expected);
+    const env = { ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap, AGENTX_RATE_LIMIT_PER_MINUTE: '10' };
+    expect(loadConfig(env).log.eventCapPerMinute).toBe(expected);
   });
 
   it('refuses an event cap below 10, which would hide ordinary activity', () => {
@@ -338,7 +383,7 @@ describe('SEC-DATA-01 Node’s own debug output is off in production', () => {
   });
 
   it.each(['development', 'test', 'staging'])('allows NODE_DEBUG in %s, for troubleshooting', (environment) => {
-    expect(problemsWith({ AGENTX_ENV: environment, AGENTX_RELEASE: RELEASE, NODE_DEBUG: 'fetch' })).toEqual([]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, NODE_DEBUG: 'fetch' })).toEqual([]);
   });
 });
 
@@ -346,8 +391,8 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
   it.each(['staging', 'production'])('refuses a plain http origin in %s', (environment) => {
     expect(
       problemsWith({
+        ...MINIMAL,
         AGENTX_ENV: environment,
-        AGENTX_RELEASE: RELEASE,
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example,http://api.partner.example',
       }),
     ).toEqual([
@@ -363,6 +408,194 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
 
   it('accepts https origins in production', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example' })).toEqual([]);
+  });
+});
+
+describe('SEC-WEB-01 the public origin: the one address browser writes are accepted from', () => {
+  it.each(['staging', 'production'])('is required in %s', (environment) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: undefined })).toEqual([
+      `AGENTX_PUBLIC_ORIGIN: is required in ${environment}; browser writes are accepted only from it`,
+    ]);
+  });
+
+  it.each(['development', 'test'])('is the local address in %s, when not set', (environment) => {
+    expect(loadConfig({ AGENTX_ENV: environment }).http.publicOrigin).toBe('http://localhost:8080');
+  });
+
+  it.each(['https://app.agentx.example', 'https://app.agentx.example:8443'])('accepts %s', (origin) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_PUBLIC_ORIGIN: origin }).http.publicOrigin).toBe(origin);
+  });
+
+  it.each([
+    ['a bare host name', 'app.agentx.example'],
+    ['a trailing slash', 'https://app.agentx.example/'],
+    ['a path', 'https://app.agentx.example/console'],
+    ['capital letters', 'https://App.agentx.example'],
+    ['the default port', 'https://app.agentx.example:443'],
+    ['a user name', 'https://someone@app.agentx.example'],
+    ['two origins', 'https://app.agentx.example,https://other.example'],
+    ['a websocket URL', 'wss://app.agentx.example'],
+  ])('refuses %s', (_what, origin) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_PUBLIC_ORIGIN: origin })).toEqual([
+      'AGENTX_PUBLIC_ORIGIN: is not an origin. Write it as scheme://host[:port]: ' +
+        'http or https, lowercase, no default port, no path, no user name',
+    ]);
+  });
+
+  it.each(['staging', 'production'])('refuses plain http in %s', (environment) => {
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://app.agentx.example' }),
+    ).toEqual([
+      `AGENTX_PUBLIC_ORIGIN: plain http is allowed only in development and test; ${environment} must use https`,
+    ]);
+  });
+
+  it.each(['development', 'test'])('accepts plain http in %s, for the local stack', (environment) => {
+    expect(problemsWith({ AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://localhost:3000' })).toEqual([]);
+  });
+});
+
+describe('SEC-AV-03 where the API listens', () => {
+  it.each(['127.0.0.1', '0.0.0.0', '::', '::1'])('accepts the address %s', (host) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_HTTP_HOST: host }).http.host).toBe(host);
+  });
+
+  it.each(['localhost', 'api.agentx.example', '256.0.0.1', '0.0.0.0:8080', ' 127.0.0.1'])(
+    'refuses %j, which is not an IP address',
+    (host) => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_HTTP_HOST: host })).toEqual([
+        'AGENTX_HTTP_HOST: must be an IP address, such as 127.0.0.1 or 0.0.0.0, not a host name',
+      ]);
+    },
+  );
+
+  it.each([
+    ['1', 1],
+    ['8080', 8080],
+    ['65535', 65_535],
+  ])('accepts the port %s', (value, expected) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_HTTP_PORT: value }).http.port).toBe(expected);
+  });
+
+  it.each([
+    ['65536', 'AGENTX_HTTP_PORT: must be at most 65535'],
+    ['9'.repeat(400), 'AGENTX_HTTP_PORT: must be at most 65535'],
+    ['80a', 'AGENTX_HTTP_PORT: must be a whole number, written in digits only'],
+    ['-1', 'AGENTX_HTTP_PORT: must be a whole number, written in digits only'],
+    [' 80', 'AGENTX_HTTP_PORT: must be a whole number, written in digits only'],
+  ])('refuses the port %j', (value, problem) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_HTTP_PORT: value })).toEqual([problem]);
+  });
+
+  it.each(['development', 'test'])('accepts port 0 (any free port) in %s, for tests', (environment) => {
+    expect(loadConfig({ AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' }).http.port).toBe(0);
+  });
+
+  it.each(['staging', 'production'])('refuses port 0 in %s, where the ingress needs a known port', (environment) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' })).toEqual([
+      `AGENTX_HTTP_PORT: 0 (any free port) is allowed only in development and test; ${environment} must name its port`,
+    ]);
+  });
+});
+
+describe('SEC-AV-07 trusted proxies are addresses or narrow ranges', () => {
+  it.each([
+    ['an IPv4 address', '10.0.0.1'],
+    ['an Azure-sized IPv4 range', '10.0.0.0/23'],
+    ['the widest IPv4 range allowed', '10.1.0.0/16'],
+    ['an IPv6 address', '2001:db8::1'],
+    ['the widest IPv6 range allowed', '2001:db8:1::/48'],
+    ['an IPv6 range written in full', '2001:0db8:0001:0000:0000:0000:0000:0000/64'],
+    ['an IPv4-mapped address, which is one IPv4 address', '::ffff:10.0.0.1'],
+    ['a NAT64 range, outside the mapped block', '64:ff9b::/96'],
+    ['a range whose groups before `::` look like the mapped block, elsewhere', '2001:db8:0:0:0:ffff::/96'],
+    ['an IPv6 range whose last groups hold a dotted IPv4 address', '2001:db8:1:2::10.0.0.0/120'],
+  ])('accepts %s', (_what, entry) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_TRUSTED_PROXIES: entry }).http.trustedProxies).toEqual([entry]);
+  });
+
+  it.each([
+    ['a host name', 'ingress.agentx.example'],
+    ['every IPv4 address', '0.0.0.0/0'],
+    ['every IPv6 address', '::/0'],
+    ['every IPv4 address, as two halves', '0.0.0.0/1,128.0.0.0/1'],
+    ['every IPv6 address, as two halves', '8000::/1,::/1'],
+    ['an IPv4 range wider than /16', '10.0.0.0/15'],
+    ['an IPv6 range wider than /48', '2001:db8::/47'],
+    ['the IPv4-mapped block, which trusts every IPv4 client', '::ffff:0:0/96'],
+    ['the mapped block written in full', '0:0:0:0:0:ffff:0:0/96'],
+    ['the mapped block with its zeros last', '0:0:0:0:0:ffff::/96'],
+    ['an IPv4 range in mapped form', '::ffff:10.0.0.0/120'],
+    ['an IPv4 range in mapped form, written in hex', '::ffff:a00:0/120'],
+    ['a range that holds the mapped block', '::/64'],
+    ['a range too wide to exist', '10.0.0.0/33'],
+    ['a space after a comma', '10.0.0.1, 10.0.0.2'],
+    ['an empty entry', '10.0.0.1,,10.0.0.2'],
+    ['a port', '10.0.0.1:443'],
+  ])('refuses %s', (_what, entries) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_TRUSTED_PROXIES: entries })).toEqual([
+      expect.stringMatching(/^AGENTX_TRUSTED_PROXIES: entry [\d, ]+ is not a proxy address\./),
+    ]);
+  });
+
+  it('names every bad entry by its position', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_TRUSTED_PROXIES: '10.0.0.1,proxy,10.0.0.0/16,::/0' })).toEqual([
+      'AGENTX_TRUSTED_PROXIES: entry 2, 4 is not a proxy address. Write each as an IP address or a CIDR range ' +
+        'no wider than /16 (IPv4) or /48 (IPv6), with IPv4 ranges in IPv4 form, comma-separated with no spaces',
+    ]);
+  });
+
+  it.each(['staging', 'production'])('is required in %s, where a TLS proxy is always in front', (environment) => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_TRUSTED_PROXIES: undefined })).toEqual([
+      `AGENTX_TRUSTED_PROXIES: is required in ${environment}; without the TLS proxy's address, ` +
+        'every client would share one rate limit',
+    ]);
+  });
+
+  it.each(['development', 'test'])('is optional in %s, where the app is reached directly', (environment) => {
+    expect(loadConfig({ AGENTX_ENV: environment }).http.trustedProxies).toEqual([]);
+  });
+});
+
+describe('SEC-AV-03 the rate limit per client address', () => {
+  it.each([
+    ['10', 10],
+    ['300', 300],
+  ])('accepts %s requests a minute (300 is half the default log cap)', (value, expected) => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_MINUTE: value }).http.rateLimitPerMinute).toBe(expected);
+  });
+
+  it('accepts 100000, with a log cap above it', () => {
+    const config = loadConfig({
+      ...MINIMAL,
+      AGENTX_RATE_LIMIT_PER_MINUTE: '100000',
+      AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000',
+    });
+    expect(config.http.rateLimitPerMinute).toBe(100_000);
+  });
+
+  it.each([
+    ['one over half the default log cap', '301', '600'],
+    ['equal to the default log cap', '600', '600'],
+    ['over half a raised log cap', '501', '1000'],
+  ])("refuses a limit %s: one client's requests could fill the request log (ADR-012 §9)", (_what, limit, cap) => {
+    const env = { ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap, AGENTX_RATE_LIMIT_PER_MINUTE: limit };
+    expect(problemsWith(env)).toEqual([
+      `AGENTX_RATE_LIMIT_PER_MINUTE: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (${cap}), ` +
+        "so one client's requests can't fill the request log on their own",
+    ]);
+  });
+
+  it('refuses fewer than 10, which would stop ordinary use of the console', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_MINUTE: '9' })).toEqual([
+      'AGENTX_RATE_LIMIT_PER_MINUTE: must be at least 10 requests (fewer would stop ordinary use of the console)',
+    ]);
+  });
+
+  it('refuses more than 100000', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_MINUTE: '100001' })).toEqual([
+      'AGENTX_RATE_LIMIT_PER_MINUTE: must be at most 100000 requests',
+    ]);
   });
 });
 

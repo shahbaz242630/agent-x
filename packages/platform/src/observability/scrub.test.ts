@@ -162,6 +162,32 @@ describe('SEC-DATA-01 scrub: URLs keep where they point, and lose credentials, q
     ['an IP address host', 'http://192.0.2.10:8080/health', 'http://[ip]:8080/health'],
     ['an email in the path', `https://api.example/users/${SAMPLES.email}/x`, 'https://api.example/users/[email]/x'],
     ['a relative path with a query, as a framework logs it', 'GET /v1/requests?limit=10 200', 'GET /v1/requests 200'],
+    // The 0e D security review: a quote in a query used to end the match, and what followed stayed.
+    [
+      'a relative path whose query holds a quote',
+      "GET /v1/suppliers/x?a='note=private-query-value 200",
+      'GET /v1/suppliers/x 200',
+    ],
+    [
+      'a quoted path whose query holds a quote, as Fastify quotes it',
+      `in "/v1/suppliers/x?a='note=private-query-value" (GET)`,
+      'in "/v1/suppliers/x" (GET)',
+    ],
+    [
+      'a URL inside JSON text, which keeps the fields after it',
+      'partner said {"next":"https://api.partner.example/v1?page=2","code":"E_LIMIT","retry":30}',
+      'partner said {"next":"https://api.partner.example/v1","code":"E_LIMIT","retry":30}',
+    ],
+    [
+      'a URL whose query holds a quote',
+      "calling https://api.partner.example/v1?a='note=private-query-value now",
+      'calling https://api.partner.example/v1 now',
+    ],
+    [
+      'a quoted URL with no query, which stays as written',
+      "'https://api.partner.example/v1'",
+      "'https://api.partner.example/v1'",
+    ],
   ])('%s', (_what, text, expected) => {
     expect(scrub(text)).toBe(expected);
   });

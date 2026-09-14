@@ -38,6 +38,7 @@ const EXPECTED: Record<string, string[]> = {
   'other-loggers': ['no-other-logger', 'not-to-unresolvable'],
   // The logger's library, imported outside the logger (ADR-013).
   'logger-outside-observability': ['logger-only-in-platform-observability', 'not-to-unresolvable'],
+  'packages-to-apps': ['packages-not-to-apps'],
   'platform-to-modules': ['platform-not-to-modules'],
   'postgres-driver': ['not-to-unresolvable', 'postgres-driver-only-in-platform-db'],
   // The test harness's db folder may use the driver; the rest of the testing package may not.
