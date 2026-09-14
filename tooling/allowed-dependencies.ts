@@ -7,6 +7,10 @@
  * (`workspace:*`) and development tools are not listed.
  */
 export const ALLOWED_DEPENDENCIES: Readonly<Record<string, string>> = {
+  '@fastify/proxy-addr':
+    "SEC-AV-07: Fastify's own proxy-trust rule, also applied to the rate limit's key for requests Fastify builds without it",
+  '@fastify/rate-limit': "ADR-011 §4: the API's rate limit per client address; Fastify's own plugin",
+  fastify: "ADR-001: the API's HTTP server",
   kysely: 'ADR-001: typed SQL with bound parameters, and the transactions withTenant opens',
   pg: 'ADR-001: the Postgres driver, used only by @agentx/platform/db and the test database harness',
   pino: 'ADR-001, ADR-013: the logger, which writes redacted JSON lines to stdout',

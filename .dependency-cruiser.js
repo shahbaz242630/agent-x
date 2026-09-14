@@ -151,6 +151,13 @@ export default {
       to: { path: MODULES },
     },
     {
+      name: 'packages-not-to-apps',
+      comment: 'Rule Book §4: dependencies point one way. The apps use the packages; no package imports an app.',
+      severity: 'error',
+      from: { path: `${ROOT}packages/` },
+      to: { path: `${ROOT}apps/` },
+    },
+    {
       name: 'no-cloud-sdk',
       comment: 'ADR-010: product code runs on any cloud or a bank server, so it imports no cloud SDK.',
       severity: 'error',

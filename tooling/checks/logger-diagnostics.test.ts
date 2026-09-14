@@ -8,6 +8,7 @@ import { tracingChannel } from 'node:diagnostics_channel';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { frameworkLogger } from '../../apps/api/src/framework-logger.ts';
 import { createLogger } from '../../packages/platform/src/observability/index.ts';
 import { findLeaks, LogCapture, SENSITIVE_SAMPLES } from '../../packages/testing/src/log-scan.ts';
 
@@ -52,5 +53,27 @@ describe('ADR-013 a diagnostics-channel subscriber sees only redacted data', () 
     const published = seen.join('\n');
     expect(published).toContain('check.sample');
     expect(findLeaks(published, [PLANTED, ...samples])).toEqual([]);
+  });
+
+  it("receives the web framework's lines already cleaned, as the API's adapter writes them", () => {
+    seen.length = 0;
+    const logger = createLogger({
+      service: 'diagnostics-check',
+      config: { environment: 'test', release: 'r-1', log: { level: 'debug', eventCapPerMinute: 100 } },
+      destination: new LogCapture(),
+    });
+    const samples = Object.values(SENSITIVE_SAMPLES);
+    const framework = frameworkLogger(logger, 'debug').child({ correlationId: 'c-1' });
+    framework.error(
+      {
+        req: { url: `/v1/x?password=${PLANTED}`, headers: { authorization: SENSITIVE_SAMPLES.bearer } },
+        err: new Error(`failed for ${samples.join(' ')}`),
+      },
+      `request to ${SENSITIVE_SAMPLES.relativeCallback} from ${SENSITIVE_SAMPLES.ipv4} errored`,
+    );
+    framework.trace(new Error(`client error from ${SENSITIVE_SAMPLES.ipv6}`));
+
+    expect(seen).toHaveLength(2);
+    expect(findLeaks(seen.join('\n'), [PLANTED, ...samples])).toEqual([]);
   });
 });

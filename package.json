@@ -11,11 +11,11 @@
     "format:check": "prettier --check .",
     "lint": "eslint --max-warnings 0 .",
     "typecheck": "tsc --project tsconfig.json",
-    "boundaries": "depcruise packages",
+    "boundaries": "depcruise apps packages",
     "knip": "knip",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "verify": "prettier --check . && eslint --max-warnings 0 . && tsc --project tsconfig.json && depcruise packages && knip && vitest run --coverage"
+    "verify": "prettier --check . && eslint --max-warnings 0 . && tsc --project tsconfig.json && depcruise apps packages && knip && vitest run --coverage"
   },
   "devDependencies": {
     "@eslint-community/eslint-plugin-eslint-comments": "4.8.0",

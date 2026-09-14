@@ -5,7 +5,13 @@ import { configFingerprint, WATCHED_VARIABLES } from './fingerprint.ts';
 
 type Env = Record<string, string | undefined>;
 
-const SETTINGS: Env = { AGENTX_ENV: 'production', AGENTX_RELEASE: 'r-1', AGENTX_PAYEE_COOLING_OFF_HOURS: '48' };
+const SETTINGS: Env = {
+  AGENTX_ENV: 'production',
+  AGENTX_RELEASE: 'r-1',
+  AGENTX_PUBLIC_ORIGIN: 'https://app.agentx.example',
+  AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
+  AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
+};
 
 /** The fingerprint of a process started with these variables and no Node flags. */
 const fingerprintOf = (env: Env, flags: readonly string[] = []) => configFingerprint(loadConfig(env), env, flags);
@@ -53,6 +59,8 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['a threshold', { AGENTX_PAYEE_COOLING_OFF_HOURS: '49' }],
     ['the log level', { AGENTX_LOG_LEVEL: 'warn' }],
     ['the outbound allowlist', { AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example' }],
+    ['the trusted proxies', { AGENTX_TRUSTED_PROXIES: '10.0.0.0/24' }],
+    ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
     ['the environment', { AGENTX_ENV: 'staging' }],
   ])('changes when %s changes', (_what, change) => {
     expect(hashOf({ ...SETTINGS, ...change })).not.toBe(hashOf(SETTINGS));

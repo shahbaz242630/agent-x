@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { LogLevel } from '../config/index.ts';
 import {
   createLogger,
+  createStartupLogger,
   eventOf,
   type EventName,
   INVALID_EVENT,
@@ -55,6 +56,25 @@ describe('logging standard §2: one JSON line per event, with the standard field
         event: 'spend_request.decided',
         outcome: 'approved',
         durationMs: 12,
+      },
+    ]);
+  });
+
+  it('writes lines from before the config is read as unconfigured, at info, redacted like any other', () => {
+    const capture = new LogCapture();
+    const logger = createStartupLogger({ service: 'api', destination: capture, now: () => START });
+    logger.debug('test.hidden');
+    logger.error('api.start_refused', { problems: ['AGENTX_ENV: is required'], note: SAMPLES.email });
+    expect(capture.lines()).toEqual([
+      {
+        time: '2026-09-14T10:00:00.000Z',
+        level: 'error',
+        service: 'api',
+        env: 'unconfigured',
+        release: 'unconfigured',
+        event: 'api.start_refused',
+        problems: ['AGENTX_ENV: is required'],
+        note: '[email]',
       },
     ]);
   });

@@ -10,7 +10,7 @@
 // finished line again (redact.ts), for every logger made from this one.
 import pino from 'pino';
 
-import type { Config, LogLevel } from '../config/index.ts';
+import { type Config, DEFAULT_LOG, type LogLevel } from '../config/index.ts';
 import { toLoggable } from './loggable.ts';
 import { redactJson, redactLine } from './redact.ts';
 import { createVolumeGuard, MINUTE_MS } from './volume-guard.ts';
@@ -96,7 +96,7 @@ export interface LoggerOptions {
    * Where lines go. By default, stdout, written synchronously so a crash can't
    * lose the last lines. Tests pass a capture.
    */
-  readonly destination?: pino.DestinationStream;
+  readonly destination?: pino.DestinationStream | undefined;
   /** Milliseconds since 1970, for the time field and the volume guard's minutes. */
   readonly now?: () => number;
 }
@@ -159,9 +159,32 @@ function wrap(instance: pino.Logger, writeSuppressed: (includeCurrentMinute?: bo
   };
 }
 
+/** What every line says about where it came from. */
+interface LogContext {
+  readonly environment: string;
+  readonly release: string;
+  readonly log: Config['log'];
+}
+
+/**
+ * Before the config is read, the environment and release aren't known. So a
+ * start-up refusal is written with both as `unconfigured`, at the config's
+ * default level and cap.
+ */
+const UNCONFIGURED: LogContext = { environment: 'unconfigured', release: 'unconfigured', log: DEFAULT_LOG };
+
 export function createLogger(options: LoggerOptions): Logger {
+  return build(options, options.config);
+}
+
+/** For the lines written before the config is read, such as a refusal to start. */
+export function createStartupLogger(options: Omit<LoggerOptions, 'config'>): Logger {
+  return build(options, UNCONFIGURED);
+}
+
+function build(options: Omit<LoggerOptions, 'config'>, context: LogContext): Logger {
   const now = options.now ?? Date.now;
-  const guard = createVolumeGuard(options.config.log.eventCapPerMinute, now);
+  const guard = createVolumeGuard(context.log.eventCapPerMinute, now);
   const destination = options.destination ?? pino.destination({ dest: 1, sync: true });
   const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -191,8 +214,8 @@ export function createLogger(options: LoggerOptions): Logger {
 
   const root = pino(
     {
-      level: options.config.log.level,
-      base: { service: options.service, env: options.config.environment, release: options.config.release },
+      level: context.log.level,
+      base: { service: options.service, env: context.environment, release: context.release },
       // The message argument is the event name, so it's written as `event`.
       messageKey: 'event',
       timestamp: () => `,"time":"${iso(now())}"`,
