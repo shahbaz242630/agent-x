@@ -147,17 +147,38 @@ describe('FX-RACE a limit under N parallel requests (the SEC-LIM-01 shape, ADR-0
    * Broken, as ADR-006 §7 warns: the count is folded into the locking
    * statement, whose snapshot was taken before it waited for the lock.
    */
-  const countInTheLockingStatement: Reserve = async (client, party, sync) => {
-    await sync();
+  const countInTheLockingStatement: Reserve = async (client, party) => {
     const [row] = await client.query<{ taken: string }>(
       'select (select count(*) from race.reservations) as taken from race.periods where id = 1 for no key update',
     );
     return reserveIf(client, party, Number(row?.taken));
   };
 
-  const raceOf = async (reserve: Reserve): Promise<PromiseSettledResult<'reserved' | 'refused'>[]> => {
+  type Outcomes = PromiseSettledResult<'reserved' | 'refused'>[];
+
+  const raceOf = async (reserve: Reserve): Promise<Outcomes> => {
     const clientOf = await parties(8);
     return race(8, (party, sync) => inTransaction(clientOf(party), () => reserve(clientOf(party), party, sync)));
+  };
+
+  /**
+   * Lines the parties up in the database instead: the test holds the period
+   * row until every party's first statement is waiting for it, so each
+   * statement has started, and taken its snapshot, before any party commits.
+   * A barrier can't promise that: it only says when each party sends.
+   */
+  const raceThroughGate = async (reserve: Reserve): Promise<Outcomes> => {
+    const clientOf = await parties(8);
+    const gate = await database.connect('app');
+    opened.push(gate);
+    await gate.query('begin');
+    await gate.query('select 1 from race.periods where id = 1 for update');
+    const running = race(8, (party) =>
+      inTransaction(clientOf(party), () => reserve(clientOf(party), party, () => Promise.resolve())),
+    );
+    expect(await waitUntilQueued(database.as('app'), 8)).toHaveLength(8);
+    await gate.query('commit');
+    return running;
   };
 
   it('never goes over when the period row is locked and the count is a separate statement', async () => {
@@ -173,24 +194,13 @@ describe('FX-RACE a limit under N parallel requests (the SEC-LIM-01 shape, ADR-0
   });
 
   it('catches a count folded into the locking statement: each party counts from before it waited', async () => {
-    expect(successes(await raceOf(countInTheLockingStatement))).toEqual(all(8, 'reserved'));
+    expect(successes(await raceThroughGate(countInTheLockingStatement))).toEqual(all(8, 'reserved'));
     expect(await reservations()).toBe(8);
   });
 
   it('lines up code that can’t call a barrier by holding the lock it takes first, until every party has queued', async () => {
-    const clientOf = await parties(8);
-    const gate = await database.connect('app');
-    opened.push(gate);
-    await gate.query('begin');
-    await gate.query('select 1 from race.periods where id = 1 for update');
-    // The parties run the ADR-006 pattern with no barrier: the first lock they take is the one the gate holds.
-    const running = race(8, (party) =>
-      inTransaction(clientOf(party), () => lockThenCount(clientOf(party), party, () => Promise.resolve())),
-    );
-    const queued = await waitUntilQueued(database.as('app'), 8);
-    expect(queued).toHaveLength(8);
-    await gate.query('commit');
-    const results = successes(await running);
+    // The ADR-006 pattern with no barrier: the first lock it takes is the one the test holds.
+    const results = successes(await raceThroughGate(lockThenCount));
     expect(results.filter((result) => result === 'reserved')).toHaveLength(LIMIT);
     expect(await reservations()).toBe(LIMIT);
   });
