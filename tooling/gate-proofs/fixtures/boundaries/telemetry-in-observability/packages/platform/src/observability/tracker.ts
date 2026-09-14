@@ -1,2 +1,3 @@
 import * as Sentry from '@sentry/node';
-export const report = Sentry;
+
+export const tracker = Sentry;
