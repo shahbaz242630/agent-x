@@ -7,6 +7,8 @@
  * (`workspace:*`) and development tools are not listed.
  */
 export const ALLOWED_DEPENDENCIES: Readonly<Record<string, string>> = {
+  kysely: 'ADR-001: typed SQL with bound parameters, and the transactions withTenant opens',
+  pg: 'ADR-001: the Postgres driver, used only by @agentx/platform/db and the test database harness',
   pino: 'ADR-001, ADR-013: the logger, which writes redacted JSON lines to stdout',
   uuid: 'ADR-001, ADR-007: UUIDv7 IDs generated in the app',
   zod: 'ADR-001, Rule Book §5: input validation at the edges, and the start-up config check',

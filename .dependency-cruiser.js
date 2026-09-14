@@ -31,9 +31,12 @@ const UNKNOWN_MODULE = `${MODULES}(?!(?:${Object.keys(MODULE_MAP).join('|')})/)[
 /** Vendor libraries confined to one adapter folder (ADR-004 §8). */
 const CONFINED = [
   {
+    // The test harness also needs the driver: it creates a database for each
+    // test file, and connects as the owner and the server admin to play the
+    // attacker. Test helpers never ship (testing-only-in-tests).
     name: 'postgres-driver-only-in-platform-db',
     packages: 'pg|pg-pool|pg-cursor|postgres',
-    allowedIn: `${ROOT}packages/platform/src/db/`,
+    allowedIn: `(?:${ROOT}packages/platform/src/db/|${ROOT}packages/testing/src/db/)`,
   },
   {
     name: 'query-builder-only-in-infrastructure',

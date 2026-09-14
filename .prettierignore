@@ -3,5 +3,6 @@ coverage/
 dist/
 Documents/
 .playwright-mcp/
+.claude/
 # Deliberately broken files that the gate proofs check are rejected.
 tooling/gate-proofs/fixtures/

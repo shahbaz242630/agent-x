@@ -40,6 +40,11 @@ const EXPECTED: Record<string, string[]> = {
   'logger-outside-observability': ['logger-only-in-platform-observability', 'not-to-unresolvable'],
   'platform-to-modules': ['platform-not-to-modules'],
   'postgres-driver': ['not-to-unresolvable', 'postgres-driver-only-in-platform-db'],
+  // The test harness's db folder may use the driver; the rest of the testing package may not.
+  'postgres-driver-in-testing': ['not-to-unresolvable', 'postgres-driver-only-in-platform-db'],
+  // The two places the driver is allowed. The fixture has no installed driver, so only
+  // not-to-unresolvable fires; the driver rule must not.
+  'postgres-driver-allowed': ['not-to-unresolvable'],
   'query-builder': ['not-to-unresolvable', 'query-builder-only-in-infrastructure'],
   'shared-kernel-leaf': ['shared-kernel-is-a-leaf'],
   // The observability folder may import the logger's library, but no telemetry SDK.

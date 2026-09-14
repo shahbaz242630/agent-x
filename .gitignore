@@ -33,4 +33,5 @@ Thumbs.db
 
 # Local AI tooling
 .claude/settings.local.json
+.claude/worktrees/
 .playwright-mcp/
