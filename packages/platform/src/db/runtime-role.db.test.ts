@@ -44,8 +44,18 @@ async function problemsFor(connection: DatabaseConnectionOptions): Promise<strin
 
 const problemsOf = (role: TestRole): Promise<string[]> => problemsFor(database.connection(role));
 
-/** Runs `check` as a new login role that `setup` (run by the admin) gives something extra. */
-async function asNewRole(setup: (name: string) => readonly string[], check: (name: string) => Promise<void>) {
+/**
+ * Runs `check` as a new login role that `setup` (run by the admin) gives
+ * something extra; `teardown` removes anything else setup made. Roles and
+ * memberships belong to the whole server, which every test file shares, so
+ * setup never changes the shared agentx_* roles: the CI-06 schema checks read
+ * them from every other test database.
+ */
+async function asNewRole(
+  setup: (name: string) => readonly string[],
+  check: (name: string) => Promise<void>,
+  teardown: (name: string) => readonly string[] = () => [],
+) {
   const name = `t_role_${randomUUID().replaceAll('-', '')}`;
   const admin = database.as('admin');
   // eslint-disable-next-line agentx/no-string-built-sql -- Test setup: CREATE ROLE can't take names as parameters; the name is generated.
@@ -63,6 +73,10 @@ async function asNewRole(setup: (name: string) => readonly string[], check: (nam
     await admin.query(`drop owned by ${name}`);
     // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
     await admin.query(`drop role ${name}`);
+    for (const statement of teardown(name)) {
+      // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above; the statements are written in the tests below.
+      await admin.query(statement);
+    }
   }
 }
 
@@ -104,14 +118,17 @@ describe(`APP-02 the app refuses to run as a role that can get round the tenant 
     expect(problems).toContain('it can create databases');
   });
 
-  it('refuses a role that is a member of the owner, whose rights it could use', async () => {
+  it('refuses a role that is a member of another role, whose rights it could use', async () => {
+    // A role of the test's own, not agentx_owner (see asNewRole). The owner's
+    // own implicit membership is covered by the migration-role test above.
     await asNewRole(
-      (name) => [`grant agentx_owner to ${name}`],
+      (name) => [`create role ${name}_group nologin`, `grant ${name}_group to ${name}`],
       async (name) => {
         expect(await problemsFor(loginAs(name))).toEqual([
-          'it is a member of other roles, whose rights it can use (agentx_owner, pg_database_owner)',
+          `it is a member of other roles, whose rights it can use (${name}_group)`,
         ]);
       },
+      (name) => [`drop role ${name}_group`],
     );
   });
 

@@ -65,6 +65,45 @@ describe(`createTestDatabase (Postgres ${server.version})`, () => {
     });
   });
 
+  it('opens a connection of its own, so a transaction stays on one connection', async () => {
+    const client = await first.connect('app');
+    try {
+      const [row] = await client.query<{ pid: number }>('select pg_catalog.pg_backend_pid() as pid');
+      expect(row?.pid).toBe(client.pid);
+      await client.query('begin');
+      const transaction = 'select pg_catalog.pg_current_xact_id()::text as id';
+      const [before] = await client.query<{ id: string }>(transaction);
+      const [after] = await client.query<{ id: string }>(transaction);
+      expect(after?.id).toBe(before?.id);
+      await client.query('rollback');
+    } finally {
+      await client.end();
+    }
+    // Ending it again is harmless.
+    await client.end();
+  });
+
+  it('closes the connections a test left open when the database is dropped', async () => {
+    const extra = await createTestDatabase(server, { schema: 'empty' });
+    const left = await extra.connect('app');
+    await extra.drop();
+    // pg's message for a connection closed from our side, not one the server cut.
+    await expect(left.query('select 1')).rejects.toThrow('Client was closed and is not queryable');
+  });
+
+  it('turns a connection the server ends into a failed query, not a crash, and keeps the server’s reason', async () => {
+    const client = await first.connect('app');
+    try {
+      // With a timeout, this returns once the process has gone; the idle connection has heard by then.
+      await first.as('admin').query('select pg_catalog.pg_terminate_backend($1, 5000)', [client.pid]);
+      const failure = (await client.query('select 1').catch((error: unknown) => error)) as Error;
+      expect(failure.message).toBe('The test connection was lost');
+      expect(String(failure.cause)).toMatch(/terminating connection due to administrator command/);
+    } finally {
+      await client.end();
+    }
+  });
+
   it('deletes the database on drop, even with a session still open', async () => {
     const extra = await createTestDatabase(server, { schema: 'empty' });
     // A session the harness doesn't know about, like a pool a test forgot to close.
