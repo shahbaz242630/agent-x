@@ -8,6 +8,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 import noStringBuiltSql from './tooling/eslint-rules/no-string-built-sql.js';
+import tenantSettingOnlyInWithTenant from './tooling/eslint-rules/tenant-setting-only-in-with-tenant.js';
 
 /** SEC-WEB-03: nothing may write raw HTML into the page. */
 const rawHtmlInjection = [
@@ -262,10 +263,18 @@ export default defineConfig([
   // Product code: packages and apps.
   {
     files: ['packages/**/*.{ts,tsx}', 'apps/**/*.{ts,tsx}'],
-    plugins: { agentx: { rules: { 'no-string-built-sql': noStringBuiltSql } } },
+    plugins: {
+      agentx: {
+        rules: {
+          'no-string-built-sql': noStringBuiltSql,
+          'tenant-setting-only-in-with-tenant': tenantSettingOnlyInWithTenant,
+        },
+      },
+    },
     rules: {
       'no-console': 'error',
       'agentx/no-string-built-sql': 'error',
+      'agentx/tenant-setting-only-in-with-tenant': 'error',
       'no-restricted-syntax': ['error', ...productSyntax],
       'no-restricted-properties': [
         'error',
@@ -275,6 +284,14 @@ export default defineConfig([
       ],
       'no-restricted-imports': ['error', { paths: productImportBans }],
     },
+  },
+
+  // ADR-005 §4: withTenant's own file sets the tenant. Tests read the setting to
+  // prove it is cleared, and the test harness builds tenant tables with the
+  // policy that names it; neither ships.
+  {
+    files: ['packages/platform/src/db/tenant.ts', '**/*.test.{ts,tsx}', 'packages/testing/**/*.{ts,tsx}'],
+    rules: { 'agentx/tenant-setting-only-in-with-tenant': 'off' },
   },
 
   // The config module is the one place that reads the environment. Flat config

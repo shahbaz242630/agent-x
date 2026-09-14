@@ -24,6 +24,7 @@ export const CONFIG = 'packages/platform/src/config/gate-proof';
 export const OUTBOUND = 'packages/platform/src/outbound/gate-proof';
 export const API = 'apps/api/src/gate-proof';
 export const CONSOLE = 'apps/console/src/gate-proof';
+export const TESTING = 'packages/testing/src/gate-proof';
 
 export function proveLintRules(rejected: readonly LintCase[], allowed: readonly LintCase[]): void {
   const eslint = new ESLint({
@@ -34,7 +35,7 @@ export function proveLintRules(rejected: readonly LintCase[], allowed: readonly 
       languageOptions: {
         parserOptions: {
           projectService: {
-            allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE].flatMap((folder) => [
+            allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING].flatMap((folder) => [
               `${folder}/*.ts`,
               `${folder}/*.tsx`,
             ]),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { REASON_CODES } from './reason-codes.ts';
+import { isReasonCode, REASON_CODES } from './reason-codes.ts';
 
 const entries = Object.entries(REASON_CODES);
 
@@ -21,4 +21,21 @@ describe('SEC-EVD-06 every reason code is registered and documented', () => {
     const codes = entries.map(([code]) => code);
     expect(codes).toEqual(codes.toSorted());
   });
+});
+
+describe('SEC-EVD-06 isReasonCode: a code read back from outside is checked', () => {
+  it.each(entries)('accepts %s', (code) => {
+    expect(isReasonCode(code)).toBe(true);
+  });
+
+  it.each(['', 'UNKNOWN_CODE', 'org_frozen', ' ORG_FROZEN', 'ORG_FROZEN ', 'ORG-FROZEN'])('refuses %j', (value) => {
+    expect(isReasonCode(value)).toBe(false);
+  });
+
+  it.each(['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf'])(
+    'refuses the inherited name %s',
+    (value) => {
+      expect(isReasonCode(value)).toBe(false);
+    },
+  );
 });

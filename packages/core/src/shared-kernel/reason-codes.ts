@@ -21,3 +21,13 @@ export const REASON_CODES = {
 } as const satisfies Readonly<Record<string, string>>;
 
 export type ReasonCode = keyof typeof REASON_CODES;
+
+/**
+ * True only for a registered code. Use it on a code read back from the
+ * database or another outside source, where the compiler can't vouch for it
+ * and `as ReasonCode` is refused by lint. Inherited names such as `toString`
+ * are not codes.
+ */
+export function isReasonCode(value: string): value is ReasonCode {
+  return Object.hasOwn(REASON_CODES, value);
+}
