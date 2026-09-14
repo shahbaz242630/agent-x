@@ -5,9 +5,14 @@
   "type": "module",
   "exports": {
     "./config": "./src/config/index.ts",
+    "./observability": "./src/observability/index.ts",
     "./outbound": "./src/outbound/index.ts"
   },
   "dependencies": {
+    "pino": "10.3.1",
     "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@agentx/testing": "workspace:*"
   }
 }

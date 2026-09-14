@@ -3,7 +3,7 @@
 // requests go only through the allowlisted client; TLS certificate checks stay
 // on; and a reason code can't be forced past the registry. Each snippet breaks
 // one rule and the real eslint.config.js must report it; each "allowed"
-// snippet must pass that rule.
+// snippet must pass that rule. The logging rules are in lint-output.test.ts.
 import { API, CONFIG, CONSOLE, CORE, type LintCase, OUTBOUND, PLATFORM, proveLintRules } from './lint-harness.ts';
 
 const REJECTED: LintCase[] = [

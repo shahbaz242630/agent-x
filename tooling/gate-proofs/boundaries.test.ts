@@ -1,4 +1,4 @@
-// Gate proof for the module-boundary rules (ADR-004, ADR-010, SEC-WEB-05): each
+// Gate proof for the module-boundary rules (ADR-004, ADR-010, SEC-WEB-05, SEC-DATA-03): each
 // fixture folder breaks one rule, and dependency-cruiser must report exactly
 // the rules that folder breaks. A rule weakened in .dependency-cruiser.js fails
 // here. For the rules built from a list of banned modules, every list entry
@@ -10,7 +10,7 @@ import { cruise, type IViolation } from 'dependency-cruiser';
 import extractDepcruiseOptions from 'dependency-cruiser/config-utl/extract-depcruise-options';
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { CLOUD_SDKS, HTTP_CLIENTS, NETWORK_CORE_MODULES } from '../banned-modules.ts';
+import { CLOUD_SDKS, HTTP_CLIENTS, NETWORK_CORE_MODULES, OTHER_LOGGERS, TELEMETRY_SDKS } from '../banned-modules.ts';
 
 const FIXTURES = 'tooling/gate-proofs/fixtures/boundaries';
 
@@ -35,11 +35,16 @@ const EXPECTED: Record<string, string[]> = {
   // A test file outside the outbound folder is not exempt.
   'network-module-in-test': ['network-only-through-platform-outbound'],
   'network-modules': ['network-only-through-platform-outbound'],
-  'observability-sdk': ['not-to-unresolvable', 'observability-sdks-only-in-platform-observability'],
+  'other-loggers': ['no-other-logger', 'not-to-unresolvable'],
+  // The logger's library, imported outside the logger (ADR-013).
+  'logger-outside-observability': ['logger-only-in-platform-observability', 'not-to-unresolvable'],
   'platform-to-modules': ['platform-not-to-modules'],
   'postgres-driver': ['not-to-unresolvable', 'postgres-driver-only-in-platform-db'],
   'query-builder': ['not-to-unresolvable', 'query-builder-only-in-infrastructure'],
   'shared-kernel-leaf': ['shared-kernel-is-a-leaf'],
+  // The observability folder may import the logger's library, but no telemetry SDK.
+  'telemetry-in-observability': ['no-telemetry-sdk', 'not-to-unresolvable'],
+  'telemetry-sdks': ['no-telemetry-sdk', 'not-to-unresolvable'],
   'testing-in-product': ['testing-only-in-tests'],
   // Imports a tool that resolves only from the repository root's devDependencies.
   'undeclared-dependency': ['product-code-uses-declared-dependencies'],
@@ -54,6 +59,8 @@ const ONE_FILE_PER_ENTRY: Record<string, { rule: string; list: readonly string[]
   'cloud-sdks': { rule: 'no-cloud-sdk', list: CLOUD_SDKS },
   'http-clients': { rule: 'network-only-through-platform-outbound', list: HTTP_CLIENTS },
   'network-modules': { rule: 'network-only-through-platform-outbound', list: NETWORK_CORE_MODULES },
+  'telemetry-sdks': { rule: 'no-telemetry-sdk', list: TELEMETRY_SDKS },
+  'other-loggers': { rule: 'no-other-logger', list: OTHER_LOGGERS },
 };
 const ENTRY_FILES = 'packages/core/src/modules/suppliers/infrastructure';
 

@@ -121,12 +121,69 @@ const environmentThroughGlobal = [
   { selector: "MemberExpression[property.name='env'][object.property.name='process']", message: configOnly },
 ];
 
+/**
+ * Rule Book §8, ADR-013: logs leave only through the logger, which redacts
+ * every line. Writing to stdout or stderr any other way would skip that. The
+ * logger itself writes to file descriptor 1 through pino, so it needs no
+ * exception. Lint catches the direct spellings; the output guard
+ * (guardOutputs, installed at start-up) cleans whatever else reaches the two
+ * streams at run time.
+ */
+const loggerOnly = 'ADR-013: write logs with createLogger from @agentx/platform/observability, which redacts them.';
+const outputStreams = ['stdout', 'stderr', '_rawDebug', 'report'].map((property) => ({
+  object: 'process',
+  property,
+  message: loggerOnly,
+}));
+const outputBypasses = [
+  {
+    selector: "MemberExpression[property.name=/^(?:stdout|stderr)$/][object.property.name='process']",
+    message: loggerOnly,
+  },
+  { selector: "MemberExpression[object.name=/^(?:globalThis|global)$/][property.name='console']", message: loggerOnly },
+  // Writing to file descriptor 1 or 2, or to their device files, is writing to stdout or stderr.
+  ...[1, 2].flatMap((descriptor) => [
+    {
+      selector: `CallExpression[callee.property.name=/^(?:write|writeSync|writeFileSync|appendFileSync)$/][arguments.0.value=${descriptor}]`,
+      message: loggerOnly,
+    },
+    {
+      selector: `CallExpression[callee.name=/^(?:write|writeSync|writeFileSync|appendFileSync)$/][arguments.0.value=${descriptor}]`,
+      message: loggerOnly,
+    },
+  ]),
+  { selector: "CallExpression[callee.name='createWriteStream'] Property[key.name='fd']", message: loggerOnly },
+  { selector: "CallExpression[callee.property.name='createWriteStream'] Property[key.name='fd']", message: loggerOnly },
+  { selector: 'Literal[value=/^\\/dev\\/(?:stdout|stderr|fd\\/[12])$/]', message: loggerOnly },
+];
+
+/** ADR-013: pino writes only to stdout; a transport or a multistream would send logs somewhere else. */
+const pinoOnlyToStdout = 'ADR-013: pino writes only to stdout. Transports and multistream send logs elsewhere.';
+const pinoTransports = [
+  { selector: "CallExpression[callee.name='pino'] Property[key.name='transport']", message: pinoOnlyToStdout },
+  {
+    selector: "MemberExpression[object.name='pino'][property.name=/^(?:transport|multistream)$/]",
+    message: pinoOnlyToStdout,
+  },
+];
+
+/**
+ * ADR-013, SEC-DATA-03: the boundary check sees only modules loaded by name. A
+ * module loaded by a computed name, or through createRequire, could be a
+ * telemetry SDK it never sees.
+ */
+const namedLoadsOnly = 'ADR-013: load modules by a fixed name, so the boundary check can see them.';
+const computedLoads = [{ selector: "ImportExpression[source.type!='Literal']", message: namedLoadsOnly }];
+
 const productSyntax = [
   ...rawHtmlInjection,
   ...tlsChecksOff,
   ...reasonCodeAssertions,
   ...networkDestructuring,
   ...environmentThroughGlobal,
+  ...outputBypasses,
+  ...pinoTransports,
+  ...computedLoads,
 ];
 
 /** Randomness must be unpredictable. */
@@ -137,7 +194,17 @@ const mathRandom = { object: 'Math', property: 'random', message: 'Math.random i
  * environment); everything else uses the global `process` for signals and exit.
  */
 const processModule = ['node:process', 'process'].map((name) => ({ name, message: configOnly }));
-const productImportBans = [...processModule];
+const productImportBans = [
+  ...processModule,
+  ...['node:console', 'console'].map((name) => ({ name, message: loggerOnly })),
+  // pino publishes each line on a diagnostics channel before its hooks run, and
+  // web frameworks publish requests the same way; nothing of ours listens.
+  ...['node:diagnostics_channel', 'diagnostics_channel'].map((name) => ({
+    name,
+    message: 'ADR-013: diagnostics channels carry data before the logger redacts it.',
+  })),
+  ...['node:module', 'module'].map((name) => ({ name, importNames: ['createRequire'], message: namedLoadsOnly })),
+];
 
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
 const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
@@ -200,7 +267,12 @@ export default defineConfig([
       'no-console': 'error',
       'agentx/no-string-built-sql': 'error',
       'no-restricted-syntax': ['error', ...productSyntax],
-      'no-restricted-properties': ['error', mathRandom, { object: 'process', property: 'env', message: configOnly }],
+      'no-restricted-properties': [
+        'error',
+        mathRandom,
+        { object: 'process', property: 'env', message: configOnly },
+        ...outputStreams,
+      ],
       'no-restricted-imports': ['error', { paths: productImportBans }],
     },
   },
@@ -210,8 +282,21 @@ export default defineConfig([
   {
     files: ['packages/platform/src/config/**/*.{ts,tsx}'],
     rules: {
-      'no-restricted-properties': ['error', mathRandom],
-      'no-restricted-imports': ['error', { paths: productImportBans.filter((ban) => !processModule.includes(ban)) }],
+      'no-restricted-properties': ['error', mathRandom, ...outputStreams],
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            ...productImportBans.filter((ban) => !processModule.includes(ban)),
+            // It may import node:process for the environment, but not the output streams.
+            ...['node:process', 'process'].map((name) => ({
+              name,
+              importNames: ['stdout', 'stderr'],
+              message: loggerOnly,
+            })),
+          ],
+        },
+      ],
     },
   },
 

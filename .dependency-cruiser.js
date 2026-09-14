@@ -1,11 +1,17 @@
-// Module boundaries (ADR-004, ADR-010). Run by `pnpm boundaries` in the CI
+// Module boundaries (ADR-004, ADR-010, ADR-013). Run by `pnpm boundaries` in the CI
 // verify job. Every rule has a broken fixture in tooling/gate-proofs.
 //
 // Paths are matched from the repository root. Rules match `packages/...` after
 // the start or a `/`, so the gate-proof fixtures (which mirror this layout
 // under tooling/gate-proofs/fixtures/boundaries/) are judged by the same rules.
 // Groups are non-capturing except a module's name, which the rules reuse as $1.
-import { CLOUD_SDKS, HTTP_CLIENTS, NETWORK_CORE_MODULES } from './tooling/banned-modules.ts';
+import {
+  CLOUD_SDKS,
+  HTTP_CLIENTS,
+  NETWORK_CORE_MODULES,
+  OTHER_LOGGERS,
+  TELEMETRY_SDKS,
+} from './tooling/banned-modules.ts';
 import { AUDIT_MODULE, MODULE_MAP } from './tooling/module-map.ts';
 
 const ROOT = '(?:^|/)';
@@ -35,8 +41,10 @@ const CONFINED = [
     allowedIn: `(?:${ROOT}packages/platform/src/db/|${MODULES}[^/]+/infrastructure/)`,
   },
   {
-    name: 'observability-sdks-only-in-platform-observability',
-    packages: '@sentry/[^/]+|pino|pino-[^/]+|@opentelemetry/[^/]+|posthog-node',
+    // ADR-013: the logger, which redacts every line, is the one way to write
+    // logs. Only pino itself: its add-ons are banned everywhere (OTHER_LOGGERS).
+    name: 'logger-only-in-platform-observability',
+    packages: 'pino',
     allowedIn: `${ROOT}packages/platform/src/observability/`,
   },
 ];
@@ -145,6 +153,20 @@ export default {
       severity: 'error',
       from: { path: `${ROOT}(?:packages|apps)/` },
       to: { path: npm(CLOUD_SDKS.join('|')) },
+    },
+    {
+      name: 'no-telemetry-sdk',
+      comment: 'SEC-DATA-03 (ADR-013): no telemetry SDK anywhere in product code; logs leave only as stdout.',
+      severity: 'error',
+      from: { path: `${ROOT}(?:packages|apps)/` },
+      to: { path: npm(TELEMETRY_SDKS.join('|')) },
+    },
+    {
+      name: 'no-other-logger',
+      comment: 'ADR-013: no logging library but pino, and no pino add-on, anywhere in product code.',
+      severity: 'error',
+      from: { path: `${ROOT}(?:packages|apps)/` },
+      to: { path: npm(OTHER_LOGGERS.join('|')) },
     },
     // Tests outside the outbound folder are covered too. Importing only a
     // module's types is fine: types do no I/O. The console is not exempt: it
