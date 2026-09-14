@@ -18,9 +18,11 @@
 const SETTING = /\bapp"?\s*\.\s*"?org_id\b/i;
 const SET_CONFIG = /\bset_config\s*\(/i;
 const NAME = '(?:"[^"]*"|[a-z_][\\w$]*)';
+// `SET [SESSION] name = | TO …` or `SET [SESSION] TIME ZONE …`. SET LOCAL,
+// SET TRANSACTION and SET CONSTRAINTS don't have that shape (another word
+// follows SET), so they don't match.
 const SET_FOR_THE_SESSION = new RegExp(
-  '(?:^|;)\\s*set\\s+(?!local\\b|transaction\\b|constraints\\b)(?:session\\s+)?' +
-    `(?:time\\s+zone\\b|${NAME}(?:\\s*\\.\\s*${NAME})*\\s*(?:=|to\\b))`,
+  `(?:^|;)\\s*set\\s+(?:session\\s+)?(?:time\\s+zone\\b|${NAME}(?:\\s*\\.\\s*${NAME})*\\s*(?:=|to\\b))`,
   'i',
 );
 
