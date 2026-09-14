@@ -1,8 +1,9 @@
 // Gate proof for the tenant-setting rule (ADR-005 §4, SEC-TEN-06): product code
 // never names the `app.org_id` setting outside withTenant's file, never calls
-// set_config, and never SETs a custom (two-part) setting, so nothing can set
-// the tenant for a whole session. Tests and the test harness may: they read the
-// setting back, and build tenant tables with the policy.
+// set_config, and never SETs anything for the whole session, so no setting
+// (the tenant included) can outlive its transaction on a pooled connection.
+// Tests and the test harness may: they read the setting back, and build tenant
+// tables with the policy.
 import { API, CORE, type LintCase, PLATFORM, proveLintRules, TESTING } from './lint-harness.ts';
 
 const RULE = 'agentx/tenant-setting-only-in-with-tenant';
@@ -53,12 +54,39 @@ const REJECTED: LintCase[] = cases([
   ],
   ['a SET SESSION of a custom setting', PLATFORM, "export const pin = 'SET SESSION agentx.mode = 1';\n", 'set_config'],
   ['a SET of a quoted custom setting', CORE, 'export const pin = \'set "app".other = 1\';\n', 'set_config'],
+  ['a SET … TO after another statement', API, "export const pin = 'select 1; set agentx.mode to 1';\n", 'set_config'],
+  // A setting made for the session leaks to the connection's next user, whatever it is.
+  [
+    'a session-wide SET of a built-in setting',
+    PLATFORM,
+    "export const pin = 'set statement_timeout = 0';\n",
+    'set_config',
+  ],
+  ['a session-wide search_path', API, "export const pin = 'SET search_path TO other';\n", 'set_config'],
+  ['a session-wide time zone', CORE, 'export const pin = "set time zone \'UTC\'";\n', 'set_config'],
+  // Found in the confirmation review: Postgres reads a comment as a space.
+  [
+    'set_config with a comment before the bracket',
+    PLATFORM,
+    "export const pin = \"select set_config/**/('app.' || 'org_id', $1, false)\";\n",
+    'set_config',
+  ],
+  ['a SET with a comment after it', API, "export const pin = 'set/**/statement_timeout = 0';\n", 'set_config'],
+  [
+    'the setting split by a comment',
+    PLATFORM,
+    "export const pin = 'set local app./**/org_id = 1';\n",
+    'naming app.org_id',
+  ],
+  ['the setting as quoted names', API, 'export const pin = \'set local "app"."org_id" = 1\';\n', 'naming app.org_id'],
 ]);
 
 const ALLOWED: LintCase[] = [
   ...cases([
     ['an UPDATE with SET', PLATFORM, "export const q = 'update t set name = $1 where id = $2';\n", ''],
     ['a SET LOCAL of a built-in setting', PLATFORM, "export const q = 'set local statement_timeout = 1000';\n", ''],
+    ['a SET TRANSACTION', PLATFORM, "export const q = 'set transaction isolation level serializable';\n", ''],
+    ['a SET CONSTRAINTS', API, "export const q = 'set constraints all deferred';\n", ''],
     ['a RESET', PLATFORM, "export const q = 'reset all';\n", ''],
     [
       'names that only look alike',
@@ -67,6 +95,18 @@ const ALLOWED: LintCase[] = [
       '',
     ],
     ['prose with the word set', API, "export const note = 'Set up the account, then set the limits.';\n", ''],
+    [
+      'a sentence where set is followed by a full stop',
+      API,
+      "export const note = 'Could not set password. Try again.';\n",
+      '',
+    ],
+    [
+      'an UPDATE of a field inside a composite column',
+      PLATFORM,
+      "export const q = 'update t set address.city = $1 where id = $2';\n",
+      '',
+    ],
   ]).map(({ says: _, ...rest }) => rest),
   {
     name: 'withTenant’s own file',

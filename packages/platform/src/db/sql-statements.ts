@@ -47,11 +47,31 @@ function endOfBlockComment(sql: string, start: number): number {
   return sql.length;
 }
 
-/** The statement's first two words, lower case. */
+/**
+ * The index of the next token: whitespace and comments are skipped, because
+ * Postgres treats a comment as whitespace (`prepare/**\/transaction` is PREPARE
+ * TRANSACTION).
+ */
+function skipIgnorable(sql: string, start: number): number {
+  let index = start;
+  for (;;) {
+    if (/\s/.test(sql.charAt(index))) {
+      index += 1;
+    } else if (sql.startsWith('--', index)) {
+      const newline = sql.indexOf('\n', index);
+      index = newline === -1 ? sql.length : newline + 1;
+    } else if (sql.startsWith('/*', index)) {
+      index = endOfBlockComment(sql, index);
+    } else {
+      return index;
+    }
+  }
+}
+
+/** The statement's first two words, lower case, with any comments between them skipped. */
 function leadingWords(sql: string, start: number): [string, string] {
   const first = WORD.exec(sql.slice(start))?.[0] ?? '';
-  const rest = sql.slice(start + first.length).replace(/^\s+/, '');
-  const second = WORD.exec(rest)?.[0] ?? '';
+  const second = WORD.exec(sql.slice(skipIgnorable(sql, start + first.length)))?.[0] ?? '';
   return [first.toLowerCase(), second.toLowerCase()];
 }
 
@@ -98,17 +118,9 @@ function endOfToken(sql: string, index: number): number {
 export function transactionControl(sql: string): string[] {
   const found: string[] = [];
   let atStatementStart = true;
-  let index = 0;
+  let index = skipIgnorable(sql, 0);
   while (index < sql.length) {
-    const character = sql.charAt(index);
-    if (/\s/.test(character)) {
-      index += 1;
-    } else if (sql.startsWith('--', index)) {
-      const newline = sql.indexOf('\n', index);
-      index = newline === -1 ? sql.length : newline + 1;
-    } else if (sql.startsWith('/*', index)) {
-      index = endOfBlockComment(sql, index);
-    } else if (character === ';') {
+    if (sql.charAt(index) === ';') {
       atStatementStart = true;
       index += 1;
     } else {
@@ -119,6 +131,7 @@ export function transactionControl(sql: string): string[] {
       }
       index = endOfToken(sql, index);
     }
+    index = skipIgnorable(sql, index);
   }
   return found;
 }

@@ -32,8 +32,12 @@ export class TenantContextError extends Error {
   }
 }
 
-/** Set while withTenant's work runs, to refuse a second withTenant inside it. */
-const insideTenant = new AsyncLocalStorage<true>();
+/**
+ * Open while withTenant's transaction runs, to refuse a second withTenant
+ * inside it. Callbacks the work starts (a timer, say) inherit the scope, so it
+ * is closed when the transaction ends: after that they may use withTenant.
+ */
+const insideTenant = new AsyncLocalStorage<{ open: boolean }>();
 
 /**
  * Runs `work` in one READ COMMITTED transaction scoped to the organisation.
@@ -51,20 +55,25 @@ export async function withTenant<Schema, Result>(
 ): Promise<Result> {
   // Checked before the transaction opens; the ID itself is never echoed.
   if (!UUID.test(orgId)) throw new TenantContextError('the organisation ID is not a UUID');
-  if (insideTenant.getStore() === true) {
+  if (insideTenant.getStore()?.open === true) {
     throw new TenantContextError('withTenant was called inside another withTenant; pass the transaction on instead');
   }
-  // READ COMMITTED is Postgres's default, but the default can be changed per
-  // server, database or role; the locking rules in ADR-006 rely on it.
-  return insideTenant.run(true, () =>
-    db
-      .transaction()
-      .setIsolationLevel('read committed')
-      .execute(async (tx) => {
-        await sql`select pg_catalog.set_config('app.org_id', ${orgId}, true)`.execute(tx);
-        return work(tx);
-      }),
-  );
+  const scope = { open: true };
+  try {
+    // READ COMMITTED is Postgres's default, but the default can be changed per
+    // server, database or role; the locking rules in ADR-006 rely on it.
+    return await insideTenant.run(scope, () =>
+      db
+        .transaction()
+        .setIsolationLevel('read committed')
+        .execute(async (tx) => {
+          await sql`select pg_catalog.set_config('app.org_id', ${orgId}, true)`.execute(tx);
+          return work(tx);
+        }),
+    );
+  } finally {
+    scope.open = false;
+  }
 }
 
 /** The tenant the connection carries: its `app.org_id` setting, or '' for none. */

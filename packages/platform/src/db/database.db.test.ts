@@ -53,15 +53,46 @@ describe(`createDatabase (Postgres ${server.version})`, () => {
     expect(rows[0]?.name).toBe('agentx_app');
   });
 
-  it('survives an idle connection being cut off (a restart or failover): it logs it and reconnects', async () => {
+  const lostCount = (): number => capture.lines().filter((line) => line.event === 'db.connection_lost').length;
+
+  /** Waits up to a second for the logger to have reported `count` lost connections. */
+  const lostReaches = async (count: number): Promise<number> => {
+    for (let waited = 0; waited < 50 && lostCount() < count; waited += 1) await sleep(20);
+    return lostCount();
+  };
+
+  it('survives an idle connection being cut off (a restart or failover): it logs it once and reconnects', async () => {
+    const logged = capture.lines().length;
     const before = await backendId(app);
     // The superuser ends the app's idle connection, as a server restart would.
     await database.as('admin').query('select pg_catalog.pg_terminate_backend($1)', [before]);
-    for (let waited = 0; waited < 50 && !capture.text.includes('db.pool.connection_lost'); waited += 1) {
-      await sleep(20);
+    expect(await lostReaches(1)).toBe(1);
+    expect(capture.lines().slice(logged)).toHaveLength(1);
+    expect(await backendId(app)).not.toBe(before);
+  });
+
+  it('survives a connection being cut off in the middle of a query: the query fails, the app carries on', async () => {
+    const lostBefore = lostCount();
+    const running = sql`select pg_catalog.pg_sleep(30)`.execute(app);
+    const rejected = running.then(
+      () => false,
+      () => true,
+    );
+    // Find the app's running query and end its connection, as a failover would.
+    let ended = false;
+    for (let tries = 0; tries < 100 && !ended; tries += 1) {
+      const [row] = await database.as('admin').query<{ ended: boolean }>(
+        `select bool_or(pg_catalog.pg_terminate_backend(pid)) as ended from pg_catalog.pg_stat_activity
+           where datname = $1 and usename = 'agentx_app' and state = 'active' and query like '%pg_sleep%'`,
+        [database.name],
+      );
+      ended = row?.ended === true;
+      if (!ended) await sleep(20);
     }
-    expect(capture.lines().map((line) => line.event)).toContain('db.pool.connection_lost');
-    const after = await backendId(app);
-    expect(after).not.toBe(before);
+    expect(ended).toBe(true);
+    expect(await rejected).toBe(true);
+    expect(await lostReaches(lostBefore + 1)).toBe(lostBefore + 1);
+    // The pool replaced the connection, and the next query works.
+    expect(await backendId(app)).toBeGreaterThan(0);
   });
 });

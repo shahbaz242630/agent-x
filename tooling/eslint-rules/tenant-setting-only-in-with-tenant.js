@@ -1,20 +1,31 @@
 // ADR-005 §4, SEC-TEN-06: withTenant sets the tenant (the `app.org_id`
-// setting) for one transaction only. Set any other way, for example by a
-// session-level SET, it would stay on the connection and reach whoever uses
-// that pooled connection next. So product code outside withTenant's own file
-// may not, in any string or template text:
-// - name the setting;
+// setting) for one transaction only. A setting made for the whole session
+// would stay on the connection and reach whoever uses that pooled connection
+// next: the tenant, or any other setting (a search_path, a statement_timeout).
+// So product code outside withTenant's own file may not, in any string or
+// template text:
+// - name the tenant setting, however it is spaced or quoted;
 // - call set_config, which could build the name from pieces
 //   (`'app.' || 'org_id'`);
-// - SET or SET SESSION a two-part setting name, which is how custom settings
-//   like app.org_id are written. (UPDATE ... SET col = is not matched: a
-//   column there can't take a table prefix.)
-// This catches the setting written out; SQL built at run time can still evade
-// it, which is why every connection is also checked for a tenant when it is
-// opened and each time it is taken from the pool (tenantCheckedPool).
-const SETTING = /app\.org_id/i;
+// - start a statement with a SET that lasts for the session. SET LOCAL (and
+//   SET TRANSACTION or SET CONSTRAINTS), which end with the transaction, are
+//   fine. Only a statement that starts the text, or follows a `;`, counts, so
+//   an UPDATE's SET and ordinary sentences are left alone.
+// SQL comments are removed first, since Postgres reads a comment as a space.
+// This catches SQL written out; SQL built at run time can still evade it,
+// which is why every connection is also checked for a tenant when it is opened
+// and each time it is taken from the pool (tenantCheckedPool).
+const SETTING = /\bapp"?\s*\.\s*"?org_id\b/i;
 const SET_CONFIG = /\bset_config\s*\(/i;
-const SET_CUSTOM = /\bset\s+(?:session\s+|local\s+)?"?[a-z_][\w$]*"?\s*\.\s*"?[a-z_]/i;
+const NAME = '(?:"[^"]*"|[a-z_][\\w$]*)';
+const SET_FOR_THE_SESSION = new RegExp(
+  '(?:^|;)\\s*set\\s+(?!local\\b|transaction\\b|constraints\\b)(?:session\\s+)?' +
+    `(?:time\\s+zone\\b|${NAME}(?:\\s*\\.\\s*${NAME})*\\s*(?:=|to\\b))`,
+  'i',
+);
+
+/** The text with SQL comments replaced by spaces. Nested block comments aren't handled; they don't occur in our SQL. */
+const withoutComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
 
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
@@ -26,13 +37,14 @@ export default {
       named:
         'ADR-005: only withTenant in @agentx/platform/db sets the tenant, for one transaction. Use withTenant rather than naming app.org_id.',
       setting:
-        'ADR-005: product code does not call set_config or SET a custom setting; a setting left on a pooled connection reaches its next user. The tenant is set only by withTenant.',
+        'ADR-005: product code does not call set_config or SET a setting for the whole session; a setting left on a pooled connection reaches its next user. Use SET LOCAL inside a transaction. The tenant is set only by withTenant.',
     },
   },
   create(context) {
     const check = (node, text) => {
-      if (SETTING.test(text)) context.report({ node, messageId: 'named' });
-      else if (SET_CONFIG.test(text) || SET_CUSTOM.test(text)) context.report({ node, messageId: 'setting' });
+      const sql = withoutComments(text);
+      if (SETTING.test(sql)) context.report({ node, messageId: 'named' });
+      else if (SET_CONFIG.test(sql) || SET_FOR_THE_SESSION.test(sql)) context.report({ node, messageId: 'setting' });
     };
     return {
       Literal(node) {

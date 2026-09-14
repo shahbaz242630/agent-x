@@ -309,6 +309,19 @@ describe('withTenant', () => {
     expect(await withTenant(app, ORG_B, () => Promise.resolve('after'))).toBe('after');
   });
 
+  it('lets work started inside withTenant, such as a timer, use withTenant once the first has finished', async () => {
+    let later: Promise<string> = Promise.resolve('not scheduled');
+    await withTenant(app, ORG_A, () => {
+      later = new Promise((resolve, reject) => {
+        setTimeout(() => {
+          withTenant(app, ORG_B, () => Promise.resolve('ran later')).then(resolve, reject);
+        }, 50);
+      });
+      return Promise.resolve();
+    });
+    expect(await later).toBe('ran later');
+  });
+
   it('runs READ COMMITTED even when the role’s default says otherwise (ADR-006)', async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- Test setup: the database name is generated, and ALTER can't take it as a parameter.
     await database

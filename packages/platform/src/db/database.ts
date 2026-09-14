@@ -94,12 +94,19 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { r
 export function createDatabase<Schema>(options: DatabaseConnectionOptions, logger: Logger): Kysely<Schema> {
   const config = poolConfig(options);
   const pool = new pg.Pool(config);
-  // An idle connection that drops (a restart, a failover, a timeout) is
-  // reported as a pool event; with no listener, Node would stop the process.
-  // pg-pool has already removed the connection by then.
-  pool.on('error', (error) => {
-    logger.warn('db.pool.connection_lost', { err: error });
+  // A connection that drops (a restart, a failover, a timeout) reports it as
+  // an 'error' event on the connection, idle or in use; with no listener, Node
+  // would stop the process. So each connection gets one listener for its whole
+  // life. The query that was running fails on its own, and pg-pool replaces
+  // the connection.
+  pool.on('connect', (client) => {
+    client.on('error', (error) => {
+      logger.warn('db.connection_lost', { err: error });
+    });
   });
+  // pg-pool also passes an idle connection's error on to the pool, which must
+  // be listened for too. The connection's own listener has already logged it.
+  pool.on('error', () => undefined);
   // Every idle connection could need replacing, and then one new one.
   const attempts = config.max + 1;
   return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: tenantCheckedPool(pool, logger, attempts) }) });

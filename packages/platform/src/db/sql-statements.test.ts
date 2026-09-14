@@ -20,6 +20,11 @@ describe('transactionControl', () => {
     ['/* a comment first */ commit;', ['COMMIT']],
     ['select 1;;commit', ['COMMIT']],
     ['begin; select 1; commit;', ['BEGIN', 'COMMIT']],
+    // Found by the adversarial review: Postgres reads a comment between two words as a space.
+    ["prepare/**/transaction 'x';", ['PREPARE']],
+    ["prepare -- a comment\ntransaction 'x';", ['PREPARE']],
+    ['start/* a comment */transaction;', ['START']],
+    ['commit/**/;', ['COMMIT']],
   ])('finds the statement in %j', (sql, expected) => {
     expect(transactionControl(sql)).toEqual(expected);
   });
@@ -31,6 +36,7 @@ describe('transactionControl', () => {
       'savepoint s; rollback to savepoint s; release s;',
     ],
     ['rollback to without the word savepoint', 'savepoint s; rollback to s;'],
+    ['rollback to with a comment between the words', 'savepoint s; rollback /* back */ to s;'],
     ['start without transaction', 'select 1; start_thing();'],
     ['a prepared statement', 'prepare q as select 1; execute q; deallocate q;'],
     ['words inside a line comment', '-- then commit;\nselect 1;'],
