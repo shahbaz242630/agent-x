@@ -14,7 +14,7 @@ const OPTIONS: DatabaseConnectionOptions = {
 };
 
 describe('poolConfig', () => {
-  it('passes every connection value explicitly, so pg never fills one from PG* variables', () => {
+  it('passes every connection value explicitly, so pg fills none of them from PG* variables', () => {
     expect(poolConfig(OPTIONS)).toMatchObject({
       host: 'db.internal',
       port: 5432,
@@ -31,6 +31,14 @@ describe('poolConfig', () => {
   it('SEC-PTR-07: checks the server certificate explicitly with verify-full, so the environment cannot turn it off', () => {
     expect(poolConfig(OPTIONS).ssl).toEqual({ rejectUnauthorized: true });
     expect(poolConfig({ ...OPTIONS, tls: 'disable' }).ssl).toBe(false);
+  });
+
+  it('refuses any other TLS value, rather than falling back to no TLS', () => {
+    for (const tls of ['', 'require', 'Verify-Full', 'prefer']) {
+      expect(() => poolConfig({ ...OPTIONS, tls: tls as 'disable' })).toThrow(
+        new DatabaseOptionsError('tls must be verify-full or disable'),
+      );
+    }
   });
 
   it('takes a pool size and an application name', () => {
@@ -64,7 +72,7 @@ describe('poolConfig', () => {
     );
   });
 
-  it.each(['host', 'database', 'user', 'password'] as const)('refuses an empty %s', (name) => {
+  it.each(['host', 'database', 'user', 'password', 'applicationName'] as const)('refuses an empty %s', (name) => {
     expect(() => poolConfig({ ...OPTIONS, [name]: '' })).toThrow(new DatabaseOptionsError(`${name} is empty`));
   });
 

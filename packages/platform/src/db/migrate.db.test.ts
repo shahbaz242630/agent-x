@@ -4,10 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
-import { MigrationFailed, MigrationRefused, runMigrations } from './migrate.ts';
+import { applyMigration, MigrationFailed, MigrationNotAtomic, MigrationRefused, runMigrations } from './migrate.ts';
 import { TenantContextError } from './tenant.ts';
 
 const REPO_MIGRATIONS = fileURLToPath(new URL('../../../../db/migrations', import.meta.url));
@@ -120,13 +121,54 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     expect((await ledger()).map((row) => row.name)).toEqual(['0001_first.sql']);
   });
 
-  it('stops at a file that ends its own transaction', async () => {
-    await write('0001_first.sql', 'create schema demo;\ncommit;\ncreate table demo.after_commit (id int);\n');
+  it('refuses a file that would end its own transaction, before running anything', async () => {
+    await write('0001_first.sql', 'create schema demo;');
+    await write('0002_second.sql', 'create table demo.one (id int);\ncommit;\ncreate table demo.two (id int);\n');
 
-    const error = await run().catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(MigrationFailed);
-    expect(String((error as MigrationFailed).cause)).toMatch(/ended its own transaction/);
+    await expect(run()).rejects.toThrow(MigrationRefused);
+    const [row] = await database
+      .as('owner')
+      .query<{ found: boolean }>("select pg_catalog.to_regnamespace('demo') is not null as found");
+    expect(row?.found).toBe(false);
+  });
+
+  it('backs that up: a file that ends the transaction anyway is reported as needing repair, with no ledger row', async () => {
+    await run(); // an empty folder: just creates the ledger
+    const client = new pg.Client({ ...database.connection('owner'), ssl: false });
+    await client.connect();
+    try {
+      const sqlText = 'create schema demo;\ncommit;\ncreate table demo.after_commit (id int);\n';
+      const error = await applyMigration(
+        client,
+        { name: '0001_first.sql', sql: sqlText, checksum: 'not checked here' },
+        createLogger({
+          service: 'migrate',
+          config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 100 } },
+          destination: capture,
+        }),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(MigrationNotAtomic);
+      expect(String(error)).toMatch(/Repair the database by hand/);
+    } finally {
+      await client.end();
+    }
+    expect(await tables()).toEqual(['after_commit']);
     expect(await ledger()).toEqual([]);
+  });
+
+  it('resets the session after each file, so a SET in one file cannot change the next', async () => {
+    await write('0001_first.sql', 'create schema demo;\nset search_path = demo;\ncreate table one (id int);\n');
+    await write('0002_second.sql', 'create table two (id int);\n');
+    await run();
+    const rows = await database
+      .as('owner')
+      .query<{ schema: string; name: string }>(
+        "select table_schema as schema, table_name as name from information_schema.tables where table_name in ('one', 'two') order by 2",
+      );
+    expect(rows).toEqual([
+      { schema: 'demo', name: 'one' },
+      { schema: 'public', name: 'two' },
+    ]);
   });
 
   it('lets only one run work at a time, so two deploys at once apply each file once', async () => {

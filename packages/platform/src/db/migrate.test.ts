@@ -88,6 +88,21 @@ describe('loadMigrations', () => {
     expect(await refusal()).toEqual(['0001_first.sql is empty', '0002_second.sql starts with a byte-order mark']);
   });
 
+  it('refuses a file that would begin or end its own transaction', async () => {
+    await write('0001_first.sql', 'begin;\ncreate table t (id int);\ncommit;\n');
+    expect(await refusal()).toEqual([
+      '0001_first.sql has BEGIN, COMMIT: each file already runs in one transaction, so it must not begin or end one (write function bodies in $$ quotes, not BEGIN ATOMIC)',
+    ]);
+  });
+
+  it('lets a function body keep its own BEGIN and END', async () => {
+    await write(
+      '0001_first.sql',
+      'create function f() returns int language plpgsql as $$\nbegin\n  return 1;\nend;\n$$;\n',
+    );
+    expect(await loadMigrations(folder)).toHaveLength(1);
+  });
+
   it('lists every problem at once', async () => {
     await write('0001_first.sql', '');
     await write('0003_third.sql', 'select 3;');

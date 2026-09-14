@@ -1,3 +1,4 @@
+import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createTenantProbe } from './tenant-probe.ts';
@@ -64,10 +65,18 @@ describe(`createTestDatabase (Postgres ${server.version})`, () => {
     });
   });
 
-  it('deletes the database on drop, even with sessions still open', async () => {
+  it('deletes the database on drop, even with a session still open', async () => {
     const extra = await createTestDatabase(server, { schema: 'empty' });
-    await extra.as('app').query('select 1');
+    // A session the harness doesn't know about, like a pool a test forgot to close.
+    const straggler = new pg.Client({ ...extra.connection('app'), ssl: false });
+    const straggling: unknown[] = [];
+    straggler.on('error', (error: unknown) => straggling.push(error));
+    await straggler.connect();
+    await straggler.query('select 1');
     await extra.drop();
+    // The server ended the straggling session, which is what WITH (FORCE) does.
+    await expect(straggler.query('select 1')).rejects.toThrow();
+    await straggler.end();
     const [row] = await first
       .as('admin')
       .query<{ found: boolean }>('select exists (select 1 from pg_catalog.pg_database where datname = $1) as found', [

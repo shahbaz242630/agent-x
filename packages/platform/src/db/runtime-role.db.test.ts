@@ -1,15 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
-import { createTestDatabase, type TestDatabase, type TestRole } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestDatabase, type TestRole } from '@agentx/testing';
 import { Kysely, PostgresDialect } from 'kysely';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createDatabase } from './database.ts';
+import { createLogger } from '../observability/index.ts';
+import { createDatabase, type DatabaseConnectionOptions } from './database.ts';
 import { assertRuntimeRole, runtimeRoleProblems, UnsafeDatabaseRole } from './runtime-role.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
+
+const OWNS_OBJECTS =
+  'it owns objects (schemas, tables, functions or types), so it could change them or switch their row-level security off';
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -19,8 +23,18 @@ afterAll(async () => {
   await database.drop();
 });
 
-async function problemsFor(role: TestRole): Promise<string[]> {
-  const db = createDatabase(database.connection(role));
+const open = (connection: DatabaseConnectionOptions): Kysely<unknown> =>
+  createDatabase(
+    connection,
+    createLogger({
+      service: 'test',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: new LogCapture(),
+    }),
+  );
+
+async function problemsFor(connection: DatabaseConnectionOptions): Promise<string[]> {
+  const db = open(connection);
   try {
     return await runtimeRoleProblems(db);
   } finally {
@@ -28,10 +42,40 @@ async function problemsFor(role: TestRole): Promise<string[]> {
   }
 }
 
+const problemsOf = (role: TestRole): Promise<string[]> => problemsFor(database.connection(role));
+
+/** Runs `check` as a new login role that `setup` (run by the admin) gives something extra. */
+async function asNewRole(setup: (name: string) => readonly string[], check: (name: string) => Promise<void>) {
+  const name = `t_role_${randomUUID().replaceAll('-', '')}`;
+  const admin = database.as('admin');
+  // eslint-disable-next-line agentx/no-string-built-sql -- Test setup: CREATE ROLE can't take names as parameters; the name is generated.
+  await admin.query(`create role ${name} login password 'plain words for a test'`);
+  // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+  await admin.query(`grant connect on database ${database.name} to ${name}`);
+  try {
+    for (const statement of setup(name)) {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above; the statements are written in the tests below.
+      await admin.query(statement);
+    }
+    await check(name);
+  } finally {
+    // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
+    await admin.query(`drop owned by ${name}`);
+    // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
+    await admin.query(`drop role ${name}`);
+  }
+}
+
+const loginAs = (name: string): DatabaseConnectionOptions => ({
+  ...database.connection('app'),
+  user: name,
+  password: 'plain words for a test',
+});
+
 describe(`APP-02 the app refuses to run as a role that can get round the tenant walls (Postgres ${server.version})`, () => {
   it('accepts agentx_app', async () => {
-    expect(await problemsFor('app')).toEqual([]);
-    const db = createDatabase(database.connection('app'));
+    expect(await problemsOf('app')).toEqual([]);
+    const db = open(database.connection('app'));
     try {
       await expect(assertRuntimeRole(db)).resolves.toBeUndefined();
     } finally {
@@ -39,22 +83,21 @@ describe(`APP-02 the app refuses to run as a role that can get round the tenant 
     }
   });
 
-  it('refuses the migration role, which owns the database, its schemas and its tables', async () => {
+  it('refuses the migration role, which owns the database and what is in it', async () => {
     // Postgres makes a database's owner a member of pg_database_owner, which owns the public schema.
-    expect(await problemsFor('owner')).toEqual([
+    expect(await problemsOf('owner')).toEqual([
       'it is a member of other roles, whose rights it can use (pg_database_owner)',
       'it owns the database',
-      'it owns schemas, so it could alter their tables',
-      'it owns tables or other relations, so it could switch their row-level security off',
+      OWNS_OBJECTS,
     ]);
   });
 
   it('refuses the backup role, which bypasses row-level security', async () => {
-    expect(await problemsFor('backup')).toEqual(['it has BYPASSRLS']);
+    expect(await problemsOf('backup')).toEqual(['it has BYPASSRLS']);
   });
 
   it('refuses the server admin', async () => {
-    const problems = await problemsFor('admin');
+    const problems = await problemsOf('admin');
     expect(problems).toContain('it is a superuser, which bypasses row-level security');
     expect(problems).toContain('it has BYPASSRLS');
     expect(problems).toContain('it can create roles');
@@ -62,25 +105,27 @@ describe(`APP-02 the app refuses to run as a role that can get round the tenant 
   });
 
   it('refuses a role that is a member of the owner, whose rights it could use', async () => {
-    const name = `t_member_${randomUUID().replaceAll('-', '')}`;
-    const admin = database.as('admin');
-    // eslint-disable-next-line agentx/no-string-built-sql -- Test setup: CREATE ROLE can't take names as parameters; the name is generated.
-    await admin.query(`create role ${name} login password 'plain words for a test' in role agentx_owner`);
-    // eslint-disable-next-line agentx/no-string-built-sql -- As above.
-    await admin.query(`grant connect on database ${database.name} to ${name}`);
-    const db = createDatabase({ ...database.connection('app'), user: name, password: 'plain words for a test' });
-    try {
-      expect(await runtimeRoleProblems(db)).toEqual([
-        'it is a member of other roles, whose rights it can use (agentx_owner, pg_database_owner)',
-      ]);
-      await expect(assertRuntimeRole(db)).rejects.toThrow(/member of other roles/);
-    } finally {
-      await db.destroy();
-      // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
-      await admin.query(`revoke connect on database ${database.name} from ${name}`);
-      // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
-      await admin.query(`drop role ${name}`);
-    }
+    await asNewRole(
+      (name) => [`grant agentx_owner to ${name}`],
+      async (name) => {
+        expect(await problemsFor(loginAs(name))).toEqual([
+          'it is a member of other roles, whose rights it can use (agentx_owner, pg_database_owner)',
+        ]);
+      },
+    );
+  });
+
+  it('refuses a role that owns only a function, in any database', async () => {
+    await asNewRole(
+      (name) => [
+        `create schema ${name}_schema`,
+        `create function ${name}_schema.helper() returns int language sql as $$ select 1 $$`,
+        `alter function ${name}_schema.helper() owner to ${name}`,
+      ],
+      async (name) => {
+        expect(await problemsFor(loginAs(name))).toEqual([OWNS_OBJECTS]);
+      },
+    );
   });
 
   it('checks the login role, not a role the session switched to', async () => {
@@ -97,11 +142,11 @@ describe(`APP-02 the app refuses to run as a role that can get round the tenant 
   });
 
   it('lists every problem at once in the error', async () => {
-    const db = createDatabase(database.connection('owner'));
+    const db = open(database.connection('owner'));
     try {
       const refusal = await assertRuntimeRole(db).catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(UnsafeDatabaseRole);
-      expect((refusal as UnsafeDatabaseRole).problems).toHaveLength(4);
+      expect((refusal as UnsafeDatabaseRole).problems).toHaveLength(3);
     } finally {
       await db.destroy();
     }

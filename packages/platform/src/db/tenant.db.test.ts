@@ -1,7 +1,8 @@
-import { createTenantProbe, createTestDatabase, type TestDatabase } from '@agentx/testing';
+import { createTenantProbe, createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import { TenantContextError, withTenant } from './tenant.ts';
 
@@ -17,6 +18,23 @@ const server = inject('postgres');
 let database: TestDatabase;
 let app: Kysely<ProbeSchema>;
 
+/** A logger whose lines the test can read. */
+function capturedLogger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
+  const capture = new LogCapture();
+  const logger = createLogger({
+    service: 'test',
+    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+    destination: capture,
+  });
+  return { capture, logger };
+}
+
+const appDatabase = (maxConnections?: number, logger = capturedLogger().logger): Kysely<ProbeSchema> =>
+  createDatabase<ProbeSchema>(
+    maxConnections === undefined ? database.connection('app') : { ...database.connection('app'), maxConnections },
+    logger,
+  );
+
 /** Every label the organisation can see, sorted. */
 const labelsSeenBy = (orgId: string): Promise<string[]> =>
   withTenant(app, orgId, async (tx) => {
@@ -24,10 +42,23 @@ const labelsSeenBy = (orgId: string): Promise<string[]> =>
     return rows.map((row) => row.label);
   });
 
+/** The connection's tenant setting, read outside any transaction. */
+const settingOutside = async (db: Kysely<ProbeSchema>): Promise<string | null> => {
+  const { rows } = await sql<{ org_id: string | null }>`
+    select pg_catalog.current_setting('app.org_id', true) as org_id
+  `.execute(db);
+  return rows[0]?.org_id ?? null;
+};
+
+const backendId = async (db: Kysely<ProbeSchema>): Promise<number> => {
+  const { rows } = await sql<{ pid: number }>`select pg_catalog.pg_backend_pid() as pid`.execute(db);
+  return rows[0]?.pid ?? 0;
+};
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   await createTenantProbe(database);
-  app = createDatabase<ProbeSchema>(database.connection('app'));
+  app = appDatabase();
   await withTenant(app, ORG_A, (tx) =>
     tx
       .insertInto('probe.items')
@@ -68,7 +99,7 @@ describe(`SEC-TEN-02 row-level security alone keeps organisations apart (Postgre
     expect(await labelsSeenBy(ORG_B)).toEqual(['b1']);
   });
 
-  it('never lets an update or delete with no filter reach another organisation’s rows', async () => {
+  it('lets an update with no filter reach only the organisation’s own rows', async () => {
     await expect(
       withTenant(app, ORG_A, async (tx) => {
         const updated = await tx.updateTable('probe.items').set({ label: 'changed' }).executeTakeFirst();
@@ -76,10 +107,20 @@ describe(`SEC-TEN-02 row-level security alone keeps organisations apart (Postgre
         throw new Error('roll back');
       }),
     ).rejects.toThrow('roll back');
-    const deleted = await withTenant(app, ORG_A, (tx) =>
-      tx.deleteFrom('probe.items').where('label', '=', 'no such label').executeTakeFirst(),
+  });
+
+  it('lets a delete with no filter reach only the organisation’s own rows', async () => {
+    await expect(
+      withTenant(app, ORG_A, async (tx) => {
+        const deleted = await tx.deleteFrom('probe.items').executeTakeFirst();
+        expect(deleted.numDeletedRows).toBe(2n);
+        throw new Error('roll back');
+      }),
+    ).rejects.toThrow('roll back');
+    const aimedAtB = await withTenant(app, ORG_A, (tx) =>
+      tx.deleteFrom('probe.items').where('label', '=', 'b1').executeTakeFirst(),
     );
-    expect(deleted.numDeletedRows).toBe(0n);
+    expect(aimedAtB.numDeletedRows).toBe(0n);
     expect(await labelsSeenBy(ORG_B)).toEqual(['b1']);
   });
 
@@ -124,15 +165,8 @@ describe('SEC-TEN-03 with no tenant context, nothing is visible', () => {
 });
 
 describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
-  const settingOutside = async (db: Kysely<ProbeSchema>): Promise<string | null> => {
-    const { rows } = await sql<{ org_id: string | null }>`
-      select pg_catalog.current_setting('app.org_id', true) as org_id
-    `.execute(db);
-    return rows[0]?.org_id ?? null;
-  };
-
   it('starts a new connection with no setting at all (NULL), which matches no rows', async () => {
-    const fresh = createDatabase<ProbeSchema>({ ...database.connection('app'), maxConnections: 1 });
+    const fresh = appDatabase(1);
     try {
       expect(await settingOutside(fresh)).toBeNull();
       expect(await fresh.selectFrom('probe.items').selectAll().execute()).toEqual([]);
@@ -142,7 +176,7 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
   });
 
   it('leaves an empty setting behind after a transaction, which nullif turns into no rows', async () => {
-    const single = createDatabase<ProbeSchema>({ ...database.connection('app'), maxConnections: 1 });
+    const single = appDatabase(1);
     try {
       expect(await withTenant(single, ORG_A, async (tx) => (await settingOutside(tx)) === ORG_A)).toBe(true);
       // The same connection, back in the pool: the transaction's setting is gone.
@@ -154,13 +188,60 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
   });
 
   it('clears the setting after a transaction that fails, too', async () => {
-    const single = createDatabase<ProbeSchema>({ ...database.connection('app'), maxConnections: 1 });
+    const single = appDatabase(1);
     try {
       await expect(withTenant(single, ORG_B, () => Promise.reject(new Error('work failed')))).rejects.toThrow(
         'work failed',
       );
       expect(await settingOutside(single)).toBe('');
       expect(await single.selectFrom('probe.items').selectAll().execute()).toEqual([]);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  // Found by the adversarial review: a session-wide setting made inside the
+  // work, with the name built from pieces so lint can't see it (as injected
+  // SQL would), outlived the transaction on the pooled connection.
+  it('discards a connection that work left with a session-wide tenant, and logs it', async () => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      const poisoned = await withTenant(single, ORG_A, async (tx) => {
+        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, false)`.execute(tx);
+        return backendId(tx);
+      });
+      expect(await single.selectFrom('probe.items').select('label').execute()).toEqual([]);
+      expect(await settingOutside(single)).toBeNull();
+      expect(await backendId(single)).not.toBe(poisoned);
+      expect(capture.lines().map((line) => line.event)).toEqual(['db.tenant.leftover_discarded']);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('discards a connection given a session-wide tenant outside withTenant, too', async () => {
+    const { capture, logger } = capturedLogger();
+    const single = appDatabase(1, logger);
+    try {
+      await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, false)`.execute(single);
+      expect(await single.selectFrom('probe.items').select('label').execute()).toEqual([]);
+      expect(capture.lines()).toHaveLength(1);
+    } finally {
+      await single.destroy();
+    }
+  });
+
+  it('still gives the next organisation only its own rows after a poisoned connection', async () => {
+    const single = appDatabase(1);
+    try {
+      await withTenant(single, ORG_A, async (tx) => {
+        await sql`select pg_catalog.set_config('app.' || 'org_id', ${ORG_B}, false)`.execute(tx);
+      });
+      const seen = await withTenant(single, ORG_A, (tx) =>
+        tx.selectFrom('probe.items').select('label').orderBy('label').execute(),
+      );
+      expect(seen.map((row) => row.label)).toEqual(['a1', 'a2']);
     } finally {
       await single.destroy();
     }
@@ -173,7 +254,7 @@ describe('SEC-TEN-06 a pooled connection never carries a tenant', () => {
     // The superuser plays the attacker; the owner could preset the database the same way.
     // eslint-disable-next-line agentx/no-string-built-sql -- Test setup: the database name is generated, and ALTER can't take it as a parameter.
     await database.as('admin').query(preset(database.name));
-    const exposed = createDatabase<ProbeSchema>(database.connection('app'));
+    const exposed = appDatabase();
     try {
       await expect(exposed.selectFrom('probe.items').selectAll().execute()).rejects.toThrow(TenantContextError);
       await expect(exposed.selectFrom('probe.items').selectAll().execute()).rejects.toThrow(/already carries/);
@@ -214,10 +295,18 @@ describe('withTenant', () => {
     expect(await labelsSeenBy(ORG_B)).toEqual(['b1', 'b2']);
   });
 
-  it('cannot be nested', async () => {
+  it('cannot be nested on the same transaction', async () => {
     await expect(
       withTenant(app, ORG_A, (tx) => withTenant<ProbeSchema, string>(tx, ORG_B, () => Promise.resolve('inner'))),
-    ).rejects.toThrow(/not supported/);
+    ).rejects.toThrow(TenantContextError);
+  });
+
+  it('cannot be nested through the pool either, which would open a second transaction', async () => {
+    await expect(withTenant(app, ORG_A, () => withTenant(app, ORG_B, () => Promise.resolve('inner')))).rejects.toThrow(
+      /inside another withTenant/,
+    );
+    // Outside a withTenant again, it works.
+    expect(await withTenant(app, ORG_B, () => Promise.resolve('after'))).toBe('after');
   });
 
   it('runs READ COMMITTED even when the role’s default says otherwise (ADR-006)', async () => {
@@ -225,18 +314,12 @@ describe('withTenant', () => {
     await database
       .as('admin')
       .query(`alter role agentx_app in database ${database.name} set default_transaction_isolation = 'serializable'`);
-    const strict = createDatabase<ProbeSchema>(database.connection('app'));
+    const strict = appDatabase();
     try {
-      const outside = await sql<{
-        level: string;
-      }>`select pg_catalog.current_setting('transaction_isolation') as level`.execute(strict);
+      const level = sql<{ level: string }>`select pg_catalog.current_setting('transaction_isolation') as level`;
+      const outside = await level.execute(strict);
       expect(outside.rows[0]?.level).toBe('serializable');
-      const inside = await withTenant(strict, ORG_A, async (tx) => {
-        const { rows } = await sql<{
-          level: string;
-        }>`select pg_catalog.current_setting('transaction_isolation') as level`.execute(tx);
-        return rows[0]?.level;
-      });
+      const inside = await withTenant(strict, ORG_A, async (tx) => (await level.execute(tx)).rows[0]?.level);
       expect(inside).toBe('read committed');
     } finally {
       await strict.destroy();

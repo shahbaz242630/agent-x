@@ -5,7 +5,8 @@
 import { Kysely, PostgresDialect } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
-import { refuseTenantPreset } from './tenant.ts';
+import type { Logger } from '../observability/index.ts';
+import { refuseTenantPreset, tenantCheckedPool } from './tenant.ts';
 
 export interface DatabaseConnectionOptions {
   readonly host: string;
@@ -43,13 +44,22 @@ function typeParsers(): pg.TypeOverrides {
   return types;
 }
 
+function tlsSetting(tls: string): PoolConfig['ssl'] {
+  // Set to true explicitly, so NODE_TLS_REJECT_UNAUTHORIZED=0 can't turn the check off (SEC-PTR-07).
+  if (tls === 'verify-full') return { rejectUnauthorized: true };
+  if (tls === 'disable') return false;
+  throw new DatabaseOptionsError('tls must be verify-full or disable');
+}
+
 /**
- * pg's settings for these options. Every connection value is given
- * explicitly: pg fills a missing or empty one from the PG* environment
- * variables, which the checked config doesn't cover.
+ * pg's settings for these options. pg fills a missing or empty host, port,
+ * database, user, password or application name from the PG* environment
+ * variables, so each is given and must not be empty. PGOPTIONS can still add
+ * session settings; a tenant set that way is refused on connection, and the
+ * start-up config check will refuse PG* variables (piece E).
  */
-export function poolConfig(options: DatabaseConnectionOptions): PoolConfig {
-  for (const name of ['host', 'database', 'user', 'password'] as const) {
+export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { readonly max: number } {
+  for (const name of ['host', 'database', 'user', 'password', 'applicationName'] as const) {
     if (options[name] === '') throw new DatabaseOptionsError(`${name} is empty`);
   }
   if (!Number.isSafeInteger(options.port) || options.port < 1 || options.port > 65_535) {
@@ -65,8 +75,7 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig {
     database: options.database,
     user: options.user,
     password: options.password,
-    // Set to true explicitly, so NODE_TLS_REJECT_UNAUTHORIZED=0 can't turn the check off (SEC-PTR-07).
-    ssl: options.tls === 'verify-full' ? { rejectUnauthorized: true } : false,
+    ssl: tlsSetting(options.tls),
     max,
     application_name: options.applicationName ?? 'agentx',
     connectionTimeoutMillis: 10_000,
@@ -82,6 +91,16 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig {
  * A query builder over a pool of connections. Tenant data is reached only
  * through `withTenant`. Call `destroy()` at shutdown to close the pool.
  */
-export function createDatabase<Schema>(options: DatabaseConnectionOptions): Kysely<Schema> {
-  return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: new pg.Pool(poolConfig(options)) }) });
+export function createDatabase<Schema>(options: DatabaseConnectionOptions, logger: Logger): Kysely<Schema> {
+  const config = poolConfig(options);
+  const pool = new pg.Pool(config);
+  // An idle connection that drops (a restart, a failover, a timeout) is
+  // reported as a pool event; with no listener, Node would stop the process.
+  // pg-pool has already removed the connection by then.
+  pool.on('error', (error) => {
+    logger.warn('db.pool.connection_lost', { err: error });
+  });
+  // Every idle connection could need replacing, and then one new one.
+  const attempts = config.max + 1;
+  return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: tenantCheckedPool(pool, logger, attempts) }) });
 }

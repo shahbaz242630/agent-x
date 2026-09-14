@@ -5,7 +5,12 @@
 // - Files are named NNNN_words.sql and numbered 0001 upward with no gaps, so a
 //   misnamed or missing file stops the run instead of being skipped.
 // - Each file runs in its own transaction with its row in the ledger
-//   (migrations.applied), so it is applied completely or not at all.
+//   (migrations.applied), so it is applied completely or not at all. A file
+//   that would begin or end a transaction itself is refused before anything
+//   runs, and a check after each file backs that up.
+// - After each file, the session's settings, role and temporary tables are
+//   reset, so a SET in one file can't change what the next one does. Every
+//   file then behaves the same whether it runs alone or in a batch.
 // - The ledger keeps each file's SHA-256. A file changed after it was applied,
 //   or a ledger row this build has no file for, stops the run.
 // - A session-level advisory lock lets only one run work at a time. Closing
@@ -18,6 +23,7 @@ import pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
 import { type DatabaseConnectionOptions, poolConfig } from './database.ts';
+import { transactionControl } from './sql-statements.ts';
 import { refuseTenantPreset } from './tenant.ts';
 
 const FILE_NAME = /^(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql$/;
@@ -37,9 +43,17 @@ const LEDGER = `
   );
 `;
 
-/** Marks the open transaction as a migration's, to catch a file that ends it early. */
-const MARK = "select pg_catalog.set_config('agentx.migration', $1, true)";
-const READ_MARK = "select pg_catalog.current_setting('agentx.migration', true) as name";
+/**
+ * The open transaction's ID. Read before and after a file runs: if it changed,
+ * the file ended our transaction (the statement after a COMMIT runs in a new one).
+ */
+const TRANSACTION_ID = 'select pg_catalog.pg_current_xact_id()::text as id';
+
+/**
+ * What a file may have changed for the rest of the session. DISCARD ALL would
+ * also drop the advisory lock, so the parts are reset one by one.
+ */
+const RESET_SESSION = 'reset all; reset role; discard temp';
 
 export interface Migration {
   readonly name: string;
@@ -70,6 +84,23 @@ export class MigrationFailed extends Error {
   }
 }
 
+/**
+ * A migration ended its own transaction, so part of it may be committed and it
+ * has no ledger row. Running it again could apply that part twice: repair the
+ * database by hand first.
+ */
+export class MigrationNotAtomic extends Error {
+  readonly migration: string;
+
+  constructor(migration: string) {
+    super(
+      `Migration ${migration} ended its own transaction, so part of it may be committed. Repair the database by hand; do not run it again as it is`,
+    );
+    this.name = 'MigrationNotAtomic';
+    this.migration = migration;
+  }
+}
+
 /** Reads and checks every migration file in the folder, in order. Throws MigrationRefused listing every problem. */
 export async function loadMigrations(directory: string): Promise<Migration[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -90,6 +121,12 @@ export async function loadMigrations(directory: string): Promise<Migration[]> {
     if (raw.startsWith(BYTE_ORDER_MARK)) problems.push(`${entry.name} starts with a byte-order mark`);
     const sql = raw.replaceAll('\r\n', '\n');
     if (sql.trim() === '') problems.push(`${entry.name} is empty`);
+    const control = transactionControl(sql);
+    if (control.length > 0) {
+      problems.push(
+        `${entry.name} has ${control.join(', ')}: each file already runs in one transaction, so it must not begin or end one (write function bodies in $$ quotes, not BEGIN ATOMIC)`,
+      );
+    }
     migrations.push({ name: entry.name, sql, checksum: createHash('sha256').update(sql).digest('hex') });
   }
 
@@ -138,7 +175,7 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
 
     const pending = files.slice(applied.length);
     for (const migration of pending) {
-      await applyOne(client, migration, options.logger);
+      await applyMigration(client, migration, options.logger);
       options.logger.info('db.migration.applied', { migration: migration.name, checksum: migration.checksum });
     }
     options.logger.info('db.migrations.done', { applied: pending.length, total: files.length });
@@ -148,23 +185,26 @@ export async function runMigrations(options: MigrationOptions): Promise<string[]
   }
 }
 
-async function applyOne(client: pg.Client, migration: Migration, logger: Logger): Promise<void> {
+/**
+ * Applies one migration in its own transaction, with its ledger row, then
+ * resets the session. Exported for its tests; runMigrations is the way in.
+ */
+export async function applyMigration(client: pg.Client, migration: Migration, logger: Logger): Promise<void> {
   await client.query('begin');
+  let stillInOurTransaction: boolean;
   try {
-    await client.query(MARK, [migration.name]);
+    const before = await client.query<{ id: string }>(TRANSACTION_ID);
     // eslint-disable-next-line agentx/no-string-built-sql -- Migration files are reviewed SQL from the repository, checksummed and run by the migration role; they are the one place SQL text comes from a file.
     await client.query(migration.sql);
-    const { rows } = await client.query<{ name: string | null }>(READ_MARK);
-    if (rows[0]?.name !== migration.name) {
-      throw new Error(
-        'the file ended its own transaction (a COMMIT or ROLLBACK in it), so part of it may be committed',
-      );
+    const after = await client.query<{ id: string }>(TRANSACTION_ID);
+    stillInOurTransaction = after.rows[0]?.id === before.rows[0]?.id;
+    if (stillInOurTransaction) {
+      await client.query('insert into migrations.applied (name, checksum) values ($1, $2)', [
+        migration.name,
+        migration.checksum,
+      ]);
+      await client.query('commit');
     }
-    await client.query('insert into migrations.applied (name, checksum) values ($1, $2)', [
-      migration.name,
-      migration.checksum,
-    ]);
-    await client.query('commit');
   } catch (error) {
     // If the rollback fails too, the connection is gone, and closing it rolls back anyway.
     await client.query('rollback').catch((rollbackError: unknown) => {
@@ -172,4 +212,7 @@ async function applyOne(client: pg.Client, migration: Migration, logger: Logger)
     });
     throw new MigrationFailed(migration.name, error);
   }
+  // loadMigrations refuses files that would do this; this check backs it up.
+  if (!stillInOurTransaction) throw new MigrationNotAtomic(migration.name);
+  await client.query(RESET_SESSION);
 }

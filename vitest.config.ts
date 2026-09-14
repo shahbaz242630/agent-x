@@ -32,7 +32,8 @@ export default defineConfig({
       ...Object.keys(POSTGRES_IMAGES).map((name) => ({
         test: {
           name,
-          include: [`packages/*/src/${DATABASE_TESTS}`, `tooling/${DATABASE_TESTS}`],
+          // The same places the other projects look, so a database test is never left out.
+          include: [`packages/*/src/${DATABASE_TESTS}`, `apps/*/src/${DATABASE_TESTS}`, `tooling/${DATABASE_TESTS}`],
           exclude: [...configDefaults.exclude, 'tooling/gate-proofs/fixtures/**'],
           globalSetup: ['tooling/test-db/global-setup.ts'],
           testTimeout: 30_000,

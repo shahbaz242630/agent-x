@@ -217,6 +217,8 @@ export default defineConfig([
     '**/coverage/',
     'Documents/',
     '.playwright-mcp/',
+    // Review agents' own copies of the repository.
+    '.claude/',
     'tooling/gate-proofs/fixtures/',
   ]),
 

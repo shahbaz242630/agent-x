@@ -27,8 +27,7 @@ interface RoleFacts {
   replication: boolean;
   member_of: string[];
   owns_database: boolean;
-  owns_schemas: boolean;
-  owns_relations: boolean;
+  owns_objects: boolean;
 }
 
 /**
@@ -55,8 +54,11 @@ export async function runtimeRoleProblems(db: Kysely<unknown>): Promise<string[]
         select 1 from pg_catalog.pg_database d
         where d.datname = pg_catalog.current_database() and d.datdba = r.oid
       ) as owns_database,
-      exists (select 1 from pg_catalog.pg_namespace n where n.nspowner = r.oid) as owns_schemas,
-      exists (select 1 from pg_catalog.pg_class c where c.relowner = r.oid) as owns_relations
+      -- Postgres records every owner of every object, in every database, here.
+      exists (
+        select 1 from pg_catalog.pg_shdepend s
+        where s.refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass and s.refobjid = r.oid and s.deptype = 'o'
+      ) as owns_objects
     from pg_catalog.pg_roles r
     where r.rolname = session_user
   `.execute(db);
@@ -74,9 +76,10 @@ export async function runtimeRoleProblems(db: Kysely<unknown>): Promise<string[]
     problems.push(`it is a member of other roles, whose rights it can use (${facts.member_of.join(', ')})`);
   }
   if (facts.owns_database) problems.push('it owns the database');
-  if (facts.owns_schemas) problems.push('it owns schemas, so it could alter their tables');
-  if (facts.owns_relations) {
-    problems.push('it owns tables or other relations, so it could switch their row-level security off');
+  if (facts.owns_objects) {
+    problems.push(
+      'it owns objects (schemas, tables, functions or types), so it could change them or switch their row-level security off',
+    );
   }
   return problems;
 }
