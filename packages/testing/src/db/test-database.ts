@@ -27,13 +27,26 @@ export interface TestSession {
   query<Row extends object = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<Row[]>;
 }
 
+/**
+ * One connection of its own, for work that must stay on a single connection:
+ * a transaction, a lock, a party in a race (FX-RACE). Every query runs on it.
+ */
+export interface TestClient extends TestSession {
+  /** The connection's server process ID, which pg_blocking_pids reports. */
+  readonly pid: number;
+  /** Closes the connection; a transaction still open on it rolls back. */
+  end(): Promise<void>;
+}
+
 export interface TestDatabase {
   readonly name: string;
   readonly server: TestPostgresServer;
   connection(role: TestRole): TestConnection;
   /** A session for the role, opened on first use and closed by `drop()`. */
   as(role: TestRole): TestSession;
-  /** Closes every session and deletes the database. */
+  /** Opens a connection of its own for the role. `drop()` closes it if the test hasn't. */
+  connect(role: TestRole): Promise<TestClient>;
+  /** Closes every session and connection, and deletes the database. */
   drop(): Promise<void>;
 }
 
@@ -91,6 +104,7 @@ export async function createTestDatabase(
     }
     return pool;
   };
+  const clients: TestClient[] = [];
 
   return {
     name,
@@ -103,10 +117,39 @@ export async function createTestDatabase(
         return result.rows;
       },
     }),
+    connect: async (role) => {
+      const client = await openClient(connectionFor(server, role, name));
+      clients.push(client);
+      return client;
+    },
     drop: async () => {
+      // pg's end() does nothing for a connection that is already closed, such as one the test closed itself.
+      await Promise.all(clients.map((client) => client.end()));
       await Promise.all([...pools.values()].map((pool) => pool.end()));
       pools.clear();
       await onServer(server, [`DROP DATABASE IF EXISTS ${quoted} WITH (FORCE)`]);
     },
+  };
+}
+
+/** Opens a connection of its own. */
+async function openClient(connection: TestConnection): Promise<TestClient> {
+  const client = new pg.Client({ ...connection, ssl: false });
+  // A connection the server ends reports it as an 'error' event, which would
+  // stop the test process if nothing listened. The next query then fails with
+  // pg's own error, so nothing is hidden.
+  client.on('error', () => undefined);
+  await client.connect();
+  const { rows } = await client.query<{ pid: number }>('select pg_catalog.pg_backend_pid() as pid');
+  const pid = rows[0]?.pid;
+  if (pid === undefined) throw new Error('The new test connection reported no server process ID');
+  return {
+    pid,
+    query: async <Row extends object>(text: string, values: readonly unknown[] = []) => {
+      // eslint-disable-next-line agentx/no-string-built-sql -- This passes on the caller's text; the rule checks it where the caller writes `.query(...)`.
+      const result = await client.query<Row>(text, [...values]);
+      return result.rows;
+    },
+    end: () => client.end(),
   };
 }
