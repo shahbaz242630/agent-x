@@ -19,7 +19,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-describe(`CI-06 the migrated schema keeps the tenant walls (Postgres ${server.version})`, () => {
+describe(`CI-06 (SEC-TEN-05, 08, 10, SEC-EVD-01) the migrated schema keeps the tenant walls (Postgres ${server.version})`, () => {
   it('passes every check', async () => {
     expect(await schemaProblems(database, SCHEMA_POLICY)).toEqual([]);
   });

@@ -186,7 +186,7 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
 });
 
 describe('CI-06 each rule fails on a broken fixture', () => {
-  describe('ADR-005 §2: tenant tables have row-level security, enabled and forced', () => {
+  describe('SEC-TEN-10 (ADR-005 §2): tenant tables have row-level security, enabled and forced', () => {
     it('fails a tenant table with row-level security off', async () => {
       expect(await problemsAfter([...TENANT_TABLE, 'alter table t.items disable row level security'])).toEqual([
         't.items: row-level security is off (ADR-005 §2)',
@@ -248,7 +248,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('ADR-005 §1: tenant tables have org_id uuid NOT NULL', () => {
+  describe('SEC-TEN-10 (ADR-005 §1): tenant tables have org_id uuid NOT NULL', () => {
     it('fails a tenant table with no org_id', async () => {
       const statements = [
         'create schema t',
@@ -302,7 +302,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('ADR-005 §2: exactly one policy, the tenant policy', () => {
+  describe('SEC-TEN-10 (ADR-005 §2): exactly one policy, the tenant policy', () => {
     it('fails a tenant table with no policy', async () => {
       expect(await problemsAfter([...TENANT_TABLE, 'drop policy tenant_isolation on t.items'])).toEqual([
         't.items: has 0 policies; a tenant table has exactly one, the tenant policy (ADR-005 §2)',
@@ -378,7 +378,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('ADR-005: nothing acts for the app with the owner’s rights', () => {
+  describe('SEC-TEN-10 (TEN-9): nothing acts for the app with the owner’s rights', () => {
     // Found by the security review (S8): two functions a migration could add.
     const OWNER_FUNCTIONS = [
       `create function t.unwall() returns void language plpgsql security definer
@@ -513,6 +513,21 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ]);
     });
 
+    it('fails a foreign key that names org_id but pairs it with another column', async () => {
+      // (org_id, item_id) → (id, org_id): the row's org_id is matched against the item's id, and the other way round.
+      const statements = [
+        ...TENANT_TABLE,
+        `create table t.notes (
+           org_id uuid not null, id uuid not null, item_id uuid not null,
+           primary key (org_id, id),
+           constraint notes_item foreign key (org_id, item_id) references t.items (id, org_id))`,
+        ...walls('t.notes'),
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        't.notes: foreign key notes_item points at the tenant table t.items without pairing org_id with its org_id (SEC-TEN-05)',
+      ]);
+    });
+
     it('fails a foreign key from a global table into a tenant table, even one that pairs org_id', async () => {
       // A global row's org_id is whatever its writer put there: no policy checks it.
       const policy: SchemaPolicy = {
@@ -569,7 +584,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('ADR-005 §8: no PUBLIC grants', () => {
+  describe('SEC-TEN-10 (ADR-005 §8): no PUBLIC grants', () => {
     it.each([
       ['a table', [...TENANT_TABLE, 'grant select on t.items to public'], 'table t.items: PUBLIC has SELECT'],
       [
@@ -645,7 +660,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
-  describe('ADR-005 §3: the roles', () => {
+  describe('SEC-TEN-10 (ADR-005 §3): the roles', () => {
     it('fails a role with BYPASSRLS, other than agentx_backup, that can connect', async () => {
       fixtureRoles = ['ci06_bypass'];
       const statements = [['admin', 'create role ci06_bypass nologin bypassrls'] as const, letConnect('ci06_bypass')];

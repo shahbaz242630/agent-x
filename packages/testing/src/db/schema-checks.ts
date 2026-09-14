@@ -66,18 +66,17 @@ export interface SchemaPolicy {
 const TENANT_POLICY = 'tenant_isolation';
 
 /**
- * The tenant policy on a temporary table, as ADR-005 §2 gives it and a
- * migration writes it. It's created inside a transaction that is rolled back.
+ * The tenant policy's expression, which ADR-005 §2 gives for both USING and
+ * WITH CHECK, on a temporary table, as a migration writes it. It's created
+ * inside a transaction that is rolled back.
  */
 const REFERENCE_TABLE = 'create temporary table ci06_reference (org_id uuid not null)';
 const REFERENCE_POLICY = `
   create policy tenant_isolation on ci06_reference
     using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
-    with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
 `;
-const REFERENCE_EXPRESSIONS = `
-  select pg_catalog.pg_get_expr(p.polqual, p.polrelid) as using_expression,
-         pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) as check_expression
+const REFERENCE_EXPRESSION = `
+  select pg_catalog.pg_get_expr(p.polqual, p.polrelid) as expression
   from pg_catalog.pg_policy p
   where p.polrelid = 'pg_temp.ci06_reference'::pg_catalog.regclass
 `;
@@ -300,17 +299,14 @@ interface Column {
   not_null: boolean;
 }
 
-interface PolicyExpressions {
-  using_expression: string | null;
-  check_expression: string | null;
-}
-
-interface Policy extends PolicyExpressions {
+interface Policy {
   table: string;
   name: string;
   command: string;
   permissive: boolean;
   to_public: boolean;
+  using_expression: string | null;
+  check_expression: string | null;
 }
 
 interface KeyWithoutOrg {
@@ -352,7 +348,8 @@ interface Membership {
 interface Facts {
   relations: Relation[];
   columns: Column[];
-  reference: PolicyExpressions;
+  /** The tenant policy's expression, as this server prints it. */
+  reference: string;
   policies: Policy[];
   keysWithoutOrg: KeyWithoutOrg[];
   foreignKeys: ForeignKey[];
@@ -392,14 +389,14 @@ async function rows<Row extends object>(client: pg.Client, text: string, values:
   return (await client.query<Row>(text, [...values])).rows;
 }
 
-async function referenceExpressions(client: pg.Client): Promise<PolicyExpressions> {
+async function referenceExpression(client: pg.Client): Promise<string> {
   await client.query('begin');
   try {
     await client.query(REFERENCE_TABLE);
     await client.query(REFERENCE_POLICY);
-    const [reference] = await rows<PolicyExpressions>(client, REFERENCE_EXPRESSIONS, []);
+    const [reference] = await rows<{ expression: string }>(client, REFERENCE_EXPRESSION, []);
     if (reference === undefined) throw new Error('The reference tenant policy was not created');
-    return reference;
+    return reference.expression;
   } finally {
     await client.query('rollback');
   }
@@ -407,7 +404,7 @@ async function referenceExpressions(client: pg.Client): Promise<PolicyExpression
 
 async function readFacts(client: pg.Client): Promise<Facts> {
   const schemas = (await rows<{ oid: number }>(client, SCHEMAS, [])).map((row) => row.oid);
-  const reference = await referenceExpressions(client);
+  const reference = await referenceExpression(client);
   const inScope = await rows<Role>(client, ROLES, []);
   return {
     relations: await rows<Relation>(client, RELATIONS, [schemas]),
@@ -557,8 +554,8 @@ function orgIdProblems(table: string, orgId: Column | undefined): string[] {
   return [];
 }
 
-/** Exactly one policy, the tenant policy: permissive, for every command and role, with the reference expressions. */
-function tenantPolicyProblems(table: string, policies: readonly Policy[], reference: PolicyExpressions): string[] {
+/** Exactly one policy, the tenant policy: permissive, for every command and role, with the reference expression in both clauses. */
+function tenantPolicyProblems(table: string, policies: readonly Policy[], reference: string): string[] {
   const [only, ...others] = policies;
   if (only === undefined || others.length > 0) {
     return [
@@ -570,10 +567,10 @@ function tenantPolicyProblems(table: string, policies: readonly Policy[], refere
   if (!only.permissive) differences.push('it is restrictive');
   if (only.command !== 'ALL') differences.push(`it covers ${only.command} only`);
   if (!only.to_public) differences.push('it applies to named roles only');
-  if (only.using_expression !== reference.using_expression) {
+  if (only.using_expression !== reference) {
     differences.push(`its USING is ${only.using_expression ?? 'missing'}`);
   }
-  if (only.check_expression !== reference.check_expression) {
+  if (only.check_expression !== reference) {
     differences.push(`its WITH CHECK is ${only.check_expression ?? 'missing'}`);
   }
   return differences.length === 0
