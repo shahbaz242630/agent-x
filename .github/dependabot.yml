@@ -32,3 +32,25 @@ updates:
           - '*'
     commit-message:
       prefix: 'chore(ci)'
+
+  # The container images pinned by digest (SEC-SC-02): the Dockerfile's base
+  # image and the compose stack's Postgres, Zitadel, login and nginx. A bump
+  # moves the tag and the digest together; the database test images
+  # (tooling/test-db/postgres-images.ts) are moved by hand at the weekly review,
+  # and a check keeps the compose Postgres equal to the newest of them.
+  - package-ecosystem: 'docker'
+    directories:
+      - '/'
+      - '/deploy/compose'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      container-images:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: 'chore(images)'

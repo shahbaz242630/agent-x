@@ -87,11 +87,14 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { r
   };
 }
 
+/** The app's handle on its database: a query builder over a pool of connections. */
+export type Database<Schema = unknown> = Kysely<Schema>;
+
 /**
  * A query builder over a pool of connections. Tenant data is reached only
  * through `withTenant`. Call `destroy()` at shutdown to close the pool.
  */
-export function createDatabase<Schema>(options: DatabaseConnectionOptions, logger: Logger): Kysely<Schema> {
+export function createDatabase<Schema = unknown>(options: DatabaseConnectionOptions, logger: Logger): Database<Schema> {
   const config = poolConfig(options);
   const pool = new pg.Pool(config);
   // A connection that drops (a restart, a failover, a timeout) reports it as

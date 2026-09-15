@@ -25,6 +25,8 @@ export const ALLOWED_ACTIONS = new Set([
   'github/codeql-action/analyze',
   'gitleaks/gitleaks-action',
   'zizmorcore/zizmor-action',
+  // SEC-SC-02: the software bill of materials of the image the End to end job builds.
+  'anchore/sbom-action',
 ]);
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;

@@ -145,3 +145,62 @@ jobs:
         with:
           fail-on-severity: high
           fail-on-scopes: runtime, development, unknown
+
+  # ADR-010 §7, the portability proof: the whole product from deploy/compose,
+  # with no cloud account and its containers off the internet, and the login
+  # tests (SEC-HA-01) against the real login service in a real browser. The
+  # image is built here from the Dockerfile, and its software bill of
+  # materials is kept with the run (SEC-SC-02).
+  end-to-end:
+    name: End to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Corepack must not read a .corepack.env file from the repository.
+      COREPACK_ENV_FILE: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          # The newest Node 24, so it always meets package.json engines (>=24.19.0).
+          check-latest: true
+          package-manager-cache: false
+
+      - name: Enable pnpm through Corepack
+        run: corepack enable pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # Random logins for this run only; the stack refuses to start without them.
+      - name: Generate the stack's logins
+        run: node deploy/compose/prepare.ts
+
+      - name: Build the image and start the stack
+        run: docker compose -f deploy/compose/compose.yaml up --build --wait --wait-timeout 420
+
+      # Chrome is on the runner already; Playwright drives it (channel: chrome).
+      - name: End-to-end tests (SEC-HA-01, ADR-010 §7)
+        run: pnpm e2e
+
+      - name: Software bill of materials for the image (CycloneDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: agentx-app:local
+          format: cyclonedx-json
+          artifact-name: sbom-agentx-app.cdx.json
+          upload-artifact: true
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Stack logs (only when something failed)
+        if: failure()
+        run: docker compose -f deploy/compose/compose.yaml logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f deploy/compose/compose.yaml down --volumes --remove-orphans

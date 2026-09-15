@@ -1,4 +1,4 @@
-export { createDatabase, type DatabaseConnectionOptions, DatabaseOptionsError } from './database.ts';
+export { createDatabase, type Database, type DatabaseConnectionOptions, DatabaseOptionsError } from './database.ts';
 export {
   MigrationFailed,
   MigrationNotAtomic,
