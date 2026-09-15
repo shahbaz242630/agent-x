@@ -62,6 +62,7 @@ const TYPES = {
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   network: 'Microsoft.Network/virtualNetworks',
   rules: 'Microsoft.Network/networkSecurityGroups',
+  rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
   setting: 'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
   vault: 'Microsoft.KeyVault/vaults',
@@ -95,6 +96,21 @@ const OTHER_DESTINATIONS = [
   'eventHubName',
   'marketplacePartnerId',
   'serviceBusRuleId',
+] as const;
+
+/** The environment's logs that reach the workspace: every container's console, and the platform's own events. */
+const APP_LOG_CATEGORIES: readonly unknown[] = ['ContainerAppConsoleLogs', 'ContainerAppSystemLogs'];
+
+/**
+ * The environment's other ways to send telemetry, each to a service that may
+ * sit outside the UAE: Dapr's Application Insights, and (in preview API
+ * versions only) the OpenTelemetry agent and Application Insights.
+ */
+const TELEMETRY_SETTINGS = [
+  'daprAIConnectionString',
+  'daprAIInstrumentationKey',
+  'openTelemetryConfiguration',
+  'appInsightsConfiguration',
 ] as const;
 
 const requiredTags = (environment: string): Readonly<Record<string, string>> => ({
@@ -472,10 +488,18 @@ const database: Check = (snapshot, expected, add) => {
   }
 };
 
-/** A subnet's inbound rules, from the rules group of this deployment attached to it. */
+/**
+ * A subnet's inbound rules, from the rules group of this deployment attached to
+ * it: those declared inside the group, and any declared as resources of their
+ * own under it, which Azure adds to the same group.
+ */
 const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] => {
   const rulesId = at(subnet, 'properties', 'networkSecurityGroup', 'id');
-  return list(at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'))
+  const inside = list(
+    at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'),
+  );
+  const apart = ofType(snapshot, TYPES.rule).filter((rule) => rule.id.startsWith(`${String(rulesId)}/securityRules/`));
+  return [...inside, ...apart]
     .map((rule) => at(rule, 'properties'))
     .filter((rule) => at(rule, 'direction') === 'Inbound');
 };
@@ -823,7 +847,8 @@ const budget: Check = (snapshot, _expected, add) => {
  * dedicated one is billed while idle: a decision, never a default), with the
  * traffic inside it encrypted, and its logs sent through Azure Monitor: a
  * diagnostic setting needs no key, where the Log Analytics destination sends
- * with the workspace's shared key (ADR-013 Amendment G1).
+ * with the workspace's shared key (ADR-013 Amendment G1). It has no other way
+ * to send telemetry (ADR-013 rule 1).
  */
 const appsEnvironment: Check = (snapshot, _expected, add) => {
   const appsSubnets = appsSubnetIds(snapshot);
@@ -841,6 +866,10 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
         'its logs sent through Azure Monitor',
         at(properties, 'appLogsConfiguration', 'destination') === 'azure-monitor',
       ],
+      [
+        'no other telemetry exit (Dapr, OpenTelemetry or Application Insights settings)',
+        TELEMETRY_SETTINGS.every((key) => isEmpty(at(properties, key)) || at(properties, key) === ''),
+      ],
     ];
     for (const [what, holds] of required) {
       if (!holds) add({ rule: 'apps-environment', resource: environment.name, message: `must run with ${what}` });
@@ -850,9 +879,10 @@ const appsEnvironment: Check = (snapshot, _expected, add) => {
 
 /**
  * The environment's console and system logs reach this deployment's workspace
- * in resource-specific tables. Its HTTP log is never sent anywhere, and neither
- * is a category group, which would bring it in: it records every client's
- * address and full URL, which our request logs leave out (ADR-011 §7).
+ * in resource-specific tables, and no other log of it is sent anywhere. Above
+ * all its HTTP log, which a category group would also bring in: it records
+ * every client's address and full URL, which our request logs leave out
+ * (ADR-011 §7).
  */
 const appsLogs: Check = (snapshot, _expected, add) => {
   const workspaces = workspaceIds(snapshot);
@@ -867,17 +897,16 @@ const appsLogs: Check = (snapshot, _expected, add) => {
           at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
           enabledLogs(setting).some((log) => at(log, 'category') === category),
       );
-    const httpLog = settings.some((setting) =>
-      enabledLogs(setting).some(
-        (log) => at(log, 'categoryGroup') !== undefined || at(log, 'category') === 'ContainerAppHTTPLogs',
-      ),
+    // A category group names no category, so it is refused here too.
+    const otherLog = settings.some((setting) =>
+      enabledLogs(setting).some((log) => !APP_LOG_CATEGORIES.includes(at(log, 'category'))),
     );
-    if (!sends('ContainerAppConsoleLogs') || !sends('ContainerAppSystemLogs') || httpLog) {
+    if (!APP_LOG_CATEGORIES.every((category) => sends(String(category))) || otherLog) {
       add({
         rule: 'apps-logs',
         resource: environment.name,
         message:
-          "must send its console and system logs to this deployment's workspace in resource-specific tables, and never its HTTP log or a category group (client addresses, ADR-011 §7)",
+          "must send its console and system logs, and no other, to this deployment's workspace in resource-specific tables: never its HTTP log or a category group (client addresses, ADR-011 §7)",
       });
     }
   }

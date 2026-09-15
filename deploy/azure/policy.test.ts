@@ -123,6 +123,27 @@ const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRu
 const subnet = (network: Mutable, name: string): Mutable =>
   (at(network, 'properties', 'subnets') as Mutable[]).find((entry) => entry.name === name) ?? {};
 
+/** An inbound allow rule declared as a resource of its own under the rules group `pick` selects. */
+function separateRule(pick: (resource: PredictedResource) => boolean, source: string, port: string): Mutable {
+  const group = staging.predictedResources.find(pick);
+  return {
+    id: `${String(group?.id)}/securityRules/allow-extra`,
+    type: 'Microsoft.Network/networkSecurityGroups/securityRules',
+    name: `${String(group?.name)}/allow-extra`,
+    apiVersion: '2025-01-01',
+    properties: {
+      priority: 120,
+      direction: 'Inbound',
+      access: 'Allow',
+      protocol: 'Tcp',
+      sourceAddressPrefix: source,
+      sourcePortRange: '*',
+      destinationAddressPrefix: '*',
+      destinationPortRange: port,
+    },
+  };
+}
+
 describe('deploy/azure', () => {
   it('has a parameters file for staging, and every one lints clean with every linter rule an error', () => {
     expect([...checked.keys()]).toContain('staging.bicepparam');
@@ -436,6 +457,8 @@ describe('each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(DATABASE_RULES, change))).toEqual(['database-network']);
     }
+    // The same door as a rule of its own under the group: Azure adds it all the same.
+    expect(brokenRules(withExtra(separateRule(DATABASE_RULES, '10.40.9.0/24', '5432')))).toEqual(['database-network']);
     for (const change of [
       (network: Mutable) => delete inside(subnet(network, 'apps'), 'properties').delegations,
       (network: Mutable) => delete inside(subnet(network, 'database'), 'properties').serviceEndpoints,
@@ -698,9 +721,30 @@ describe('each rule can fail', () => {
         (inside(environment, 'properties', 'appLogsConfiguration').destination = 'log-analytics'),
       (environment: Mutable) => (inside(environment, 'properties', 'appLogsConfiguration').destination = 'none'),
       (environment: Mutable) => delete properties(environment).appLogsConfiguration,
+      // Another way to send telemetry, to a service that may sit outside the UAE.
+      (environment: Mutable) => (properties(environment).daprAIConnectionString = "[parameters('daprTelemetry')]"),
+      (environment: Mutable) => (properties(environment).daprAIInstrumentationKey = 'a key'),
+      (environment: Mutable) =>
+        (properties(environment).openTelemetryConfiguration = {
+          destinationsConfiguration: {
+            otlpConfigurations: [{ name: 'abroad', endpoint: 'https://collector.example' }],
+          },
+        }),
+      (environment: Mutable) =>
+        (properties(environment).appInsightsConfiguration = { connectionString: "[parameters('insights')]" }),
     ]) {
       expect(brokenRules(changed(ENVIRONMENT, change))).toEqual(['apps-environment']);
     }
+    // Present but empty, they send nothing.
+    expect(
+      brokenRules(
+        changed(ENVIRONMENT, (environment) => {
+          properties(environment).daprAIConnectionString = '';
+          properties(environment).openTelemetryConfiguration = {};
+          properties(environment).appInsightsConfiguration = null;
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it('apps-network: the apps subnet without its rules, or a door wider than the probes and the subnet itself', () => {
@@ -740,6 +784,7 @@ describe('each rule can fail', () => {
       ),
     ).toEqual(['apps-network']);
     expect(brokenRules(without(APPS_RULES))).toEqual(['apps-network']);
+    expect(brokenRules(withExtra(separateRule(APPS_RULES, 'VirtualNetwork', '*')))).toEqual(['apps-network']);
     // No apps subnet at all: the database's rule refuses it too, and the vault
     // and the environment point at a subnet that isn't there.
     expect(
@@ -761,6 +806,7 @@ describe('each rule can fail', () => {
       (setting: Mutable) => logs(setting).push({ category: 'ContainerAppHTTPLogs', enabled: true }),
       (setting: Mutable) => logs(setting).push({ categoryGroup: 'allLogs', enabled: true }),
       (setting: Mutable) => logs(setting).push({ categoryGroup: 'audit', enabled: true }),
+      (setting: Mutable) => logs(setting).push({ category: 'AppEnvSessionConsoleLogs', enabled: true }),
     ]) {
       expect(brokenRules(changed(APP_LOGS, change))).toEqual(['apps-logs']);
     }
