@@ -27,6 +27,10 @@ export const ALLOWED_ACTIONS = new Set([
   'zizmorcore/zizmor-action',
   // SEC-SC-02: the software bill of materials of the image the End to end job builds.
   'anchore/sbom-action',
+  // SEC-SC-02: cosign, which signs the published image; the installer checks cosign's own signature.
+  'sigstore/cosign-installer',
+  // SEC-SC-02: hands the published image's SBOM from the job that makes it to the job that signs it.
+  'actions/download-artifact',
 ]);
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;

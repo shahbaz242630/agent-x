@@ -3,10 +3,10 @@
 // only the stack holds (Zitadel's automation token, the generated logins).
 // Docker is always run with an argument list and no shell.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+
+import { firstFileIn } from './tar.ts';
 
 const COMPOSE_FILE = fileURLToPath(new URL('../../deploy/compose/compose.yaml', import.meta.url));
 const ENV_FILE = fileURLToPath(new URL('../../deploy/compose/.env', import.meta.url));
@@ -17,6 +17,8 @@ export const LOGIN_ORIGIN = 'http://localhost:8081';
 
 export interface Run {
   readonly stdout: string;
+  /** stdout as it came, for a command that writes bytes (a tar stream). */
+  readonly bytes: Buffer;
   readonly stderr: string;
   readonly code: number | null;
 }
@@ -25,13 +27,13 @@ export interface Run {
 function docker(args: readonly string[], timeoutMs = 120_000): Promise<Run> {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
+    const stdout: Buffer[] = [];
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`docker ${args.slice(0, 2).join(' ')} took longer than ${String(timeoutMs)} ms`));
     }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
     child.on('error', (error) => {
       clearTimeout(timer);
@@ -39,7 +41,8 @@ function docker(args: readonly string[], timeoutMs = 120_000): Promise<Run> {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ stdout, stderr, code });
+      const bytes = Buffer.concat(stdout);
+      resolve({ stdout: bytes.toString('utf8'), bytes, stderr, code });
     });
   });
 }
@@ -48,29 +51,29 @@ function docker(args: readonly string[], timeoutMs = 120_000): Promise<Run> {
 const compose = (args: readonly string[], timeoutMs?: number): Promise<Run> =>
   docker(['compose', '-f', COMPOSE_FILE, ...args], timeoutMs);
 
-/** Runs a compose command and returns its output, or throws with Docker's own message. */
-async function composeOk(args: readonly string[], timeoutMs?: number): Promise<string> {
+/** Runs a compose command, or throws with Docker's own message. */
+async function composeRun(args: readonly string[], timeoutMs?: number): Promise<Run> {
   const run = await compose(args, timeoutMs);
   if (run.code !== 0) {
     throw new Error(`docker compose ${args[0] ?? ''} failed (exit ${String(run.code)}): ${run.stderr.trim()}`);
   }
-  return run.stdout;
+  return run;
 }
+
+/** Runs a compose command and returns its output, or throws with Docker's own message. */
+const composeOk = async (args: readonly string[], timeoutMs?: number): Promise<string> =>
+  (await composeRun(args, timeoutMs)).stdout;
 
 /**
  * Zitadel's automation token, which its first start wrote inside the stack
- * (compose.yaml). Copied out of the container into a private temporary file,
- * read, and removed: it never lands in the repository folder.
+ * (compose.yaml). `cp … -` streams it out of the container as a tar archive
+ * on stdout, so it is read in memory and never touches the host's disk.
  */
 export async function readAutomationToken(): Promise<string> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'agentx-e2e-'));
-  try {
-    const file = path.join(dir, 'automation.pat');
-    await composeOk(['cp', 'zitadel:/pat-automation/automation.pat', file]);
-    return readFileSync(file, 'utf8').trim();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const { bytes } = await composeRun(['cp', 'zitadel:/pat-automation/automation.pat', '-']);
+  const token = firstFileIn(bytes).toString('utf8').trim();
+  if (token === '') throw new Error("Zitadel's automation token is empty");
+  return token;
 }
 
 /** One service's log, as the container wrote it. */
