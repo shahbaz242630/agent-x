@@ -130,6 +130,12 @@ jobs:
       - name: Dead code (knip)
         run: pnpm knip
 
+      # The deploy/azure checks run the Bicep compiler, and tests download
+      # nothing (Rule Book §6), so the pinned binary is installed here and
+      # checked against its SHA-256 (tooling/bicep/bicep.ts).
+      - name: Install the pinned Bicep compiler
+        run: pnpm tools
+
       - name: Tests, gate proofs and coverage
         run: pnpm test:coverage
 

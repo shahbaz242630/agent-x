@@ -1,0 +1,750 @@
+// What every Azure deployment of Agent X must be, checked on the resources its
+// snapshot predicts (snapshot.ts), so a change to deploy/azure that breaks a
+// rule fails CI before it reaches Azure. Each rule names the decision it
+// enforces; each is proven able to fail (policy.test.ts).
+//
+// main.bicep builds every id one module hands another from its list of names,
+// so a snapshot resolves them all. The rules compare those ids with the ids of
+// the resources this deployment creates: a reference to anything else (a
+// workspace abroad, another subnet) is refused, and so is a protection that is
+// simply missing, not only one that is switched off.
+import type { PredictedResource, Snapshot } from './snapshot.ts';
+
+export type RuleId =
+  | 'snapshot-complete'
+  | 'required'
+  | 'in-country'
+  | 'stable-api'
+  | 'tags'
+  | 'no-secret-literals'
+  | 'database-private'
+  | 'database-network'
+  | 'database-logins'
+  | 'database-tls'
+  | 'database-backup'
+  | 'vault'
+  | 'workspace'
+  | 'log-quota-alerts'
+  | 'alert-counts-only'
+  | 'alert-runbook'
+  | 'alert-delivery'
+  | 'resource-logs'
+  | 'activity-log'
+  | 'budget';
+
+export interface Problem {
+  readonly rule: RuleId;
+  /** The resource's name, or "the deployment" for a rule about what is missing. */
+  readonly resource: string;
+  readonly message: string;
+}
+
+export interface Expectations {
+  /** Where every resource with a location must be, but the few Azure only offers globally (ADR-009). */
+  readonly region: string;
+  readonly environment: 'staging' | 'production';
+}
+
+const TYPES = {
+  actionGroup: 'Microsoft.Insights/actionGroups',
+  alert: 'Microsoft.Insights/scheduledQueryRules',
+  budget: 'Microsoft.Consumption/budgets',
+  diagnostics: 'Microsoft.Insights/diagnosticSettings',
+  dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
+  dnsZone: 'Microsoft.Network/privateDnsZones',
+  network: 'Microsoft.Network/virtualNetworks',
+  rules: 'Microsoft.Network/networkSecurityGroups',
+  server: 'Microsoft.DBforPostgreSQL/flexibleServers',
+  setting: 'Microsoft.DBforPostgreSQL/flexibleServers/configurations',
+  vault: 'Microsoft.KeyVault/vaults',
+  vaultSecret: 'Microsoft.KeyVault/vaults/secrets',
+  workspace: 'Microsoft.OperationalInsights/workspaces',
+} as const;
+
+/** Types Azure offers only as global resources. None holds customer data or logs. */
+const GLOBAL_TYPES: ReadonlySet<string> = new Set([TYPES.actionGroup, TYPES.dnsZone, TYPES.dnsLink]);
+
+/** Types whose newest API version is a preview, with why the preview is used. */
+export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
+  [TYPES.diagnostics]:
+    'Azure publishes diagnostic settings only in preview API versions after 2016-09-01, which predates category groups and resource-specific tables',
+};
+
+/** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
+const BACKUP_ROLE = 'agentx_backup';
+
+const requiredTags = (environment: string): Readonly<Record<string, string>> => ({
+  product: 'agent-x',
+  environment,
+  'managed-by': 'deploy/azure',
+});
+
+/** One nested value, or undefined when any step of the path is missing. */
+export function at(value: unknown, ...keys: readonly string[]): unknown {
+  let current = value;
+  for (const key of keys) {
+    if (typeof current !== 'object' || current === null) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+const list = (value: unknown): readonly unknown[] => (Array.isArray(value) ? value : []);
+
+/** An object with no keys, or nothing at all. */
+const isEmpty = (value: unknown): boolean =>
+  value === undefined || value === null || (typeof value === 'object' && Object.keys(value).length === 0);
+
+/** Where a KQL string or comment starting at `index` ends (one past it), or undefined if none starts there. */
+function skipQuoted(query: string, index: number): number | undefined {
+  const rest = query.slice(index);
+  const endOf = (marker: string, from: number): number => {
+    const end = query.indexOf(marker, from);
+    return end === -1 ? query.length : end + marker.length;
+  };
+  if (rest.startsWith('```')) return endOf('```', index + 3);
+  if (rest.startsWith('//')) return endOf('\n', index + 2);
+  if (/^@["']/.test(rest)) {
+    // Verbatim: no escapes but a doubled quote.
+    const quote = rest.charAt(1);
+    let end = index + 2;
+    while (end < query.length) {
+      if (query.charAt(end) === quote) {
+        if (query.charAt(end + 1) !== quote) return end + 1;
+        end += 2;
+      } else {
+        end += 1;
+      }
+    }
+    return query.length;
+  }
+  if (rest.startsWith('"') || rest.startsWith("'")) {
+    const quote = rest.charAt(0);
+    let end = index + 1;
+    while (end < query.length && query.charAt(end) !== quote) end += query.charAt(end) === '\\' ? 2 : 1;
+    return Math.min(end + 1, query.length);
+  }
+  return undefined;
+}
+
+/**
+ * Walks a query's top level: `visit` sees each character outside strings,
+ * comments and brackets, and `keep` gets everything else. A pipe in a regex's
+ * alternation or in a subquery's brackets is never at the top level.
+ */
+function topLevel(query: string, visit: (character: string) => void, keep: (text: string) => void): void {
+  let depth = 0;
+  let index = 0;
+  while (index < query.length) {
+    const quotedEnd = skipQuoted(query, index);
+    if (quotedEnd !== undefined) {
+      keep(query.slice(index, quotedEnd));
+      index = quotedEnd;
+      continue;
+    }
+    const character = query.charAt(index);
+    if (character === '(' || character === '[') depth += 1;
+    if (character === ')' || character === ']') depth -= 1;
+    if (depth === 0 && character !== ')' && character !== ']') visit(character);
+    else keep(character);
+    index += 1;
+  }
+}
+
+/** A query split at its top-level pipes, each stage trimmed. */
+export function kqlStages(query: string): string[] {
+  const stages: string[] = [];
+  let current = '';
+  topLevel(
+    query,
+    (character) => {
+      if (character === '|') {
+        stages.push(current.trim());
+        current = '';
+      } else {
+        current += character;
+      }
+    },
+    (text) => {
+      current += text;
+    },
+  );
+  stages.push(current.trim());
+  return stages;
+}
+
+/**
+ * The one column a query's final `summarize Name = aggregation(…)` produces, or
+ * undefined if the query ends otherwise, makes more than one column, or groups
+ * `by` anything: then it would return rows, not one number.
+ */
+export function singleSummaryColumn(query: string): string | undefined {
+  const last = kqlStages(query).at(-1) ?? '';
+  const summarize = /^summarize\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]+)$/.exec(last);
+  if (summarize === null) return undefined;
+  let outside = '';
+  topLevel(
+    summarize[2] ?? '',
+    (character) => {
+      outside += character;
+    },
+    () => {
+      outside += ' ';
+    },
+  );
+  if (outside.includes(',') || /\bby\b/i.test(outside)) return undefined;
+  return summarize[1];
+}
+
+/**
+ * Whether a query is exactly `table | stage | … | summarize Name = aggregation`:
+ * the same stages, in order, whatever the spacing around its pipes.
+ */
+const queryIs = (query: unknown, table: string, filters: readonly string[], aggregation: string): boolean => {
+  const stages = kqlStages(String(query));
+  const last = stages.at(-1) ?? '';
+  return (
+    stages.length === filters.length + 2 &&
+    stages[0] === table &&
+    filters.every((filter, index) => stages[index + 1] === filter) &&
+    last.replace(/^summarize\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*/, '') === aggregation
+  );
+};
+
+type Check = (snapshot: Snapshot, expected: Expectations, add: (problem: Problem) => void) => void;
+
+const ofType = (snapshot: Snapshot, type: string): readonly PredictedResource[] =>
+  snapshot.predictedResources.filter((resource) => resource.type === type);
+
+/** Settings attached to a resource: their ids sit under the resource's own. */
+const settingsOf = (snapshot: Snapshot, resource: PredictedResource): readonly PredictedResource[] =>
+  ofType(snapshot, TYPES.diagnostics).filter((setting) =>
+    setting.id.toLowerCase().startsWith(`${resource.id}/providers/${TYPES.diagnostics}/`.toLowerCase()),
+  );
+
+/** The ids of the workspaces this deployment creates: a reference to any other id is refused. */
+const workspaceIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
+  new Set(ofType(snapshot, TYPES.workspace).map((workspace) => workspace.id));
+
+/** An action group of this deployment that is switched on and reaches someone. */
+const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
+  ofType(snapshot, TYPES.actionGroup).some(
+    (group) =>
+      group.id === id &&
+      at(group.properties, 'enabled') === true &&
+      list(at(group.properties, 'emailReceivers')).length + list(at(group.properties, 'azureAppPushReceivers')).length >
+        0,
+  );
+
+const complete: Check = (snapshot, _expected, add) => {
+  if (list(snapshot.diagnostics).length > 0) {
+    add({
+      rule: 'snapshot-complete',
+      resource: 'the deployment',
+      message: `bicep snapshot reported ${String(list(snapshot.diagnostics).length)} diagnostic(s), so what it predicts may be partial: fix them first`,
+    });
+  }
+};
+
+/** The protections exist at all: a rule that checks each resource of a type passes when there are none. */
+const required: Check = (snapshot, _expected, add) => {
+  const counts: readonly (readonly [string, string, number, number])[] = [
+    ['the log workspace', TYPES.workspace, 1, 1],
+    ['an action group', TYPES.actionGroup, 1, Infinity],
+    ['the network', TYPES.network, 1, 1],
+    ['the key vault', TYPES.vault, 1, Infinity],
+    ['the Postgres server', TYPES.server, 1, Infinity],
+  ];
+  for (const [what, type, least, most] of counts) {
+    const found = ofType(snapshot, type).length;
+    if (found < least || found > most) {
+      add({
+        rule: 'required',
+        resource: 'the deployment',
+        message: `needs ${least === most ? 'exactly one' : 'at least one'} ${what} (${type}); the snapshot has ${String(found)}`,
+      });
+    }
+  }
+};
+
+const inCountry: Check = (snapshot, expected, add) => {
+  for (const resource of snapshot.predictedResources) {
+    if (resource.location === undefined) continue;
+    const wanted = GLOBAL_TYPES.has(resource.type) ? 'global' : expected.region;
+    if (resource.location.toLowerCase() !== wanted) {
+      add({
+        rule: 'in-country',
+        resource: resource.name,
+        message: `is in ${resource.location}; it must be in ${wanted} (ADR-009: customer data and monitoring stay in the UAE)`,
+      });
+    }
+  }
+};
+
+const stableApi: Check = (snapshot, _expected, add) => {
+  for (const resource of snapshot.predictedResources) {
+    if (resource.apiVersion.includes('preview') && PREVIEW_API_EXCEPTIONS[resource.type] === undefined) {
+      add({
+        rule: 'stable-api',
+        resource: resource.name,
+        message: `uses preview API ${resource.apiVersion}; use a stable version, or list the type in PREVIEW_API_EXCEPTIONS with its reason`,
+      });
+    }
+  }
+};
+
+const tagged: Check = (snapshot, expected, add) => {
+  for (const resource of snapshot.predictedResources) {
+    if (resource.location === undefined) continue;
+    for (const [key, value] of Object.entries(requiredTags(expected.environment))) {
+      if (resource.tags?.[key] !== value) {
+        add({ rule: 'tags', resource: resource.name, message: `needs the tag ${key}: ${value}` });
+      }
+    }
+  }
+};
+
+const PARAMETER_REFERENCE = /^\[parameters\('[^']+'\)\]$/;
+
+/**
+ * A secret holds a parameter reference, never a value written in the code:
+ * any property whose name ends in "password" or "secret" (a switch named after
+ * one, like `passwordAuth`, doesn't), a key vault secret's value, and the value
+ * of every entry in a `secrets` list (Container Apps' own secrets).
+ */
+const noSecretLiterals: Check = (snapshot, _expected, add) => {
+  const refuse = (resource: PredictedResource, where: string): void => {
+    add({
+      rule: 'no-secret-literals',
+      resource: resource.name,
+      message: `${where} must come from a @secure() parameter, never a value in the code`,
+    });
+  };
+  const literal = (value: unknown): boolean => typeof value === 'string' && !PARAMETER_REFERENCE.test(value);
+  const walk = (resource: PredictedResource, value: unknown, trail: string): void => {
+    if (typeof value !== 'object' || value === null) return;
+    for (const [key, child] of Object.entries(value)) {
+      const where = trail === '' ? key : `${trail}.${key}`;
+      if (/(?:password|secret)$/i.test(key) && literal(child)) refuse(resource, where);
+      if (key === 'secrets') {
+        list(child).forEach((entry, index) => {
+          if (literal(at(entry, 'value'))) refuse(resource, `${where}[${String(index)}].value`);
+        });
+      }
+      walk(resource, child, where);
+    }
+  };
+  for (const resource of snapshot.predictedResources) {
+    if (resource.type === TYPES.vaultSecret && literal(at(resource.properties, 'value'))) refuse(resource, 'value');
+    walk(resource, resource.properties, '');
+  }
+};
+
+/**
+ * The same for a parameters file, which the snapshot can't show: a secure
+ * parameter's value comes from the deploying shell, with no default written
+ * down, or from a key vault.
+ */
+export function paramsFileProblems(file: string, text: string, secureParameters: readonly string[]): Problem[] {
+  return secureParameters.flatMap((name) => {
+    const assignment = new RegExp(`^param\\s+${name}\\s*=\\s*(.+)$`, 'm').exec(text)?.[1]?.trim();
+    const fromShell = assignment !== undefined && /^readEnvironmentVariable\('[A-Z0-9_]+'\)$/.test(assignment);
+    const fromVault = assignment?.startsWith('az.getSecret(') === true;
+    return assignment === undefined || fromShell || fromVault
+      ? []
+      : [
+          {
+            rule: 'no-secret-literals' as const,
+            resource: file,
+            message: `${name} is secure: read it with readEnvironmentVariable('NAME') and no default, or az.getSecret, never a value in the file`,
+          },
+        ];
+  });
+}
+
+const delegatedTo = (subnet: unknown): unknown =>
+  at(list(at(subnet, 'properties', 'delegations'))[0], 'properties', 'serviceName');
+
+/** Where a server must sit: a Postgres-delegated subnet of this deployment's network. */
+const postgresSubnets = (snapshot: Snapshot): readonly { id: string; subnet: unknown; network: PredictedResource }[] =>
+  ofType(snapshot, TYPES.network).flatMap((network) =>
+    list(at(network.properties, 'subnets'))
+      .filter((subnet) => delegatedTo(subnet) === TYPES.server)
+      .map((subnet) => ({ id: `${network.id}/subnets/${String(at(subnet, 'name'))}`, subnet, network })),
+  );
+
+const database: Check = (snapshot, expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const server of ofType(snapshot, TYPES.server)) {
+    const problem = (rule: RuleId, message: string): void => {
+      add({ rule, resource: server.name, message });
+    };
+    const properties = server.properties;
+    // In a Postgres subnet of this deployment's network, its DNS zone one this
+    // deployment creates and links to that network: Azure then refuses public access outright.
+    const home = postgresSubnets(snapshot).find(
+      ({ id }) => id === at(properties, 'network', 'delegatedSubnetResourceId'),
+    );
+    const zone = at(properties, 'network', 'privateDnsZoneArmResourceId');
+    // Only a server in a subnet of ours has a network for its zone to be linked to.
+    const zoneLinked =
+      home !== undefined &&
+      ofType(snapshot, TYPES.dnsLink).some(
+        (link) =>
+          link.id.startsWith(`${String(zone)}/virtualNetworkLinks/`) &&
+          at(link.properties, 'virtualNetwork', 'id') === home.network.id,
+      );
+    if (
+      !ofType(snapshot, TYPES.dnsZone).some((candidate) => candidate.id === zone) ||
+      !zoneLinked ||
+      at(properties, 'network', 'publicNetworkAccess') === 'Enabled' ||
+      at(properties, 'version') !== '18'
+    ) {
+      problem(
+        'database-private',
+        "runs PostgreSQL 18 in this deployment's Postgres subnet, with a private DNS zone linked to that network, never public (ADR-002)",
+      );
+    }
+    if (
+      at(properties, 'authConfig', 'passwordAuth') !== 'Enabled' ||
+      at(properties, 'authConfig', 'activeDirectoryAuth') !== 'Disabled'
+    ) {
+      problem('database-logins', 'takes password logins only, never Microsoft Entra ones (ADR-002, ADR-010)');
+    }
+    const retention = at(properties, 'backup', 'backupRetentionDays');
+    const minimum = expected.environment === 'production' ? 35 : 7;
+    if (typeof retention !== 'number' || retention < minimum) {
+      problem('database-backup', `keeps at least ${String(minimum)} days of point-in-time restore (ADR-002)`);
+    }
+    const settings = new Map(
+      ofType(snapshot, TYPES.setting)
+        .filter((setting) => setting.id.startsWith(`${server.id}/`))
+        .map((setting) => [setting.name.split('/').at(-1), at(setting.properties, 'value')]),
+    );
+    if (settings.get('require_secure_transport') !== 'on' || settings.get('ssl_min_protocol_version') !== 'TLSv1.3') {
+      problem('database-tls', 'requires TLS on every connection, 1.3 at least');
+    }
+    // ADR-012 §2: every login is logged, and one by the admin or the backup
+    // role raises a SEV-1 alert that notifies on every window it happens in.
+    const admin = String(at(properties, 'administratorLogin'));
+    const pattern = `@"^connection authorized: user=(${admin}|${BACKUP_ROLE}) "`;
+    const alerted = ofType(snapshot, TYPES.alert).some(
+      (alert) =>
+        at(alert.properties, 'enabled') === true &&
+        at(alert.properties, 'severity') === 1 &&
+        at(alert.properties, 'autoMitigate') === false &&
+        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
+        list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
+          queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()'),
+        ),
+    );
+    if (settings.get('log_connections') !== 'on' || !alerted) {
+      problem(
+        'database-logins',
+        `logs every login, and an enabled, stateless SEV-1 alert on the workspace fires when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+      );
+    }
+  }
+};
+
+/**
+ * Every Postgres subnet lets in port 5432 from the apps subnet and from itself
+ * (Microsoft: the server's own features need 5432 inside its subnet), and
+ * nothing else from the network; it keeps the Storage endpoint that carries the
+ * server's write-ahead log.
+ */
+const databaseNetwork: Check = (snapshot, _expected, add) => {
+  for (const network of ofType(snapshot, TYPES.network)) {
+    const subnets = list(at(network.properties, 'subnets'));
+    const apps = subnets.find((subnet) => at(subnet, 'name') === 'apps');
+    const appsPrefix = at(apps, 'properties', 'addressPrefix');
+    const own = postgresSubnets(snapshot).filter((entry) => entry.network.id === network.id);
+    const safe = (subnet: unknown): boolean => {
+      const prefix = at(subnet, 'properties', 'addressPrefix');
+      const rulesId = at(subnet, 'properties', 'networkSecurityGroup', 'id');
+      const inbound = list(
+        at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'),
+      )
+        .map((rule) => at(rule, 'properties'))
+        .filter((rule) => at(rule, 'direction') === 'Inbound');
+      const allows = inbound.filter((rule) => at(rule, 'access') === 'Allow');
+      const onlyPostgres = allows.every(
+        (rule) =>
+          at(rule, 'protocol') === 'Tcp' &&
+          at(rule, 'destinationPortRange') === '5432' &&
+          at(rule, 'destinationAddressPrefix') === prefix &&
+          [appsPrefix, prefix].includes(at(rule, 'sourceAddressPrefix')),
+      );
+      const fromApps = allows.some((rule) => at(rule, 'sourceAddressPrefix') === appsPrefix);
+      const fromItself = allows.some((rule) => at(rule, 'sourceAddressPrefix') === prefix);
+      const lastAllow = Math.max(...allows.map((rule) => Number(at(rule, 'priority'))));
+      // Kept explicit, though onlyPostgres already refuses any rule that
+      // matches this one without denying (the one mutant tests can't tell apart).
+      const deniesRest = inbound.some(
+        (rule) =>
+          at(rule, 'access') === 'Deny' &&
+          at(rule, 'protocol') === '*' &&
+          at(rule, 'sourceAddressPrefix') === 'VirtualNetwork' &&
+          at(rule, 'destinationAddressPrefix') === '*' &&
+          at(rule, 'destinationPortRange') === '*' &&
+          Number(at(rule, 'priority')) > lastAllow,
+      );
+      const keepsStorage = list(at(subnet, 'properties', 'serviceEndpoints')).some(
+        (endpoint) => at(endpoint, 'service') === 'Microsoft.Storage',
+      );
+      return onlyPostgres && fromApps && fromItself && deniesRest && keepsStorage;
+    };
+    if (
+      delegatedTo(apps) !== 'Microsoft.App/environments' ||
+      own.length === 0 ||
+      !own.every(({ subnet }) => safe(subnet))
+    ) {
+      add({
+        rule: 'database-network',
+        resource: network.name,
+        message:
+          'needs an apps subnet for Container Apps, and Postgres subnets that let in port 5432 only from the apps subnet and themselves, deny the rest of the network, and keep their Storage endpoint',
+      });
+    }
+  }
+};
+
+const vault: Check = (snapshot, _expected, add) => {
+  const appsSubnets: ReadonlySet<unknown> = new Set(
+    ofType(snapshot, TYPES.network).map((network) => `${network.id}/subnets/apps`),
+  );
+  for (const store of ofType(snapshot, TYPES.vault)) {
+    const properties = store.properties;
+    const acls = at(properties, 'networkAcls');
+    const subnetRules = list(at(acls, 'virtualNetworkRules'));
+    const required: readonly (readonly [string, boolean])[] = [
+      ['Azure roles only (enableRbacAuthorization)', at(properties, 'enableRbacAuthorization') === true],
+      ['no access policies', list(at(properties, 'accessPolicies')).length === 0],
+      ['purge protection', at(properties, 'enablePurgeProtection') === true],
+      ['90 days of soft delete', at(properties, 'softDeleteRetentionInDays') === 90],
+      [
+        'no other Azure service fetching its secrets',
+        ['enabledForDeployment', 'enabledForDiskEncryption', 'enabledForTemplateDeployment'].every(
+          (key) => at(properties, key) === false,
+        ),
+      ],
+      [
+        'requests refused by default, with no exceptions for Azure services or addresses',
+        at(acls, 'defaultAction') === 'Deny' && at(acls, 'bypass') === 'None' && list(at(acls, 'ipRules')).length === 0,
+      ],
+      [
+        "this deployment's apps subnet as the only subnet let in",
+        subnetRules.length === 1 && appsSubnets.has(at(subnetRules[0], 'id')),
+      ],
+    ];
+    for (const [what, holds] of required) {
+      if (!holds) add({ rule: 'vault', resource: store.name, message: `must have ${what}` });
+    }
+  }
+};
+
+const workspaceAndQuota: Check = (snapshot, _expected, add) => {
+  const alerts = ofType(snapshot, TYPES.alert);
+  for (const workspace of ofType(snapshot, TYPES.workspace)) {
+    const problem = (rule: RuleId, message: string): void => {
+      add({ rule, resource: workspace.name, message });
+    };
+    if (at(workspace.properties, 'retentionInDays') !== 31) problem('workspace', 'keeps logs 31 days (ADR-013 rule 7)');
+    if (at(workspace.properties, 'features', 'disableLocalAuth') !== true) {
+      problem('workspace', 'takes no shared-key logins (disableLocalAuth)');
+    }
+    const cap = at(workspace.properties, 'workspaceCapping', 'dailyQuotaGb');
+    if (typeof cap !== 'number' || cap <= 0) {
+      problem('workspace', 'needs a daily cap (ADR-013 rule 6)');
+      continue;
+    }
+    // Enabled rules on this workspace, their queries exactly the ones the logging standard names.
+    const criteria = alerts
+      .filter(
+        (alert) =>
+          at(alert.properties, 'enabled') === true && list(at(alert.properties, 'scopes')).includes(workspace.id),
+      )
+      .flatMap((alert) => list(at(alert.properties, 'criteria', 'allOf')));
+    const warnsAt80 = criteria.some(
+      (criterion) =>
+        queryIs(at(criterion, 'query'), 'Usage', ['where IsBillable'], 'sum(Quantity)') &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === cap * 800,
+    );
+    const warnsAtCap = criteria.some(
+      (criterion) =>
+        queryIs(
+          at(criterion, 'query'),
+          '_LogOperation',
+          ['where Category =~ "Ingestion"', 'where Detail contains "OverQuota"'],
+          'count()',
+        ) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0,
+    );
+    if (!warnsAt80 || !warnsAtCap) {
+      problem(
+        'log-quota-alerts',
+        `needs an enabled alert above 80% of its ${String(cap)} GB cap (${String(cap * 800)} MB) and one when the cap is reached (SEC-AV-09)`,
+      );
+    }
+  }
+};
+
+const alertRules: Check = (snapshot, _expected, add) => {
+  for (const alert of ofType(snapshot, TYPES.alert)) {
+    const criteria = list(at(alert.properties, 'criteria', 'allOf'));
+    const countsOnly =
+      alert.kind === 'LogAlert' &&
+      criteria.length > 0 &&
+      criteria.every((criterion) => {
+        const column = singleSummaryColumn(String(at(criterion, 'query')));
+        return (
+          column !== undefined &&
+          at(criterion, 'metricMeasureColumn') === column &&
+          list(at(criterion, 'dimensions')).length === 0 &&
+          at(criterion, 'resourceIdColumn') === undefined
+        );
+      }) &&
+      isEmpty(at(alert.properties, 'actions', 'customProperties'));
+    if (!countsOnly) {
+      add({
+        rule: 'alert-counts-only',
+        resource: alert.name,
+        message:
+          'must end in one summarize with no `by`, measured on that column, with no dimensions or custom properties: notifications leave the UAE (ADR-013 rule 3)',
+      });
+    }
+    const severity = at(alert.properties, 'severity');
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-F]\.$/.exec(
+      String(at(alert.properties, 'description')),
+    );
+    if (runbook === null || Number(runbook[1]) !== severity) {
+      add({
+        rule: 'alert-runbook',
+        resource: alert.name,
+        message:
+          'its description must start with its SEV (1 or 2, matching its severity) and end with its runbook section',
+      });
+    }
+    const groups = list(at(alert.properties, 'actions', 'actionGroups'));
+    if (
+      at(alert.properties, 'enabled') !== true ||
+      groups.length === 0 ||
+      !groups.every((group) => deliversAlerts(snapshot, group)) ||
+      (severity === 1 && at(alert.properties, 'autoMitigate') !== false)
+    ) {
+      add({
+        rule: 'alert-delivery',
+        resource: alert.name,
+        message:
+          "must be enabled and reach this deployment's action groups, each switched on with someone to tell; a SEV-1 alert is stateless, so it notifies every time",
+      });
+    }
+  }
+};
+
+const resourceLogs: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  const wanted: readonly (readonly [string, (log: unknown) => boolean])[] = [
+    [TYPES.vault, (log) => at(log, 'categoryGroup') === 'audit' || at(log, 'categoryGroup') === 'allLogs'],
+    [TYPES.server, (log) => at(log, 'category') === 'PostgreSQLLogs'],
+  ];
+  for (const [type, isTheLog] of wanted) {
+    for (const resource of ofType(snapshot, type)) {
+      const sent = settingsOf(snapshot, resource).some(
+        (setting) =>
+          workspaces.has(at(setting.properties, 'workspaceId')) &&
+          at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
+          list(at(setting.properties, 'logs')).some((log) => isTheLog(log) && at(log, 'enabled') === true),
+      );
+      if (!sent) {
+        add({
+          rule: 'resource-logs',
+          resource: resource.name,
+          message: "must send its logs to this deployment's workspace, in resource-specific tables",
+        });
+      }
+    }
+  }
+};
+
+const activityLog: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  const kept = ofType(snapshot, TYPES.diagnostics)
+    .filter((setting) =>
+      /^\/subscriptions\/[^/]+\/providers\/Microsoft\.Insights\/diagnosticSettings\//i.test(setting.id),
+    )
+    .some(
+      (setting) =>
+        workspaces.has(at(setting.properties, 'workspaceId')) &&
+        list(at(setting.properties, 'logs')).some(
+          (log) => at(log, 'category') === 'Administrative' && at(log, 'enabled') === true,
+        ),
+    );
+  if (!kept) {
+    add({
+      rule: 'activity-log',
+      resource: 'the deployment',
+      message: "must keep the subscription's Administrative events in this deployment's workspace (ADR-012 §6)",
+    });
+  }
+};
+
+const budget: Check = (snapshot, _expected, add) => {
+  const budgets = ofType(snapshot, TYPES.budget);
+  const notices = budgets.flatMap((entry) =>
+    Object.values((at(entry.properties, 'notifications') ?? {}) as Record<string, unknown>),
+  );
+  const has = (type: string, threshold: number): boolean =>
+    notices.some(
+      (notice) =>
+        at(notice, 'enabled') === true &&
+        at(notice, 'thresholdType') === type &&
+        at(notice, 'threshold') === threshold &&
+        list(at(notice, 'contactEmails')).length > 0,
+    );
+  // Azure takes a monthly budget's start only as the first of a month, and only the current month or later on creation.
+  const starts = budgets.every((entry) =>
+    /^\d{4}-(0[1-9]|1[0-2])-01$/.test(String(at(entry.properties, 'timePeriod', 'startDate'))),
+  );
+  if (!has('Actual', 80) || !has('Forecasted', 100) || !starts) {
+    add({
+      rule: 'budget',
+      resource: 'the deployment',
+      message:
+        "needs a budget, starting on the first of a month, that emails at 80% of it and when the month's forecast passes it",
+    });
+  }
+};
+
+const CHECKS: readonly Check[] = [
+  complete,
+  required,
+  inCountry,
+  stableApi,
+  tagged,
+  noSecretLiterals,
+  database,
+  databaseNetwork,
+  vault,
+  workspaceAndQuota,
+  alertRules,
+  resourceLogs,
+  activityLog,
+  budget,
+];
+
+/** Every rule a snapshot breaks; none for a deployment we can ship. */
+export function policyProblems(snapshot: Snapshot, expected: Expectations): Problem[] {
+  const problems: Problem[] = [];
+  for (const check of CHECKS) {
+    check(snapshot, expected, (problem) => {
+      problems.push(problem);
+    });
+  }
+  return problems;
+}
+
+/** One line per problem: `resource [rule] message`. */
+export const describeProblem = ({ rule, resource, message }: Problem): string => `${resource} [${rule}] ${message}`;
