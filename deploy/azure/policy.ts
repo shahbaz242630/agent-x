@@ -7,7 +7,9 @@
 // so a snapshot resolves them all. The rules compare those ids with the ids of
 // the resources this deployment creates: a reference to anything else (a
 // workspace abroad, another subnet) is refused, and so is a protection that is
-// simply missing, not only one that is switched off.
+// simply missing, not only one that is switched off. An environment's parts
+// (secrets.bicep) are checked together with its foundation, so they too may
+// point only at what the foundation creates.
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
 export type RuleId =
@@ -36,7 +38,9 @@ export type RuleId =
   | 'apps-network'
   | 'apps-logs'
   | 'app-errors-alert'
-  | 'identities';
+  | 'identities'
+  | 'vault-secrets'
+  | 'secret-access';
 
 export interface Problem {
   readonly rule: RuleId;
@@ -61,6 +65,7 @@ const TYPES = {
   environment: 'Microsoft.App/managedEnvironments',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   network: 'Microsoft.Network/virtualNetworks',
+  roleAssignment: 'Microsoft.Authorization/roleAssignments',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
@@ -115,6 +120,39 @@ const TELEMETRY_SETTINGS = [
   'openTelemetryConfiguration',
   'appInsightsConfiguration',
 ] as const;
+
+/**
+ * The secrets each app and job reads, and so every secret in the vault (ADR-002
+ * Amendment G2c). secrets.bicep holds the same, by secret; it is written again
+ * here so that changing who reads what takes both. Keyed by the reader: a key
+ * that says "password" beside a reader's name reads as a password to the
+ * secret scanners (PR #27). The set-up job reads every database login, since
+ * each of its runs sets them all.
+ */
+const READABLE: Readonly<Record<string, readonly string[]>> = {
+  api: ['db-app-password'],
+  zitadel: ['db-zitadel-password', 'zitadel-masterkey', 'login-client-public-key'],
+  login: ['login-client-private-key'],
+  'db-setup': [
+    'db-admin-password',
+    'db-owner-password',
+    'db-app-password',
+    'db-backup-password',
+    'db-zitadel-password',
+  ],
+  migrate: ['db-owner-password'],
+  'zitadel-init': ['db-zitadel-password'],
+  'zitadel-setup': ['db-zitadel-password', 'zitadel-masterkey', 'zitadel-admin-password'],
+};
+
+/** Every secret an app or job reads: the vault holds these and no other. */
+const VAULT_SECRETS: ReadonlySet<string> = new Set(Object.values(READABLE).flat());
+
+/** Secrets created once and never written again: Zitadel can't read what it encrypted with another master key. */
+const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey']);
+
+/** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
+const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
 
 const requiredTags = (environment: string): Readonly<Record<string, string>> => ({
   product: 'agent-x',
@@ -348,7 +386,11 @@ const tagged: Check = (snapshot, expected, add) => {
   }
 };
 
-const PARAMETER_REFERENCE = /^\[parameters\('[^']+'\)\]$/;
+const PARAMETER_REFERENCE = /^\[parameters\('([^']+)'\)\]$/;
+
+/** The parameter a value is, or undefined for anything else. */
+const parameterOf = (value: unknown): string | undefined =>
+  typeof value === 'string' ? PARAMETER_REFERENCE.exec(value)?.[1] : undefined;
 
 /**
  * A secret holds a parameter reference, never a value written in the code:
@@ -403,6 +445,53 @@ export function paramsFileProblems(file: string, text: string, secureParameters:
             message: `${name} is secure: read it with readEnvironmentVariable('NAME') and no default, or az.getSecret, never a value in the file`,
           },
         ];
+  });
+}
+
+/**
+ * What only a compiled template shows, since a snapshot drops a resource's
+ * options and any condition Bicep can settle offline: every key vault secret
+ * it writes is written either only when its own value is given (a condition
+ * exactly `not(empty(<its value>))`) or only if it doesn't exist yet
+ * (`@onlyIfNotExists()`), never both and never on every run. With
+ * `vault-secrets`, that leaves Zitadel's master key created once, even under a
+ * condition that would vanish from the snapshot (security review, S15), and
+ * every other secret written only when given. A module's own template is read
+ * the same way.
+ */
+export function templateProblems(file: string, template: unknown): Problem[] {
+  const resources = at(template, 'resources');
+  // Language version 2.0 keys resources by their symbolic names; 1.0 lists them.
+  const entries: readonly (readonly [string, unknown])[] = Array.isArray(resources)
+    ? resources.map((resource: unknown, index) => {
+        const name = at(resource, 'name');
+        return [typeof name === 'string' ? name : `resource ${String(index)}`, resource] as const;
+      })
+    : Object.entries((resources ?? {}) as Record<string, unknown>);
+  return entries.flatMap(([name, resource]): Problem[] => {
+    if (at(resource, 'type') === 'Microsoft.Resources/deployments') {
+      return templateProblems(file, at(resource, 'properties', 'template'));
+    }
+    if (at(resource, 'type') !== TYPES.vaultSecret || at(resource, 'existing') === true) return [];
+    const condition = at(resource, 'condition');
+    const once = at(resource, '@options', 'onlyIfNotExists') !== undefined;
+    const value = at(resource, 'properties', 'value');
+    const expression = typeof value === 'string' ? /^\[(.+)\]$/.exec(value)?.[1] : undefined;
+    const whenGiven = expression !== undefined && condition === `[not(empty(${expression}))]`;
+    const problem = (message: string): Problem[] => [{ rule: 'vault-secrets', resource: `${file}: ${name}`, message }];
+    if (once && condition !== undefined) {
+      return problem(
+        "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, the master key @onlyIfNotExists() alone",
+      );
+    }
+    if (!once && !whenGiven) {
+      return problem(
+        condition === undefined
+          ? 'is written on every run: write it only when its value is given (if (!empty(value))), or create it once (@onlyIfNotExists())'
+          : 'is written on a condition other than its own value being given, which a snapshot may settle and drop: write it only if (!empty(value)), or create it once (@onlyIfNotExists())',
+      );
+    }
+    return [];
   });
 }
 
@@ -960,6 +1049,118 @@ const identities: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** A secret's own name, the last part of its id (its resource name is `<vault>/<secret>`). */
+const secretNameOf = (secret: PredictedResource): string => secret.id.slice(secret.id.lastIndexOf('/') + 1);
+
+/** The vault a secret is in: its id up to `/secrets/`. */
+const vaultOf = (secret: PredictedResource): string => secret.id.slice(0, secret.id.lastIndexOf('/secrets/'));
+
+const WRITTEN_WHEN_GIVEN = /^\[not\(empty\(parameters\('([^']+)'\)\)\)\]$/;
+
+/**
+ * The vault holds exactly the secrets the apps read, each once and in a vault
+ * of this deployment (ADR-002 Amendment G2c). Each is written only when its
+ * value is given, on a condition naming the parameter its value comes from, so
+ * a run that rotates one secret leaves the rest as they are. Zitadel's master
+ * key has no such condition, since it is created once: a snapshot drops the
+ * option that does that, so `templateProblems` reads it from the compiled
+ * template. A value written into the code is `no-secret-literals`'s to refuse.
+ */
+const vaultSecrets: Check = (snapshot, _expected, add) => {
+  const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
+  const secrets = ofType(snapshot, TYPES.vaultSecret);
+  for (const secret of secrets) {
+    const name = secretNameOf(secret);
+    const problem = (message: string): void => {
+      add({ rule: 'vault-secrets', resource: secret.name, message });
+    };
+    if (!vaults.has(vaultOf(secret))) problem("must be in this deployment's key vault");
+    if (!VAULT_SECRETS.has(name)) {
+      problem('is no secret an app or job reads (READABLE): one nobody needs is one more to leak');
+    }
+    const condition = WRITTEN_WHEN_GIVEN.exec(secret.condition ?? '')?.[1];
+    const value = parameterOf(at(secret.properties, 'value'));
+    if (CREATED_ONCE.has(name)) {
+      if (secret.condition !== undefined) {
+        problem('is created once (@onlyIfNotExists()), never on a condition a later run could meet');
+      }
+    } else if (condition === undefined || (value !== undefined && value !== condition)) {
+      problem(
+        'must be written only when its value is given (if (!empty(value))), so a run that rotates another secret leaves this one',
+      );
+    }
+  }
+  for (const name of VAULT_SECRETS) {
+    const count = secrets.filter((secret) => secretNameOf(secret) === name).length;
+    if (count !== 1) {
+      add({
+        rule: 'vault-secrets',
+        resource: 'the deployment',
+        message: `needs the secret ${name} once; the snapshot has ${String(count)}`,
+      });
+    }
+  }
+};
+
+/** An identity's app or job: its name without `id-agentx-<environment>-` (names.bicep). */
+const workloadOf = (identityName: string): string => identityName.replace(/^id-agentx-[a-z]+-/, '');
+
+const REFERENCED_PRINCIPAL = /^\[reference\('([^']+)', '[^']+'\)\.principalId\]$/;
+
+/**
+ * Who reads what (ADR-002 Amendment G2c). Every role assignment in the
+ * deployment gives Key Vault Secrets User on one secret it writes, to an
+ * identity it creates, named a service principal: no other role, and nothing
+ * at the vault, the resource group or the subscription. Together they are
+ * exactly READABLE, so no identity reads another's secret and each can read
+ * its own.
+ */
+const secretAccess: Check = (snapshot, _expected, add) => {
+  const secrets = new Map(ofType(snapshot, TYPES.vaultSecret).map((secret) => [secret.id, secretNameOf(secret)]));
+  const identities = new Map(ofType(snapshot, TYPES.identity).map((identity) => [identity.id, identity.name]));
+  const marker = `/providers/${TYPES.roleAssignment}/`;
+  const granted = new Set<string>();
+  for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
+    const properties = assignment.properties;
+    const secret = secrets.get(assignment.id.slice(0, assignment.id.lastIndexOf(marker)));
+    const principal = REFERENCED_PRINCIPAL.exec(String(at(properties, 'principalId')))?.[1];
+    const identity = principal === undefined ? undefined : identities.get(principal);
+    const role = String(at(properties, 'roleDefinitionId')).toLowerCase();
+    if (
+      !role.endsWith(`/providers/microsoft.authorization/roledefinitions/${VAULT_READER_ROLE}`) ||
+      secret === undefined ||
+      identity === undefined ||
+      at(properties, 'principalType') !== 'ServicePrincipal'
+    ) {
+      add({
+        rule: 'secret-access',
+        resource: assignment.name,
+        message:
+          'must give Key Vault Secrets User on one secret this deployment writes to an identity it creates (principalType ServicePrincipal): no other role, and nothing at the vault, the resource group or the subscription',
+      });
+      continue;
+    }
+    const workload = workloadOf(identity);
+    granted.add(`${workload} ${secret}`);
+    if (READABLE[workload]?.includes(secret) !== true) {
+      add({
+        rule: 'secret-access',
+        resource: assignment.name,
+        message: `lets ${workload} read ${secret}, which isn't one of its secrets (READABLE)`,
+      });
+    }
+  }
+  for (const [reader, own] of Object.entries(READABLE)) {
+    for (const secret of own.filter((candidate) => !granted.has(`${reader} ${candidate}`))) {
+      add({
+        rule: 'secret-access',
+        resource: 'the deployment',
+        message: `must let ${reader} read ${secret}, which it needs (READABLE)`,
+      });
+    }
+  }
+};
+
 const CHECKS: readonly Check[] = [
   complete,
   required,
@@ -981,6 +1182,8 @@ const CHECKS: readonly Check[] = [
   appsLogs,
   appErrorsAlert,
   identities,
+  vaultSecrets,
+  secretAccess,
 ];
 
 /** Every rule a snapshot breaks; none for a deployment we can ship. */

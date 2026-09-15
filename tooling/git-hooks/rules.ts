@@ -69,6 +69,14 @@ const NAMED_FOR_A_SECRET = /passw(?:or)?d|secret|token|key/i;
 /** A key that holds where a password is, not the password: `AGENTX_DB_PASSWORD_FILE`. */
 const NAMES_A_PLACE = /(?:file|path)$/i;
 
+/**
+ * A quoted key that says "password" given a quoted word, or a list that starts
+ * with one, which GitGuardian read as the password itself: a map from a
+ * secret's name to the apps that read it (PR #27, S15). Key such a map by
+ * something else, such as the reader.
+ */
+const PASSWORD_NAMED_KEY_WITH_WORD = /(['"`])[A-Za-z0-9_.-]*passw(?:or)?d\1\s*:\s*\[?\s*(['"`])[A-Za-z0-9_.-]{8,}\2/i;
+
 /** A required-variable placeholder with a message, which GitGuardian paired with a user name (PR #16, S10). */
 const PLACEHOLDER_WITH_MESSAGE = /\$\{[A-Za-z0-9_]+:\?[^}]+\}/;
 const YAML_FILE = /\.ya?ml$/i;
@@ -148,6 +156,12 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a variable in a password-named field; GitGuardian reads its name as the password. Name the value for what it is (`role.password`) or pass it through a call',
+    );
+  }
+  if (PASSWORD_NAMED_KEY_WITH_WORD.test(text)) {
+    add(
+      'scanner-bait',
+      'a word under a quoted password-named key; GitGuardian reads it as the password. Key the map by something else, such as the reader',
     );
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {
