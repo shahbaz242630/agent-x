@@ -50,6 +50,25 @@ export interface TestDatabase {
   drop(): Promise<void>;
 }
 
+/**
+ * One query on a connection of its own, closed after: for a server a test
+ * starts itself, where no TestDatabase exists. The text is fixed, as for
+ * TestSession.query.
+ */
+export async function queryOnce<Row extends object = Record<string, unknown>>(
+  connection: TestConnection,
+  text: string,
+): Promise<Row[]> {
+  const client = new pg.Client({ ...connection, ssl: false });
+  await client.connect();
+  try {
+    // eslint-disable-next-line agentx/no-string-built-sql -- This passes on the caller's text; the rule checks it where the caller writes it.
+    return (await client.query<Row>(text)).rows;
+  } finally {
+    await client.end();
+  }
+}
+
 function loginFor(server: TestPostgresServer, role: TestRole): TestLogin {
   return role === 'admin' ? server.admin : server.roles[role];
 }
@@ -132,8 +151,8 @@ export async function createTestDatabase(
   };
 }
 
-/** Opens a connection of its own. */
-async function openClient(connection: TestConnection): Promise<TestClient> {
+/** Opens a connection of its own: for a TestDatabase, or for a server a test starts itself. */
+export async function openClient(connection: TestConnection): Promise<TestClient> {
   const client = new pg.Client({ ...connection, ssl: false });
   // A connection the server ends while idle reports why as an 'error' event,
   // which would stop the test process if nothing listened. pg then reports the

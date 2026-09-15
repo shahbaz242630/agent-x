@@ -79,6 +79,16 @@ importers:
         specifier: workspace:*
         version: link:../../packages/testing
 
+  apps/db-setup:
+    dependencies:
+      '@agentx/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
+    devDependencies:
+      '@agentx/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+
   apps/migrate:
     dependencies:
       '@agentx/platform':

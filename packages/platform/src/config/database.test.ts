@@ -256,7 +256,7 @@ describe("SEC-AV-03 the other job's settings are refused by name", () => {
     'the app refuses %s: it never holds the migration login',
     (name) => {
       expect(appProblems({ ...APP, [name]: 'x' })).toEqual([
-        `${name} belongs to the migration job (apps/migrate); the running app never holds the migration role's login (ADR-005 §3)`,
+        `${name} belongs to the migration job (apps/migrate); the running app holds no login but its own role's (ADR-005 §3)`,
       ]);
     },
   );

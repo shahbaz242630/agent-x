@@ -4,6 +4,8 @@ export { type SchemaPolicy, schemaProblems } from './db/schema-checks.ts';
 export { createTenantProbe } from './db/tenant-probe.ts';
 export {
   createTestDatabase,
+  openClient,
+  queryOnce,
   type TestClient,
   type TestConnection,
   type TestDatabase,

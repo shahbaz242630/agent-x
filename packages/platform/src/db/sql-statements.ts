@@ -1,9 +1,13 @@
-// Finds the statements in a migration file that would begin or end a
-// transaction. The runner wraps each file in one transaction, so a COMMIT in
-// the file would commit part of it and leave the rest to run on its own,
-// making the file impossible to retry safely. Only top-level statements count:
-// comments, quoted strings, quoted names and dollar-quoted bodies (where a
-// function's own BEGIN and END live) are skipped over.
+// Reads SQL files at the level of their statements, with comments, quoted
+// strings, quoted names and dollar-quoted bodies (where a function's own BEGIN
+// and END live) skipped over:
+// - transactionControl finds the statements in a migration file that would
+//   begin or end a transaction. The runner wraps each file in one
+//   transaction, so a COMMIT in the file would commit part of it and leave the
+//   rest to run on its own, making the file impossible to retry safely.
+// - splitStatements cuts a db/bootstrap file into its statements, because the
+//   set-up job sends them one at a time, as psql does: CREATE DATABASE can't
+//   run with other statements in one query.
 
 /** A dollar-quote tag: `$$` or `$name$`. A `$` followed by a digit is a parameter, not a quote. */
 const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
@@ -114,24 +118,37 @@ function endOfToken(sql: string, index: number): number {
   return index + 1;
 }
 
-/** The first word, in capitals, of each top-level statement that begins or ends a transaction. */
-export function transactionControl(sql: string): string[] {
-  const found: string[] = [];
-  let atStatementStart = true;
+/** Where each top-level statement starts and ends (its `;` excluded), comments between statements left out. */
+function statementBounds(sql: string): { start: number; end: number }[] {
+  const bounds: { start: number; end: number }[] = [];
+  let start: number | undefined;
+  let end = 0;
   let index = skipIgnorable(sql, 0);
   while (index < sql.length) {
     if (sql.charAt(index) === ';') {
-      atStatementStart = true;
+      if (start !== undefined) bounds.push({ start, end });
+      start = undefined;
       index += 1;
     } else {
-      if (atStatementStart) {
-        const words = leadingWords(sql, index);
-        if (controlsTransaction(words)) found.push(words[0].toUpperCase());
-        atStatementStart = false;
-      }
+      start ??= index;
       index = endOfToken(sql, index);
+      end = index;
     }
     index = skipIgnorable(sql, index);
   }
-  return found;
+  if (start !== undefined) bounds.push({ start, end });
+  return bounds;
+}
+
+/** The first word, in capitals, of each top-level statement that begins or ends a transaction. */
+export function transactionControl(sql: string): string[] {
+  return statementBounds(sql)
+    .map(({ start }) => leadingWords(sql, start))
+    .filter(controlsTransaction)
+    .map(([first]) => first.toUpperCase());
+}
+
+/** Each top-level statement, without its `;`: comments inside a statement stay, those between statements go. */
+export function splitStatements(sql: string): string[] {
+  return statementBounds(sql).map(({ start, end }) => sql.slice(start, end));
 }

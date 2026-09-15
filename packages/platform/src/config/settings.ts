@@ -1,8 +1,9 @@
-// The AGENTX_ variable registry and the checks a value goes through. Two
+// The AGENTX_ variable registry and the checks a value goes through. Three
 // processes read settings, each through its own loader: the app (loadConfig,
-// config.ts) and the migration job (loadMigrationConfig, migration.ts). Both
-// know every registered name, so a variable meant for the other job is
-// refused by name rather than mistaken for a typo.
+// config.ts), the migration job (loadMigrationConfig, migration.ts) and the
+// database set-up job (loadSetupConfig, setup.ts). Each knows every
+// registered name, so a variable meant for another job is refused by name
+// rather than mistaken for a typo.
 import { z } from 'zod';
 
 import {
@@ -134,9 +135,94 @@ const SETTINGS = {
   AGENTX_DB_MIGRATION_USER: { schema: identifier, default: 'agentx_owner' },
   AGENTX_DB_MIGRATION_PASSWORD: { schema: text },
   AGENTX_DB_MIGRATION_PASSWORD_FILE: { schema: text },
+  // The set-up job's (ADR-002): the server admin, who creates the roles and
+  // databases, and the login it gives each role. Neither the app nor the
+  // migration job ever holds them.
+  AGENTX_DB_ADMIN_USER: { schema: identifier },
+  AGENTX_DB_ADMIN_DATABASE: { schema: identifier, default: 'postgres' },
+  AGENTX_DB_ADMIN_PASSWORD: { schema: text },
+  AGENTX_DB_ADMIN_PASSWORD_FILE: { schema: text },
+  AGENTX_DB_OWNER_PASSWORD: { schema: text },
+  AGENTX_DB_OWNER_PASSWORD_FILE: { schema: text },
+  AGENTX_DB_APP_PASSWORD: { schema: text },
+  AGENTX_DB_APP_PASSWORD_FILE: { schema: text },
+  AGENTX_DB_BACKUP_PASSWORD: { schema: text },
+  AGENTX_DB_BACKUP_PASSWORD_FILE: { schema: text },
+  AGENTX_DB_ZITADEL_PASSWORD: { schema: text },
+  AGENTX_DB_ZITADEL_PASSWORD_FILE: { schema: text },
 } as const;
 
 export type SettingName = keyof typeof SETTINGS;
+
+/** What every process reads: which build and environment it is, and how it logs. */
+const COMMON: readonly SettingName[] = [
+  'AGENTX_ENV',
+  'AGENTX_RELEASE',
+  'AGENTX_LOG_LEVEL',
+  'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+];
+
+/** Where the database is and how the connection is protected. */
+const LOCATION: readonly SettingName[] = ['AGENTX_DB_HOST', 'AGENTX_DB_PORT', 'AGENTX_DB_NAME', 'AGENTX_DB_TLS'];
+
+export type Process = 'app' | 'migrate' | 'setup';
+
+/**
+ * Each process's settings, and the reason it gives when it refuses one that
+ * belongs to another. Anything else in AGENTX_ style is refused.
+ */
+export const READERS: Readonly<Record<Process, { job: string; reads: readonly SettingName[]; reason: string }>> = {
+  app: {
+    job: 'the app (apps/api)',
+    reads: [
+      ...COMMON,
+      'AGENTX_HTTP_HOST',
+      'AGENTX_HTTP_PORT',
+      'AGENTX_PUBLIC_ORIGIN',
+      'AGENTX_TRUSTED_PROXIES',
+      'AGENTX_RATE_LIMIT_PER_MINUTE',
+      'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
+      'AGENTX_PAYEE_COOLING_OFF_HOURS',
+      ...LOCATION,
+      'AGENTX_DB_USER',
+      'AGENTX_DB_PASSWORD',
+      'AGENTX_DB_PASSWORD_FILE',
+      'AGENTX_DB_POOL_MAX',
+    ],
+    reason: "the running app holds no login but its own role's (ADR-005 §3)",
+  },
+  migrate: {
+    job: 'the migration job (apps/migrate)',
+    reads: [
+      ...COMMON,
+      ...LOCATION,
+      'AGENTX_DB_MIGRATION_USER',
+      'AGENTX_DB_MIGRATION_PASSWORD',
+      'AGENTX_DB_MIGRATION_PASSWORD_FILE',
+    ],
+    reason: 'the migration job reads only the database and log settings',
+  },
+  setup: {
+    job: 'the database set-up job (apps/db-setup)',
+    reads: [
+      ...COMMON,
+      ...LOCATION,
+      'AGENTX_DB_ADMIN_USER',
+      'AGENTX_DB_ADMIN_DATABASE',
+      'AGENTX_DB_ADMIN_PASSWORD',
+      'AGENTX_DB_ADMIN_PASSWORD_FILE',
+      'AGENTX_DB_OWNER_PASSWORD',
+      'AGENTX_DB_OWNER_PASSWORD_FILE',
+      'AGENTX_DB_APP_PASSWORD',
+      'AGENTX_DB_APP_PASSWORD_FILE',
+      'AGENTX_DB_BACKUP_PASSWORD',
+      'AGENTX_DB_BACKUP_PASSWORD_FILE',
+      'AGENTX_DB_ZITADEL_PASSWORD',
+      'AGENTX_DB_ZITADEL_PASSWORD_FILE',
+    ],
+    reason: 'the set-up job reads only the database, log and login settings it needs',
+  },
+};
 
 const PREFIX = 'AGENTX_';
 
@@ -160,23 +246,21 @@ export function setting<Name extends SettingName>(env: Env, name: Name): Checked
 
 /**
  * Names in AGENTX_ style, in any case, that this process doesn't read: typos,
- * which would otherwise be ignored, and settings that belong to the other
+ * which would otherwise be ignored, and settings that belong to another
  * process, named as such so an operator sees which job they were meant for.
  * Worded without a colon after the name: the log scrubber redacts whatever
  * follows a name like `PASSWORD:`, which would hide the message.
  */
-export function unknownSettings(
-  env: Env,
-  mine: readonly SettingName[],
-  other: { readonly job: string; readonly reason: string },
-): string[] {
+export function unknownSettings(env: Env, reader: Process): string[] {
+  const mine: readonly string[] = READERS[reader].reads;
   return Object.keys(env)
-    .filter((name) => name.toUpperCase().startsWith(PREFIX) && !(mine as readonly string[]).includes(name))
-    .map((name) =>
-      Object.hasOwn(SETTINGS, name)
-        ? `${name} belongs to ${other.job}; ${other.reason}`
-        : `${name} is not a setting the app knows; check the spelling and the capitals`,
-    );
+    .filter((name) => name.toUpperCase().startsWith(PREFIX) && !mine.includes(name))
+    .map((name) => {
+      const owners = Object.values(READERS).filter((other) => (other.reads as readonly string[]).includes(name));
+      return owners.length > 0
+        ? `${name} belongs to ${owners.map((owner) => owner.job).join(' and ')}; ${READERS[reader].reason}`
+        : `${name} is not a setting the app knows; check the spelling and the capitals`;
+    });
 }
 
 /** The problems among checked settings, in their order. */
