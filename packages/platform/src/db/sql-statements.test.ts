@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { transactionControl } from './sql-statements.ts';
+import { splitStatements, transactionControl } from './sql-statements.ts';
 
 describe('transactionControl', () => {
   it.each([
@@ -75,5 +75,35 @@ describe('transactionControl', () => {
 
   it('does not take a name that ends in e for the E of an E string', () => {
     expect(transactionControl("select note'x\\'; commit;")).toEqual(['COMMIT']);
+  });
+});
+
+describe('splitStatements', () => {
+  it.each([
+    ['one statement without a semicolon', 'select 1', ['select 1']],
+    ['statements on their own lines', 'create role a;\ncreate role b;\n', ['create role a', 'create role b']],
+    ['empty statements', ';;select 1;;', ['select 1']],
+    ['nothing but comments', '-- a comment\n/* another */\n', []],
+    [
+      'a comment before, between and after',
+      '-- first\nselect 1; -- second\nselect 2;\n-- last',
+      ['select 1', 'select 2'],
+    ],
+    ['a comment inside a statement, which stays', 'select /* one */ 1;', ['select /* one */ 1']],
+    ['a comment before the semicolon, which goes', 'select 1 -- trailing\n;', ['select 1']],
+    ['a semicolon in a string', "select 'a;b'; select 2", ["select 'a;b'", 'select 2']],
+    ['a semicolon in a quoted name', 'select 1 as "a;b"; select 2', ['select 1 as "a;b"', 'select 2']],
+    [
+      'a semicolon in a dollar-quoted body',
+      'do $$ begin perform 1; end $$; select 2',
+      ['do $$ begin perform 1; end $$', 'select 2'],
+    ],
+  ])('splits %s', (_, sql, expected) => {
+    expect(splitStatements(sql)).toEqual(expected);
+  });
+
+  it('keeps a statement whole across lines, as written', () => {
+    const role = 'CREATE ROLE agentx_app\n  LOGIN NOSUPERUSER NOINHERIT';
+    expect(splitStatements(`-- header\n\n${role};\n`)).toEqual([role]);
   });
 });

@@ -1,12 +1,14 @@
 # What the image build may see (Dockerfile). Everything is left out unless
-# listed: the manifests, the two apps, the packages they use, and the
-# migrations. Test files and the test helpers never reach the image.
+# listed: the manifests, the apps, the packages they use, and the database
+# files (the bootstrap and the migrations). Test files and the test helpers
+# never reach the image.
 *
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !apps/api/**
 !apps/migrate/**
+!apps/db-setup/**
 !packages/core/**
 !packages/platform/**
 !db/**

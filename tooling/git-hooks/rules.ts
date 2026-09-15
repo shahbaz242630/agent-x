@@ -56,6 +56,19 @@ const PROVIDER_TOKENS: readonly { readonly name: string; readonly pattern: RegEx
 const SECRET_NAMED_LITERAL =
   /\b[A-Za-z0-9_]*(?:secret|token|passw(?:or)?d|api[_-]?key|private[_-]?key|credential)[A-Za-z0-9_]*\s*[:=]\s*(['"`])([A-Za-z0-9+/_.=-]{10,})\1/gi;
 
+/**
+ * A name that says "password" given a camelCase variable or a dotted path,
+ * which GitGuardian read as the password itself (a test's login variable, PR
+ * #23; the same as a dotted path, PR #24; S13). It passed over calls, names in
+ * capitals, and values that name a secret (`server.roles.app.password`).
+ * Written case by case, so the value's capitals still count.
+ */
+const PASSWORD_NAMED_IDENTIFIER =
+  /\b([A-Za-z0-9_]*[Pp][Aa][Ss][Ss][Ww](?:[Oo][Rr])?[Dd][A-Za-z0-9_]*)\s*:\s*([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*|[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*(?:[,;})]|$)/g;
+const NAMED_FOR_A_SECRET = /passw(?:or)?d|secret|token|key/i;
+/** A key that holds where a password is, not the password: `AGENTX_DB_PASSWORD_FILE`. */
+const NAMES_A_PLACE = /(?:file|path)$/i;
+
 /** A required-variable placeholder with a message, which GitGuardian paired with a user name (PR #16, S10). */
 const PLACEHOLDER_WITH_MESSAGE = /\$\{[A-Za-z0-9_]+:\?[^}]+\}/;
 const YAML_FILE = /\.ya?ml$/i;
@@ -126,6 +139,15 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a random-looking value in a secret-named field; the secret scanners will flag it. Name it for what it is, or build it when the test runs',
+    );
+  }
+  const passwordIdentifiers = [...text.matchAll(PASSWORD_NAMED_IDENTIFIER)].filter(
+    ([, key = '', value = '']) => !NAMES_A_PLACE.test(key) && !NAMED_FOR_A_SECRET.test(value),
+  );
+  if (passwordIdentifiers.length > 0) {
+    add(
+      'scanner-bait',
+      'a variable in a password-named field; GitGuardian reads its name as the password. Name the value for what it is (`role.password`) or pass it through a call',
     );
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {

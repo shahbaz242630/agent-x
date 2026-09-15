@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { MASTER_KEY, PASSWORDS } from '../../deploy/compose/prepare.ts';
+import { LOGIN_CLIENT_KEYS, VARIABLES } from '../../deploy/compose/prepare.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
 
@@ -25,6 +25,8 @@ interface Service {
   security_opt?: string[];
   stop_grace_period?: string;
   volumes?: string[];
+  command?: string[];
+  depends_on?: Record<string, { condition: string }>;
 }
 
 interface ComposeFile {
@@ -49,7 +51,7 @@ export function variableReferences(compose: string): { name: string; modifier: s
 }
 
 /** Environment entries whose name says they hold a secret (not a switch about one, such as PASSWORDCHANGEREQUIRED). */
-const SECRET_NAME = /(?:PASSWORD|MASTERKEY|SECRET|TOKEN)$/;
+const SECRET_NAME = /(?:PASSWORD|MASTERKEY|SECRET|TOKEN|PRIVATE_KEY)$/;
 
 describe('SEC-OPS-08 the compose stack has no default logins', () => {
   it('names every login as a required variable, so a missing one stops the stack', () => {
@@ -60,7 +62,7 @@ describe('SEC-OPS-08 the compose stack has no default logins', () => {
 
   it('needs exactly the variables prepare generates', () => {
     const referenced = new Set(variableReferences(text).map((reference) => reference.name));
-    expect([...referenced].sort()).toEqual([...PASSWORDS, MASTER_KEY].sort());
+    expect([...referenced].sort()).toEqual([...VARIABLES].sort());
   });
 
   it('gives no service a literal secret: every secret-looking setting is a variable', () => {
@@ -111,9 +113,9 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
   it("mounts the instance owner's token in Zitadel only, never in the browser-facing login container", () => {
     const mounts = (name: string): string[] =>
       (file.services[name]?.volumes ?? []).map((volume) => volume.split(':')[0] ?? '');
-    expect(mounts('zitadel')).toEqual(['zitadel-pat', 'zitadel-automation']);
-    expect(mounts('login')).toEqual(['zitadel-pat']);
-    expect(mounts('zitadel-volume')).toEqual(['zitadel-pat', 'zitadel-automation']);
+    expect(mounts('zitadel')).toEqual(['zitadel-automation']);
+    expect(mounts('login')).toEqual([]);
+    expect(mounts('zitadel-volume')).toEqual(['zitadel-automation']);
     const elsewhere = services
       .filter(([name]) => !['zitadel', 'zitadel-volume'].includes(name))
       .filter(([name]) => mounts(name).includes('zitadel-automation'))
@@ -129,7 +131,7 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(socket.map(([name]) => name)).toEqual([]);
   });
 
-  it.each(['api', 'migrate'])('runs %s read-only', (name) => {
+  it.each(['api', 'migrate', 'db-setup'])('runs %s read-only', (name) => {
     expect(file.services[name]?.read_only).toBe(true);
   });
 
@@ -167,11 +169,73 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(file.services.api?.environment?.AGENTX_DB_MIGRATION_PASSWORD).toBeUndefined();
   });
 
+  it("sets the server up with the set-up job, as the superuser, before the migrations and Zitadel's schemas", () => {
+    expect(file.services['db-setup']?.command).toEqual(['node', 'apps/db-setup/src/main.ts']);
+    expect(file.services['db-setup']?.environment).toMatchObject({
+      AGENTX_ENV: 'development',
+      AGENTX_DB_TLS: 'disable',
+      AGENTX_DB_ADMIN_USER: 'postgres',
+    });
+    for (const name of ['migrate', 'zitadel-init']) {
+      expect(file.services[name]?.depends_on, name).toEqual({
+        'db-setup': { condition: 'service_completed_successfully' },
+      });
+    }
+  });
+
+  it("keeps no login in the database container but its superuser's, and mounts no set-up scripts there", () => {
+    expect(Object.keys(file.services.db?.environment ?? {}).sort()).toEqual([
+      'POSTGRES_INITDB_ARGS',
+      'POSTGRES_PASSWORD',
+    ]);
+    expect(file.services.db?.volumes).toEqual(['db-data:/var/lib/postgresql']);
+  });
+
   it('the reference reader sees every form of a variable', () => {
     expect(variableReferences('a: ${ONE:?set it}\nb: ${TWO}\nc: ${THREE:-x}\nd: $FOUR')).toEqual([
       { name: 'ONE', modifier: ':?set it' },
       { name: 'TWO', modifier: '' },
       { name: 'THREE', modifier: ':-x' },
     ]);
+  });
+});
+
+describe('ADR-003 and ADR-013: the login service as Azure runs it', () => {
+  it('lets the login container sign its calls with its own private key, which only it holds', () => {
+    const holders = services
+      .filter(([, service]) => JSON.stringify(service.environment ?? {}).includes(LOGIN_CLIENT_KEYS.private))
+      .map(([name]) => name);
+    expect(holders).toEqual(['login']);
+    expect(file.services.login?.environment).toMatchObject({
+      SYSTEM_USER_ID: 'login-client',
+      AUDIENCE: 'http://localhost:8081',
+    });
+    expect(Object.keys(file.services.login?.environment ?? {}).filter((name) => name.includes('TOKEN'))).toEqual([]);
+  });
+
+  it('gives Zitadel only the public half, for the system user the login pages need and nothing more', () => {
+    const users = JSON.parse(file.services.zitadel?.environment?.ZITADEL_SYSTEMAPIUSERS ?? '{}') as unknown;
+    expect(users).toEqual({
+      'login-client': {
+        KeyData: '${AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY:?}',
+        Memberships: [{ MemberType: 'System', Roles: ['IAM_LOGIN_CLIENT'] }],
+      },
+    });
+    expect(LOGIN_CLIENT_KEYS.public).toBe('AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY');
+    const creates = Object.keys(file.services.zitadel?.environment ?? {}).filter((name) =>
+      name.includes('LOGINCLIENT'),
+    );
+    expect(creates).toEqual([]);
+  });
+
+  it("switches off Zitadel's daily report to zitadel.com and its metrics endpoint (nothing leaves the UAE)", () => {
+    expect(file.services.zitadel?.environment).toMatchObject({
+      ZITADEL_SERVICEPING_ENABLED: 'false',
+      ZITADEL_METRICS_TYPE: 'none',
+    });
+  });
+
+  it("switches off the login pages' OpenTelemetry SDK, which starts by default", () => {
+    expect(file.services.login?.environment?.OTEL_SDK_DISABLED).toBe('true');
   });
 });

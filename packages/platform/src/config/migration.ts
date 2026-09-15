@@ -13,7 +13,6 @@ import {
   nodeDebugProblems,
   releaseProblems,
   setting,
-  type SettingName,
   unknownSettings,
 } from './settings.ts';
 import { tlsProblems } from './tls.ts';
@@ -37,22 +36,6 @@ export interface MigrationConfig {
   };
 }
 
-const MIGRATION_SETTINGS: readonly SettingName[] = [
-  'AGENTX_ENV',
-  'AGENTX_RELEASE',
-  'AGENTX_LOG_LEVEL',
-  'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
-  'AGENTX_DB_HOST',
-  'AGENTX_DB_PORT',
-  'AGENTX_DB_NAME',
-  'AGENTX_DB_TLS',
-  'AGENTX_DB_MIGRATION_USER',
-  'AGENTX_DB_MIGRATION_PASSWORD',
-  'AGENTX_DB_MIGRATION_PASSWORD_FILE',
-];
-
-const APP = { job: 'the app (apps/api)', reason: 'the migration job reads only the database and log settings' };
-
 /** Reads and checks the migration job's settings, or throws a ConfigError listing every problem. */
 export function loadMigrationConfig(env: Env = process.env): MigrationConfig {
   const location = checkLocation(env);
@@ -73,7 +56,7 @@ export function loadMigrationConfig(env: Env = process.env): MigrationConfig {
   const problems = [
     ...tlsProblems(env),
     ...pgVariableProblems(env),
-    ...unknownSettings(env, MIGRATION_SETTINGS, APP),
+    ...unknownSettings(env, 'migrate'),
     ...failures(Object.values(checks)),
     ...(environment.ok && release.ok ? releaseProblems(environment.value, release.value) : []),
     ...(environment.ok && logLevel.ok ? logLevelProblems(environment.value, logLevel.value) : []),

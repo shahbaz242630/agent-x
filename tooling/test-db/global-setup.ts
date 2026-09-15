@@ -40,8 +40,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
   if (image === undefined) throw new Error(`No Postgres image is pinned for the Vitest project ${project.name}`);
 
   await removeExpiredContainers(Date.now());
-  const adminLogin = newLogin();
-  const container = await startPostgres(image, adminLogin, Date.now());
+  const admin = { user: 'postgres', password: newLogin() };
+  const container = await startPostgres(image, admin.password, Date.now());
   try {
     const roles = {
       owner: { user: 'agentx_owner', password: newLogin() },
@@ -74,7 +74,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
       version,
       host,
       port: container.port,
-      admin: { user: 'postgres', password: adminLogin },
+      admin,
       roles,
       templateDatabase: TEMPLATE,
     });
