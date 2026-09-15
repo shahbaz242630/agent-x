@@ -147,6 +147,13 @@ export async function startPostgres(image: string, superuserLogin: string, now: 
   }
 }
 
+/** What a container has written so far: Postgres logs to stderr, so both streams, in the order Docker kept. */
+export async function containerLogs(id: string): Promise<string> {
+  const result = await docker(['logs', id]);
+  if (result.code !== 0) throw new Error(`docker logs failed (exit ${String(result.code)}): ${result.stderr.trim()}`);
+  return `${result.stdout}${result.stderr}`;
+}
+
 /**
  * Runs a SQL script with psql inside the container, as the superuser, like an
  * admin running db/bootstrap. `variables` fill `:'name'` and `:"name"` in the

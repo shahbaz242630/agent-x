@@ -7,4 +7,11 @@ export {
   runMigrations,
 } from './migrate.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
+export {
+  type ServerSetupOptions,
+  type ServerSetupOutcome,
+  ServerSetupRefused,
+  type SetupLogins,
+  setUpServer,
+} from './server-setup.ts';
 export { TenantContextError, withTenant } from './tenant.ts';

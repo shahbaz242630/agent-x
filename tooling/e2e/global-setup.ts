@@ -2,8 +2,8 @@
 // With the compose stack up, it takes Zitadel's automation token out of the
 // stack and provisions what the login tests need, named by this run: an OIDC
 // client, a user with a password and no second factor, and a user with an
-// authenticator app. It reads the policies the tests assert on. Teardown
-// removes what it created.
+// authenticator app, then waits until the login can see both. It reads the
+// policies the tests assert on. Teardown removes what it created.
 import { randomBytes } from 'node:crypto';
 
 import type { TestProject } from 'vitest/node';
@@ -18,6 +18,7 @@ import {
   impersonationEnabled,
   type LoginPolicy,
   loginPolicy,
+  loginSees,
   registerTotp,
   verifyTotp,
   zitadelClient,
@@ -72,6 +73,8 @@ export default async function setup(project: TestProject): Promise<() => Promise
     created.push(withTotp);
     const totpSecret = await registerTotp(client, withTotp.userId);
     await verifyTotp(client, withTotp.userId, totp(totpSecret, Date.now()));
+    await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
+    await loginSees(client, withTotp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
 
     project.provide('e2e', {
       issuer: LOGIN_ORIGIN,

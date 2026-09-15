@@ -99,6 +99,12 @@ describe('text the secret scanners mistake for a secret', () => {
     ['a random test value named as a token', join('const TEST_', 'TOKEN = ', q, 'a1b2c3d4', 'e5f6g7h8', q, ';')],
     ['an object key', join('  api', 'Key: ', q, 'k3Jd92n', 'fKq01ZxP', q, ',')],
     ['a backtick literal', join('const pass', 'word = `', 'Zq81mV', 'n02kLp', '`;')],
+    [
+      'a camelCase variable in a password-named key (PR #23)',
+      join('    AGENTX_DB_ZITADEL_PASS', 'WORD: zitadel', 'Login,'),
+    ],
+    ['a camelCase variable as an object password', join('  { user: x, pass', 'word: zitadel', 'Login }')],
+    ['a dotted path that names no secret (PR #24)', join('    AGENTX_DB_ZITADEL_PASS', 'WORD: zitadel.', 'login,')],
   ])('finds %s', (_name, line) => {
     expect(rulesOf('a.test.ts', line)).toEqual(['scanner-bait']);
   });
@@ -108,6 +114,12 @@ describe('text the secret scanners mistake for a secret', () => {
     ['a plain word', join('const token', 'Type = ', q, 'Bearer', q, ';')],
     ['a constant label', join('accessToken', 'Type: ', q, 'OIDC_TOKEN_TYPE_BEARER', q, ',')],
     ['a psql variable', "ALTER ROLE agentx_owner PASSWORD :'owner_login';"],
+    ['a dotted path that names the secret', join('    AGENTX_DB_ZITADEL_PASS', 'WORD: zitadelRole.pass', 'word,')],
+    ['a call in a password-named key', join('    pass', "word: loginOf('owner'),")],
+    ['a variable named for the secret it holds', join('    admin', 'Password: postgresAdmin', 'Password')],
+    ['a name in capitals', join('    AGENTX_DB_PASS', 'WORD: MISPLACED,')],
+    ['a type', join('  readonly pass', 'word: string;')],
+    ['the path of a mounted file', join('AGENTX_DB_PASS', 'WORD_FILE: appFile,')],
     ['a redaction marker', join('secret: ', q, '[redacted]', q, ',')],
     ['a short value', join('const token = ', q, 'a1b2', q, ';')],
     ['a value with no digits', join('const secret = ', q, 'abcdefgh', 'ijklmnop', q, ';')],
@@ -121,7 +133,7 @@ describe('text the secret scanners mistake for a secret', () => {
     expect(rulesOf('deploy/compose/compose.yaml', withMessage)).toEqual(['placeholder-message']);
     expect(rulesOf('.github/workflows/ci.yml', withMessage)).toEqual(['placeholder-message']);
     expect(rulesOf('deploy/compose/compose.yaml', join('      image: ', '$', '{TAG:?}'))).toEqual([]);
-    expect(rulesOf('deploy/compose/db-init/10-agentx.sh', withMessage)).toEqual([]);
+    expect(rulesOf('scripts/example.sh', withMessage)).toEqual([]);
   });
 });
 

@@ -115,6 +115,39 @@ export async function createHumanUser(client: ZitadelClient, username: string, p
 export const deleteUser = (client: ZitadelClient, userId: string): Promise<void> =>
   client.delete(`/v2/users/${userId}`);
 
+/**
+ * Waits until the login pages can see the user as it now is: found by its
+ * login name, with every one of the sign-in methods given. Zitadel keeps both
+ * in tables it updates a moment after each change, and on a stack that has
+ * only just started the update can lag by seconds; a login begun before then
+ * finds nothing to offer and stays on its first page (PR #25's End to end run,
+ * S13).
+ */
+export async function loginSees(
+  client: ZitadelClient,
+  user: HumanUser,
+  methods: readonly string[],
+  timeoutMs = 60_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { result = [] } = await client.post<{ result?: { userId: string }[] }>('/v2/users', {
+      queries: [{ loginNameQuery: { loginName: user.loginName, method: 'TEXT_QUERY_METHOD_EQUALS' } }],
+    });
+    const { authMethodTypes = [] } = await client.get<{ authMethodTypes?: string[] }>(
+      `/v2/users/${user.userId}/authentication_methods`,
+    );
+    const found = result.some(({ userId }) => userId === user.userId);
+    if (found && methods.every((method) => authMethodTypes.includes(method))) return;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the login still can't see a test user after ${String(timeoutMs)} ms (found: ${String(found)}, methods: ${JSON.stringify(authMethodTypes)})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 /** Starts an authenticator-app registration for the user and returns its secret, as the app would scan it. */
 export async function registerTotp(client: ZitadelClient, userId: string): Promise<string> {
   const { secret } = await client.post<{ secret: string; uri: string }>(`/v2/users/${userId}/totp`);

@@ -1,0 +1,12 @@
+{
+  "name": "@agentx/db-setup",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentx/platform": "workspace:*"
+  },
+  "devDependencies": {
+    "@agentx/testing": "workspace:*"
+  }
+}

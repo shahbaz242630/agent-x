@@ -28,7 +28,14 @@ export function checkLocation(env: Env): LocationChecks {
 }
 
 /** A password set directly, or the path of a file the platform mounted with it in. */
-type SecretName = 'AGENTX_DB_PASSWORD' | 'AGENTX_DB_MIGRATION_PASSWORD';
+export type SecretName =
+  | 'AGENTX_DB_PASSWORD'
+  | 'AGENTX_DB_MIGRATION_PASSWORD'
+  | 'AGENTX_DB_ADMIN_PASSWORD'
+  | 'AGENTX_DB_OWNER_PASSWORD'
+  | 'AGENTX_DB_APP_PASSWORD'
+  | 'AGENTX_DB_BACKUP_PASSWORD'
+  | 'AGENTX_DB_ZITADEL_PASSWORD';
 
 const refused = (problem: string): Checked<never> => ({ ok: false, problem });
 
