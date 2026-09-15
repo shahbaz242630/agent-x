@@ -353,7 +353,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      packages: read # to pull the image, which is private; the scanner needs nothing else
+      packages: read # to pull the image (it would need it if the package were private); the scanner needs nothing else
     env:
       IMAGE: ghcr.io/shahbaz242630/agent-x
     steps:

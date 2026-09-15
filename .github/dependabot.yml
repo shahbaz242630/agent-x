@@ -48,6 +48,12 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 7
+    # A major version moves by hand, with the decision behind it: Node with
+    # .nvmrc (the LTS line), Postgres with ADR-002 and the test images,
+    # Zitadel with ADR-003. Digests, minors and patches still come weekly.
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
     groups:
       container-images:
         patterns:

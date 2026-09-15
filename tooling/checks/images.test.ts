@@ -93,6 +93,15 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(version(compose.login)).toBe(version(compose.zitadel));
   });
 
+  it('lets Dependabot propose digests, minors and patches, never a major, which moves by hand', () => {
+    const { updates } = parse(readFileSync('.github/dependabot.yml', 'utf8')) as {
+      updates: { 'package-ecosystem': string; ignore?: { 'dependency-name': string; 'update-types'?: string[] }[] }[];
+    };
+    const docker = updates.filter((update) => update['package-ecosystem'] === 'docker');
+    expect(docker).toHaveLength(1);
+    expect(docker[0]?.ignore).toEqual([{ 'dependency-name': '*', 'update-types': ['version-update:semver-major'] }]);
+  });
+
   it('the check catches every way an image can be left unpinned', () => {
     const digest = 'a'.repeat(64);
     expect(
