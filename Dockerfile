@@ -8,7 +8,7 @@
 # lockfile (frozen). Only production dependencies of the two apps are
 # installed; test helpers and test files never ship (.dockerignore).
 
-FROM node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590 AS dependencies
+FROM node:26.8-trixie-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS dependencies
 
 # Corepack must not read a .corepack.env file, which could turn off its
 # signature checks or point it at another registry (the same rule as CI).
@@ -25,7 +25,7 @@ COPY packages/platform/package.json packages/platform/
 RUN corepack enable pnpm \
   && pnpm install --frozen-lockfile --prod --filter "@agentx/api..." --filter "@agentx/migrate..."
 
-FROM node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
+FROM node:26.8-trixie-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239
 
 ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
