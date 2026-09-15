@@ -1,8 +1,31 @@
+import { MigrationFailed, MigrationNotAtomic, MigrationRefused } from '@agentx/platform/db';
 import type { Output } from '@agentx/platform/observability';
 import { findLeaks, LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { type MigrateProcess, runMigrate } from './main.ts';
+import { failure, type MigrateProcess, runMigrate } from './main.ts';
+
+describe('what a failed run reports: names, never file contents', () => {
+  it('a refused set of files: its problems', () => {
+    const refused = new MigrationRefused(['0002_x.sql is out of sequence', '0003_y.sql is empty']);
+    expect(failure(refused)).toEqual({ problems: ['0002_x.sql is out of sequence', '0003_y.sql is empty'] });
+  });
+
+  it('a migration that failed and was rolled back: its name and the error', () => {
+    const failed = new MigrationFailed('0004_z.sql', new Error('division by zero'));
+    expect(failure(failed)).toEqual({ migration: '0004_z.sql', err: failed });
+  });
+
+  it('a migration that ended its own transaction: its name and the error', () => {
+    const notAtomic = new MigrationNotAtomic('0005_w.sql');
+    expect(failure(notAtomic)).toEqual({ migration: '0005_w.sql', err: notAtomic });
+  });
+
+  it('anything else: the error alone', () => {
+    const other = new Error('connection refused');
+    expect(failure(other)).toEqual({ err: other });
+  });
+});
 
 /** Plain words standing in for a secret put in the wrong setting, so secret scanners ignore it. */
 const MISPLACED = 'value that must never be printed';

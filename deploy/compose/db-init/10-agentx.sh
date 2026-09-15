@@ -7,11 +7,16 @@ set -euo pipefail
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres --file /agentx/bootstrap/roles.sql
 
-# psql quotes the values (:'name'), so they never meet the SQL as text.
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
-  --set owner_login="$AGENTX_LOCAL_DB_OWNER_PASSWORD" \
-  --set app_login="$AGENTX_LOCAL_DB_APP_PASSWORD" \
-  --set backup_login="$AGENTX_LOCAL_DB_BACKUP_PASSWORD" <<'SQL'
+# psql reads each password straight from the environment (\getenv) and quotes
+# it (:'name'), so it never meets the SQL as text and never appears in a
+# command line that `ps` could show. The server would log a failing statement
+# in full, password included, so statement logging is off for this session.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
+SET log_min_error_statement = panic;
+SET log_statement = 'none';
+\getenv owner_login AGENTX_LOCAL_DB_OWNER_PASSWORD
+\getenv app_login AGENTX_LOCAL_DB_APP_PASSWORD
+\getenv backup_login AGENTX_LOCAL_DB_BACKUP_PASSWORD
 ALTER ROLE agentx_owner PASSWORD :'owner_login';
 ALTER ROLE agentx_app PASSWORD :'app_login';
 ALTER ROLE agentx_backup PASSWORD :'backup_login';

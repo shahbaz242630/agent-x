@@ -77,7 +77,7 @@ describe('the migration job config loads', () => {
   });
 
   it('ignores variables that are not AGENTX_ or PG settings', () => {
-    expect(problemsWith({ ...DEPLOYED, PATH: '/usr/bin', HOME: '/home/app', pghost: 'x' })).toEqual([]);
+    expect(problemsWith({ ...DEPLOYED, PATH: '/usr/bin', HOME: '/home/app', HOSTNAME: 'replica-7' })).toEqual([]);
   });
 });
 
@@ -125,6 +125,13 @@ describe('SEC-AV-03 the migration job refuses to start on a bad config', () => {
     ['NODE_DEBUG in production', { ...DEPLOYED, NODE_DEBUG: 'net' }, /^NODE_DEBUG: must be unset in production/],
   ])('applies the rules the app applies: %s', (_what, env, problem) => {
     expect(problemsWith(env)).toEqual([expect.stringMatching(problem)]);
+  });
+
+  it('reports the database TLS rule alongside a problem in another setting', () => {
+    expect(problemsWith({ ...DEPLOYED, AGENTX_DB_TLS: 'disable', AGENTX_DB_PORT: 'five' })).toEqual([
+      expect.stringMatching(/^AGENTX_DB_PORT: must be a whole number/),
+      expect.stringMatching(/^AGENTX_DB_TLS: disable is allowed only in development and test; production/),
+    ]);
   });
 
   it.each(['development', 'test'])('accepts TLS off and no release in %s, for the local stack', (environment) => {

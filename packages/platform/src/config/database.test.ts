@@ -80,6 +80,15 @@ describe('SEC-AV-03 database settings', () => {
     },
   );
 
+  it('accepts a host label of 63 characters, the DNS limit, and refuses 64', () => {
+    expect(loadConfig({ ...APP, AGENTX_DB_HOST: `${'a'.repeat(63)}.example` }).db.host).toBe(
+      `${'a'.repeat(63)}.example`,
+    );
+    expect(appProblems({ ...APP, AGENTX_DB_HOST: `${'a'.repeat(64)}.example` })).toEqual([
+      expect.stringMatching(/^AGENTX_DB_HOST: must be a host name/),
+    ]);
+  });
+
   it.each(['agentx', 'agentx_uae', '_x', 'a1', 'a'.repeat(63)])('accepts the database name and role %s', (name) => {
     const config = loadConfig({ ...APP, AGENTX_DB_NAME: name, AGENTX_DB_USER: name });
     expect([config.db.database, config.db.user]).toEqual([name, name]);
@@ -228,11 +237,17 @@ describe('SEC-TEN-06 a PG* variable refuses the start', () => {
     ]);
   });
 
-  it('leaves names alone that pg never reads: lower case, or a different prefix', () => {
-    expect(pgVariableProblems({ pghost: 'x', Pghost: 'x', PGADMIN: 'x', APG: 'x', PG2: 'x' })).toEqual([
+  it('refuses the name in any case: Windows reads the environment case-insensitively, so pghost is PGHOST there', () => {
+    expect(pgVariableProblems({ pghost: 'x', Pgoptions: 'x', PGADMIN: 'x', PG2: 'x' })).toEqual([
       PG_PROBLEM('PG2'),
       PG_PROBLEM('PGADMIN'),
+      PG_PROBLEM('Pgoptions'),
+      PG_PROBLEM('pghost'),
     ]);
+  });
+
+  it('leaves names alone that only contain pg, or start with something else', () => {
+    expect(pgVariableProblems({ APG: 'x', MYPGHOST: 'x', XPG_COLOR: 'x', P: 'x' })).toEqual([]);
   });
 });
 

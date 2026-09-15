@@ -67,17 +67,17 @@ export async function impersonationEnabled(client: ZitadelClient): Promise<boole
   return policy.enableImpersonation ?? false;
 }
 
-export interface OidcApp {
-  readonly projectId: string;
-  readonly clientId: string;
-}
-
 /**
- * A public web client (authorization code with PKCE, no secret), in
- * development mode so its redirect may be plain http on the loopback address.
+ * A public web client (authorization code with PKCE, no secret) in an
+ * existing project, in development mode so its redirect may be plain http on
+ * the loopback address.
  */
-export async function createOidcApp(client: ZitadelClient, name: string, redirectUri: string): Promise<OidcApp> {
-  const { id: projectId } = await client.post<{ id: string }>('/management/v1/projects', { name });
+export async function createOidcApp(
+  client: ZitadelClient,
+  projectId: string,
+  name: string,
+  redirectUri: string,
+): Promise<{ clientId: string }> {
   const { clientId } = await client.post<{ clientId: string }>(`/management/v1/projects/${projectId}/apps/oidc`, {
     name,
     redirectUris: [redirectUri],
@@ -88,7 +88,7 @@ export async function createOidcApp(client: ZitadelClient, name: string, redirec
     accessTokenType: 'OIDC_TOKEN_TYPE_BEARER',
     devMode: true,
   });
-  return { projectId, clientId };
+  return { clientId };
 }
 
 export const deleteProject = (client: ZitadelClient, projectId: string): Promise<void> =>

@@ -2,6 +2,8 @@
 // deploy/compose with no cloud account and no internet. These tests look at
 // the running stack from outside (through the edge, as a browser would) and
 // from inside (through docker compose).
+import { request as httpRequest } from 'node:http';
+
 import { describe, expect, it } from 'vitest';
 
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
@@ -70,5 +72,29 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     const discovery = (await response.json()) as { issuer: string };
     expect(discovery.issuer).toBe(LOGIN_ORIGIN);
     expect((await fetch(`${LOGIN_ORIGIN}/ui/v2/login/ready`)).status).toBe(200);
+  });
+
+  it.each([8080, 8081])(
+    'answers a request for any other host name on port %s with 421 (DNS rebinding)',
+    async (port) => {
+      // Node's fetch won't send a foreign Host header, so a plain request does.
+      const status = await new Promise<number>((resolve, reject) => {
+        const request = httpRequest(
+          { host: '127.0.0.1', port, path: '/health', headers: { host: 'evil.example' } },
+          (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+          },
+        );
+        request.on('error', reject);
+        request.end();
+      });
+      expect(status).toBe(421);
+    },
+  );
+
+  it("hides Zitadel's own debug and metrics pages behind the edge", async () => {
+    expect((await fetch(`${LOGIN_ORIGIN}/debug/metrics`)).status).toBe(404);
+    expect((await fetch(`${LOGIN_ORIGIN}/debug/ready`)).status).toBe(404);
   });
 });

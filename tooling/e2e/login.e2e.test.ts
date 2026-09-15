@@ -87,9 +87,17 @@ async function submitAndLeave(page: Page, current: PageName): Promise<void> {
     });
 }
 
-/** A one-time code never used before in this run: Zitadel refuses a repeat, so a new step is waited for. */
+const TOTP_STEP_MS = 30_000;
+
+/**
+ * A one-time code never used before in this run (Zitadel refuses a repeat, so
+ * a new step is waited for), and never from the last seconds of a step, so it
+ * is still current when the login page checks it.
+ */
 let lastCode = '';
 async function freshCode(secret: string): Promise<string> {
+  const remaining = TOTP_STEP_MS - (Date.now() % TOTP_STEP_MS);
+  if (remaining < 3000) await sleep(remaining + 100);
   let code = totp(secret, Date.now());
   while (code === lastCode) {
     await sleep(1000);

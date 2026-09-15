@@ -5,7 +5,7 @@
 // (`${NAME:?}`), so a stack can't come up on a default. An existing .env is
 // kept as it is: the database keeps the passwords it was created with.
 import { randomBytes } from 'node:crypto';
-import { existsSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /** Where compose reads the file from: its own folder. */
@@ -54,11 +54,18 @@ export function generate(random: Random = randomBytes): Record<string, string> {
   };
 }
 
-/** Writes the file unless it exists. Returns what happened, never a value. */
+/**
+ * Writes the file unless it exists: `wx` lets the file system decide, so two
+ * runs at once can't both write. Returns what happened, never a value.
+ */
 export function prepare(file: string = ENV_FILE, random: Random = randomBytes): 'created' | 'kept' {
-  if (existsSync(file)) return 'kept';
-  writeFileSync(file, renderEnv(generate(random)), { mode: 0o600, flag: 'wx' });
-  return 'created';
+  try {
+    writeFileSync(file, renderEnv(generate(random)), { mode: 0o600, flag: 'wx' });
+    return 'created';
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'kept';
+    throw error;
+  }
 }
 
 if (import.meta.main) {

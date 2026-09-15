@@ -60,8 +60,12 @@ export function secretSetting(env: Env, name: SecretName): Checked<string> {
   return value === '' ? refused(`${fileName} names an empty file`) : { ok: true, value };
 }
 
-/** Anything pg or libpq would read on their own: PGHOST, PGOPTIONS, PGSSLMODE, PGPASSWORD and the rest. */
-const PG_VARIABLE = /^PG[A-Z0-9_]*$/;
+/**
+ * Anything pg or libpq would read on their own: PGHOST, PGOPTIONS, PGSSLMODE,
+ * PGPASSWORD and the rest. In any case: on Windows the environment is
+ * case-insensitive, so `pghost` there is `PGHOST` to the driver.
+ */
+const PG_VARIABLE = /^pg[a-z0-9_]*$/i;
 
 /**
  * SEC-TEN-06 (ADR-005 §4): the database is reached only through the settings

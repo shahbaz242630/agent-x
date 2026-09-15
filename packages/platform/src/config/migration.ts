@@ -80,9 +80,8 @@ export function loadMigrationConfig(env: Env = process.env): MigrationConfig {
     ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
     ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
   ];
-  // A failed setting is already among the problems; the first test only narrows the types.
-  if (!allOk(checks)) throw new ConfigError(problems);
-  if (problems.length > 0) throw new ConfigError(problems);
+  // Every failed setting is already among the problems; the type guard narrows the checks to their values.
+  if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);
 
   return Object.freeze({
     environment: checks.environment.value,

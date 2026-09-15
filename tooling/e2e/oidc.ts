@@ -199,6 +199,7 @@ export async function verifyIdToken(
   }
   const header = decodeSegment(headerSegment) as { alg?: string; kid?: string };
   if (header.alg !== 'RS256') throw new Error(`unexpected ID token algorithm: ${String(header.alg)}`);
+  if (typeof header.kid !== 'string' || header.kid === '') throw new Error('the ID token names no key');
 
   const { jwks_uri } = await discover(issuer);
   const { keys } = (await (await fetch(jwks_uri)).json()) as { keys: Jwk[] };
@@ -210,11 +211,15 @@ export async function verifyIdToken(
     throw new Error('the ID token signature does not verify');
   }
 
-  const claims = decodeSegment(payloadSegment) as IdTokenClaims;
+  const claims = decodeSegment(payloadSegment) as IdTokenClaims & { azp?: string };
   const audiences = typeof claims.aud === 'string' ? [claims.aud] : claims.aud;
   if (claims.iss !== issuer) throw new Error(`unexpected issuer: ${claims.iss}`);
   if (!audiences.includes(clientId)) throw new Error('the ID token is not for this client');
+  // With several audiences, OpenID Connect Core §3.1.3.7 wants the authorized party named, and it must be us.
+  if (audiences.length > 1 && claims.azp !== clientId) throw new Error('the ID token was authorized for another party');
   if (claims.exp * 1000 <= nowMs) throw new Error('the ID token has expired');
+  // A minute of clock skew, as the product will allow.
+  if (claims.iat * 1000 > nowMs + 60_000) throw new Error('the ID token was issued in the future');
   if (claims.nonce !== expectedNonce) throw new Error('the ID token nonce does not match');
   return claims;
 }

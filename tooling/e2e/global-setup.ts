@@ -59,9 +59,13 @@ export default async function setup(project: TestProject): Promise<() => Promise
   const run = `e2e-${randomBytes(4).toString('hex')}`;
   const password = `${randomBytes(12).toString('hex')}aZ9!`;
 
-  const app = await createOidcApp(client, run, REDIRECT_URI);
+  // The project is created first and named up front, so a failure at any later
+  // step (the app included) can remove it.
+  const { id: projectId } = await client.post<{ id: string }>('/management/v1/projects', { name: run });
+  const app = { projectId, clientId: '' };
   const created: TestUser[] = [];
   try {
+    app.clientId = (await createOidcApp(client, projectId, run, REDIRECT_URI)).clientId;
     const noFactor = await createHumanUser(client, `${run}-nofactor`, password);
     created.push(noFactor);
     const withTotp = await createHumanUser(client, `${run}-totp`, password);

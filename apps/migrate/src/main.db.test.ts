@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { Output } from '@agentx/platform/observability';
 import { createTestDatabase, findLeaks, LogCapture, type TestDatabase } from '@agentx/testing';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type MigrateProcess, runMigrate } from './main.ts';
 
@@ -143,5 +143,24 @@ describe(`the migration job (Postgres ${server.version})`, () => {
       .as('admin')
       .query("select 1 from information_schema.tables where table_name = 'example'");
     expect(tables).toEqual([]);
+  });
+
+  it('names its connection agentx-migrate in Postgres, so an operator can tell it from the API', async () => {
+    const fresh = await emptyDatabase();
+    const folder = folderWith({ '0001_slow.sql': 'select pg_catalog.pg_sleep(3);\n' });
+    const running = run(envFor(fresh), folder);
+    await vi.waitFor(
+      async () => {
+        const rows = await fresh
+          .as('admin')
+          .query<{ application_name: string }>(
+            'select application_name from pg_catalog.pg_stat_activity where datname = $1 and application_name = $2',
+            [fresh.name, 'agentx-migrate'],
+          );
+        expect(rows).toHaveLength(1);
+      },
+      { timeout: 5000 },
+    );
+    expect((await running).code).toBe(0);
   });
 });

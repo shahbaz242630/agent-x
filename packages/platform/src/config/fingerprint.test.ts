@@ -154,10 +154,19 @@ describe('SEC-OPS-05 what can change the app from outside its settings is visibl
   });
 
   it('lists the flags Node was started with by name, without their values, and hashes them in full', () => {
-    const flags = ['--use-system-ca', '--require=/app/preload.js', '--max-old-space-size=4096', '--use-system-ca'];
+    const flags = [
+      '-r',
+      './hooks.js',
+      '--use-system-ca',
+      '--require=/app/preload.js',
+      '--max-old-space-size=4096',
+      '--use-system-ca',
+    ];
     const fingerprint = fingerprintOf(SETTINGS, flags);
-    expect(fingerprint.nodeFlags).toEqual(['--use-system-ca', '--require', '--max-old-space-size']);
+    // Short flags too, by name; the file `-r` loads is a value, not a flag.
+    expect(fingerprint.nodeFlags).toEqual(['-r', '--use-system-ca', '--require', '--max-old-space-size']);
     expect(JSON.stringify(fingerprint)).not.toContain('preload');
+    expect(JSON.stringify(fingerprint)).not.toContain('hooks.js');
     expect(hashOf(SETTINGS, flags)).not.toBe(hashOf(SETTINGS));
     expect(hashOf(SETTINGS, ['--require=/app/other.js'])).not.toBe(hashOf(SETTINGS, ['--require=/app/preload.js']));
   });

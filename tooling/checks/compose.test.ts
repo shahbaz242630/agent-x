@@ -16,10 +16,12 @@ interface Service {
   image?: string;
   environment?: Record<string, string>;
   networks?: string[] | Record<string, { ipv4_address?: string } | null>;
+  network_mode?: string;
   ports?: string[];
   privileged?: boolean;
   read_only?: boolean;
   cap_drop?: string[];
+  cap_add?: string[];
   security_opt?: string[];
   stop_grace_period?: string;
   volumes?: string[];
@@ -72,12 +74,15 @@ describe('SEC-OPS-08 the compose stack has no default logins', () => {
 });
 
 describe('ADR-010 §7 the compose stack is air-gapped behind one front door', () => {
-  it('keeps every service but the edge on the internal network only', () => {
+  it('keeps every service but the edge on the internal network only, or off the network', () => {
     const elsewhere = services
       .filter(([name]) => name !== 'edge')
+      .filter(([, service]) => service.network_mode !== 'none' || service.networks !== undefined)
       .filter(([, service]) => networksOf(service).join(',') !== 'internal')
       .map(([name]) => name);
     expect(elsewhere).toEqual([]);
+    // The step that only changes a folder's owner needs no network at all.
+    expect(file.services['zitadel-volume']?.network_mode).toBe('none');
   });
 
   it('marks the internal network internal, and keeps its dynamic addresses away from the edge', () => {
@@ -103,6 +108,19 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(file.services.edge?.ports).toEqual(['127.0.0.1:8080:8080', '127.0.0.1:8081:8081']);
   });
 
+  it("mounts the instance owner's token in Zitadel only, never in the browser-facing login container", () => {
+    const mounts = (name: string): string[] =>
+      (file.services[name]?.volumes ?? []).map((volume) => volume.split(':')[0] ?? '');
+    expect(mounts('zitadel')).toEqual(['zitadel-pat', 'zitadel-automation']);
+    expect(mounts('login')).toEqual(['zitadel-pat']);
+    expect(mounts('zitadel-volume')).toEqual(['zitadel-pat', 'zitadel-automation']);
+    const elsewhere = services
+      .filter(([name]) => !['zitadel', 'zitadel-volume'].includes(name))
+      .filter(([name]) => mounts(name).includes('zitadel-automation'))
+      .map(([name]) => name);
+    expect(elsewhere).toEqual([]);
+  });
+
   it('gives no service privileges, and no service the Docker socket', () => {
     expect(services.filter(([, service]) => service.privileged === true).map(([name]) => name)).toEqual([]);
     const socket = services.filter(([, service]) =>
@@ -111,11 +129,24 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(socket.map(([name]) => name)).toEqual([]);
   });
 
-  it.each(['api', 'migrate'])('runs %s read-only, with no capabilities and no privilege escalation', (name) => {
-    const service = file.services[name];
-    expect(service?.read_only).toBe(true);
-    expect(service?.cap_drop).toEqual(['ALL']);
-    expect(service?.security_opt).toEqual(['no-new-privileges:true']);
+  it.each(['api', 'migrate'])('runs %s read-only', (name) => {
+    expect(file.services[name]?.read_only).toBe(true);
+  });
+
+  it('drops every capability from every service, adding back only what three third-party images need', () => {
+    const allowedAdditions: Record<string, string[]> = {
+      // Postgres starts as root to own its data directory, then runs as its own user.
+      db: ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID'],
+      // nginx starts as root, hands its cache to its worker user and drops to it.
+      edge: ['CHOWN', 'SETGID', 'SETUID'],
+      // The step that gives Zitadel its token folders.
+      'zitadel-volume': ['CHOWN'],
+    };
+    for (const [name, service] of services) {
+      expect(service.cap_drop, name).toEqual(['ALL']);
+      expect(service.cap_add ?? [], name).toEqual(allowedAdditions[name] ?? []);
+      expect(service.security_opt, name).toEqual(['no-new-privileges:true']);
+    }
   });
 
   it('gives the API longer to stop than its own 25-second deadline', () => {

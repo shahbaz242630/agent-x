@@ -43,7 +43,7 @@ export interface MigrateOptions {
 }
 
 /** What went wrong, in the fields the operator needs: names, never file contents or values. */
-function failure(error: unknown): Record<string, unknown> {
+export function failure(error: unknown): Record<string, unknown> {
   if (error instanceof MigrationRefused) return { problems: error.problems };
   if (error instanceof MigrationFailed || error instanceof MigrationNotAtomic) {
     return { migration: error.migration, err: error };

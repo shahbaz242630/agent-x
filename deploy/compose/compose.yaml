@@ -70,6 +70,10 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    # The image starts as root to own the data directory, then runs Postgres as
+    # its own user: the rights that takes, no more.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     security_opt: ['no-new-privileges:true']
     networks: [internal]
     restart: unless-stopped
@@ -125,14 +129,19 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  # Makes the shared folder for Zitadel's generated tokens writable by Zitadel
-  # (uid 1000). A named volume starts out owned by root; a distroless image can't chown.
+  # Makes the folders for Zitadel's generated tokens writable by Zitadel (uid
+  # 1000). A named volume starts out owned by root; a distroless image can't
+  # chown. Needs no network and nothing but the right to change an owner.
   zitadel-volume:
     image: node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
-    command: ['chown', '1000:1000', '/pat']
+    command: ['chown', '1000:1000', '/pat', '/pat-automation']
     volumes:
       - zitadel-pat:/pat
-    networks: [internal]
+      - zitadel-automation:/pat-automation
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ['no-new-privileges:true']
     restart: 'no'
 
   # Zitadel's schemas in its own database, as its owner (ADR-003; Zitadel v4).
@@ -144,6 +153,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
     networks: [internal]
     restart: 'no'
 
@@ -173,7 +184,7 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: automation
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Local automation (tests and set-up)
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
-      ZITADEL_FIRSTINSTANCE_PATPATH: /pat/automation.pat
+      ZITADEL_FIRSTINSTANCE_PATPATH: /pat-automation/automation.pat
       ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
       ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login UI
       ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
@@ -187,8 +198,11 @@ services:
       ZITADEL_DEFAULTINSTANCE_RESTRICTIONS_DISALLOWPUBLICORGREGISTRATION: 'true'
       ZITADEL_LOG_LEVEL: info
       ZITADEL_LOG_FORMATTER_FORMAT: json
+      # No metrics endpoint: nothing scrapes it here, and it would be served through the edge.
+      ZITADEL_METRICS_TYPE: none
     volumes:
       - zitadel-pat:/pat
+      - zitadel-automation:/pat-automation
     depends_on:
       db:
         condition: service_healthy
@@ -202,6 +216,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
     networks: [internal]
     restart: unless-stopped
@@ -233,13 +248,15 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
     networks: [internal]
     restart: unless-stopped
 
   # The one front door (edge/nginx.conf): 8080 → the API, 8081 → the login
   # service. The only container the host can reach, and the only one on a
-  # network that reaches anything.
+  # network that reaches anything. nginx starts as root, hands its cache to
+  # its worker user and drops to it: the three rights that takes, no more.
   edge:
     image: nginx:1.31.5-alpine-slim@sha256:3b171d7224b669faa3cc2137fea0a65301791df1ec1f271ebd2a2b7461f7fade
     volumes:
@@ -252,6 +269,8 @@ services:
         condition: service_healthy
       login:
         condition: service_healthy
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     security_opt: ['no-new-privileges:true']
     networks:
       internal:
@@ -273,4 +292,7 @@ networks:
 
 volumes:
   db-data: {}
+  # The login container's token: read by Zitadel and the login container only.
   zitadel-pat: {}
+  # The automation token (instance owner): read by Zitadel and the test suite only, never by the login container.
+  zitadel-automation: {}

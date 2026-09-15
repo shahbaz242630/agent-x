@@ -44,6 +44,13 @@ describe('TOTP for the authenticator-app test user', () => {
     expect(base32Decode(RFC_SECRET_BASE32)).toEqual(RFC_SECRET);
   });
 
+  it('maps every one of the 32 characters to its value (the whole alphabet, then the last one repeated)', () => {
+    expect(base32Decode('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567').toString('hex')).toBe(
+      '00443214c74254b635cf84653a56d7c675be77df',
+    );
+    expect(base32Decode('77777777').toString('hex')).toBe('ffffffffff');
+  });
+
   it('refuses text that is not base32', () => {
     expect(() => base32Decode('not-base32!')).toThrow('not a base32 character');
   });

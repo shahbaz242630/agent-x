@@ -301,6 +301,13 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     ]);
   });
 
+  it('reports the database TLS rule alongside a problem in another setting', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_DB_TLS: 'disable', AGENTX_HTTP_PORT: 'eighty' })).toEqual([
+      expect.stringMatching(/^AGENTX_HTTP_PORT: must be a whole number/),
+      expect.stringMatching(/^AGENTX_DB_TLS: disable is allowed only in development and test; production/),
+    ]);
+  });
+
   it('reports every broken rule between settings together', () => {
     expect(
       problemsWith({
@@ -442,6 +449,12 @@ describe('SEC-AV-03 logging settings', () => {
 });
 
 describe('SEC-DATA-01 Node’s own debug output is off in production', () => {
+  it('refuses NODE_DEBUG in production even when empty: unset means unset', () => {
+    expect(problemsWith({ ...MINIMAL, NODE_DEBUG: '' })).toEqual([
+      'NODE_DEBUG: must be unset in production; Node would print its own debug output outside the logger',
+    ]);
+  });
+
   it.each(['NODE_DEBUG', 'NODE_DEBUG_NATIVE'])('refuses %s in production, as it prints outside the logger', (name) => {
     expect(problemsWith({ ...MINIMAL, [name]: 'fetch' })).toEqual([
       `${name}: must be unset in production; Node would print its own debug output outside the logger`,

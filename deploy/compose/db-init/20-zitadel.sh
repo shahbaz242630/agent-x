@@ -6,8 +6,13 @@
 # connect to Agent X's: db/bootstrap/database.sql took that right from PUBLIC.
 set -euo pipefail
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
-  --set login="$AGENTX_LOCAL_ZITADEL_DB_PASSWORD" <<'SQL'
+# psql reads the password from the environment (\getenv) and quotes it, so it
+# never meets the SQL as text and never appears in a command line. The server
+# would log a failing statement in full, so statement logging is off here.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
+SET log_min_error_statement = panic;
+SET log_statement = 'none';
+\getenv login AGENTX_LOCAL_ZITADEL_DB_PASSWORD
 CREATE ROLE zitadel
   LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
   PASSWORD :'login';

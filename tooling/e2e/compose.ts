@@ -66,7 +66,7 @@ export async function readAutomationToken(): Promise<string> {
   const dir = mkdtempSync(path.join(tmpdir(), 'agentx-e2e-'));
   try {
     const file = path.join(dir, 'automation.pat');
-    await composeOk(['cp', 'zitadel:/pat/automation.pat', file]);
+    await composeOk(['cp', 'zitadel:/pat-automation/automation.pat', file]);
     return readFileSync(file, 'utf8').trim();
   } finally {
     rmSync(dir, { recursive: true, force: true });

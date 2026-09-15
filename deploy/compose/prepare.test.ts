@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { generate, MASTER_KEY, newMasterKey, newPassword, PASSWORDS, prepare, renderEnv } from './prepare.ts';
+import { ENV_FILE, generate, MASTER_KEY, newMasterKey, newPassword, PASSWORDS, prepare, renderEnv } from './prepare.ts';
 
 /** A predictable byte source, so a test can check the shape without the randomness. */
 const bytes = (fill: number) => (count: number) => Buffer.alloc(count, fill);
@@ -15,6 +15,11 @@ afterAll(() => {
 });
 
 describe('SEC-OPS-08 the local stack has no default logins: prepare generates them', () => {
+  it('writes the file where compose reads it: next to compose.yaml', () => {
+    const root = path.resolve(import.meta.dirname, '../..');
+    expect(path.relative(root, ENV_FILE).replaceAll('\\', '/')).toBe('deploy/compose/.env');
+  });
+
   it('makes a password from 128 random bits, with every kind of character Zitadel asks for', () => {
     const password = newPassword();
     expect(password).toMatch(/^[0-9a-f]{32}aZ9!$/);

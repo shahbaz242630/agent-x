@@ -280,14 +280,17 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
 
 describe('the API stops cleanly on a signal', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
-    'on %s: stops listening, then closes the pool, writes the held-back counts, exits 0',
+    'on %s: logs the signal, stops listening, then closes the pool, exits 0',
     async (signal) => {
-      const { host, server, events } = await start();
+      const { host, server, events, capture } = await start();
       host.emit(signal, signal);
       await vi.waitFor(() => {
         expect(host.exits).toEqual([0]);
       });
       expect(events().slice(-2)).toEqual(['api.stopping', 'api.stopped']);
+      expect(capture.lines().find((line) => line.event === 'api.stopping')).toEqual(
+        expect.objectContaining({ event: 'api.stopping', signal }),
+      );
       expect(server?.server.listening).toBe(false);
       expect(fake.steps).toEqual(['role checked', 'pool closed']);
     },
@@ -362,15 +365,15 @@ describe('the API stops within its deadline', () => {
   /** Replaces the server's close for one test, with a fake clock for the deadline. */
   async function withClose(
     close: () => Promise<undefined>,
-    run: (host: FakeProcess, events: () => unknown[]) => Promise<void>,
+    run: (host: FakeProcess, events: () => unknown[], capture: LogCapture) => Promise<void>,
   ) {
-    const { host, server, events } = await start();
+    const { host, server, events, capture } = await start();
     if (server === undefined) throw new Error('the server should have started');
     const realClose = server.close.bind(server);
     Object.assign(server, { close });
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      await run(host, events);
+      await run(host, events, capture);
     } finally {
       vi.useRealTimers();
       Object.assign(server, { close: realClose });
@@ -380,13 +383,16 @@ describe('the API stops within its deadline', () => {
   it('gives up when stopping hangs: logs it, writes the counts and exits 1 after 25 seconds', async () => {
     await withClose(
       () => new Promise<undefined>(() => undefined),
-      async (host, events) => {
+      async (host, events, capture) => {
         host.emit('SIGTERM', 'SIGTERM');
         await vi.advanceTimersByTimeAsync(24_999);
         expect(host.exits).toEqual([]);
         await vi.advanceTimersByTimeAsync(1);
         expect(host.exits).toEqual([1]);
         expect(events()).toContain('api.stop_timed_out');
+        expect(capture.lines().at(-1)).toEqual(
+          expect.objectContaining({ event: 'api.stop_timed_out', deadlineMs: 25_000 }),
+        );
       },
     );
   });
@@ -414,6 +420,59 @@ describe('the API stops within its deadline', () => {
         expect(events()).not.toContain('api.stop_timed_out');
       },
     );
+  });
+});
+
+describe("every exit writes the log's held-back counts first", () => {
+  /** A cap the request lines soon exceed, with the rate limit at half of it, as the config requires. */
+  const CAPPED = { ...ENV, AGENTX_LOG_EVENT_CAP_PER_MINUTE: '20', AGENTX_RATE_LIMIT_PER_MINUTE: '10' };
+
+  /** Starts, then makes more requests than the cap, so lines of one event are being held back. */
+  async function startWithHeldBackLines() {
+    const started = await start(CAPPED);
+    if (started.server === undefined) throw new Error('the server should have started');
+    for (let request = 0; request < 45; request += 1) await started.server.inject('/health');
+    expect(started.capture.lines().some((line) => line.event === 'log.suppressed')).toBe(false);
+    return started;
+  }
+
+  /** The counts the logger wrote out: 10 requests answered, 20 refusals written, the other 15 held back. */
+  const heldBack = (capture: LogCapture) =>
+    capture
+      .lines()
+      .filter((line) => line.event === 'log.suppressed')
+      .map((line) => line.suppressedCount);
+
+  it('on a clean stop', async () => {
+    const { host, capture } = await startWithHeldBackLines();
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    expect(heldBack(capture)).toEqual([15]);
+  });
+
+  it('on a stop that failed', async () => {
+    const { host, server, capture } = await startWithHeldBackLines();
+    if (server === undefined) throw new Error('the server should have started');
+    const close = server.close.bind(server);
+    Object.assign(server, { close: () => Promise.reject(new Error('close failed')) });
+    try {
+      host.emit('SIGTERM', 'SIGTERM');
+      await vi.waitFor(() => {
+        expect(host.exits).toEqual([1]);
+      });
+      expect(heldBack(capture)).toEqual([15]);
+    } finally {
+      Object.assign(server, { close });
+    }
+  });
+
+  it('on a crash', async () => {
+    const { host, capture } = await startWithHeldBackLines();
+    host.emit('uncaughtException', new Error('bad state'), 'uncaughtException');
+    expect(host.exits).toEqual([1]);
+    expect(heldBack(capture)).toEqual([15]);
   });
 });
 

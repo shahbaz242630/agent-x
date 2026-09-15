@@ -52,22 +52,11 @@ export interface ConfigFingerprint {
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-/** JSON with every object's fields in sorted order, so the same settings always hash the same. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (typeof value === 'object' && value !== null) {
-    const fields = Object.entries(value)
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([name, item]) => `${JSON.stringify(name)}:${canonical(item)}`);
-    return `{${fields.join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 /**
- * The settings that count, named one by one. The release is left out: it
- * changes with every deploy, and the fingerprint should change only when a
- * setting does. The database password is left out: it's a secret.
+ * The settings that count, named one by one, in a fixed order, so the same
+ * settings always hash the same however the config was built. The release is
+ * left out: it changes with every deploy, and the fingerprint should change
+ * only when a setting does. The database password is left out: it's a secret.
  */
 export function fingerprintedSettings(config: Config): Record<string, unknown> {
   return {
@@ -99,10 +88,11 @@ export function configFingerprint(
   nodeArguments: readonly string[] = process.execArgv,
 ): ConfigFingerprint {
   const settings = fingerprintedSettings(config);
+  // In WATCHED_VARIABLES' order, like the settings above: nothing here depends on how the environment was built.
   const watched = Object.fromEntries(
     WATCHED_VARIABLES.flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   );
-  const hash = createHash('sha256').update(canonical({ settings, watched, nodeArguments })).digest('hex');
+  const hash = createHash('sha256').update(JSON.stringify({ settings, watched, nodeArguments })).digest('hex');
   const flags = [
     ...new Set(nodeArguments.filter((argument) => argument.startsWith('-')).map((flag) => flag.replace(/=.*$/s, ''))),
   ];
