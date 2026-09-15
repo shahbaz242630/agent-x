@@ -16,9 +16,16 @@ export interface AddedLine {
 
 const HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/g;
 
-/** The file a `+++ b/path` header names; git quotes unusual paths, which are kept as written. */
+const TAB = String.fromCharCode(9);
+
+/**
+ * The file a `+++ b/path` header names. Git ends the header with a tab when
+ * the name holds a space, and quotes a name with control characters, which is
+ * kept as written.
+ */
 function headerPath(header: string): string {
-  const name = header.slice('+++ '.length);
+  const raw = header.slice('+++ '.length);
+  const name = raw.endsWith(TAB) ? raw.slice(0, -1) : raw;
   const unquoted = name.startsWith('"') && name.endsWith('"') ? name.slice(1, -1) : name;
   return unquoted.startsWith('b/') ? unquoted.slice(2) : unquoted;
 }
@@ -68,18 +75,37 @@ export function stagedProblems(files: readonly string[], diff: string): Problem[
   ];
 }
 
-/** The staged files Prettier would change, checked on their staged content. */
-export async function unformatted(files: readonly string[], staged: (file: string) => string): Promise<string[]> {
+export interface FormatProblem {
+  readonly file: string;
+  readonly message: string;
+}
+
+/**
+ * The staged files Prettier would change, checked on their staged content. A
+ * file Prettier can't parse is reported without Prettier's message, which
+ * quotes the lines around the error.
+ */
+export async function unformatted(
+  files: readonly string[],
+  staged: (file: string) => string,
+): Promise<FormatProblem[]> {
   const prettier = await import('prettier');
-  const changed: string[] = [];
+  const problems: FormatProblem[] = [];
   for (const file of files) {
     // Prettier gives no parser to a file it ignores or can't format.
     const info = await prettier.getFileInfo(file, { ignorePath: ['.gitignore', '.prettierignore'] });
     if (info.inferredParser === null) continue;
     const options = (await prettier.resolveConfig(file)) ?? {};
-    if (!(await prettier.check(staged(file), { ...options, filepath: file }))) changed.push(file);
+    let formatted: boolean;
+    try {
+      formatted = await prettier.check(staged(file), { ...options, filepath: file });
+    } catch {
+      problems.push({ file, message: 'Prettier could not parse it: fix the syntax, then stage it again' });
+      continue;
+    }
+    if (!formatted) problems.push({ file, message: 'not formatted: run corepack pnpm format, then stage it again' });
   }
-  return changed;
+  return problems;
 }
 
 export type Git = (args: readonly string[]) => string;
@@ -99,7 +125,7 @@ export const runGit: Git = (args) => {
 
 /** The hook: returns the exit code, printing what to fix. */
 export async function preCommit(git: Git = runGit, log: (line: string) => void = console.error): Promise<number> {
-  const files = git(['diff', '--cached', '--name-only', '-z', '--diff-filter=ACM', '--no-renames'])
+  const files = git(['diff', '--cached', '--name-only', '-z', '--diff-filter=ACMT', '--no-renames'])
     .split(String.fromCharCode(0))
     .filter((file) => file !== '');
   if (files.length === 0) return 0;
@@ -110,17 +136,16 @@ export async function preCommit(git: Git = runGit, log: (line: string) => void =
     '--unified=0',
     '--no-color',
     '--no-ext-diff',
-    '--diff-filter=ACM',
+    '--diff-filter=ACMT',
     '--no-renames',
   ]);
   const problems = stagedProblems(files, diff);
-  const notFormatted = await unformatted(files, (file) => git(['show', `:${file}`]));
+  const formatting = await unformatted(files, (file) => git(['show', `:${file}`]));
 
-  if (problems.length === 0 && notFormatted.length === 0) return 0;
+  if (problems.length === 0 && formatting.length === 0) return 0;
   log('Commit refused by the pre-commit hook (tooling/git-hooks):');
   for (const problem of problems) log(`  ${describeProblem(problem)}`);
-  for (const file of notFormatted)
-    log(`  ${file} [format] not formatted: run corepack pnpm format, then stage it again`);
+  for (const { file, message } of formatting) log(`  ${file} [format] ${message}`);
   log('Fix these and commit again. CI checks the same rules; never skip them with --no-verify.');
   return 1;
 }

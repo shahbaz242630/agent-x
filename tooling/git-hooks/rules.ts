@@ -19,17 +19,22 @@ export interface Problem {
   readonly message: string;
 }
 
-/** Paths that must never be committed, whatever they hold. */
+/** Paths that must never be committed, whatever they hold. Case-insensitive: so is Windows. */
 const FORBIDDEN_PATHS: readonly { readonly pattern: RegExp; readonly message: string }[] = [
-  { pattern: /^Documents(?:\/|$)/, message: 'the internal documents never go to git (Rule Book §7)' },
-  { pattern: /(?:^|\/)\.env(?:\.(?!example$)[^/]+)?$/, message: 'an env file holds local secrets' },
+  { pattern: /^Documents(?:\/|$)/i, message: 'the internal documents never go to git (Rule Book §7)' },
+  { pattern: /(?:^|\/)\.env(?:\.(?!example$)[^/]+)?$/i, message: 'an env file holds local secrets' },
   { pattern: /\.(?:pem|key|p12|pfx|jks|keystore|pat)$/i, message: 'a key, certificate store or access-token file' },
-  { pattern: /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)$/, message: 'a private SSH key' },
+  { pattern: /(?:^|\/)id_(?:rsa|dsa|ecdsa|ed25519)$/i, message: 'a private SSH key' },
+  {
+    // The hooks run these by name from the repository root, and Windows looks in the current folder first.
+    pattern: /^(?:git|node|corepack|pnpm|npm|npx|tar|gitleaks|sh|bash)(?:\.[^/]+)?$/i,
+    message: 'a root file named like a tool the hooks run: Windows would run it instead of the real one',
+  },
 ];
 
 // Built from pieces, so this file never holds text that looks like what it finds.
 const DASHES = '-'.repeat(5);
-const PRIVATE_KEY = new RegExp(`${DASHES}BEGIN [A-Z0-9 ]*PRIVATE KEY${DASHES}`);
+const PRIVATE_KEY = new RegExp(`${DASHES}BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?${DASHES}`);
 
 /** Token formats whose shape alone gives them away. */
 const PROVIDER_TOKENS: readonly { readonly name: string; readonly pattern: RegExp }[] = [

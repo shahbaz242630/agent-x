@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
+
 import { describe, expect, it } from 'vitest';
 
-import { gitleaksArgs, logRanges, parseRefs, prePush, type Steps } from './pre-push.ts';
+import { commitCount, gitleaksArgs, knownCommit, logRanges, parseRefs, prePush, type Steps } from './pre-push.ts';
 
 const NONE = '0'.repeat(40);
 const A = 'a'.repeat(40);
@@ -33,8 +35,24 @@ describe('the commits a push adds', () => {
           { localRef: '(delete)', localSha: NONE, remoteRef: 'refs/heads/old', remoteSha: B },
         ],
         'origin',
+        () => true,
       ),
     ).toEqual([`${B}..${A}`, `${C} --not --remotes=origin`]);
+  });
+
+  it("scans everything the remote hasn't got when this clone lacks the remote's commit (the branch moved on GitHub)", () => {
+    const ref = { localRef: 'refs/heads/x', localSha: A, remoteRef: 'refs/heads/x', remoteSha: B };
+    expect(logRanges([ref], 'origin', (sha) => sha !== B)).toEqual([`${A} --not --remotes=origin`]);
+  });
+
+  it('asks git whether a commit is here, and how many commits a range names, refusing a range it cannot read', () => {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const absent = '0123456789abcdef0123456789abcdef01234567';
+    expect(knownCommit(head)).toBe(true);
+    expect(knownCommit(absent)).toBe(false);
+    expect(commitCount(`${head}..${head}`)).toBe(0);
+    expect(commitCount(`${head} --not ${head}`)).toBe(0);
+    expect(() => commitCount(`${absent}..${head}`)).toThrow('git rev-list failed');
   });
 
   it('runs gitleaks as CI does, on the repository and with its rules, redacting what it finds', () => {
@@ -57,10 +75,13 @@ describe('the hook', () => {
   /** Steps that succeed unless told otherwise, recording the order they ran in. */
   const steps = (
     fail: Partial<Record<'gitleaks' | 'typecheck' | 'lint', number | Error>> = {},
+    commits: (range: string) => number = () => 1,
   ): Steps & { ran: string[] } => {
     const ran: string[] = [];
     return {
       ran,
+      known: () => true,
+      commits,
       gitleaks: (range) => {
         ran.push(`gitleaks ${range}`);
         const outcome = fail.gitleaks;
@@ -98,6 +119,24 @@ describe('the hook', () => {
     expect(said).toEqual([
       `Push refused by the pre-push hook: ${reason}. CI would refuse it too; never skip this with --no-verify.`,
     ]);
+  });
+
+  it('skips the scan for a push that adds no commits, and still type-checks and lints', async () => {
+    const run = steps({}, () => 0);
+    expect(await prePush(push, 'origin', run, () => undefined)).toBe(0);
+    expect(run.ran).toEqual(['typecheck', 'lint']);
+  });
+
+  it('refuses a push whose commits git cannot read, rather than pass it unscanned', async () => {
+    const said: string[] = [];
+    const run = steps({}, () => {
+      throw new Error('git rev-list failed: bad revision');
+    });
+    expect(await prePush(push, 'origin', run, (line) => said.push(line))).toBe(1);
+    expect(run.ran).toEqual([]);
+    expect(said[0]).toContain(
+      "git can't read the commits being pushed (git rev-list failed: bad revision); fetch, then push again",
+    );
   });
 
   it('refuses when gitleaks cannot run, and says how to install it', async () => {

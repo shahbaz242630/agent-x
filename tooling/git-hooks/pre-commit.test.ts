@@ -58,19 +58,41 @@ describe('reading the lines a commit adds', () => {
     ]);
   });
 
-  it('counts context lines, skips binary files and reads a quoted path', () => {
+  it('counts context lines, skips binary files, and reads a name with a space as git prints it (ending in a tab)', () => {
+    const tab = String.fromCharCode(9);
     const diff = lines(
       'diff --git a/image.png b/image.png',
       'Binary files /dev/null and b/image.png differ',
-      'diff --git "a/odd name.ts" "b/odd name.ts"',
-      '--- "a/odd name.ts"',
-      '+++ "b/odd name.ts"',
+      'diff --git a/my compose.yml b/my compose.yml',
+      `--- a/my compose.yml${tab}`,
+      `+++ b/my compose.yml${tab}`,
       '@@ -1,2 +1,3 @@',
       ' kept',
       '+added',
       String.fromCharCode(92) + ' No newline at end of file',
     );
-    expect(addedLines(diff)).toEqual([{ file: 'odd name.ts', line: 2, text: 'added' }]);
+    expect(addedLines(diff)).toEqual([{ file: 'my compose.yml', line: 2, text: 'added' }]);
+  });
+
+  it('reads a quoted name (git quotes one holding a control character) as written', () => {
+    const diff = lines('diff --git "a/odd" "b/odd"', '--- "a/odd"', '+++ "b/odd"', '@@ -0,0 +1 @@', '+added');
+    expect(addedLines(diff)).toEqual([{ file: 'odd', line: 1, text: 'added' }]);
+  });
+});
+
+describe('a YAML file whose name has a space', () => {
+  it('still gets the YAML rule', () => {
+    const tab = String.fromCharCode(9);
+    const placeholder = ['  image: ', '$', '{TAG:?set it first}'].join('');
+    const diff = lines(
+      'diff --git a/my compose.yml b/my compose.yml',
+      `+++ b/my compose.yml${tab}`,
+      '@@ -0,0 +1 @@',
+      `+${placeholder}`,
+    );
+    expect(stagedProblems(['my compose.yml'], diff).map((problem) => [problem.rule, problem.file])).toEqual([
+      ['placeholder-message', 'my compose.yml'],
+    ]);
   });
 });
 
@@ -101,7 +123,19 @@ describe('formatting, on the staged content', () => {
       'coverage/report.ts': `export const a=1${LF}`,
       'assets/logo.png': 'not text',
     };
-    expect(await unformatted(Object.keys(staged), (file) => staged[file] ?? '')).toEqual(['tooling/bad.ts']);
+    expect(await unformatted(Object.keys(staged), (file) => staged[file] ?? '')).toEqual([
+      { file: 'tooling/bad.ts', message: 'not formatted: run corepack pnpm format, then stage it again' },
+    ]);
+  });
+
+  it("reports a file Prettier can't parse without Prettier's message, which quotes the file", async () => {
+    const nearby = ['const note = ', "'", 'quoted-by-prettier', "'", ';'].join('');
+    const broken = [nearby, 'export const = ;'].join(LF);
+    const problems = await unformatted(['tooling/broken.ts'], () => broken);
+    expect(problems).toEqual([
+      { file: 'tooling/broken.ts', message: 'Prettier could not parse it: fix the syntax, then stage it again' },
+    ]);
+    expect(JSON.stringify(problems)).not.toContain('quoted-by-prettier');
   });
 });
 
@@ -172,6 +206,8 @@ describe('the hook in a real repository', () => {
 
   it('passes clean staged files, and refuses a staged env file and an invisible character', () => {
     git('init', '--quiet');
+    // A config of its own, so Prettier's search for one stops here and never reads a shared temporary folder.
+    writeFileSync(path.join(repo, '.prettierrc.json'), `{}${LF}`);
     mkdirSync(path.join(repo, 'src'));
     writeFileSync(path.join(repo, 'src', 'a.ts'), `export const a = 1;${LF}`);
     git('add', 'src/a.ts');

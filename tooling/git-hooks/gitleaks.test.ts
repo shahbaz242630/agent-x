@@ -52,15 +52,17 @@ describe('the pinned gitleaks', () => {
       'linux-x64',
       'win32-x64',
     ]);
-    for (const { file, sha256 } of Object.values(ARCHIVES)) {
+    for (const { file, sha256, binarySha256 } of Object.values(ARCHIVES)) {
       expect(file).toMatch(
         new RegExp(
           `^gitleaks_${GITLEAKS_VERSION.replaceAll('.', '[.]')}_(windows|linux|darwin)_(x64|arm64)[.](zip|tar[.]gz)$`,
         ),
       );
       expect(sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(binarySha256).toMatch(/^[0-9a-f]{64}$/);
     }
-    expect(new Set(Object.values(ARCHIVES).map((archive) => archive.sha256)).size).toBe(5);
+    const pins = Object.values(ARCHIVES).flatMap((archive) => [archive.sha256, archive.binarySha256]);
+    expect(new Set(pins).size).toBe(10);
   });
 
   it("downloads from gitleaks' own release, and names what isn't pinned", () => {
@@ -77,12 +79,41 @@ describe('the pinned gitleaks', () => {
 });
 
 describe('installing it', () => {
-  it('uses the installed binary without downloading anything', async () => {
+  /** A binary already in place under a fresh tools folder, and pins that name it. */
+  const installed = (content: string): { dir: string; binary: string; archives: typeof ARCHIVES } => {
     const dir = mkdtempSync(path.join(tools, 'installed-'));
     const binary = gitleaksPath('linux', dir);
     mkdirSync(path.dirname(binary), { recursive: true });
-    writeFileSync(binary, 'installed');
-    expect(await ensureGitleaks({ platform: 'linux', arch: 'x64', toolsDir: dir, fetch: noFetch })).toBe(binary);
+    writeFileSync(binary, content);
+    const pinned = {
+      file: 'test.tar.gz',
+      sha256: '0'.repeat(64),
+      binarySha256: sha256Of(Buffer.from('the pinned binary')),
+    };
+    return { dir, binary, archives: { 'linux-x64': pinned } };
+  };
+
+  it('uses an installed binary that matches its pin, without downloading anything', async () => {
+    const { dir, binary, archives } = installed('the pinned binary');
+    expect(await ensureGitleaks({ platform: 'linux', arch: 'x64', toolsDir: dir, fetch: noFetch, archives })).toBe(
+      binary,
+    );
+  });
+
+  it('refuses an installed binary that does not match its pin (a file swapped in under .tools)', async () => {
+    const { dir, binary, archives } = installed('something else');
+    await expect(
+      ensureGitleaks({ platform: 'linux', arch: 'x64', toolsDir: dir, fetch: noFetch, archives }),
+    ).rejects.toThrow(
+      `${binary} does not match its pinned SHA-256: delete the .tools folder and run corepack pnpm hooks.`,
+    );
+  });
+
+  it('checks against the real pins unless told otherwise', async () => {
+    const { dir } = installed('the pinned binary');
+    await expect(ensureGitleaks({ platform: 'linux', arch: 'x64', toolsDir: dir, fetch: noFetch })).rejects.toThrow(
+      'does not match its pinned SHA-256',
+    );
   });
 
   it('refuses a download that does not match its pin, and installs nothing', async () => {

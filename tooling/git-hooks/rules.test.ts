@@ -27,6 +27,13 @@ describe('files that must never be committed', () => {
     ['pat-automation/automation.pat'],
     ['id_rsa'],
     ['home/.ssh/id_ed25519'],
+    ['DOCUMENTS/notes.md'],
+    ['config/.ENV'],
+    ['corepack.cmd'],
+    ['git.exe'],
+    ['node.bat'],
+    ['GITLEAKS'],
+    ['corepack.js'],
   ])('refuses %s', (file) => {
     expect(pathProblems(file).map((problem) => problem.rule)).toEqual(['forbidden-file']);
   });
@@ -39,6 +46,11 @@ describe('files that must never be committed', () => {
     ['id_rsa.pub'],
     ['keys/README.md'],
     ['monkey.ts'],
+    ['.ENV.example'],
+    ['pnpm-lock.yaml'],
+    ['pnpm-workspace.yaml'],
+    ['tooling/git-hooks/gitleaks.ts'],
+    ['scripts/node.mjs'],
   ])('allows %s', (file) => {
     expect(pathProblems(file)).toEqual([]);
   });
@@ -48,6 +60,9 @@ describe('secrets in a line', () => {
   it('finds a private key block', () => {
     expect(rulesOf('a.txt', join('-'.repeat(5), 'BEGIN RSA PRIVATE KEY', '-'.repeat(5)))).toEqual(['private-key']);
     expect(rulesOf('a.txt', join('-'.repeat(5), 'BEGIN PRIVATE KEY', '-'.repeat(5)))).toEqual(['private-key']);
+    expect(rulesOf('a.txt', join('-'.repeat(5), 'BEGIN PGP PRIVATE KEY BLOCK', '-'.repeat(5)))).toEqual([
+      'private-key',
+    ]);
     expect(rulesOf('a.txt', join('-'.repeat(5), 'BEGIN PUBLIC KEY', '-'.repeat(5)))).toEqual([]);
   });
 

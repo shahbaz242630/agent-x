@@ -7,6 +7,7 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 import { ensureGitleaks } from './gitleaks.ts';
+import { runGit } from './pre-commit.ts';
 
 export interface PushedRef {
   readonly localRef: string;
@@ -33,16 +34,31 @@ export function parseRefs(stdin: string): PushedRef[] {
 
 /**
  * The `git log` arguments naming the commits each push adds: those after the
- * remote's commit, or, for a new branch, those on no branch of that remote
- * yet. A deleted ref adds nothing.
+ * remote's commit, or those on no branch of that remote yet, for a new branch
+ * or when this clone lacks the remote's commit (the branch moved on GitHub
+ * and wasn't fetched). A deleted ref adds nothing.
  */
-export function logRanges(refs: readonly PushedRef[], remote: string): string[] {
+export function logRanges(refs: readonly PushedRef[], remote: string, known: (sha: string) => boolean): string[] {
   return refs
     .filter((ref) => !NO_COMMIT.test(ref.localSha))
     .map((ref) =>
-      NO_COMMIT.test(ref.remoteSha) ? `${ref.localSha} --not --remotes=${remote}` : `${ref.remoteSha}..${ref.localSha}`,
+      NO_COMMIT.test(ref.remoteSha) || !known(ref.remoteSha)
+        ? `${ref.localSha} --not --remotes=${remote}`
+        : `${ref.remoteSha}..${ref.localSha}`,
     );
 }
+
+/** Whether this clone has the commit. */
+export const knownCommit = (sha: string): boolean =>
+  spawnSync('git', ['cat-file', '-e', `${sha}^{commit}`], { windowsHide: true }).status === 0;
+
+/**
+ * How many commits a range names; throws when git can't read it. gitleaks
+ * reports an unreadable range as "0 commits scanned" and exits 0, so the hook
+ * counts first and refuses rather than pass a push it never scanned.
+ */
+export const commitCount = (range: string): number =>
+  Number(runGit(['rev-list', '--count', ...range.split(' ')]).trim());
 
 /** gitleaks over a range of commits, with the repository's rules, redacting whatever it finds. */
 export const gitleaksArgs = (range: string): string[] => [
@@ -64,11 +80,15 @@ function packageScript(name: 'typecheck' | 'lint'): SpawnSyncReturns<Buffer> {
 }
 
 export interface Steps {
+  readonly known: (sha: string) => boolean;
+  readonly commits: (range: string) => number;
   readonly gitleaks: (range: string) => Promise<number>;
   readonly script: (name: 'typecheck' | 'lint') => number;
 }
 
 const realSteps: Steps = {
+  known: knownCommit,
+  commits: commitCount,
   gitleaks: async (range) => {
     const binary = await ensureGitleaks();
     return spawnSync(binary, gitleaksArgs(range), { stdio: 'inherit', windowsHide: true }).status ?? 1;
@@ -83,7 +103,7 @@ export async function prePush(
   steps: Steps = realSteps,
   log: (line: string) => void = console.error,
 ): Promise<number> {
-  const ranges = logRanges(parseRefs(stdin), remote);
+  const ranges = logRanges(parseRefs(stdin), remote, steps.known);
   if (ranges.length === 0) return 0;
 
   const refuse = (what: string): number => {
@@ -91,6 +111,13 @@ export async function prePush(
     return 1;
   };
   for (const range of ranges) {
+    let count: number;
+    try {
+      count = steps.commits(range);
+    } catch (error) {
+      return refuse(`git can't read the commits being pushed (${(error as Error).message}); fetch, then push again`);
+    }
+    if (count === 0) continue;
     let status: number;
     try {
       status = await steps.gitleaks(range);
