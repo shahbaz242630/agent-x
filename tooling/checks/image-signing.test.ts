@@ -79,6 +79,15 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect(powerful.sort()).toEqual([`${SIGNING_WORKFLOW}: image-attest`, `${SIGNING_WORKFLOW}: image-publish`]);
   });
 
+  it('gives every push its own run, so no merged commit is left without a signed image', () => {
+    // GitHub cancels all but one waiting run in a concurrency group, whatever cancel-in-progress says.
+    const { concurrency } = parse(readFileSync(SIGNING_WORKFLOW, 'utf8')) as {
+      concurrency?: { group?: string; 'cancel-in-progress'?: string };
+    };
+    expect(concurrency?.group).toBe("ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}");
+    expect(concurrency?.['cancel-in-progress']).toBe("${{ github.event_name == 'pull_request' }}");
+  });
+
   it('runs the image jobs only on a push to main', () => {
     for (const name of IMAGE_JOBS) expect(job(name).if).toBe(MAIN_PUSH_ONLY);
   });
@@ -148,6 +157,23 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       /cosign attest --yes --type cyclonedx --predicate "\$\{files\[0\]\}" "\$\{IMAGE\}@\$\{DIGEST\}"\n?$/,
     );
     expect(attesting[0]?.env?.DIGEST).toBe('${{ needs.image-publish.outputs.digest }}');
+  });
+
+  it('signs the digest this push uploaded, read from the local image, never from the movable tag', () => {
+    const push = steps('image-publish').find((step) => step.name === 'Push');
+    expect(push?.run).toContain(
+      'docker image inspect "${IMAGE}:${COMMIT}" --format \'{{range .RepoDigests}}{{.}} {{end}}\'',
+    );
+    expect(push?.run).toContain('if [ "${#digests[@]}" -ne 1 ]; then');
+    expect(push?.run).toContain('docker buildx imagetools inspect "${IMAGE}@${digest}"');
+    expect(push?.run).not.toContain('imagetools inspect "${IMAGE}:${COMMIT}"');
+  });
+
+  it("uses the runner image's own Node, not a same-day download, in the jobs that can sign", () => {
+    for (const name of ['image-publish', 'image-attest']) {
+      const setupNode = steps(name).find((step) => step.uses?.startsWith('actions/setup-node@') === true);
+      expect(setupNode?.with?.['check-latest']).toBe(false);
+    }
   });
 
   it('proves each refusal against the real image, in order: unsigned, then no SBOM, then another commit', () => {
