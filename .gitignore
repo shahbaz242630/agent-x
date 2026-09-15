@@ -31,8 +31,11 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Local tools the hooks install (the pinned gitleaks)
+# Local tools the hooks and `pnpm tools` install (the pinned gitleaks and Bicep)
 .tools/
+
+# What `bicep snapshot` writes beside a parameters file (deploy/azure): made on demand, never kept
+deploy/azure/*.snapshot.json
 
 # Local AI tooling
 .claude/settings.local.json

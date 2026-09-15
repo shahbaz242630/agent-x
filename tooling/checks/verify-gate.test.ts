@@ -30,12 +30,17 @@ const endToEndJob = ciJobs['end-to-end'];
 /** The end-to-end suite (ADR-010 §7), run by its own CI job against the compose stack. */
 const END_TO_END = { e2e: 'vitest run --config vitest.e2e.config.ts' } as const;
 
-/** The only other root scripts: conveniences that CI never runs, and the one-time git hooks set-up (Security-Handoff §7). */
+/**
+ * The only other root scripts: conveniences that CI never runs, the one-time
+ * git hooks set-up (Security-Handoff §7), and the one-time install of the pinned
+ * Bicep compiler, which Verify also runs before its tests (tooling/bicep).
+ */
 const OTHER_SCRIPTS = {
   format: 'prettier --write .',
   test: 'vitest run',
   verify: Object.values(CHECKS).join(' && '),
   hooks: 'node tooling/git-hooks/install.ts',
+  tools: 'node tooling/bicep/install.ts',
 };
 
 /** Scripts pnpm runs by itself during an install. */
