@@ -441,11 +441,14 @@ export function paramsFileProblems(file: string, text: string, secureParameters:
 
 /**
  * What only a compiled template shows, since a snapshot drops a resource's
- * options: every key vault secret it writes is written either on a condition
- * or only if it doesn't exist yet (`@onlyIfNotExists()`), never both and never
- * on every run. With `vault-secrets`, that leaves Zitadel's master key created
- * once and every other secret written only when its value is given. A module's
- * own template is read the same way.
+ * options and any condition Bicep can settle offline: every key vault secret
+ * it writes is written either only when its own value is given (a condition
+ * exactly `not(empty(<its value>))`) or only if it doesn't exist yet
+ * (`@onlyIfNotExists()`), never both and never on every run. With
+ * `vault-secrets`, that leaves Zitadel's master key created once, even under a
+ * condition that would vanish from the snapshot (security review, S15), and
+ * every other secret written only when given. A module's own template is read
+ * the same way.
  */
 export function templateProblems(file: string, template: unknown): Problem[] {
   const resources = at(template, 'resources');
@@ -461,18 +464,25 @@ export function templateProblems(file: string, template: unknown): Problem[] {
       return templateProblems(file, at(resource, 'properties', 'template'));
     }
     if (at(resource, 'type') !== TYPES.vaultSecret || at(resource, 'existing') === true) return [];
-    const conditional = at(resource, 'condition') !== undefined;
+    const condition = at(resource, 'condition');
     const once = at(resource, '@options', 'onlyIfNotExists') !== undefined;
-    if (conditional !== once) return [];
-    return [
-      {
-        rule: 'vault-secrets',
-        resource: `${file}: ${name}`,
-        message: conditional
-          ? "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, the master key @onlyIfNotExists() alone"
-          : 'is written on every run: write it only when its value is given (if (!empty(value))), or create it once (@onlyIfNotExists())',
-      },
-    ];
+    const value = at(resource, 'properties', 'value');
+    const expression = typeof value === 'string' ? /^\[(.+)\]$/.exec(value)?.[1] : undefined;
+    const whenGiven = expression !== undefined && condition === `[not(empty(${expression}))]`;
+    const problem = (message: string): Problem[] => [{ rule: 'vault-secrets', resource: `${file}: ${name}`, message }];
+    if (once && condition !== undefined) {
+      return problem(
+        "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, the master key @onlyIfNotExists() alone",
+      );
+    }
+    if (!once && !whenGiven) {
+      return problem(
+        condition === undefined
+          ? 'is written on every run: write it only when its value is given (if (!empty(value))), or create it once (@onlyIfNotExists())'
+          : 'is written on a condition other than its own value being given, which a snapshot may settle and drop: write it only if (!empty(value)), or create it once (@onlyIfNotExists())',
+      );
+    }
+    return [];
   });
 }
 

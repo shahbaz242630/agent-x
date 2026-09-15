@@ -1044,12 +1044,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
   });
 
-  it('SEC-OPS-11 vault-secrets in a compiled template: a secret written on every run, or both on a condition and once', () => {
+  it('SEC-OPS-11 vault-secrets in a compiled template: a secret written on every run, on another condition, or both on a condition and once', () => {
+    const master = "@onlyIfNotExists()\nresource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {";
     for (const [from, to] of [
       // The master key overwritten by every run.
       ['@onlyIfNotExists()\nresource created', 'resource created'],
-      // Every other secret overwritten by every run, given or not.
+      // The master key overwritten by every staging run: a condition the snapshot settles and drops (security review, S15).
+      [master, "resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = if (environment == 'staging') {"],
+      // Every other secret overwritten by every run, given or not, or whenever a secret has a name.
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: {'],
+      ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: if (!empty(secret.name)) {'],
       // Rotating secrets that a run can no longer rotate.
       ["resource written 'Microsoft", "@onlyIfNotExists()\nresource written 'Microsoft"],
     ] as const) {
@@ -1073,6 +1077,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       }),
     ).toHaveLength(1);
     expect(templateProblems('t.bicep', { resources: { found: { ...secret, existing: true } } })).toEqual([]);
+    // Written when its own value is given; a condition on another value, or around its own, is not that.
+    const given = { ...secret, condition: "[not(empty(parameters('p')))]", properties: { value: "[parameters('p')]" } };
+    expect(templateProblems('t.bicep', { resources: [given] })).toEqual([]);
+    for (const condition of ["[not(empty(parameters('q')))]", "[and(true(), not(empty(parameters('p'))))]"]) {
+      expect(templateProblems('t.bicep', { resources: [{ ...given, condition }] })).toHaveLength(1);
+    }
+    for (const value of ['p', "x[parameters('p')]", "[parameters('p')]x"]) {
+      expect(templateProblems('t.bicep', { resources: [{ ...given, properties: { value } }] })).toHaveLength(1);
+    }
   });
 
   it("SEC-OPS-11 secret-access: another role, a wider scope, someone else's principal, or a reader the list doesn't name", () => {
