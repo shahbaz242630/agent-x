@@ -1,8 +1,13 @@
 // Staging's secrets (0e G2c; secrets.bicep). Every value comes from the shell
 // that deploys, never from this repository (Rule Book §7): the machine logins
-// made for the run, the people's from the password manager (G3). An empty
-// value leaves that secret as the vault has it; Zitadel's master key is
-// written only the first time.
+// made for the run, the people's from the password manager (G3).
+// - every variable is set on every run: an empty one leaves that secret as the
+//   vault has it, and a missing one stops the run, so a misspelt name can't
+//   pass for a rotation
+// - Windows PowerShell 5.1 deletes a variable set to empty, so a run goes
+//   through G3's tool or Git Bash, which keep it
+// - Zitadel's master key takes a fresh 32 characters every run, never the real
+//   one again: only the first run's is kept
 using 'secrets.bicep'
 
 param environment = 'staging'

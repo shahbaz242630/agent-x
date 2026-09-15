@@ -11,9 +11,9 @@
 // - written through Azure Resource Manager, which the vault's firewall doesn't
 //   cover (Microsoft), so the vault stays closed to all but the apps subnet
 // - a secret is written only when its value is given; an empty value leaves it
-//   as the vault has it, so rotating one secret touches no other. Every app
-//   that reads a secret restarts with its new version within 30 minutes
-//   (Microsoft)
+//   as the vault has it, so rotating one secret touches no other (the
+//   parameters file says how a run sets them). Every app that reads a secret
+//   restarts with its new version within 30 minutes (Microsoft)
 // - Zitadel's master key is created once and never overwritten, whatever a
 //   later run brings: Zitadel can't read what it encrypted with another key
 // - each identity reads only the secrets listed for it below (Key Vault
@@ -56,7 +56,7 @@ param dbBackupPassword string
 @secure()
 param dbZitadelPassword string
 
-@description('Zitadel\'s master key, exactly 32 characters. Only the first run writes it: a later run\'s value is ignored.')
+@description('Zitadel\'s master key, exactly 32 characters, on every run. Only the first run\'s is kept and a later one is ignored, so a run gives a fresh random one, never the real key again.')
 @minLength(32)
 @maxLength(32)
 @secure()

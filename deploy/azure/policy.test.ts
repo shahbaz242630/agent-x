@@ -316,6 +316,28 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ]);
   });
 
+  it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
+    const text = params.get('staging.secrets.bicepparam')?.text ?? '';
+    const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
+    expect(variables).toHaveLength(9);
+    // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
+    // fresh 32 characters, which Azure leaves alone once one exists. Empty values reach Bicep from Node, as G3's tool sends them.
+    const kept = Object.fromEntries(
+      variables
+        .filter((name) => !['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY'].includes(name))
+        .map((name) => [name, '']),
+    );
+    inCopy((dir) => {
+      const rotation = environmentSnapshot(dir, 'staging', kept).together;
+      expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(9);
+      // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
+      expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MASTERKEY: '' })).toThrow(
+        /minimum allowable length is 32/,
+      );
+    });
+  });
+
   it('resolves every reference between modules to a resource it creates', () => {
     const server = staging.predictedResources.find(SERVER);
     const network = staging.predictedResources.find(NETWORK);

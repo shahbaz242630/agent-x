@@ -135,11 +135,17 @@ export function secureParameters(template: unknown): string[] {
 }
 
 /**
+ * Values a deploying shell sets over the stand-ins, such as a rotation run's
+ * empty ones. Environment variables only: this is how a parameters file reads them.
+ */
+type ShellValues = Readonly<Record<string, string>>;
+
+/**
  * What a deployment of the parameters file would create, resolved as far as
  * Bicep can without Azure: at subscription scope, or into `resourceGroup` for
  * a part of an environment's foundation.
  */
-function snapshot(dir: string, paramsFile: string, resourceGroup?: string): Snapshot {
+function snapshot(dir: string, paramsFile: string, resourceGroup: string | undefined, values: ShellValues): Snapshot {
   const run = runBicep(
     [
       'snapshot',
@@ -155,7 +161,7 @@ function snapshot(dir: string, paramsFile: string, resourceGroup?: string): Snap
       ...(resourceGroup === undefined ? [] : ['--resource-group', resourceGroup]),
     ],
     dir,
-    standInEnvironment(),
+    { ...standInEnvironment(), ...values },
   );
   if (run.status !== 0) throw new Error(`bicep snapshot ${paramsFile} failed:\n${run.output}`);
   const written = path.join(dir, paramsFile.replace(/\.bicepparam$/, '.snapshot.json'));
@@ -174,10 +180,11 @@ export interface EnvironmentSnapshot {
 /**
  * Everything an environment's deployments would create: the foundation at
  * subscription scope, then each part into the resource group the foundation
- * creates, the order they are deployed in (G3).
+ * creates, the order they are deployed in (G3). `values` are set over the
+ * stand-ins, as a deploying shell would.
  */
-export function environmentSnapshot(dir: string, environment: string): EnvironmentSnapshot {
-  const foundation = snapshot(dir, `${environment}.bicepparam`);
+export function environmentSnapshot(dir: string, environment: string, values: ShellValues = {}): EnvironmentSnapshot {
+  const foundation = snapshot(dir, `${environment}.bicepparam`, undefined, values);
   const groups = foundation.predictedResources.filter(
     (resource) => resource.type === 'Microsoft.Resources/resourceGroups',
   );
@@ -188,7 +195,7 @@ export function environmentSnapshot(dir: string, environment: string): Environme
   const parts = new Map(
     paramsFiles(dir)
       .filter((file) => file.startsWith(`${environment}.`) && file !== `${environment}.bicepparam`)
-      .map((file) => [file, snapshot(dir, file, group.name)] as const),
+      .map((file) => [file, snapshot(dir, file, group.name, values)] as const),
   );
   const all = [foundation, ...parts.values()];
   return {
