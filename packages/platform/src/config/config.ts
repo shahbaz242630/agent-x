@@ -1,24 +1,25 @@
-// Deployment config (Rule Book §5, ADR-010 §5, ADR-011 §9, ADR-012 §6). Every
-// setting comes from an AGENTX_ environment variable, set by reviewed
-// infrastructure code, and is checked once at start-up. Anything wrong stops
-// the start: a bad value, a broken rule between settings, a value below a
-// safety minimum, a misspelt AGENTX_ variable, or TLS certificate checks
-// turned off. Problems name the variable and the rule, never the value, so a
-// secret pasted into the wrong variable can't leak through the error.
-import { z } from 'zod';
-
-import { refusedProxyEntries } from './proxies.ts';
+// The app's deployment config (Rule Book §5, ADR-010 §5, ADR-011 §9, ADR-012
+// §6). Every setting comes from an AGENTX_ environment variable, set by
+// reviewed infrastructure code, and is checked once at start-up. Anything
+// wrong stops the start: a bad value, a broken rule between settings, a value
+// below a safety minimum, a misspelt AGENTX_ variable, a setting that belongs
+// to the migration job, a PG* variable, or TLS certificate checks turned off.
+// Problems name the variable and the rule, never the value, so a secret pasted
+// into the wrong variable can't leak through the error.
+import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
+import { checkLocation, pgVariableProblems, secretSetting, tlsModeProblems } from './database.ts';
+import type { DatabaseTlsMode } from './primitives.ts';
+import {
+  allOk,
+  failures,
+  logLevelProblems,
+  nodeDebugProblems,
+  releaseProblems,
+  setting,
+  type SettingName,
+  unknownSettings,
+} from './settings.ts';
 import { tlsProblems } from './tls.ts';
-
-const ENVIRONMENTS = ['development', 'test', 'staging', 'production'] as const;
-export type Environment = (typeof ENVIRONMENTS)[number];
-
-/** Where nothing real is at stake, so a local stack may talk plain http and needs no release name. */
-const LOCAL_ONLY: readonly Environment[] = ['development', 'test'];
-
-/** The logging standard's levels, most to least severe. */
-const LOG_LEVELS = ['error', 'warn', 'info', 'debug'] as const;
-export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** The release name a local run uses when none is set. */
 const LOCAL_RELEASE = 'local';
@@ -52,181 +53,57 @@ export interface Config {
     /** ADR-011 §4: the most requests one client address may make per minute. */
     readonly rateLimitPerMinute: number;
   };
+  /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
+  readonly db: {
+    readonly host: string;
+    readonly port: number;
+    readonly database: string;
+    readonly user: string;
+    /** Never logged, never in the fingerprint. */
+    readonly password: string;
+    readonly tls: DatabaseTlsMode;
+    /** The most connections the pool keeps open. */
+    readonly poolMax: number;
+  };
   /** SEC-WEB-05: the only origins the app may call, as `scheme://host[:port]`. */
   readonly outbound: { readonly allowedOrigins: readonly string[] };
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
 }
 
-/** The log settings when none are set; also what the start-up logger writes with before the config is read. */
-export const DEFAULT_LOG: Config['log'] = Object.freeze({ level: 'info', eventCapPerMinute: 600 });
+/** The settings the app reads. Anything else in AGENTX_ style is refused. */
+const APP_SETTINGS: readonly SettingName[] = [
+  'AGENTX_ENV',
+  'AGENTX_RELEASE',
+  'AGENTX_LOG_LEVEL',
+  'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
+  'AGENTX_HTTP_HOST',
+  'AGENTX_HTTP_PORT',
+  'AGENTX_PUBLIC_ORIGIN',
+  'AGENTX_TRUSTED_PROXIES',
+  'AGENTX_RATE_LIMIT_PER_MINUTE',
+  'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
+  'AGENTX_PAYEE_COOLING_OFF_HOURS',
+  'AGENTX_DB_HOST',
+  'AGENTX_DB_PORT',
+  'AGENTX_DB_NAME',
+  'AGENTX_DB_TLS',
+  'AGENTX_DB_USER',
+  'AGENTX_DB_PASSWORD',
+  'AGENTX_DB_PASSWORD_FILE',
+  'AGENTX_DB_POOL_MAX',
+];
 
-export class ConfigError extends Error {
-  readonly problems: readonly string[];
-
-  constructor(problems: readonly string[]) {
-    super(`Refusing to start: ${problems.length} config problem(s).\n- ${problems.join('\n- ')}`);
-    this.name = 'ConfigError';
-    this.problems = problems;
-  }
-}
-
-type Env = Readonly<Record<string, string | undefined>>;
-
-const text = z
-  .string({ error: 'is required' })
-  .min(1, { error: 'is empty: give it a value, or remove it to use the default', abort: true });
-
-function wholeNumber(limits: { min: number; max: number; unit?: string; minimumReason?: string }) {
-  const unit = limits.unit === undefined ? '' : ` ${limits.unit}`;
-  const reason = limits.minimumReason === undefined ? '' : ` (${limits.minimumReason})`;
-  return text
-    .regex(/^[0-9]+$/, { error: 'must be a whole number, written in digits only' })
-    .transform(Number)
-    .pipe(
-      // A digits-only value that isn't a finite number overflowed, so it is too big.
-      z
-        .number({ error: `must be at most ${limits.max}${unit}` })
-        .min(limits.min, { error: `must be at least ${limits.min}${unit}${reason}` })
-        .max(limits.max, { error: `must be at most ${limits.max}${unit}` }),
-    );
-}
-
-/**
- * True for an http(s) origin written exactly as the URL standard prints it.
- * The standard allows `*` in a host name, but it would only ever match a host
- * literally called that, so it's refused rather than mistaken for a wildcard.
- */
-function isCanonicalOrigin(entry: string): boolean {
-  if (!URL.canParse(entry)) return false;
-  const url = new URL(entry);
-  return (url.protocol === 'https:' || url.protocol === 'http:') && url.origin === entry && !url.host.includes('*');
-}
-
-const originList = text.transform((raw, ctx) => {
-  const entries = raw.split(',');
-  const bad = entries.flatMap((entry, index) => (isCanonicalOrigin(entry) ? [] : [index + 1]));
-  if (bad.length > 0) {
-    ctx.addIssue({
-      code: 'custom',
-      message:
-        `entry ${bad.join(', ')} is not an origin. Write each as scheme://host[:port]: ` +
-        'http or https, lowercase, no default port, no path, no user name, comma-separated with no spaces',
-    });
-    return z.NEVER;
-  }
-  return [...new Set(entries)].sort();
-});
-
-const publicOrigin = text.refine(isCanonicalOrigin, {
-  error:
-    'is not an origin. Write it as scheme://host[:port]: http or https, lowercase, no default port, no path, no user name',
-});
-
-/** A host name is refused: it could resolve to an address nobody meant. */
-const listenAddress = text.pipe(
-  z.union([z.ipv4(), z.ipv6()], { error: 'must be an IP address, such as 127.0.0.1 or 0.0.0.0, not a host name' }),
-);
-
-const proxyList = text.transform((raw, ctx) => {
-  const entries = raw.split(',');
-  const bad = refusedProxyEntries(entries);
-  if (bad.length > 0) {
-    ctx.addIssue({
-      code: 'custom',
-      message:
-        `entry ${bad.join(', ')} is not a proxy address. Write each as an IP address or a CIDR range ` +
-        'no wider than /16 (IPv4) or /48 (IPv6), with IPv4 ranges in IPv4 form, comma-separated with no spaces',
-    });
-    return z.NEVER;
-  }
-  return [...new Set(entries)].sort();
-});
-
-/**
- * Each AGENTX_ variable the app reads. A default is written as the text an
- * operator would set, so it goes through the same checks as a set value.
- */
-const SETTINGS = {
-  AGENTX_ENV: { schema: text.pipe(z.enum(ENVIRONMENTS, { error: `must be one of: ${ENVIRONMENTS.join(', ')}` })) },
-  AGENTX_RELEASE: {
-    schema: text
-      .regex(/^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$/, {
-        error: 'must be 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit',
-      })
-      .optional(),
-  },
-  AGENTX_LOG_LEVEL: {
-    schema: text.pipe(z.enum(LOG_LEVELS, { error: `must be one of: ${LOG_LEVELS.join(', ')}` })),
-    default: DEFAULT_LOG.level,
-  },
-  AGENTX_LOG_EVENT_CAP_PER_MINUTE: {
-    schema: wholeNumber({
-      min: 10,
-      max: 1_000_000,
-      unit: 'lines',
-      minimumReason: 'fewer would hide ordinary activity',
-    }),
-    default: String(DEFAULT_LOG.eventCapPerMinute),
-  },
-  AGENTX_HTTP_HOST: { schema: listenAddress, default: '127.0.0.1' },
-  AGENTX_HTTP_PORT: { schema: wholeNumber({ min: 0, max: 65_535 }), default: '8080' },
-  AGENTX_PUBLIC_ORIGIN: { schema: publicOrigin.optional() },
-  AGENTX_TRUSTED_PROXIES: { schema: proxyList.optional() },
-  AGENTX_RATE_LIMIT_PER_MINUTE: {
-    schema: wholeNumber({
-      min: 10,
-      max: 100_000,
-      unit: 'requests',
-      minimumReason: 'fewer would stop ordinary use of the console',
-    }),
-    // Half the default log cap, so one client's request lines can't fill it (see rateLimitProblems).
-    default: '300',
-  },
-  AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
-  AGENTX_PAYEE_COOLING_OFF_HOURS: {
-    schema: wholeNumber({
-      min: 24,
-      // Longer than a year is almost certainly a typo, and a huge value could overflow date arithmetic.
-      max: 8760,
-      unit: 'hours',
-      minimumReason: 'the ADR-012 safety minimum for payee changes',
-    }),
-    default: '24',
-  },
-} as const;
-
-type SettingName = keyof typeof SETTINGS;
-
-const PREFIX = 'AGENTX_';
-
-type Checked<T> = { ok: true; value: T } | { ok: false; problem: string };
-
-function check<T>(env: Env, name: SettingName, schema: z.ZodType<T>, fallback?: string): Checked<T> {
-  const result = schema.safeParse(env[name] ?? fallback);
-  return result.success
-    ? { ok: true, value: result.data }
-    : { ok: false, problem: `${name}: ${result.error.issues.map((issue) => issue.message).join('; ')}` };
-}
-
-/** Names in AGENTX_ style, in any case, that aren't exactly a setting: typos, which would otherwise be ignored. */
-function unknownSettings(env: Env): string[] {
-  return Object.keys(env)
-    .filter((name) => name.toUpperCase().startsWith(PREFIX) && !Object.hasOwn(SETTINGS, name))
-    .map((name) => `${name}: not a setting the app knows; check the spelling and the capitals`);
-}
+/** The other process that reads AGENTX_ settings, for the message when one of its variables reaches the app. */
+const MIGRATION_JOB = {
+  job: 'the migration job (apps/migrate)',
+  reason: "the running app never holds the migration role's login (ADR-005 §3)",
+};
 
 function plainHttpProblems(name: SettingName, environment: Environment, origins: readonly string[]): string[] {
   const plainHttp = origins.some((origin) => origin.startsWith('http:'));
   return plainHttp && !LOCAL_ONLY.includes(environment)
     ? [`${name}: plain http is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} must use https`]
-    : [];
-}
-
-/** Every deployed build names its release, so each error can be traced to the code that ran. */
-function releaseProblems(environment: Environment, release: string | undefined): string[] {
-  return release === undefined && !LOCAL_ONLY.includes(environment)
-    ? [`AGENTX_RELEASE: is required in ${environment}, so every log line and error names the build that ran`]
     : [];
 }
 
@@ -278,77 +155,40 @@ function portProblems(environment: Environment, value: number): string[] {
     : [];
 }
 
-/** Logging standard §2: debug is off in production, where lines could carry more detail than needed. */
-function logLevelProblems(environment: Environment, level: LogLevel): string[] {
-  return environment === 'production' && level === 'debug'
-    ? ['AGENTX_LOG_LEVEL: debug is off in production; use info, warn or error']
-    : [];
-}
-
-/**
- * Node's own debug switches make its core modules print request details
- * (fetch prints whole URLs, queries included) straight to stderr, outside the
- * redacting logger. They're for local debugging, never production.
- */
-const NODE_DEBUG_SWITCHES = ['NODE_DEBUG', 'NODE_DEBUG_NATIVE'];
-
-function nodeDebugProblems(environment: Environment, env: Env): string[] {
-  return environment === 'production'
-    ? NODE_DEBUG_SWITCHES.filter((name) => env[name] !== undefined).map(
-        (name) => `${name}: must be unset in production; Node would print its own debug output outside the logger`,
-      )
-    : [];
-}
-
 /**
  * Reads and checks the config, or throws a ConfigError listing every problem.
  * The app calls this once at start-up and exits if it throws.
  */
 export function loadConfig(env: Env = process.env): Config {
-  const environment = check(env, 'AGENTX_ENV', SETTINGS.AGENTX_ENV.schema);
-  const release = check(env, 'AGENTX_RELEASE', SETTINGS.AGENTX_RELEASE.schema);
-  const logLevel = check(env, 'AGENTX_LOG_LEVEL', SETTINGS.AGENTX_LOG_LEVEL.schema, SETTINGS.AGENTX_LOG_LEVEL.default);
-  const eventCap = check(
-    env,
-    'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
-    SETTINGS.AGENTX_LOG_EVENT_CAP_PER_MINUTE.schema,
-    SETTINGS.AGENTX_LOG_EVENT_CAP_PER_MINUTE.default,
-  );
-  const host = check(env, 'AGENTX_HTTP_HOST', SETTINGS.AGENTX_HTTP_HOST.schema, SETTINGS.AGENTX_HTTP_HOST.default);
-  const httpPort = check(env, 'AGENTX_HTTP_PORT', SETTINGS.AGENTX_HTTP_PORT.schema, SETTINGS.AGENTX_HTTP_PORT.default);
-  const origin = check(env, 'AGENTX_PUBLIC_ORIGIN', SETTINGS.AGENTX_PUBLIC_ORIGIN.schema);
-  const trustedProxies = check(env, 'AGENTX_TRUSTED_PROXIES', SETTINGS.AGENTX_TRUSTED_PROXIES.schema);
-  const rateLimit = check(
-    env,
-    'AGENTX_RATE_LIMIT_PER_MINUTE',
-    SETTINGS.AGENTX_RATE_LIMIT_PER_MINUTE.schema,
-    SETTINGS.AGENTX_RATE_LIMIT_PER_MINUTE.default,
-  );
-  const allowedOrigins = check(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS', SETTINGS.AGENTX_OUTBOUND_ALLOWED_ORIGINS.schema);
-  const coolingOffHours = check(
-    env,
-    'AGENTX_PAYEE_COOLING_OFF_HOURS',
-    SETTINGS.AGENTX_PAYEE_COOLING_OFF_HOURS.schema,
-    SETTINGS.AGENTX_PAYEE_COOLING_OFF_HOURS.default,
-  );
+  const location = checkLocation(env);
+  const checks = {
+    environment: setting(env, 'AGENTX_ENV'),
+    release: setting(env, 'AGENTX_RELEASE'),
+    logLevel: setting(env, 'AGENTX_LOG_LEVEL'),
+    eventCap: setting(env, 'AGENTX_LOG_EVENT_CAP_PER_MINUTE'),
+    host: setting(env, 'AGENTX_HTTP_HOST'),
+    httpPort: setting(env, 'AGENTX_HTTP_PORT'),
+    origin: setting(env, 'AGENTX_PUBLIC_ORIGIN'),
+    trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
+    rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
+    allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
+    coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
+    dbHost: location.host,
+    dbPort: location.port,
+    dbName: location.database,
+    dbTls: location.tls,
+    dbUser: setting(env, 'AGENTX_DB_USER'),
+    dbPassword: secretSetting(env, 'AGENTX_DB_PASSWORD'),
+    dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
+  };
+  const { environment, release, logLevel, eventCap, httpPort, origin, trustedProxies, rateLimit, allowedOrigins } =
+    checks;
 
-  const settings = [
-    environment,
-    release,
-    logLevel,
-    eventCap,
-    host,
-    httpPort,
-    origin,
-    trustedProxies,
-    rateLimit,
-    allowedOrigins,
-    coolingOffHours,
-  ];
   const problems = [
     ...tlsProblems(env),
-    ...unknownSettings(env),
-    ...settings.flatMap((setting) => (setting.ok ? [] : [setting.problem])),
+    ...pgVariableProblems(env),
+    ...unknownSettings(env, APP_SETTINGS, MIGRATION_JOB),
+    ...failures(Object.values(checks)),
     // A rule between settings runs whenever the settings it compares are valid,
     // so one start reports it alongside any other problem.
     ...(environment.ok && allowedOrigins.ok
@@ -360,38 +200,34 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && httpPort.ok ? portProblems(environment.value, httpPort.value) : []),
     ...(environment.ok && trustedProxies.ok ? trustedProxiesProblems(environment.value, trustedProxies.value) : []),
     ...(rateLimit.ok && eventCap.ok ? rateLimitProblems(rateLimit.value, eventCap.value) : []),
+    ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
     ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
   ];
-  if (
-    !environment.ok ||
-    !release.ok ||
-    !logLevel.ok ||
-    !eventCap.ok ||
-    !host.ok ||
-    !httpPort.ok ||
-    !origin.ok ||
-    !trustedProxies.ok ||
-    !rateLimit.ok ||
-    !allowedOrigins.ok ||
-    !coolingOffHours.ok ||
-    problems.length > 0
-  ) {
-    throw new ConfigError(problems);
-  }
+  // Every failed setting is already among the problems; the type guard narrows the checks to their values.
+  if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);
 
   return Object.freeze({
-    environment: environment.value,
-    release: release.value ?? LOCAL_RELEASE,
-    log: Object.freeze({ level: logLevel.value, eventCapPerMinute: eventCap.value }),
+    environment: checks.environment.value,
+    release: checks.release.value ?? LOCAL_RELEASE,
+    log: Object.freeze({ level: checks.logLevel.value, eventCapPerMinute: checks.eventCap.value }),
     http: Object.freeze({
-      host: host.value,
-      port: httpPort.value,
+      host: checks.host.value,
+      port: checks.httpPort.value,
       // Only development and test get here without one (publicOriginProblems).
-      publicOrigin: origin.value ?? LOCAL_PUBLIC_ORIGIN,
-      trustedProxies: Object.freeze(trustedProxies.value ?? []),
-      rateLimitPerMinute: rateLimit.value,
+      publicOrigin: checks.origin.value ?? LOCAL_PUBLIC_ORIGIN,
+      trustedProxies: Object.freeze(checks.trustedProxies.value ?? []),
+      rateLimitPerMinute: checks.rateLimit.value,
     }),
-    outbound: Object.freeze({ allowedOrigins: Object.freeze(allowedOrigins.value ?? []) }),
-    payees: Object.freeze({ coolingOffHours: coolingOffHours.value }),
+    db: Object.freeze({
+      host: checks.dbHost.value,
+      port: checks.dbPort.value,
+      database: checks.dbName.value,
+      user: checks.dbUser.value,
+      password: checks.dbPassword.value,
+      tls: checks.dbTls.value,
+      poolMax: checks.dbPoolMax.value,
+    }),
+    outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
+    payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
   });
 }

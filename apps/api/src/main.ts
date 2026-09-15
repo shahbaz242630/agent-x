@@ -3,11 +3,15 @@
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
 // 2. reads the config, or refuses to start and says why (SEC-AV-03)
 // 3. logs the config fingerprint (SEC-OPS-05)
-// 4. listens, and stops cleanly on SIGTERM or SIGINT
+// 4. opens the database pool as the app's role and refuses to run as one that
+//    could get round the tenant walls (ADR-005 §3, APP-02)
+// 5. listens, and stops cleanly on SIGTERM or SIGINT: HTTP first, so every
+//    request in flight is answered, then the pool those requests were using
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
+import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
 import {
   createLogger,
   createStartupLogger,
@@ -21,6 +25,9 @@ import type { FastifyInstance } from 'fastify';
 import { buildServer } from './server.ts';
 
 const SERVICE = 'api';
+
+/** How the API's connections are named in Postgres's own views. */
+const APPLICATION_NAME = 'agentx-api';
 
 /**
  * How long a stop may take before the process gives up and exits, within the
@@ -52,7 +59,7 @@ export interface RunOptions {
  * stay on: without one, Node's default for a second SIGTERM would end the
  * process at once, before the counts are written.
  */
-function onStopSignals(host: ApiProcess, server: FastifyInstance, logger: Logger): void {
+function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Database, logger: Logger): void {
   let stopping = false;
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     if (stopping) return;
@@ -65,7 +72,10 @@ function onStopSignals(host: ApiProcess, server: FastifyInstance, logger: Logger
       host.exit(1);
     }, STOP_DEADLINE_MS);
     try {
+      // Requests are still answered while the server stops (return503OnClosing is
+      // off), so the pool closes only once the last of them has finished with it.
       await server.close();
+      await database.destroy();
       logger.info('api.stopped');
       logger.flush();
       host.exit(0);
@@ -79,6 +89,42 @@ function onStopSignals(host: ApiProcess, server: FastifyInstance, logger: Logger
   };
   host.on('SIGTERM', (signal) => void stop(signal));
   host.on('SIGINT', (signal) => void stop(signal));
+}
+
+/**
+ * Opens the pool and checks the role it logged in as. A role that could bypass
+ * the tenant walls is a wrong setting, refused like any other; a database that
+ * can't be reached is reported as unavailable. Either way the pool is closed
+ * and nothing is returned.
+ */
+async function connectDatabase(config: Config, logger: Logger): Promise<Database | undefined> {
+  const database = createDatabase(
+    {
+      host: config.db.host,
+      port: config.db.port,
+      database: config.db.database,
+      user: config.db.user,
+      password: config.db.password,
+      tls: config.db.tls,
+      maxConnections: config.db.poolMax,
+      applicationName: APPLICATION_NAME,
+    },
+    logger,
+  );
+  try {
+    await assertRuntimeRole(database);
+  } catch (error) {
+    if (error instanceof UnsafeDatabaseRole) {
+      // The problems name the role's rights and other roles, never a value.
+      logger.error('api.start_refused', { problems: error.problems });
+    } else {
+      logger.error('api.database_unavailable', { err: error });
+    }
+    await database.destroy();
+    return undefined;
+  }
+  logger.info('api.database_connected', { role: config.db.user });
+  return database;
 }
 
 /**
@@ -109,24 +155,32 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   logger.info('api.starting', { ...configFingerprint(config, options.env) });
 
+  const database = await connectDatabase(config, logger);
+  if (database === undefined) {
+    logger.flush();
+    host.exitCode = 1;
+    return undefined;
+  }
+
   // A failure to build the server is a bug, so it goes to the crash handler above.
   const server = await buildServer({ config, logger, ids: uuidV7Ids, healthChecks: [] });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
   } catch (error) {
     logger.error('api.listen_failed', { err: error });
-    // Closed, so nothing it opened (a database pool, later) keeps the process running.
+    // Closed, so nothing it opened keeps the process running.
     await server.close();
+    await database.destroy();
     logger.flush();
     host.exitCode = 1;
     return undefined;
   }
   logger.info('api.listening', { ports: server.addresses().map((address) => address.port) });
-  onStopSignals(host, server, logger);
+  onStopSignals(host, server, database, logger);
   return server;
 }
 
 // Only when Node runs this file itself. That's a real process, which in-process
-// coverage can't see: tooling/checks/api-process.test.ts runs it.
+// coverage can't see: tooling/checks/api-process.db.test.ts runs it.
 /* v8 ignore next -- @preserve */
 if (import.meta.main) await runApi(process, {});
