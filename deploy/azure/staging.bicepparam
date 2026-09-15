@@ -21,3 +21,9 @@ param budgetStartDate = '2026-09-01'
 param postgresAdminPassword = readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')
 param postgresBackupRetentionDays = 7
 param postgresGeoRedundantBackup = false
+
+// One zone is enough for synthetic data; it can't be changed later.
+param appsZoneRedundant = false
+
+// Staging runs synthetic traffic only, so any error event is worth a look.
+param appErrorAlertThreshold = 0

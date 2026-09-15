@@ -29,8 +29,14 @@ export type RuleId =
   | 'alert-runbook'
   | 'alert-delivery'
   | 'resource-logs'
+  | 'log-destinations'
   | 'activity-log'
-  | 'budget';
+  | 'budget'
+  | 'apps-environment'
+  | 'apps-network'
+  | 'apps-logs'
+  | 'app-errors-alert'
+  | 'identities';
 
 export interface Problem {
   readonly rule: RuleId;
@@ -52,6 +58,8 @@ const TYPES = {
   diagnostics: 'Microsoft.Insights/diagnosticSettings',
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
+  environment: 'Microsoft.App/managedEnvironments',
+  identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   network: 'Microsoft.Network/virtualNetworks',
   rules: 'Microsoft.Network/networkSecurityGroups',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
@@ -72,6 +80,22 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 
 /** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
 const BACKUP_ROLE = 'agentx_backup';
+
+/** What counts as an error event: our logger's level, and Zitadel's three. */
+const ERROR_LINES = 'where tostring(parse_json(Log).level) in ("error", "fatal", "panic")';
+
+/**
+ * Where a diagnostic setting could send logs other than a workspace: a storage
+ * account, an event hub, a partner solution or a Service Bus rule, any of which
+ * may sit outside the UAE.
+ */
+const OTHER_DESTINATIONS = [
+  'storageAccountId',
+  'eventHubAuthorizationRuleId',
+  'eventHubName',
+  'marketplacePartnerId',
+  'serviceBusRuleId',
+] as const;
 
 const requiredTags = (environment: string): Readonly<Record<string, string>> => ({
   product: 'agent-x',
@@ -254,6 +278,7 @@ const required: Check = (snapshot, _expected, add) => {
     ['the network', TYPES.network, 1, 1],
     ['the key vault', TYPES.vault, 1, Infinity],
     ['the Postgres server', TYPES.server, 1, Infinity],
+    ['the Container Apps environment', TYPES.environment, 1, 1],
   ];
   for (const [what, type, least, most] of counts) {
     const found = ofType(snapshot, type).length;
@@ -447,6 +472,39 @@ const database: Check = (snapshot, expected, add) => {
   }
 };
 
+/** A subnet's inbound rules, from the rules group of this deployment attached to it. */
+const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] => {
+  const rulesId = at(subnet, 'properties', 'networkSecurityGroup', 'id');
+  return list(at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'))
+    .map((rule) => at(rule, 'properties'))
+    .filter((rule) => at(rule, 'direction') === 'Inbound');
+};
+
+const allowing = (inbound: readonly unknown[]): readonly unknown[] =>
+  inbound.filter((rule) => at(rule, 'access') === 'Allow');
+
+/**
+ * A rule that denies the rest of the network, after every rule that allows:
+ * it overrides Azure's default one that lets the whole network in. Kept
+ * explicit, though each caller's own list of allowed rules already refuses any
+ * rule matching this one without denying (the one mutant tests can't tell apart).
+ */
+const deniesRestOfNetwork = (inbound: readonly unknown[]): boolean => {
+  const lastAllow = Math.max(...allowing(inbound).map((rule) => Number(at(rule, 'priority'))));
+  return inbound.some(
+    (rule) =>
+      at(rule, 'access') === 'Deny' &&
+      at(rule, 'protocol') === '*' &&
+      at(rule, 'sourceAddressPrefix') === 'VirtualNetwork' &&
+      at(rule, 'destinationAddressPrefix') === '*' &&
+      at(rule, 'destinationPortRange') === '*' &&
+      Number(at(rule, 'priority')) > lastAllow,
+  );
+};
+
+const appsSubnetOf = (network: PredictedResource): unknown =>
+  list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'apps');
+
 /**
  * Every Postgres subnet lets in port 5432 from the apps subnet and from itself
  * (Microsoft: the server's own features need 5432 inside its subnet), and
@@ -455,19 +513,13 @@ const database: Check = (snapshot, expected, add) => {
  */
 const databaseNetwork: Check = (snapshot, _expected, add) => {
   for (const network of ofType(snapshot, TYPES.network)) {
-    const subnets = list(at(network.properties, 'subnets'));
-    const apps = subnets.find((subnet) => at(subnet, 'name') === 'apps');
+    const apps = appsSubnetOf(network);
     const appsPrefix = at(apps, 'properties', 'addressPrefix');
     const own = postgresSubnets(snapshot).filter((entry) => entry.network.id === network.id);
     const safe = (subnet: unknown): boolean => {
       const prefix = at(subnet, 'properties', 'addressPrefix');
-      const rulesId = at(subnet, 'properties', 'networkSecurityGroup', 'id');
-      const inbound = list(
-        at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'),
-      )
-        .map((rule) => at(rule, 'properties'))
-        .filter((rule) => at(rule, 'direction') === 'Inbound');
-      const allows = inbound.filter((rule) => at(rule, 'access') === 'Allow');
+      const inbound = inboundRules(snapshot, subnet);
+      const allows = allowing(inbound);
       const onlyPostgres = allows.every(
         (rule) =>
           at(rule, 'protocol') === 'Tcp' &&
@@ -477,22 +529,10 @@ const databaseNetwork: Check = (snapshot, _expected, add) => {
       );
       const fromApps = allows.some((rule) => at(rule, 'sourceAddressPrefix') === appsPrefix);
       const fromItself = allows.some((rule) => at(rule, 'sourceAddressPrefix') === prefix);
-      const lastAllow = Math.max(...allows.map((rule) => Number(at(rule, 'priority'))));
-      // Kept explicit, though onlyPostgres already refuses any rule that
-      // matches this one without denying (the one mutant tests can't tell apart).
-      const deniesRest = inbound.some(
-        (rule) =>
-          at(rule, 'access') === 'Deny' &&
-          at(rule, 'protocol') === '*' &&
-          at(rule, 'sourceAddressPrefix') === 'VirtualNetwork' &&
-          at(rule, 'destinationAddressPrefix') === '*' &&
-          at(rule, 'destinationPortRange') === '*' &&
-          Number(at(rule, 'priority')) > lastAllow,
-      );
       const keepsStorage = list(at(subnet, 'properties', 'serviceEndpoints')).some(
         (endpoint) => at(endpoint, 'service') === 'Microsoft.Storage',
       );
-      return onlyPostgres && fromApps && fromItself && deniesRest && keepsStorage;
+      return onlyPostgres && fromApps && fromItself && deniesRestOfNetwork(inbound) && keepsStorage;
     };
     if (
       delegatedTo(apps) !== 'Microsoft.App/environments' ||
@@ -509,10 +549,52 @@ const databaseNetwork: Check = (snapshot, _expected, add) => {
   }
 };
 
-const vault: Check = (snapshot, _expected, add) => {
-  const appsSubnets: ReadonlySet<unknown> = new Set(
-    ofType(snapshot, TYPES.network).map((network) => `${network.id}/subnets/apps`),
+/**
+ * The apps subnet has rules of its own, from Microsoft's list for a workload
+ * profiles environment: the load balancer's probes and the subnet's own
+ * traffic let in, and the rest of the network denied after them. Public
+ * traffic reaches the apps through the environment's public IP, not through
+ * the subnet (Microsoft), so these rules keep the rest of the network out.
+ */
+const appsNetwork: Check = (snapshot, _expected, add) => {
+  for (const network of ofType(snapshot, TYPES.network)) {
+    const apps = appsSubnetOf(network);
+    const prefix = at(apps, 'properties', 'addressPrefix');
+    const inbound = inboundRules(snapshot, apps);
+    const allows = allowing(inbound);
+    const probes = (rule: unknown): boolean =>
+      at(rule, 'protocol') === 'Tcp' &&
+      at(rule, 'sourceAddressPrefix') === 'AzureLoadBalancer' &&
+      at(rule, 'destinationAddressPrefix') === prefix &&
+      at(rule, 'destinationPortRange') === '30000-32767';
+    const itself = (rule: unknown): boolean =>
+      at(rule, 'sourceAddressPrefix') === prefix && at(rule, 'destinationAddressPrefix') === prefix;
+    if (
+      !allows.every((rule) => probes(rule) || itself(rule)) ||
+      !allows.some(probes) ||
+      !allows.some(itself) ||
+      !deniesRestOfNetwork(inbound)
+    ) {
+      add({
+        rule: 'apps-network',
+        resource: network.name,
+        message:
+          "needs rules on its apps subnet that let in only the load balancer's probes (TCP 30000-32767) and the subnet itself, then deny the rest of the network",
+      });
+    }
+  }
+};
+
+/** Where the apps may run, and the only subnet the database and the key vault let in. */
+const appsSubnetIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
+  new Set(
+    ofType(snapshot, TYPES.network)
+      .filter((network) => appsSubnetOf(network) !== undefined)
+      .map((network) => `${network.id}/subnets/apps`),
   );
+
+const vault: Check = (snapshot, _expected, add) => {
+  const appsSubnets = appsSubnetIds(snapshot);
   for (const store of ofType(snapshot, TYPES.vault)) {
     const properties = store.properties;
     const acls = at(properties, 'networkAcls');
@@ -669,6 +751,23 @@ const resourceLogs: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** Every diagnostic setting sends to this deployment's workspace, and nowhere else (ADR-013). */
+const logDestinations: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const setting of ofType(snapshot, TYPES.diagnostics)) {
+    const elsewhere = OTHER_DESTINATIONS.filter(
+      (key) => !isEmpty(at(setting.properties, key)) && at(setting.properties, key) !== '',
+    );
+    if (!workspaces.has(at(setting.properties, 'workspaceId')) || elsewhere.length > 0) {
+      add({
+        rule: 'log-destinations',
+        resource: setting.name,
+        message: `must send to this deployment's workspace only${elsewhere.length > 0 ? `, not to ${elsewhere.join(', ')}` : ''}: logs stay in the UAE (ADR-013)`,
+      });
+    }
+  }
+};
+
 const activityLog: Check = (snapshot, _expected, add) => {
   const workspaces = workspaceIds(snapshot);
   const kept = ofType(snapshot, TYPES.diagnostics)
@@ -718,6 +817,117 @@ const budget: Check = (snapshot, _expected, add) => {
   }
 };
 
+/**
+ * The environment runs in this deployment's apps subnet (the one subnet the
+ * database and the key vault let in), on the Consumption profile alone (a
+ * dedicated one is billed while idle: a decision, never a default), with the
+ * traffic inside it encrypted, and its logs sent through Azure Monitor: a
+ * diagnostic setting needs no key, where the Log Analytics destination sends
+ * with the workspace's shared key (ADR-013 Amendment G1).
+ */
+const appsEnvironment: Check = (snapshot, _expected, add) => {
+  const appsSubnets = appsSubnetIds(snapshot);
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const properties = environment.properties;
+    const profiles = list(at(properties, 'workloadProfiles'));
+    const required: readonly (readonly [string, boolean])[] = [
+      ["this deployment's apps subnet", appsSubnets.has(at(properties, 'vnetConfiguration', 'infrastructureSubnetId'))],
+      [
+        'the Consumption workload profile alone',
+        profiles.length === 1 && at(profiles[0], 'workloadProfileType') === 'Consumption',
+      ],
+      ['peer-to-peer encryption', at(properties, 'peerTrafficConfiguration', 'encryption', 'enabled') === true],
+      [
+        'its logs sent through Azure Monitor',
+        at(properties, 'appLogsConfiguration', 'destination') === 'azure-monitor',
+      ],
+    ];
+    for (const [what, holds] of required) {
+      if (!holds) add({ rule: 'apps-environment', resource: environment.name, message: `must run with ${what}` });
+    }
+  }
+};
+
+/**
+ * The environment's console and system logs reach this deployment's workspace
+ * in resource-specific tables. Its HTTP log is never sent anywhere, and neither
+ * is a category group, which would bring it in: it records every client's
+ * address and full URL, which our request logs leave out (ADR-011 §7).
+ */
+const appsLogs: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const enabledLogs = (setting: PredictedResource): readonly unknown[] =>
+      list(at(setting.properties, 'logs')).filter((log) => at(log, 'enabled') === true);
+    const settings = settingsOf(snapshot, environment);
+    const sends = (category: string): boolean =>
+      settings.some(
+        (setting) =>
+          workspaces.has(at(setting.properties, 'workspaceId')) &&
+          at(setting.properties, 'logAnalyticsDestinationType') === 'Dedicated' &&
+          enabledLogs(setting).some((log) => at(log, 'category') === category),
+      );
+    const httpLog = settings.some((setting) =>
+      enabledLogs(setting).some(
+        (log) => at(log, 'categoryGroup') !== undefined || at(log, 'category') === 'ContainerAppHTTPLogs',
+      ),
+    );
+    if (!sends('ContainerAppConsoleLogs') || !sends('ContainerAppSystemLogs') || httpLog) {
+      add({
+        rule: 'apps-logs',
+        resource: environment.name,
+        message:
+          "must send its console and system logs to this deployment's workspace in resource-specific tables, and never its HTTP log or a category group (client addresses, ADR-011 §7)",
+      });
+    }
+  }
+};
+
+/** An enabled alert on the workspace counts the apps' error events (logging standard §5, "Error spike"). */
+const appErrorsAlert: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = ofType(snapshot, TYPES.alert).some(
+      (alert) =>
+        at(alert.properties, 'enabled') === true &&
+        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
+        list(at(alert.properties, 'criteria', 'allOf')).some((criterion) => {
+          const threshold = at(criterion, 'threshold');
+          return (
+            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ERROR_LINES], 'count()') &&
+            at(criterion, 'operator') === 'GreaterThan' &&
+            typeof threshold === 'number' &&
+            threshold >= 0
+          );
+        }),
+    );
+    if (!alerted) {
+      add({
+        rule: 'app-errors-alert',
+        resource: environment.name,
+        message: "needs an enabled alert on this deployment's workspace that counts the apps' error events",
+      });
+    }
+  }
+};
+
+/**
+ * Every identity is usable only by resources in its own region (isolation
+ * scope Regional, Microsoft's recommendation): a resource created elsewhere
+ * can't take it on (ADR-009).
+ */
+const identities: Check = (snapshot, _expected, add) => {
+  for (const identity of ofType(snapshot, TYPES.identity)) {
+    if (at(identity.properties, 'isolationScope') !== 'Regional') {
+      add({
+        rule: 'identities',
+        resource: identity.name,
+        message: 'must be usable only in its own region (isolationScope Regional)',
+      });
+    }
+  }
+};
+
 const CHECKS: readonly Check[] = [
   complete,
   required,
@@ -727,12 +937,18 @@ const CHECKS: readonly Check[] = [
   noSecretLiterals,
   database,
   databaseNetwork,
+  appsNetwork,
   vault,
   workspaceAndQuota,
   alertRules,
   resourceLogs,
+  logDestinations,
   activityLog,
   budget,
+  appsEnvironment,
+  appsLogs,
+  appErrorsAlert,
+  identities,
 ];
 
 /** Every rule a snapshot breaks; none for a deployment we can ship. */

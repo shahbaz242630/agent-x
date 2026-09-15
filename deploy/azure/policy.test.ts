@@ -104,7 +104,13 @@ const SERVER = type('Microsoft.DBforPostgreSQL/flexibleServers');
 const VAULT = type('Microsoft.KeyVault/vaults');
 const WORKSPACE = type('Microsoft.OperationalInsights/workspaces');
 const RULES = type('Microsoft.Network/networkSecurityGroups');
+const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
+const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
 const NETWORK = type('Microsoft.Network/virtualNetworks');
+const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
+const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
+const APP_LOGS = named(/^app-logs-to-workspace$/);
+const ERRORS_ALERT = named(/-app-errors$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
@@ -164,6 +170,7 @@ describe('deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-log-cap-reached',
       'Microsoft.Insights/diagnosticSettings activity-log-to-workspace',
       'Microsoft.Consumption/budgets budget-agentx-staging',
+      'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-apps',
       'Microsoft.Network/networkSecurityGroups nsg-agentx-staging-database',
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
       'Microsoft.Network/privateDnsZones agentx-staging.private.postgres.database.azure.com',
@@ -178,6 +185,13 @@ describe('deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
       ),
+      'Microsoft.App/managedEnvironments cae-agentx-staging',
+      'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
+      ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'].map(
+        (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
+      ),
+      'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
     ]);
   });
 
@@ -187,6 +201,17 @@ describe('deploy/azure', () => {
     expect(at(server?.properties, 'network', 'delegatedSubnetResourceId')).toBe(
       `${String(network?.id)}/subnets/database`,
     );
+    expect(
+      at(staging.predictedResources.find(ENVIRONMENT)?.properties, 'vnetConfiguration', 'infrastructureSubnetId'),
+    ).toBe(`${String(network?.id)}/subnets/apps`);
+    expect(
+      at(
+        (at(network?.properties, 'subnets') as Mutable[]).find((entry) => entry.name === 'apps'),
+        'properties',
+        'networkSecurityGroup',
+        'id',
+      ),
+    ).toBe(staging.predictedResources.find(APPS_RULES)?.id);
     expect(at(server?.properties, 'administratorLoginPassword')).toBe("[parameters('postgresAdminPassword')]");
     expect(staging.diagnostics).toEqual([]);
   });
@@ -206,7 +231,8 @@ describe('each rule can fail', () => {
     expect(
       brokenRules(
         without(
-          (resource) => resource.type.startsWith('Microsoft.DBforPostgreSQL') || /psql|logs-to/.test(resource.name),
+          (resource) =>
+            resource.type.startsWith('Microsoft.DBforPostgreSQL') || /psql|^logs-to-workspace$/.test(resource.name),
         ),
       ),
     ).toEqual(['required']);
@@ -218,6 +244,12 @@ describe('each rule can fail', () => {
     expect(brokenRules(withExtra({ ...structuredClone(workspace), id: `${String(workspace?.id)}-second` }))).toContain(
       'required',
     );
+    expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual(['required']);
+    const environment = staging.predictedResources.find(ENVIRONMENT);
+    // A second environment also sends no logs of its own.
+    expect(
+      brokenRules(withExtra({ ...structuredClone(environment), id: `${String(environment?.id)}-second` })),
+    ).toContain('required');
   });
 
   it('in-country: a resource outside the region, or a global-only type pinned to one', () => {
@@ -402,7 +434,7 @@ describe('each rule can fail', () => {
         rules(group).push(extra);
       },
     ]) {
-      expect(brokenRules(changed(RULES, change))).toEqual(['database-network']);
+      expect(brokenRules(changed(DATABASE_RULES, change))).toEqual(['database-network']);
     }
     for (const change of [
       (network: Mutable) => delete inside(subnet(network, 'apps'), 'properties').delegations,
@@ -563,10 +595,53 @@ describe('each rule can fail', () => {
       (entry: Mutable) => (inside(entry, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).enabled = false),
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).category = 'PostgreSQLFlexSessions'),
-      (entry: Mutable) => (inside(entry, 'properties').workspaceId = elsewhere),
     ]) {
       expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['resource-logs']);
     }
+    expect(
+      brokenRules(
+        changed(named(/^logs-to-workspace$/), (entry) => (inside(entry, 'properties').workspaceId = elsewhere)),
+      ),
+    ).toEqual(['resource-logs', 'log-destinations']);
+  });
+
+  it('log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {
+    const AUDIT = named(/^audit-to-workspace$/);
+    for (const [key, value] of [
+      ['storageAccountId', '/subscriptions/x/resourceGroups/y/providers/Microsoft.Storage/storageAccounts/abroad'],
+      [
+        'eventHubAuthorizationRuleId',
+        '/subscriptions/x/resourceGroups/y/providers/Microsoft.EventHub/namespaces/n/authorizationRules/r',
+      ],
+      ['eventHubName', 'hub'],
+      ['marketplacePartnerId', '/subscriptions/x/resourceGroups/y/providers/Microsoft.Datadog/monitors/m'],
+      [
+        'serviceBusRuleId',
+        '/subscriptions/x/resourceGroups/y/providers/Microsoft.ServiceBus/namespaces/n/authorizationRules/r',
+      ],
+    ] as const) {
+      expect(brokenRules(changed(AUDIT, (entry) => (inside(entry, 'properties')[key] = value)))).toEqual([
+        'log-destinations',
+      ]);
+    }
+    // Empty, it sends nowhere.
+    expect(brokenRules(changed(AUDIT, (entry) => (inside(entry, 'properties').storageAccountId = '')))).toEqual([]);
+    expect(brokenRules(changed(AUDIT, (entry) => (inside(entry, 'properties').storageAccountId = null)))).toEqual([]);
+    // A second setting on the server sending its logs out, while the first still reaches the workspace.
+    const serverLogs = staging.predictedResources.find(named(/^logs-to-workspace$/));
+    expect(
+      brokenRules(
+        withExtra({
+          ...structuredClone(serverLogs),
+          id: `${String(serverLogs?.id)}-abroad`,
+          name: 'logs-abroad',
+          properties: {
+            storageAccountId: '/subscriptions/x/resourceGroups/y/providers/Microsoft.Storage/storageAccounts/abroad',
+            logs: [{ category: 'PostgreSQLLogs', enabled: true }],
+          },
+        }),
+      ),
+    ).toEqual(['log-destinations']);
   });
 
   it("activity-log: the subscription's changes not kept, or kept elsewhere", () => {
@@ -579,7 +654,7 @@ describe('each rule can fail', () => {
       brokenRules(
         changed(ACTIVITY, (entry) => (inside(entry, 'properties').workspaceId = '/subscriptions/x/workspaces/y')),
       ),
-    ).toEqual(['activity-log']);
+    ).toEqual(['log-destinations', 'activity-log']);
   });
 
   it("budget: none, a notice to nobody or at another threshold, or a start that isn't a first of the month", () => {
@@ -595,6 +670,167 @@ describe('each rule can fail', () => {
       expect(brokenRules(changed(BUDGET, change))).toEqual(['budget']);
     }
     expect(brokenRules(without(BUDGET))).toEqual(['budget']);
+  });
+
+  it('apps-environment: another subnet, a dedicated profile, traffic unencrypted, or logs sent with a key or not at all', () => {
+    const properties = (environment: Mutable): Mutable => inside(environment, 'properties');
+    const network = staging.predictedResources.find(NETWORK);
+    for (const change of [
+      (environment: Mutable) =>
+        (inside(environment, 'properties', 'vnetConfiguration').infrastructureSubnetId =
+          '/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/virtualNetworks/v/subnets/apps'),
+      (environment: Mutable) =>
+        (inside(environment, 'properties', 'vnetConfiguration').infrastructureSubnetId =
+          `${String(network?.id)}/subnets/database`),
+      (environment: Mutable) => delete properties(environment).vnetConfiguration,
+      (environment: Mutable) => (first(properties(environment).workloadProfiles).workloadProfileType = 'D4'),
+      (environment: Mutable) =>
+        (properties(environment).workloadProfiles = [
+          first(properties(environment).workloadProfiles),
+          { name: 'dedicated', workloadProfileType: 'D4', minimumCount: 1, maximumCount: 1 },
+        ]),
+      // A Consumption-only environment, the legacy kind Microsoft's network rules above don't describe.
+      (environment: Mutable) => delete properties(environment).workloadProfiles,
+      (environment: Mutable) =>
+        (inside(environment, 'properties', 'peerTrafficConfiguration', 'encryption').enabled = false),
+      (environment: Mutable) => delete properties(environment).peerTrafficConfiguration,
+      (environment: Mutable) =>
+        (inside(environment, 'properties', 'appLogsConfiguration').destination = 'log-analytics'),
+      (environment: Mutable) => (inside(environment, 'properties', 'appLogsConfiguration').destination = 'none'),
+      (environment: Mutable) => delete properties(environment).appLogsConfiguration,
+    ]) {
+      expect(brokenRules(changed(ENVIRONMENT, change))).toEqual(['apps-environment']);
+    }
+  });
+
+  it('apps-network: the apps subnet without its rules, or a door wider than the probes and the subnet itself', () => {
+    const probes = (group: Mutable): Mutable => inside(nth(rules(group), 0), 'properties');
+    const itself = (group: Mutable): Mutable => inside(nth(rules(group), 1), 'properties');
+    const deny = (group: Mutable): Mutable => inside(nth(rules(group), 2), 'properties');
+    for (const change of [
+      (group: Mutable) => (probes(group).sourceAddressPrefix = 'Internet'),
+      (group: Mutable) => (probes(group).destinationPortRange = '*'),
+      (group: Mutable) => (probes(group).protocol = '*'),
+      (group: Mutable) => (probes(group).destinationAddressPrefix = '*'),
+      (group: Mutable) => (itself(group).sourceAddressPrefix = '10.40.0.0/16'),
+      (group: Mutable) => (itself(group).destinationAddressPrefix = '*'),
+      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 1), nth(rules(group), 2)]),
+      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 2)]),
+      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 1)]),
+      (group: Mutable) => (deny(group).priority = 105),
+      (group: Mutable) => (deny(group).access = 'Allow'),
+      (group: Mutable) => (deny(group).protocol = 'Tcp'),
+      (group: Mutable) => (deny(group).sourceAddressPrefix = '10.40.1.0/24'),
+      (group: Mutable) => (deny(group).destinationAddressPrefix = '10.40.1.0/24'),
+      (group: Mutable) => (deny(group).destinationPortRange = '22'),
+      // A third door: the database subnet let in.
+      (group: Mutable) => {
+        const extra = structuredClone(nth(rules(group), 1));
+        extra.name = 'allow-database';
+        inside(extra, 'properties').sourceAddressPrefix = '10.40.1.0/24';
+        inside(extra, 'properties').priority = 120;
+        rules(group).push(extra);
+      },
+    ]) {
+      expect(brokenRules(changed(APPS_RULES, change))).toEqual(['apps-network']);
+    }
+    expect(
+      brokenRules(
+        changed(NETWORK, (network) => delete inside(subnet(network, 'apps'), 'properties').networkSecurityGroup),
+      ),
+    ).toEqual(['apps-network']);
+    expect(brokenRules(without(APPS_RULES))).toEqual(['apps-network']);
+    // No apps subnet at all: the database's rule refuses it too, and the vault
+    // and the environment point at a subnet that isn't there.
+    expect(
+      brokenRules(
+        changed(NETWORK, (network) => {
+          inside(network, 'properties').subnets = [subnet(network, 'database')];
+        }),
+      ),
+    ).toEqual(['database-network', 'apps-network', 'vault', 'apps-environment']);
+  });
+
+  it('apps-logs: console or system logs kept out of the workspace, or the HTTP log sent anywhere', () => {
+    const logs = (setting: Mutable): Mutable[] => at(setting, 'properties', 'logs') as Mutable[];
+    for (const change of [
+      (setting: Mutable) => (inside(setting, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
+      (setting: Mutable) => (first(logs(setting)).enabled = false),
+      (setting: Mutable) => (nth(logs(setting), 1).enabled = false),
+      (setting: Mutable) => (nth(logs(setting), 1).category = 'AppEnvSessionConsoleLogs'),
+      (setting: Mutable) => logs(setting).push({ category: 'ContainerAppHTTPLogs', enabled: true }),
+      (setting: Mutable) => logs(setting).push({ categoryGroup: 'allLogs', enabled: true }),
+      (setting: Mutable) => logs(setting).push({ categoryGroup: 'audit', enabled: true }),
+    ]) {
+      expect(brokenRules(changed(APP_LOGS, change))).toEqual(['apps-logs']);
+    }
+    expect(
+      brokenRules(
+        changed(
+          APP_LOGS,
+          (setting) =>
+            (inside(setting, 'properties').workspaceId =
+              '/subscriptions/x/resourceGroups/y/providers/Microsoft.OperationalInsights/workspaces/elsewhere'),
+        ),
+      ),
+    ).toEqual(['log-destinations', 'apps-logs']);
+    expect(brokenRules(without(APP_LOGS))).toEqual(['apps-logs']);
+    // Listed but switched off, it sends nothing.
+    expect(
+      brokenRules(
+        changed(APP_LOGS, (setting) => logs(setting).push({ category: 'ContainerAppHTTPLogs', enabled: false })),
+      ),
+    ).toEqual([]);
+    // The HTTP log sent by a second setting on the environment, to the same workspace.
+    const appLogs = staging.predictedResources.find(APP_LOGS);
+    expect(
+      brokenRules(
+        withExtra({
+          ...structuredClone(appLogs),
+          id: `${String(appLogs?.id)}-http`,
+          name: 'http-logs',
+          properties: {
+            ...structuredClone(appLogs?.properties as Mutable),
+            logs: [{ category: 'ContainerAppHTTPLogs', enabled: true }],
+          },
+        }),
+      ),
+    ).toEqual(['apps-logs']);
+  });
+
+  it("app-errors-alert: no alert on the apps' error events, or one that can't fire", () => {
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(ERRORS_ALERT))).toEqual(['app-errors-alert']);
+    for (const change of [
+      query('ContainerAppConsoleLogs | where tostring(parse_json(Log).level) == "error" | summarize Errors = count()'),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic") | summarize Errors = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic") | where ContainerAppName == "api" | summarize Errors = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).threshold = -1),
+      (alert: Mutable) => delete criterion(alert).threshold,
+      (alert: Mutable) => (inside(alert, 'properties').scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(ERRORS_ALERT, change))).toEqual(['app-errors-alert']);
+    }
+    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (inside(alert, 'properties').enabled = false)))).toEqual([
+      'alert-delivery',
+      'app-errors-alert',
+    ]);
+    // A higher threshold is a choice, not a break.
+    expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 5)))).toEqual([]);
+  });
+
+  it('identities: one usable in any region', () => {
+    expect(
+      brokenRules(
+        changed(named(/^id-agentx-stg-api$/), (identity) => (inside(identity, 'properties').isolationScope = 'None')),
+      ),
+    ).toEqual(['identities']);
+    expect(brokenRules(changed(IDENTITIES, (identity) => delete identity.properties))).toEqual(['identities']);
   });
 });
 
