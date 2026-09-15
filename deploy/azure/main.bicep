@@ -1,8 +1,9 @@
 // Agent X on Azure (ADR-002; ADR-002 Amendment G1): one deployment per
 // environment, each in its own subscription, everything in UAE North (ADR-009).
 // This is the foundation: the private network, the database server, the key
-// vault, the log workspace with its cap and alerts, the activity log and the
-// budget. The containers come with piece G2.
+// vault, the log workspace with its cap and alerts, the Container Apps
+// environment with one identity per app and job, the activity log and the
+// budget. The apps and jobs are a deployment of their own (G2d).
 //
 //   bicep snapshot deploy/azure/staging.bicepparam   # what it would create
 //   az deployment sub create --location uaenorth \
@@ -71,6 +72,13 @@ param postgresBackupRetentionDays int
 @description('Whether backups are also kept in the paired region. It can\'t be changed once the server exists, so each environment states it (ADR-002, R-08).')
 param postgresGeoRedundantBackup bool
 
+@description('Whether the Container Apps environment spreads over availability zones. It can only be set when the environment is created (Microsoft), so each environment states it.')
+param appsZoneRedundant bool
+
+@description('The apps\' error alert fires above this many error events in 15 minutes (logging standard §5).')
+@minValue(0)
+param appErrorAlertThreshold int
+
 var short = environment == 'production' ? 'prd' : 'stg'
 
 var tags = {
@@ -85,15 +93,33 @@ resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   tags: tags
 }
 
+// Every app and job, each with an identity of its own: the API; Zitadel and its
+// login pages; the jobs that set up a server's roles and databases, migrate the
+// app's database, and build Zitadel's (init, then setup). The worker joins in
+// Phase 4.
+var workloads = [
+  'api'
+  'zitadel'
+  'login'
+  'db-setup'
+  'migrate'
+  'zitadel-init'
+  'zitadel-setup'
+]
+
 // Every name, once. The modules create their resources under these names.
 var names = {
   workspace: 'log-agentx-${short}'
   actionGroup: 'ag-agentx-${short}'
   network: 'vnet-agentx-${environment}'
+  appsRules: 'nsg-agentx-${environment}-apps'
   databaseRules: 'nsg-agentx-${environment}-database'
   databaseZone: 'agentx-${environment}.private.postgres.database.azure.com'
   vault: 'kv-agentx-${short}-${nameSuffix}'
   server: 'psql-agentx-${short}-${nameSuffix}'
+  appsEnvironment: 'cae-agentx-${environment}'
+  appErrors: 'alert-agentx-${short}-app-errors'
+  identities: map(workloads, workload => 'id-agentx-${short}-${workload}')
 }
 
 // The ids one module hands another, built here from the same names rather than
@@ -125,6 +151,7 @@ module network 'modules/network.bicep' = {
   params: {
     location: location
     name: names.network
+    appsRulesName: names.appsRules
     databaseRulesName: names.databaseRules
     databaseZoneName: names.databaseZone
     tags: tags
@@ -164,6 +191,28 @@ module database 'modules/postgres.bicep' = {
     actionGroupId: ids.actionGroup
   }
   // The delegated subnet, the zone linked to the network, the workspace and the action group must exist first.
+  dependsOn: [
+    network
+    monitoring
+  ]
+}
+
+module appsEnvironment 'modules/environment.bicep' = {
+  scope: group
+  params: {
+    location: location
+    name: names.appsEnvironment
+    tags: tags
+    appsSubnetId: ids.appsSubnet
+    zoneRedundant: appsZoneRedundant
+    identityNames: names.identities
+    workspaceName: names.workspace
+    workspaceId: ids.workspace
+    actionGroupId: ids.actionGroup
+    errorAlertName: names.appErrors
+    errorAlertThreshold: appErrorAlertThreshold
+  }
+  // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [
     network
     monitoring
@@ -244,3 +293,4 @@ output workspaceId string = ids.workspace
 output appsSubnetId string = ids.appsSubnet
 output keyVaultName string = vault.outputs.name
 output databaseHost string = database.outputs.host
+output appsEnvironmentName string = appsEnvironment.outputs.name
