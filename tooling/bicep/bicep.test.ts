@@ -91,7 +91,7 @@ describe('installing it', () => {
     expect(readFileSync(binary, 'utf8')).toBe('something else');
   });
 
-  it('checks a binary again once its size or modified time changes after a check', () => {
+  it('checks the binary on every use, so one swapped in after a check is refused', () => {
     const { dir, binary } = installed('the pinned binary');
     const options = { platform: 'linux', arch: 'x64', toolsDir: dir, binaries: pins } as const;
     expect(installedBicep(options)).toBe(binary);

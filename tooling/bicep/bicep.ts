@@ -4,13 +4,13 @@
 // repository, are what we trust: GitHub's digest of each release file, checked
 // against a download. A download that doesn't match is refused before it is
 // written (tooling/pinned-download.ts). The installed binary is checked against
-// its pin before it is used, and again whenever its size or modified time has
-// changed since, so a file swapped in under .tools/ is refused too. Installed
-// under .tools/ (git-ignored) by `corepack pnpm tools`.
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+// its pin every time it is used, so a file swapped in under .tools/ is refused
+// too; it is hashed in pieces through one open handle, never held whole.
+// Installed under .tools/ (git-ignored) by `corepack pnpm tools`.
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { downloadPinned, type Fetch, sha256Of, TOOLS_DIR } from '../pinned-download.ts';
+import { downloadPinned, type Fetch, sha256OfFile, TOOLS_DIR } from '../pinned-download.ts';
 
 export const BICEP_VERSION = '0.47.16';
 
@@ -73,29 +73,20 @@ export interface BicepOptions {
 const MISSING = 'run corepack pnpm tools to install it';
 
 /**
- * Binaries this process has already found matching their pin, with the size
- * and modified time they had then. Hashing a 120 MB file before every lint and
- * snapshot adds up; a change to either brings the full check back.
- */
-const verified = new Map<string, { readonly sha256: string; readonly size: number; readonly modified: number }>();
-
-/**
  * The installed binary's path, once it matches its pin. Downloads nothing: a
- * test or a check that finds it missing says how to install it.
+ * test or a check that finds it missing says how to install it. Checked on
+ * every call: remembering an earlier check by the file's size and modified
+ * time was tried and dropped, since whoever can swap the file can set both back.
  */
 export function installedBicep(options: BicepOptions = {}): string {
   const platform = options.platform ?? process.platform;
   const pinned = binaryFor(platform, options.arch ?? process.arch, options.binaries);
   const target = bicepPath(platform, options.toolsDir);
-  if (!existsSync(target)) throw new Error(`Bicep ${BICEP_VERSION} isn't installed at ${target}: ${MISSING}.`);
-  const { size, mtimeMs } = statSync(target);
-  const known = verified.get(target);
-  if (known?.sha256 === pinned.sha256 && known.size === size && known.modified === mtimeMs) return target;
-  if (sha256Of(readFileSync(target)) !== pinned.sha256) {
-    verified.delete(target);
+  const actual = sha256OfFile(target);
+  if (actual === undefined) throw new Error(`Bicep ${BICEP_VERSION} isn't installed at ${target}: ${MISSING}.`);
+  if (actual !== pinned.sha256) {
     throw new Error(`${target} does not match its pinned SHA-256: delete the .tools folder and ${MISSING}.`);
   }
-  verified.set(target, { sha256: pinned.sha256, size, modified: mtimeMs });
   return target;
 }
 
