@@ -4,6 +4,6 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["packages/*/src", "apps/*/src", "tooling/**/*.ts", "*.config.ts"],
+  "include": ["packages/*/src", "apps/*/src", "tooling/**/*.ts", "deploy/**/*.ts", "*.config.ts"],
   "exclude": ["tooling/gate-proofs/fixtures"]
 }

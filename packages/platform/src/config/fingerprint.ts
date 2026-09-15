@@ -11,9 +11,9 @@
 // fingerprint names the ones set, never their values, and their values count
 // towards the hash.
 //
-// When secret settings are added to Config, list the fingerprinted fields
-// explicitly instead of hashing the whole config: a hash of a weak secret can
-// be guessed offline.
+// The config holds a secret (the database password), so the fields that count
+// towards the hash are listed one by one below, and the password is not among
+// them: a hash of a weak secret can be guessed offline.
 import { createHash } from 'node:crypto';
 
 import type { Config } from './config.ts';
@@ -65,15 +65,40 @@ function canonical(value: unknown): string {
 }
 
 /**
- * The release is left out: it changes with every deploy, and the fingerprint
- * should change only when a setting does.
+ * The settings that count, named one by one. The release is left out: it
+ * changes with every deploy, and the fingerprint should change only when a
+ * setting does. The database password is left out: it's a secret.
  */
+export function fingerprintedSettings(config: Config): Record<string, unknown> {
+  return {
+    environment: config.environment,
+    log: { level: config.log.level, eventCapPerMinute: config.log.eventCapPerMinute },
+    http: {
+      host: config.http.host,
+      port: config.http.port,
+      publicOrigin: config.http.publicOrigin,
+      trustedProxies: config.http.trustedProxies,
+      rateLimitPerMinute: config.http.rateLimitPerMinute,
+    },
+    db: {
+      host: config.db.host,
+      port: config.db.port,
+      database: config.db.database,
+      user: config.db.user,
+      tls: config.db.tls,
+      poolMax: config.db.poolMax,
+    },
+    outbound: { allowedOrigins: config.outbound.allowedOrigins },
+    payees: { coolingOffHours: config.payees.coolingOffHours },
+  };
+}
+
 export function configFingerprint(
   config: Config,
   env: Env = process.env,
   nodeArguments: readonly string[] = process.execArgv,
 ): ConfigFingerprint {
-  const { release: _release, ...settings } = config;
+  const settings = fingerprintedSettings(config);
   const watched = Object.fromEntries(
     WATCHED_VARIABLES.flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   );

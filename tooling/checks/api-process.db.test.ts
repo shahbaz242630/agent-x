@@ -1,25 +1,40 @@
 // The API as it really runs: `node apps/api/src/main.ts` in its own process,
-// with Node stripping the TypeScript itself, real sockets and the real stdout.
-// The unit tests run the same code in-process through Vitest; this proves the
-// entry point starts on plain Node, writes only clean JSON lines, and answers
-// with the protections in place. (Stopping on a signal is tested in-process:
-// Windows can't send one a process can catch.)
+// with Node stripping the TypeScript itself, real sockets, a real database and
+// the real stdout. The unit tests run the same code in-process through Vitest;
+// this proves the entry point starts on plain Node, connects as the app role,
+// writes only clean JSON lines, and answers with the protections in place.
+// (Stopping on a signal is tested in-process: Windows can't send one a process
+// can catch.)
 import { type ChildProcess, spawn } from 'node:child_process';
 import path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
+import { createTestDatabase, type TestDatabase } from '../../packages/testing/src/db/test-database.ts';
 
 const MAIN = path.resolve('apps/api/src/main.ts');
 const PUBLIC_ORIGIN = 'http://localhost:8080';
+const server = inject('postgres');
 
-/** The parent's environment without any AGENTX_ setting, plus a test run's. */
-function childEnv(): NodeJS.ProcessEnv {
+/** The parent's environment without any AGENTX_ or PG setting, plus a test run's, against the test database. */
+function childEnv(database: TestDatabase): NodeJS.ProcessEnv {
   const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith('AGENTX_')),
+    Object.entries(process.env).filter(([name]) => !/^(?:AGENTX_|PG)/.test(name.toUpperCase())),
   );
-  return { ...inherited, AGENTX_ENV: 'test', AGENTX_HTTP_PORT: '0', AGENTX_PUBLIC_ORIGIN: PUBLIC_ORIGIN };
+  const connection = database.connection('app');
+  return {
+    ...inherited,
+    AGENTX_ENV: 'test',
+    AGENTX_HTTP_PORT: '0',
+    AGENTX_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
+    AGENTX_DB_HOST: connection.host,
+    AGENTX_DB_PORT: String(connection.port),
+    AGENTX_DB_NAME: connection.database,
+    AGENTX_DB_USER: connection.user,
+    AGENTX_DB_PASSWORD: connection.password,
+    AGENTX_DB_TLS: 'disable',
+  };
 }
 
 interface Line {
@@ -29,13 +44,15 @@ interface Line {
   status?: number;
 }
 
+let database: TestDatabase;
 let child: ChildProcess;
 let stdout = '';
 let stderr = '';
 let port = 0;
 
 beforeAll(async () => {
-  child = spawn(process.execPath, [MAIN], { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+  database = await createTestDatabase(server, { schema: 'migrated' });
+  child = spawn(process.execPath, [MAIN], { env: childEnv(database), stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout?.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
   child.stderr?.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
   port = await new Promise<number>((resolve, reject) => {
@@ -58,8 +75,10 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => {
+afterAll(async () => {
   child.kill();
+  await new Promise((resolve) => child.once('exit', resolve));
+  await database.drop();
 });
 
 function lines(): Line[] {
@@ -69,10 +88,12 @@ function lines(): Line[] {
     .map((line) => JSON.parse(line) as Line);
 }
 
-describe('the API process', () => {
-  it('SEC-OPS-05 logs its config fingerprint, then listens', () => {
-    const events = lines().map((line) => line.event);
-    expect(events.indexOf('api.starting')).toBeLessThan(events.indexOf('api.listening'));
+describe(`the API process (Postgres ${server.version})`, () => {
+  it('SEC-OPS-05 logs its config fingerprint, connects as the app role, then listens', () => {
+    const events = lines()
+      .map((line) => String(line.event))
+      .filter((event) => event.startsWith('api.'));
+    expect(events).toEqual(['api.starting', 'api.database_connected', 'api.listening']);
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
@@ -93,13 +114,16 @@ describe('the API process', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_REFUSED' } });
   });
 
-  it('SEC-DATA-01 writes only JSON lines to stdout, with no client address or query in them', async () => {
+  it('SEC-DATA-01 writes only JSON lines to stdout, with no client address, query or database login in them', async () => {
     await fetch(`http://127.0.0.1:${port}/nothing-here?note=plantedqueryvalue`);
     await vi.waitFor(() => {
       expect(lines().some((line) => line.event === 'http.request_completed' && line.status === 404)).toBe(true);
     });
     const written = stdout.split('\n').filter((line) => line !== '');
     expect(written.filter((line) => !line.startsWith('{'))).toEqual([]);
-    expect(findLeaks(stdout, ['127.0.0.1', 'plantedqueryvalue', 'nothing-here'])).toEqual([]);
+    expect(stderr).toBe('');
+    expect(
+      findLeaks(stdout, ['127.0.0.1', 'plantedqueryvalue', 'nothing-here', database.connection('app').password]),
+    ).toEqual([]);
   });
 });

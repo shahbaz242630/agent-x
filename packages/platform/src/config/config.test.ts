@@ -1,18 +1,35 @@
 import { describe, expect, it } from 'vitest';
 
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError } from './common.ts';
+import { loadConfig } from './config.ts';
 
 type Env = Record<string, string | undefined>;
 
 const RELEASE = '2026.09.14-a1b2c3d';
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const PROXIES = '10.0.0.0/23';
+const DB_HOST = 'db.internal.example';
+/** Plain words, so secret scanners ignore it. */
+const DB_LOGIN = 'app login for these tests';
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
   AGENTX_RELEASE: RELEASE,
   AGENTX_PUBLIC_ORIGIN: PUBLIC_ORIGIN,
   AGENTX_TRUSTED_PROXIES: PROXIES,
+  AGENTX_DB_HOST: DB_HOST,
+  AGENTX_DB_PASSWORD: DB_LOGIN,
 };
+const DB_DEFAULTS = {
+  host: DB_HOST,
+  port: 5432,
+  database: 'agentx',
+  user: 'agentx_app',
+  password: DB_LOGIN,
+  tls: 'verify-full',
+  poolMax: 10,
+};
+/** The database settings a local run can't do without, for tests of the other settings' local defaults. */
+const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN };
 
 /** The problems loadConfig reports, or [] when it accepts the config. */
 function problemsWith(env: Env): readonly string[] {
@@ -38,6 +55,7 @@ describe('config: a correct config loads', () => {
         trustedProxies: [PROXIES],
         rateLimitPerMinute: 300,
       },
+      db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
       payees: { coolingOffHours: 24 },
     });
@@ -61,6 +79,13 @@ describe('config: a correct config loads', () => {
       AGENTX_OUTBOUND_ALLOWED_ORIGINS:
         'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
+      AGENTX_DB_HOST: '10.0.0.5',
+      AGENTX_DB_PORT: '6432',
+      AGENTX_DB_NAME: 'agentx_uae',
+      AGENTX_DB_USER: 'agentx_app_uae',
+      AGENTX_DB_PASSWORD: DB_LOGIN,
+      AGENTX_DB_TLS: 'verify-full',
+      AGENTX_DB_POOL_MAX: '25',
     });
     expect(config).toEqual({
       environment: 'staging',
@@ -72,6 +97,15 @@ describe('config: a correct config loads', () => {
         publicOrigin: 'https://staging.agentx.example',
         trustedProxies: ['10.0.0.0/23', '100.100.0.1'],
         rateLimitPerMinute: 120,
+      },
+      db: {
+        host: '10.0.0.5',
+        port: 6432,
+        database: 'agentx_uae',
+        user: 'agentx_app_uae',
+        password: DB_LOGIN,
+        tls: 'verify-full',
+        poolMax: 25,
       },
       outbound: { allowedOrigins: ['https://api.partner.example:8443', 'https://telemetry.example'] },
       payees: { coolingOffHours: 48 },
@@ -95,6 +129,7 @@ describe('config: a correct config loads', () => {
     expect(Object.isFrozen(config.outbound)).toBe(true);
     expect(Object.isFrozen(config.outbound.allowedOrigins)).toBe(true);
     expect(Object.isFrozen(config.payees)).toBe(true);
+    expect(Object.isFrozen(config.db)).toBe(true);
     expect(() => (config.outbound.allowedOrigins as string[]).push('https://evil.example')).toThrow(TypeError);
     expect(() => (config.http.trustedProxies as string[]).push('0.0.0.0/0')).toThrow(TypeError);
   });
@@ -102,11 +137,15 @@ describe('config: a correct config loads', () => {
 
 describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   it('refuses a missing environment: the app must know if it is in production', () => {
-    expect(problemsWith({})).toEqual(['AGENTX_ENV: is required']);
+    expect(problemsWith({})).toEqual([
+      'AGENTX_ENV: is required',
+      'AGENTX_DB_HOST: is required',
+      expect.stringMatching(/^AGENTX_DB_PASSWORD is required/),
+    ]);
   });
 
   it('refuses an unknown environment', () => {
-    expect(problemsWith({ AGENTX_ENV: 'prod' })).toEqual([
+    expect(problemsWith({ ...LOCAL, AGENTX_ENV: 'prod' })).toEqual([
       'AGENTX_ENV: must be one of: development, test, staging, production',
     ]);
   });
@@ -123,6 +162,12 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_RATE_LIMIT_PER_MINUTE',
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
+    'AGENTX_DB_HOST',
+    'AGENTX_DB_PORT',
+    'AGENTX_DB_NAME',
+    'AGENTX_DB_TLS',
+    'AGENTX_DB_USER',
+    'AGENTX_DB_POOL_MAX',
   ])('refuses %s set to an empty value', (name) => {
     expect(problemsWith({ ...MINIMAL, [name]: '' })).toEqual([
       `${name}: is empty: give it a value, or remove it to use the default`,
@@ -131,7 +176,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
 
   it('refuses a misspelt AGENTX_ variable instead of silently ignoring it', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_PAYEE_COOLING_OF_HOURS: '48' })).toEqual([
-      'AGENTX_PAYEE_COOLING_OF_HOURS: not a setting the app knows; check the spelling and the capitals',
+      'AGENTX_PAYEE_COOLING_OF_HOURS is not a setting the app knows; check the spelling and the capitals',
     ]);
   });
 
@@ -139,7 +184,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'refuses %s, a setting in the wrong case, instead of silently using the default',
     (name) => {
       expect(problemsWith({ ...MINIMAL, [name]: '168' })).toEqual([
-        `${name}: not a setting the app knows; check the spelling and the capitals`,
+        `${name} is not a setting the app knows; check the spelling and the capitals`,
       ]);
     },
   );
@@ -195,14 +240,14 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       ['a leading space', ' https://api.partner.example'],
       ['a wildcard, which would never match', 'https://*.partner.example'],
     ])('refuses %s', (_what, entry) => {
-      expect(problemsWith({ AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry })).toEqual([
+      expect(problemsWith({ ...LOCAL, AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry })).toEqual([
         expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry 1 is not an origin\./),
       ]);
     });
 
     it('names every bad entry by its position', () => {
       const entries = 'https://a.example,https://B.example,,https://c.example/';
-      expect(problemsWith({ AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entries })).toEqual([
+      expect(problemsWith({ ...LOCAL, AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entries })).toEqual([
         expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry 2, 3, 4 is not an origin\./),
       ]);
     });
@@ -213,7 +258,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       'http://127.0.0.1:3000',
       'http://[::1]:5432',
     ])('accepts %s', (entry) => {
-      expect(problemsWith({ AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry })).toEqual([]);
+      expect(problemsWith({ ...LOCAL, AGENTX_ENV: 'test', AGENTX_OUTBOUND_ALLOWED_ORIGINS: entry })).toEqual([]);
     });
   });
 
@@ -231,13 +276,15 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       }),
     ).toEqual([
       expect.stringMatching(/^NODE_TLS_REJECT_UNAUTHORIZED: /),
-      expect.stringMatching(/^AGENTX_LOG_LEVLE: /),
+      expect.stringMatching(/^AGENTX_LOG_LEVLE is not a setting/),
       expect.stringMatching(/^AGENTX_ENV: /),
       expect.stringMatching(/^AGENTX_RELEASE: /),
       expect.stringMatching(/^AGENTX_LOG_LEVEL: /),
       expect.stringMatching(/^AGENTX_LOG_EVENT_CAP_PER_MINUTE: /),
       expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: /),
       expect.stringMatching(/^AGENTX_PAYEE_COOLING_OFF_HOURS: /),
+      expect.stringMatching(/^AGENTX_DB_HOST: is required$/),
+      expect.stringMatching(/^AGENTX_DB_PASSWORD is required, or AGENTX_DB_PASSWORD_FILE /),
     ]);
   });
 
@@ -260,6 +307,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
         AGENTX_ENV: 'production',
         AGENTX_LOG_LEVEL: 'debug',
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://api.partner.example',
+        AGENTX_DB_HOST: DB_HOST,
+        AGENTX_DB_PASSWORD: DB_LOGIN,
       }),
     ).toEqual([
       expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: plain http/),
@@ -271,7 +320,14 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   });
 
   it('puts every problem in the error message, for the operator reading the start-up output', () => {
-    expect(() => loadConfig({ AGENTX_ENV: 'live', AGENTX_PAYEE_COOLING_OFF_HOURS: '1' })).toThrow(
+    expect(() =>
+      loadConfig({
+        AGENTX_ENV: 'live',
+        AGENTX_PAYEE_COOLING_OFF_HOURS: '1',
+        AGENTX_DB_HOST: DB_HOST,
+        AGENTX_DB_PASSWORD: DB_LOGIN,
+      }),
+    ).toThrow(
       'Refusing to start: 2 config problem(s).\n' +
         '- AGENTX_ENV: must be one of: development, test, staging, production\n' +
         '- AGENTX_PAYEE_COOLING_OFF_HOURS: must be at least 24 hours (the ADR-012 safety minimum for payee changes)',
@@ -293,11 +349,21 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       AGENTX_RATE_LIMIT_PER_MINUTE: misplaced,
       AGENTX_OUTBOUND_ALLOWED_ORIGINS: `https://api.partner.example,${misplaced}`,
       AGENTX_PAYEE_COOLING_OFF_HOURS: misplaced,
+      AGENTX_DB_HOST: misplaced,
+      AGENTX_DB_PORT: misplaced,
+      AGENTX_DB_NAME: misplaced,
+      AGENTX_DB_TLS: misplaced,
+      AGENTX_DB_USER: misplaced,
+      AGENTX_DB_PASSWORD: misplaced,
+      AGENTX_DB_POOL_MAX: misplaced,
+      AGENTX_DB_MIGRATION_PASSWORD: misplaced,
       AGENTX_MISSPELT: misplaced,
       NODE_TLS_REJECT_UNAUTHORIZED: misplaced,
+      PGPASSWORD: misplaced,
     };
     const problems = problemsWith(env);
-    expect(problems).toHaveLength(13);
+    // Every variable but the app's password, which any text may be. The migration login is refused by name.
+    expect(problems).toHaveLength(21);
     expect(problems.filter((problem) => problem.toLowerCase().includes(misplaced))).toEqual([]);
   });
 });
@@ -310,7 +376,7 @@ describe('SEC-AV-03 release: every deployed build is named', () => {
   });
 
   it.each(['development', 'test'])('names a %s run without a release "local"', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment }).release).toBe('local');
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).release).toBe('local');
   });
 
   it.each(['v1.2.3', '2026.09.14-a1b2c3d', 'a1b2c3d4e5f6', 'build_17', 'a'.repeat(64)])(
@@ -401,9 +467,9 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
   });
 
   it.each(['development', 'test'])('accepts a plain http origin in %s, for the local stack', (environment) => {
-    expect(problemsWith({ AGENTX_ENV: environment, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://localhost:8080' })).toEqual(
-      [],
-    );
+    expect(
+      problemsWith({ ...LOCAL, AGENTX_ENV: environment, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://localhost:8080' }),
+    ).toEqual([]);
   });
 
   it('accepts https origins in production', () => {
@@ -419,7 +485,7 @@ describe('SEC-WEB-01 the public origin: the one address browser writes are accep
   });
 
   it.each(['development', 'test'])('is the local address in %s, when not set', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment }).http.publicOrigin).toBe('http://localhost:8080');
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).http.publicOrigin).toBe('http://localhost:8080');
   });
 
   it.each(['https://app.agentx.example', 'https://app.agentx.example:8443'])('accepts %s', (origin) => {
@@ -451,7 +517,9 @@ describe('SEC-WEB-01 the public origin: the one address browser writes are accep
   });
 
   it.each(['development', 'test'])('accepts plain http in %s, for the local stack', (environment) => {
-    expect(problemsWith({ AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://localhost:3000' })).toEqual([]);
+    expect(problemsWith({ ...LOCAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://localhost:3000' })).toEqual(
+      [],
+    );
   });
 });
 
@@ -488,7 +556,7 @@ describe('SEC-AV-03 where the API listens', () => {
   });
 
   it.each(['development', 'test'])('accepts port 0 (any free port) in %s, for tests', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' }).http.port).toBe(0);
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' }).http.port).toBe(0);
   });
 
   it.each(['staging', 'production'])('refuses port 0 in %s, where the ingress needs a known port', (environment) => {
@@ -553,7 +621,7 @@ describe('SEC-AV-07 trusted proxies are addresses or narrow ranges', () => {
   });
 
   it.each(['development', 'test'])('is optional in %s, where the app is reached directly', (environment) => {
-    expect(loadConfig({ AGENTX_ENV: environment }).http.trustedProxies).toEqual([]);
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).http.trustedProxies).toEqual([]);
   });
 });
 

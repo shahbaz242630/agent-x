@@ -1,0 +1,276 @@
+# The local stack (ADR-001 layout; ADR-010 §7, the portability proof): the
+# whole product from one command, with no cloud account and no internet.
+#
+#   node deploy/compose/prepare.ts        # once: generates the logins into .env
+#   docker compose -f deploy/compose/compose.yaml up --build --wait
+#
+# Then http://localhost:8080/health is the API and http://localhost:8081 the
+# login service (Zitadel; the console signs in as `admin` with the password
+# prepare wrote to .env).
+#
+# How it is laid out:
+# - every service but `edge` sits on the `internal` network, which Docker
+#   keeps off the internet and off the host: if anything in there needed an
+#   outside service, the stack would not come up
+# - `edge` (nginx) is the one front door, published on 127.0.0.1 only, and
+#   stands where the TLS proxy stands in a real deployment
+# - every image is pinned by digest (SEC-SC-02) and every login comes from
+#   .env, which prepare generates: a missing one stops the stack (SEC-OPS-08)
+# - the app image is built from the repository root's Dockerfile
+name: agentx
+
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: agentx-app:local
+  # The app writes nothing to disk and needs no privilege.
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+  networks: [internal]
+
+# Zitadel's connection to its own database, as its own role (20-zitadel.sh).
+# The same role is its "admin": the database and role exist before it starts,
+# so it never holds the server admin's login.
+x-zitadel-database: &zitadel-database
+  ZITADEL_DATABASE_POSTGRES_HOST: db
+  ZITADEL_DATABASE_POSTGRES_PORT: '5432'
+  ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?run node deploy/compose/prepare.ts first}
+  ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+  ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: zitadel
+  ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?run node deploy/compose/prepare.ts first}
+  ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+  ZITADEL_DATABASE_POSTGRES_ADMIN_EXISTINGDATABASE: zitadel
+
+services:
+  # PostgreSQL 18 (ADR-002), the same image the database tests run against
+  # (tooling/test-db/postgres-images.ts; a check keeps the two digests equal).
+  # On first start it runs db-init: the Agent X roles and database from
+  # db/bootstrap, exactly as an admin sets up a real server, then Zitadel's.
+  db:
+    image: postgres:18.6-trixie@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+    environment:
+      POSTGRES_PASSWORD: ${AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD:?run node deploy/compose/prepare.ts first}
+      # Passwords for every connection, local ones included: no trust auth anywhere.
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+      AGENTX_LOCAL_DB_OWNER_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?run node deploy/compose/prepare.ts first}
+      AGENTX_LOCAL_DB_APP_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?run node deploy/compose/prepare.ts first}
+      AGENTX_LOCAL_DB_BACKUP_PASSWORD: ${AGENTX_LOCAL_DB_BACKUP_PASSWORD:?run node deploy/compose/prepare.ts first}
+      AGENTX_LOCAL_ZITADEL_DB_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?run node deploy/compose/prepare.ts first}
+    volumes:
+      - db-data:/var/lib/postgresql
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+      - ../../db/bootstrap:/agentx/bootstrap:ro
+    healthcheck:
+      test: ['CMD', 'pg_isready', '--username', 'postgres', '--dbname', 'postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt: ['no-new-privileges:true']
+    networks: [internal]
+    restart: unless-stopped
+
+  # Applies db/migrations as the migration role, then exits (ADR-001: never
+  # inside the app). The API waits for it to have finished.
+  migrate:
+    <<: *app
+    command: ['node', 'apps/migrate/src/main.ts']
+    environment:
+      AGENTX_ENV: development
+      AGENTX_DB_HOST: db
+      AGENTX_DB_NAME: agentx
+      AGENTX_DB_TLS: disable
+      AGENTX_DB_MIGRATION_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?run node deploy/compose/prepare.ts first}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+
+  # The API (Product-Documentation/API.md), as the app role only.
+  api:
+    <<: *app
+    environment:
+      AGENTX_ENV: development
+      AGENTX_HTTP_HOST: 0.0.0.0
+      AGENTX_HTTP_PORT: '8080'
+      # The address the browser uses: the edge's published port.
+      AGENTX_PUBLIC_ORIGIN: http://localhost:8080
+      # The edge's fixed address, so each client keeps its own rate limit and request.ip.
+      AGENTX_TRUSTED_PROXIES: 10.77.0.2
+      AGENTX_DB_HOST: db
+      AGENTX_DB_NAME: agentx
+      AGENTX_DB_USER: agentx_app
+      AGENTX_DB_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?run node deploy/compose/prepare.ts first}
+      AGENTX_DB_TLS: disable
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    # Longer than the API's own 25-second stop deadline (API.md).
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  # Makes the shared folder for Zitadel's generated tokens writable by Zitadel
+  # (uid 1000). A named volume starts out owned by root; a distroless image can't chown.
+  zitadel-volume:
+    image: node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
+    command: ['chown', '1000:1000', '/pat']
+    volumes:
+      - zitadel-pat:/pat
+    networks: [internal]
+    restart: 'no'
+
+  # Zitadel's schemas in its own database, as its owner (ADR-003; Zitadel v4).
+  zitadel-init:
+    image: ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc752c321c7041358dea8b33b63ea5e021ec499ad5e2d9f
+    command: ['init', 'zitadel']
+    environment:
+      <<: *zitadel-database
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+    restart: 'no'
+
+  # The login service (ADR-003): forced MFA for everyone, passkeys and
+  # authenticator apps, no self-registration, no outside identity providers.
+  # Its first start creates the instance, the `admin` user, and two machine
+  # users whose tokens land in the shared folder: `login-client` for the login
+  # container and `automation` for the end-to-end tests (tooling/e2e).
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc752c321c7041358dea8b33b63ea5e021ec499ad5e2d9f
+    command: ['start-from-setup', '--masterkeyFromEnv', '--tlsMode', 'disabled']
+    environment:
+      <<: *zitadel-database
+      ZITADEL_MASTERKEY: ${AGENTX_LOCAL_ZITADEL_MASTERKEY:?run node deploy/compose/prepare.ts first}
+      # Reached through the edge, as the browser sees it.
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALPORT: '8081'
+      ZITADEL_EXTERNALSECURE: 'false'
+      ZITADEL_TLS_ENABLED: 'false'
+      ZITADEL_FIRSTINSTANCE_INSTANCENAME: Agent X local
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: Agent X
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${AGENTX_LOCAL_ZITADEL_ADMIN_PASSWORD:?run node deploy/compose/prepare.ts first}
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: 'false'
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS: admin@agentx.localhost
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: 'true'
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: automation
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Local automation (tests and set-up)
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
+      ZITADEL_FIRSTINSTANCE_PATPATH: /pat/automation.pat
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login UI
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /pat/login-client.pat
+      # ADR-003 §2: MFA for everyone; ADR-005: no self-registration.
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_FORCEMFA: 'true'
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWREGISTER: 'false'
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWEXTERNALIDP: 'false'
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_PASSWORDLESSTYPE: '1'
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_MFAINITSKIPLIFETIME: 0h
+      ZITADEL_DEFAULTINSTANCE_RESTRICTIONS_DISALLOWPUBLICORGREGISTRATION: 'true'
+      ZITADEL_LOG_LEVEL: info
+      ZITADEL_LOG_FORMATTER_FORMAT: json
+    volumes:
+      - zitadel-pat:/pat
+    depends_on:
+      db:
+        condition: service_healthy
+      zitadel-init:
+        condition: service_completed_successfully
+      zitadel-volume:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', '/app/zitadel', 'ready']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    security_opt: ['no-new-privileges:true']
+    networks: [internal]
+    restart: unless-stopped
+
+  # Zitadel's login pages (the v2 login, required by Zitadel v4), served under
+  # /ui/v2/login through the edge. It reads Zitadel through the internal
+  # network, presenting the Host the browser uses. Run as Zitadel's uid so it
+  # can read the token Zitadel wrote for it.
+  login:
+    image: ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd1aa49dbc015617a0c1bc9e6abd956616856f0bb374269fae7da79059
+    user: '1000:1000'
+    environment:
+      ZITADEL_API_URL: http://zitadel:8080
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /pat/login-client.pat
+      CUSTOM_REQUEST_HEADERS: Host:localhost:8081
+    volumes:
+      - zitadel-pat:/pat:ro
+    depends_on:
+      zitadel:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/ui/v2/login/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    security_opt: ['no-new-privileges:true']
+    networks: [internal]
+    restart: unless-stopped
+
+  # The one front door (edge/nginx.conf): 8080 → the API, 8081 → the login
+  # service. The only container the host can reach, and the only one on a
+  # network that reaches anything.
+  edge:
+    image: nginx:1.31.5-alpine-slim@sha256:3b171d7224b669faa3cc2137fea0a65301791df1ec1f271ebd2a2b7461f7fade
+    volumes:
+      - ./edge/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '127.0.0.1:8080:8080'
+      - '127.0.0.1:8081:8081'
+    depends_on:
+      api:
+        condition: service_healthy
+      login:
+        condition: service_healthy
+    security_opt: ['no-new-privileges:true']
+    networks:
+      internal:
+        ipv4_address: 10.77.0.2
+      frontend: {}
+    restart: unless-stopped
+
+networks:
+  # No route in or out: Docker gives an internal network no gateway. The
+  # other services take addresses from the upper half, so the edge's fixed
+  # address (the one the API trusts) is never handed to anything else.
+  internal:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+          ip_range: 10.77.0.128/25
+  frontend: {}
+
+volumes:
+  db-data: {}
+  zitadel-pat: {}
