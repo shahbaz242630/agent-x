@@ -31,6 +31,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Local tools the hooks install (the pinned gitleaks)
+.tools/
+
 # Local AI tooling
 .claude/settings.local.json
 .claude/worktrees/

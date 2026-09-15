@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "verify": "prettier --check . && eslint --max-warnings 0 . && tsc --project tsconfig.json && depcruise apps packages && knip && vitest run --coverage",
-    "e2e": "vitest run --config vitest.e2e.config.ts"
+    "e2e": "vitest run --config vitest.e2e.config.ts",
+    "hooks": "node tooling/git-hooks/install.ts"
   },
   "devDependencies": {
     "@eslint-community/eslint-plugin-eslint-comments": "4.8.0",

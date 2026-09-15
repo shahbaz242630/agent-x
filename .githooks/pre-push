@@ -1,0 +1,6 @@
+#!/bin/sh
+# Installed by `corepack pnpm hooks` (tooling/git-hooks/install.ts). Scans the
+# commits being pushed with gitleaks, then type-checks and lints. Git passes
+# the remote's name and URL as arguments and the refs on stdin. CI checks the
+# same; never skip it with --no-verify.
+exec node tooling/git-hooks/pre-push.ts "$@"
