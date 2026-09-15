@@ -82,8 +82,11 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 /** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
 const BACKUP_ROLE = 'agentx_backup';
 
-/** What counts as an error event: our logger's level, and Zitadel's three. */
-const ERROR_LINES = 'where tostring(parse_json(Log).level) in ("error", "fatal", "panic")';
+/**
+ * What counts as an error event: our logger's level and Zitadel's three, in
+ * any case, since Zitadel's newer lines write "ERROR" (`in~` ignores case).
+ */
+const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage

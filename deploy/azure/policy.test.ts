@@ -849,11 +849,15 @@ describe('each rule can fail', () => {
     expect(brokenRules(without(ERRORS_ALERT))).toEqual(['app-errors-alert']);
     for (const change of [
       query('ContainerAppConsoleLogs | where tostring(parse_json(Log).level) == "error" | summarize Errors = count()'),
+      // Case-sensitive: it would miss Zitadel's "ERROR" lines (code review, S14).
       query(
-        'ContainerAppSystemLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic") | summarize Errors = count()',
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic") | summarize Errors = count()',
       ),
       query(
-        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic") | where ContainerAppName == "api" | summarize Errors = count()',
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic") | summarize Errors = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic") | where ContainerAppName == "api" | summarize Errors = count()',
       ),
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (criterion(alert).threshold = -1),

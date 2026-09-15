@@ -95,9 +95,11 @@ resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30
   }
 ]
 
-// Error events: our logger writes `"level":"error"`; Zitadel's JSON lines say
-// "error", "fatal" or "panic". A line that isn't JSON counts as nothing here.
-var errorLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in ("error", "fatal", "panic")'
+// Error events: our logger and the login pages write `"level":"error"`; Zitadel
+// writes "ERROR" in its newer lines and "error", "fatal" or "panic" in its
+// older ones, so the match ignores case (`in~`). A line that isn't JSON counts
+// as nothing here.
+var errorLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")'
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' existing = {
   name: workspaceName
@@ -106,14 +108,17 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' existin
 // Where to look first (Incident-Response-Playbook.md section 2). It returns
 // rows, which is fine: a saved query runs only for someone signed in to Azure,
 // inside the workspace in UAE North. Saved in the workspace rather than a query
-// pack, which is a resource of its own with a region.
+// pack, which is a resource of its own with a region. Each service names its
+// fields its own way: the event is our `event`, Zitadel's `msg` or the login
+// pages' `message`; the error type is our `err.type`, or Zitadel's `err.id`
+// or `err.kind`.
 resource errorsByType 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
   parent: workspace
   name: 'agentx-errors-by-type'
   properties: {
     category: 'Agent X'
     displayName: 'Errors by type'
-    query: '${errorLines} | extend Line = parse_json(Log) | summarize Errors = count(), Latest = max(TimeGenerated) by Service = coalesce(tostring(Line.service), ContainerAppName, JobName), Event = coalesce(tostring(Line.event), tostring(Line.msg)), ErrorType = tostring(Line.err.type) | order by Latest desc'
+    query: '${errorLines} | extend Line = parse_json(Log) | summarize Errors = count(), Latest = max(TimeGenerated) by Service = coalesce(tostring(Line.service), ContainerAppName, JobName), Event = coalesce(tostring(Line.event), tostring(Line.msg), tostring(Line.message)), ErrorType = coalesce(tostring(Line.err.type), tostring(Line.err.id), tostring(Line.err.kind)) | order by Latest desc'
     version: 2
   }
 }
