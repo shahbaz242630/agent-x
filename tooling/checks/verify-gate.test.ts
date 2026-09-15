@@ -23,8 +23,12 @@ type Step = Record<string, unknown> & { run?: string };
 type Job = Record<string, unknown> & { name?: string; steps?: Step[] };
 
 const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;
-const verifyJob = (parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as { jobs: Record<string, Job> }).jobs
-  .verify;
+const ciJobs = (parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as { jobs: Record<string, Job> }).jobs;
+const verifyJob = ciJobs.verify;
+const endToEndJob = ciJobs['end-to-end'];
+
+/** The end-to-end suite (ADR-010 §7), run by its own CI job against the compose stack. */
+const END_TO_END = { e2e: 'vitest run --config vitest.e2e.config.ts' } as const;
 
 /** The only other root scripts: conveniences that CI never runs. */
 const OTHER_SCRIPTS = { format: 'prettier --write .', test: 'vitest run', verify: Object.values(CHECKS).join(' && ') };
@@ -38,7 +42,18 @@ describe('CI-05 verify gate', () => {
   });
 
   it('has no root script beyond the reviewed ones', () => {
-    expect(scripts).toEqual({ ...CHECKS, ...OTHER_SCRIPTS });
+    expect(scripts).toEqual({ ...CHECKS, ...END_TO_END, ...OTHER_SCRIPTS });
+  });
+
+  it('runs the end-to-end suite, as reviewed, in the CI "End to end" job, which nothing may skip', () => {
+    expect(scripts.e2e).toBe(END_TO_END.e2e);
+    expect(endToEndJob?.name).toBe('End to end');
+    expect((endToEndJob?.steps ?? []).map((step) => step.run)).toContain('pnpm e2e');
+    const escapes = [endToEndJob ?? {}, ...(endToEndJob?.steps ?? [])]
+      .filter((entry) => 'if' in entry || 'continue-on-error' in entry)
+      .map((entry) => ('name' in entry ? String(entry.name) : 'job'));
+    // Only the two clean-up steps may run on failure; nothing may be allowed to fail.
+    expect(escapes).toEqual(['Stack logs (only when something failed)', 'Stop the stack']);
   });
 
   it('gives no workspace package or app a script that runs on install', () => {

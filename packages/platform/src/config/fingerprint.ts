@@ -11,9 +11,9 @@
 // fingerprint names the ones set, never their values, and their values count
 // towards the hash.
 //
-// When secret settings are added to Config, list the fingerprinted fields
-// explicitly instead of hashing the whole config: a hash of a weak secret can
-// be guessed offline.
+// The config holds a secret (the database password), so the fields that count
+// towards the hash are listed one by one below, and the password is not among
+// them: a hash of a weak secret can be guessed offline.
 import { createHash } from 'node:crypto';
 
 import type { Config } from './config.ts';
@@ -52,32 +52,47 @@ export interface ConfigFingerprint {
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-/** JSON with every object's fields in sorted order, so the same settings always hash the same. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (typeof value === 'object' && value !== null) {
-    const fields = Object.entries(value)
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([name, item]) => `${JSON.stringify(name)}:${canonical(item)}`);
-    return `{${fields.join(',')}}`;
-  }
-  return JSON.stringify(value);
+/**
+ * The settings that count, named one by one, in a fixed order, so the same
+ * settings always hash the same however the config was built. The release is
+ * left out: it changes with every deploy, and the fingerprint should change
+ * only when a setting does. The database password is left out: it's a secret.
+ */
+export function fingerprintedSettings(config: Config): Record<string, unknown> {
+  return {
+    environment: config.environment,
+    log: { level: config.log.level, eventCapPerMinute: config.log.eventCapPerMinute },
+    http: {
+      host: config.http.host,
+      port: config.http.port,
+      publicOrigin: config.http.publicOrigin,
+      trustedProxies: config.http.trustedProxies,
+      rateLimitPerMinute: config.http.rateLimitPerMinute,
+    },
+    db: {
+      host: config.db.host,
+      port: config.db.port,
+      database: config.db.database,
+      user: config.db.user,
+      tls: config.db.tls,
+      poolMax: config.db.poolMax,
+    },
+    outbound: { allowedOrigins: config.outbound.allowedOrigins },
+    payees: { coolingOffHours: config.payees.coolingOffHours },
+  };
 }
 
-/**
- * The release is left out: it changes with every deploy, and the fingerprint
- * should change only when a setting does.
- */
 export function configFingerprint(
   config: Config,
   env: Env = process.env,
   nodeArguments: readonly string[] = process.execArgv,
 ): ConfigFingerprint {
-  const { release: _release, ...settings } = config;
+  const settings = fingerprintedSettings(config);
+  // In WATCHED_VARIABLES' order, like the settings above: nothing here depends on how the environment was built.
   const watched = Object.fromEntries(
     WATCHED_VARIABLES.flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   );
-  const hash = createHash('sha256').update(canonical({ settings, watched, nodeArguments })).digest('hex');
+  const hash = createHash('sha256').update(JSON.stringify({ settings, watched, nodeArguments })).digest('hex');
   const flags = [
     ...new Set(nodeArguments.filter((argument) => argument.startsWith('-')).map((flag) => flag.replace(/=.*$/s, ''))),
   ];

@@ -1,0 +1,14 @@
+# What the image build may see (Dockerfile). Everything is left out unless
+# listed: the manifests, the two apps, the packages they use, and the
+# migrations. Test files and the test helpers never reach the image.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!apps/api/**
+!apps/migrate/**
+!packages/core/**
+!packages/platform/**
+!db/**
+**/*.test.ts
+**/node_modules
