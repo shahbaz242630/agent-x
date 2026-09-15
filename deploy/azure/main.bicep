@@ -3,7 +3,8 @@
 // This is the foundation: the private network, the database server, the key
 // vault, the log workspace with its cap and alerts, the Container Apps
 // environment with one identity per app and job, the activity log and the
-// budget. The apps and jobs are a deployment of their own (G2d).
+// budget. The secrets (secrets.bicep) and the apps and jobs (G2d) are
+// deployments of their own, into the resource group this one creates.
 //
 //   bicep snapshot deploy/azure/staging.bicepparam   # what it would create
 //   az deployment sub create --location uaenorth \
@@ -19,6 +20,8 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
+import { resourceNames, shortName, uniqueSuffix } from 'names.bicep'
+
 targetScope = 'subscription'
 
 @description('Which environment this is. Staging holds synthetic data only (ADR-009).')
@@ -34,7 +37,7 @@ param location string
 @description('Makes the names that must be unique across Azure (the key vault, the database server) unique. Change it only to start afresh: a deleted key vault keeps its name for 90 days.')
 @minLength(4)
 @maxLength(6)
-param nameSuffix string = take(uniqueString(subscription().id), 6)
+param nameSuffix string = uniqueSuffix(subscription().id)
 
 @description('The private network\'s address space. The apps and the database each get a /24 from it.')
 param addressSpace string = '10.40.0.0/16'
@@ -79,7 +82,7 @@ param appsZoneRedundant bool
 @minValue(0)
 param appErrorAlertThreshold int
 
-var short = environment == 'production' ? 'prd' : 'stg'
+var short = shortName(environment)
 
 var tags = {
   product: 'agent-x'
@@ -87,39 +90,14 @@ var tags = {
   'managed-by': 'deploy/azure'
 }
 
+// Every name, once (names.bicep). The modules create their resources under
+// these names, and the secrets deployment finds them by the same.
+var names = resourceNames(environment, nameSuffix)
+
 resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
-  name: 'rg-agentx-${environment}'
+  name: names.group
   location: location
   tags: tags
-}
-
-// Every app and job, each with an identity of its own: the API; Zitadel and its
-// login pages; the jobs that set up a server's roles and databases, migrate the
-// app's database, and build Zitadel's (init, then setup). The worker joins in
-// Phase 4.
-var workloads = [
-  'api'
-  'zitadel'
-  'login'
-  'db-setup'
-  'migrate'
-  'zitadel-init'
-  'zitadel-setup'
-]
-
-// Every name, once. The modules create their resources under these names.
-var names = {
-  workspace: 'log-agentx-${short}'
-  actionGroup: 'ag-agentx-${short}'
-  network: 'vnet-agentx-${environment}'
-  appsRules: 'nsg-agentx-${environment}-apps'
-  databaseRules: 'nsg-agentx-${environment}-database'
-  databaseZone: 'agentx-${environment}.private.postgres.database.azure.com'
-  vault: 'kv-agentx-${short}-${nameSuffix}'
-  server: 'psql-agentx-${short}-${nameSuffix}'
-  appsEnvironment: 'cae-agentx-${environment}'
-  appErrors: 'alert-agentx-${short}-app-errors'
-  identities: map(workloads, workload => 'id-agentx-${short}-${workload}')
 }
 
 // The ids one module hands another, built here from the same names rather than

@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -13,46 +13,83 @@ import {
   PREVIEW_API_EXCEPTIONS,
   type RuleId,
   singleSummaryColumn,
+  templateProblems,
 } from './policy.ts';
 import {
   type BicepRun,
+  build,
+  environments,
+  type EnvironmentSnapshot,
+  environmentSnapshot,
   inCopy,
   lint,
   paramsFiles,
   type PredictedResource,
   secureParameters,
-  snapshot,
   type Snapshot,
+  templateOf,
 } from './snapshot.ts';
 
 const STAGING: Expectations = { region: 'uaenorth', environment: 'staging' };
 
-interface Checked {
+/** A Bicep file in deploy/azure, with what the linter says of it and its compiled template. */
+interface BicepFile {
   readonly lint: BicepRun;
-  readonly snapshot: Snapshot;
-  readonly text: string;
+  readonly template: unknown;
+  readonly secure: readonly string[];
 }
 
-let checked: ReadonlyMap<string, Checked>;
-let mainLint: BicepRun;
-let secure: readonly string[];
+/** A parameters file, with what the linter says of it and the Bicep file it deploys. */
+interface ParamsFile {
+  readonly lint: BicepRun;
+  readonly text: string;
+  readonly deploys: string;
+}
+
+let bicepFiles: ReadonlyMap<string, BicepFile>;
+let params: ReadonlyMap<string, ParamsFile>;
+let deployed: ReadonlyMap<string, EnvironmentSnapshot>;
+/** Staging's deployments together, as the policy checks them. */
 let staging: Snapshot;
 
 beforeAll(() => {
   inCopy((dir) => {
-    mainLint = lint(dir, 'main.bicep');
-    secure = secureParameters(dir);
-    checked = new Map(
-      paramsFiles(dir).map((file) => [
-        file,
-        { lint: lint(dir, file), snapshot: snapshot(dir, file), text: readFileSync(path.join(dir, file), 'utf8') },
-      ]),
+    bicepFiles = new Map(
+      readdirSync(dir)
+        .filter((file) => file.endsWith('.bicep'))
+        .sort()
+        .map((file) => {
+          const template = build(dir, file);
+          return [file, { lint: lint(dir, file), template, secure: secureParameters(template) }];
+        }),
     );
+    params = new Map(
+      paramsFiles(dir).map((file) => {
+        const text = readFileSync(path.join(dir, file), 'utf8');
+        return [file, { lint: lint(dir, file), text, deploys: templateOf(text) }];
+      }),
+    );
+    deployed = new Map(environments(dir).map((environment) => [environment, environmentSnapshot(dir, environment)]));
   });
-  const found = checked.get('staging.bicepparam');
+  const found = deployed.get('staging');
   if (found === undefined) throw new Error('deploy/azure has no staging.bicepparam');
-  staging = found.snapshot;
+  staging = found.together;
 });
+
+/** A Bicep file of deploy/azure, or a failure naming it. */
+function bicepFile(file: string): BicepFile {
+  const found = bicepFiles.get(file);
+  if (found === undefined) throw new Error(`deploy/azure has no ${file}`);
+  return found;
+}
+
+/** One of staging's deployments alone. */
+function stagingPart(paramsFile: string): Snapshot {
+  const environment = deployed.get('staging');
+  const part = paramsFile === 'staging.bicepparam' ? environment?.foundation : environment?.parts.get(paramsFile);
+  if (part === undefined) throw new Error(`deploy/azure has no ${paramsFile}`);
+  return part;
+}
 
 /** Every UAE deployment's region (ADR-009), and the environment its resource group says it is. */
 function expectationsOf(snapshotted: Snapshot): Expectations {
@@ -118,6 +155,14 @@ const LOGIN_ALERT = named(/-privileged-login$/);
 const CAP_ALERT = named(/-log-cap-reached$/);
 const QUOTA_ALERT = named(/-log-quota$/);
 const setting = (name: string) => (resource: PredictedResource) => resource.name.endsWith(`/${name}`);
+const SECRETS = type('Microsoft.KeyVault/vaults/secrets');
+const SECRET = (name: string) => (resource: PredictedResource) =>
+  SECRETS(resource) && resource.id.endsWith(`/secrets/${name}`);
+const ASSIGNMENTS = type('Microsoft.Authorization/roleAssignments');
+/** The role assignment that lets `who` read `what`, by the description secrets.bicep gives it. */
+const READS = (who: string, what: string) => (resource: PredictedResource) =>
+  ASSIGNMENTS(resource) &&
+  at(resource.properties, 'description') === `${who} reads ${what} (deploy/azure/secrets.bicep)`;
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
 const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
 const subnet = (network: Mutable, name: string): Mutable =>
@@ -144,23 +189,39 @@ function separateRule(pick: (resource: PredictedResource) => boolean, source: st
   };
 }
 
-describe('deploy/azure', () => {
-  it('has a parameters file for staging, and every one lints clean with every linter rule an error', () => {
-    expect([...checked.keys()]).toContain('staging.bicepparam');
-    expect(mainLint).toEqual({ status: 0, output: '', stdout: '' });
-    for (const [file, { lint: run }] of checked)
+describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
+  it('has staging, its foundation and its secrets, and every file lints clean with every linter rule an error', () => {
+    expect([...deployed.keys()]).toEqual(['staging']);
+    expect([...params.keys()]).toEqual(['staging.bicepparam', 'staging.secrets.bicepparam']);
+    expect([...params.values()].map((entry) => entry.deploys)).toEqual(['main.bicep', 'secrets.bicep']);
+    expect([...bicepFiles.keys()]).toEqual(['main.bicep', 'names.bicep', 'secrets.bicep']);
+    for (const [file, { lint: run }] of [...bicepFiles, ...params])
       expect({ file, ...run }).toEqual({ file, status: 0, output: '', stdout: '' });
   });
 
-  it('breaks no rule in any environment, and no parameters file writes down a secret', () => {
-    expect(secure).toEqual(['postgresAdminPassword']);
-    for (const [file, entry] of checked) {
+  it('breaks no rule in any environment, and no file writes down a secret', () => {
+    expect(bicepFile('main.bicep').secure).toEqual(['postgresAdminPassword']);
+    expect(bicepFile('secrets.bicep').secure).toEqual([
+      'postgresAdminPassword',
+      'dbOwnerPassword',
+      'dbAppPassword',
+      'dbBackupPassword',
+      'dbZitadelPassword',
+      'zitadelMasterKey',
+      'zitadelAdminPassword',
+      'loginClientPrivateKey',
+      'loginClientPublicKey',
+    ]);
+    for (const [environment, { together }] of deployed) {
       expect({
-        file,
-        problems: policyProblems(entry.snapshot, expectationsOf(entry.snapshot)).map(describeProblem),
-      }).toEqual({ file, problems: [] });
-      expect(paramsFileProblems(file, entry.text, secure)).toEqual([]);
+        environment,
+        problems: policyProblems(together, expectationsOf(together)).map(describeProblem),
+      }).toEqual({ environment, problems: [] });
     }
+    for (const [file, entry] of params) {
+      expect(paramsFileProblems(file, entry.text, bicepFile(entry.deploys).secure)).toEqual([]);
+    }
+    for (const [file, { template }] of bicepFiles) expect(templateProblems(file, template)).toEqual([]);
   });
 
   it('applies bicepconfig.json: a secret in an output is an error, not a warning', () => {
@@ -183,7 +244,9 @@ describe('deploy/azure', () => {
   });
 
   it('creates the foundation, and only it', () => {
-    expect(staging.predictedResources.map((resource) => `${resource.type} ${resource.name}`)).toEqual([
+    expect(
+      stagingPart('staging.bicepparam').predictedResources.map((resource) => `${resource.type} ${resource.name}`),
+    ).toEqual([
       'Microsoft.Resources/resourceGroups rg-agentx-staging',
       'Microsoft.OperationalInsights/workspaces log-agentx-stg',
       'Microsoft.Insights/actionGroups ag-agentx-stg',
@@ -216,6 +279,65 @@ describe('deploy/azure', () => {
     ]);
   });
 
+  it('writes the secrets, each only when given but the master key, and lets each app and job read its own', () => {
+    const part = stagingPart('staging.secrets.bicepparam').predictedResources;
+    const label = (resource: PredictedResource): string =>
+      SECRETS(resource)
+        ? `${resource.id.slice(resource.id.lastIndexOf('/') + 1)} ${resource.condition ?? 'once'}`
+        : String(at(resource.properties, 'description'));
+    const givenOnly = (parameter: string): string => `[not(empty(parameters('${parameter}')))]`;
+    expect(part.map(label)).toEqual([
+      `db-admin-password ${givenOnly('postgresAdminPassword')}`,
+      `db-owner-password ${givenOnly('dbOwnerPassword')}`,
+      `db-app-password ${givenOnly('dbAppPassword')}`,
+      `db-backup-password ${givenOnly('dbBackupPassword')}`,
+      `db-zitadel-password ${givenOnly('dbZitadelPassword')}`,
+      `zitadel-admin-password ${givenOnly('zitadelAdminPassword')}`,
+      `login-client-private-key ${givenOnly('loginClientPrivateKey')}`,
+      `login-client-public-key ${givenOnly('loginClientPublicKey')}`,
+      'zitadel-masterkey once',
+      ...[
+        'db-setup reads db-admin-password',
+        'db-setup reads db-owner-password',
+        'migrate reads db-owner-password',
+        'db-setup reads db-app-password',
+        'api reads db-app-password',
+        'db-setup reads db-backup-password',
+        'db-setup reads db-zitadel-password',
+        'zitadel-init reads db-zitadel-password',
+        'zitadel-setup reads db-zitadel-password',
+        'zitadel reads db-zitadel-password',
+        'zitadel-setup reads zitadel-admin-password',
+        'login reads login-client-private-key',
+        'zitadel reads login-client-public-key',
+        'zitadel-setup reads zitadel-masterkey',
+        'zitadel reads zitadel-masterkey',
+      ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
+    ]);
+  });
+
+  it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
+    const text = params.get('staging.secrets.bicepparam')?.text ?? '';
+    const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
+    expect(variables).toHaveLength(9);
+    // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
+    // fresh 32 characters, which Azure leaves alone once one exists. Empty values reach Bicep from Node, as G3's tool sends them.
+    const kept = Object.fromEntries(
+      variables
+        .filter((name) => !['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY'].includes(name))
+        .map((name) => [name, '']),
+    );
+    inCopy((dir) => {
+      const rotation = environmentSnapshot(dir, 'staging', kept).together;
+      expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(9);
+      // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
+      expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MASTERKEY: '' })).toThrow(
+        /minimum allowable length is 32/,
+      );
+    });
+  });
+
   it('resolves every reference between modules to a resource it creates', () => {
     const server = staging.predictedResources.find(SERVER);
     const network = staging.predictedResources.find(NETWORK);
@@ -234,11 +356,22 @@ describe('deploy/azure', () => {
       ),
     ).toBe(staging.predictedResources.find(APPS_RULES)?.id);
     expect(at(server?.properties, 'administratorLoginPassword')).toBe("[parameters('postgresAdminPassword')]");
+    // The secrets deployment's too: the vault and the identities the foundation creates.
+    const vault = staging.predictedResources.find(VAULT);
+    const apiReads = staging.predictedResources.find(READS('api', 'db-app-password'));
+    const api = staging.predictedResources.find(named(/^id-agentx-stg-api$/));
+    expect(apiReads?.id).toBe(
+      `${String(vault?.id)}/secrets/db-app-password/providers/Microsoft.Authorization/roleAssignments/${String(apiReads?.name)}`,
+    );
+    expect(at(apiReads?.properties, 'principalId')).toBe(`[reference('${String(api?.id)}', '2024-11-30').principalId]`);
+    expect(at(staging.predictedResources.find(SECRET('db-app-password'))?.properties, 'value')).toBe(
+      "[parameters('dbAppPassword')]",
+    );
     expect(staging.diagnostics).toEqual([]);
   });
 });
 
-describe('each rule can fail', () => {
+describe('SEC-OPS-09 each rule can fail', () => {
   it('snapshot-complete: Bicep reporting what it could not work out', () => {
     expect(brokenRules({ ...staging, diagnostics: [{ level: 'Warning', message: 'skipped' }] })).toEqual([
       'snapshot-complete',
@@ -246,8 +379,10 @@ describe('each rule can fail', () => {
   });
 
   it('required: a protection that is missing, not only switched off', () => {
+    // The secrets the vault held are left in no vault of this deployment.
     expect(brokenRules(without((resource) => VAULT(resource) || named(/^audit-to-workspace$/)(resource)))).toEqual([
       'required',
+      'vault-secrets',
     ]);
     expect(
       brokenRules(
@@ -299,15 +434,9 @@ describe('each rule can fail', () => {
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties', 'network').adminPassword = literal))),
     ).toEqual(['no-secret-literals']);
-    const vault = staging.predictedResources.find(VAULT);
-    const secret = {
-      id: `${String(vault?.id)}/secrets/leaked`,
-      type: 'Microsoft.KeyVault/vaults/secrets',
-      name: 'leaked',
-      apiVersion: '2025-05-01',
-    };
-    expect(brokenRules(withExtra({ ...secret, properties: { value: literal } }))).toEqual(['no-secret-literals']);
-    expect(brokenRules(withExtra({ ...secret, properties: { value: "[parameters('fromTheShell')]" } }))).toEqual([]);
+    expect(
+      brokenRules(changed(SECRET('db-app-password'), (secret) => (inside(secret, 'properties').value = literal))),
+    ).toEqual(['no-secret-literals']);
     const app = {
       id: '/subscriptions/x/resourceGroups/rg-agentx-staging/providers/Microsoft.App/containerApps/api',
       type: 'Microsoft.App/containerApps',
@@ -321,19 +450,21 @@ describe('each rule can fail', () => {
   });
 
   it('no-secret-literals in a parameters file: a secure value written down, or given a default', () => {
-    const text = checked.get('staging.bicepparam')?.text ?? '';
-    const assignment = /^param postgresAdminPassword = .+$/m;
-    expect(text).toMatch(assignment);
-    for (const written of [
-      "'written in the code'",
-      "readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', 'a default')",
-    ]) {
-      const problems = paramsFileProblems(
-        'staging.bicepparam',
-        text.replace(assignment, `param postgresAdminPassword = ${written}`),
-        secure,
-      );
-      expect(problems.map((problem) => problem.rule)).toEqual(['no-secret-literals']);
+    for (const [file, parameter, variable] of [
+      ['staging.bicepparam', 'postgresAdminPassword', 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD'],
+      ['staging.secrets.bicepparam', 'zitadelMasterKey', 'AGENTX_AZURE_ZITADEL_MASTERKEY'],
+    ] as const) {
+      const entry = params.get(file);
+      const assignment = new RegExp(`^param ${parameter} = .+$`, 'm');
+      expect(entry?.text).toMatch(assignment);
+      for (const written of ["'written in the code'", `readEnvironmentVariable('${variable}', 'a default')`]) {
+        const problems = paramsFileProblems(
+          file,
+          String(entry?.text).replace(assignment, `param ${parameter} = ${written}`),
+          bicepFile(String(entry?.deploys)).secure,
+        );
+        expect(problems.map((problem) => problem.rule)).toEqual(['no-secret-literals']);
+      }
     }
   });
 
@@ -519,7 +650,7 @@ describe('each rule can fail', () => {
     ).toEqual(['workspace']);
   });
 
-  it('log-quota-alerts: the 80% alert off its threshold or its query, or the cap alert inverted or gone', () => {
+  it('SEC-AV-09 log-quota-alerts: the 80% alert off its threshold or its query, or the cap alert inverted or gone', () => {
     expect(
       brokenRules(
         changed(WORKSPACE, (workspace) => (inside(workspace, 'properties', 'workspaceCapping').dailyQuotaGb = 2)),
@@ -628,7 +759,7 @@ describe('each rule can fail', () => {
     ).toEqual(['resource-logs', 'log-destinations']);
   });
 
-  it('log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {
+  it('SEC-DATA-09 log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {
     const AUDIT = named(/^audit-to-workspace$/);
     for (const [key, value] of [
       ['storageAccountId', '/subscriptions/x/resourceGroups/y/providers/Microsoft.Storage/storageAccounts/abroad'],
@@ -796,7 +927,7 @@ describe('each rule can fail', () => {
     ).toEqual(['database-network', 'apps-network', 'vault', 'apps-environment']);
   });
 
-  it('apps-logs: console or system logs kept out of the workspace, or the HTTP log sent anywhere', () => {
+  it('SEC-DATA-09 apps-logs: console or system logs kept out of the workspace, or the HTTP log sent anywhere', () => {
     const logs = (setting: Mutable): Mutable[] => at(setting, 'properties', 'logs') as Mutable[];
     for (const change of [
       (setting: Mutable) => (inside(setting, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
@@ -881,6 +1012,159 @@ describe('each rule can fail', () => {
       ),
     ).toEqual(['identities']);
     expect(brokenRules(changed(IDENTITIES, (identity) => delete identity.properties))).toEqual(['identities']);
+  });
+
+  it('SEC-OPS-11 vault-secrets: a secret written on every run or on another condition, missing, doubled, unread, or elsewhere', () => {
+    for (const change of [
+      (secret: Mutable) => delete secret.condition,
+      (secret: Mutable) => (secret.condition = "[not(empty(parameters('dbOwnerPassword')))]"),
+      (secret: Mutable) => (secret.condition = "[empty(parameters('dbAppPassword'))]"),
+      (secret: Mutable) => (secret.condition = 'true'),
+      // Not an expression at all, only text around one.
+      (secret: Mutable) => (secret.condition = `x${String(secret.condition)}`),
+      (secret: Mutable) => (secret.condition = `${String(secret.condition)}x`),
+      // Its value from one parameter, its condition on another's.
+      (secret: Mutable) => (inside(secret, 'properties').value = "[parameters('dbOwnerPassword')]"),
+    ]) {
+      expect(brokenRules(changed(SECRET('db-app-password'), change))).toEqual(['vault-secrets']);
+    }
+    // The master key written whenever a run brings one.
+    expect(
+      brokenRules(
+        changed(
+          SECRET('zitadel-masterkey'),
+          (secret) => (secret.condition = "[not(empty(parameters('zitadelMasterKey')))]"),
+        ),
+      ),
+    ).toEqual(['vault-secrets']);
+    // Missing: nobody can read it either.
+    expect(brokenRules(without(SECRET('db-app-password')))).toEqual(['vault-secrets', 'secret-access']);
+    const appPassword = structuredClone(
+      staging.predictedResources.find(SECRET('db-app-password')),
+    ) as unknown as Mutable;
+    const elsewhere = String(appPassword.id).replace('/vaults/kv-agentx-stg-', '/vaults/kv-abroad-');
+    // Written twice into our vault, as when two deployments both write it; a second copy in another vault.
+    expect(brokenRules(withExtra({ ...appPassword }))).toEqual(['vault-secrets']);
+    expect(brokenRules(withExtra({ ...appPassword, id: elsewhere }))).toEqual(['vault-secrets']);
+    // A value written into the code, and on every run.
+    expect(
+      brokenRules(
+        changed(SECRET('db-app-password'), (secret) => {
+          inside(secret, 'properties').value = 'written in the code';
+          delete secret.condition;
+        }),
+      ),
+    ).toEqual(['no-secret-literals', 'vault-secrets']);
+    // A secret no app or job reads.
+    expect(brokenRules(withExtra({ ...appPassword, id: `${String(appPassword.id)}-spare` }))).toEqual([
+      'vault-secrets',
+    ]);
+    // Moved to another vault: its readers are let read a secret this deployment doesn't write.
+    expect(brokenRules(changed(SECRET('db-app-password'), (secret) => (secret.id = elsewhere)))).toEqual([
+      'vault-secrets',
+      'secret-access',
+    ]);
+  });
+
+  it('SEC-OPS-11 vault-secrets in a compiled template: a secret written on every run, on another condition, or both on a condition and once', () => {
+    const master = "@onlyIfNotExists()\nresource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {";
+    for (const [from, to] of [
+      // The master key overwritten by every run.
+      ['@onlyIfNotExists()\nresource created', 'resource created'],
+      // The master key overwritten by every staging run: a condition the snapshot settles and drops (security review, S15).
+      [master, "resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = if (environment == 'staging') {"],
+      // Every other secret overwritten by every run, given or not, or whenever a secret has a name.
+      ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: {'],
+      ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: if (!empty(secret.name)) {'],
+      // Rotating secrets that a run can no longer rotate.
+      ["resource written 'Microsoft", "@onlyIfNotExists()\nresource written 'Microsoft"],
+    ] as const) {
+      inCopy((dir) => {
+        const file = path.join(dir, 'secrets.bicep');
+        const text = readFileSync(file, 'utf8');
+        expect(text).toContain(from);
+        writeFileSync(file, text.replace(from, to));
+        const problems = templateProblems('secrets.bicep', build(dir, 'secrets.bicep'));
+        expect(problems.map((problem) => problem.rule)).toEqual(['vault-secrets']);
+      });
+    }
+    // A module's own template and language version 1.0's list are read the same way; a secret only looked up isn't written.
+    const secret = { type: 'Microsoft.KeyVault/vaults/secrets', name: 'x' };
+    expect(templateProblems('t.bicep', { resources: [secret] })).toHaveLength(1);
+    expect(
+      templateProblems('t.bicep', {
+        resources: {
+          part: { type: 'Microsoft.Resources/deployments', properties: { template: { resources: [secret] } } },
+        },
+      }),
+    ).toHaveLength(1);
+    expect(templateProblems('t.bicep', { resources: { found: { ...secret, existing: true } } })).toEqual([]);
+    // Written when its own value is given; a condition on another value, or around its own, is not that.
+    const given = { ...secret, condition: "[not(empty(parameters('p')))]", properties: { value: "[parameters('p')]" } };
+    expect(templateProblems('t.bicep', { resources: [given] })).toEqual([]);
+    for (const condition of ["[not(empty(parameters('q')))]", "[and(true(), not(empty(parameters('p'))))]"]) {
+      expect(templateProblems('t.bicep', { resources: [{ ...given, condition }] })).toHaveLength(1);
+    }
+    for (const value of ['p', "x[parameters('p')]", "[parameters('p')]x"]) {
+      expect(templateProblems('t.bicep', { resources: [{ ...given, properties: { value } }] })).toHaveLength(1);
+    }
+  });
+
+  it("SEC-OPS-11 secret-access: another role, a wider scope, someone else's principal, or a reader the list doesn't name", () => {
+    const API_READS = READS('api', 'db-app-password');
+    const properties = (assignment: Mutable): Mutable => inside(assignment, 'properties');
+    const role = (id: string) => (assignment: Mutable) =>
+      (properties(assignment).roleDefinitionId = String(properties(assignment).roleDefinitionId).replace(
+        '4633458b-17de-408a-b874-0445c86b69e6',
+        id,
+      ));
+    const scoped = (scope: unknown) => (assignment: Mutable) =>
+      (assignment.id = `${String(scope)}/providers/Microsoft.Authorization/roleAssignments/${String(assignment.name)}`);
+    const principal = (workload: string): string =>
+      `[reference('${String(staging.predictedResources.find(named(new RegExp(`^id-agentx-stg-${workload}$`)))?.id)}', '2024-11-30').principalId]`;
+    for (const change of [
+      // Key Vault Secrets Officer, which also writes and deletes secrets; Key Vault Administrator.
+      role('b86a8fe4-44ce-4948-aee5-eccb2c155cd7'),
+      role('00482a5a-887f-4fb3-b363-3b7fe8e74483'),
+      // Every secret at once: the vault, the resource group, the subscription.
+      scoped(staging.predictedResources.find(VAULT)?.id),
+      scoped(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id),
+      scoped('/subscriptions/00000000-0000-0000-0000-000000000001'),
+      // Someone other than an identity this deployment creates.
+      (assignment: Mutable) => (properties(assignment).principalId = '00000000-0000-0000-0000-00000000abcd'),
+      (assignment: Mutable) =>
+        (properties(assignment).principalId = principal('api').replace(
+          '/resourceGroups/rg-agentx-staging/',
+          '/resourceGroups/elsewhere/',
+        )),
+      (assignment: Mutable) => (properties(assignment).principalId = `x${principal('api')}`),
+      (assignment: Mutable) => (properties(assignment).principalId = `${principal('api')}x`),
+      (assignment: Mutable) => (properties(assignment).principalType = 'User'),
+      (assignment: Mutable) => delete properties(assignment).principalType,
+      // Another app's identity: the login pages reading the API's database login.
+      (assignment: Mutable) => (properties(assignment).principalId = principal('login')),
+    ]) {
+      expect(brokenRules(changed(API_READS, change))).toEqual(['secret-access']);
+    }
+    // A wider scope is refused as that, not only as a reader the list doesn't name.
+    for (const scope of [
+      staging.predictedResources.find(VAULT)?.id,
+      staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id,
+    ]) {
+      expect(policyProblems(changed(API_READS, scoped(scope)), STAGING).map(describeProblem)).toContainEqual(
+        expect.stringMatching(
+          /\[secret-access\] must give Key Vault Secrets User on one secret this deployment writes/,
+        ),
+      );
+    }
+    // One more secret for the API, on top of its own.
+    const extra = structuredClone(staging.predictedResources.find(API_READS)) as unknown as Mutable;
+    extra.id = String(extra.id).replace('/secrets/db-app-password/', '/secrets/db-owner-password/');
+    expect(brokenRules(withExtra(extra))).toEqual(['secret-access']);
+    // A reader left out: the migration job can't read its login.
+    expect(brokenRules(without(READS('migrate', 'db-owner-password')))).toEqual(['secret-access']);
+    // A reader whose identity the foundation doesn't create.
+    expect(brokenRules(without(named(/^id-agentx-stg-login$/)))).toEqual(['secret-access']);
   });
 });
 
