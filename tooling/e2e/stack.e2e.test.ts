@@ -39,6 +39,11 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     expect(await response.json()).toMatchObject({ error: { code: 'ORIGIN_REFUSED' } });
   });
 
+  it('ran the set-up job to completion, and the server matched db/bootstrap', async () => {
+    expect(await serviceState('db-setup')).toMatchObject({ State: 'exited', ExitCode: 0 });
+    expect(await serviceLogs('db-setup')).toContain('"event":"db_setup.done"');
+  });
+
   it('ran the migration job to completion before the API started', async () => {
     expect(await serviceState('migrate')).toMatchObject({ State: 'exited', ExitCode: 0 });
     const migrateLog = await serviceLogs('migrate');
@@ -54,6 +59,7 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     expect(raw.split('\n').filter((line) => line !== '' && !line.startsWith('{'))).toEqual([]);
     expect(findLeaks(raw, localLogins())).toEqual([]);
     expect(findLeaks(await serviceLogs('migrate'), localLogins())).toEqual([]);
+    expect(findLeaks(await serviceLogs('db-setup'), localLogins())).toEqual([]);
   });
 
   it('gives the API no way out: a call to the internet from inside fails to resolve', async () => {

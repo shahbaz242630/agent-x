@@ -48,22 +48,15 @@ x-zitadel-database: &zitadel-database
 services:
   # PostgreSQL 18 (ADR-002), the same image the database tests run against
   # (tooling/test-db/postgres-images.ts; a check keeps the two digests equal).
-  # On first start it runs db-init: the Agent X roles and database from
-  # db/bootstrap, exactly as an admin sets up a real server, then Zitadel's.
+  # It starts empty but for its superuser; db-setup gives it everything else.
   db:
     image: postgres:18.6-trixie@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
     environment:
       POSTGRES_PASSWORD: ${AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD:?}
       # Passwords for every connection, local ones included: no trust auth anywhere.
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=scram-sha-256
-      AGENTX_LOCAL_DB_OWNER_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?}
-      AGENTX_LOCAL_DB_APP_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?}
-      AGENTX_LOCAL_DB_BACKUP_PASSWORD: ${AGENTX_LOCAL_DB_BACKUP_PASSWORD:?}
-      AGENTX_LOCAL_ZITADEL_DB_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?}
     volumes:
       - db-data:/var/lib/postgresql
-      - ./db-init:/docker-entrypoint-initdb.d:ro
-      - ../../db/bootstrap:/agentx/bootstrap:ro
     healthcheck:
       test: ['CMD', 'pg_isready', '--username', 'postgres', '--dbname', 'postgres']
       interval: 5s
@@ -78,6 +71,29 @@ services:
     networks: [internal]
     restart: unless-stopped
 
+  # The database set-up job (apps/db-setup), the one Azure runs: the Agent X
+  # roles and database and Zitadel's, from db/bootstrap, as the server admin,
+  # each role's login sent as a SCRAM verifier. Then it exits; it's safe to
+  # run again, so it runs on every start.
+  db-setup:
+    <<: *app
+    command: ['node', 'apps/db-setup/src/main.ts']
+    environment:
+      AGENTX_ENV: development
+      AGENTX_DB_HOST: db
+      AGENTX_DB_NAME: agentx
+      AGENTX_DB_TLS: disable
+      AGENTX_DB_ADMIN_USER: postgres
+      AGENTX_DB_ADMIN_PASSWORD: ${AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD:?}
+      AGENTX_DB_OWNER_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?}
+      AGENTX_DB_APP_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?}
+      AGENTX_DB_BACKUP_PASSWORD: ${AGENTX_LOCAL_DB_BACKUP_PASSWORD:?}
+      AGENTX_DB_ZITADEL_PASSWORD: ${AGENTX_LOCAL_ZITADEL_DB_PASSWORD:?}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+
   # Applies db/migrations as the migration role, then exits (ADR-001: never
   # inside the app). The API waits for it to have finished.
   migrate:
@@ -90,8 +106,8 @@ services:
       AGENTX_DB_TLS: disable
       AGENTX_DB_MIGRATION_PASSWORD: ${AGENTX_LOCAL_DB_OWNER_PASSWORD:?}
     depends_on:
-      db:
-        condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
     restart: 'no'
 
   # The API (Product-Documentation/API.md), as the app role only.
@@ -129,14 +145,13 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  # Makes the folders for Zitadel's generated tokens writable by Zitadel (uid
+  # Makes the folder for Zitadel's automation token writable by Zitadel (uid
   # 1000). A named volume starts out owned by root; a distroless image can't
   # chown. Needs no network and nothing but the right to change an owner.
   zitadel-volume:
     image: node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
-    command: ['chown', '1000:1000', '/pat', '/pat-automation']
+    command: ['chown', '1000:1000', '/pat-automation']
     volumes:
-      - zitadel-pat:/pat
       - zitadel-automation:/pat-automation
     network_mode: none
     cap_drop: [ALL]
@@ -151,8 +166,8 @@ services:
     environment:
       <<: *zitadel-database
     depends_on:
-      db:
-        condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
     networks: [internal]
@@ -160,9 +175,11 @@ services:
 
   # The login service (ADR-003): forced MFA for everyone, passkeys and
   # authenticator apps, no self-registration, no outside identity providers.
-  # Its first start creates the instance, the `admin` user, and two machine
-  # users whose tokens land in the shared folder: `login-client` for the login
-  # container and `automation` for the end-to-end tests (tooling/e2e).
+  # Its first start creates the instance, the `admin` user, and the machine
+  # user `automation`, whose token lands in its folder for the end-to-end
+  # tests (tooling/e2e). The login container signs in as the system user
+  # `login-client` with a key prepare generated: Zitadel holds only the public
+  # half, and no token is ever written to disk or shared between containers.
   zitadel:
     image: ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc752c321c7041358dea8b33b63ea5e021ec499ad5e2d9f
     command: ['start-from-setup', '--masterkeyFromEnv', '--tlsMode', 'disabled']
@@ -185,10 +202,9 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Local automation (tests and set-up)
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
       ZITADEL_FIRSTINSTANCE_PATPATH: /pat-automation/automation.pat
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login UI
-      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
-      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /pat/login-client.pat
+      # The login container's system user: its public key, and the one role
+      # the login pages need (Zitadel's own Helm chart does the same).
+      ZITADEL_SYSTEMAPIUSERS: '{"login-client":{"KeyData":"${AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY:?}","Memberships":[{"MemberType":"System","Roles":["IAM_LOGIN_CLIENT"]}]}}'
       # ADR-003 §2: MFA for everyone; ADR-005: no self-registration.
       ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_FORCEMFA: 'true'
       ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWREGISTER: 'false'
@@ -200,8 +216,11 @@ services:
       ZITADEL_LOG_FORMATTER_FORMAT: json
       # No metrics endpoint: nothing scrapes it here, and it would be served through the edge.
       ZITADEL_METRICS_TYPE: none
+      # ADR-013: nothing leaves the UAE. Zitadel's daily report to zitadel.com
+      # (its version, every instance's domains, resource counts) is on unless
+      # switched off. The internal network couldn't send it; Azure could.
+      ZITADEL_SERVICEPING_ENABLED: 'false'
     volumes:
-      - zitadel-pat:/pat
       - zitadel-automation:/pat-automation
     depends_on:
       db:
@@ -223,18 +242,22 @@ services:
 
   # Zitadel's login pages (the v2 login, required by Zitadel v4), served under
   # /ui/v2/login through the edge. It reads Zitadel through the internal
-  # network, presenting the Host the browser uses. Run as Zitadel's uid so it
-  # can read the token Zitadel wrote for it.
+  # network, presenting the Host the browser uses, and signs each call as the
+  # system user `login-client` with its private key, for Zitadel's own address
+  # (AUDIENCE). The image runs as its own unprivileged user.
   login:
     image: ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd1aa49dbc015617a0c1bc9e6abd956616856f0bb374269fae7da79059
-    user: '1000:1000'
     environment:
       ZITADEL_API_URL: http://zitadel:8080
       NEXT_PUBLIC_BASE_PATH: /ui/v2/login
-      ZITADEL_SERVICE_USER_TOKEN_FILE: /pat/login-client.pat
       CUSTOM_REQUEST_HEADERS: Host:localhost:8081
-    volumes:
-      - zitadel-pat:/pat:ro
+      AUDIENCE: http://localhost:8081
+      SYSTEM_USER_ID: login-client
+      SYSTEM_USER_PRIVATE_KEY: ${AGENTX_LOCAL_LOGIN_CLIENT_PRIVATE_KEY:?}
+      # ADR-013: the login pages carry an OpenTelemetry SDK that starts by
+      # default and exports to an OTLP endpoint (localhost unless set). Off,
+      # so nothing is gathered to be sent anywhere.
+      OTEL_SDK_DISABLED: 'true'
     depends_on:
       zitadel:
         condition: service_healthy
@@ -292,7 +315,5 @@ networks:
 
 volumes:
   db-data: {}
-  # The login container's token: read by Zitadel and the login container only.
-  zitadel-pat: {}
   # The automation token (instance owner): read by Zitadel and the test suite only, never by the login container.
   zitadel-automation: {}

@@ -3,7 +3,7 @@
 // reviewed infrastructure code, and is checked once at start-up. Anything
 // wrong stops the start: a bad value, a broken rule between settings, a value
 // below a safety minimum, a misspelt AGENTX_ variable, a setting that belongs
-// to the migration job, a PG* variable, or TLS certificate checks turned off.
+// to another job, a PG* variable, or TLS certificate checks turned off.
 // Problems name the variable and the rule, never the value, so a secret pasted
 // into the wrong variable can't leak through the error.
 import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
@@ -70,35 +70,6 @@ export interface Config {
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
 }
-
-/** The settings the app reads. Anything else in AGENTX_ style is refused. */
-const APP_SETTINGS: readonly SettingName[] = [
-  'AGENTX_ENV',
-  'AGENTX_RELEASE',
-  'AGENTX_LOG_LEVEL',
-  'AGENTX_LOG_EVENT_CAP_PER_MINUTE',
-  'AGENTX_HTTP_HOST',
-  'AGENTX_HTTP_PORT',
-  'AGENTX_PUBLIC_ORIGIN',
-  'AGENTX_TRUSTED_PROXIES',
-  'AGENTX_RATE_LIMIT_PER_MINUTE',
-  'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
-  'AGENTX_PAYEE_COOLING_OFF_HOURS',
-  'AGENTX_DB_HOST',
-  'AGENTX_DB_PORT',
-  'AGENTX_DB_NAME',
-  'AGENTX_DB_TLS',
-  'AGENTX_DB_USER',
-  'AGENTX_DB_PASSWORD',
-  'AGENTX_DB_PASSWORD_FILE',
-  'AGENTX_DB_POOL_MAX',
-];
-
-/** The other process that reads AGENTX_ settings, for the message when one of its variables reaches the app. */
-const MIGRATION_JOB = {
-  job: 'the migration job (apps/migrate)',
-  reason: "the running app never holds the migration role's login (ADR-005 §3)",
-};
 
 function plainHttpProblems(name: SettingName, environment: Environment, origins: readonly string[]): string[] {
   const plainHttp = origins.some((origin) => origin.startsWith('http:'));
@@ -187,7 +158,7 @@ export function loadConfig(env: Env = process.env): Config {
   const problems = [
     ...tlsProblems(env),
     ...pgVariableProblems(env),
-    ...unknownSettings(env, APP_SETTINGS, MIGRATION_JOB),
+    ...unknownSettings(env, 'app'),
     ...failures(Object.values(checks)),
     // A rule between settings runs whenever the settings it compares are valid,
     // so one start reports it alongside any other problem.

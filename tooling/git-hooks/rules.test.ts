@@ -121,7 +121,7 @@ describe('text the secret scanners mistake for a secret', () => {
     expect(rulesOf('deploy/compose/compose.yaml', withMessage)).toEqual(['placeholder-message']);
     expect(rulesOf('.github/workflows/ci.yml', withMessage)).toEqual(['placeholder-message']);
     expect(rulesOf('deploy/compose/compose.yaml', join('      image: ', '$', '{TAG:?}'))).toEqual([]);
-    expect(rulesOf('deploy/compose/db-init/10-agentx.sh', withMessage)).toEqual([]);
+    expect(rulesOf('scripts/example.sh', withMessage)).toEqual([]);
   });
 });
 
