@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed by `corepack pnpm hooks` (tooling/git-hooks/install.ts). Checks the
+# staged changes: secrets, key and env files, scanner bait, invisible
+# characters, formatting. CI checks the same; never skip it with --no-verify.
+exec node tooling/git-hooks/pre-commit.ts
