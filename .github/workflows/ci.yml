@@ -1,8 +1,10 @@
 # CI for every pull request and every push to main.
 #
-# Every job here is a required status check on the main ruleset. All actions
-# are pinned to full commit SHAs, the default token is read-only, and no job
-# keeps git credentials after checkout.
+# Every job that runs on a pull request is a required status check on the main
+# ruleset. The three image jobs run only on a push to main, after every other
+# job passed, so they can't gate a PR: they publish and sign the image that
+# deployments run (SEC-SC-02). All actions are pinned to full commit SHAs, the
+# default token is read-only, and no job keeps git credentials after checkout.
 name: CI
 
 on:
@@ -180,6 +182,20 @@ jobs:
       - name: Generate the stack's logins
         run: node deploy/compose/prepare.ts
 
+      # The third-party images on their own, with a short retry, so a registry
+      # hiccup can't read as a red build (main's first run after PR #17 died
+      # on a Docker Hub token error before the stack started). The app image
+      # is built in the next step; its Node base is pulled here too, as the
+      # volume step's image.
+      - name: Pull the stack's images (retried)
+        run: |
+          for attempt in 1 2 3; do
+            docker compose -f deploy/compose/compose.yaml pull --ignore-buildable --quiet && exit 0
+            echo "Pull attempt ${attempt} of 3 failed."
+            [ "${attempt}" -lt 3 ] && sleep 15
+          done
+          exit 1
+
       - name: Build the image and start the stack
         run: docker compose -f deploy/compose/compose.yaml up --build --wait --wait-timeout 420
 
@@ -204,3 +220,223 @@ jobs:
       - name: Stop the stack
         if: always()
         run: docker compose -f deploy/compose/compose.yaml down --volumes --remove-orphans
+
+  # SEC-SC-02 and ADR-002 Amendment E2: the image every deployment runs. Built
+  # from main once every other job has passed, pushed to GitHub's registry and
+  # signed keyless (Sigstore) by its digest. The signature's certificate names
+  # this workflow, main, the push and the commit, and deploy/image/verify.ts,
+  # the check before every deploy, accepts nothing else. Each refusal that
+  # check relies on is proven here against the real image, on every publish.
+  image-publish:
+    name: Image (main) - build, push and sign
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [workflow-policy, zizmor, gitleaks, verify, end-to-end]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # to check out the Dockerfile and the deploy check
+      packages: write # to push the image and its signature
+      id-token: write # for the token Sigstore's certificate authority turns into the signing certificate
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      IMAGE: ghcr.io/shahbaz242630/agent-x
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          package-manager-cache: false
+
+      # The installer checks cosign's own signature before it installs it.
+      # 3.1.3 carries the fix for GHSA-fx35-mq7g-6g98.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # No attestations of BuildKit's own, so the image is a single manifest
+      # whatever the runner's image store; its SBOM is attached, signed, by the
+      # image-attest job. The Node base comes from Docker Hub, so a hiccup
+      # there is retried.
+      - name: Build the image
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          for attempt in 1 2 3; do
+            docker build --provenance=false --sbom=false --build-arg "AGENTX_RELEASE=${COMMIT}" --tag "${IMAGE}:${COMMIT}" . && exit 0
+            echo "Build attempt ${attempt} of 3 failed."
+            [ "${attempt}" -lt 3 ] && sleep 15
+          done
+          exit 1
+
+      - name: Log in to GitHub's registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      # The digest is read back from the registry: that is what gets signed
+      # and what a deployment names.
+      - name: Push
+        id: push
+        env:
+          COMMIT: ${{ github.sha }}
+        run: |
+          docker push --quiet "${IMAGE}:${COMMIT}"
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${COMMIT}" --format '{{json .Manifest}}' | jq -r .digest)
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The registry gave no digest for the pushed image."
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed ${IMAGE}@${digest}"
+
+      - name: Proof - the deploy check refuses the image while it is unsigned (IMAGE_UNSIGNED)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          COMMIT: ${{ github.sha }}
+          EXPECTED_EXIT: '3'
+        run: |
+          status=0
+          node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
+          if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
+            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            exit 1
+          fi
+
+      - name: Sign the image by its digest (keyless)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Proof - the deploy check refuses the signed image while its SBOM is missing (SBOM_MISSING)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          COMMIT: ${{ github.sha }}
+          EXPECTED_EXIT: '5'
+        run: |
+          status=0
+          node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
+          if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
+            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            exit 1
+          fi
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
+  # The SBOM of the pushed image, by its digest, made in a job that can
+  # neither push nor sign: the scanner is outside code, so it never runs where
+  # it could.
+  image-sbom:
+    name: Image (main) - SBOM
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      packages: read # to pull the image, which is private; the scanner needs nothing else
+    env:
+      IMAGE: ghcr.io/shahbaz242630/agent-x
+    steps:
+      # Logged out again before the scanner runs, so it never sees a registry login.
+      - name: Pull the image by its digest
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: |
+          trap 'docker logout ghcr.io' EXIT
+          printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+          docker pull --quiet "${IMAGE}@${DIGEST}"
+
+      - name: Software bill of materials for the pushed image (CycloneDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ghcr.io/shahbaz242630/agent-x@${{ needs.image-publish.outputs.digest }}
+          format: cyclonedx-json
+          artifact-name: sbom-published-image.cdx.json
+          upload-artifact: true
+          upload-release-assets: false
+          dependency-snapshot: false
+
+  # Attaches the SBOM to the image as an attestation signed like the image,
+  # then runs the deploy check exactly as a deployment will, and proves it
+  # pins the commit.
+  image-attest:
+    name: Image (main) - attach the SBOM and verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish, image-sbom]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # to check out the deploy check
+      packages: write # to push the attestation
+      id-token: write # for the signing certificate, as in image-publish
+    env:
+      IMAGE: ghcr.io/shahbaz242630/agent-x
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          package-manager-cache: false
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      # Refuses a download whose hash differs from the one recorded at upload.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom-published-image.cdx.json
+          path: sbom
+
+      - name: Log in to GitHub's registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Attach the SBOM as a signed attestation (keyless)
+        env:
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: |
+          mapfile -t files < <(find sbom -type f -name '*.json')
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::Expected one SBOM file, found ${#files[@]}."
+            exit 1
+          fi
+          cosign attest --yes --type cyclonedx --predicate "${files[0]}" "${IMAGE}@${DIGEST}"
+
+      - name: The deploy check accepts the image (deploy/image/verify.ts)
+        env:
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+          COMMIT: ${{ github.sha }}
+        run: node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}"
+
+      - name: Proof - the deploy check refuses the image for another commit (SIGNATURE_REFUSED)
+        env:
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+          COMMIT: '0000000000000000000000000000000000000000'
+          EXPECTED_EXIT: '4'
+        run: |
+          status=0
+          node deploy/image/verify.ts "${IMAGE}@${DIGEST}" "${COMMIT}" || status=$?
+          if [ "${status}" -ne "${EXPECTED_EXIT}" ]; then
+            echo "::error::The deploy check exited ${status}; this proof expects ${EXPECTED_EXIT}."
+            exit 1
+          fi
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout ghcr.io
