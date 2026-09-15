@@ -69,6 +69,17 @@ const NAMED_FOR_A_SECRET = /passw(?:or)?d|secret|token|key/i;
 /** A key that holds where a password is, not the password: `AGENTX_DB_PASSWORD_FILE`. */
 const NAMES_A_PLACE = /(?:file|path)$/i;
 
+/**
+ * A quoted word and a quoted password-named name on either side of a colon,
+ * which GitGuardian read as a password, the word being it: a map from a
+ * secret's name to the apps that read it (PR #27, S15), and the same map keyed
+ * by the app (PR #28). Write such a pairing as one string ("api reads
+ * db-app-password") instead.
+ */
+const PASSWORD_NAMED_KEY_WITH_WORD = /(['"`])[A-Za-z0-9_.-]*passw(?:or)?d\1\s*:\s*\[?\s*(['"`])[A-Za-z0-9_.-]{8,}\2/i;
+const WORD_KEY_WITH_PASSWORD_NAMED =
+  /(['"`])[A-Za-z0-9_.-]{8,}\1\s*:\s*\[?[^:]*?(['"`])[A-Za-z0-9_.-]*passw(?:or)?d[A-Za-z0-9_.-]*\2/i;
+
 /** A required-variable placeholder with a message, which GitGuardian paired with a user name (PR #16, S10). */
 const PLACEHOLDER_WITH_MESSAGE = /\$\{[A-Za-z0-9_]+:\?[^}]+\}/;
 const YAML_FILE = /\.ya?ml$/i;
@@ -148,6 +159,12 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a variable in a password-named field; GitGuardian reads its name as the password. Name the value for what it is (`role.password`) or pass it through a call',
+    );
+  }
+  if (PASSWORD_NAMED_KEY_WITH_WORD.test(text) || WORD_KEY_WITH_PASSWORD_NAMED.test(text)) {
+    add(
+      'scanner-bait',
+      'a quoted word paired with a quoted password-named name; GitGuardian reads the word as the password. Write the pair as one string ("api reads db-app-password")',
     );
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {

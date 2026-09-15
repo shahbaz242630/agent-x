@@ -105,6 +105,34 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['a camelCase variable as an object password', join('  { user: x, pass', 'word: zitadel', 'Login }')],
     ['a dotted path that names no secret (PR #24)', join('    AGENTX_DB_ZITADEL_PASS', 'WORD: zitadel.', 'login,')],
+    [
+      'a list of readers under a quoted password key (PR #27)',
+      join('  ', q, 'zitadel-admin-pass', 'word', q, ': [', q, 'zitadel-', 'setup', q, '],'),
+    ],
+    ['a word under a double-quoted password key', join('  "db_pass', 'word": "some-', 'thing-long",')],
+    [
+      'a quoted reader keying a list of password-named secrets (PR #28)',
+      join('  ', q, 'zitadel-init', q, ': [', q, 'db-zitadel-pass', 'word', q, '],'),
+    ],
+    [
+      'the password-named secret later in the list',
+      join(
+        '  ',
+        q,
+        'zitadel-setup',
+        q,
+        ': [',
+        q,
+        'zitadel-masterkey',
+        q,
+        ', ',
+        q,
+        'zitadel-admin-pass',
+        'word',
+        q,
+        '],',
+      ),
+    ],
   ])('finds %s', (_name, line) => {
     expect(rulesOf('a.test.ts', line)).toEqual(['scanner-bait']);
   });
@@ -124,6 +152,14 @@ describe('text the secret scanners mistake for a secret', () => {
     ['a short value', join('const token = ', q, 'a1b2', q, ';')],
     ['a value with no digits', join('const secret = ', q, 'abcdefgh', 'ijklmnop', q, ';')],
     ['a repeated value', join('const secret = ', q, 'a1a1a1a1a1a1', q, ';')],
+    ['a pairing written as one string', join('  ', q, 'zitadel-setup reads zitadel-admin-pass', 'word', q, ',')],
+    ['a short unquoted key', join('  api: [', q, 'db-app-pass', 'word', q, '],')],
+    [
+      'a word and a password-named name not paired by a colon',
+      join('READS(', q, 'migrate', q, ', ', q, 'db-owner-pass', 'word', q, ')'),
+    ],
+    ['a short word under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, 'none', q, ',')],
+    ['a reference under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, '${DB_PASS}', q, ',')],
   ])('leaves alone %s', (_name, line) => {
     expect(rulesOf('a.ts', line)).toEqual([]);
   });
