@@ -147,7 +147,9 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
         }
       ]
     }
-    autoMitigate: true
+    // Stateless: every 15 minutes with such a login notifies again. A stateful
+    // alert stays fired and says nothing about a second login while it lasts.
+    autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]
     }

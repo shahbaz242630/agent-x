@@ -12,12 +12,14 @@
 
 param location string
 param short string
+param workspaceName string
+param actionGroupName string
 param tags object
 param alertEmail string
 param logDailyCapGb int
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
-  name: 'log-agentx-${short}'
+  name: workspaceName
   location: location
   tags: tags
   properties: {
@@ -47,7 +49,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
 // "Global" means any region may process them, which is why alerts carry only
 // counts and a link that needs an Azure sign-in (ADR-013 rule 3).
 resource partner 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: 'ag-agentx-${short}'
+  name: actionGroupName
   location: 'Global'
   tags: tags
   properties: {
@@ -143,6 +145,3 @@ resource capReached 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
   }
 }
-
-output workspaceId string = workspace.id
-output actionGroupId string = partner.id

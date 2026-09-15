@@ -85,11 +85,35 @@ resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
   tags: tags
 }
 
+// Every name, once. The modules create their resources under these names.
+var names = {
+  workspace: 'log-agentx-${short}'
+  actionGroup: 'ag-agentx-${short}'
+  network: 'vnet-agentx-${environment}'
+  databaseRules: 'nsg-agentx-${environment}-database'
+  databaseZone: 'agentx-${environment}.private.postgres.database.azure.com'
+  vault: 'kv-agentx-${short}-${nameSuffix}'
+  server: 'psql-agentx-${short}-${nameSuffix}'
+}
+
+// The ids one module hands another, built here from the same names rather than
+// passed on as module outputs. So a snapshot resolves every one of them, and
+// the policy can check each points at a resource this deployment creates.
+var ids = {
+  workspace: resourceId(subscription().subscriptionId, group.name, 'Microsoft.OperationalInsights/workspaces', names.workspace)
+  actionGroup: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Insights/actionGroups', names.actionGroup)
+  appsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'apps')
+  databaseSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'database')
+  databaseZone: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/privateDnsZones', names.databaseZone)
+}
+
 module monitoring 'modules/monitoring.bicep' = {
   scope: group
   params: {
     location: location
     short: short
+    workspaceName: names.workspace
+    actionGroupName: names.actionGroup
     tags: tags
     alertEmail: alertEmail
     logDailyCapGb: logDailyCapGb
@@ -100,7 +124,9 @@ module network 'modules/network.bicep' = {
   scope: group
   params: {
     location: location
-    environment: environment
+    name: names.network
+    databaseRulesName: names.databaseRules
+    databaseZoneName: names.databaseZone
     tags: tags
     addressSpace: addressSpace
   }
@@ -110,28 +136,38 @@ module vault 'modules/keyvault.bicep' = {
   scope: group
   params: {
     location: location
-    name: 'kv-agentx-${short}-${nameSuffix}'
+    name: names.vault
     tags: tags
-    appsSubnetId: network.outputs.appsSubnetId
-    workspaceId: monitoring.outputs.workspaceId
+    appsSubnetId: ids.appsSubnet
+    workspaceId: ids.workspace
   }
+  // The subnet's service endpoint and the workspace must exist first.
+  dependsOn: [
+    network
+    monitoring
+  ]
 }
 
 module database 'modules/postgres.bicep' = {
   scope: group
   params: {
     location: location
-    name: 'psql-agentx-${short}-${nameSuffix}'
+    name: names.server
     tags: tags
     adminPassword: postgresAdminPassword
     sku: postgresSku
     backupRetentionDays: postgresBackupRetentionDays
     geoRedundantBackup: postgresGeoRedundantBackup
-    subnetId: network.outputs.databaseSubnetId
-    privateDnsZoneId: network.outputs.databaseDnsZoneId
-    workspaceId: monitoring.outputs.workspaceId
-    actionGroupId: monitoring.outputs.actionGroupId
+    subnetId: ids.databaseSubnet
+    privateDnsZoneId: ids.databaseZone
+    workspaceId: ids.workspace
+    actionGroupId: ids.actionGroup
   }
+  // The delegated subnet, the zone linked to the network, the workspace and the action group must exist first.
+  dependsOn: [
+    network
+    monitoring
+  ]
 }
 
 // Who changed what in this subscription, kept in the same workspace: every
@@ -140,7 +176,7 @@ module database 'modules/postgres.bicep' = {
 resource activityLog 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: 'activity-log-to-workspace'
   properties: {
-    workspaceId: monitoring.outputs.workspaceId
+    workspaceId: ids.workspace
     logs: [
       {
         category: 'Administrative'
@@ -156,6 +192,7 @@ resource activityLog 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' 
       }
     ]
   }
+  dependsOn: [monitoring]
 }
 
 // A cost alarm, not a limit: Azure keeps running when it is passed. Budget
@@ -203,7 +240,7 @@ resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
 }
 
 output resourceGroupName string = group.name
-output workspaceId string = monitoring.outputs.workspaceId
-output appsSubnetId string = network.outputs.appsSubnetId
+output workspaceId string = ids.workspace
+output appsSubnetId string = ids.appsSubnet
 output keyVaultName string = vault.outputs.name
 output databaseHost string = database.outputs.host

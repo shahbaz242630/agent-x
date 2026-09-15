@@ -3,13 +3,14 @@
 // publishes no signatures, so the SHA-256 pins here, reviewed in the
 // repository, are what we trust: GitHub's digest of each release file, checked
 // against a download. A download that doesn't match is refused before it is
-// written, and the installed binary is checked against its pin every time it is
-// used, so a file swapped in under .tools/ is refused too. Installed under
-// .tools/ (git-ignored) by `corepack pnpm tools`.
-import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+// written (tooling/pinned-download.ts). The installed binary is checked against
+// its pin before it is used, and again whenever its size or modified time has
+// changed since, so a file swapped in under .tools/ is refused too. Installed
+// under .tools/ (git-ignored) by `corepack pnpm tools`.
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+
+import { downloadPinned, type Fetch, sha256Of, TOOLS_DIR } from '../pinned-download.ts';
 
 export const BICEP_VERSION = '0.47.16';
 
@@ -46,8 +47,6 @@ export const BINARIES: Readonly<Record<string, PinnedBinary>> = {
   },
 };
 
-const TOOLS_DIR = fileURLToPath(new URL('../../.tools/', import.meta.url));
-
 /** Where the binary lives once installed. */
 export function bicepPath(platform: NodeJS.Platform = process.platform, toolsDir = TOOLS_DIR): string {
   return path.join(toolsDir, 'bicep', BICEP_VERSION, platform === 'win32' ? 'bicep.exe' : 'bicep');
@@ -63,10 +62,6 @@ export function binaryFor(platform: string, arch: string, binaries = BINARIES): 
 export const downloadUrl = (file: string): string =>
   `https://github.com/Azure/bicep/releases/download/v${BICEP_VERSION}/${file}`;
 
-export const sha256Of = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
-
-export type Fetch = (url: string) => Promise<{ ok: boolean; status: number; arrayBuffer(): Promise<ArrayBuffer> }>;
-
 export interface BicepOptions {
   readonly platform?: NodeJS.Platform;
   readonly arch?: string;
@@ -78,6 +73,13 @@ export interface BicepOptions {
 const MISSING = 'run corepack pnpm tools to install it';
 
 /**
+ * Binaries this process has already found matching their pin, with the size
+ * and modified time they had then. Hashing a 120 MB file before every lint and
+ * snapshot adds up; a change to either brings the full check back.
+ */
+const verified = new Map<string, { readonly sha256: string; readonly size: number; readonly modified: number }>();
+
+/**
  * The installed binary's path, once it matches its pin. Downloads nothing: a
  * test or a check that finds it missing says how to install it.
  */
@@ -86,9 +88,14 @@ export function installedBicep(options: BicepOptions = {}): string {
   const pinned = binaryFor(platform, options.arch ?? process.arch, options.binaries);
   const target = bicepPath(platform, options.toolsDir);
   if (!existsSync(target)) throw new Error(`Bicep ${BICEP_VERSION} isn't installed at ${target}: ${MISSING}.`);
+  const { size, mtimeMs } = statSync(target);
+  const known = verified.get(target);
+  if (known?.sha256 === pinned.sha256 && known.size === size && known.modified === mtimeMs) return target;
   if (sha256Of(readFileSync(target)) !== pinned.sha256) {
+    verified.delete(target);
     throw new Error(`${target} does not match its pinned SHA-256: delete the .tools folder and ${MISSING}.`);
   }
+  verified.set(target, { sha256: pinned.sha256, size, modified: mtimeMs });
   return target;
 }
 
@@ -102,14 +109,7 @@ export async function ensureBicep(options: BicepOptions & { readonly fetch?: Fet
   const target = bicepPath(platform, options.toolsDir);
   if (existsSync(target)) return installedBicep(options);
 
-  const response = await (options.fetch ?? fetch)(downloadUrl(pinned.file));
-  if (!response.ok) throw new Error(`Downloading ${pinned.file} failed: HTTP ${String(response.status)}.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const actual = sha256Of(bytes);
-  if (actual !== pinned.sha256) {
-    throw new Error(`${pinned.file} does not match its pinned SHA-256 (got ${actual}); nothing was installed.`);
-  }
-
+  const bytes = await downloadPinned(downloadUrl(pinned.file), pinned.file, pinned.sha256, options.fetch);
   // Written beside the target, then renamed into place: a half-written file never carries the final name.
   mkdirSync(path.dirname(target), { recursive: true });
   const partial = `${target}.partial`;

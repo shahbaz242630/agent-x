@@ -7,7 +7,6 @@
 // checked against its pin every time the hook runs it, so a file swapped in
 // under .tools/ is refused too. Installed under .tools/ (git-ignored).
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -20,7 +19,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+
+import { downloadPinned, type Fetch, sha256Of, TOOLS_DIR } from '../pinned-download.ts';
 
 export const GITLEAKS_VERSION = '8.30.1';
 
@@ -61,8 +61,6 @@ export const ARCHIVES: Readonly<Record<string, PinnedArchive>> = {
   },
 };
 
-const TOOLS_DIR = fileURLToPath(new URL('../../.tools/', import.meta.url));
-
 /** Where the binary lives once installed. */
 export function gitleaksPath(platform: NodeJS.Platform = process.platform, toolsDir = TOOLS_DIR): string {
   return path.join(toolsDir, 'gitleaks', GITLEAKS_VERSION, platform === 'win32' ? 'gitleaks.exe' : 'gitleaks');
@@ -77,10 +75,6 @@ export function archiveFor(platform: string, arch: string, archives = ARCHIVES):
 
 export const downloadUrl = (file: string): string =>
   `https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${file}`;
-
-export const sha256Of = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
-
-export type Fetch = (url: string) => Promise<{ ok: boolean; status: number; arrayBuffer(): Promise<ArrayBuffer> }>;
 
 export interface InstallOptions {
   readonly platform?: NodeJS.Platform;
@@ -121,13 +115,7 @@ export async function ensureGitleaks(options: InstallOptions = {}): Promise<stri
     return target;
   }
 
-  const response = await (options.fetch ?? fetch)(downloadUrl(pinned.file));
-  if (!response.ok) throw new Error(`Downloading ${pinned.file} failed: HTTP ${String(response.status)}.`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  const actual = sha256Of(bytes);
-  if (actual !== pinned.sha256) {
-    throw new Error(`${pinned.file} does not match its pinned SHA-256 (got ${actual}); nothing was installed.`);
-  }
+  const bytes = await downloadPinned(downloadUrl(pinned.file), pinned.file, pinned.sha256, options.fetch);
 
   const work = mkdtempSync(path.join(tmpdir(), 'agentx-gitleaks-'));
   try {

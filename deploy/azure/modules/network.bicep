@@ -6,12 +6,14 @@
 //   range is also what the API trusts as its proxy (ADR-011 §4, set in G2)
 // - database: the Postgres server, delegated to it, with a private DNS zone so
 //   the server's name resolves to its private address inside the network.
-//   Only the apps subnet may reach its port
+//   Only the apps subnet, and the server's own subnet, may reach its port
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
 param location string
-param environment string
+param name string
+param databaseRulesName string
+param databaseZoneName string
 param tags object
 param addressSpace string
 
@@ -19,7 +21,7 @@ var appsPrefix = cidrSubnet(addressSpace, 24, 0)
 var databasePrefix = cidrSubnet(addressSpace, 24, 1)
 
 resource databaseRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
-  name: 'nsg-agentx-${environment}-database'
+  name: databaseRulesName
   location: location
   tags: tags
   properties: {
@@ -33,6 +35,23 @@ resource databaseRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
           access: 'Allow'
           protocol: 'Tcp'
           sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: databasePrefix
+          destinationPortRange: '5432'
+        }
+      }
+      {
+        // Microsoft: a server's own features (high availability among them) need
+        // port 5432 open inside its subnet, so a rule that denies the network
+        // must let the subnet reach itself.
+        name: 'allow-postgres-within-subnet'
+        properties: {
+          description: 'The server\'s own traffic inside its subnet, which Microsoft requires when an NSG denies the rest.'
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: databasePrefix
           sourcePortRange: '*'
           destinationAddressPrefix: databasePrefix
           destinationPortRange: '5432'
@@ -57,7 +76,7 @@ resource databaseRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
 }
 
 resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
-  name: 'vnet-agentx-${environment}'
+  name: name
   location: location
   tags: tags
   properties: {
@@ -93,6 +112,14 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
           networkSecurityGroup: {
             id: databaseRules.id
           }
+          // Azure adds this endpoint itself when the first server is created
+          // (Microsoft: it carries the server's write-ahead log to Azure Storage).
+          // Declared here, so a redeploy of the network keeps it.
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+          ]
           delegations: [
             {
               name: 'postgres'
@@ -109,7 +136,7 @@ resource network 'Microsoft.Network/virtualNetworks@2025-01-01' = {
 
 // The zone's name must end in private.postgres.database.azure.com (Microsoft).
 resource databaseDns 'Microsoft.Network/privateDnsZones@2024-06-01' = {
-  name: 'agentx-${environment}.private.postgres.database.azure.com'
+  name: databaseZoneName
   location: 'global'
   tags: tags
 }
@@ -126,20 +153,3 @@ resource databaseDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
     }
   }
 }
-
-resource appsSubnet 'Microsoft.Network/virtualNetworks/subnets@2025-01-01' existing = {
-  parent: network
-  name: 'apps'
-}
-
-resource databaseSubnet 'Microsoft.Network/virtualNetworks/subnets@2025-01-01' existing = {
-  parent: network
-  name: 'database'
-}
-
-output appsSubnetId string = appsSubnet.id
-output appsSubnetPrefix string = appsPrefix
-output databaseSubnetId string = databaseSubnet.id
-// The server needs the zone linked to the network before it is created; the
-// module that creates it waits for this whole module, the link included.
-output databaseDnsZoneId string = databaseDns.id

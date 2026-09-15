@@ -5,16 +5,8 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import {
-  ARCHIVES,
-  archiveFor,
-  downloadUrl,
-  ensureGitleaks,
-  type Fetch,
-  GITLEAKS_VERSION,
-  gitleaksPath,
-  sha256Of,
-} from './gitleaks.ts';
+import { type Fetch, sha256Of } from '../pinned-download.ts';
+import { ARCHIVES, archiveFor, downloadUrl, ensureGitleaks, GITLEAKS_VERSION, gitleaksPath } from './gitleaks.ts';
 
 const tools = mkdtempSync(path.join(tmpdir(), 'agentx-tools-'));
 afterAll(() => {

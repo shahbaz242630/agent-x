@@ -5,17 +5,8 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import {
-  BICEP_VERSION,
-  bicepPath,
-  BINARIES,
-  binaryFor,
-  downloadUrl,
-  ensureBicep,
-  type Fetch,
-  installedBicep,
-  sha256Of,
-} from './bicep.ts';
+import { type Fetch, sha256Of } from '../pinned-download.ts';
+import { BICEP_VERSION, bicepPath, BINARIES, binaryFor, downloadUrl, ensureBicep, installedBicep } from './bicep.ts';
 
 const tools = mkdtempSync(path.join(tmpdir(), 'agentx-bicep-'));
 afterAll(() => {
@@ -98,6 +89,26 @@ describe('installing it', () => {
     await expect(ensureBicep({ ...options, fetch: noFetch })).rejects.toThrow(message);
     expect(() => installedBicep(options)).toThrow(message);
     expect(readFileSync(binary, 'utf8')).toBe('something else');
+  });
+
+  it('checks a binary again once its size or modified time changes after a check', () => {
+    const { dir, binary } = installed('the pinned binary');
+    const options = { platform: 'linux', arch: 'x64', toolsDir: dir, binaries: pins } as const;
+    expect(installedBicep(options)).toBe(binary);
+    writeFileSync(binary, 'swapped in afterwards');
+    expect(() => installedBicep(options)).toThrow('does not match its pinned SHA-256');
+  });
+
+  it('gives every download a deadline, so a stalled one fails instead of hanging', async () => {
+    const dir = mkdtempSync(path.join(tools, 'deadline-'));
+    const signals: unknown[] = [];
+    const recording: Fetch = (_url, init) => {
+      signals.push(init?.signal);
+      return serve(new TextEncoder().encode('the pinned binary'))('');
+    };
+    await ensureBicep({ platform: 'linux', arch: 'x64', toolsDir: dir, binaries: pins, fetch: recording });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
   });
 
   it('checks against the real pins unless told otherwise', () => {
