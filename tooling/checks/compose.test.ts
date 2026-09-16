@@ -111,8 +111,12 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
   });
 
   it("mounts the instance owner's token in Zitadel only, never in the browser-facing login container", () => {
+    // Named volumes alone: a path of its own (the login key pair) is mounted
+    // file by file and checked with the login service below.
     const mounts = (name: string): string[] =>
-      (file.services[name]?.volumes ?? []).map((volume) => volume.split(':')[0] ?? '');
+      (file.services[name]?.volumes ?? [])
+        .map((volume) => volume.split(':')[0] ?? '')
+        .filter((source) => !source.startsWith('.'));
     expect(mounts('zitadel')).toEqual(['zitadel-automation']);
     expect(mounts('login')).toEqual([]);
     expect(mounts('zitadel-volume')).toEqual(['zitadel-automation']);
@@ -200,28 +204,51 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
   });
 });
 
+/** Where both deployments mount a secret: Azure's path, so the settings that name one are the same string. */
+const SECRETS_PATH = '/mnt/secrets';
+
+/** The services that mount a file of prepare's secrets folder, with where each mounts it. */
+const mountersOf = (secret: string): string[] =>
+  services
+    .filter(([, service]) => (service.volumes ?? []).some((volume) => volume.startsWith(`./secrets/${secret}:`)))
+    .map(([name]) => name);
+
+/** Exactly how one service mounts it, so a writable or wrongly placed mount fails. */
+const mountIn = (service: string, secret: string): string | undefined =>
+  (file.services[service]?.volumes ?? []).find((volume) => volume.startsWith(`./secrets/${secret}:`));
+
 describe('ADR-003 and ADR-013: the login service as Azure runs it', () => {
-  it('lets the login container sign its calls with its own private key, which only it holds', () => {
-    const holders = services
-      .filter(([, service]) => JSON.stringify(service.environment ?? {}).includes(LOGIN_CLIENT_KEYS.private))
-      .map(([name]) => name);
-    expect(holders).toEqual(['login']);
+  it('gives each half of the key pair to one container only, as a file it cannot write', () => {
+    expect(mountersOf(LOGIN_CLIENT_KEYS.private)).toEqual(['login']);
+    expect(mountersOf(LOGIN_CLIENT_KEYS.public)).toEqual(['zitadel']);
+    expect(mountIn('login', LOGIN_CLIENT_KEYS.private)).toBe(
+      `./secrets/${LOGIN_CLIENT_KEYS.private}:${SECRETS_PATH}/${LOGIN_CLIENT_KEYS.private}:ro`,
+    );
+    expect(mountIn('zitadel', LOGIN_CLIENT_KEYS.public)).toBe(
+      `./secrets/${LOGIN_CLIENT_KEYS.public}:${SECRETS_PATH}/${LOGIN_CLIENT_KEYS.public}:ro`,
+    );
+  });
+
+  it('lets the login container sign its calls with the key in that file, never a value in its environment', () => {
     expect(file.services.login?.environment).toMatchObject({
       SYSTEM_USER_ID: 'login-client',
       AUDIENCE: 'http://localhost:8081',
+      SYSTEM_USER_PRIVATE_KEY_FILE: `${SECRETS_PATH}/${LOGIN_CLIENT_KEYS.private}`,
     });
-    expect(Object.keys(file.services.login?.environment ?? {}).filter((name) => name.includes('TOKEN'))).toEqual([]);
+    // The value form the image also takes, which would put the key in the
+    // environment, and any token that would stand in for the signature.
+    const names = Object.keys(file.services.login?.environment ?? {});
+    expect(names.filter((name) => name === 'SYSTEM_USER_PRIVATE_KEY' || name.includes('TOKEN'))).toEqual([]);
   });
 
-  it('gives Zitadel only the public half, for the system user the login pages need and nothing more', () => {
+  it('gives Zitadel only the public half, by path, for the one role the login pages need', () => {
     const users = JSON.parse(file.services.zitadel?.environment?.ZITADEL_SYSTEMAPIUSERS ?? '{}') as unknown;
     expect(users).toEqual({
       'login-client': {
-        KeyData: '${AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY:?}',
+        Path: `${SECRETS_PATH}/${LOGIN_CLIENT_KEYS.public}`,
         Memberships: [{ MemberType: 'System', Roles: ['IAM_LOGIN_CLIENT'] }],
       },
     });
-    expect(LOGIN_CLIENT_KEYS.public).toBe('AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY');
     const creates = Object.keys(file.services.zitadel?.environment ?? {}).filter((name) =>
       name.includes('LOGINCLIENT'),
     );
