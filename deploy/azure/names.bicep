@@ -45,6 +45,18 @@ func identityName(environment string, workload string) string => 'id-agentx-${sh
 func jobName(environment string, workload string) string => 'job-agentx-${shortName(environment)}-${workload}'
 
 @export()
+@description('An app, by the work it does. Also its address inside the environment, since an app with internal ingress answers at `<name>.internal.<the environment\'s default domain>`.')
+func appName(environment string, workload string) string => 'ca-agentx-${shortName(environment)}-${workload}'
+
+@export()
+@description('The private network\'s address space (network.bicep divides it). Written here rather than in main.bicep alone, because the apps deployment needs the apps subnet\'s range and must not spell it a second time.')
+var networkAddressSpace = '10.40.0.0/16'
+
+@export()
+@description('The apps subnet\'s range: the Container Apps environment sits in it, and the API trusts it as the proxy in front of it (ADR-011 §4). A /24, which `AGENTX_TRUSTED_PROXIES` accepts (it refuses anything wider than /16).')
+func appsPrefix(addressSpace string) string => cidrSubnet(addressSpace, 24, 0)
+
+@export()
 @description('The tags every resource with a location carries, so a stray resource stands out (policy rule `tags`).')
 func resourceTags(environment string) object => {
   product: 'agent-x'

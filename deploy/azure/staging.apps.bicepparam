@@ -25,3 +25,14 @@ param zitadelImage = 'ghcr.io/zitadel/zitadel:v4.17.3@sha256:2ec2a42551862ca59dc
 
 param authHost = readEnvironmentVariable('AGENTX_AZURE_AUTH_HOST')
 param zitadelAdminEmail = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_EMAIL')
+
+// The login pages, the same version and the same reference the compose stack
+// runs (tooling/checks/images.test.ts keeps them equal).
+param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd1aa49dbc015617a0c1bc9e6abd956616856f0bb374269fae7da79059'
+
+param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
+
+// ADR-002: "Staging scales to zero when not in use". Nothing is billed while
+// nothing runs; the first request after a quiet spell waits for a cold start,
+// which synthetic traffic can afford. Production sets 1.
+param appMinReplicas = 0

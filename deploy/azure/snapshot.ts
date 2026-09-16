@@ -80,6 +80,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_APP_IMAGE_DIGEST: standInDigest(),
     AGENTX_AZURE_RELEASE: randomBytes(20).toString('hex'),
     AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
+    AGENTX_AZURE_APP_HOST: 'app.example.invalid',
     AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
     AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_OWNER_PASSWORD: standIn(24),

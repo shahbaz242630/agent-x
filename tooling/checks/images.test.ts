@@ -93,12 +93,22 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(version(compose.login)).toBe(version(compose.zitadel));
   });
 
-  it('runs the same Zitadel image on Azure as the compose stack, so one bump moves both', () => {
+  it('runs the same Zitadel images on Azure as the compose stack, so one bump moves both', () => {
     const named = (text: string, parameter: string): string | undefined =>
       [...text.matchAll(new RegExp(`^param ${parameter} = '([^']+)'$`, 'gm'))][0]?.[1];
     const azure = readFileSync('deploy/azure/staging.apps.bicepparam', 'utf8');
-    expect(imageProblems([named(azure, 'zitadelImage') ?? ''])).toEqual([]);
-    expect(named(azure, 'zitadelImage')).toBe(compose.zitadel);
+    // Both of them: the server and its login pages, each against the service
+    // that runs it here (ADR-003 Amendment S10).
+    for (const [parameter, service] of [
+      ['zitadelImage', 'zitadel'],
+      ['zitadelLoginImage', 'login'],
+    ] as const) {
+      expect({ parameter, problems: imageProblems([named(azure, parameter) ?? '']) }).toEqual({
+        parameter,
+        problems: [],
+      });
+      expect({ parameter, image: named(azure, parameter) }).toEqual({ parameter, image: compose[service] });
+    }
     // Ours is named by digest alone there, which CI gives the deployment.
     expect(azure).toContain("param appImageRepository = 'ghcr.io/shahbaz242630/agent-x'");
   });

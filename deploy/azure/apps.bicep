@@ -1,16 +1,17 @@
-// Agent X's jobs on Azure (ADR-002 Amendment G2d): the four jobs that prepare a
-// deployment, each started by hand. The apps that serve traffic (the API,
-// Zitadel and its login pages) and the public doors join this file in G2d-2 and
-// G2e. A deployment of its own, into the resource group main.bicep creates and
-// after secrets.bicep has written the secrets:
+// Agent X's apps and jobs on Azure (ADR-002 Amendment G2d): the four jobs that
+// prepare a deployment, each started by hand, and the three apps that serve
+// traffic (the API, Zitadel and its login pages). The public doors that put an
+// app on a host name join this file in G2e; until then nothing here is reachable
+// from outside the environment. A deployment of its own, into the resource group
+// main.bicep creates and after secrets.bicep has written the secrets:
 //
 //   bicep snapshot deploy/azure/staging.apps.bicepparam --resource-group rg-agentx-staging
 //   az deployment group create --resource-group rg-agentx-staging \
 //     --parameters deploy/azure/staging.apps.bicepparam   # G3
 //
-// - each job runs as its own identity (main.bicep created one per app and job)
-//   and reads its own secrets alone, by versionless URL, so a rotation reaches
-//   it without a redeployment. `GRANTS` in policy.ts holds the one list of who
+// - each app and job runs as its own identity (main.bicep created one per app
+//   and job) and reads its own secrets alone, by versionless URL, so a rotation
+//   reaches it without a redeployment. `GRANTS` in policy.ts holds the one list of who
 //   reads what, and checks this file against it
 // - a secret reaches a container as a mounted file wherever the program can read
 //   one: an environment is copied into crash output and read by every child
@@ -18,7 +19,14 @@
 //   file form too (`--masterkeyFile`, checked against the image). Only the
 //   settings with no file form arrive in the environment, and `policy.ts` lists
 //   exactly which (`SECRETS_IN_ENVIRONMENT`)
-// - manual trigger only: nothing here runs on a clock or an event. The set-up
+// - every app's ingress is internal, and the environment routes one app to
+//   another by name inside it. The environment has a public IP, but an app is
+//   only ever public because a route config says so (G2e), never by accident
+// - the apps scale as the environment allows, within two limits: the API and
+//   Zitadel each hold something one replica's (a rate limit's counts in memory;
+//   Zitadel's projections and its ten database connections), and staging keeps
+//   no replica at all while nothing runs (ADR-002)
+// - manual trigger only: no *job* here runs on a clock or an event. The set-up
 //   job holds the server admin's login, and Microsoft treats permission to
 //   start a job as permission to use its secrets, so who may start which job is
 //   settled with the deploy job (G4)
@@ -30,12 +38,16 @@
 //   own lock
 // - every image is named by digest (SEC-SC-02): ours by the digest the deploying
 //   shell gives, which `deploy/image/verify.ts` has checked a signature for
-//   (G4), and Zitadel's by the same pinned reference the compose stack runs
-//   (`tooling/checks/images.test.ts` keeps the two equal)
+//   (G4), and Zitadel's two by the same pinned references the compose stack runs
+//   (`tooling/checks/images.test.ts` keeps them equal)
 import {
+  appName
+  appsPrefix
+  appWorkloads
   identityName
   jobName
   jobWorkloads
+  networkAddressSpace
   resourceNames
   resourceTags
   uniqueSuffix
@@ -74,9 +86,21 @@ param release string
 @description('Zitadel\'s image, pinned by digest, the same reference the compose stack runs.')
 param zitadelImage string
 
+@description('Zitadel\'s login pages, a second image of the same version, pinned by digest, the same reference the compose stack runs.')
+param zitadelLoginImage string
+
 @description('The host name Zitadel is served on, which its first instance is created with. The domain never sits in this repository (Rule Book §7).')
 @minLength(4)
 param authHost string
+
+@description('The host name the API is served on, which it takes as its one public origin (SEC-WEB-01). The domain never sits in this repository (Rule Book §7).')
+@minLength(4)
+param appHost string
+
+@description('How many replicas of each app keep running with no traffic. Staging scales to zero (ADR-002): nothing is billed while nothing runs, at the cost of a cold start on the first request.')
+@minValue(0)
+@maxValue(1)
+param appMinReplicas int
 
 @description('The first Zitadel admin\'s email address, the only way in before anyone else exists. No mail is sent: nothing in the UAE deployment has an SMTP server, so the address is marked verified and the password comes from the vault.')
 @minLength(6)
@@ -95,12 +119,25 @@ var secretsVolume = 'secrets'
 
 // Each identity's resource id, by the workload it belongs to.
 var identityIds = toObject(
-  jobWorkloads,
+  concat(appWorkloads, jobWorkloads),
   workload => workload,
   workload => resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', identityName(environment, workload))
 )
 
-var appsEnvironmentId = resourceId('Microsoft.App/managedEnvironments', names.appsEnvironment)
+// The environment the foundation created (G2b). Read as an existing resource
+// rather than by id alone, because an app with internal ingress answers at
+// `<name>.internal.<the environment's default domain>`, and that domain is
+// Azure's to give: it can't be written down here.
+resource appsEnvironment 'Microsoft.App/managedEnvironments@2026-01-01' existing = {
+  name: names.appsEnvironment
+}
+
+var appsEnvironmentId = appsEnvironment.id
+
+// Where the login pages reach Zitadel: inside the environment, never out and
+// back in through a public door. The ingress is https, which the platform's own
+// certificate serves, and peer-to-peer encryption covers it besides (G2b).
+var zitadelInternalUrl = 'https://${appName(environment, 'zitadel')}.internal.${appsEnvironment.properties.defaultDomain}'
 
 // What every container of ours is told, wherever it runs: which environment
 // this is, which build it is, and where the database is. Each job adds the
@@ -191,6 +228,34 @@ var zitadelLogging = [
   }
   {
     name: 'ZITADEL_METRICS_TYPE'
+    value: 'none'
+  }
+  // Tracing. G2d-1 left it out because `init` never reads it; it goes on every
+  // Zitadel container now that the server runs, so that one list says what all
+  // of them do about telemetry and the rule can check every one the same way.
+  // Its accepted values are "otel", "google", "log" and "none", read off the
+  // defaults the pinned image carries; "none" is already the default, and is
+  // said here so that a later version's default can't quietly export a trace.
+  {
+    name: 'ZITADEL_TRACING_TYPE'
+    value: 'none'
+  }
+  // The same image marks the three settings above ZITADEL_TRACING_TYPE
+  // deprecated in favour of an `Instrumentation` family, whose exporters each
+  // offer an "auto" mode that follows the standard OTEL_* variables. Every one
+  // of them is "none" by default today, and said outright here so that the
+  // version that stops reading the deprecated settings changes nothing
+  // (ADR-013, SEC-DATA-08).
+  {
+    name: 'ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE'
+    value: 'none'
+  }
+  {
+    name: 'ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE'
+    value: 'none'
+  }
+  {
+    name: 'ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE'
     value: 'none'
   }
 ]
@@ -380,6 +445,166 @@ var jobs = [
   }
 ]
 
+// The three apps that serve traffic (ADR-002 Amendment G2d). Each is shaped
+// like a job above — the work it does, its image and command, what it reads as
+// a mounted file, its settings — with what only something long-running has:
+// the port it answers on and how many replicas may run.
+//
+// Every one of them has internal ingress. The environment has a public IP, but
+// nothing here is a door: the doors are the route configs of G2e, so an app is
+// only ever public because a route says so.
+var apps = [
+  {
+    // The API (Product-Documentation/API.md), as the app role and no other.
+    workload: 'api'
+    image: appImage
+    command: ['node', 'apps/api/src/main.ts']
+    args: []
+    targetPort: 8080
+    transport: 'auto'
+    reachesZitadel: false
+    // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
+    // second replica would give every client two allowances. The worker, which
+    // holds no such count, is the part that scales in Phase 4.
+    maxReplicas: 1
+    // Longer than the API's own 25-second stop deadline (API.md), so the log's
+    // held-back counts are still written.
+    stopSeconds: 30
+    files: [
+      {
+        reads: 'db-app-password'
+        setting: 'AGENTX_DB_PASSWORD_FILE'
+      }
+    ]
+    settings: concat(ourSettings, [
+      {
+        name: 'AGENTX_HTTP_HOST'
+        value: '0.0.0.0'
+      }
+      {
+        name: 'AGENTX_HTTP_PORT'
+        value: '8080'
+      }
+      {
+        name: 'AGENTX_DB_USER'
+        value: 'agentx_app'
+      }
+      // The one address a browser may send a change from (SEC-WEB-01). The
+      // route config of G2e is what serves that host.
+      {
+        name: 'AGENTX_PUBLIC_ORIGIN'
+        value: 'https://${appHost}'
+      }
+      // The proxy in front, so each client keeps its own rate limit and its own
+      // address in a security event rather than every client sharing the
+      // ingress's (ADR-011 §4). Microsoft: Envoy appends the client to
+      // X-Forwarded-For and "only the rightmost IP is provided by Azure
+      // Container Apps", so what is trusted is the subnet the ingress sits in.
+      {
+        name: 'AGENTX_TRUSTED_PROXIES'
+        value: appsPrefix(networkAddressSpace)
+      }
+      // Ten of the server's 35 user connections, leaving Zitadel's ten, one for
+      // each job, and room for the worker (ADR-002 Amendment G1).
+      {
+        name: 'AGENTX_DB_POOL_MAX'
+        value: '10'
+      }
+    ])
+  }
+  {
+    // Zitadel itself, already set up by the two jobs above: this only starts it.
+    workload: 'zitadel'
+    image: zitadelImage
+    command: ['/app/zitadel']
+    // The master key from a file, as `setup` takes it: `zitadel start --help`
+    // on the pinned image offers `--masterkeyFile` too.
+    args: ['start', '--masterkeyFile', '${secretsPath}/zitadel-masterkey']
+    targetPort: 8080
+    // Zitadel serves gRPC beside HTTP on the one port, as it does on the
+    // compose stack.
+    transport: 'http2'
+    reachesZitadel: false
+    // Its projections and its cache are one replica's; a second would also take
+    // ten more of the server's connections.
+    maxReplicas: 1
+    stopSeconds: 30
+    files: [
+      {
+        reads: 'zitadel-masterkey'
+        // Named on the command line above, not by a setting.
+        setting: ''
+      }
+      {
+        reads: 'login-client-public-key'
+        // Named by Path inside ZITADEL_SYSTEMAPIUSERS below.
+        setting: ''
+      }
+    ]
+    settings: concat(zitadelDatabase, zitadelLogging, zitadelAddress, [
+      // The login pages' system user: the file its public half is in, and the
+      // one role they need. `Path` rather than `KeyData`, so the key is read
+      // from the mount and never sits in an environment — and because this is
+      // one JSON setting holding the roles as well, which a secret reference
+      // would have to replace whole. Proven on the compose stack (G2d-2a).
+      {
+        name: 'ZITADEL_SYSTEMAPIUSERS'
+        value: '{"login-client":{"Path":"${secretsPath}/login-client-public-key","Memberships":[{"MemberType":"System","Roles":["IAM_LOGIN_CLIENT"]}]}}'
+      }
+    ])
+  }
+  {
+    // Zitadel v4's login pages, a second container of the same version.
+    workload: 'login'
+    image: zitadelLoginImage
+    command: []
+    args: []
+    targetPort: 3000
+    transport: 'auto'
+    // Nothing here holds state, but one replica is enough for a pilot and
+    // keeps the deployment's shape the same everywhere.
+    maxReplicas: 1
+    stopSeconds: 30
+    files: [
+      {
+        reads: 'login-client-private-key'
+        setting: 'SYSTEM_USER_PRIVATE_KEY_FILE'
+      }
+    ]
+    // ZITADEL_API_URL is added where the app is deployed, not here: the
+    // environment's default domain is Azure's to give, and Bicep needs this
+    // list settled before the deployment starts.
+    reachesZitadel: true
+    settings: [
+      // The host the browser uses, which Zitadel reads before the Host header
+      // (ADR-003 Amendment S10), so the pages need no Host override here.
+      {
+        name: 'CUSTOM_REQUEST_HEADERS'
+        value: 'x-zitadel-instance-host:${authHost},x-zitadel-public-host:${authHost}'
+      }
+      {
+        name: 'AUDIENCE'
+        value: 'https://${authHost}'
+      }
+      {
+        name: 'SYSTEM_USER_ID'
+        value: 'login-client'
+      }
+      {
+        name: 'NEXT_PUBLIC_BASE_PATH'
+        value: '/ui/v2/login'
+      }
+      // The pages carry an OpenTelemetry SDK that starts by default and exports
+      // to an OTLP endpoint. Off, so nothing is gathered to be sent anywhere
+      // (ADR-013).
+      {
+        name: 'OTEL_SDK_DISABLED'
+        value: 'true'
+      }
+    ]
+  }
+]
+
 // Every secret a job is given, once each: the ones it reads as files and the
 // ones its settings name.
 func secretsOf(job object) array =>
@@ -463,6 +688,108 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 // Named one by one: a secret volume with no list mounts every
                 // secret the job has.
                 secrets: map(job.files, file => {
+                  secretRef: file.reads
+                  path: file.reads
+                })
+              }
+            ]
+      }
+    }
+  }
+]
+
+resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
+  for app in apps: {
+    name: appName(environment, app.workload)
+    location: location
+    tags: tags
+    // Its own identity and no other, so it can read its own secrets alone.
+    identity: {
+      type: 'UserAssigned'
+      userAssignedIdentities: {
+        '${identityIds[app.workload]}': {}
+      }
+    }
+    properties: {
+      environmentId: appsEnvironmentId
+      workloadProfileName: 'Consumption'
+      configuration: {
+        // Internal: reachable inside the environment only. The public doors are
+        // the route configs (G2e), so no app is a door by accident.
+        ingress: {
+          external: false
+          targetPort: app.targetPort
+          transport: app.transport
+          // Plain http is refused even inside the environment, which peer-to-peer
+          // encryption already covers (G2b).
+          allowInsecure: false
+          traffic: [
+            {
+              latestRevision: true
+              weight: 100
+            }
+          ]
+        }
+        // Read from the vault by the app's own identity, never a value held here.
+        secrets: map(secretsOf(app), secret => {
+          name: secret
+          keyVaultUrl: uri(vault.properties.vaultUri, 'secrets/${secret}')
+          identity: identityIds[app.workload]
+        })
+      }
+      template: {
+        scale: {
+          minReplicas: appMinReplicas
+          maxReplicas: app.maxReplicas
+        }
+        terminationGracePeriodSeconds: app.stopSeconds
+        containers: [
+          {
+            name: app.workload
+            image: app.image
+            command: app.command
+            args: app.args
+            // The smallest pair the Consumption profile offers above its
+            // minimum, as the jobs take.
+            resources: {
+              cpu: json('0.5')
+              memory: '1Gi'
+            }
+            env: concat(
+              app.settings,
+              map(filter(app.files, file => !empty(file.setting)), file => {
+                name: file.setting
+                value: '${secretsPath}/${file.reads}'
+              }),
+              // Zitadel inside the environment, by the name the platform routes.
+              app.reachesZitadel
+                ? [
+                    {
+                      name: 'ZITADEL_API_URL'
+                      value: zitadelInternalUrl
+                    }
+                  ]
+                : []
+            )
+            volumeMounts: empty(app.files)
+              ? []
+              : [
+                  {
+                    volumeName: secretsVolume
+                    mountPath: secretsPath
+                  }
+                ]
+          }
+        ]
+        volumes: empty(app.files)
+          ? []
+          : [
+              {
+                name: secretsVolume
+                storageType: 'Secret'
+                // Named one by one: a secret volume with no list mounts every
+                // secret the app has.
+                secrets: map(app.files, file => {
                   secretRef: file.reads
                   path: file.reads
                 })

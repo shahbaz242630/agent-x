@@ -166,6 +166,11 @@ const READS = (who: string, what: string) => (resource: PredictedResource) =>
 const JOBS = type('Microsoft.App/jobs');
 /** One job, by the work it does. */
 const JOB = (workload: string) => named(new RegExp(`^job-agentx-[a-z]+-${workload}$`));
+const APPS = type('Microsoft.App/containerApps');
+/** One app, by the work it does. */
+const APP = (workload: string) => named(new RegExp(`^ca-agentx-[a-z]+-${workload}$`));
+const ingressOf = (app: Mutable): Mutable => inside(app, 'properties', 'configuration', 'ingress');
+const scaleOf = (app: Mutable): Mutable => inside(app, 'properties', 'template', 'scale');
 const configurationOf = (job: Mutable): Mutable => inside(job, 'properties', 'configuration');
 const declaredSecrets = (job: Mutable): Mutable[] => at(configurationOf(job), 'secrets') as Mutable[];
 const containerOf = (job: Mutable): Mutable => first(at(job, 'properties', 'template', 'containers'));
@@ -417,6 +422,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
       'jobs',
+      'apps',
     ]);
     const environment = staging.predictedResources.find(ENVIRONMENT);
     // A second environment also sends no logs of its own.
@@ -454,16 +460,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(SECRET('db-app-password'), (secret) => (inside(secret, 'properties').value = literal))),
     ).toEqual(['no-secret-literals']);
-    const app = {
-      id: '/subscriptions/x/resourceGroups/rg-agentx-staging/providers/Microsoft.App/containerApps/api',
-      type: 'Microsoft.App/containerApps',
-      name: 'api',
-      apiVersion: '2026-01-01',
-      location: 'uaenorth',
-      tags: { product: 'agent-x', environment: 'staging', 'managed-by': 'deploy/azure' },
-      properties: { configuration: { secrets: [{ name: 'db-password', value: literal }] } },
-    };
-    expect(brokenRules(withExtra(app))).toEqual(['no-secret-literals']);
+    // An app's own secret, carrying a value rather than reading one: two rules
+    // catch it, this one on any resource and workload-secrets on what an app
+    // may hold.
+    expect(
+      brokenRules(changed(APP('api'), (app) => (first(at(configurationOf(app), 'secrets')).value = literal))),
+    ).toEqual(['no-secret-literals', 'workload-secrets']);
   });
 
   it('no-secret-literals in a parameters file: a secure value written down, or given a default', () => {
@@ -1249,6 +1251,76 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it('apps: one made a public door, left on plain http, scaled past what it may run, or missing', () => {
+    const environment = staging.predictedResources.find(ENVIRONMENT);
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          inside(app, 'properties').environmentId = `${String(environment?.id)}-second`;
+        }),
+      ),
+    ).toEqual(['apps']);
+    expect(
+      brokenRules(
+        changed(APPS, (app) => {
+          inside(app, 'properties').workloadProfileName = 'D4';
+        }),
+      ),
+    ).toEqual(['apps']);
+    // A public door nothing decided to publish: the doors are the route
+    // configs (G2e), so an external ingress here is one nobody asked for.
+    expect(brokenRules(changed(APP('api'), (app) => (ingressOf(app).external = true)))).toEqual(['apps']);
+    expect(brokenRules(changed(APP('zitadel'), (app) => (ingressOf(app).allowInsecure = true)))).toEqual(['apps']);
+    // An ingress left out entirely is one Azure decides, not us.
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          delete inside(app, 'properties', 'configuration').ingress;
+        }),
+      ),
+    ).toEqual(['apps']);
+    // The two that hold something one replica's, given a second.
+    for (const workload of ['api', 'zitadel']) {
+      expect({ workload, rules: brokenRules(changed(APP(workload), (app) => (scaleOf(app).maxReplicas = 2))) }).toEqual(
+        {
+          workload,
+          rules: ['apps'],
+        },
+      );
+    }
+    // An app that may run no replica at all, and one holding more than it may run.
+    for (const scale of [{ maxReplicas: 0 }, { maxReplicas: 'one' }, { minReplicas: -1 }, { minReplicas: 2 }]) {
+      expect({
+        scale,
+        rules: brokenRules(changed(APP('login'), (app) => Object.assign(scaleOf(app), scale))),
+      }).toEqual({ scale, rules: ['apps'] });
+    }
+    // Two containers, or work hidden in an init container that runs before it.
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          inside(app, 'properties', 'template').containers = [containerOf(app), structuredClone(containerOf(app))];
+        }),
+      ),
+    ).toEqual(['apps']);
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          inside(app, 'properties', 'template').initContainers = [structuredClone(containerOf(app))];
+        }),
+      ),
+    ).toEqual(['apps']);
+    // A tag in place of the digest: the same name, another image tomorrow.
+    expect(brokenRules(changed(APP('api'), (app) => (containerOf(app).image = 'ghcr.io/x/agent-x:v1')))).toEqual([
+      'apps',
+    ]);
+    // An app the deployment needs, left out. Zitadel's own secrets are then
+    // read by nothing, and the login pages have nothing to sign a call to.
+    expect(brokenRules(without(APP('api')))).toEqual(['apps']);
+    expect(brokenRules(without(APP('login')))).toEqual(['apps']);
+    expect(brokenRules(without(APP('zitadel')))).toEqual(['apps']);
+  });
+
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {
     const vault = staging.predictedResources.find(VAULT);
     const identity = (workload: string): string => String(staging.predictedResources.find(JOB(workload))?.identity);
@@ -1394,6 +1466,60 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['workload-secrets']);
+    // The apps are held to all of it too, not only the jobs: another app's
+    // identity, another app's secret, a version pinned into the address, and a
+    // key in an environment that has a file form.
+    expect(
+      brokenRules(
+        changed(APP('api'), (app) => {
+          inside(app, 'identity').userAssignedIdentities = at(
+            staging.predictedResources.find(APP('login'))?.identity,
+            'userAssignedIdentities',
+          );
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    expect(
+      messages(
+        changed(APP('login'), (app) => {
+          declaredSecrets(app).push({
+            name: 'db-app-password',
+            keyVaultUrl: String(at(first(declaredSecrets(app)), 'keyVaultUrl')).replace(
+              'login-client-private-key',
+              'db-app-password',
+            ),
+            identity: at(first(declaredSecrets(app)), 'identity'),
+          });
+        }),
+      ),
+    ).toEqual([
+      "ca-agentx-stg-login [workload-secrets] is given db-app-password, which GRANTS doesn't let login read",
+      'ca-agentx-stg-login [workload-secrets] is given db-app-password and never reads it; one nobody needs is one more to leak',
+    ]);
+    expect(
+      brokenRules(
+        changed(APP('api'), (app) => {
+          secretNamed(app, 'db-app-password').keyVaultUrl =
+            'https://kv-agentx-stg-abcdef.vault.azure.net/secrets/db-app-password/0123456789abcdef';
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    expect(
+      brokenRules(
+        changed(APP('api'), (app) => {
+          settingsOf(app).push({ name: 'AGENTX_DB_PASSWORD', secretRef: 'db-app-password' });
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // The login pages' own key, which they read from a file, put in their
+    // environment instead: their image has no listed setting for one.
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          settingsOf(app).push({ name: 'SYSTEM_USER_PRIVATE_KEY', secretRef: 'login-client-private-key' });
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
   });
 
   it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
@@ -1431,7 +1557,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['container-telemetry']);
-    for (const name of ['ZITADEL_SERVICEPING_ENABLED', 'ZITADEL_METRICS_TYPE']) {
+    for (const name of [
+      'ZITADEL_SERVICEPING_ENABLED',
+      'ZITADEL_METRICS_TYPE',
+      'ZITADEL_TRACING_TYPE',
+      'ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE',
+      'ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE',
+      'ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE',
+    ]) {
       expect({
         name,
         rules: brokenRules(
@@ -1440,7 +1573,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
           }),
         ),
       }).toEqual({ name, rules: ['container-telemetry'] });
+      // The same switch on the server that serves traffic, not only the jobs.
+      expect({
+        name,
+        rules: brokenRules(
+          changed(APP('zitadel'), (app) => {
+            containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== name);
+          }),
+        ),
+      }).toEqual({ name, rules: ['container-telemetry'] });
     }
+    // The login pages are a different program in a different image: they read
+    // none of the settings above, and the one switch they do need is their own.
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          containerOf(app).env = settingsOf(app).filter((entry) => entry.name !== 'OTEL_SDK_DISABLED');
+        }),
+      ),
+    ).toEqual(['container-telemetry']);
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          settingsOf(app).push({ name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'https://collector.example.invalid' });
+        }),
+      ),
+    ).toEqual(['container-telemetry']);
+    // Asking the login pages for the server's settings would be asking for
+    // something they ignore, so the server's absence from them is no problem.
+    expect(
+      brokenRules(
+        changed(APP('login'), (app) => {
+          containerOf(app).env = settingsOf(app).filter((entry) => !String(entry.name).startsWith('ZITADEL_'));
+        }),
+      ),
+    ).toEqual([]);
   });
 });
 
