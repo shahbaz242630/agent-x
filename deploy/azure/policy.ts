@@ -590,6 +590,11 @@ export function paramsFileProblems(file: string, text: string, secureParameters:
  * condition that would vanish from the snapshot (security review, S15), and
  * every other secret written only when given. A module's own template is read
  * the same way.
+ *
+ * A template that writes secrets looks none up: Azure refuses a template that
+ * both writes a secret and looks it up as existing ("defined multiple times"),
+ * a refusal no what-if or snapshot shows (the first real secrets run, S19).
+ * Lookups go in a module of their own.
  */
 export function templateProblems(file: string, template: unknown): Problem[] {
   const resources = at(template, 'resources');
@@ -600,7 +605,7 @@ export function templateProblems(file: string, template: unknown): Problem[] {
         return [typeof name === 'string' ? name : `resource ${String(index)}`, resource] as const;
       })
     : Object.entries((resources ?? {}) as Record<string, unknown>);
-  return entries.flatMap(([name, resource]): Problem[] => {
+  const problems = entries.flatMap(([name, resource]): Problem[] => {
     if (at(resource, 'type') === 'Microsoft.Resources/deployments') {
       return templateProblems(file, at(resource, 'properties', 'template'));
     }
@@ -625,6 +630,20 @@ export function templateProblems(file: string, template: unknown): Problem[] {
     }
     return [];
   });
+  return [...lookupsBesideWrites(file, entries), ...problems];
+}
+
+/** The secrets a template looks up though it writes some, which Azure refuses (`templateProblems`). */
+function lookupsBesideWrites(file: string, entries: readonly (readonly [string, unknown])[]): Problem[] {
+  const secrets = entries.filter(([, resource]) => at(resource, 'type') === TYPES.vaultSecret);
+  const lookups = secrets.filter(([, resource]) => at(resource, 'existing') === true);
+  if (lookups.length === secrets.length) return [];
+  return lookups.map(([name]): Problem => ({
+    rule: 'vault-secrets',
+    resource: `${file}: ${name}`,
+    message:
+      'is looked up in a template that writes secrets, which Azure refuses ("defined multiple times") though no what-if or snapshot shows it: look secrets up in a module of their own',
+  }));
 }
 
 const delegatedTo = (subnet: unknown): unknown =>

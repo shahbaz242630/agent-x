@@ -64,12 +64,7 @@ func resourceTags(environment string) object => {
   'managed-by': 'deploy/azure'
 }
 
-// The database server, and the private zone the network resolves it in
-// (postgres.bicep): built here so that the host name below is the same two
-// parts, never a second spelling of them.
 func serverName(environment string, nameSuffix string) string => 'psql-agentx-${shortName(environment)}-${nameSuffix}'
-
-func databaseZoneName(environment string) string => 'agentx-${environment}.private.postgres.database.azure.com'
 
 @export()
 @description('Every name, for an environment and its suffix.')
@@ -80,13 +75,17 @@ func resourceNames(environment string, nameSuffix string) object => {
   network: 'vnet-agentx-${environment}'
   appsRules: 'nsg-agentx-${environment}-apps'
   databaseRules: 'nsg-agentx-${environment}-database'
-  databaseZone: databaseZoneName(environment)
+  // The private zone the network resolves the database server in (postgres.bicep).
+  databaseZone: 'agentx-${environment}.private.postgres.database.azure.com'
   vault: 'kv-agentx-${shortName(environment)}-${nameSuffix}'
   server: serverName(environment, nameSuffix)
-  // A server in a private network answers only to this name, its own inside the
-  // zone linked to the network. G3 confirms it against the foundation's
-  // `databaseHost` output, which Azure fills in.
-  databaseHost: '${serverName(environment, nameSuffix)}.${databaseZoneName(environment)}'
+  // The name Azure gives a server in a private network (the foundation's
+  // `databaseHost` output). Public DNS points it at a record Azure names itself
+  // in the private zone, which only the linked network resolves; the server's
+  // own name inside the zone doesn't exist (the first real run, S19). TLS is
+  // checked to this name. Written here rather than read from the server, since
+  // the apps' and jobs' loops need it before the deployment starts.
+  databaseHost: '${serverName(environment, nameSuffix)}.postgres.database.azure.com'
   appsEnvironment: 'cae-agentx-${environment}'
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
   identities: map(workloads, workload => identityName(environment, workload))
