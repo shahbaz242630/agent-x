@@ -6,6 +6,9 @@
 .env
 .env.*
 !.env.example
+# The local stack's login key pair, a PEM file each (deploy/compose/prepare.ts).
+# The names have no extension, so the patterns below don't cover them.
+/deploy/compose/secrets/
 *.pem
 *.key
 *.p12

@@ -1,7 +1,7 @@
 # The local stack (ADR-001 layout; ADR-010 §7, the portability proof): the
 # whole product from one command, with no cloud account and no internet.
 #
-#   node deploy/compose/prepare.ts        # once: generates the logins into .env
+#   node deploy/compose/prepare.ts        # once: the logins into .env, the login key pair into secrets/
 #   docker compose -f deploy/compose/compose.yaml up --build --wait
 #
 # Then http://localhost:8080/health is the API and http://localhost:8081 the
@@ -15,7 +15,10 @@
 # - `edge` (nginx) is the one front door, published on 127.0.0.1 only, and
 #   stands where the TLS proxy stands in a real deployment
 # - every image is pinned by digest (SEC-SC-02) and every login comes from
-#   .env, which prepare generates: a missing one stops the stack (SEC-OPS-08)
+#   .env, which prepare generates: a missing one stops the stack (SEC-OPS-08).
+#   The login container's key pair comes from secrets/ instead, a file each,
+#   because that is how Zitadel and the login container read a key — the same
+#   two file names Azure mounts from Key Vault
 # - the app image is built from the repository root's Dockerfile
 name: agentx
 
@@ -202,9 +205,12 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Local automation (tests and set-up)
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2036-01-01T00:00:00Z'
       ZITADEL_FIRSTINSTANCE_PATPATH: /pat-automation/automation.pat
-      # The login container's system user: its public key, and the one role
-      # the login pages need (Zitadel's own Helm chart does the same).
-      ZITADEL_SYSTEMAPIUSERS: '{"login-client":{"KeyData":"${AGENTX_LOCAL_LOGIN_CLIENT_PUBLIC_KEY:?}","Memberships":[{"MemberType":"System","Roles":["IAM_LOGIN_CLIENT"]}]}}'
+      # The login container's system user: the file its public half is in, and
+      # the one role the login pages need (Zitadel's own Helm chart does the
+      # same). `Path` rather than `KeyData` so the key is read from the mount
+      # and never sits in this container's environment, which crash output and
+      # every child process see. Azure mounts the same name from Key Vault.
+      ZITADEL_SYSTEMAPIUSERS: '{"login-client":{"Path":"/mnt/secrets/login-client-public-key","Memberships":[{"MemberType":"System","Roles":["IAM_LOGIN_CLIENT"]}]}}'
       # ADR-003 §2: MFA for everyone; ADR-005: no self-registration.
       ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_FORCEMFA: 'true'
       ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWREGISTER: 'false'
@@ -222,6 +228,9 @@ services:
       ZITADEL_SERVICEPING_ENABLED: 'false'
     volumes:
       - zitadel-automation:/pat-automation
+      # The public half alone: the private half is the login container's, and
+      # neither ever sees the other's file.
+      - ./secrets/login-client-public-key:/mnt/secrets/login-client-public-key:ro
     depends_on:
       db:
         condition: service_healthy
@@ -253,11 +262,16 @@ services:
       CUSTOM_REQUEST_HEADERS: Host:localhost:8081
       AUDIENCE: http://localhost:8081
       SYSTEM_USER_ID: login-client
-      SYSTEM_USER_PRIVATE_KEY: ${AGENTX_LOCAL_LOGIN_CLIENT_PRIVATE_KEY:?}
+      # The file its private half is in, read as the PEM text it holds. A file
+      # rather than the value, for the same reason Zitadel takes `Path` above;
+      # Azure mounts the same name from Key Vault.
+      SYSTEM_USER_PRIVATE_KEY_FILE: /mnt/secrets/login-client-private-key
       # ADR-013: the login pages carry an OpenTelemetry SDK that starts by
       # default and exports to an OTLP endpoint (localhost unless set). Off,
       # so nothing is gathered to be sent anywhere.
       OTEL_SDK_DISABLED: 'true'
+    volumes:
+      - ./secrets/login-client-private-key:/mnt/secrets/login-client-private-key:ro
     depends_on:
       zitadel:
         condition: service_healthy
