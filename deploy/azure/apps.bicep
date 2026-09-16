@@ -163,8 +163,12 @@ var ourSettings = [
 
 // Zitadel's own connection, as its own role and as its own "admin": the role and
 // the database exist before it runs (db-setup makes them), so Zitadel never
-// holds the server admin's login. TLS is checked to the host name (names.bicep);
-// the compose stack has no TLS and so says `disable` there.
+// holds the server admin's login. TLS is checked to the host name (names.bicep)
+// against the image's own trusted roots: Zitadel refuses verify-full without a
+// root certificate setting (the first real run, S19), and its driver (pgx
+// v5.9.2) reads `system` as the operating system's pool, which in the pinned
+// image holds the roots Azure's server certificates chain to. The compose stack
+// has no TLS and so says `disable` there.
 var zitadelDatabase = [
   {
     name: 'ZITADEL_DATABASE_POSTGRES_HOST'
@@ -191,6 +195,10 @@ var zitadelDatabase = [
     value: 'verify-full'
   }
   {
+    name: 'ZITADEL_DATABASE_POSTGRES_USER_SSL_ROOTCERT'
+    value: 'system'
+  }
+  {
     name: 'ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME'
     value: 'zitadel'
   }
@@ -201,6 +209,10 @@ var zitadelDatabase = [
   {
     name: 'ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE'
     value: 'verify-full'
+  }
+  {
+    name: 'ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_ROOTCERT'
+    value: 'system'
   }
   {
     name: 'ZITADEL_DATABASE_POSTGRES_ADMIN_EXISTINGDATABASE'
