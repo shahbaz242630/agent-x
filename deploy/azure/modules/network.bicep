@@ -12,6 +12,8 @@
 // A server's networking can't be changed after it is created, and neither can
 // an environment's subnet size (Microsoft), so both are fixed here.
 
+import { appsPrefix as appsSubnetPrefix } from '../names.bicep'
+
 param location string
 param name string
 param appsRulesName string
@@ -20,7 +22,9 @@ param databaseZoneName string
 param tags object
 param addressSpace string
 
-var appsPrefix = cidrSubnet(addressSpace, 24, 0)
+// The one spelling of the apps subnet's range: the apps deployment reads the
+// same function for what the API trusts as its proxy.
+var appsPrefix = appsSubnetPrefix(addressSpace)
 var databasePrefix = cidrSubnet(addressSpace, 24, 1)
 
 // Microsoft's inbound list for a workload profiles environment. The apps take

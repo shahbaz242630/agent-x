@@ -42,6 +42,7 @@ export type RuleId =
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
+  | 'apps'
   | 'workload-secrets'
   | 'container-telemetry';
 
@@ -66,6 +67,7 @@ const TYPES = {
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
   environment: 'Microsoft.App/managedEnvironments',
+  app: 'Microsoft.App/containerApps',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   job: 'Microsoft.App/jobs',
   network: 'Microsoft.Network/virtualNetworks',
@@ -169,13 +171,37 @@ const secretsRead = (workload: string): ReadonlySet<string> =>
 /**
  * Every job the deployment runs, each started by hand (ADR-002 Amendment G2d):
  * a server's roles and databases, the app's migrations, and Zitadel's own init
- * and setup. The apps that serve traffic are checked the same way when G2d-2
- * adds them; this list is what must be there.
+ * and setup. This list is what must be there.
  */
 const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'];
 
-/** Where Zitadel's images come from: its server and its login pages (ADR-003 Amendment S10). */
-const ZITADEL_IMAGES = 'ghcr.io/zitadel/';
+/**
+ * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
+ * its login pages. The worker joins in Phase 4.
+ */
+const APP_WORKLOADS: readonly string[] = ['api', 'zitadel', 'login'];
+
+/**
+ * The apps whose replicas must stay at one, with why. The API's rate limit
+ * counts each client's requests in memory (ADR-011 §4), so a second replica
+ * would give every client two allowances; Zitadel's projections and cache are
+ * one replica's, and a second would take ten more of the server's 35 user
+ * connections (ADR-002 Amendment G1).
+ */
+const ONE_REPLICA: Readonly<Record<string, string>> = {
+  api: "the rate limit's counts are one replica's, in memory",
+  zitadel: "its projections are one replica's, and a second would take ten more database connections",
+};
+
+/**
+ * Zitadel is two programs in two images (ADR-003 Amendment S10), and they are
+ * told different things: the server reads `ZITADEL_*` settings, its login pages
+ * are a Next.js app that reads none of them. A rule that took both for the
+ * server would ask the login pages for settings they ignore, and would let the
+ * one switch they do need go missing.
+ */
+const ZITADEL_SERVER_IMAGE = 'ghcr.io/zitadel/zitadel:';
+const ZITADEL_LOGIN_IMAGE = 'ghcr.io/zitadel/zitadel-login:';
 
 /**
  * The only settings a container may take a secret in, by image, with why: an
@@ -192,23 +218,45 @@ const SECRETS_IN_ENVIRONMENT: readonly {
   readonly reason: string;
 }[] = [
   {
-    images: ZITADEL_IMAGES,
+    images: ZITADEL_SERVER_IMAGE,
     settings: /^ZITADEL_(?:DATABASE_POSTGRES_(?:USER|ADMIN)_PASSWORD|FIRSTINSTANCE_ORG_HUMAN_PASSWORD)$/,
     reason: 'Zitadel offers no file form for a database login or its first admin’s password',
   },
 ];
 
 /**
- * What a Zitadel container must say outright, so no default of a later version
- * sends anything out of the UAE (ADR-013, SEC-DATA-08): no daily report to
- * zitadel.com, no metrics endpoint. Tracing is a setting of the server it starts,
- * not of these jobs (proven against the image: `init` never reads it), and joins
- * this list with the apps in G2d-2.
+ * What every Zitadel container must say outright, so no default of a later
+ * version sends anything out of the UAE (ADR-013, SEC-DATA-08): no daily report
+ * to zitadel.com, no metrics endpoint, no tracing — and none of the four
+ * exporters of the `Instrumentation` family that v4.17.3 marks the first three
+ * deprecated in favour of, each of which offers an "auto" mode that follows the
+ * standard `OTEL_*` variables. Every one of them is already the default; saying
+ * so here is what makes the version that changes a default a change to this
+ * file rather than a surprise. Read off the defaults the pinned image carries
+ * (G2d-2a); the jobs carry them too, so one list covers every container.
  */
-const TELEMETRY_OFF: Readonly<Record<string, string>> = {
-  ZITADEL_SERVICEPING_ENABLED: 'false',
-  ZITADEL_METRICS_TYPE: 'none',
-};
+const TELEMETRY_OFF: readonly {
+  readonly images: string;
+  readonly settings: Readonly<Record<string, string>>;
+}[] = [
+  {
+    images: ZITADEL_SERVER_IMAGE,
+    settings: {
+      ZITADEL_SERVICEPING_ENABLED: 'false',
+      ZITADEL_METRICS_TYPE: 'none',
+      ZITADEL_TRACING_TYPE: 'none',
+      ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: 'none',
+      ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE: 'none',
+      ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE: 'none',
+    },
+  },
+  {
+    // The login pages start an OpenTelemetry SDK unless told not to, and export
+    // to an OTLP endpoint (localhost unless one is set).
+    images: ZITADEL_LOGIN_IMAGE,
+    settings: { OTEL_SDK_DISABLED: 'true' },
+  },
+];
 
 /** The one workload profile the environment offers (ADR-002 Amendment G2b). */
 const WORKLOAD_PROFILE = 'Consumption';
@@ -1231,10 +1279,17 @@ const secretAccess: Check = (snapshot, _expected, add) => {
 };
 
 /** A job's workload: its name without `job-agentx-<environment>-` (names.bicep). */
-const jobWorkloadOf = (jobName: string): string => jobName.replace(/^job-agentx-[a-z]+-/, '');
+/** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
+const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
 
-/** The containers a job runs. */
+/** The containers a job or an app runs. */
 const containersOf = (job: PredictedResource): readonly unknown[] => list(at(job.properties, 'template', 'containers'));
+
+/** Everything that runs a container of ours: the jobs and the apps, checked by the same rules. */
+const workloadsIn = (snapshot: Snapshot): readonly PredictedResource[] => [
+  ...ofType(snapshot, TYPES.job),
+  ...ofType(snapshot, TYPES.app),
+];
 
 /** An image named by digest: a tag can be moved to another image, a digest can't (SEC-SC-02). */
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
@@ -1309,6 +1364,81 @@ const jobs: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * Every app that serves traffic (ADR-002 Amendment G2d): in this deployment's
+ * environment, on Consumption, running the exact image it names, and **never a
+ * public door** — the doors are the route configs (G2e), so an app whose ingress
+ * is external is one reachable from the internet that nothing decided to
+ * publish. Plain http is refused even inside the environment. The apps that
+ * hold something one replica's keep to one (`ONE_REPLICA`), and every app can
+ * run at least one. Together they are the three apps a deployment needs, so a
+ * dropped one is caught here rather than at the first deployment.
+ */
+const apps: Check = (snapshot, _expected, add) => {
+  const environments = new Set<unknown>(ofType(snapshot, TYPES.environment).map((resource) => resource.id));
+  const found = ofType(snapshot, TYPES.app);
+  for (const app of found) {
+    const workload = jobWorkloadOf(app.name);
+    const problem = (message: string): void => {
+      add({ rule: 'apps', resource: app.name, message });
+    };
+    if (!environments.has(at(app.properties, 'environmentId'))) {
+      problem("must run in this deployment's Container Apps environment");
+    }
+    if (at(app.properties, 'workloadProfileName') !== WORKLOAD_PROFILE) {
+      problem(`must run on the ${WORKLOAD_PROFILE} workload profile, the only one the environment offers`);
+    }
+    // An ingress left out is caught by the same two conditions: nothing said is
+    // nothing that says false, and what isn't said here is Azure's to decide
+    // (a mutation pass showed a branch of its own adds nothing).
+    const ingress = at(app.properties, 'configuration', 'ingress');
+    if (at(ingress, 'external') !== false) {
+      problem('must say its ingress is internal (external false): the public doors are the route configs (G2e)');
+    }
+    if (at(ingress, 'allowInsecure') !== false) {
+      problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
+    }
+    const scale = at(app.properties, 'template', 'scale');
+    const most = at(scale, 'maxReplicas');
+    const fewest = at(scale, 'minReplicas');
+    const only = ONE_REPLICA[workload];
+    if (only !== undefined && most !== 1) {
+      problem(`must run at most one replica (maxReplicas 1): ${only}; it says ${String(most)}`);
+    }
+    if (typeof most !== 'number' || most < 1) {
+      problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);
+    }
+    if (typeof fewest !== 'number' || fewest < 0 || (typeof most === 'number' && fewest > most)) {
+      problem(
+        `must keep no more replicas than it may run (minReplicas ${String(fewest)}, maxReplicas ${String(most)})`,
+      );
+    }
+    const containers = containersOf(app);
+    if (containers.length !== 1) {
+      problem(`must run exactly one container; the snapshot has ${String(containers.length)}`);
+    }
+    if (list(at(app.properties, 'template', 'initContainers')).length > 0) {
+      problem('must run no init container: the work is the one container, in view of the log');
+    }
+    for (const container of containers) {
+      const image = text(at(container, 'image'));
+      if (!PINNED_IMAGE.test(image)) {
+        problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
+      }
+    }
+  }
+  for (const workload of APP_WORKLOADS) {
+    const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
+    if (count !== 1) {
+      add({
+        rule: 'apps',
+        resource: 'the deployment',
+        message: `needs the ${workload} app once; the snapshot has ${String(count)}`,
+      });
+    }
+  }
+};
+
+/**
  * A secret read from a vault: the vault's id and the name asked for. A version
  * would be a further part of that name, which the rule refuses by comparing it
  * with the secret's own (a mutation pass showed narrowing the pattern here as
@@ -1348,16 +1478,16 @@ const secretsUsed = (job: PredictedResource): { readonly environment: string[]; 
 });
 
 /**
- * What each job may read (ADR-002 Amendment G2d): its own identity alone,
- * exactly the secrets `GRANTS` says it reads, each from this deployment's vault
- * by name with no version, through that identity; every one of them read, and
- * nothing read that it wasn't given. A secret reaches a container as a mounted
- * file, except in the few settings `SECRETS_IN_ENVIRONMENT` lists for an image
- * that has no file form for them. The apps join this rule in G2d-2.
+ * What each job and app may read (ADR-002 Amendment G2d): its own identity
+ * alone, exactly the secrets `GRANTS` says it reads, each from this
+ * deployment's vault by name with no version, through that identity; every one
+ * of them read, and nothing read that it wasn't given. A secret reaches a
+ * container as a mounted file, except in the few settings
+ * `SECRETS_IN_ENVIRONMENT` lists for an image that has no file form for them.
  */
 const workloadSecrets: Check = (snapshot, _expected, add) => {
   const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
-  for (const job of ofType(snapshot, TYPES.job)) {
+  for (const job of workloadsIn(snapshot)) {
     const workload = jobWorkloadOf(job.name);
     const problem = (message: string): void => {
       add({ rule: 'workload-secrets', resource: job.name, message });
@@ -1417,14 +1547,14 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
 };
 
 /**
- * Nothing a container runs sends telemetry out of the UAE (ADR-013,
- * SEC-DATA-08): no OpenTelemetry exporter switched on, and Zitadel's daily
- * report to zitadel.com (which carries every instance's domains and counts) and
- * its metrics endpoint said to be off outright, never left to a default a
- * version change could move.
+ * Nothing a container runs — job or app — sends telemetry out of the UAE
+ * (ADR-013, SEC-DATA-08): no OpenTelemetry exporter switched on, and every
+ * switch in `TELEMETRY_OFF` said outright on a Zitadel image, never left to a
+ * default a version change could move. Zitadel's daily report to zitadel.com
+ * carries every instance's domains and counts.
  */
 const containerTelemetry: Check = (snapshot, _expected, add) => {
-  for (const job of ofType(snapshot, TYPES.job)) {
+  for (const job of workloadsIn(snapshot)) {
     const problem = (message: string): void => {
       add({ rule: 'container-telemetry', resource: job.name, message });
     };
@@ -1437,10 +1567,13 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
       )) {
         problem(`sets ${name}: OpenTelemetry sends to a collector, and ADR-013 keeps every trace in the UAE`);
       }
-      if (!text(at(container, 'image')).startsWith(ZITADEL_IMAGES)) continue;
-      for (const [name, wanted] of Object.entries(TELEMETRY_OFF)) {
+      const image = text(at(container, 'image'));
+      const switches = TELEMETRY_OFF.filter((off) => image.startsWith(off.images)).flatMap((off) =>
+        Object.entries(off.settings),
+      );
+      for (const [name, wanted] of switches) {
         if (settings.get(name) !== wanted) {
-          problem(`must set ${name} to ${wanted} outright, never leave it to Zitadel's default (ADR-013)`);
+          problem(`must set ${name} to ${wanted} outright, never leave it to the image's default (ADR-013)`);
         }
       }
     }
@@ -1471,6 +1604,7 @@ const CHECKS: readonly Check[] = [
   vaultSecrets,
   secretAccess,
   jobs,
+  apps,
   workloadSecrets,
   containerTelemetry,
 ];

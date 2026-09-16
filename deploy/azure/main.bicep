@@ -20,7 +20,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { networkAddressSpace, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'subscription'
 
@@ -38,9 +38,6 @@ param location string
 @minLength(4)
 @maxLength(6)
 param nameSuffix string = uniqueSuffix(subscription().id)
-
-@description('The private network\'s address space. The apps and the database each get a /24 from it.')
-param addressSpace string = '10.40.0.0/16'
 
 @description('Who alert emails and Azure mobile app pushes go to: the Azure account the partner signs in with.')
 param alertEmail string
@@ -130,7 +127,7 @@ module network 'modules/network.bicep' = {
     databaseRulesName: names.databaseRules
     databaseZoneName: names.databaseZone
     tags: tags
-    addressSpace: addressSpace
+    addressSpace: networkAddressSpace
   }
 }
 
