@@ -113,13 +113,19 @@ function runBicep(args: readonly string[], cwd: string, env: Record<string, stri
   return { status: run.status, output: `${run.stdout}${run.stderr}`.trim(), stdout: run.stdout };
 }
 
+/** The JSON files the Bicep compiler reads, which a throwaway copy must keep. */
+const BICEP_READS: ReadonlySet<string> = new Set(['bicepconfig.json', 'github-ranges.json']);
+
 /** A throwaway copy of a deploy/azure folder, removed after `use` returns. */
 export function inCopy<T>(use: (dir: string) => T, source = AZURE_DIR): T {
   const dir = mkdtempSync(path.join(tmpdir(), 'agentx-azure-'));
   try {
     cpSync(source, dir, {
       recursive: true,
-      filter: (file) => !/\.(?:ts|json)$/.test(file) || path.basename(file) === 'bicepconfig.json',
+      // The checks and their snapshots stay out of the copy, but the two JSON
+      // files Bicep itself reads come with it: its linter settings, and the
+      // GitHub ranges network.bicep loads at build time (G2d-3).
+      filter: (file) => !/\.(?:ts|json)$/.test(file) || BICEP_READS.has(path.basename(file)),
     });
     return use(dir);
   } finally {

@@ -180,11 +180,24 @@ const secretNamed = (job: Mutable, name: string): Mutable =>
   declaredSecrets(job).find((secret) => secret.name === name) ?? {};
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
 const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
+/** One rule of a group, by name, for changing it in place. */
+const ruleNamed = (group: Mutable, name: string): Mutable =>
+  inside(rules(group).find((rule) => rule.name === name) ?? {}, 'properties');
+/** The same group without one of its rules. */
+const dropRule = (group: Mutable, name: string): void => {
+  inside(group, 'properties').securityRules = rules(group).filter((rule) => rule.name !== name);
+};
 const subnet = (network: Mutable, name: string): Mutable =>
   (at(network, 'properties', 'subnets') as Mutable[]).find((entry) => entry.name === name) ?? {};
 
-/** An inbound allow rule declared as a resource of its own under the rules group `pick` selects. */
-function separateRule(pick: (resource: PredictedResource) => boolean, source: string, port: string): Mutable {
+/** An allow rule declared as a resource of its own under the rules group `pick` selects. */
+function separateRule(
+  pick: (resource: PredictedResource) => boolean,
+  direction: 'Inbound' | 'Outbound',
+  source: string,
+  destination: string,
+  port: string,
+): Mutable {
   const group = staging.predictedResources.find(pick);
   return {
     id: `${String(group?.id)}/securityRules/allow-extra`,
@@ -193,12 +206,12 @@ function separateRule(pick: (resource: PredictedResource) => boolean, source: st
     apiVersion: '2025-01-01',
     properties: {
       priority: 120,
-      direction: 'Inbound',
+      direction,
       access: 'Allow',
       protocol: 'Tcp',
       sourceAddressPrefix: source,
       sourcePortRange: '*',
-      destinationAddressPrefix: '*',
+      destinationAddressPrefix: destination,
       destinationPortRange: port,
     },
   };
@@ -578,18 +591,24 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it('database-network: any door wider than 5432 from the apps and the subnet itself, or a Postgres subnet without its rules', () => {
-    const allowApps = (group: Mutable): Mutable => inside(nth(rules(group), 0), 'properties');
-    const allowItself = (group: Mutable): Mutable => inside(nth(rules(group), 1), 'properties');
-    const deny = (group: Mutable): Mutable => inside(nth(rules(group), 2), 'properties');
+    const allowApps = (group: Mutable): Mutable => ruleNamed(group, 'allow-postgres-from-apps');
+    const allowItself = (group: Mutable): Mutable => ruleNamed(group, 'allow-postgres-within-subnet');
+    const deny = (group: Mutable): Mutable => ruleNamed(group, 'deny-rest-of-network');
     for (const change of [
       (group: Mutable) => (allowApps(group).sourceAddressPrefix = '10.40.0.0/16'),
       (group: Mutable) => (allowApps(group).destinationPortRange = '*'),
       (group: Mutable) => (allowApps(group).protocol = '*'),
       (group: Mutable) => (allowApps(group).destinationAddressPrefix = '*'),
       (group: Mutable) => (allowItself(group).sourceAddressPrefix = '10.40.9.0/24'),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 1), nth(rules(group), 2)]),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 2)]),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 1)]),
+      (group: Mutable) => {
+        dropRule(group, 'allow-postgres-from-apps');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-postgres-within-subnet');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'deny-rest-of-network');
+      },
       (group: Mutable) => (deny(group).protocol = 'Tcp'),
       (group: Mutable) => (deny(group).sourceAddressPrefix = '10.99.0.0/24'),
       (group: Mutable) => (deny(group).destinationAddressPrefix = '10.99.0.0/24'),
@@ -608,7 +627,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       expect(brokenRules(changed(DATABASE_RULES, change))).toEqual(['database-network']);
     }
     // The same door as a rule of its own under the group: Azure adds it all the same.
-    expect(brokenRules(withExtra(separateRule(DATABASE_RULES, '10.40.9.0/24', '5432')))).toEqual(['database-network']);
+    expect(brokenRules(withExtra(separateRule(DATABASE_RULES, 'Inbound', '10.40.9.0/24', '*', '5432')))).toEqual([
+      'database-network',
+    ]);
     for (const change of [
       (network: Mutable) => delete inside(subnet(network, 'apps'), 'properties').delegations,
       (network: Mutable) => delete inside(subnet(network, 'database'), 'properties').serviceEndpoints,
@@ -898,9 +919,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
   });
 
   it('apps-network: the apps subnet without its rules, or a door wider than the probes and the subnet itself', () => {
-    const probes = (group: Mutable): Mutable => inside(nth(rules(group), 0), 'properties');
-    const itself = (group: Mutable): Mutable => inside(nth(rules(group), 1), 'properties');
-    const deny = (group: Mutable): Mutable => inside(nth(rules(group), 2), 'properties');
+    const probes = (group: Mutable): Mutable => ruleNamed(group, 'allow-load-balancer-probes');
+    const itself = (group: Mutable): Mutable => ruleNamed(group, 'allow-within-subnet');
+    const deny = (group: Mutable): Mutable => ruleNamed(group, 'deny-rest-of-network');
     for (const change of [
       (group: Mutable) => (probes(group).sourceAddressPrefix = 'Internet'),
       (group: Mutable) => (probes(group).destinationPortRange = '*'),
@@ -908,9 +929,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (group: Mutable) => (probes(group).destinationAddressPrefix = '*'),
       (group: Mutable) => (itself(group).sourceAddressPrefix = '10.40.0.0/16'),
       (group: Mutable) => (itself(group).destinationAddressPrefix = '*'),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 1), nth(rules(group), 2)]),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 2)]),
-      (group: Mutable) => (inside(group, 'properties').securityRules = [nth(rules(group), 0), nth(rules(group), 1)]),
+      (group: Mutable) => {
+        dropRule(group, 'allow-load-balancer-probes');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-within-subnet');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'deny-rest-of-network');
+      },
       (group: Mutable) => (deny(group).priority = 105),
       (group: Mutable) => (deny(group).access = 'Allow'),
       (group: Mutable) => (deny(group).protocol = 'Tcp'),
@@ -928,13 +955,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(APPS_RULES, change))).toEqual(['apps-network']);
     }
+    // No rules group at all takes the way out with it, so both rules speak.
     expect(
       brokenRules(
         changed(NETWORK, (network) => delete inside(subnet(network, 'apps'), 'properties').networkSecurityGroup),
       ),
-    ).toEqual(['apps-network']);
-    expect(brokenRules(without(APPS_RULES))).toEqual(['apps-network']);
-    expect(brokenRules(withExtra(separateRule(APPS_RULES, 'VirtualNetwork', '*')))).toEqual(['apps-network']);
+    ).toEqual(['apps-network', 'apps-egress']);
+    expect(brokenRules(without(APPS_RULES))).toEqual(['apps-network', 'apps-egress']);
+    expect(brokenRules(withExtra(separateRule(APPS_RULES, 'Inbound', 'VirtualNetwork', '*', '*')))).toEqual([
+      'apps-network',
+    ]);
     // No apps subnet at all: the database's rule refuses it too, and the vault
     // and the environment point at a subnet that isn't there.
     expect(
@@ -943,7 +973,82 @@ describe('SEC-OPS-09 each rule can fail', () => {
           inside(network, 'properties').subnets = [subnet(network, 'database')];
         }),
       ),
-    ).toEqual(['database-network', 'apps-network', 'vault', 'apps-environment']);
+    ).toEqual(['database-network', 'apps-network', 'apps-egress', 'vault', 'apps-environment']);
+  });
+
+  it('apps-egress: a door out that nothing needs, one the apps need missing, or the rest not denied after them', () => {
+    const out = (group: Mutable, name: string): Mutable => ruleNamed(group, `allow-out-${name}`);
+    const deny = (group: Mutable): Mutable => ruleNamed(group, 'deny-out-rest');
+    const prefixes = (group: Mutable, name: string): string[] =>
+      at(out(group, name), 'destinationAddressPrefixes') as string[];
+    for (const change of [
+      // A door widened is a door nothing needs, and the one it replaced gone.
+      (group: Mutable) => (out(group, 'within-subnet').destinationAddressPrefix = '*'),
+      (group: Mutable) => (out(group, 'within-subnet').protocol = 'Tcp'),
+      (group: Mutable) => (out(group, 'azure-dns').destinationPortRange = '*'),
+      (group: Mutable) => (out(group, 'database').destinationPortRange = '*'),
+      (group: Mutable) => (out(group, 'database').destinationAddressPrefix = 'VirtualNetwork'),
+      // The key vault of another country, which ADR-009 refuses.
+      (group: Mutable) => (out(group, 'key-vault').destinationAddressPrefix = 'AzureKeyVault'),
+      (group: Mutable) => (out(group, 'key-vault').destinationAddressPrefix = 'AzureKeyVault.westeurope'),
+      (group: Mutable) => (out(group, 'monitor').destinationAddressPrefix = 'AzureCloud'),
+      // Every door simply missing.
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-within-subnet');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-azure-dns');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-database');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-key-vault');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-monitor');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-entra');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-platform-images');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-platform-images-front-door');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-github-registry');
+      },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-github-downloads');
+      },
+      // GitHub's ranges drifting from github-ranges.json, either way.
+      (group: Mutable) => prefixes(group, 'github-registry').push('203.0.113.7/32'),
+      (group: Mutable) => prefixes(group, 'github-registry').pop(),
+      (group: Mutable) => (out(group, 'github-downloads').destinationAddressPrefixes = ['0.0.0.0/0']),
+      // A door open to something that isn't the apps subnet.
+      (group: Mutable) => (out(group, 'monitor').sourceAddressPrefix = '*'),
+      (group: Mutable) => (out(group, 'entra').sourceAddressPrefix = '10.40.1.0/24'),
+      // The backstop weakened: any of its parts, or moved above a door it must follow.
+      (group: Mutable) => (deny(group).access = 'Allow'),
+      (group: Mutable) => (deny(group).protocol = 'Tcp'),
+      (group: Mutable) => (deny(group).sourceAddressPrefix = '10.40.0.0/24'),
+      (group: Mutable) => (deny(group).destinationAddressPrefix = 'Internet'),
+      (group: Mutable) => (deny(group).destinationPortRange = '443'),
+      (group: Mutable) => (deny(group).priority = 205),
+      (group: Mutable) => {
+        dropRule(group, 'deny-out-rest');
+      },
+    ]) {
+      expect(brokenRules(changed(APPS_RULES, change))).toEqual(['apps-egress']);
+    }
+    // A door added as a resource of its own under the group counts with the group's.
+    expect(brokenRules(withExtra(separateRule(APPS_RULES, 'Outbound', '10.40.0.0/24', 'Internet', '443')))).toEqual([
+      'apps-egress',
+    ]);
+    // The order Azure is given a list of addresses in is its business, not ours.
+    expect(brokenRules(changed(APPS_RULES, (group) => prefixes(group, 'github-registry').reverse()))).toEqual([]);
   });
 
   it('SEC-DATA-09 apps-logs: console or system logs kept out of the workspace, or the HTTP log sent anywhere', () => {

@@ -10,6 +10,7 @@
 // simply missing, not only one that is switched off. An environment's parts
 // (secrets.bicep) are checked together with its foundation, so they too may
 // point only at what the foundation creates.
+import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
 export type RuleId =
@@ -36,6 +37,7 @@ export type RuleId =
   | 'budget'
   | 'apps-environment'
   | 'apps-network'
+  | 'apps-egress'
   | 'apps-logs'
   | 'app-errors-alert'
   | 'identities'
@@ -260,6 +262,17 @@ const TELEMETRY_OFF: readonly {
 
 /** The one workload profile the environment offers (ADR-002 Amendment G2b). */
 const WORKLOAD_PROFILE = 'Consumption';
+
+/**
+ * The addresses the apps subnet may leave for to pull an image, read from the
+ * same file network.bicep compiles into the rules (github-ranges.ts): the rule
+ * below holds the deployment to exactly them, so a hand-edited allowlist that
+ * has drifted from the refresher's file fails the check.
+ */
+const GITHUB_RANGES = readRanges();
+
+/** Azure's own DNS, which Microsoft says an environment stops working without. */
+const AZURE_DNS = '168.63.129.16';
 
 /** The longest a job's one run may take, so a stuck run can't hold a replica for a day. */
 const LONGEST_RUN_SECONDS = 3600;
@@ -700,11 +713,11 @@ const database: Check = (snapshot, expected, add) => {
 };
 
 /**
- * A subnet's inbound rules, from the rules group of this deployment attached to
- * it: those declared inside the group, and any declared as resources of their
- * own under it, which Azure adds to the same group.
+ * A subnet's rules in one direction, from the rules group of this deployment
+ * attached to it: those declared inside the group, and any declared as
+ * resources of their own under it, which Azure adds to the same group.
  */
-const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] => {
+const subnetRules = (snapshot: Snapshot, subnet: unknown, direction: string): readonly unknown[] => {
   const rulesId = at(subnet, 'properties', 'networkSecurityGroup', 'id');
   const inside = list(
     at(ofType(snapshot, TYPES.rules).find((group) => group.id === rulesId)?.properties, 'securityRules'),
@@ -712,30 +725,45 @@ const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =
   const apart = ofType(snapshot, TYPES.rule).filter((rule) => rule.id.startsWith(`${String(rulesId)}/securityRules/`));
   return [...inside, ...apart]
     .map((rule) => at(rule, 'properties'))
-    .filter((rule) => at(rule, 'direction') === 'Inbound');
+    .filter((rule) => at(rule, 'direction') === direction);
 };
+
+const inboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =>
+  subnetRules(snapshot, subnet, 'Inbound');
+
+const outboundRules = (snapshot: Snapshot, subnet: unknown): readonly unknown[] =>
+  subnetRules(snapshot, subnet, 'Outbound');
 
 const allowing = (inbound: readonly unknown[]): readonly unknown[] =>
   inbound.filter((rule) => at(rule, 'access') === 'Allow');
 
 /**
- * A rule that denies the rest of the network, after every rule that allows:
- * it overrides Azure's default one that lets the whole network in. Kept
- * explicit, though each caller's own list of allowed rules already refuses any
- * rule matching this one without denying (the one mutant tests can't tell apart).
+ * The backstop of a direction: a rule that denies everything from `source`,
+ * after every rule that allows, so it overrides Azure's default rule rather
+ * than sitting under one of ours. `access` is kept explicit though it is
+ * implied — a rule that allows is in `allowing`, so its priority can never be
+ * above the last of them — because a backstop that doesn't say "Deny" is not a
+ * backstop to read. It is the one condition a mutant survives, in both
+ * directions, and knowingly so.
  */
-const deniesRestOfNetwork = (inbound: readonly unknown[]): boolean => {
-  const lastAllow = Math.max(...allowing(inbound).map((rule) => Number(at(rule, 'priority'))));
-  return inbound.some(
+const deniesRest = (rules: readonly unknown[], source: string): boolean => {
+  const lastAllow = Math.max(...allowing(rules).map((rule) => Number(at(rule, 'priority'))));
+  return rules.some(
     (rule) =>
       at(rule, 'access') === 'Deny' &&
       at(rule, 'protocol') === '*' &&
-      at(rule, 'sourceAddressPrefix') === 'VirtualNetwork' &&
+      at(rule, 'sourceAddressPrefix') === source &&
       at(rule, 'destinationAddressPrefix') === '*' &&
       at(rule, 'destinationPortRange') === '*' &&
       Number(at(rule, 'priority')) > lastAllow,
   );
 };
+
+/** In: Azure's default rule lets the whole network in, so ours denies it after every allow. */
+const deniesRestOfNetwork = (inbound: readonly unknown[]): boolean => deniesRest(inbound, 'VirtualNetwork');
+
+/** Out: Azure's defaults let the subnet reach anything, so ours denies every source and destination. */
+const deniesRestOfTheInternet = (outbound: readonly unknown[]): boolean => deniesRest(outbound, '*');
 
 const appsSubnetOf = (network: PredictedResource): unknown =>
   list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'apps');
@@ -816,6 +844,88 @@ const appsNetwork: Check = (snapshot, _expected, add) => {
         message:
           "needs rules on its apps subnet that let in only the load balancer's probes (TCP 30000-32767) and the subnet itself, then deny the rest of the network",
       });
+    }
+  }
+};
+
+/** Where a rule sends traffic: its one destination, or its list of them in a settled order. */
+const destinationOf = (rule: unknown): string => {
+  const one = at(rule, 'destinationAddressPrefix');
+  if (one !== undefined) return text(one);
+  return list(at(rule, 'destinationAddressPrefixes')).map(text).sort().join(' ');
+};
+
+/** One door out, as a single line: what may leave, for where, on which port. */
+const doorOf = (rule: unknown): string =>
+  `${text(at(rule, 'protocol'))} to ${destinationOf(rule)} on ${text(at(rule, 'destinationPortRange'))}`;
+
+/**
+ * Every door the apps subnet may have out, and why it is there. The first three
+ * are this deployment's own addresses, the next five Azure's service tags,
+ * which Azure keeps current; the last two are GitHub's published addresses,
+ * which nothing keeps current but the refresher (github-ranges.ts).
+ *
+ * What is deliberately absent: `Storage.<region>`, which Microsoft's list needs
+ * only for images hosted in Azure Container Registry, and any door for the
+ * apps' own outbound calls, which they make none of before Phase 1.
+ */
+const egressDoors = (region: string, apps: string, database: string): readonly (readonly [string, string])[] => [
+  [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
+  [`* to ${AZURE_DNS} on 53`, "Azure's DNS, which resolves the database's private name and every host below"],
+  [`Tcp to ${database} on 5432`, 'Postgres, in its own subnet'],
+  [`Tcp to AzureKeyVault.${region} on 443`, 'the secrets each app and job reads, in this region alone'],
+  ['Tcp to AzureMonitor on 443', "the apps' console logs on their way to the workspace"],
+  ['Tcp to AzureActiveDirectory on 443', 'the token an identity reads its own secrets with'],
+  ['Tcp to MicrosoftContainerRegistry on 443', "the platform's own system containers"],
+  ['Tcp to AzureFrontDoor.FirstParty on 443', 'Microsoft names it a dependency of the registry above'],
+  [
+    `Tcp to ${[...GITHUB_RANGES.registry.prefixes].sort().join(' ')} on 443`,
+    'ghcr.io: the pull token and the manifest',
+  ],
+  [
+    `Tcp to ${[...GITHUB_RANGES.downloads.prefixes].sort().join(' ')} on 443`,
+    'where ghcr.io redirects every layer download',
+  ],
+];
+
+/**
+ * The way out of the apps subnet is an allowlist (ADR-002 Amendment G2d-3).
+ * Azure's default rules let a subnet reach the whole internet, so a container
+ * that was taken over could send anything anywhere, out of the UAE; these
+ * rules name what the apps and jobs need and deny the rest after them. The
+ * doors must match exactly: one missing breaks a deployment, one extra is a
+ * way out nobody decided on.
+ */
+const appsEgress: Check = (snapshot, _expected, add) => {
+  for (const network of ofType(snapshot, TYPES.network)) {
+    const apps = appsSubnetOf(network);
+    const prefix = text(at(apps, 'properties', 'addressPrefix'));
+    const database = list(at(network.properties, 'subnets')).find((subnet) => at(subnet, 'name') === 'database');
+    const outbound = outboundRules(snapshot, apps);
+    const allows = allowing(outbound);
+    const problem = (message: string): void => {
+      add({ rule: 'apps-egress', resource: network.name, message });
+    };
+    // The network's own region, not the expected one: this rule asks that the
+    // key vault tag names where this deployment is, and `in-country` asks
+    // separately that that is the UAE.
+    const wanted = new Map(
+      egressDoors(text(network.location), prefix, text(at(database, 'properties', 'addressPrefix'))),
+    );
+    const open = new Set(allows.map(doorOf));
+    for (const [door, why] of wanted) {
+      if (!open.has(door)) problem(`its apps subnet must let out ${door}, for ${why}`);
+    }
+    for (const door of [...open].filter((door) => !wanted.has(door))) {
+      problem(`its apps subnet lets out ${door}, which nothing it runs needs`);
+    }
+    for (const source of new Set(
+      allows.map((rule) => text(at(rule, 'sourceAddressPrefix'))).filter((source) => source !== prefix),
+    )) {
+      problem(`its apps subnet lets out traffic from ${source || 'nowhere named'}, not from the subnet alone`);
+    }
+    if (!deniesRestOfTheInternet(outbound)) {
+      problem('its apps subnet must deny everything else out, after every rule that allows');
     }
   }
 };
@@ -1590,6 +1700,7 @@ const CHECKS: readonly Check[] = [
   database,
   databaseNetwork,
   appsNetwork,
+  appsEgress,
   vault,
   workspaceAndQuota,
   alertRules,
