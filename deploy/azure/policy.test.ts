@@ -190,6 +190,20 @@ const dropRule = (group: Mutable, name: string): void => {
 const subnet = (network: Mutable, name: string): Mutable =>
   (at(network, 'properties', 'subnets') as Mutable[]).find((entry) => entry.name === name) ?? {};
 
+/** Azure refuses a network rule whose description is longer (preflight: SecurityRuleDescriptionTooLong). */
+const RULE_DESCRIPTION_LIMIT = 140;
+
+/** The names of every network rule in a snapshot whose description Azure would refuse. */
+const overLongRuleDescriptions = (snapshotted: Snapshot): string[] =>
+  snapshotted.predictedResources
+    .filter(RULES)
+    .flatMap((group) => (at(group.properties, 'securityRules') as Mutable[] | undefined) ?? [])
+    .filter((rule) => {
+      const description = at(rule, 'properties', 'description');
+      return typeof description === 'string' && description.length > RULE_DESCRIPTION_LIMIT;
+    })
+    .map((rule) => String(rule.name));
+
 /** An allow rule declared as a resource of its own under the rules group `pick` selects. */
 function separateRule(
   pick: (resource: PredictedResource) => boolean,
@@ -250,6 +264,22 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect(paramsFileProblems(file, entry.text, bicepFile(entry.deploys).secure)).toEqual([]);
     }
     for (const [file, { template }] of bicepFiles) expect(templateProblems(file, template)).toEqual([]);
+  });
+
+  it("stays within the limits Azure's own preflight enforces, which no linter checks", () => {
+    // The first dry run against a real subscription (G3a) refused two rule
+    // descriptions over 140 characters; no offline check had seen them.
+    for (const [environment, { together }] of deployed) {
+      expect({ environment, tooLong: overLongRuleDescriptions(together) }).toEqual({ environment, tooLong: [] });
+    }
+    const longer = changed(APPS_RULES, (group) => {
+      ruleNamed(group, 'allow-within-subnet').description = 'x'.repeat(RULE_DESCRIPTION_LIMIT + 1);
+    });
+    expect(overLongRuleDescriptions(longer)).toEqual(['allow-within-subnet']);
+    const atTheLimit = changed(APPS_RULES, (group) => {
+      ruleNamed(group, 'allow-within-subnet').description = 'x'.repeat(RULE_DESCRIPTION_LIMIT);
+    });
+    expect(overLongRuleDescriptions(atTheLimit)).toEqual([]);
   });
 
   it('applies bicepconfig.json: a secret in an output is an error, not a warning', () => {
