@@ -323,6 +323,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/require_secure_transport$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/ssl_min_protocol_version$/),
       expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_connections$/),
+      expect.stringMatching(/\/configurations psql-agentx-stg-[a-z0-9]{6}\/log_line_prefix$/),
       'Microsoft.Insights/diagnosticSettings logs-to-workspace',
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
@@ -571,7 +572,24 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(setting('log_connections'), (entry) => (inside(entry, 'properties').value = 'off'))),
     ).toEqual(['database-logins']);
+    // A line that starts some other way is one the alert doesn't match.
+    expect(
+      brokenRules(changed(setting('log_line_prefix'), (entry) => (inside(entry, 'properties').value = '%m [%p] '))),
+    ).toEqual(['database-logins']);
     expect(brokenRules(without(LOGIN_ALERT))).toEqual(['database-logins']);
+    // The pattern without the line's start, as it was until the first real run (S19).
+    expect(
+      brokenRules(
+        changed(
+          LOGIN_ALERT,
+          (alert) =>
+            (criterion(alert).query = String(criterion(alert).query).replace(
+              /@"\^[^"]*?connection authorized/,
+              '@"^connection authorized',
+            )),
+        ),
+      ),
+    ).toEqual(['database-logins']);
     expect(
       brokenRules(
         changed(
@@ -596,6 +614,32 @@ describe('SEC-OPS-09 each rule can fail', () => {
         changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').scopes = ['/subscriptions/x/workspaces/y'])),
       ),
     ).toEqual(['database-logins']);
+  });
+
+  it('SEC-OPS-09 the login alert matches the lines Postgres 18 on Azure writes, and no others (S19)', () => {
+    const query = String(criterion(staging.predictedResources.find(LOGIN_ALERT) as unknown as Mutable).query);
+    const source = /matches regex @"([^"]+)"/.exec(query)?.[1];
+    expect(source).toBeDefined();
+    // Kusto's regular expressions are RE2; this pattern uses nothing JavaScript reads differently.
+    const pattern = new RegExp(source ?? '(?!)');
+    // A line as the set-up job's login wrote it on the first real run, the session and role filled in here.
+    const line = (message: string, session = '6aaae7b4.1dc3') => `2026-09-16 19:02:12 UTC-${session}-LOG:  ${message}`;
+    const authorized = (role: string) =>
+      `connection authorized: user=${role} database=postgres application_name=agentx-db-setup SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)`;
+    for (const role of ['agentx_admin', 'agentx_backup']) {
+      expect(line(authorized(role))).toMatch(pattern);
+      expect(line(authorized(role), '6aaae7b4.1dc4')).toMatch(pattern);
+    }
+    for (const other of [
+      line(authorized('agentx_app')),
+      line(authorized('azuresu')),
+      line(authorized('agentx_administrator')),
+      line('connection authenticated: identity="agentx_admin" method=md5 (/datadrive/pg/data/pg_hba.conf:29)'),
+      line(`statement: SELECT '${authorized('agentx_admin')}'`),
+      authorized('agentx_admin'),
+    ]) {
+      expect(other).not.toMatch(pattern);
+    }
   });
 
   it('database-tls: TLS not required, or older than 1.3', () => {
