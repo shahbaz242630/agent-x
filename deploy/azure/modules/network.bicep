@@ -115,10 +115,12 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         // Microsoft: traffic to this address isn't subject to an NSG unless a
         // rule names the AzurePlatformDNS tag, and denying it stops the
         // environment working — no rule here names that tag. The allow is kept
-        // so the dependency is written down rather than relied on silently.
+        // so the dependency is written down rather than relied on silently. One
+        // rule with protocol `*`, because a rule takes one protocol and
+        // Microsoft asks for both TCP and UDP.
         name: 'allow-out-azure-dns'
         properties: {
-          description: 'Azure\'s own DNS, which resolves the database\'s private name and every host below. One rule, because a rule takes one protocol and Microsoft asks for TCP and UDP.'
+          description: 'Azure\'s own DNS, over TCP and UDP: it resolves the database\'s private name and every host below.'
           priority: 210
           direction: 'Outbound'
           access: 'Allow'
@@ -219,9 +221,10 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         }
       }
       {
+        // GitHub has no service tag, so these are its published addresses.
         name: 'allow-out-github-registry'
         properties: {
-          description: 'ghcr.io, which answers for the pull token and the image manifest. GitHub has no service tag, so these are its published addresses (github-ranges.json).'
+          description: 'ghcr.io, for the pull token and the image manifest: GitHub\'s published addresses (github-ranges.json).'
           priority: 280
           direction: 'Outbound'
           access: 'Allow'
