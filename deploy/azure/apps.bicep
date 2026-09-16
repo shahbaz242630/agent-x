@@ -163,9 +163,8 @@ var ourSettings = [
 
 // Zitadel's own connection, as its own role and as its own "admin": the role and
 // the database exist before it runs (db-setup makes them), so Zitadel never
-// holds the server admin's login. TLS is checked to the host name, which is the
-// server's own inside the private zone; the compose stack has no TLS and so
-// says `disable` there.
+// holds the server admin's login. TLS is checked to the host name (names.bicep);
+// the compose stack has no TLS and so says `disable` there.
 var zitadelDatabase = [
   {
     name: 'ZITADEL_DATABASE_POSTGRES_HOST'

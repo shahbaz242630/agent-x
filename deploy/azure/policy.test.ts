@@ -1232,6 +1232,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: if (!empty(secret.name)) {'],
       // Rotating secrets that a run can no longer rotate.
       ["resource written 'Microsoft", "@onlyIfNotExists()\nresource written 'Microsoft"],
+      // A secret looked up where secrets are written, which Azure refuses at deployment (S19).
+      [
+        '// Who reads what, in a template of its own',
+        "resource found 'Microsoft.KeyVault/vaults/secrets@2025-05-01' existing = {\n  parent: vault\n  name: 'db-admin-password'\n}\n\noutput found string = found.id\n\n// Who reads what, in a template of its own",
+      ],
     ] as const) {
       inCopy((dir) => {
         const file = path.join(dir, 'secrets.bicep');
@@ -1253,6 +1258,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
       }),
     ).toHaveLength(1);
     expect(templateProblems('t.bicep', { resources: { found: { ...secret, existing: true } } })).toEqual([]);
+    // Looked up beside one it writes, in a module too: each lookup named.
+    const found = { ...secret, existing: true };
+    const created = { ...secret, '@options': { onlyIfNotExists: [] } };
+    const part = {
+      type: 'Microsoft.Resources/deployments',
+      properties: { template: { resources: { found, again: found, created } } },
+    };
+    expect(templateProblems('t.bicep', { resources: { part } }).map((problem) => problem.resource)).toEqual([
+      't.bicep: found',
+      't.bicep: again',
+    ]);
     // Written when its own value is given; a condition on another value, or around its own, is not that.
     const given = { ...secret, condition: "[not(empty(parameters('p')))]", properties: { value: "[parameters('p')]" } };
     expect(templateProblems('t.bicep', { resources: [given] })).toEqual([]);
@@ -1768,7 +1784,7 @@ describe('what each job is told', () => {
     expect(settingsGiven('db-setup')).toEqual({
       AGENTX_ENV: 'staging',
       AGENTX_RELEASE: someCommit,
-      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.postgres.database.azure.com',
       AGENTX_DB_NAME: 'agentx',
       AGENTX_DB_ADMIN_USER: 'agentx_admin',
       AGENTX_DB_ADMIN_DATABASE: 'postgres',
@@ -1782,7 +1798,7 @@ describe('what each job is told', () => {
     expect(settingsGiven('migrate')).toEqual({
       AGENTX_ENV: 'staging',
       AGENTX_RELEASE: someCommit,
-      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.postgres.database.azure.com',
       AGENTX_DB_NAME: 'agentx',
       AGENTX_DB_MIGRATION_PASSWORD_FILE: '/mnt/secrets/db-owner-password',
     });
@@ -1798,7 +1814,7 @@ describe('what each job is told', () => {
       expect({ workload, settings: settingsGiven(workload) }).toMatchObject({
         workload,
         settings: {
-          ZITADEL_DATABASE_POSTGRES_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+          ZITADEL_DATABASE_POSTGRES_HOST: 'psql-agentx-stg-ksacnt.postgres.database.azure.com',
           ZITADEL_DATABASE_POSTGRES_DATABASE: 'zitadel',
           // Its own role is also its "admin": it never holds the server admin's login.
           ZITADEL_DATABASE_POSTGRES_USER_USERNAME: 'zitadel',

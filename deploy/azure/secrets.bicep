@@ -17,10 +17,11 @@
 // - Zitadel's master key is created once and never overwritten, whatever a
 //   later run brings: Zitadel can't read what it encrypted with another key
 // - each identity reads only the secrets listed for it below (Key Vault
-//   Secrets User on that one secret); the policy holds the same list
+//   Secrets User on that one secret, modules/secret-access.bicep); the policy
+//   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
-import { identityName, resourceNames, uniqueSuffix, workloads } from 'names.bicep'
+import { resourceNames, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -75,10 +76,6 @@ param loginClientPrivateKey string
 param loginClientPublicKey string
 
 var names = resourceNames(environment, nameSuffix)
-
-// Key Vault Secrets User: reads a secret's value and nothing else (Microsoft's
-// built-in role, by its id).
-var vaultReaderRole = '4633458b-17de-408a-b874-0445c86b69e6'
 
 // Every secret a run writes when given a value, and who reads each. The
 // set-up job reads every database login, since each of its runs sets them all.
@@ -137,13 +134,6 @@ var access = concat(map(secrets, secret => {
   readers: secret.readers
 }), [masterKey])
 
-// One role assignment for each secret and each of its readers: the secret's
-// place in `access`, and the reader's in the list of apps and jobs.
-var grants = flatten(map(range(0, length(access)), secret => map(access[secret].readers, reader => {
-  secret: secret
-  reader: indexOf(workloads, reader)
-})))
-
 resource vault 'Microsoft.KeyVault/vaults@2025-05-01' existing = {
   name: names.vault
 }
@@ -167,37 +157,18 @@ resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   }
 }
 
-// Every secret as the vault has it, written by this run or an earlier one:
-// each looked up once, as the scope its readers are given.
-resource vaultSecrets 'Microsoft.KeyVault/vaults/secrets@2025-05-01' existing = [
-  for secret in access: {
-    parent: vault
-    name: secret.name
+// Who reads what, in a template of its own: Azure refuses one that both writes
+// a secret and looks it up, and each grant needs its secret looked up as its
+// scope (modules/secret-access.bicep).
+module readAccess 'modules/secret-access.bicep' = {
+  params: {
+    environment: environment
+    vaultName: names.vault
+    access: access
   }
-]
-
-// Every app's and job's identity, which main.bicep created: each looked up once.
-resource identities 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = [
-  for workload in workloads: {
-    name: identityName(environment, workload)
-  }
-]
-
-resource readAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for grant in grants: {
-    scope: vaultSecrets[grant.secret]
-    name: guid(vaultSecrets[grant.secret].id, identities[grant.reader].id, vaultReaderRole)
-    properties: {
-      description: '${workloads[grant.reader]} reads ${access[grant.secret].name} (deploy/azure/secrets.bicep)'
-      roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', vaultReaderRole)
-      principalId: identities[grant.reader].properties.principalId
-      // Said outright, so Azure needn't look the identity up first.
-      principalType: 'ServicePrincipal'
-    }
-    // A secret exists before anyone is let read it.
-    dependsOn: [
-      written
-      created
-    ]
-  }
-]
+  // A secret exists before anyone is let read it.
+  dependsOn: [
+    written
+    created
+  ]
+}
