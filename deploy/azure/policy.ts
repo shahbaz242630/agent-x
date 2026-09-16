@@ -40,7 +40,10 @@ export type RuleId =
   | 'app-errors-alert'
   | 'identities'
   | 'vault-secrets'
-  | 'secret-access';
+  | 'secret-access'
+  | 'jobs'
+  | 'workload-secrets'
+  | 'container-telemetry';
 
 export interface Problem {
   readonly rule: RuleId;
@@ -64,6 +67,7 @@ const TYPES = {
   dnsZone: 'Microsoft.Network/privateDnsZones',
   environment: 'Microsoft.App/managedEnvironments',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
+  job: 'Microsoft.App/jobs',
   network: 'Microsoft.Network/virtualNetworks',
   roleAssignment: 'Microsoft.Authorization/roleAssignments',
   rules: 'Microsoft.Network/networkSecurityGroups',
@@ -153,6 +157,65 @@ const GRANT = / reads /;
 /** Every secret an app or job reads: the vault holds these and no other. */
 const VAULT_SECRETS: ReadonlySet<string> = new Set([...GRANTS].map((grant) => grant.split(GRANT)[1] ?? ''));
 
+/** The secrets one app or job reads, from GRANTS: what it is given, and nothing besides. */
+const secretsRead = (workload: string): ReadonlySet<string> =>
+  new Set(
+    [...GRANTS].flatMap((grant) => {
+      const [reader, secret] = grant.split(GRANT);
+      return reader === workload && secret !== undefined ? [secret] : [];
+    }),
+  );
+
+/**
+ * Every job the deployment runs, each started by hand (ADR-002 Amendment G2d):
+ * a server's roles and databases, the app's migrations, and Zitadel's own init
+ * and setup. The apps that serve traffic are checked the same way when G2d-2
+ * adds them; this list is what must be there.
+ */
+const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'];
+
+/** Where Zitadel's images come from: its server and its login pages (ADR-003 Amendment S10). */
+const ZITADEL_IMAGES = 'ghcr.io/zitadel/';
+
+/**
+ * The only settings a container may take a secret in, by image, with why: an
+ * environment is copied into crash output and inherited by every child process,
+ * so anything a program can read from a file is mounted as one. Ours takes every
+ * login as a file (`AGENTX_DB_*_PASSWORD_FILE`) and Zitadel's master key has a
+ * file form it uses (`--masterkeyFile`, checked against the pinned image). These
+ * are what is left: Zitadel reads them from its settings or a config file, and a
+ * config file would have to hold the value itself.
+ */
+const SECRETS_IN_ENVIRONMENT: readonly {
+  readonly images: string;
+  readonly settings: RegExp;
+  readonly reason: string;
+}[] = [
+  {
+    images: ZITADEL_IMAGES,
+    settings: /^ZITADEL_(?:DATABASE_POSTGRES_(?:USER|ADMIN)_PASSWORD|FIRSTINSTANCE_ORG_HUMAN_PASSWORD)$/,
+    reason: 'Zitadel offers no file form for a database login or its first admin’s password',
+  },
+];
+
+/**
+ * What a Zitadel container must say outright, so no default of a later version
+ * sends anything out of the UAE (ADR-013, SEC-DATA-08): no daily report to
+ * zitadel.com, no metrics endpoint. Tracing is a setting of the server it starts,
+ * not of these jobs (proven against the image: `init` never reads it), and joins
+ * this list with the apps in G2d-2.
+ */
+const TELEMETRY_OFF: Readonly<Record<string, string>> = {
+  ZITADEL_SERVICEPING_ENABLED: 'false',
+  ZITADEL_METRICS_TYPE: 'none',
+};
+
+/** The one workload profile the environment offers (ADR-002 Amendment G2b). */
+const WORKLOAD_PROFILE = 'Consumption';
+
+/** The longest a job's one run may take, so a stuck run can't hold a replica for a day. */
+const LONGEST_RUN_SECONDS = 3600;
+
 /** Secrets created once and never written again: Zitadel can't read what it encrypted with another master key. */
 const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey']);
 
@@ -176,6 +239,9 @@ export function at(value: unknown, ...keys: readonly string[]): unknown {
 }
 
 const list = (value: unknown): readonly unknown[] => (Array.isArray(value) ? value : []);
+
+/** A value as the string it must be, or an empty string for anything else, which no rule accepts. */
+const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 /** An object with no keys, or nothing at all. */
 const isEmpty = (value: unknown): boolean =>
@@ -1164,6 +1230,223 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** A job's workload: its name without `job-agentx-<environment>-` (names.bicep). */
+const jobWorkloadOf = (jobName: string): string => jobName.replace(/^job-agentx-[a-z]+-/, '');
+
+/** The containers a job runs. */
+const containersOf = (job: PredictedResource): readonly unknown[] => list(at(job.properties, 'template', 'containers'));
+
+/** An image named by digest: a tag can be moved to another image, a digest can't (SEC-SC-02). */
+const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
+
+/**
+ * Every job is started by hand, runs one replica per run, gives up rather than
+ * retrying, and runs the exact image it names (ADR-002 Amendment G2d). Container
+ * Apps has no lock between runs, so starting one at a time is the operator's
+ * (Azure.md "The jobs"); what this rule holds is that no run is a clock's or an
+ * event's, and that one replica does the work. Together
+ * they are the four jobs a deployment needs, so a dropped one is caught here
+ * rather than at the first deployment.
+ */
+const jobs: Check = (snapshot, _expected, add) => {
+  const environments = new Set<unknown>(ofType(snapshot, TYPES.environment).map((resource) => resource.id));
+  const found = ofType(snapshot, TYPES.job);
+  for (const job of found) {
+    const problem = (message: string): void => {
+      add({ rule: 'jobs', resource: job.name, message });
+    };
+    const configuration = at(job.properties, 'configuration');
+    if (!environments.has(at(job.properties, 'environmentId'))) {
+      problem("must run in this deployment's Container Apps environment");
+    }
+    if (at(job.properties, 'workloadProfileName') !== WORKLOAD_PROFILE) {
+      problem(`must run on the ${WORKLOAD_PROFILE} workload profile, the only one the environment offers`);
+    }
+    if (at(configuration, 'triggerType') !== 'Manual') {
+      problem('must be started by hand (triggerType Manual): one that starts itself would use its secrets unwatched');
+    }
+    for (const trigger of ['scheduleTriggerConfig', 'eventTriggerConfig'] as const) {
+      if (at(configuration, trigger) !== undefined) problem(`must have no ${trigger}: it is started by hand`);
+    }
+    for (const setting of ['parallelism', 'replicaCompletionCount'] as const) {
+      if (at(configuration, 'manualTriggerConfig', setting) !== 1) {
+        problem(`must run one replica per run (manualTriggerConfig.${setting} 1): two of them would race`);
+      }
+    }
+    if (at(configuration, 'replicaRetryLimit') !== 0) {
+      problem('must not retry a failed run (replicaRetryLimit 0): a retry hides why the first run failed');
+    }
+    const timeout = at(configuration, 'replicaTimeout');
+    if (typeof timeout !== 'number' || timeout <= 0 || timeout > LONGEST_RUN_SECONDS) {
+      problem(
+        `must give up after 1 to ${String(LONGEST_RUN_SECONDS)} seconds (replicaTimeout); it says ${String(timeout)}`,
+      );
+    }
+    const containers = containersOf(job);
+    if (containers.length !== 1) {
+      problem(`must run exactly one container; the snapshot has ${String(containers.length)}`);
+    }
+    if (list(at(job.properties, 'template', 'initContainers')).length > 0) {
+      problem('must run no init container: the work is the one container, in view of the log');
+    }
+    for (const container of containers) {
+      const image = text(at(container, 'image'));
+      if (!PINNED_IMAGE.test(image)) {
+        problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
+      }
+    }
+  }
+  for (const workload of JOB_WORKLOADS) {
+    const count = found.filter((job) => jobWorkloadOf(job.name) === workload).length;
+    if (count !== 1) {
+      add({
+        rule: 'jobs',
+        resource: 'the deployment',
+        message: `needs the ${workload} job once; the snapshot has ${String(count)}`,
+      });
+    }
+  }
+};
+
+/**
+ * A secret read from a vault: the vault's id and the name asked for. A version
+ * would be a further part of that name, which the rule refuses by comparing it
+ * with the secret's own (a mutation pass showed narrowing the pattern here as
+ * well adds nothing).
+ */
+const VAULT_SECRET_URL = /^\[uri\(reference\('([^']+)', '[^']+'\)\.vaultUri, 'secrets\/([^']+)'\)\]$/;
+
+/**
+ * The vault and secret a Container Apps secret reads, or nothing for anything
+ * else: an address built from a vault this deployment knows, ending in the
+ * secret's own name, so a version can't be pinned into it.
+ */
+function urlOfSecret(keyVaultUrl: string): { readonly vault: string; readonly secret: string } | undefined {
+  const parts = VAULT_SECRET_URL.exec(keyVaultUrl);
+  const [, vault, secret] = parts ?? [];
+  return vault === undefined || secret === undefined ? undefined : { vault, secret };
+}
+
+/** Whether a container's image may take a secret in this setting (`SECRETS_IN_ENVIRONMENT`). */
+const mayTakeSecretInEnvironment = (image: unknown, setting: string): boolean =>
+  SECRETS_IN_ENVIRONMENT.some(({ images, settings }) => text(image).startsWith(images) && settings.test(setting));
+
+/** The secrets a job names, by how each reaches it: its environment, or a mounted file. */
+const secretsUsed = (job: PredictedResource): { readonly environment: string[]; readonly files: string[] } => ({
+  environment: containersOf(job).flatMap((container) =>
+    list(at(container, 'env')).flatMap((entry) => {
+      const read = text(at(entry, 'secretRef'));
+      return read === '' ? [] : [read];
+    }),
+  ),
+  files: list(at(job.properties, 'template', 'volumes')).flatMap((volume) =>
+    list(at(volume, 'secrets')).flatMap((item) => {
+      const read = text(at(item, 'secretRef'));
+      return read === '' ? [] : [read];
+    }),
+  ),
+});
+
+/**
+ * What each job may read (ADR-002 Amendment G2d): its own identity alone,
+ * exactly the secrets `GRANTS` says it reads, each from this deployment's vault
+ * by name with no version, through that identity; every one of them read, and
+ * nothing read that it wasn't given. A secret reaches a container as a mounted
+ * file, except in the few settings `SECRETS_IN_ENVIRONMENT` lists for an image
+ * that has no file form for them. The apps join this rule in G2d-2.
+ */
+const workloadSecrets: Check = (snapshot, _expected, add) => {
+  const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
+  for (const job of ofType(snapshot, TYPES.job)) {
+    const workload = jobWorkloadOf(job.name);
+    const problem = (message: string): void => {
+      add({ rule: 'workload-secrets', resource: job.name, message });
+    };
+    const assigned = Object.keys(at(job.identity, 'userAssignedIdentities') ?? {});
+    if (at(job.identity, 'type') !== 'UserAssigned') {
+      problem('must run as a user-assigned identity, never a system-assigned one tied to the resource');
+    }
+    const only = assigned[0] ?? '';
+    if (assigned.length !== 1 || workloadOf(only.slice(only.lastIndexOf('/') + 1)) !== workload) {
+      problem(`must run as its own identity alone, the one named for ${workload}`);
+    }
+    const declared = list(at(job.properties, 'configuration', 'secrets'));
+    const given = declared.map((secret) => text(at(secret, 'name')));
+    const needed = secretsRead(workload);
+    for (const name of given.filter((secret) => !needed.has(secret))) {
+      problem(`is given ${name}, which GRANTS doesn't let ${workload} read`);
+    }
+    for (const name of [...needed].filter((secret) => !given.includes(secret))) {
+      problem(`must be given ${name}, which ${workload} reads (GRANTS)`);
+    }
+    for (const secret of declared) {
+      const name = text(at(secret, 'name'));
+      if (at(secret, 'value') !== undefined) {
+        problem(`holds ${name}'s value; a secret is read from the vault, never carried in the deployment`);
+      }
+      const url = urlOfSecret(text(at(secret, 'keyVaultUrl')));
+      if (url === undefined || !vaults.has(url.vault) || url.secret !== name) {
+        problem(`must read ${name} from this deployment's vault by that name and no version, so a rotation reaches it`);
+      }
+      if (!assigned.includes(text(at(secret, 'identity')))) {
+        problem(`must read ${name} through its own identity`);
+      }
+    }
+    const used = secretsUsed(job);
+    for (const volume of list(at(job.properties, 'template', 'volumes'))) {
+      if (at(volume, 'storageType') === 'Secret' && list(at(volume, 'secrets')).length === 0) {
+        problem(`mounts ${text(at(volume, 'name'))} without naming what is in it, which mounts every secret it has`);
+      }
+    }
+    for (const name of given.filter((secret) => ![...used.environment, ...used.files].includes(secret))) {
+      problem(`is given ${name} and never reads it; one nobody needs is one more to leak`);
+    }
+    for (const name of [...used.environment, ...used.files].filter((secret) => !given.includes(secret))) {
+      problem(`reads ${name}, which it is not given`);
+    }
+    for (const container of containersOf(job)) {
+      for (const entry of list(at(container, 'env')).filter((setting) => at(setting, 'secretRef') !== undefined)) {
+        const setting = text(at(entry, 'name'));
+        if (mayTakeSecretInEnvironment(at(container, 'image'), setting)) continue;
+        problem(
+          `takes ${setting} in the environment, which crash output and every child process see; mount it as a file, or list the setting in SECRETS_IN_ENVIRONMENT with why its image can't read one`,
+        );
+      }
+    }
+  }
+};
+
+/**
+ * Nothing a container runs sends telemetry out of the UAE (ADR-013,
+ * SEC-DATA-08): no OpenTelemetry exporter switched on, and Zitadel's daily
+ * report to zitadel.com (which carries every instance's domains and counts) and
+ * its metrics endpoint said to be off outright, never left to a default a
+ * version change could move.
+ */
+const containerTelemetry: Check = (snapshot, _expected, add) => {
+  for (const job of ofType(snapshot, TYPES.job)) {
+    const problem = (message: string): void => {
+      add({ rule: 'container-telemetry', resource: job.name, message });
+    };
+    for (const container of containersOf(job)) {
+      const settings = new Map(
+        list(at(container, 'env')).map((entry) => [text(at(entry, 'name')), at(entry, 'value')] as const),
+      );
+      for (const [name] of [...settings].filter(
+        ([setting, value]) => setting.startsWith('OTEL_') && value !== 'true',
+      )) {
+        problem(`sets ${name}: OpenTelemetry sends to a collector, and ADR-013 keeps every trace in the UAE`);
+      }
+      if (!text(at(container, 'image')).startsWith(ZITADEL_IMAGES)) continue;
+      for (const [name, wanted] of Object.entries(TELEMETRY_OFF)) {
+        if (settings.get(name) !== wanted) {
+          problem(`must set ${name} to ${wanted} outright, never leave it to Zitadel's default (ADR-013)`);
+        }
+      }
+    }
+  }
+};
+
 const CHECKS: readonly Check[] = [
   complete,
   required,
@@ -1187,6 +1470,9 @@ const CHECKS: readonly Check[] = [
   identities,
   vaultSecrets,
   secretAccess,
+  jobs,
+  workloadSecrets,
+  containerTelemetry,
 ];
 
 /** Every rule a snapshot breaks; none for a deployment we can ship. */

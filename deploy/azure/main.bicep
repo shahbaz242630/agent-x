@@ -20,7 +20,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { resourceNames, shortName, uniqueSuffix } from 'names.bicep'
+import { resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'subscription'
 
@@ -84,11 +84,8 @@ param appErrorAlertThreshold int
 
 var short = shortName(environment)
 
-var tags = {
-  product: 'agent-x'
-  environment: environment
-  'managed-by': 'deploy/azure'
-}
+// The same tags every deployment of this environment gives its resources.
+var tags = resourceTags(environment)
 
 // Every name, once (names.bicep). The modules create their resources under
 // these names, and the secrets deployment finds them by the same.
