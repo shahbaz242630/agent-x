@@ -32,8 +32,10 @@ const END_TO_END = { e2e: 'vitest run --config vitest.e2e.config.ts' } as const;
 
 /**
  * The only other root scripts: conveniences that CI never runs, the one-time
- * git hooks set-up (Security-Handoff §7), and the one-time install of the pinned
- * Bicep compiler, which Verify also runs before its tests (tooling/bicep).
+ * git hooks set-up (Security-Handoff §7), the one-time install of the pinned
+ * Bicep compiler, which Verify also runs before its tests (tooling/bicep), and
+ * the one-time install of the pinned cosign on a machine that deploys, which
+ * CI never runs (tooling/cosign).
  */
 const OTHER_SCRIPTS = {
   format: 'prettier --write .',
@@ -41,6 +43,7 @@ const OTHER_SCRIPTS = {
   verify: Object.values(CHECKS).join(' && '),
   hooks: 'node tooling/git-hooks/install.ts',
   tools: 'node tooling/bicep/install.ts',
+  'tools:cosign': 'node tooling/cosign/install.ts',
 };
 
 /** Scripts pnpm runs by itself during an install. */
