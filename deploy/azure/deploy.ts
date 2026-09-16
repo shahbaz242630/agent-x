@@ -566,6 +566,44 @@ function checkPolicy(steps: Steps, values: Readonly<Record<string, string>>): vo
   }
 }
 
+/** How a deployment the operator was asked about ended: Azure's state, or Declined when none was made. */
+interface Ended {
+  readonly state: string;
+  readonly outputs: unknown;
+}
+
+/**
+ * Reads back how a deployment ended. It is never assumed from the CLI's exit
+ * status: `--confirm-with-what-if` ends with status 0 when the operator answers
+ * no, and then no deployment exists to show (found on the first rehearsal, S18).
+ */
+function howItEnded(steps: Steps, show: readonly string[]): Ended {
+  const done = steps.az.run([
+    ...show,
+    '--query',
+    '{state: properties.provisioningState, outputs: properties.outputs}',
+    '--output',
+    'json',
+  ]);
+  if (done.status !== 0) {
+    if (done.stderr.includes('DeploymentNotFound')) return { state: 'Declined', outputs: undefined };
+    throw new Error(`az ${show.join(' ')} failed:\n${done.stderr.trim()}`);
+  }
+  const parsed = JSON.parse(done.stdout) as { state?: unknown; outputs?: unknown };
+  return { state: text(parsed.state), outputs: parsed.outputs };
+}
+
+/** Says how a deployment ended unless it succeeded; true only when it did. */
+function succeeded(steps: Steps, name: string, ended: Ended): boolean {
+  if (ended.state === 'Succeeded') return true;
+  steps.terminal.say(
+    ended.state === 'Declined'
+      ? 'You answered no at the what-if: nothing was deployed.'
+      : `The deployment ${name} ended ${ended.state === '' ? 'in a state Azure did not say' : ended.state}: nothing more was done.`,
+  );
+  return false;
+}
+
 async function deployFoundation(steps: Steps): Promise<number> {
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
@@ -602,19 +640,10 @@ async function deployFoundation(steps: Steps): Promise<number> {
     values,
   );
   if (status !== 0) return 1;
-  const outputs = azJson(steps.az, [
-    'deployment',
-    'sub',
-    'show',
-    '--subscription',
-    subscription,
-    '--name',
-    name,
-    '--query',
-    'properties.outputs',
-  ]);
+  const ended = howItEnded(steps, ['deployment', 'sub', 'show', '--subscription', subscription, '--name', name]);
+  if (!succeeded(steps, name, ended)) return 1;
   steps.terminal.say('Deployed. What the foundation reports:');
-  for (const [key, output] of Object.entries(outputs as Record<string, { value?: unknown }>)) {
+  for (const [key, output] of Object.entries((ended.outputs ?? {}) as Record<string, { value?: unknown }>)) {
     steps.terminal.say(`  ${key}: ${text(output.value)}`);
   }
   return 0;
@@ -684,6 +713,18 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
     values,
   );
   if (status !== 0) return 1;
+  const ended = howItEnded(steps, [
+    'deployment',
+    'group',
+    'show',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--name',
+    name,
+  ]);
+  if (!succeeded(steps, name, ended)) return 1;
   steps.terminal.say('Deployed. The vault now holds:');
   for (const secret of secretsInVault(steps, subscription, vault).sort()) steps.terminal.say(`  ${secret}`);
   if (plan.kind === 'rotate' && [...plan.names].some((secret) => secret.startsWith('db-'))) {
@@ -750,6 +791,18 @@ async function deployApps(steps: Steps, commit: string | undefined): Promise<num
     values,
   );
   if (status !== 0) return 1;
+  const ended = howItEnded(steps, [
+    'deployment',
+    'group',
+    'show',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--name',
+    name,
+  ]);
+  if (!succeeded(steps, name, ended)) return 1;
   const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
     const found = azJson(steps.az, [
       ...kind.split(' '),
