@@ -1,5 +1,5 @@
 {
-  "source": "https://api.github.com/meta",
+  "writtenBy": "node deploy/azure/github-ranges.ts --write",
   "refreshed": "2026-09-16",
   "registry": {
     "what": "The registry API: the pull token and the image manifest.",

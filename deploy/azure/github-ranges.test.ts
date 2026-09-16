@@ -8,6 +8,7 @@ import {
   covers,
   type GithubRanges,
   type LiveRanges,
+  META,
   rangeProblems,
   rangesText,
   readRanges,
@@ -15,7 +16,6 @@ import {
 } from './github-ranges.ts';
 
 const PINNED: GithubRanges = {
-  source: 'https://api.github.com/meta',
   refreshed: '2026-09-16',
   registry: { what: 'the manifest', host: 'registry.example', publishedUnder: 'packages', prefixes: ['192.0.2.0/24'] },
   downloads: { what: 'the layers', host: 'downloads.example', publishedUnder: null, prefixes: ['198.51.100.0/24'] },
@@ -74,13 +74,13 @@ describe('rangeProblems', () => {
       ),
     ).toEqual(['registry: the "packages" field has changed; run with --write to take it']);
     expect(rangeProblems(PINNED, liveWith({ meta: { web: ['198.51.100.0/24'] } }))).toEqual([
-      'registry: https://api.github.com/meta no longer publishes a "packages" field',
+      `registry: ${META} no longer publishes a "packages" field`,
     ]);
   });
 
   it('notices a hand-pinned prefix GitHub no longer publishes anywhere', () => {
     expect(rangeProblems(PINNED, liveWith({ meta: { packages: ['192.0.2.0/24'] } }))).toEqual([
-      'downloads: 198.51.100.0/24 is pinned by hand but https://api.github.com/meta no longer publishes it anywhere',
+      `downloads: 198.51.100.0/24 is pinned by hand but ${META} no longer publishes it anywhere`,
     ]);
   });
 
@@ -120,8 +120,12 @@ describe('refreshed', () => {
 describe('the checked-in ranges', () => {
   const ranges = readRanges();
 
-  it('names the source, the day it was last checked, and a host for each group', () => {
-    expect(ranges.source).toBe('https://api.github.com/meta');
+  it('names the day it was last checked, and a host for each group', () => {
+    // Where to ask is the code's (`META`), never the file's: a data file that
+    // could redirect an outbound call is a different thing from one holding
+    // addresses (CodeQL alert 5, PR #33).
+    expect(META).toBe('https://api.github.com/meta');
+    expect(Object.keys(ranges)).not.toContain('source');
     expect(ranges.refreshed).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(ranges.registry.host).toBe('ghcr.io');
     expect(ranges.registry.publishedUnder).toBe('packages');

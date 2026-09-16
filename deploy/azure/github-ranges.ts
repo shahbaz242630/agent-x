@@ -37,8 +37,7 @@ interface RangeGroup {
 }
 
 export interface GithubRanges {
-  readonly source: string;
-  /** The day the prefixes below were last checked against `source`, as YYYY-MM-DD. */
+  /** The day the prefixes below were last checked against `META`, as YYYY-MM-DD. */
   readonly refreshed: string;
   /** The registry API: the token and the manifest. */
   readonly registry: RangeGroup;
@@ -67,6 +66,15 @@ function prefixList(value: unknown): string[] | undefined {
   }
   return prefixes;
 }
+
+/**
+ * Where the ranges are published. A constant, never a field of the file: the
+ * file says what came back, the code says who to ask. CodeQL reads a request
+ * whose address comes from a file as a finding, and it is right to — a data
+ * file that could redirect an outbound call is a different thing from one that
+ * holds addresses (alert 5, PR #33).
+ */
+export const META = 'https://api.github.com/meta';
 
 const RANGES_FILE = path.join(import.meta.dirname, 'github-ranges.json');
 
@@ -127,13 +135,13 @@ export function rangeProblems(pinned: GithubRanges, live: LiveRanges): string[] 
     if (group.publishedUnder !== null) {
       const current = prefixList(live.meta[group.publishedUnder]);
       if (current === undefined) {
-        problems.push(`${name}: ${pinned.source} no longer publishes a "${group.publishedUnder}" field`);
+        problems.push(`${name}: ${META} no longer publishes a "${group.publishedUnder}" field`);
       } else if (!same(group.prefixes, current)) {
         problems.push(`${name}: the "${group.publishedUnder}" field has changed; run with --write to take it`);
       }
     } else {
       for (const prefix of group.prefixes.filter((prefix) => !published.has(prefix))) {
-        problems.push(`${name}: ${prefix} is pinned by hand but ${pinned.source} no longer publishes it anywhere`);
+        problems.push(`${name}: ${prefix} is pinned by hand but ${META} no longer publishes it anywhere`);
       }
     }
     const addresses = live.addresses[group.host] ?? [];
@@ -164,8 +172,8 @@ export const rangesText = (ranges: GithubRanges): string => `${JSON.stringify(ra
 
 async function live(ranges: GithubRanges): Promise<LiveRanges> {
   const { resolve4 } = await import('node:dns/promises');
-  const response = await fetch(ranges.source, { headers: { accept: 'application/vnd.github+json' } });
-  if (!response.ok) throw new Error(`${ranges.source} answered ${String(response.status)}`);
+  const response = await fetch(META, { headers: { accept: 'application/vnd.github+json' } });
+  if (!response.ok) throw new Error(`${META} answered ${String(response.status)}`);
   const meta = (await response.json()) as LiveRanges['meta'];
   const addresses: Record<string, readonly string[]> = {};
   for (const [, group] of groupsOf(ranges)) {
