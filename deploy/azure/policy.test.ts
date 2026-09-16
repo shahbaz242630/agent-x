@@ -1810,9 +1810,9 @@ describe('what each job is told', () => {
   /** The commit the deployment was given, whatever this run's stand-in is. */
   const someCommit = expect.stringMatching(/^[0-9a-f]{40}$/) as unknown as string;
 
-  /** Every setting a job's container is given, name to value, a secret's as `secret:<name>`. */
+  /** Every setting a job's or an app's container is given, name to value, a secret's as `secret:<name>`. */
   const settingsGiven = (workload: string): Record<string, unknown> => {
-    const job = staging.predictedResources.find(JOB(workload));
+    const job = staging.predictedResources.find((resource) => JOB(workload)(resource) || APP(workload)(resource));
     const container = first(at(job?.properties, 'template', 'containers'));
     return Object.fromEntries(
       (at(container, 'env') as Mutable[]).map((entry) => [
@@ -1854,7 +1854,7 @@ describe('what each job is told', () => {
   });
 
   it('connects Zitadel as its own role, with TLS checked to the host', () => {
-    for (const workload of ['zitadel-init', 'zitadel-setup']) {
+    for (const workload of ['zitadel-init', 'zitadel-setup', 'zitadel']) {
       expect({ workload, settings: settingsGiven(workload) }).toMatchObject({
         workload,
         settings: {
@@ -1867,6 +1867,9 @@ describe('what each job is told', () => {
           ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: 'secret:db-zitadel-password',
           ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: 'verify-full',
           ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: 'verify-full',
+          // Checked against the image's own roots: Zitadel refuses verify-full without a root setting (S19).
+          ZITADEL_DATABASE_POSTGRES_USER_SSL_ROOTCERT: 'system',
+          ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_ROOTCERT: 'system',
           // db-setup made the database, so init must not try to make it again.
           ZITADEL_DATABASE_POSTGRES_ADMIN_EXISTINGDATABASE: 'zitadel',
           ZITADEL_LOG_FORMATTER_FORMAT: 'json',
