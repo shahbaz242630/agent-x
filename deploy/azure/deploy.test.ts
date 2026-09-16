@@ -8,11 +8,12 @@ import { createPublicKey, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
 import {
+  APP_VARIABLES,
   askPassword,
   type Az,
   azInvocation,
@@ -22,12 +23,14 @@ import {
   deploymentName,
   describePlan,
   HiddenLine,
+  type Images,
   main,
   type Makers,
   parseArguments,
   passwordProblems,
   peopleAskedFor,
   policyCheck,
+  realImages,
   RESOURCE_GROUP,
   secretValues,
   shapedForPolicy,
@@ -41,6 +44,9 @@ import { environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
 const AZURE_DIR = import.meta.dirname;
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000a';
+/** A commit and an image digest in the shapes GitHub and ghcr.io give them, made up. */
+const COMMIT = 'a'.repeat(40);
+const DIGEST = `sha256:${'b'.repeat(64)}`;
 
 /** What an operator would paste: assembled when the tests run, all four kinds, never written down. */
 const aPaste = (): string => ['Str0ng', 'Enough', '#', randomBytes(8).toString('hex')].join('');
@@ -80,6 +86,8 @@ describe('parseArguments', () => {
   it('reads the three ways the tool is run', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
+    expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined });
+    expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({ command: 'apps', commit: COMMIT });
     expect(parseArguments(['secrets', '--rotate', 'db-app-password', 'db-owner-password'])).toEqual({
       command: 'secrets',
       plan: rotating('db-app-password', 'db-owner-password'),
@@ -98,7 +106,12 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation or secrets, not deploy/],
+      [['deploy'], /say foundation, secrets or apps, not deploy/],
+      [['apps', '--commit'], /apps takes nothing, or --commit/],
+      [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
+      [['apps', '--commit', COMMIT.toUpperCase()], /one full 40-hex commit/],
+      [['apps', '--commit', COMMIT, 'extra'], /apps takes nothing/],
+      [['apps', 'latest'], /apps takes nothing/],
       [['foundation', '--all'], /foundation takes no options/],
       [['secrets'], /needs --all .* or --rotate/],
       [['secrets', '--all', 'db-app-password'], /--all takes no names/],
@@ -277,6 +290,7 @@ describe('azInvocation', () => {
       HOME: '/home/op',
       AZURE_BICEP_USE_BINARY_FROM_PATH: 'true',
       AZURE_BICEP_CHECK_VERSION: 'false',
+      AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no',
     });
   });
 
@@ -402,6 +416,10 @@ class RecordingAz implements Az {
         return json({ databaseHost: { type: 'String', value: 'db.example.invalid' } });
       case 'keyvault list':
         return json(this.options.vaults ?? ['kv-agentx-stg-abcdef']);
+      case 'containerapp list':
+        return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
+      case 'containerapp job':
+        return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
       case 'rest --method': {
         const names = (this.#deployed ? this.options.after : this.options.before) ?? [];
         return json({ value: names.map((name) => ({ name })) });
@@ -427,6 +445,7 @@ interface Scenario {
   readonly az?: RecordingAz;
   readonly problems?: readonly string[];
   readonly rangesCurrent?: boolean;
+  readonly images?: Images;
 }
 
 /** One run of the tool, with everything it touched. */
@@ -444,6 +463,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     rangesCurrent: () => scenario.rangesCurrent ?? true,
     now: () => new Date('2026-09-16T16:42:15Z'),
     makers: quickMakers(),
+    ...(scenario.images === undefined ? {} : { images: scenario.images }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -615,6 +635,184 @@ describe('deploy secrets', () => {
   });
 });
 
+/** An image source that answers from the options and records what it was asked. */
+function recordingImages(
+  options: { readonly commit?: string; readonly digest?: string; readonly refuse?: boolean } = {},
+): Images & { readonly asked: string[] } {
+  const asked: string[] = [];
+  return {
+    asked,
+    latestCommit: () => {
+      asked.push('latest');
+      return Promise.resolve(options.commit ?? COMMIT);
+    },
+    digestOf: (commit) => {
+      asked.push(`digest ${commit}`);
+      return Promise.resolve(options.digest ?? DIGEST);
+    },
+    verify: (image, commit) => {
+      asked.push(`verify ${image} ${commit}`);
+      return options.refuse === true
+        ? { verified: false, reason: 'SIGNATURE_REFUSED', detail: 'not signed by CI on main' }
+        : { verified: true };
+    },
+  };
+}
+
+describe('deploy apps', () => {
+  const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid'];
+
+  it("deploys main's newest image only once it is verified, by digest, with the hosts as typed", async () => {
+    const images = recordingImages();
+    const done = await run(['apps'], { answers, images });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(images.asked).toEqual([
+      'latest',
+      `digest ${COMMIT}`,
+      `verify ghcr.io/shahbaz242630/agent-x@${DIGEST} ${COMMIT}`,
+    ]);
+    expect(done.az.sequence).toEqual([
+      'account show --output',
+      'bicep version',
+      'deployment group create',
+      'containerapp list --subscription',
+      'containerapp job list',
+    ]);
+    const deployment = done.az.deployment;
+    expect(deployment?.args).toContain('staging.apps.bicepparam');
+    expect(deployment?.args).toContain('--confirm-with-what-if');
+    expect(deployment?.values).toEqual({
+      AGENTX_AZURE_APP_IMAGE_DIGEST: DIGEST,
+      AGENTX_AZURE_RELEASE: COMMIT,
+      AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
+      AGENTX_AZURE_APP_HOST: 'app.example.invalid',
+      AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
+    });
+    expect(done.checked).toEqual([deployment?.values]);
+    expect(done.terminal.said).toContain('  ca-agentx-stg-api: Succeeded');
+    expect(done.terminal.said).toContain('  job-agentx-stg-db-setup: Succeeded');
+  });
+
+  it('deploys the commit it is given, without asking GitHub for the newest', async () => {
+    const other = 'c'.repeat(40);
+    const images = recordingImages();
+    const done = await run(['apps', '--commit', other], { answers, images });
+    expect(done.status).toBe(0);
+    expect(images.asked[0]).toBe(`digest ${other}`);
+    expect(done.az.deployment?.values?.AGENTX_AZURE_RELEASE).toBe(other);
+  });
+
+  it('asks nothing and sends nothing when the image is refused, or the registry or GitHub answer nonsense', async () => {
+    for (const [images, reason] of [
+      [
+        recordingImages({ refuse: true }),
+        /refused \(SIGNATURE_REFUSED\), so nothing was deployed:\nnot signed by CI on main/,
+      ],
+      [recordingImages({ digest: 'sha256:short' }), /isn't one/],
+      [recordingImages({ digest: '' }), /isn't one/],
+      [recordingImages({ commit: 'main' }), /main's newest commit, which isn't one/],
+    ] as const) {
+      const done = await run(['apps'], { answers: ['y'], images });
+      expect(done.error).toMatchObject({ message: expect.stringMatching(reason) as unknown });
+      expect(done.az.deployment).toBeUndefined();
+      expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+    }
+  });
+
+  it('sends nothing for a host that is no host, the same host twice, or an address that is no address', async () => {
+    for (const [typed, reason] of [
+      [['y', 'auth example', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
+      [['y', 'localhost', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
+      [['y', '-auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
+      [['y', 'https://auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
+      [['y', 'auth.example.invalid', 'AUTH.example.invalid', 'admin@example.invalid'], /two hosts must differ/],
+      [['y', 'auth.example.invalid', 'app.example.invalid', 'admin'], /isn't an email address/],
+    ] as const) {
+      const done = await run(['apps'], { answers: typed, images: recordingImages() });
+      expect(done.error).toMatchObject({ message: expect.stringMatching(reason) as unknown });
+      expect(done.az.deployment).toBeUndefined();
+    }
+  });
+
+  it('reports failure, and lists nothing, when the what-if is declined', async () => {
+    const done = await run(['apps'], { answers, images: recordingImages(), az: new RecordingAz({ status: 1 }) });
+    expect(done.status).toBe(1);
+    expect(done.az.sequence).not.toContain('containerapp list --subscription');
+  });
+
+  it('refuses to run without a way to find the image', async () => {
+    const done = await run(['apps'], { answers });
+    expect(done.error).toMatchObject({ message: 'No way to find the image was given.' });
+    expect(done.az.calls).toEqual([]);
+  });
+});
+
+describe('realImages', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A fetch that answers each address from the table and records what was asked. */
+  function stubFetch(table: Readonly<Record<string, Response>>): { url: string; init?: RequestInit }[] {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, ...(init === undefined ? {} : { init }) });
+      const key = Object.keys(table).find((prefix) => url.startsWith(prefix));
+      return Promise.resolve(
+        key === undefined
+          ? new Response(null, { status: 404 })
+          : (table[key]?.clone() ?? new Response(null, { status: 500 })),
+      );
+    });
+    return calls;
+  }
+
+  it("asks GitHub for main's newest commit and ghcr.io for its image's digest, with a pull token and no credential of ours", async () => {
+    const calls = stubFetch({
+      'https://api.github.com/repos/shahbaz242630/agent-x/commits/main': Response.json({ sha: COMMIT }),
+      'https://ghcr.io/token?scope=repository:shahbaz242630/agent-x:pull&service=ghcr.io': Response.json({
+        token: 'pull-only',
+      }),
+      [`https://ghcr.io/v2/shahbaz242630/agent-x/manifests/${COMMIT}`]: new Response(null, {
+        status: 200,
+        headers: { 'docker-content-digest': DIGEST },
+      }),
+    });
+    const images = realImages(() => 'unused');
+    await expect(images.latestCommit()).resolves.toBe(COMMIT);
+    await expect(images.digestOf(COMMIT)).resolves.toBe(DIGEST);
+    const manifest = calls.at(-1);
+    expect(manifest?.init?.method).toBe('HEAD');
+    const headers = new Headers(manifest?.init?.headers);
+    expect(headers.get('authorization')).toBe('Bearer pull-only');
+    expect(headers.get('accept')).toContain('application/vnd.oci.image.index.v1+json');
+    expect(headers.get('accept')).toContain('application/vnd.docker.distribution.manifest.v2+json');
+    for (const call of calls) expect(call.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("says CI hasn't published an image the registry doesn't have, and fails on any other refusal", async () => {
+    stubFetch({
+      'https://ghcr.io/token': Response.json({ token: 'pull-only' }),
+      'https://api.github.com/': new Response(null, { status: 403 }),
+    });
+    const images = realImages(() => 'unused');
+    await expect(images.digestOf(COMMIT)).rejects.toThrow(
+      `ghcr.io has no image for ${COMMIT} (404): has CI published it on main yet?`,
+    );
+    await expect(images.latestCommit()).rejects.toThrow(/answered 403/);
+  });
+
+  it('checks the image with the installed cosign, and refuses before running anything when cosign is missing', () => {
+    const images = realImages(() => {
+      throw new Error("cosign 3.1.3 isn't installed");
+    });
+    expect(() => images.verify(`ghcr.io/shahbaz242630/agent-x@${DIGEST}`, COMMIT)).toThrow(
+      "cosign 3.1.3 isn't installed",
+    );
+  });
+});
+
 describe('main', () => {
   it('prints the usage for arguments it cannot read, and refuses to run anywhere but a terminal', async () => {
     const said: string[] = [];
@@ -650,6 +848,9 @@ describe('the tool and the deployment agree', () => {
         .map((secret) => secret.variable)
         .sort(),
     );
+    const appsText = readFileSync(path.join(AZURE_DIR, 'staging.apps.bicepparam'), 'utf8');
+    const appsRead = [...appsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
+    expect(appsRead.sort()).toEqual(Object.values(APP_VARIABLES).sort());
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
@@ -685,6 +886,15 @@ describe('the tool and the deployment agree', () => {
         .map(([variable]) => variable)
         .sort(),
     ).toEqual(['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
-    expect(policyCheck(values)).toEqual([]);
+    // The apps' values too, which are no secrets and pass through as given.
+    const appValues = {
+      [APP_VARIABLES.digest]: DIGEST,
+      [APP_VARIABLES.release]: COMMIT,
+      [APP_VARIABLES.authHost]: 'auth.example.invalid',
+      [APP_VARIABLES.appHost]: 'app.example.invalid',
+      [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
+    };
+    expect(shapedForPolicy(appValues, randomBytes)).toEqual(appValues);
+    expect(policyCheck({ ...values, ...appValues })).toEqual([]);
   });
 });

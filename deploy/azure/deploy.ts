@@ -1,9 +1,10 @@
-// Deploys staging's foundation and its secrets from an operator's own terminal
-// (0e G3a):
+// Deploys staging from an operator's own terminal (0e G3a), in this order:
 //
 //   node deploy/azure/deploy.ts foundation
 //   node deploy/azure/deploy.ts secrets --all
-//   node deploy/azure/deploy.ts secrets --rotate db-app-password [more names]
+//   node deploy/azure/deploy.ts apps
+//
+// and, later, `secrets --rotate db-app-password [more names]`.
 //
 // The two secrets that belong to people — the database admin's password and
 // Zitadel's first admin's — are pasted from the password manager into a prompt
@@ -18,6 +19,8 @@
 // downloads for itself; the deployment the run would send is checked by the
 // same rules CI runs, with stand-ins in place of every secret; and Azure's own
 // what-if is shown, the deployment waiting for a "y" (`--confirm-with-what-if`).
+// The apps run only an image that verify.ts has found signed by CI on main at
+// the commit being deployed, named by its digest (ADR-002 Amendment E2).
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -25,7 +28,9 @@ import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 
 import { BICEP_VERSION, installedBicep } from '../../tooling/bicep/bicep.ts';
+import { installedCosign } from '../../tooling/cosign/cosign.ts';
 import { type KeyPair, newKeyPair, newMasterKey, newPassword, type Random } from '../compose/prepare.ts';
+import { IMAGE_REPOSITORY, type Outcome, runCosign, SOURCE_REPOSITORY, verifyImage } from '../image/verify.ts';
 import { describeProblem, policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
@@ -34,6 +39,15 @@ const REGION = 'uaenorth';
 const AZURE_DIR = import.meta.dirname;
 /** The group the foundation creates for staging (names.bicep); a test holds the two equal. */
 export const RESOURCE_GROUP = 'rg-agentx-staging';
+
+/** What the apps deployment reads from the shell (staging.apps.bicepparam); a test holds the two equal. */
+export const APP_VARIABLES = {
+  digest: 'AGENTX_AZURE_APP_IMAGE_DIGEST',
+  release: 'AGENTX_AZURE_RELEASE',
+  authHost: 'AGENTX_AZURE_AUTH_HOST',
+  appHost: 'AGENTX_AZURE_APP_HOST',
+  adminEmail: 'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
+} as const;
 
 /**
  * Every secret the vault holds, by its name there, with the variable
@@ -72,7 +86,10 @@ const PERSON_LABELS: Readonly<Record<string, string>> = {
 
 export type SecretPlan = { readonly kind: 'all' } | { readonly kind: 'rotate'; readonly names: ReadonlySet<string> };
 
-export type Request = { readonly command: 'foundation' } | { readonly command: 'secrets'; readonly plan: SecretPlan };
+export type Request =
+  | { readonly command: 'foundation' }
+  | { readonly command: 'secrets'; readonly plan: SecretPlan }
+  | { readonly command: 'apps'; readonly commit: string | undefined };
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -84,7 +101,8 @@ export class UsageError extends Error {
 export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts foundation
   node deploy/azure/deploy.ts secrets --all
-  node deploy/azure/deploy.ts secrets --rotate <secret name> [...]`;
+  node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>]`;
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
@@ -93,7 +111,15 @@ export function parseArguments(argv: readonly string[]): Request {
     if (rest.length > 0) throw new UsageError(`foundation takes no options, not ${rest.join(' ')}`);
     return { command };
   }
-  if (command !== 'secrets') throw new UsageError(`say foundation or secrets, not ${command ?? 'nothing'}`);
+  if (command === 'apps') {
+    if (rest.length === 0) return { command, commit: undefined };
+    const [flag, commit, ...extra] = rest;
+    if (flag !== '--commit' || commit === undefined || extra.length > 0 || !COMMIT.test(commit)) {
+      throw new UsageError('apps takes nothing, or --commit and one full 40-hex commit');
+    }
+    return { command, commit };
+  }
+  if (command !== 'secrets') throw new UsageError(`say foundation, secrets or apps, not ${command ?? 'nothing'}`);
   const [mode, ...names] = rest;
   if (mode === '--all') {
     if (names.length > 0) throw new UsageError('--all takes no names: it writes every secret');
@@ -206,6 +232,12 @@ export function passwordProblems(value: string): string[] {
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** A host name as DNS writes it: lower case, two labels or more, none starting or ending with a hyphen. */
+const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+const COMMIT = /^[0-9a-f]{40}$/;
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 /**
  * What a hidden prompt has been sent so far, one keystroke or paste at a time.
@@ -337,7 +369,8 @@ export interface AzInvocation {
  * `az` on the PATH is a .cmd file that runs the CLI's own Python, which Node
  * won't start without a shell; starting that Python directly keeps a shell out
  * of it. The pinned Bicep goes first on the PATH, and the CLI is told to use
- * the one it finds there and not to look for a newer one.
+ * the one it finds there, not to look for a newer one, and never to install an
+ * extension of its own accord.
  */
 export function azInvocation(
   platform: NodeJS.Platform,
@@ -355,6 +388,8 @@ export function azInvocation(
   env[pathKey] = [paths.dirname(bicep), ...searched].join(paths.delimiter);
   env.AZURE_BICEP_USE_BINARY_FROM_PATH = 'true';
   env.AZURE_BICEP_CHECK_VERSION = 'false';
+  // A command that needs an extension fails rather than installing one unpinned (it offers to, unasked).
+  env.AZURE_EXTENSION_USE_DYNAMIC_INSTALL = 'no';
   if (platform !== 'win32') return { command: 'az', prefix: [], env };
   const launcher = searched.map((entry) => paths.join(entry, 'az.cmd')).find((file) => exists(file));
   if (launcher === undefined) {
@@ -431,6 +466,69 @@ export const deploymentName = (part: string, at: Date): string =>
     .replace(/[-:]/g, '')
     .replace(/\.\d+Z$/, 'Z')}`;
 
+/** Finding the image a commit on main was published as, and checking it. */
+export interface Images {
+  /** The newest commit on main, from GitHub. */
+  latestCommit(): Promise<string>;
+  /** The digest ghcr.io gives the image CI tagged with that commit. */
+  digestOf(commit: string): Promise<string>;
+  /** verify.ts's answer for the image, by digest, at that commit. */
+  verify(image: string, commit: string): Outcome;
+}
+
+/** Media types a registry may answer a manifest request with. */
+const MANIFEST_TYPES = [
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json',
+  'application/vnd.docker.distribution.manifest.v2+json',
+].join(', ');
+
+async function json(url: string, headers: Readonly<Record<string, string>> = {}): Promise<unknown> {
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) throw new Error(`${url} answered ${String(response.status)}`);
+  return await response.json();
+}
+
+/** GitHub and ghcr.io, both public, so nothing here holds a credential. */
+export function realImages(cosign: () => string = installedCosign): Images {
+  const repository = IMAGE_REPOSITORY.replace(/^ghcr\.io\//, '');
+  return {
+    latestCommit: async () =>
+      text(
+        (
+          (await json(`https://api.github.com/repos/${SOURCE_REPOSITORY}/commits/main`, {
+            accept: 'application/vnd.github+json',
+          })) as { sha?: unknown }
+        ).sha,
+      ),
+    digestOf: async (commit) => {
+      const token = text(
+        (
+          (await json(`https://ghcr.io/token?scope=repository:${repository}:pull&service=ghcr.io`)) as {
+            token?: unknown;
+          }
+        ).token,
+      );
+      const response = await fetch(`https://ghcr.io/v2/${repository}/manifests/${commit}`, {
+        method: 'HEAD',
+        headers: { authorization: `Bearer ${token}`, accept: MANIFEST_TYPES },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        throw new Error(
+          `ghcr.io has no image for ${commit} (${String(response.status)}): has CI published it on main yet?`,
+        );
+      }
+      return response.headers.get('docker-content-digest') ?? '';
+    },
+    verify: (image, commit) => {
+      const binary = cosign();
+      return verifyImage(image, commit, (args) => runCosign(args, binary));
+    },
+  };
+}
+
 export interface Steps {
   readonly terminal: Terminal;
   readonly az: Az;
@@ -439,6 +537,7 @@ export interface Steps {
   readonly rangesCurrent: () => boolean;
   readonly now: () => Date;
   readonly makers?: Makers;
+  readonly images?: Images;
 }
 
 /** The subscription the CLI is signed in to, confirmed by the operator. */
@@ -593,8 +692,94 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   return 0;
 }
 
+/** A host name the operator types, held to DNS's shape. */
+async function askHost(steps: Steps, question: string): Promise<string> {
+  const host = (await steps.terminal.ask(question)).toLowerCase();
+  if (!HOST.test(host)) throw new Error(`${host} isn't a host name: nothing was deployed.`);
+  return host;
+}
+
+async function deployApps(steps: Steps, commit: string | undefined): Promise<number> {
+  const images = steps.images;
+  if (images === undefined) throw new Error('No way to find the image was given.');
+  const subscription = await confirmSubscription(steps);
+  confirmBicep(steps);
+  const release = commit ?? (await images.latestCommit());
+  if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
+  const digest = await images.digestOf(release);
+  if (!DIGEST.test(digest)) throw new Error(`ghcr.io gave ${digest} as the image's digest, which isn't one.`);
+  const image = `${IMAGE_REPOSITORY}@${digest}`;
+  steps.terminal.say(`The image for commit ${release}:\n  ${image}`);
+  steps.terminal.say('Checking it was signed by CI on main at that commit, with its SBOM...');
+  const outcome = images.verify(image, release);
+  if (!outcome.verified) {
+    throw new Error(`The image was refused (${outcome.reason}), so nothing was deployed:\n${outcome.detail}`);
+  }
+  steps.terminal.say('Verified.');
+  steps.terminal.say('Zitadel keeps the address it is first set up with, so type the two hosts as they will stay.');
+  const authHost = await askHost(steps, 'Host for sign-in (Zitadel): ');
+  const appHost = await askHost(steps, 'Host for the app (the API): ');
+  if (authHost === appHost) throw new Error('The two hosts must differ: nothing was deployed.');
+  const adminEmail = await steps.terminal.ask("Zitadel's first admin's address: ");
+  if (!EMAIL.test(adminEmail)) throw new Error("That isn't an email address: nothing was deployed.");
+  const values = {
+    [APP_VARIABLES.digest]: digest,
+    [APP_VARIABLES.release]: release,
+    [APP_VARIABLES.authHost]: authHost,
+    [APP_VARIABLES.appHost]: appHost,
+    [APP_VARIABLES.adminEmail]: adminEmail,
+  };
+  checkPolicy(steps, values);
+  const name = deploymentName('apps', steps.now());
+  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
+  const status = steps.az.interactive(
+    [
+      'deployment',
+      'group',
+      'create',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--name',
+      name,
+      '--parameters',
+      `${ENVIRONMENT}.apps.bicepparam`,
+      '--confirm-with-what-if',
+    ],
+    values,
+  );
+  if (status !== 0) return 1;
+  const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
+    const found = azJson(steps.az, [
+      ...kind.split(' '),
+      'list',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--query',
+      '[].{name: name, state: properties.provisioningState}',
+    ]);
+    return Array.isArray(found) ? (found as { name?: unknown; state?: unknown }[]) : [];
+  };
+  steps.terminal.say('Deployed. The apps and jobs, and how Azure left each:');
+  for (const each of [...listed('containerapp'), ...listed('containerapp job')]) {
+    steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
+  }
+  steps.terminal.say('Nothing is reachable from outside yet (G2e). Next, the four jobs, in order.');
+  return 0;
+}
+
 export async function deploy(request: Request, steps: Steps): Promise<number> {
-  return request.command === 'foundation' ? deployFoundation(steps) : deploySecrets(steps, request.plan);
+  switch (request.command) {
+    case 'foundation':
+      return deployFoundation(steps);
+    case 'secrets':
+      return deploySecrets(steps, request.plan);
+    case 'apps':
+      return deployApps(steps, request.commit);
+  }
 }
 
 /** Whether GitHub's ranges match the pinned file, by running the refresher's own check. */
@@ -632,6 +817,7 @@ export async function main(
       policy: (values) => policyCheck(values),
       rangesCurrent,
       now: () => new Date(),
+      images: realImages(),
     });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
