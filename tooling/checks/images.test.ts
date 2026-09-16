@@ -93,6 +93,16 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(version(compose.login)).toBe(version(compose.zitadel));
   });
 
+  it('runs the same Zitadel image on Azure as the compose stack, so one bump moves both', () => {
+    const named = (text: string, parameter: string): string | undefined =>
+      [...text.matchAll(new RegExp(`^param ${parameter} = '([^']+)'$`, 'gm'))][0]?.[1];
+    const azure = readFileSync('deploy/azure/staging.apps.bicepparam', 'utf8');
+    expect(imageProblems([named(azure, 'zitadelImage') ?? ''])).toEqual([]);
+    expect(named(azure, 'zitadelImage')).toBe(compose.zitadel);
+    // Ours is named by digest alone there, which CI gives the deployment.
+    expect(azure).toContain("param appImageRepository = 'ghcr.io/shahbaz242630/agent-x'");
+  });
+
   it('lets Dependabot propose digests, minors and patches, never a major, which moves by hand', () => {
     const { updates } = parse(readFileSync('.github/dependabot.yml', 'utf8')) as {
       updates: { 'package-ecosystem': string; ignore?: { 'dependency-name': string; 'update-types'?: string[] }[] }[];

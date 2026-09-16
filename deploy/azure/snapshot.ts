@@ -25,6 +25,8 @@ export interface PredictedResource {
   readonly tags?: Readonly<Record<string, string>>;
   /** A condition Bicep can't settle offline, such as one on a secure parameter: the resource is deployed only if it holds. */
   readonly condition?: string;
+  /** The identities a resource runs as, for the resources that take one (`Microsoft.App/jobs`). */
+  readonly identity?: unknown;
   readonly properties?: unknown;
 }
 
@@ -63,14 +65,22 @@ const TENANT = '00000000-0000-0000-0000-000000000002';
 /** A stand-in for one secret, made afresh on every run, so no value that looks like one is ever written down. */
 const standIn = (bytes: number): string => randomBytes(bytes).toString('hex');
 
+/** A stand-in image digest: the shape a real one has, so the policy reads it as a deployment would. */
+const standInDigest = (): string => `sha256:${randomBytes(32).toString('hex')}`;
+
 /**
- * Values the parameters files read from the deploying shell: a reserved
- * example domain for the alert address, and a fresh stand-in for every secret.
- * Zitadel's master key is exactly 32 characters, as secrets.bicep requires.
+ * Values the parameters files read from the deploying shell: reserved example
+ * names for the addresses and the host, a stand-in image and commit, and a
+ * fresh stand-in for every secret. Zitadel's master key is exactly 32
+ * characters, as secrets.bicep requires.
  */
 function standInEnvironment(): Record<string, string> {
   return {
     AGENTX_AZURE_ALERT_EMAIL: 'alerts@example.invalid',
+    AGENTX_AZURE_APP_IMAGE_DIGEST: standInDigest(),
+    AGENTX_AZURE_RELEASE: randomBytes(20).toString('hex'),
+    AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
+    AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
     AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_OWNER_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_APP_PASSWORD: standIn(24),

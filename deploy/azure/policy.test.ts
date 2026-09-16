@@ -163,6 +163,16 @@ const ASSIGNMENTS = type('Microsoft.Authorization/roleAssignments');
 const READS = (who: string, what: string) => (resource: PredictedResource) =>
   ASSIGNMENTS(resource) &&
   at(resource.properties, 'description') === `${who} reads ${what} (deploy/azure/secrets.bicep)`;
+const JOBS = type('Microsoft.App/jobs');
+/** One job, by the work it does. */
+const JOB = (workload: string) => named(new RegExp(`^job-agentx-[a-z]+-${workload}$`));
+const configurationOf = (job: Mutable): Mutable => inside(job, 'properties', 'configuration');
+const declaredSecrets = (job: Mutable): Mutable[] => at(configurationOf(job), 'secrets') as Mutable[];
+const containerOf = (job: Mutable): Mutable => first(at(job, 'properties', 'template', 'containers'));
+const settingsOf = (job: Mutable): Mutable[] => at(containerOf(job), 'env') as Mutable[];
+/** One secret a job is given, by its name. */
+const secretNamed = (job: Mutable, name: string): Mutable =>
+  declaredSecrets(job).find((secret) => secret.name === name) ?? {};
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
 const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
 const subnet = (network: Mutable, name: string): Mutable =>
@@ -192,9 +202,9 @@ function separateRule(pick: (resource: PredictedResource) => boolean, source: st
 describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('has staging, its foundation and its secrets, and every file lints clean with every linter rule an error', () => {
     expect([...deployed.keys()]).toEqual(['staging']);
-    expect([...params.keys()]).toEqual(['staging.bicepparam', 'staging.secrets.bicepparam']);
-    expect([...params.values()].map((entry) => entry.deploys)).toEqual(['main.bicep', 'secrets.bicep']);
-    expect([...bicepFiles.keys()]).toEqual(['main.bicep', 'names.bicep', 'secrets.bicep']);
+    expect([...params.keys()]).toEqual(['staging.apps.bicepparam', 'staging.bicepparam', 'staging.secrets.bicepparam']);
+    expect([...params.values()].map((entry) => entry.deploys)).toEqual(['apps.bicep', 'main.bicep', 'secrets.bicep']);
+    expect([...bicepFiles.keys()]).toEqual(['apps.bicep', 'main.bicep', 'names.bicep', 'secrets.bicep']);
     for (const [file, { lint: run }] of [...bicepFiles, ...params])
       expect({ file, ...run }).toEqual({ file, status: 0, output: '', stdout: '' });
   });
@@ -380,9 +390,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
 
   it('required: a protection that is missing, not only switched off', () => {
     // The secrets the vault held are left in no vault of this deployment.
+    // Without the vault, the secrets are in no vault of this deployment and no
+    // job can be shown to read its own from one.
     expect(brokenRules(without((resource) => VAULT(resource) || named(/^audit-to-workspace$/)(resource)))).toEqual([
       'required',
       'vault-secrets',
+      'workload-secrets',
     ]);
     expect(
       brokenRules(
@@ -400,7 +413,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra({ ...structuredClone(workspace), id: `${String(workspace?.id)}-second` }))).toContain(
       'required',
     );
-    expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual(['required']);
+    // Without the environment there is nowhere of ours for the jobs to run.
+    expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
+      'required',
+      'jobs',
+    ]);
     const environment = staging.predictedResources.find(ENVIRONMENT);
     // A second environment also sends no logs of its own.
     expect(
@@ -1165,6 +1182,386 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(without(READS('migrate', 'db-owner-password')))).toEqual(['secret-access']);
     // A reader whose identity the foundation doesn't create.
     expect(brokenRules(without(named(/^id-agentx-stg-login$/)))).toEqual(['secret-access']);
+  });
+
+  it('jobs: one that starts itself, runs twice at once, retries, or runs an image a tag could move', () => {
+    const environment = staging.predictedResources.find(ENVIRONMENT);
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          inside(job, 'properties').environmentId = `${String(environment?.id)}-second`;
+        }),
+      ),
+    ).toEqual(['jobs']);
+    expect(
+      brokenRules(
+        changed(JOBS, (job) => {
+          inside(job, 'properties').workloadProfileName = 'D4';
+        }),
+      ),
+    ).toEqual(['jobs']);
+    for (const start of [
+      { triggerType: 'Schedule' },
+      { scheduleTriggerConfig: { cronExpression: '0 3 * * *' } },
+      { eventTriggerConfig: { scale: {} } },
+      { replicaRetryLimit: 1 },
+      { replicaTimeout: 0 },
+      { replicaTimeout: 4000 },
+      { replicaTimeout: 'soon' },
+      { manualTriggerConfig: { parallelism: 2, replicaCompletionCount: 1 } },
+      { manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 2 } },
+    ]) {
+      expect({
+        start,
+        rules: brokenRules(
+          changed(JOB('db-setup'), (job) => {
+            Object.assign(configurationOf(job), start);
+          }),
+        ),
+      }).toEqual({ start, rules: ['jobs'] });
+    }
+    // Two containers, or work hidden in an init container that runs before it.
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          inside(job, 'properties', 'template').containers = [containerOf(job), structuredClone(containerOf(job))];
+        }),
+      ),
+    ).toEqual(['jobs']);
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          inside(job, 'properties', 'template').initContainers = [structuredClone(containerOf(job))];
+        }),
+      ),
+    ).toEqual(['jobs']);
+    // A tag in place of the digest: the same name, another image tomorrow.
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          containerOf(job).image = 'ghcr.io/shahbaz242630/agent-x:v1';
+        }),
+      ),
+    ).toEqual(['jobs']);
+    // A job the deployment needs, left out.
+    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup']) {
+      expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({ workload, rules: ['jobs'] });
+    }
+  });
+
+  it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {
+    const vault = staging.predictedResources.find(VAULT);
+    const identity = (workload: string): string => String(staging.predictedResources.find(JOB(workload))?.identity);
+    expect(identity).toBeTypeOf('function');
+    // An identity that isn't its own, one too many, or one the resource shares.
+    expect(
+      brokenRules(
+        changed(JOB('db-setup'), (job) => {
+          job.identity = structuredClone(staging.predictedResources.find(JOB('migrate'))?.identity);
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    expect(
+      brokenRules(
+        changed(JOB('db-setup'), (job) => {
+          const ids = inside(job, 'identity', 'userAssignedIdentities');
+          ids['/subscriptions/x/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-agentx-stg-api'] = {};
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    expect(
+      brokenRules(
+        changed(JOBS, (job) => {
+          inside(job, 'identity').type = 'SystemAssigned, UserAssigned';
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // A secret GRANTS doesn't give it, mounted and named like its own so that
+    // nothing but the reader list can object; then a secret it needs left out,
+    // with its use taken away too, so nothing but the list can object to that.
+    const messages = (snapshotted: Snapshot): string[] => policyProblems(snapshotted, STAGING).map(describeProblem);
+    expect(
+      messages(
+        changed(JOB('migrate'), (job) => {
+          declaredSecrets(job).push({
+            ...structuredClone(secretNamed(job, 'db-owner-password')),
+            name: 'db-app-password',
+            keyVaultUrl: `[uri(reference('${String(vault?.id)}', '2025-05-01').vaultUri, 'secrets/db-app-password')]`,
+          });
+          (at(first(at(job, 'properties', 'template', 'volumes')), 'secrets') as Mutable[]).push({
+            secretRef: 'db-app-password',
+            path: 'db-app-password',
+          });
+          settingsOf(job).push({ name: 'AGENTX_DB_APP_PASSWORD_FILE', value: '/mnt/secrets/db-app-password' });
+        }),
+      ),
+    ).toEqual([
+      "job-agentx-stg-migrate [workload-secrets] is given db-app-password, which GRANTS doesn't let migrate read",
+    ]);
+    expect(
+      messages(
+        changed(JOB('migrate'), (job) => {
+          configurationOf(job).secrets = [];
+          inside(job, 'properties', 'template').volumes = [];
+          containerOf(job).env = settingsOf(job).filter((entry) => entry.name !== 'AGENTX_DB_MIGRATION_PASSWORD_FILE');
+        }),
+      ),
+    ).toEqual([
+      'job-agentx-stg-migrate [workload-secrets] must be given db-owner-password, which migrate reads (GRANTS)',
+    ]);
+    // A value carried in the deployment rather than read from the vault, a
+    // version pinned into the address, another vault, and another's identity.
+    for (const change of [
+      { value: "[parameters('dbOwnerPassword')]" },
+      { keyVaultUrl: `[uri(reference('${String(vault?.id)}', '2025-05-01').vaultUri, 'secrets/db-owner-password/9')]` },
+      {
+        keyVaultUrl: `[uri(reference('${String(vault?.id)}-second', '2025-05-01').vaultUri, 'secrets/db-owner-password')]`,
+      },
+      { keyVaultUrl: 'https://kv-agentx-stg-other.vault.azure.net/secrets/db-owner-password' },
+    ]) {
+      expect({
+        change,
+        rules: brokenRules(
+          changed(JOB('migrate'), (job) => {
+            Object.assign(secretNamed(job, 'db-owner-password'), change);
+          }),
+        ),
+      }).toEqual({ change, rules: ['workload-secrets'] });
+    }
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          secretNamed(job, 'db-owner-password').identity = String(
+            Object.keys(
+              at(staging.predictedResources.find(JOB('db-setup'))?.identity, 'userAssignedIdentities') ?? {},
+            )[0],
+          );
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // A secret volume with no list mounts every secret the job has. Its own
+    // message is asserted, because the five logins then also count as unread.
+    expect(
+      messages(
+        changed(JOB('db-setup'), (job) => {
+          delete first(at(job, 'properties', 'template', 'volumes')).secrets;
+        }),
+      ),
+    ).toContainEqual(
+      'job-agentx-stg-db-setup [workload-secrets] mounts secrets without naming what is in it, which mounts every secret it has',
+    );
+    // A secret it is given and never reads, and one it reads unasked.
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          inside(job, 'properties', 'template').volumes = [];
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // Mounted, not in the environment, so only the reader list can object.
+    expect(
+      messages(
+        changed(JOB('migrate'), (job) => {
+          (at(first(at(job, 'properties', 'template', 'volumes')), 'secrets') as Mutable[]).push({
+            secretRef: 'db-app-password',
+            path: 'db-app-password',
+          });
+        }),
+      ),
+    ).toEqual(['job-agentx-stg-migrate [workload-secrets] reads db-app-password, which it is not given']);
+    // Our own image taking a login from the environment, which crash output shows.
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          settingsOf(job).push({ name: 'AGENTX_DB_MIGRATION_PASSWORD', secretRef: 'db-owner-password' });
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // Zitadel's database login may be in its environment; the same login in our
+    // own image may not, and nor may its master key, which has a file form.
+    expect(
+      brokenRules(
+        changed(JOB('zitadel-init'), (job) => {
+          containerOf(job).image =
+            'ghcr.io/shahbaz242630/agent-x@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    expect(
+      brokenRules(
+        changed(JOB('zitadel-setup'), (job) => {
+          settingsOf(job).push({ name: 'ZITADEL_MASTERKEY', secretRef: 'zitadel-masterkey' });
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+  });
+
+  it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {
+    for (const setting of [
+      { name: 'OTEL_EXPORTER_OTLP_ENDPOINT', value: 'https://collector.example.invalid' },
+      { name: 'OTEL_SDK_DISABLED', value: 'false' },
+    ]) {
+      for (const workload of ['migrate', 'zitadel-setup']) {
+        expect({
+          setting,
+          workload,
+          rules: brokenRules(
+            changed(JOB(workload), (job) => {
+              settingsOf(job).push(setting);
+            }),
+          ),
+        }).toEqual({ setting, workload, rules: ['container-telemetry'] });
+      }
+    }
+    // Switched off is the point, not silence: this one is allowed.
+    expect(
+      brokenRules(
+        changed(JOB('zitadel-setup'), (job) => {
+          settingsOf(job).push({ name: 'OTEL_SDK_DISABLED', value: 'true' });
+        }),
+      ),
+    ).toEqual([]);
+    // Zitadel's daily report and metrics, switched on or left to its default.
+    expect(
+      brokenRules(
+        changed(JOB('zitadel-init'), (job) => {
+          containerOf(job).env = settingsOf(job).map((entry) =>
+            entry.name === 'ZITADEL_SERVICEPING_ENABLED' ? { ...entry, value: 'true' } : entry,
+          );
+        }),
+      ),
+    ).toEqual(['container-telemetry']);
+    for (const name of ['ZITADEL_SERVICEPING_ENABLED', 'ZITADEL_METRICS_TYPE']) {
+      expect({
+        name,
+        rules: brokenRules(
+          changed(JOB('zitadel-setup'), (job) => {
+            containerOf(job).env = settingsOf(job).filter((entry) => entry.name !== name);
+          }),
+        ),
+      }).toEqual({ name, rules: ['container-telemetry'] });
+    }
+  });
+});
+
+describe('what each job is told', () => {
+  /** The commit the deployment was given, whatever this run's stand-in is. */
+  const someCommit = expect.stringMatching(/^[0-9a-f]{40}$/) as unknown as string;
+
+  /** Every setting a job's container is given, name to value, a secret's as `secret:<name>`. */
+  const settingsGiven = (workload: string): Record<string, unknown> => {
+    const job = staging.predictedResources.find(JOB(workload));
+    const container = first(at(job?.properties, 'template', 'containers'));
+    return Object.fromEntries(
+      (at(container, 'env') as Mutable[]).map((entry) => [
+        String(entry.name),
+        typeof entry.secretRef === 'string' ? `secret:${entry.secretRef}` : entry.value,
+      ]),
+    );
+  };
+
+  it('gives our jobs the environment, the build, the database and each login as a file', () => {
+    // Configuration.md: the shared four, the admin's role and first database,
+    // and one login per role, each read from where the platform mounts it.
+    expect(settingsGiven('db-setup')).toEqual({
+      AGENTX_ENV: 'staging',
+      AGENTX_RELEASE: someCommit,
+      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+      AGENTX_DB_NAME: 'agentx',
+      AGENTX_DB_ADMIN_USER: 'agentx_admin',
+      AGENTX_DB_ADMIN_DATABASE: 'postgres',
+      AGENTX_DB_ADMIN_PASSWORD_FILE: '/mnt/secrets/db-admin-password',
+      AGENTX_DB_OWNER_PASSWORD_FILE: '/mnt/secrets/db-owner-password',
+      AGENTX_DB_APP_PASSWORD_FILE: '/mnt/secrets/db-app-password',
+      AGENTX_DB_BACKUP_PASSWORD_FILE: '/mnt/secrets/db-backup-password',
+      AGENTX_DB_ZITADEL_PASSWORD_FILE: '/mnt/secrets/db-zitadel-password',
+    });
+    // The migration job holds the owner's login and nothing else.
+    expect(settingsGiven('migrate')).toEqual({
+      AGENTX_ENV: 'staging',
+      AGENTX_RELEASE: someCommit,
+      AGENTX_DB_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+      AGENTX_DB_NAME: 'agentx',
+      AGENTX_DB_MIGRATION_PASSWORD_FILE: '/mnt/secrets/db-owner-password',
+    });
+    // Neither is told the other's, and TLS is left at its default, verify-full.
+    for (const workload of ['db-setup', 'migrate']) {
+      expect(Object.keys(settingsGiven(workload))).not.toContain('AGENTX_DB_TLS');
+      expect(Object.keys(settingsGiven(workload))).not.toContain('AGENTX_DB_PASSWORD');
+    }
+  });
+
+  it('connects Zitadel as its own role, with TLS checked to the host', () => {
+    for (const workload of ['zitadel-init', 'zitadel-setup']) {
+      expect({ workload, settings: settingsGiven(workload) }).toMatchObject({
+        workload,
+        settings: {
+          ZITADEL_DATABASE_POSTGRES_HOST: 'psql-agentx-stg-ksacnt.agentx-staging.private.postgres.database.azure.com',
+          ZITADEL_DATABASE_POSTGRES_DATABASE: 'zitadel',
+          // Its own role is also its "admin": it never holds the server admin's login.
+          ZITADEL_DATABASE_POSTGRES_USER_USERNAME: 'zitadel',
+          ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: 'zitadel',
+          ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: 'secret:db-zitadel-password',
+          ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: 'secret:db-zitadel-password',
+          ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: 'verify-full',
+          ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: 'verify-full',
+          // db-setup made the database, so init must not try to make it again.
+          ZITADEL_DATABASE_POSTGRES_ADMIN_EXISTINGDATABASE: 'zitadel',
+          ZITADEL_LOG_FORMATTER_FORMAT: 'json',
+        },
+      });
+    }
+    // Only setup writes an instance, so only setup is given the master key, and
+    // it reads it from a file (`--masterkeyFile`), never its environment.
+    for (const workload of ['zitadel-init', 'zitadel-setup']) {
+      expect(Object.keys(settingsGiven(workload))).not.toContain('ZITADEL_MASTERKEY');
+    }
+    const mounted = (workload: string): unknown =>
+      at(first(at(staging.predictedResources.find(JOB(workload))?.properties, 'template', 'volumes')), 'secrets');
+    expect(mounted('zitadel-setup')).toEqual([{ secretRef: 'zitadel-masterkey', path: 'zitadel-masterkey' }]);
+    expect(mounted('zitadel-init')).toBeUndefined();
+  });
+
+  it('creates the first instance with a starting password and the rules of ADR-003 and ADR-005', () => {
+    expect(settingsGiven('zitadel-setup')).toMatchObject({
+      // The ingress terminates TLS: https outside, plain http within.
+      ZITADEL_EXTERNALDOMAIN: 'auth.example.invalid',
+      ZITADEL_EXTERNALPORT: '443',
+      ZITADEL_EXTERNALSECURE: 'true',
+      ZITADEL_TLS_ENABLED: 'false',
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: 'admin',
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: 'secret:zitadel-admin-password',
+      // Zitadel's default, said outright: the vault's password is a starting one.
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: 'true',
+      // No mail can be sent from the deployment, so the address is verified here.
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: 'true',
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_FORCEMFA: 'true',
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWREGISTER: 'false',
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_ALLOWEXTERNALIDP: 'false',
+      ZITADEL_DEFAULTINSTANCE_LOGINPOLICY_MFAINITSKIPLIFETIME: '0h',
+      ZITADEL_DEFAULTINSTANCE_RESTRICTIONS_DISALLOWPUBLICORGREGISTRATION: 'true',
+    });
+    // The compose stack's test machine user and its token belong to it alone.
+    expect(Object.keys(settingsGiven('zitadel-setup')).filter((name) => name.includes('MACHINE'))).toEqual([]);
+    expect(Object.keys(settingsGiven('zitadel-setup')).filter((name) => name.includes('PATPATH'))).toEqual([]);
+  });
+
+  it('starts each job on the command the compose stack runs it with', () => {
+    const ran = (workload: string): unknown => {
+      const container = first(at(staging.predictedResources.find(JOB(workload))?.properties, 'template', 'containers'));
+      return [...(at(container, 'command') as unknown[]), ...(at(container, 'args') as unknown[])];
+    };
+    expect(ran('db-setup')).toEqual(['node', 'apps/db-setup/src/main.ts']);
+    expect(ran('migrate')).toEqual(['node', 'apps/migrate/src/main.ts']);
+    // The compose stack's healthcheck proves this path on the same digest, and
+    // splits `start-from-setup` into the two steps a deployment runs separately.
+    expect(ran('zitadel-init')).toEqual(['/app/zitadel', 'init', 'zitadel']);
+    expect(ran('zitadel-setup')).toEqual([
+      '/app/zitadel',
+      'setup',
+      '--masterkeyFile',
+      '/mnt/secrets/zitadel-masterkey',
+    ]);
   });
 });
 
