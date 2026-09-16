@@ -95,6 +95,16 @@ export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
 /** The one role besides the server admin whose login raises the alert (ADR-012 §2). */
 const BACKUP_ROLE = 'agentx_backup';
 
+/** How every Postgres log line starts: its time, then its session (Azure's default, held by postgres.bicep). */
+const LOG_LINE_PREFIX = '%t-%c-';
+
+/**
+ * The start of a line that prefix writes, up to the message, as the login
+ * alert matches it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-LOG:  ` (S19).
+ * Azure holds the log's time zone at UTC.
+ */
+const LOG_LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  ';
+
 /**
  * What counts as an error event: our logger's level and Zitadel's three, in
  * any case, since Zitadel's newer lines write "ERROR" (`in~` ignores case).
@@ -710,8 +720,10 @@ const database: Check = (snapshot, expected, add) => {
     }
     // ADR-012 §2: every login is logged, and one by the admin or the backup
     // role raises a SEV-1 alert that notifies on every window it happens in.
+    // The alert matches the line as Azure writes it, from the prefix held
+    // here on (S19: a pattern without the prefix never matched).
     const admin = String(at(properties, 'administratorLogin'));
-    const pattern = `@"^connection authorized: user=(${admin}|${BACKUP_ROLE}) "`;
+    const pattern = `@"${LOG_LINE_START}connection authorized: user=(${admin}|${BACKUP_ROLE}) "`;
     const alerted = ofType(snapshot, TYPES.alert).some(
       (alert) =>
         at(alert.properties, 'enabled') === true &&
@@ -722,7 +734,7 @@ const database: Check = (snapshot, expected, add) => {
           queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()'),
         ),
     );
-    if (settings.get('log_connections') !== 'on' || !alerted) {
+    if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
         `logs every login, and an enabled, stateless SEV-1 alert on the workspace fires when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,

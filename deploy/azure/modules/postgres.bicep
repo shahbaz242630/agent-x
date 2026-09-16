@@ -84,6 +84,13 @@ var settings = [
     name: 'log_connections'
     value: 'on'
   }
+  // Every line starts with its time and its session (`2026-09-16 19:02:12
+  // UTC-6aaae7b4.1dc3-`): Azure's default, held here because the alert below
+  // matches it. Azure keeps the log's time zone at UTC and doesn't let it change.
+  {
+    name: 'log_line_prefix'
+    value: '%t-%c-'
+  }
 ]
 
 // One at a time: the server refuses a second change while one is in progress.
@@ -116,7 +123,10 @@ resource serverLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' =
 }
 
 // ADR-012 §2: a login by the server admin or the backup role raises an alert.
-// The set-up job's own login (G2) is one of them, and expected.
+// The set-up job's own login (G2) is one of them, and expected. The pattern
+// matches the whole start of the line, prefix included: anchored at
+// "connection authorized" alone, it matched none of the set-up job's real
+// logins (the first real run, S19).
 resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: 'alert-${name}-privileged-login'
   location: location
@@ -135,7 +145,7 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where Message matches regex @"^connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
+          query: 'PGSQLServerLogs | where Message matches regex @"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Logins'
           operator: 'GreaterThan'
