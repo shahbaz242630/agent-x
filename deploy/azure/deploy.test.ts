@@ -380,8 +380,13 @@ interface AzAnswers {
   /** The secrets the vault holds before the deployment, and after it. */
   readonly before?: readonly string[];
   readonly after?: readonly string[];
-  /** How the deployment ends: 0, or what a declined what-if or a failure returns. */
+  /** The status the deployment command ends with: 0, or what a failure returns. */
   readonly status?: number;
+  /**
+   * How Azure says the deployment ended, read back afterwards. Declined: none
+   * exists, as when the operator answers no — the CLI still ends with 0.
+   */
+  readonly ended?: string;
 }
 
 /** An Azure CLI that answers from the options and records every call. */
@@ -413,7 +418,17 @@ class RecordingAz implements Az {
           stderr: '',
         };
       case 'deployment sub':
-        return json({ databaseHost: { type: 'String', value: 'db.example.invalid' } });
+      case 'deployment group': {
+        const ended = this.options.ended ?? 'Succeeded';
+        if (ended === 'Declined') {
+          return {
+            status: 3,
+            stdout: '',
+            stderr: "ERROR: (DeploymentNotFound) Deployment 'x' could not be found.\nCode: DeploymentNotFound\n",
+          };
+        }
+        return json({ state: ended, outputs: { databaseHost: { type: 'String', value: 'db.example.invalid' } } });
+      }
       case 'keyvault list':
         return json(this.options.vaults ?? ['kv-agentx-stg-abcdef']);
       case 'containerapp list':
@@ -579,6 +594,7 @@ describe('deploy secrets', () => {
       'keyvault list --subscription',
       'rest --method get',
       'deployment group create',
+      'deployment group show',
       'rest --method get',
     ]);
     const deployment = done.az.deployment;
@@ -676,6 +692,7 @@ describe('deploy apps', () => {
       'account show --output',
       'bicep version',
       'deployment group create',
+      'deployment group show',
       'containerapp list --subscription',
       'containerapp job list',
     ]);
@@ -810,6 +827,43 @@ describe('realImages', () => {
     expect(() => images.verify(`ghcr.io/shahbaz242630/agent-x@${DIGEST}`, COMMIT)).toThrow(
       "cosign 3.1.3 isn't installed",
     );
+  });
+});
+
+describe('a deployment the operator declines, or that ends otherwise', () => {
+  const admin = aPaste();
+  const zitadel = aPaste();
+  const commands: readonly (readonly [string, readonly string[], Scenario])[] = [
+    ['foundation', ['foundation'], { answers: ['y', 'ops@example.invalid'], hidden: [admin, admin] }],
+    ['secrets', ['secrets', '--all'], { answers: ['y'], hidden: [admin, admin, zitadel, zitadel] }],
+    [
+      'apps',
+      ['apps'],
+      {
+        answers: ['y', 'auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'],
+        images: recordingImages(),
+      },
+    ],
+  ];
+
+  it('says nothing was deployed when the what-if is answered no, though the CLI ends with 0, and reads nothing more', async () => {
+    for (const [command, argv, scenario] of commands) {
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Declined' }) });
+      expect({ command, status: done.status, error: done.error }).toEqual({ command, status: 1, error: undefined });
+      expect(done.terminal.said.at(-1)).toBe('You answered no at the what-if: nothing was deployed.');
+      const afterShow = done.az.sequence.slice(done.az.sequence.findIndex((call) => call.endsWith(' show')) + 1);
+      expect({ command, afterShow }).toEqual({ command, afterShow: [] });
+    }
+  });
+
+  it('reports any other end, and reads nothing more', async () => {
+    for (const [command, argv, scenario] of commands) {
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Canceled' }) });
+      expect({ command, status: done.status }).toEqual({ command, status: 1 });
+      expect(done.terminal.said.at(-1)).toMatch(
+        /^The deployment agentx-staging-\w+-20260916T164215Z ended Canceled: nothing more was done\.$/,
+      );
+    }
   });
 });
 
