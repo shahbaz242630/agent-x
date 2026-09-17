@@ -14,6 +14,12 @@
 //
 // A job is never started while a run of it hasn't ended: Container Apps would
 // run both side by side, and two set-up runs at once race on the same roles.
+//
+// `cleanup` is for a Zitadel setup that died part-way through a step (S19): it
+// leaves the step marked as started, and every later setup run waits on it for
+// ever ("migration already started"). Once that waiting run is stopped,
+// `cleanup` runs the setup job once as `zitadel setup cleanup`, which cancels
+// the marker; then `run zitadel-setup` goes again.
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
@@ -60,7 +66,14 @@ const LOG_MARGIN_MS = 5 * 60_000;
 
 export type Request =
   | { readonly command: 'start' | 'run'; readonly job: Job }
-  | { readonly command: 'wait'; readonly job: Job; readonly execution: string };
+  | { readonly command: 'wait'; readonly job: Job; readonly execution: string }
+  | { readonly command: 'cleanup'; readonly job: 'zitadel-setup' };
+
+/** The Container Apps API version the stuck-step run is started with (Microsoft.App/jobs in apps.bicep); a test holds the two equal. */
+export const JOBS_API = '2026-01-01';
+
+/** What the setup job runs instead, once, to cancel a step a dead run left marked as started. */
+const CLEANUP_ARGS = ['setup', 'cleanup'] as const;
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -73,6 +86,7 @@ export const USAGE = `Usage:
   node deploy/azure/jobs.ts run <job>             start the job, wait for the run to end, read its log
   node deploy/azure/jobs.ts start <job>           start it only
   node deploy/azure/jobs.ts wait <job> <run>      wait for a run to end, read its log
+  node deploy/azure/jobs.ts cleanup               clear a step a dead Zitadel setup run left started
 The jobs, in the order a first deploy runs them: ${JOBS.join(', ')}`;
 
 const isJob = (value: string | undefined): value is Job => JOBS.some((job) => job === value);
@@ -92,8 +106,15 @@ const isRunOf = (job: Job, execution: string): boolean => {
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, job, ...rest] = argv;
+  if (command === 'cleanup') {
+    // Only Zitadel's setup marks its steps, so there is no job to name.
+    if (job !== undefined) {
+      throw new UsageError(`cleanup takes nothing: it is for zitadel-setup alone, not ${argv.slice(1).join(' ')}`);
+    }
+    return { command, job: 'zitadel-setup' };
+  }
   if (command !== 'start' && command !== 'run' && command !== 'wait') {
-    throw new UsageError(`say run, start or wait, not ${command ?? 'nothing'}`);
+    throw new UsageError(`say run, start, wait or cleanup, not ${command ?? 'nothing'}`);
   }
   if (!isJob(job)) throw new UsageError(`${job ?? 'nothing'} isn't a job: ${JOBS.join(', ')}`);
   if (command !== 'wait') {
@@ -136,16 +157,113 @@ const jobArgs = ({ subscription, job }: Target): string[] => [
   RESOURCE_GROUP,
 ];
 
-/** The job's own time limit, in seconds; reading it also proves the job is deployed. */
-function timeLimit(steps: JobSteps, target: Target): number {
+/** A job as Azure has it: its own time limit, in seconds, and the containers it runs. */
+interface Deployed {
+  readonly limit: number;
+  readonly containers: unknown;
+}
+
+/** The job as deployed; reading it also proves it is. */
+function readJob(steps: JobSteps, target: Target): Deployed {
   const shown = azJson(steps.az, ['containerapp', 'job', 'show', ...jobArgs(target)]) as {
-    properties?: { configuration?: { replicaTimeout?: unknown } };
+    properties?: { configuration?: { replicaTimeout?: unknown }; template?: { containers?: unknown } };
   };
   const seconds = shown.properties?.configuration?.replicaTimeout;
   if (typeof seconds !== 'number' || !Number.isInteger(seconds) || seconds <= 0) {
     throw new Error(`Azure gave no time limit for ${jobName(target.job)}, so how long to wait is unknown.`);
   }
-  return seconds;
+  return { limit: seconds, containers: shown.properties?.template?.containers };
+}
+
+/** One container of a run started with other arguments, in the fields a run's template takes (no mounts). */
+interface RunContainer {
+  readonly name: string;
+  readonly image: string;
+  readonly command: readonly string[];
+  readonly args: readonly string[];
+  readonly env: readonly (
+    { readonly name: string; readonly value: string } | { readonly name: string; readonly secretRef: string }
+  )[];
+  readonly resources: { readonly cpu: number; readonly memory: string };
+}
+
+const isStrings = (value: unknown): value is readonly string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+/**
+ * The setup job's own container with `setup cleanup` as its arguments, and
+ * nothing else changed: the same image, command, settings and size. The
+ * settings are copied as names with values or with secret references only, so
+ * no secret value is ever in hand. Anything that isn't the Zitadel setup this
+ * tool knows is refused rather than guessed at.
+ */
+export function cleanupContainers(containers: unknown): RunContainer[] {
+  const name = jobName('zitadel-setup');
+  const refuse = (why: string): never => {
+    throw new Error(`${name} isn't the Zitadel setup this tool knows (${why}), so it wasn't started to clean up.`);
+  };
+  if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
+  const container = (containers as readonly Record<string, unknown>[])[0] ?? {};
+  const { image, command, args, env, resources } = container;
+  if (container.name !== 'zitadel-setup') return refuse('its container is not named zitadel-setup');
+  if (typeof image !== 'string' || !image.startsWith('ghcr.io/zitadel/zitadel:')) {
+    return refuse("its image isn't Zitadel's");
+  }
+  if (!isStrings(command) || command.join(' ') !== '/app/zitadel') return refuse("its command isn't /app/zitadel");
+  if (!isStrings(args) || args[0] !== 'setup') return refuse("its arguments don't start with setup");
+  const size = resources as { cpu?: unknown; memory?: unknown } | undefined;
+  if (typeof size?.cpu !== 'number' || typeof size.memory !== 'string') return refuse('its size is not given');
+  if (!Array.isArray(env)) return refuse('its settings are not a list');
+  const settings = (env as readonly ({ name?: unknown; value?: unknown; secretRef?: unknown } | null)[]).map(
+    (entry) => {
+      const setting = entry ?? {};
+      if (typeof setting.name !== 'string') return refuse('a setting has no name');
+      if (typeof setting.secretRef === 'string' && setting.value === undefined) {
+        return { name: setting.name, secretRef: setting.secretRef };
+      }
+      if (typeof setting.value === 'string' && setting.secretRef === undefined) {
+        return { name: setting.name, value: setting.value };
+      }
+      return refuse(`the setting ${setting.name} has neither a value nor a secret reference alone`);
+    },
+  );
+  return [
+    {
+      name: container.name,
+      image,
+      command,
+      args: [...CLEANUP_ARGS],
+      env: settings,
+      resources: { cpu: size.cpu, memory: size.memory },
+    },
+  ];
+}
+
+/**
+ * Starts a run with other containers, through Resource Manager: the only way to
+ * change a run's arguments, since CLI 2.90.0's `job start --args` sends a
+ * container with no image and no settings (S19). The body is never repeated in
+ * a message, though it holds no secret value.
+ */
+function startWith(steps: JobSteps, target: Target, containers: readonly RunContainer[]): unknown {
+  const name = jobName(target.job);
+  const done = steps.az.run([
+    'rest',
+    '--method',
+    'post',
+    '--url',
+    `${ARM}subscriptions/${target.subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${name}/start?api-version=${JOBS_API}`,
+    '--body',
+    JSON.stringify({ containers }),
+  ]);
+  if (done.status !== 0) throw new Error(`Azure refused to start ${name} to clean up:\n${done.stderr.trim()}`);
+  if (done.stdout.trim() === '') {
+    // The start is a long-running operation, which may answer 202 with no body.
+    throw new Error(
+      `Azure took the start of ${name} without naming the run. Find it with az containerapp job execution list --subscription ${target.subscription} --name ${name} --resource-group ${RESOURCE_GROUP}, and start nothing else until it has ended.`,
+    );
+  }
+  return JSON.parse(done.stdout) as unknown;
 }
 
 /** The job's runs that haven't ended, with their states. */
@@ -157,8 +275,11 @@ function unfinishedRuns(steps: JobSteps, target: Target): string[] {
     .map((run) => `${text(run.name)} (${text(run.properties?.status) || 'no state'})`);
 }
 
-/** Starts the job, once nothing of it is still going: the new run's name. */
-function start(steps: JobSteps, target: Target): string {
+/**
+ * Starts the job, once nothing of it is still going, as it is deployed or with
+ * the containers given: the new run's name.
+ */
+function start(steps: JobSteps, target: Target, containers?: readonly RunContainer[]): string {
   const name = jobName(target.job);
   const going = unfinishedRuns(steps, target);
   if (going.length > 0) {
@@ -166,8 +287,12 @@ function start(steps: JobSteps, target: Target): string {
       `${name} has runs that haven't ended, so it wasn't started: ${going.join(', ')}. Wait for them, or stop one with az containerapp job stop --subscription ${target.subscription} --name ${name} --resource-group ${RESOURCE_GROUP} --job-execution-name <run>.`,
     );
   }
-  const started = azJson(steps.az, ['containerapp', 'job', 'start', ...jobArgs(target)]) as { name?: unknown };
-  const execution = text(started.name);
+  const started = (
+    containers === undefined
+      ? azJson(steps.az, ['containerapp', 'job', 'start', ...jobArgs(target)])
+      : startWith(steps, target, containers)
+  ) as { name?: unknown } | null;
+  const execution = text(started?.name);
   if (!isRunOf(target.job, execution)) {
     throw new Error(`Azure started ${name} but named the run "${execution}", which isn't one of its runs.`);
   }
@@ -358,7 +483,7 @@ export async function jobs(request: Request, steps: JobSteps): Promise<number> {
   if (!GUID.test(subscription)) throw new Error('Azure gave no subscription ID: is the CLI signed in?');
   const target = { subscription, job: request.job };
   // Read first, so a job that isn't deployed is refused before anything starts.
-  const limit = timeLimit(steps, target);
+  const deployed = readJob(steps, target);
   switch (request.command) {
     case 'start': {
       const execution = start(steps, target);
@@ -366,19 +491,40 @@ export async function jobs(request: Request, steps: JobSteps): Promise<number> {
       return 0;
     }
     case 'run':
-    case 'wait': {
-      const execution = 'execution' in request ? request.execution : start(steps, target);
-      const run = await waitFor(steps, target, execution, limit);
-      if (run === undefined) return 1;
-      await readLog(steps, target, execution, run);
-      if (run.status !== 'Succeeded') {
-        steps.say('Read the lines above before starting anything else.');
-        return 1;
-      }
-      steps.say(after(target.job));
-      return 0;
+      return finish(steps, target, start(steps, target), deployed.limit, after(target.job));
+    case 'wait':
+      return finish(steps, target, request.execution, deployed.limit, after(target.job));
+    case 'cleanup': {
+      // The containers are checked before anything starts.
+      const execution = start(steps, target, cleanupContainers(deployed.containers));
+      return finish(
+        steps,
+        target,
+        execution,
+        deployed.limit,
+        'The clean-up has run: the lines above say which step it cancelled, if any. Now run setup again: node deploy/azure/jobs.ts run zitadel-setup',
+      );
     }
   }
+}
+
+/** Waits for a run, shows its log, and says what comes next: 0 only when it succeeded. */
+async function finish(
+  steps: JobSteps,
+  target: Target,
+  execution: string,
+  limit: number,
+  next: string,
+): Promise<number> {
+  const run = await waitFor(steps, target, execution, limit);
+  if (run === undefined) return 1;
+  await readLog(steps, target, execution, run);
+  if (run.status !== 'Succeeded') {
+    steps.say('Read the lines above before starting anything else.');
+    return 1;
+  }
+  steps.say(next);
+  return 0;
 }
 
 export async function main(
