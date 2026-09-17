@@ -168,6 +168,7 @@ const JOBS = type('Microsoft.App/jobs');
 const JOB = (workload: string) => named(new RegExp(`^job-agentx-[a-z]+-${workload}$`));
 const APPS = type('Microsoft.App/containerApps');
 const DOOR = type('Microsoft.App/managedEnvironments/httpRouteConfigs');
+const CERTIFICATE = type('Microsoft.App/managedEnvironments/managedCertificates');
 /** One app, by the work it does. */
 const APP = (workload: string) => named(new RegExp(`^ca-agentx-[a-z]+-${workload}$`));
 const ingressOf = (app: Mutable): Mutable => inside(app, 'properties', 'configuration', 'ingress');
@@ -233,11 +234,27 @@ function separateRule(
 }
 
 describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
-  it('has staging, its foundation and its secrets, and every file lints clean with every linter rule an error', () => {
+  it('has staging, its foundation and its parts, and every file lints clean with every linter rule an error', () => {
     expect([...deployed.keys()]).toEqual(['staging']);
-    expect([...params.keys()]).toEqual(['staging.apps.bicepparam', 'staging.bicepparam', 'staging.secrets.bicepparam']);
-    expect([...params.values()].map((entry) => entry.deploys)).toEqual(['apps.bicep', 'main.bicep', 'secrets.bicep']);
-    expect([...bicepFiles.keys()]).toEqual(['apps.bicep', 'main.bicep', 'names.bicep', 'secrets.bicep']);
+    expect([...params.keys()]).toEqual([
+      'staging.apps.bicepparam',
+      'staging.bicepparam',
+      'staging.certificates.bicepparam',
+      'staging.secrets.bicepparam',
+    ]);
+    expect([...params.values()].map((entry) => entry.deploys)).toEqual([
+      'apps.bicep',
+      'main.bicep',
+      'certificates.bicep',
+      'secrets.bicep',
+    ]);
+    expect([...bicepFiles.keys()]).toEqual([
+      'apps.bicep',
+      'certificates.bicep',
+      'main.bicep',
+      'names.bicep',
+      'secrets.bicep',
+    ]);
     for (const [file, { lint: run }] of [...bicepFiles, ...params])
       expect({ file, ...run }).toEqual({ file, status: 0, output: '', stdout: '' });
   });
@@ -464,12 +481,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'required',
     );
     // Without the environment there is nowhere of ours for the jobs to run, and
-    // the app door is a door of no environment of ours.
+    // the doors and their certificates belong to no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
       'jobs',
       'apps',
       'public-doors',
+      'door-certificates',
     ]);
     const environment = staging.predictedResources.find(ENVIRONMENT);
     // A second environment also sends no logs of its own.
@@ -1659,6 +1677,82 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(doorProblems(withExtra(structuredClone(appDoor) as unknown as Mutable))).toEqual([
       'the deployment: needs the app door once; the snapshot has 2',
     ]);
+  });
+
+  it('door-certificates: a door host without its one certificate, one elsewhere, for no door, or not validated by HTTP', () => {
+    // The rule's own messages, so a condition another one also catches can't hide.
+    const certificateProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'door-certificates')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    const APP_CERTIFICATE = named(/\/mc-agentx-stg-app$/);
+    const appCertificate = staging.predictedResources.find(APP_CERTIFICATE);
+    const environment = staging.predictedResources.find(ENVIRONMENT);
+    const app = 'cae-agentx-staging/mc-agentx-stg-app';
+    expect(staging.predictedResources.filter(CERTIFICATE).map((certificate) => certificate.name)).toEqual([
+      app,
+      'cae-agentx-staging/mc-agentx-stg-auth',
+    ]);
+    expect(
+      staging.predictedResources.filter(CERTIFICATE).map((certificate) => at(certificate.properties, 'subjectName')),
+    ).toEqual(['app.example.invalid', 'auth.example.invalid']);
+    expect(certificateProblems(staging)).toEqual([]);
+    const propertiesOf = (certificate: Mutable): Mutable => inside(certificate, 'properties');
+    // Another environment's certificate.
+    expect(
+      certificateProblems(
+        changed(APP_CERTIFICATE, (certificate) => {
+          certificate.id = `${String(environment?.id)}-second/managedCertificates/mc-agentx-stg-app`;
+        }),
+      ),
+    ).toEqual([`${app}: must be a certificate of this deployment's Container Apps environment`]);
+    // A certificate for a host no door serves, which leaves the app door's host without one.
+    expect(
+      certificateProblems(
+        changed(APP_CERTIFICATE, (certificate) => (propertiesOf(certificate).subjectName = 'other.example.invalid')),
+      ),
+    ).toEqual([
+      `${app}: is for "other.example.invalid", a host no door serves`,
+      'the deployment: needs one certificate for "app.example.invalid"; the snapshot has 0',
+    ]);
+    // The door moved to another host, its certificate left behind.
+    expect(
+      certificateProblems(
+        changed(named(/\/rtagentxstgapp$/), (door) => {
+          first(at(door, 'properties', 'customDomains')).name = 'new.example.invalid';
+        }),
+      ),
+    ).toEqual([
+      `${app}: is for "app.example.invalid", a host no door serves`,
+      'the deployment: needs one certificate for "new.example.invalid"; the snapshot has 0',
+    ]);
+    // Any validation but HTTP, or none said.
+    for (const validation of ['TXT', 'CNAME']) {
+      expect(
+        certificateProblems(
+          changed(APP_CERTIFICATE, (certificate) => (propertiesOf(certificate).domainControlValidation = validation)),
+        ),
+      ).toEqual([
+        `${app}: must be validated by HTTP, as a door's host with an A record is; it says ${JSON.stringify(validation)}`,
+      ]);
+    }
+    expect(
+      certificateProblems(
+        changed(APP_CERTIFICATE, (certificate) => delete propertiesOf(certificate).domainControlValidation),
+      ),
+    ).toEqual([`${app}: must be validated by HTTP, as a door's host with an A record is; it says undefined`]);
+    // A door's certificate missing, or made twice.
+    expect(certificateProblems(without(APP_CERTIFICATE))).toEqual([
+      'the deployment: needs one certificate for "app.example.invalid"; the snapshot has 0',
+    ]);
+    expect(certificateProblems(withExtra(structuredClone(appCertificate) as unknown as Mutable))).toEqual([
+      'the deployment: needs one certificate for "app.example.invalid"; the snapshot has 2',
+    ]);
+    // Certificates outside the UAE or untagged are the generic rules' to refuse.
+    expect(brokenRules(changed(APP_CERTIFICATE, (certificate) => (certificate.location = 'westeurope')))).toEqual([
+      'in-country',
+    ]);
+    expect(brokenRules(changed(CERTIFICATE, (certificate) => delete certificate.tags))).toEqual(['tags']);
   });
 
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {

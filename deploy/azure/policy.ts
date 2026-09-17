@@ -46,6 +46,7 @@ export type RuleId =
   | 'jobs'
   | 'apps'
   | 'public-doors'
+  | 'door-certificates'
   | 'workload-secrets'
   | 'container-telemetry';
 
@@ -72,6 +73,7 @@ const TYPES = {
   environment: 'Microsoft.App/managedEnvironments',
   app: 'Microsoft.App/containerApps',
   door: 'Microsoft.App/managedEnvironments/httpRouteConfigs',
+  certificate: 'Microsoft.App/managedEnvironments/managedCertificates',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   job: 'Microsoft.App/jobs',
   network: 'Microsoft.Network/virtualNetworks',
@@ -1704,6 +1706,45 @@ const publicDoors: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * The doors' certificates (ADR-002 Amendment G2e): a door binds its host's
+ * managed certificate once one exists and serves plain http until then, so the
+ * host of every door has exactly one, in this deployment's environment,
+ * validated by HTTP as a host with an A record is (Microsoft); and none is made
+ * for a host no door serves.
+ */
+const doorCertificates: Check = (snapshot, _expected, add) => {
+  const environments = ofType(snapshot, TYPES.environment).map((resource) => resource.id);
+  const hosts = ofType(snapshot, TYPES.door).flatMap((door) =>
+    list(at(door.properties, 'customDomains')).map((host) => at(host, 'name')),
+  );
+  const found = ofType(snapshot, TYPES.certificate);
+  for (const certificate of found) {
+    const problem = (message: string): void => {
+      add({ rule: 'door-certificates', resource: certificate.name, message });
+    };
+    if (!environments.some((id) => certificate.id.startsWith(`${id}/managedCertificates/`))) {
+      problem("must be a certificate of this deployment's Container Apps environment");
+    }
+    const subject = at(certificate.properties, 'subjectName');
+    if (!hosts.includes(subject)) problem(`is for ${JSON.stringify(subject)}, a host no door serves`);
+    const validation = at(certificate.properties, 'domainControlValidation');
+    if (validation !== 'HTTP') {
+      problem(`must be validated by HTTP, as a door's host with an A record is; it says ${JSON.stringify(validation)}`);
+    }
+  }
+  for (const host of hosts) {
+    const count = found.filter((certificate) => at(certificate.properties, 'subjectName') === host).length;
+    if (count !== 1) {
+      add({
+        rule: 'door-certificates',
+        resource: 'the deployment',
+        message: `needs one certificate for ${JSON.stringify(host)}; the snapshot has ${String(count)}`,
+      });
+    }
+  }
+};
+
+/**
  * A secret read from a vault: the vault's id and the name asked for. A version
  * would be a further part of that name, which the rule refuses by comparing it
  * with the secret's own (a mutation pass showed narrowing the pattern here as
@@ -1872,6 +1913,7 @@ const CHECKS: readonly Check[] = [
   jobs,
   apps,
   publicDoors,
+  doorCertificates,
   workloadSecrets,
   containerTelemetry,
 ];

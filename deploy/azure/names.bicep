@@ -1,8 +1,9 @@
 // Every name an Agent X deployment gives Azure, once (ADR-002 Amendment G2c).
 // The foundation (main.bicep) creates its resources under these names; the
-// secrets deployment (secrets.bicep) and the apps and jobs (apps.bicep) find
-// the vault, the environment and the identities by them. Nothing here depends
-// on a deployment, so all three import it.
+// secrets deployment (secrets.bicep), the apps and jobs (apps.bicep) and the
+// doors' certificates (certificates.bicep) find the vault, the environment and
+// the identities by them. Nothing here depends on a deployment, so every one of
+// them imports it.
 
 // Every app, each with an identity of its own: the API, Zitadel and its login
 // pages. The worker joins in Phase 4.
@@ -51,6 +52,10 @@ func appName(environment string, workload string) string => 'ca-agentx-${shortNa
 @export()
 @description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
 func doorName(environment string, door string) string => 'rtagentx${shortName(environment)}${door}'
+
+@export()
+@description('The managed certificate for a public door\'s host (G2e-3), by the door.')
+func certificateName(environment string, door string) string => 'mc-agentx-${shortName(environment)}-${door}'
 
 @export()
 @description('The private network\'s address space (network.bicep divides it). Written here rather than in main.bicep alone, because the apps deployment needs the apps subnet\'s range and must not spell it a second time.')
