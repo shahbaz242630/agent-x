@@ -292,12 +292,26 @@ jobs:
       # The digest is what gets signed and what a deployment names. It comes
       # from this push (the local image's record of it), never from the tag,
       # which anyone who can push could move; the registry must then serve it.
+      # GitHub's registry sometimes refuses a push with "unknown blob"; pushing
+      # the same local image again is safe, so a failed push is retried.
       - name: Push
         id: push
         env:
           COMMIT: ${{ github.sha }}
         run: |
-          docker push --quiet "${IMAGE}:${COMMIT}"
+          pushed=false
+          for attempt in 1 2 3; do
+            if docker push --quiet "${IMAGE}:${COMMIT}"; then
+              pushed=true
+              break
+            fi
+            echo "Push attempt ${attempt} of 3 failed."
+            if [ "${attempt}" -lt 3 ]; then sleep 15; fi
+          done
+          if [ "${pushed}" != true ]; then
+            echo "::error::Pushing ${IMAGE}:${COMMIT} failed 3 times."
+            exit 1
+          fi
           digests=()
           for ref in $(docker image inspect "${IMAGE}:${COMMIT}" --format '{{range .RepoDigests}}{{.}} {{end}}'); do
             candidate="${ref#"${IMAGE}@"}"
