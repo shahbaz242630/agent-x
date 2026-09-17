@@ -220,6 +220,27 @@ var zitadelDatabase = [
   }
 ]
 
+// How Zitadel tells its processes apart in the IDs it makes (the first real
+// setup run, S19). Its defaults are the container's private address, which a
+// Container Apps replica doesn't have in the ranges Zitadel counts as private,
+// and then Google Cloud's metadata server, a call out that can only fail here;
+// with both failing, setup panicked. Every replica and job run has a hostname
+// of its own, which Zitadel hashes to the 16 bits it needs.
+var zitadelMachine = [
+  {
+    name: 'ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED'
+    value: 'false'
+  }
+  {
+    name: 'ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED'
+    value: 'true'
+  }
+  {
+    name: 'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED'
+    value: 'false'
+  }
+]
+
 // What Zitadel writes, and what it must not send anywhere (ADR-013,
 // SEC-DATA-08): JSON lines at info level, which the workspace collects; no
 // daily report to zitadel.com (it carries every instance's domains and counts)
@@ -429,7 +450,7 @@ var jobs = [
     args: ['init', 'zitadel']
     timeoutSeconds: 900
     files: []
-    settings: concat(zitadelDatabase, zitadelLogging)
+    settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
   }
   {
     // Zitadel's setup steps: the first instance, its admin and the rules every
@@ -452,7 +473,7 @@ var jobs = [
         setting: ''
       }
     ]
-    settings: concat(zitadelDatabase, zitadelLogging, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
+    settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
   }
 ]
 
@@ -552,7 +573,7 @@ var apps = [
         setting: ''
       }
     ]
-    settings: concat(zitadelDatabase, zitadelLogging, zitadelAddress, [
+    settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, [
       // The login pages' system user: the file its public half is in, and the
       // one role they need. `Path` rather than `KeyData`, so the key is read
       // from the mount and never sits in an environment — and because this is
