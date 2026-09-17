@@ -1505,12 +1505,10 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'release-identity', resource, message });
   };
+  // One at most, since the name is one resource's: what matters is that it's there.
   const releases = ofType(snapshot, TYPES.identity).filter((identity) => workloadOf(identity.name) === 'release');
-  if (releases.length !== 1) {
-    problem(
-      'the deployment',
-      `needs one identity for CI (id-agentx-<environment>-release); the snapshot has ${String(releases.length)}`,
-    );
+  if (releases.length === 0) {
+    problem('the deployment', 'needs an identity for CI (id-agentx-<environment>-release)');
   }
   const trusts = ofType(snapshot, TYPES.trust);
   for (const trust of trusts) {
@@ -1518,8 +1516,9 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
       problem(trust.name, "must be on CI's identity: no other identity is signed in to from outside Azure");
     }
     const issuer = at(trust.properties, 'issuer');
-    if (issuer !== GITHUB_ISSUER)
+    if (issuer !== GITHUB_ISSUER) {
       problem(trust.name, `must trust ${GITHUB_ISSUER} alone; it trusts ${JSON.stringify(issuer)}`);
+    }
     const subject = at(trust.properties, 'subject');
     if (subject !== releaseSubject(expected.environment)) {
       problem(

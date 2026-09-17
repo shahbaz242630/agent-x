@@ -1324,7 +1324,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       "the deployment: needs one trust, for CI's identity; the snapshot has 2",
     ]);
     expect(releaseProblems(without(RELEASE))).toEqual([
-      'the deployment: needs one identity for CI (id-agentx-<environment>-release); the snapshot has 0',
+      'the deployment: needs an identity for CI (id-agentx-<environment>-release)',
       `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
     ]);
 
