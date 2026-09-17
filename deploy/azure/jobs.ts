@@ -6,16 +6,17 @@
 //   node deploy/azure/jobs.ts run zitadel-init
 //   node deploy/azure/jobs.ts run zitadel-setup
 //
-// `run` starts a job and waits for that run to end. `start` only starts it, and
-// `wait <job> <run>` only waits, so a run can be started in one place and
-// watched from another. Nothing is asked and no secret passes through here:
-// each job reads its own from the vault (apps.bicep).
+// `run` starts a job, waits for that run to end, then reads the run's log from
+// the workspace. `start` only starts it, and `wait <job> <run>` does the rest,
+// so a run can be started in one place and watched from another; `wait` on a
+// run that has ended reads its log at once. Nothing is asked and no secret
+// passes through here: each job reads its own from the vault (apps.bicep).
 //
 // A job is never started while a run of it hasn't ended: Container Apps would
 // run both side by side, and two set-up runs at once race on the same roles.
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
+import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 
 /** The jobs, by the work each does, in the order a first deploy runs them (names.bicep); a test holds the two equal. */
 export const JOBS = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as const;
@@ -37,6 +38,26 @@ const POLL_MS = 15_000;
  */
 const START_ALLOWANCE_SECONDS = 300;
 
+/** The workspace the apps and jobs log to (names.bicep); a test holds the two equal. */
+export const WORKSPACE = 'log-agentx-stg';
+
+/** Log Analytics' query API, and the audience its token is for (the `.azure.com` one is refused, S19). */
+const LOG_API = 'https://api.loganalytics.azure.com/v1/workspaces/';
+const LOG_AUDIENCE = 'https://api.loganalytics.io';
+
+/**
+ * How long after a run's end its log may still be arriving: a container's
+ * lines reach the workspace 5 to 10 minutes after they are written, the
+ * platform's within a minute (S19).
+ */
+const LOG_DELAY_MS = 15 * 60_000;
+
+/** How often the log is read while it arrives; two readings this far apart with the same lines settle it. */
+const LOG_POLL_MS = 60_000;
+
+/** How far either side of the run the log is searched, for clocks that disagree a little. */
+const LOG_MARGIN_MS = 5 * 60_000;
+
 export type Request =
   | { readonly command: 'start' | 'run'; readonly job: Job }
   | { readonly command: 'wait'; readonly job: Job; readonly execution: string };
@@ -49,9 +70,9 @@ export class UsageError extends Error {
 }
 
 export const USAGE = `Usage:
-  node deploy/azure/jobs.ts run <job>             start the job and wait for the run to end
+  node deploy/azure/jobs.ts run <job>             start the job, wait for the run to end, read its log
   node deploy/azure/jobs.ts start <job>           start it only
-  node deploy/azure/jobs.ts wait <job> <run>      wait for a run that has started
+  node deploy/azure/jobs.ts wait <job> <run>      wait for a run to end, read its log
 The jobs, in the order a first deploy runs them: ${JOBS.join(', ')}`;
 
 const isJob = (value: string | undefined): value is Job => JOBS.some((job) => job === value);
@@ -93,7 +114,8 @@ export interface JobSteps {
   readonly sleep: (ms: number) => Promise<void>;
 }
 
-const SUBSCRIPTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A subscription's or a workspace's ID, as Azure writes it. */
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A job in the subscription the operator is signed in to. */
 interface Target {
@@ -167,8 +189,15 @@ function after(job: Job): string {
     : `In a first deploy, the next is: node deploy/azure/jobs.ts run ${next}`;
 }
 
-/** Waits for a run to end, `limit` being the job's time limit: 0 when it succeeded, 1 for any other end or none in time. */
-async function waitFor(steps: JobSteps, target: Target, execution: string, limit: number): Promise<number> {
+/** How a run ended: its state, and its start and end as Azure gave them. */
+interface Ended {
+  readonly status: string;
+  readonly began: string;
+  readonly ended: string;
+}
+
+/** Waits for a run to end, `limit` being the job's time limit: how it ended, or nothing when it didn't in time. */
+async function waitFor(steps: JobSteps, target: Target, execution: string, limit: number): Promise<Ended | undefined> {
   const deadline = steps.now().getTime() + (limit + START_ALLOWANCE_SECONDS) * 1000;
   steps.say(`Waiting for ${execution} to end (the job gives up after ${String(limit)} s)...`);
   let last: string | undefined;
@@ -193,26 +222,140 @@ async function waitFor(steps: JobSteps, target: Target, execution: string, limit
       const seconds = (new Date(ended).getTime() - new Date(began).getTime()) / 1000;
       const took = Number.isFinite(seconds) ? ` (${String(seconds)} s)` : '';
       steps.say(`${execution} ended ${status}: started ${clock(began)}, ended ${clock(ended)}${took}.`);
-      if (status !== 'Succeeded') {
-        steps.say('Read its logs before starting anything else.');
-        return 1;
-      }
-      steps.say(after(target.job));
-      return 0;
+      return { status, began, ended };
     }
     if (steps.now().getTime() >= deadline) {
       steps.say(
         `${execution} hadn't ended ${String(limit + START_ALLOWANCE_SECONDS)} s after the wait began. To wait again: node deploy/azure/jobs.ts wait ${target.job} ${execution}`,
       );
-      return 1;
+      return undefined;
     }
     await steps.sleep(POLL_MS);
   }
 }
 
+/** The workspace's own ID, which the query API takes. */
+function workspaceId(steps: JobSteps, subscription: string): string {
+  const workspace = azJson(steps.az, [
+    'rest',
+    '--method',
+    'get',
+    '--url',
+    `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${WORKSPACE}?api-version=2025-02-01`,
+  ]) as { properties?: { customerId?: unknown } };
+  const id = text(workspace.properties?.customerId);
+  if (!GUID.test(id)) throw new Error(`Azure gave no ID for ${WORKSPACE}, so the log can't be read.`);
+  return id;
+}
+
+/**
+ * Everything logged about one run, oldest first: the platform's lines (which
+ * name the run in the replica's name, or in the text for the run's own events)
+ * and the container's (whose group is named after the run). Both names are
+ * held to `isRunOf` before they get here, so neither can end a string early.
+ */
+const logQuery = (job: Job, execution: string): string =>
+  [
+    'union',
+    `(ContainerAppSystemLogs | where JobName == '${jobName(job)}' and (ReplicaName startswith_cs '${execution}-' or Log contains_cs "'${execution}'") | project TimeGenerated, Source = 'platform', Reason, Text = Log),`,
+    `(ContainerAppConsoleLogs | where JobName == '${jobName(job)}' and ContainerGroupName startswith_cs '${execution}-' | project TimeGenerated, Source = Stream, Reason = '', Text = Log)`,
+    '| order by TimeGenerated asc',
+  ].join('\n');
+
+interface LogLine {
+  readonly time: string;
+  readonly source: string;
+  readonly reason: string;
+  readonly text: string;
+}
+
+/** The query's rows, or an error when the answer isn't the table asked for. */
+function logLines(answer: unknown): LogLine[] {
+  const table = (answer as { tables?: readonly { columns?: readonly { name?: unknown }[]; rows?: unknown }[] })
+    .tables?.[0];
+  const columns = (table?.columns ?? []).map((column) => text(column.name));
+  const wanted = ['TimeGenerated', 'Source', 'Reason', 'Text'];
+  if (!Array.isArray(table?.rows) || !wanted.every((column) => columns.includes(column))) {
+    throw new Error("Log Analytics' answer wasn't the table asked for.");
+  }
+  return (table.rows as readonly unknown[]).map((row) => {
+    if (!Array.isArray(row)) throw new Error("Log Analytics' answer held a row that isn't one.");
+    const cell = (column: string): string => text((row as readonly unknown[])[columns.indexOf(column)]);
+    return { time: cell('TimeGenerated'), source: cell('Source'), reason: cell('Reason'), text: cell('Text') };
+  });
+}
+
+/** The HH:MM:SS of a time the workspace gave. */
+const TIME_OF_DAY = /T(\d{2}:\d{2}:\d{2})/;
+
+/** A line as the operator reads it: the time, where it came from, what it says. */
+function shown(line: LogLine): string {
+  const time = TIME_OF_DAY.exec(line.time)?.[1] ?? line.time;
+  return `  ${time}  ${line.source.padEnd(8)}  ${line.reason === '' ? '' : `${line.reason}: `}${line.text}`;
+}
+
+/**
+ * Reads a run's log once it has all arrived, and shows it. It has arrived when
+ * the platform has logged the container's end and two readings a minute apart
+ * hold the same container lines, or when the run ended long enough ago that
+ * nothing more will come.
+ */
+async function readLog(steps: JobSteps, target: Target, execution: string, run: Ended): Promise<void> {
+  const began = Date.parse(run.began);
+  const ended = Date.parse(run.ended);
+  if (!Number.isFinite(began) || !Number.isFinite(ended)) {
+    throw new Error(`Azure gave no start and end for ${execution}, so its log can't be looked for.`);
+  }
+  const workspace = workspaceId(steps, target.subscription);
+  const query = logQuery(target.job, execution);
+  let previous: number | undefined;
+  for (let reading = 0; ; reading += 1) {
+    const now = steps.now().getTime();
+    const timespan = `${new Date(began - LOG_MARGIN_MS).toISOString()}/${new Date(Math.max(now, ended) + LOG_MARGIN_MS).toISOString()}`;
+    const lines = logLines(
+      azJson(steps.az, [
+        'rest',
+        '--method',
+        'post',
+        '--url',
+        `${LOG_API}${workspace}/query`,
+        '--resource',
+        LOG_AUDIENCE,
+        '--body',
+        JSON.stringify({ query, timespan }),
+      ]),
+    );
+    const fromContainer = lines.filter((line) => line.source !== 'platform').length;
+    const terminated = lines.some((line) => line.reason === 'ContainerTerminated');
+    const late = now >= ended + LOG_DELAY_MS;
+    if (late || (terminated && fromContainer > 0 && fromContainer === previous)) {
+      steps.say(
+        `${execution}'s log, ${String(lines.length - fromContainer)} from the platform and ${String(fromContainer)} from the container:`,
+      );
+      for (const line of lines) steps.say(shown(line));
+      if (!terminated) {
+        steps.say("Azure logged no end for the container, so these may not be all the run's lines.");
+      } else if (fromContainer === 0) {
+        steps.say('No line from the container reached the workspace.');
+      } else if (previous !== undefined && fromContainer !== previous) {
+        // Late with the lines still changing: a run read long after it ended has had no earlier reading to differ from.
+        steps.say("The container's lines were still arriving 15 minutes after the run ended, so more may be missing.");
+      }
+      return;
+    }
+    if (reading === 0) {
+      steps.say(
+        `Reading ${execution}'s log: Azure delivers a container's lines up to 10 minutes after they are written, so this can take that long...`,
+      );
+    }
+    previous = fromContainer;
+    await steps.sleep(LOG_POLL_MS);
+  }
+}
+
 export async function jobs(request: Request, steps: JobSteps): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
-  if (!SUBSCRIPTION_ID.test(subscription)) throw new Error('Azure gave no subscription ID: is the CLI signed in?');
+  if (!GUID.test(subscription)) throw new Error('Azure gave no subscription ID: is the CLI signed in?');
   const target = { subscription, job: request.job };
   // Read first, so a job that isn't deployed is refused before anything starts.
   const limit = timeLimit(steps, target);
@@ -223,9 +366,18 @@ export async function jobs(request: Request, steps: JobSteps): Promise<number> {
       return 0;
     }
     case 'run':
-      return waitFor(steps, target, start(steps, target), limit);
-    case 'wait':
-      return waitFor(steps, target, request.execution, limit);
+    case 'wait': {
+      const execution = 'execution' in request ? request.execution : start(steps, target);
+      const run = await waitFor(steps, target, execution, limit);
+      if (run === undefined) return 1;
+      await readLog(steps, target, execution, run);
+      if (run.status !== 'Succeeded') {
+        steps.say('Read the lines above before starting anything else.');
+        return 1;
+      }
+      steps.say(after(target.job));
+      return 0;
+    }
   }
 }
 
