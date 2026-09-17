@@ -2,7 +2,7 @@
 // apps and jobs run, in the apps subnet of our private network (network.bicep).
 // This deployment, run by hand with a what-if first, creates the environment
 // and one identity per app and job. The apps and jobs themselves come in their
-// own deployment (G2d), which CI runs with only an image digest and the hosts.
+// own deployment (G2d), also run by hand; CI only moves our image (G4).
 //
 // - workload profiles, Consumption only: nothing is billed while nothing runs,
 //   but the network's load balancer and IPs (ADR-002 Amendment G1)
