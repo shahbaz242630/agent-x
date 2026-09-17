@@ -172,8 +172,12 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
   it('tries the push three times before failing, since the registry sometimes refuses one ("unknown blob")', () => {
     const run = steps('image-publish').find((step) => step.name === 'Push')?.run ?? '';
     expect(run.match(/docker push /g)).toHaveLength(1);
-    expect(run).toContain('for attempt in 1 2 3; do\n  if docker push --quiet "${IMAGE}:${COMMIT}"; then');
-    expect(run).toContain('if [ "${pushed}" != true ]; then');
+    expect(run).toContain(
+      'pushed=false\nfor attempt in 1 2 3; do\n  if docker push --quiet "${IMAGE}:${COMMIT}"; then\n    pushed=true\n    break\n  fi\n',
+    );
+    expect(run).toContain(
+      'if [ "${pushed}" != true ]; then\n  echo "::error::Pushing ${IMAGE}:${COMMIT} failed 3 times."\n  exit 1\nfi\n',
+    );
     expect(run.indexOf('docker push ')).toBeLessThan(run.indexOf('docker image inspect'));
   });
 
