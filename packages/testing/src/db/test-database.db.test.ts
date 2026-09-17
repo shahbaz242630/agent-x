@@ -104,6 +104,25 @@ describe(`createTestDatabase (Postgres ${server.version})`, () => {
     }
   });
 
+  it('keeps a pooled session the server ends from stopping the run, and opens a fresh one', async () => {
+    // What a drop does to a pooled connection still closing: the pool reports
+    // the server's reason as an 'error' event, which stops the test process if
+    // nothing listens (a CI run on PR #43, S19).
+    const extra = await createTestDatabase(server, { schema: 'empty' });
+    try {
+      const pidOf = async (): Promise<number | undefined> =>
+        (await extra.as('app').query<{ pid: number }>('select pg_catalog.pg_backend_pid() as pid'))[0]?.pid;
+      const ended = await pidOf();
+      // With a timeout, this returns once the process has gone; the idle connection has heard by then.
+      await first.as('admin').query('select pg_catalog.pg_terminate_backend($1, 5000)', [ended]);
+      const fresh = await pidOf();
+      expect(fresh).toBeDefined();
+      expect(fresh).not.toBe(ended);
+    } finally {
+      await extra.drop();
+    }
+  });
+
   it('deletes the database on drop, even with a session still open', async () => {
     const extra = await createTestDatabase(server, { schema: 'empty' });
     // A session the harness doesn't know about, like a pool a test forgot to close.
