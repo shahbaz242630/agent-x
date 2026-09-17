@@ -924,6 +924,10 @@ describe('deploy apps', () => {
     expect(done.terminal.said.join('\n')).not.toContain('--keep-running');
     expect(done.terminal.said).toContain('  ca-agentx-stg-api: Succeeded');
     expect(done.terminal.said).toContain('  job-agentx-stg-db-setup: Succeeded');
+    // Which jobs come next depends on the deploy, so the tool says when each is needed.
+    expect(done.terminal.said.slice(-1)[0]).toMatch(
+      /^On a first deploy, run the four jobs next, in order \(deploy\/azure\/jobs\.ts\)\. Later, run migrate when a release adds a migration, and zitadel-setup when Zitadel moves to a new version\.$/,
+    );
   });
 
   it('keeps one replica of each app running when asked, and says so before and after', async () => {
