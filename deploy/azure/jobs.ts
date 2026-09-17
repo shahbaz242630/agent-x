@@ -56,6 +56,18 @@ The jobs, in the order a first deploy runs them: ${JOBS.join(', ')}`;
 
 const isJob = (value: string | undefined): value is Job => JOBS.some((job) => job === value);
 
+/** The part of a run's name Azure gives it, after the job's name and a hyphen. */
+const RUN_SUFFIX = /^[a-z0-9]+$/;
+
+/**
+ * Whether a name is one of the job's runs. A fixed pattern and a prefix, never
+ * a pattern built from what was typed (CodeQL js/regex-injection).
+ */
+const isRunOf = (job: Job, execution: string): boolean => {
+  const prefix = `${jobName(job)}-`;
+  return execution.startsWith(prefix) && RUN_SUFFIX.test(execution.slice(prefix.length));
+};
+
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, job, ...rest] = argv;
@@ -68,8 +80,7 @@ export function parseArguments(argv: readonly string[]): Request {
     return { command, job };
   }
   const [execution, ...extra] = rest;
-  // A run is named after its job, with a suffix Azure gives it.
-  if (execution === undefined || extra.length > 0 || !new RegExp(`^${jobName(job)}-[a-z0-9]+$`).test(execution)) {
+  if (execution === undefined || extra.length > 0 || !isRunOf(job, execution)) {
     throw new UsageError(`wait takes the job and one of its runs, named ${jobName(job)}-<suffix>`);
   }
   return { command, job, execution };
@@ -135,7 +146,7 @@ function start(steps: JobSteps, target: Target): string {
   }
   const started = azJson(steps.az, ['containerapp', 'job', 'start', ...jobArgs(target)]) as { name?: unknown };
   const execution = text(started.name);
-  if (!execution.startsWith(`${name}-`)) {
+  if (!isRunOf(target.job, execution)) {
     throw new Error(`Azure started ${name} but named the run "${execution}", which isn't one of its runs.`);
   }
   steps.say(`Started ${execution}.`);

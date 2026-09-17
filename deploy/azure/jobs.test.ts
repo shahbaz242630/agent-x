@@ -297,7 +297,14 @@ describe('start', () => {
     const notList = await run(['start', 'db-setup'], { runs: { value: [] } });
     expect(notList.error).toMatchObject({ message: "Azure's list of job-agentx-stg-db-setup's runs wasn't a list." });
     expect(notList.az.sequence).not.toContain('containerapp job start');
-    for (const started of ['job-agentx-stg-migrate-o2jp673', 'job-agentx-stg-db-setup', '']) {
+    // Held to the same shape as a run typed on the command line.
+    for (const started of [
+      'job-agentx-stg-migrate-o2jp673',
+      'job-agentx-stg-db-setup',
+      'job-agentx-stg-db-setup-',
+      'job-agentx-stg-db-setup-o2jp673 x',
+      '',
+    ]) {
       const odd = await run(['run', 'db-setup'], { started });
       expect(odd.error).toMatchObject({
         message: `Azure started job-agentx-stg-db-setup but named the run "${started}", which isn't one of its runs.`,
