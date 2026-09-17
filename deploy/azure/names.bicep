@@ -49,6 +49,10 @@ func jobName(environment string, workload string) string => 'job-agentx-${shortN
 func appName(environment string, workload string) string => 'ca-agentx-${shortName(environment)}-${workload}'
 
 @export()
+@description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
+func doorName(environment string, door string) string => 'rtagentx${shortName(environment)}${door}'
+
+@export()
 @description('The private network\'s address space (network.bicep divides it). Written here rather than in main.bicep alone, because the apps deployment needs the apps subnet\'s range and must not spell it a second time.')
 var networkAddressSpace = '10.40.0.0/16'
 

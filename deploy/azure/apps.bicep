@@ -1,8 +1,7 @@
 // Agent X's apps and jobs on Azure (ADR-002 Amendment G2d): the four jobs that
 // prepare a deployment, each started by hand, and the three apps that serve
-// traffic (the API, Zitadel and its login pages). The public doors that put an
-// app on a host name join this file in G2e; until then nothing here is reachable
-// from outside the environment. A deployment of its own, into the resource group
+// traffic (the API, Zitadel and its login pages), and the public doors that put
+// an app on a host name (G2e). A deployment of its own, into the resource group
 // main.bicep creates and after secrets.bicep has written the secrets:
 //
 //   bicep snapshot deploy/azure/staging.apps.bicepparam --resource-group rg-agentx-staging
@@ -21,7 +20,7 @@
 //   exactly which (`SECRETS_IN_ENVIRONMENT`)
 // - every app's ingress is internal, and the environment routes one app to
 //   another by name inside it. The environment has a public IP, but an app is
-//   only ever public because a route config says so (G2e), never by accident
+//   only ever public because a door below says so (G2e), never by accident
 // - the apps scale as the environment allows, within two limits: the API and
 //   Zitadel each hold something one replica's (a rate limit's counts in memory;
 //   Zitadel's projections and its ten database connections), and staging keeps
@@ -45,6 +44,7 @@ import {
   appName
   appsPrefix
   appWorkloads
+  doorName
   identityName
   jobName
   jobWorkloads
@@ -484,8 +484,8 @@ var jobs = [
 // the port it answers on and how many replicas may run.
 //
 // Every one of them has internal ingress. The environment has a public IP, but
-// nothing here is a door: the doors are the route configs of G2e, so an app is
-// only ever public because a route says so.
+// nothing here is a door: the doors are the route configs at the end of this
+// file (G2e), so an app is only ever public because a door names it.
 var apps = [
   {
     // The API (Product-Documentation/API.md), as the app role and no other.
@@ -523,7 +523,7 @@ var apps = [
         value: 'agentx_app'
       }
       // The one address a browser may send a change from (SEC-WEB-01). The
-      // route config of G2e is what serves that host.
+      // app door (below) is what serves that host.
       {
         name: 'AGENTX_PUBLIC_ORIGIN'
         value: 'https://${appHost}'
@@ -748,7 +748,7 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
       workloadProfileName: 'Consumption'
       configuration: {
         // Internal: reachable inside the environment only. The public doors are
-        // the route configs (G2e), so no app is a door by accident.
+        // the route configs (below), so no app is a door by accident.
         ingress: {
           external: false
           targetPort: app.targetPort
@@ -830,5 +830,64 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
             ]
       }
     }
+  }
+]
+
+// The public doors (G2e): the only way in from the internet. A route config can
+// send traffic to an app whose ingress is internal, so each door names the apps
+// it reaches here and nowhere else, and the policy rule `public-doors` holds
+// every door to its own list. Each door is one host, which the environment
+// serves once the host's DNS records point at it (G3b):
+// - `Auto` binds the managed certificate Azure makes for the host (G2e-3) once
+//   it exists, and again on every later deployment (Microsoft: "If a managed
+//   certificate is already created for this domain, it is added to the route
+//   automatically"). Until then the host answers over plain http only, so
+//   G2e-3 adds each door's certificate to this same deployment
+// - rules match on a path's prefix, and each sends its matches to the apps it
+//   names, unchanged: no rewrite, no revision or label pinned, so a door always
+//   reaches the app's live revision
+var doors = [
+  {
+    // The app host: every path to the API, which answers anything it doesn't
+    // serve with its own 404 (Product-Documentation/API.md).
+    door: 'app'
+    host: appHost
+    rules: [
+      {
+        description: 'Every path on the app host goes to the API'
+        prefixes: ['/']
+        targets: ['api']
+      }
+    ]
+  }
+]
+
+resource publicDoors 'Microsoft.App/managedEnvironments/httpRouteConfigs@2026-01-01' = [
+  for door in doors: {
+    parent: appsEnvironment
+    name: doorName(environment, door.door)
+    properties: {
+      customDomains: [
+        {
+          name: door.host
+          bindingType: 'Auto'
+        }
+      ]
+      rules: map(door.rules, rule => {
+        description: rule.description
+        routes: map(rule.prefixes, prefix => {
+          match: {
+            prefix: prefix
+          }
+        })
+        targets: map(rule.targets, workload => {
+          containerApp: appName(environment, workload)
+        })
+      })
+    }
+    // A door names its apps, so they are made first.
+    dependsOn: [
+      deployedApps
+    ]
   }
 ]

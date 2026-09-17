@@ -45,6 +45,7 @@ export type RuleId =
   | 'secret-access'
   | 'jobs'
   | 'apps'
+  | 'public-doors'
   | 'workload-secrets'
   | 'container-telemetry';
 
@@ -70,6 +71,7 @@ const TYPES = {
   dnsZone: 'Microsoft.Network/privateDnsZones',
   environment: 'Microsoft.App/managedEnvironments',
   app: 'Microsoft.App/containerApps',
+  door: 'Microsoft.App/managedEnvironments/httpRouteConfigs',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
   job: 'Microsoft.App/jobs',
   network: 'Microsoft.Network/virtualNetworks',
@@ -204,6 +206,23 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
   api: "the rate limit's counts are one replica's, in memory",
   zitadel: "its projections are one replica's, and a second would take ten more database connections",
 };
+
+/**
+ * The public doors (ADR-002 Amendment G2e), by the part of the name `doorName`
+ * gives each after the environment's, with the apps each may reach. A route
+ * config can reach an app whose ingress is internal, so a door missing from
+ * this list, or one reaching an app its entry doesn't name, publishes an app
+ * nobody decided to publish.
+ */
+const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
+  app: ['api'],
+};
+
+/** How a door binds its host's certificate: a managed one once it exists, or one it names. `Disabled` is plain http. */
+const SECURE_BINDINGS: ReadonlySet<unknown> = new Set(['Auto', 'SniEnabled']);
+
+/** The ways a route matches a path. */
+const PATH_MATCHES = ['prefix', 'path', 'pathSeparatedPrefix'] as const;
 
 /**
  * Zitadel is two programs in two images (ADR-003 Amendment S10), and they are
@@ -1581,6 +1600,79 @@ const apps: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** A door by the part of its name after the environment's (`doorName`): `cae-…/rtagentxstgapp` is `app`. */
+const publicDoorOf = (name: string): string =>
+  name.slice(name.lastIndexOf('/') + 1).replace(/^rtagentx(?:stg|prd)/, '');
+
+/**
+ * The public doors (ADR-002 Amendment G2e), the only way in from the internet.
+ * Each is a door of this deployment's environment that `PUBLIC_DOORS` names,
+ * serves one host with a certificate binding that is never plain http alone,
+ * matches every route on exactly one path and passes it on unchanged, and
+ * reaches only the apps its entry names, at their live revision. Every door the
+ * list names is there once.
+ */
+const publicDoors: Check = (snapshot, _expected, add) => {
+  const environments = ofType(snapshot, TYPES.environment).map((resource) => resource.id);
+  const workloadsByApp = new Map<unknown, string>(
+    ofType(snapshot, TYPES.app).map((app) => [app.name, jobWorkloadOf(app.name)] as const),
+  );
+  const found = ofType(snapshot, TYPES.door);
+  for (const door of found) {
+    const problem = (message: string): void => {
+      add({ rule: 'public-doors', resource: door.name, message });
+    };
+    const listed = PUBLIC_DOORS[publicDoorOf(door.name)];
+    if (listed === undefined) {
+      problem(`isn't a door PUBLIC_DOORS names (${Object.keys(PUBLIC_DOORS).join(', ')}), so it may reach no app`);
+    }
+    const reaches = listed ?? [];
+    if (!environments.some((id) => door.id.startsWith(`${id}/httpRouteConfigs/`))) {
+      problem("must be a door of this deployment's Container Apps environment");
+    }
+    const hosts = list(at(door.properties, 'customDomains'));
+    if (hosts.length !== 1) problem(`must serve exactly one host; it names ${String(hosts.length)}`);
+    for (const host of hosts) {
+      if (!SECURE_BINDINGS.has(at(host, 'bindingType'))) {
+        problem(`must bind a certificate to ${text(at(host, 'name'))} (Auto or SniEnabled), never plain http alone`);
+      }
+    }
+    for (const rule of list(at(door.properties, 'rules'))) {
+      const routes = list(at(rule, 'routes'));
+      if (routes.length === 0) problem('must match each rule on at least one path');
+      for (const route of routes) {
+        if (PATH_MATCHES.filter((kind) => text(at(route, 'match', kind)) !== '').length !== 1) {
+          problem(`must match each route on exactly one of ${PATH_MATCHES.join(', ')}`);
+        }
+        if (!isEmpty(at(route, 'action'))) {
+          problem('must pass each path on as it came: a rewrite can take a request where no rule sends it');
+        }
+      }
+      for (const target of list(at(rule, 'targets'))) {
+        const app = at(target, 'containerApp');
+        if (!reaches.includes(workloadsByApp.get(app) ?? '')) {
+          problem(
+            `may reach ${reaches.length === 0 ? 'no app' : `only ${reaches.join(' and ')}`}; it reaches ${text(app)}`,
+          );
+        }
+        if (at(target, 'revision') !== undefined || at(target, 'label') !== undefined) {
+          problem("must reach an app's live revision, not a revision or label it pins");
+        }
+      }
+    }
+  }
+  for (const name of Object.keys(PUBLIC_DOORS)) {
+    const count = found.filter((door) => publicDoorOf(door.name) === name).length;
+    if (count !== 1) {
+      add({
+        rule: 'public-doors',
+        resource: 'the deployment',
+        message: `needs the ${name} door once; the snapshot has ${String(count)}`,
+      });
+    }
+  }
+};
+
 /**
  * A secret read from a vault: the vault's id and the name asked for. A version
  * would be a further part of that name, which the rule refuses by comparing it
@@ -1749,6 +1841,7 @@ const CHECKS: readonly Check[] = [
   secretAccess,
   jobs,
   apps,
+  publicDoors,
   workloadSecrets,
   containerTelemetry,
 ];
