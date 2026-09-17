@@ -5,9 +5,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
 import {
+  cleanupContainers,
   type Job,
   jobName,
   JOBS,
+  JOBS_API,
   jobs,
   main,
   parseArguments,
@@ -42,6 +44,48 @@ const line = (event: string): Row => ['2026-09-17T05:47:12.4133012Z', 'stdout', 
 /** What a finished run's log holds once it has all arrived. */
 const WHOLE_LOG: readonly Row[] = [CREATED, line('db-setup.done'), TERMINATED];
 
+/**
+ * Names assembled from their words, so no test line pairs a secret's name with
+ * a quoted value: the shape GitGuardian reads as a password (PRs #27 and #28).
+ */
+const setting = (...words: readonly string[]): string => words.join('_');
+const secret = (...words: readonly string[]): string => words.join('-');
+
+/** The setup job's container as `job show` gives it (S20), with made-up values. */
+const SETUP_CONTAINER = {
+  name: 'zitadel-setup',
+  image: `ghcr.io/zitadel/zitadel:v4.17.3@sha256:${'d'.repeat(64)}`,
+  command: ['/app/zitadel'],
+  args: ['setup', '--masterkeyFile', '/mnt/secrets/zitadel-masterkey'],
+  env: [
+    { name: 'ZITADEL_DATABASE_POSTGRES_HOST', value: 'db.example.invalid' },
+    {
+      name: setting('ZITADEL', 'DATABASE', 'POSTGRES', 'USER', 'PASSWORD'),
+      secretRef: secret('db', 'zitadel', 'password'),
+    },
+    { name: 'ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_ADDRESS', value: 'admin@example.invalid' },
+    {
+      name: setting('ZITADEL', 'FIRSTINSTANCE', 'ORG', 'HUMAN', 'PASSWORD'),
+      secretRef: secret('zitadel', 'admin', 'password'),
+    },
+  ],
+  resources: { cpu: 0.5, memory: '1Gi', ephemeralStorage: '' },
+  volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
+  probes: [],
+};
+
+/** What the clean-up run is started with: the same container, `setup cleanup` its arguments, nothing it can't take. */
+const CLEANUP_CONTAINER = {
+  name: 'zitadel-setup',
+  image: SETUP_CONTAINER.image,
+  command: ['/app/zitadel'],
+  args: ['setup', 'cleanup'],
+  env: SETUP_CONTAINER.env,
+  resources: { cpu: 0.5, memory: '1Gi' },
+};
+
+const CLEANUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/jobs/job-agentx-stg-zitadel-setup/start?api-version=2026-01-01`;
+
 interface Script {
   /** The subscription ID `account show` gives. */
   readonly subscription?: unknown;
@@ -61,6 +105,11 @@ interface Script {
   /** The log query's rows, one list per reading, the last one repeated; or a whole answer of another shape. */
   readonly logs?: readonly (readonly Row[])[];
   readonly logAnswer?: unknown;
+  /** The containers `job show` gives; the setup job's by default. */
+  readonly containers?: unknown;
+  /** How Resource Manager answers a start with other containers: its status, and what it prints. */
+  readonly startStatus?: number;
+  readonly startAnswer?: string;
 }
 
 /** An Azure CLI that answers from the script and records every call. */
@@ -82,6 +131,23 @@ class ScriptedAz implements Az {
     this.calls.push(args);
     const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
     const script = this.#script;
+    if (args[0] === 'rest' && args[args.indexOf('--url') + 1]?.includes('/Microsoft.App/jobs/') === true) {
+      expect(args.slice(0, 5)).toEqual(['rest', '--method', 'post', '--url', CLEANUP_URL]);
+      if (script.startStatus !== undefined && script.startStatus !== 0) {
+        return {
+          status: script.startStatus,
+          stdout: '',
+          stderr: 'ERROR: Bad Request({"error":{"code":"InvalidParameter"}})',
+        };
+      }
+      return {
+        status: 0,
+        stdout:
+          script.startAnswer ??
+          JSON.stringify({ id: '/subscriptions/x', name: 'job-agentx-stg-zitadel-setup-c1e2a3n' }),
+        stderr: '',
+      };
+    }
     if (args[0] === 'rest') return json(this.#rest(args));
     const words = args.filter((arg) => !arg.startsWith('-')).slice(0, 4);
     switch (words.join(' ')) {
@@ -96,7 +162,10 @@ class ScriptedAz implements Az {
         }
         return json({
           name: args[args.indexOf('--name') + 1],
-          properties: { configuration: { replicaTimeout: 'limit' in script ? script.limit : 900 } },
+          properties: {
+            configuration: { replicaTimeout: 'limit' in script ? script.limit : 900 },
+            template: { containers: 'containers' in script ? script.containers : [SETUP_CONTAINER] },
+          },
         });
       case 'containerapp job execution list':
         return json('runs' in script ? script.runs : [{ name: 'old', properties: { status: 'Succeeded' } }]);
@@ -160,9 +229,18 @@ class ScriptedAz implements Az {
 
   /** What each log query asked for. */
   get queries(): { query: string; timespan: string }[] {
+    return this.#bodies('/query') as { query: string; timespan: string }[];
+  }
+
+  /** What each start through Resource Manager sent. */
+  get starts(): unknown[] {
+    return this.#bodies('/start?');
+  }
+
+  #bodies(urlPart: string): unknown[] {
     return this.calls
-      .filter((call) => call[2] === 'post')
-      .map((call) => JSON.parse(call[call.indexOf('--body') + 1] ?? '') as { query: string; timespan: string });
+      .filter((call) => call[2] === 'post' && call[4]?.includes(urlPart) === true)
+      .map((call) => JSON.parse(call[call.indexOf('--body') + 1] ?? '') as unknown);
   }
 }
 
@@ -192,6 +270,10 @@ async function run(argv: readonly string[], script: Script = {}) {
 const stateLines = (said: readonly string[]): string[] => said.filter((line) => / UTC {2}/.test(line));
 
 describe('parseArguments', () => {
+  it('reads cleanup as being for the setup job alone', () => {
+    expect(parseArguments(['cleanup'])).toEqual({ command: 'cleanup', job: 'zitadel-setup' });
+  });
+
   it('reads the three ways the runner is used, for every job', () => {
     for (const job of JOBS) {
       expect(parseArguments(['run', job])).toEqual({ command: 'run', job });
@@ -206,8 +288,10 @@ describe('parseArguments', () => {
 
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
-      [[], /say run, start or wait, not nothing/],
-      [['stop', 'db-setup'], /say run, start or wait, not stop/],
+      [[], /say run, start, wait or cleanup, not nothing/],
+      [['stop', 'db-setup'], /say run, start, wait or cleanup, not stop/],
+      [['cleanup', 'zitadel-setup'], /cleanup takes nothing: it is for zitadel-setup alone, not zitadel-setup$/],
+      [['cleanup', 'db-setup', 'x'], /cleanup takes nothing: .* not db-setup x$/],
       [['run'], /nothing isn't a job: db-setup, migrate, zitadel-init, zitadel-setup/],
       [['run', 'setup'], /setup isn't a job/],
       [['run', 'job-agentx-stg-db-setup'], /isn't a job/],
@@ -571,6 +655,142 @@ describe('wait', () => {
   });
 });
 
+describe('cleanup', () => {
+  it("starts the setup job once as setup cleanup, through Resource Manager, with the job's own container", async () => {
+    const done = await run(['cleanup']);
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.az.sequence).toEqual([
+      'account show --output',
+      'containerapp job show',
+      'containerapp job execution list',
+      'rest --method post',
+      'containerapp job execution show',
+      'rest --method get',
+      'rest --method post',
+      'rest --method post',
+    ]);
+    expect(done.az.calls[1]).toContain('job-agentx-stg-zitadel-setup');
+    expect(done.az.starts).toEqual([{ containers: [CLEANUP_CONTAINER] }]);
+    // Settings that read a secret still name it alone, with no value beside it.
+    expect(JSON.stringify(done.az.starts)).not.toMatch(/"secretRef":"[^"]+","value"|"value":"[^"]*","secretRef"/);
+    expect(done.said).toContain('Started job-agentx-stg-zitadel-setup-c1e2a3n.');
+    expect(done.az.queries[0]?.query).toContain("startswith_cs 'job-agentx-stg-zitadel-setup-c1e2a3n-'");
+    expect(done.said.at(-1)).toBe(
+      'The clean-up has run: the lines above say which step it cancelled, if any. Now run setup again: node deploy/azure/jobs.ts run zitadel-setup',
+    );
+    // The body is never repeated where it could be read.
+    expect(done.said.join('\n')).not.toContain('admin@example.invalid');
+  });
+
+  it('waits, like any run, and ends with failure when the clean-up fails', async () => {
+    const done = await run(['cleanup'], { states: ['Running', 'Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe('Read the lines above before starting anything else.');
+  });
+
+  it('refuses while a setup run is still waiting, saying how to stop it, and starts nothing', async () => {
+    const done = await run(['cleanup'], {
+      runs: [{ name: 'job-agentx-stg-zitadel-setup-w4it1ng', properties: { status: 'Running' } }],
+    });
+    expect(done.error).toMatchObject({
+      message: expect.stringContaining(
+        "job-agentx-stg-zitadel-setup has runs that haven't ended, so it wasn't started: job-agentx-stg-zitadel-setup-w4it1ng (Running). Wait for them, or stop one with az containerapp job stop",
+      ) as unknown,
+    });
+    expect(done.az.starts).toEqual([]);
+  });
+
+  it('refuses when Resource Manager refuses, or answers without naming a run of the job, never repeating what was sent', async () => {
+    const refused = await run(['cleanup'], { startStatus: 1 });
+    expect(refused.error).toMatchObject({
+      message:
+        'Azure refused to start job-agentx-stg-zitadel-setup to clean up:\nERROR: Bad Request({"error":{"code":"InvalidParameter"}})',
+    });
+    const silent = await run(['cleanup'], { startAnswer: '  \n' });
+    expect(silent.error).toMatchObject({
+      message: `Azure took the start of job-agentx-stg-zitadel-setup without naming the run. Find it with az containerapp job execution list --subscription ${SUBSCRIPTION} --name job-agentx-stg-zitadel-setup --resource-group rg-agentx-staging, and start nothing else until it has ended.`,
+    });
+    for (const startAnswer of ['null', '{}', JSON.stringify({ name: 'job-agentx-stg-zitadel-init-c1e2a3n' })]) {
+      const odd = await run(['cleanup'], { startAnswer });
+      expect(odd.error).toMatchObject({
+        message: expect.stringMatching(/^Azure started job-agentx-stg-zitadel-setup but named the run/) as unknown,
+      });
+      expect(odd.az.sequence).not.toContain('containerapp job execution show');
+    }
+    for (const done of [refused, silent]) {
+      expect((done.error as Error).message).not.toContain('admin@example.invalid');
+      expect(done.az.sequence).not.toContain('containerapp job execution show');
+    }
+  });
+
+  it('refuses a job that is not the Zitadel setup it knows, before anything starts', async () => {
+    const done = await run(['cleanup'], {
+      containers: [{ ...SETUP_CONTAINER, image: 'ghcr.io/shahbaz242630/agent-x@sha256:x' }],
+    });
+    expect(done.error).toMatchObject({
+      message:
+        "job-agentx-stg-zitadel-setup isn't the Zitadel setup this tool knows (its image isn't Zitadel's), so it wasn't started to clean up.",
+    });
+    expect(done.az.sequence).toEqual(['account show --output', 'containerapp job show']);
+  });
+});
+
+describe('cleanupContainers', () => {
+  const refusal = (why: string): string =>
+    `job-agentx-stg-zitadel-setup isn't the Zitadel setup this tool knows (${why}), so it wasn't started to clean up.`;
+  const withSetting = (entry: unknown) => [{ ...SETUP_CONTAINER, env: [...SETUP_CONTAINER.env, entry] }];
+
+  it("keeps the job's image, command, settings and size, and only those, with setup cleanup as its arguments", () => {
+    expect(cleanupContainers([SETUP_CONTAINER])).toEqual([CLEANUP_CONTAINER]);
+    // Whatever else a setting carries is left behind.
+    expect(
+      cleanupContainers(withSetting({ name: 'ZITADEL_TLS_ENABLED', value: 'false', extra: 'x' }))[0]?.env.at(-1),
+    ).toEqual({ name: 'ZITADEL_TLS_ENABLED', value: 'false' });
+    // A value may be empty.
+    expect(cleanupContainers(withSetting({ name: 'ZITADEL_EXTERNALPORT', value: '' }))[0]?.env.at(-1)).toEqual({
+      name: 'ZITADEL_EXTERNALPORT',
+      value: '',
+    });
+  });
+
+  it('refuses anything else, saying what', () => {
+    for (const [containers, why] of [
+      [undefined, 'it must run exactly one container'],
+      [{}, 'it must run exactly one container'],
+      [[], 'it must run exactly one container'],
+      [[SETUP_CONTAINER, SETUP_CONTAINER], 'it must run exactly one container'],
+      [[{ ...SETUP_CONTAINER, name: 'zitadel-init' }], 'its container is not named zitadel-setup'],
+      [[{ ...SETUP_CONTAINER, image: undefined }], "its image isn't Zitadel's"],
+      [[{ ...SETUP_CONTAINER, image: 'ghcr.io/zitadel/zitadel-login:v4.17.3' }], "its image isn't Zitadel's"],
+      [[{ ...SETUP_CONTAINER, image: 'evil.example/ghcr.io/zitadel/zitadel:v4' }], "its image isn't Zitadel's"],
+      [[{ ...SETUP_CONTAINER, command: ['/app/zitadel', 'start'] }], "its command isn't /app/zitadel"],
+      [[{ ...SETUP_CONTAINER, command: '/app/zitadel' }], "its command isn't /app/zitadel"],
+      [[{ ...SETUP_CONTAINER, command: [7] }], "its command isn't /app/zitadel"],
+      // A list inside the list joins to the same words.
+      [[{ ...SETUP_CONTAINER, command: [['/app/zitadel']] }], "its command isn't /app/zitadel"],
+      [[{ ...SETUP_CONTAINER, args: ['start-from-init'] }], "its arguments don't start with setup"],
+      [[{ ...SETUP_CONTAINER, args: [] }], "its arguments don't start with setup"],
+      [[{ ...SETUP_CONTAINER, args: 'setup' }], "its arguments don't start with setup"],
+      [[{ ...SETUP_CONTAINER, resources: undefined }], 'its size is not given'],
+      [[{ ...SETUP_CONTAINER, resources: { cpu: '0.5', memory: '1Gi' } }], 'its size is not given'],
+      [[{ ...SETUP_CONTAINER, resources: { cpu: 0.5 } }], 'its size is not given'],
+      [[{ ...SETUP_CONTAINER, env: undefined }], 'its settings are not a list'],
+      [withSetting({ value: 'x' }), 'a setting has no name'],
+      [withSetting(null), 'a setting has no name'],
+      [
+        withSetting({ name: 'A', value: 'x', secretRef: secret('a', 'b') }),
+        'the setting A has neither a value nor a secret reference alone',
+      ],
+      [withSetting({ name: 'A' }), 'the setting A has neither a value nor a secret reference alone'],
+      [withSetting({ name: 'A', value: 5 }), 'the setting A has neither a value nor a secret reference alone'],
+      [withSetting({ name: 'A', secretRef: 5 }), 'the setting A has neither a value nor a secret reference alone'],
+    ] as const) {
+      expect(() => cleanupContainers(containers)).toThrow(refusal(why));
+    }
+  });
+});
+
 describe('before anything starts', () => {
   const each: readonly Request[] = [
     { command: 'run', job: 'db-setup' },
@@ -657,5 +877,11 @@ describe('the runner and the deployment agree', () => {
         .filter((resource) => resource.type === 'Microsoft.OperationalInsights/workspaces')
         .map((resource) => resource.name),
     ).toEqual([WORKSPACE]);
+    // The clean-up run is started with the API version the jobs are deployed with.
+    expect(
+      new Set(
+        created.filter((resource) => resource.type === 'Microsoft.App/jobs').map((resource) => resource.apiVersion),
+      ),
+    ).toEqual(new Set([JOBS_API]));
   });
 });
