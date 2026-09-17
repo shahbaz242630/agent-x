@@ -41,6 +41,7 @@ export type RuleId =
   | 'apps-logs'
   | 'app-errors-alert'
   | 'identities'
+  | 'release-identity'
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
@@ -75,9 +76,12 @@ const TYPES = {
   door: 'Microsoft.App/managedEnvironments/httpRouteConfigs',
   certificate: 'Microsoft.App/managedEnvironments/managedCertificates',
   identity: 'Microsoft.ManagedIdentity/userAssignedIdentities',
+  trust: 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials',
   job: 'Microsoft.App/jobs',
   network: 'Microsoft.Network/virtualNetworks',
   roleAssignment: 'Microsoft.Authorization/roleAssignments',
+  roleDefinition: 'Microsoft.Authorization/roleDefinitions',
+  group: 'Microsoft.Resources/resourceGroups',
   rules: 'Microsoft.Network/networkSecurityGroups',
   rule: 'Microsoft.Network/networkSecurityGroups/securityRules',
   server: 'Microsoft.DBforPostgreSQL/flexibleServers',
@@ -232,6 +236,45 @@ const PATH_MATCHES = ['prefix', 'path', 'pathSeparatedPrefix'] as const;
 
 /** The two ways a target can hold on to an old revision. */
 const TARGET_PINS = ['revision', 'label'] as const;
+
+/** The issuer of the tokens a GitHub job signs in to Azure with (G4). */
+const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
+
+/** The one audience Azure accepts in such a token. */
+const TOKEN_EXCHANGE = 'api://AzureADTokenExchange';
+
+/**
+ * The GitHub subject CI signs in with (G4): a job of this repository in the
+ * GitHub environment of the same name, in the immutable form GitHub writes for
+ * a repository made after 15 July 2026. names.bicep writes it too, so changing
+ * who may sign in takes both.
+ */
+const releaseSubject = (environment: string): string =>
+  `repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}`;
+
+/** CI's identity in an environment, as names.bicep names it. */
+const releaseIdentityName = (environment: string): string =>
+  `id-agentx-${environment === 'production' ? 'prd' : 'stg'}-release`;
+
+/**
+ * Everything CI's role allows (G4): an app's and a job's own reads and writes,
+ * their revisions and runs, starting a run, and the two linked actions a write
+ * needs because the app runs as its own identity in the environment. Nothing
+ * that lists secrets, opens a shell or a log stream, stops or deletes, writes a
+ * door, or grants access. The apps deployment says which resources it covers.
+ */
+const RELEASE_ACTIONS: readonly string[] = [
+  'Microsoft.App/containerApps/read',
+  'Microsoft.App/containerApps/write',
+  'Microsoft.App/containerApps/revisions/read',
+  'Microsoft.App/jobs/read',
+  'Microsoft.App/jobs/write',
+  'Microsoft.App/jobs/start/action',
+  'Microsoft.App/jobs/executions/read',
+  'Microsoft.App/jobs/execution/read',
+  'Microsoft.App/managedEnvironments/join/action',
+  'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+];
 
 /**
  * Zitadel is two programs in two images (ADR-003 Amendment S10), and they are
@@ -1449,6 +1492,88 @@ const secretAccess: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** A set of role actions as Azure compares them: without case or repeats, in order. */
+const actionSet = (actions: readonly unknown[]): string =>
+  JSON.stringify([...new Set(actions.map((action) => String(action).toLowerCase()))].sort());
+
+/**
+ * CI's identity (G4). The deployment trusts GitHub for exactly one identity,
+ * the one names.bicep calls release, which no app or job runs as, and only
+ * for GitHub's issuer, this
+ * environment's subject and the token exchange: no other identity can be
+ * signed in to from outside Azure. And it defines exactly one custom role,
+ * which allows RELEASE_ACTIONS and no data action, and can be given in this
+ * deployment's resource group only. Where that role is given is the apps
+ * deployment's to say (G4-2b).
+ */
+const releaseIdentity: Check = (snapshot, expected, add) => {
+  const problem = (resource: string, message: string): void => {
+    add({ rule: 'release-identity', resource, message });
+  };
+  // One at most, since the name is one resource's: what matters is that it's there.
+  const name = releaseIdentityName(expected.environment);
+  const releases = ofType(snapshot, TYPES.identity).filter((identity) => identity.name === name);
+  if (releases.length === 0) problem('the deployment', `needs an identity for CI (${name})`);
+  // Nothing runs as it, so its role stays CI's alone.
+  for (const workload of [...ofType(snapshot, TYPES.job), ...ofType(snapshot, TYPES.app)]) {
+    const assigned = Object.keys(at(workload.identity, 'userAssignedIdentities') ?? {});
+    if (assigned.some((id) => id.slice(id.lastIndexOf('/') + 1) === name)) {
+      problem(workload.name, "must not run as CI's identity, whose role is CI's alone");
+    }
+  }
+  const trusts = ofType(snapshot, TYPES.trust);
+  for (const trust of trusts) {
+    if (!releases.some((release) => trust.id.startsWith(`${release.id}/federatedIdentityCredentials/`))) {
+      problem(trust.name, "must be on CI's identity: no other identity is signed in to from outside Azure");
+    }
+    const issuer = at(trust.properties, 'issuer');
+    if (issuer !== GITHUB_ISSUER) {
+      problem(trust.name, `must trust ${GITHUB_ISSUER} alone; it trusts ${JSON.stringify(issuer)}`);
+    }
+    const subject = at(trust.properties, 'subject');
+    if (subject !== releaseSubject(expected.environment)) {
+      problem(
+        trust.name,
+        `must trust ${releaseSubject(expected.environment)} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+      );
+    }
+    const audiences = list(at(trust.properties, 'audiences'));
+    if (audiences.length !== 1 || audiences[0] !== TOKEN_EXCHANGE) {
+      problem(trust.name, `must accept the audience ${TOKEN_EXCHANGE} alone; it accepts ${JSON.stringify(audiences)}`);
+    }
+  }
+  if (trusts.length !== 1) {
+    problem('the deployment', `needs one trust, for CI's identity; the snapshot has ${String(trusts.length)}`);
+  }
+
+  const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
+  const roles = ofType(snapshot, TYPES.roleDefinition);
+  for (const role of roles) {
+    const scopes = list(at(role.properties, 'assignableScopes'));
+    if (scopes.length !== 1 || !groups.includes(String(scopes[0]))) {
+      problem(
+        role.name,
+        `must be assignable in this deployment's resource group alone; it says ${JSON.stringify(scopes)}`,
+      );
+    }
+    const permissions = list(at(role.properties, 'permissions'));
+    const actions = permissions.flatMap((entry) => list(at(entry, 'actions')));
+    if (actionSet(actions) !== actionSet(RELEASE_ACTIONS)) {
+      problem(role.name, `must allow exactly ${RELEASE_ACTIONS.join(', ')}; it allows ${actions.join(', ')}`);
+    }
+    const dataActions = permissions.flatMap((entry) => list(at(entry, 'dataActions')));
+    if (dataActions.length > 0) {
+      problem(
+        role.name,
+        `must allow no data action, which could read a secret's value; it allows ${dataActions.join(', ')}`,
+      );
+    }
+  }
+  if (roles.length !== 1) {
+    problem('the deployment', `needs one custom role, CI's; the snapshot has ${String(roles.length)}`);
+  }
+};
+
 /** A job's workload: its name without `job-agentx-<environment>-` (names.bicep). */
 /** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
 const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
@@ -1908,6 +2033,7 @@ const CHECKS: readonly Check[] = [
   appsLogs,
   appErrorsAlert,
   identities,
+  releaseIdentity,
   vaultSecrets,
   secretAccess,
   jobs,

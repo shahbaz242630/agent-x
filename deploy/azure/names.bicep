@@ -50,6 +50,10 @@ func jobName(environment string, workload string) string => 'job-agentx-${shortN
 func appName(environment string, workload string) string => 'ca-agentx-${shortName(environment)}-${workload}'
 
 @export()
+@description('Who CI signs in to Azure as (G4): a job of this repository in the GitHub environment of the same name. GitHub writes the subject with the owner\'s and the repository\'s IDs for a repository made after 15 July 2026 (`use_immutable_subject`), as ours is; Azure matches it exactly, and a wrong one fails without an error.')
+func releaseSubject(environment string) string => 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}'
+
+@export()
 @description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
 func doorName(environment string, door string) string => 'rtagentx${shortName(environment)}${door}'
 
@@ -99,4 +103,9 @@ func resourceNames(environment string, nameSuffix string) object => {
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
   identities: map(workloads, workload => identityName(environment, workload))
   jobs: map(jobWorkloads, workload => jobName(environment, workload))
+  // CI's identity and the one role it may be given (G4); nothing runs as it. A
+  // custom role's name is the whole directory's and outlives its resource group,
+  // so it carries the suffix too.
+  release: identityName(environment, 'release')
+  releaseRole: 'Agent X release (${environment} ${nameSuffix})'
 }

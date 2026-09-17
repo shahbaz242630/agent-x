@@ -2,9 +2,10 @@
 // environment, each in its own subscription, everything in UAE North (ADR-009).
 // This is the foundation: the private network, the database server, the key
 // vault, the log workspace with its cap and alerts, the Container Apps
-// environment with one identity per app and job, the activity log and the
-// budget. The secrets (secrets.bicep) and the apps and jobs (G2d) are
-// deployments of their own, into the resource group this one creates.
+// environment with one identity per app and job, CI's identity and role (G4),
+// the activity log and the budget. The secrets (secrets.bicep), the apps and
+// jobs (apps.bicep) and the doors' certificates are deployments of their own,
+// into the resource group this one creates.
 //
 //   bicep snapshot deploy/azure/staging.bicepparam   # what it would create
 //   az deployment sub create --location uaenorth \
@@ -20,7 +21,7 @@
 //   (ADR-013 rule 3)
 // - names of people and addresses never sit in this repository: the bicepparam
 //   file reads them from the shell that deploys (Rule Book §7)
-import { networkAddressSpace, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
+import { networkAddressSpace, releaseSubject, resourceNames, resourceTags, shortName, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'subscription'
 
@@ -191,6 +192,18 @@ module appsEnvironment 'modules/environment.bicep' = {
   ]
 }
 
+// CI's identity, its trust in GitHub and the one role it may be given (G4).
+module release 'modules/release.bicep' = {
+  scope: group
+  params: {
+    location: location
+    tags: tags
+    identityName: names.release
+    roleName: names.releaseRole
+    subject: releaseSubject(environment)
+  }
+}
+
 // Who changed what in this subscription, kept in the same workspace: every
 // change is meant to come from this code (ADR-012 §6), so a change from
 // anywhere else shows up here. The activity log costs nothing to collect.
@@ -266,3 +279,4 @@ output appsSubnetId string = ids.appsSubnet
 output keyVaultName string = vault.outputs.name
 output databaseHost string = database.outputs.host
 output appsEnvironmentName string = appsEnvironment.outputs.name
+output releaseClientId string = release.outputs.clientId

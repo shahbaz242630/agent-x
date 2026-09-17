@@ -126,6 +126,26 @@ const withExtra = (resource: Mutable): Snapshot => ({
   diagnostics: [],
 });
 
+/**
+ * Staging's resources as production's would name them: their tags and CI's
+ * identity, and (unless a test wants it left) CI's GitHub subject.
+ */
+function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
+  const copy = changed(
+    (resource) => resource.tags !== undefined,
+    (resource) => (inside(resource, 'tags').environment = 'production'),
+  );
+  for (const resource of copy.predictedResources as unknown as Mutable[]) {
+    resource.id = String(resource.id).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
+    resource.name = String(resource.name).replace(/^id-agentx-stg-release/, 'id-agentx-prd-release');
+    if (subject && resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
+      const trust = resource.properties as Mutable;
+      trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
+    }
+  }
+  return copy;
+}
+
 const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
   ...new Set(policyProblems(snapshotted, expected).map((problem) => problem.rule)),
 ];
@@ -353,6 +373,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
+      'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-release',
+      'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
+      expect.stringMatching(
+        /^Microsoft\.Authorization\/roleDefinitions [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      ),
     ]);
   });
 
@@ -678,10 +703,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties', 'backup').backupRetentionDays = 5))),
     ).toEqual(['database-backup']);
-    const production = changed(
-      (resource) => resource.tags !== undefined,
-      (resource) => (inside(resource, 'tags').environment = 'production'),
-    );
+    const production = productionLike({ subject: true });
     expect(brokenRules(production, { region: 'uaenorth', environment: 'production' })).toEqual(['database-backup']);
   });
 
@@ -1231,6 +1253,177 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual(['identities']);
     expect(brokenRules(changed(IDENTITIES, (identity) => delete identity.properties))).toEqual(['identities']);
+  });
+
+  it('release-identity: CI trusted for another subject, on another identity, or given a role wider than an image update', () => {
+    // The rule's own messages, so a condition another one also catches can't hide.
+    const releaseProblems = (snapshotted: Snapshot, expected = STAGING): string[] =>
+      policyProblems(snapshotted, expected)
+        .filter((problem) => problem.rule === 'release-identity')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    const TRUST = type('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials');
+    const ROLE = type('Microsoft.Authorization/roleDefinitions');
+    const RELEASE = named(/^id-agentx-stg-release$/);
+    const subject = 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:staging';
+    const trust = 'id-agentx-stg-release/github';
+    const trustIn = (resource: Mutable): Mutable => inside(resource, 'properties');
+    const permissionsOf = (role: Mutable): Mutable => first(at(role, 'properties', 'permissions'));
+    const role = String(staging.predictedResources.find(ROLE)?.name);
+    const group = String(staging.predictedResources.find(type('Microsoft.Resources/resourceGroups'))?.id);
+
+    expect(staging.predictedResources.filter(TRUST).map((found) => [found.name, found.properties])).toEqual([
+      [
+        trust,
+        {
+          issuer: 'https://token.actions.githubusercontent.com',
+          subject,
+          audiences: ['api://AzureADTokenExchange'],
+        },
+      ],
+    ]);
+    expect(staging.predictedResources.filter(RELEASE).map((found) => found.properties)).toEqual([
+      { isolationScope: 'Regional' },
+    ]);
+    expect(at(staging.predictedResources.find(ROLE)?.properties, 'assignableScopes')).toEqual([group]);
+    expect(releaseProblems(staging)).toEqual([]);
+
+    // Another subject: the old form without IDs, a branch, a pull request, or another environment's.
+    for (const other of [
+      'repo:shahbaz242630/agent-x:environment:staging',
+      'repo:shahbaz242630@205810405/agent-x@1368211207:ref:refs/heads/main',
+      'repo:shahbaz242630@205810405/agent-x@1368211207:pull_request',
+      'repo:shahbaz242630@205810405/agent-x@1368211207:environment:production',
+    ]) {
+      expect(releaseProblems(changed(TRUST, (found) => (trustIn(found).subject = other)))).toEqual([
+        `${trust}: must trust ${subject} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(other)}`,
+      ]);
+    }
+    // Production's deployment must name production's GitHub environment, and staging's identity isn't production's.
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    expect(releaseProblems(productionLike({ subject: false }), production)).toEqual([
+      `id-agentx-prd-release/github: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+    ]);
+    expect(releaseProblems(productionLike({ subject: true }), production)).toEqual([]);
+    expect(releaseProblems(staging, production)).toEqual([
+      'the deployment: needs an identity for CI (id-agentx-prd-release)',
+      `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+      `${trust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+    ]);
+    // Another issuer, or an audience besides the token exchange.
+    expect(
+      releaseProblems(changed(TRUST, (found) => (trustIn(found).issuer = 'https://token.actions.example.invalid'))),
+    ).toEqual([
+      `${trust}: must trust https://token.actions.githubusercontent.com alone; it trusts "https://token.actions.example.invalid"`,
+    ]);
+    for (const audiences of [['api://AzureADTokenExchange', 'api://other'], ['api://other'], []]) {
+      expect(releaseProblems(changed(TRUST, (found) => (trustIn(found).audiences = audiences)))).toEqual([
+        `${trust}: must accept the audience api://AzureADTokenExchange alone; it accepts ${JSON.stringify(audiences)}`,
+      ]);
+    }
+    // A trust on an app's identity, whose secrets it would hand to GitHub, or on one whose name only starts like CI's.
+    const api = staging.predictedResources.find(named(/^id-agentx-stg-api$/));
+    const release = staging.predictedResources.find(RELEASE);
+    for (const identity of [String(api?.id), `${String(release?.id)}2`]) {
+      expect(
+        releaseProblems(
+          changed(TRUST, (found) => {
+            found.id = `${identity}/federatedIdentityCredentials/github`;
+          }),
+        ),
+      ).toEqual([`${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`]);
+    }
+    // No trust, two, or no identity for CI.
+    expect(releaseProblems(without(TRUST))).toEqual([
+      "the deployment: needs one trust, for CI's identity; the snapshot has 0",
+    ]);
+    const second = structuredClone(staging.predictedResources.find(TRUST)) as unknown as Mutable;
+    expect(releaseProblems(withExtra(second))).toEqual([
+      "the deployment: needs one trust, for CI's identity; the snapshot has 2",
+    ]);
+    expect(releaseProblems(without(RELEASE))).toEqual([
+      'the deployment: needs an identity for CI (id-agentx-stg-release)',
+      `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+    ]);
+    // Only this environment's name counts: production's CI identity, or one named plainly, is not staging's.
+    for (const other of ['id-agentx-prd-release', 'release']) {
+      const moved = changed(RELEASE, (identity) => {
+        identity.name = other;
+        identity.id = String(identity.id).replace(/id-agentx-stg-release$/, other);
+      });
+      for (const found of moved.predictedResources.filter(TRUST)) {
+        (found as unknown as Mutable).id = found.id.replace('/id-agentx-stg-release/', `/${other}/`);
+      }
+      expect(releaseProblems(moved)).toEqual([
+        'the deployment: needs an identity for CI (id-agentx-stg-release)',
+        `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+      ]);
+    }
+    // An app or a job running as CI's identity would hold CI's role.
+    for (const pick of [JOB('migrate'), APP('api')]) {
+      const running = changed(pick, (workload) => {
+        const assigned = inside(workload, 'identity', 'userAssignedIdentities');
+        assigned[String(release?.id)] = {};
+      });
+      const name = String(staging.predictedResources.find(pick)?.name);
+      expect(releaseProblems(running)).toEqual([`${name}: must not run as CI's identity, whose role is CI's alone`]);
+    }
+
+    // The role: an action more (a secret's list, a shell, a door), one less, or every action.
+    const wanted = at(
+      permissionsOf(staging.predictedResources.find(ROLE) as unknown as Mutable),
+      'actions',
+    ) as string[];
+    for (const actions of [
+      [...wanted, 'Microsoft.App/containerApps/listSecrets/action'],
+      [...wanted, 'Microsoft.App/containerApps/exec/action'],
+      [...wanted, 'Microsoft.App/managedEnvironments/httpRouteConfigs/write'],
+      [...wanted, 'Microsoft.Authorization/roleAssignments/write'],
+      wanted.slice(1),
+      ['*'],
+      ['Microsoft.App/*', 'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action'],
+    ]) {
+      expect(releaseProblems(changed(ROLE, (found) => (permissionsOf(found).actions = actions)))).toEqual([
+        `${role}: must allow exactly ${wanted.join(', ')}; it allows ${actions.join(', ')}`,
+      ]);
+    }
+    // A second block of permissions counts too.
+    expect(
+      releaseProblems(
+        changed(ROLE, (found) => {
+          (at(found, 'properties', 'permissions') as Mutable[]).push({ actions: ['Microsoft.App/jobs/delete'] });
+        }),
+      ),
+    ).toEqual([
+      `${role}: must allow exactly ${wanted.join(', ')}; it allows ${[...wanted, 'Microsoft.App/jobs/delete'].join(', ')}`,
+    ]);
+    // Azure compares actions without case or order, so another case, order or a repeat is the same role.
+    for (const actions of [[...wanted.map((action) => action.toLowerCase()), wanted[0]], [...wanted].reverse()]) {
+      expect(releaseProblems(changed(ROLE, (found) => (permissionsOf(found).actions = actions)))).toEqual([]);
+    }
+    // A data action, which reaches into a resource's data (a secret's value).
+    const secretValue = 'Microsoft.KeyVault/vaults/secrets/getSecret/action';
+    expect(releaseProblems(changed(ROLE, (found) => (permissionsOf(found).dataActions = [secretValue])))).toEqual([
+      `${role}: must allow no data action, which could read a secret's value; it allows ${secretValue}`,
+    ]);
+    // Assignable anywhere but this resource group.
+    const subscriptionScope = group.slice(0, group.indexOf('/resourceGroups/'));
+    for (const scopes of [[subscriptionScope], [group, subscriptionScope], [`${group}-other`], []]) {
+      expect(
+        releaseProblems(changed(ROLE, (found) => (inside(found, 'properties').assignableScopes = scopes))),
+      ).toEqual([
+        `${role}: must be assignable in this deployment's resource group alone; it says ${JSON.stringify(scopes)}`,
+      ]);
+    }
+    // No custom role, or two.
+    expect(releaseProblems(without(ROLE))).toEqual(["the deployment: needs one custom role, CI's; the snapshot has 0"]);
+    const another = structuredClone(staging.predictedResources.find(ROLE)) as unknown as Mutable;
+    expect(releaseProblems(withExtra(another))).toEqual([
+      "the deployment: needs one custom role, CI's; the snapshot has 2",
+    ]);
+    // An identity for CI that any region may use is the generic rule's to refuse.
+    expect(brokenRules(changed(RELEASE, (found) => (inside(found, 'properties').isolationScope = 'None')))).toEqual([
+      'identities',
+    ]);
   });
 
   it('SEC-OPS-11 vault-secrets: a secret written on every run or on another condition, missing, doubled, unread, or elsewhere', () => {
