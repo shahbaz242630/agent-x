@@ -671,7 +671,7 @@ async function deployFoundation(steps: Steps): Promise<number> {
 }
 
 /** Where Azure Resource Manager answers: a list's next page must be there too. */
-const ARM = 'https://management.azure.com/';
+export const ARM = 'https://management.azure.com/';
 
 /** The first version of the action group API that says whether an address is confirmed (`verificationStatus`, S20). */
 const ACTION_GROUP_API = '2026-03-01-preview';

@@ -4,11 +4,43 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
-import { type Job, jobName, JOBS, jobs, main, parseArguments, type Request, USAGE, UsageError } from './jobs.ts';
+import {
+  type Job,
+  jobName,
+  JOBS,
+  jobs,
+  main,
+  parseArguments,
+  type Request,
+  USAGE,
+  UsageError,
+  WORKSPACE,
+} from './jobs.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000b';
+const WORKSPACE_ID = '00000000-0000-0000-0000-00000000000c';
 const START = new Date('2026-09-17T05:46:30Z');
+
+/** A row of the log query: when, where from, the platform's reason, the text. */
+type Row = readonly [string, string, string, string];
+
+const TERMINATED: Row = [
+  '2026-09-17T05:47:12.6002662Z',
+  'platform',
+  'ContainerTerminated',
+  "Container 'db-setup' was terminated with exit code '0' and reason 'ProcessExited'",
+];
+const CREATED: Row = [
+  '2026-09-17T05:46:43.8217382Z',
+  'platform',
+  'SuccessfulCreate',
+  "Successfully created pod for Job Execution 'job-agentx-stg-db-setup-o2jp673'",
+];
+const line = (event: string): Row => ['2026-09-17T05:47:12.4133012Z', 'stdout', '', `{"event":"${event}"}`];
+
+/** What a finished run's log holds once it has all arrived. */
+const WHOLE_LOG: readonly Row[] = [CREATED, line('db-setup.done'), TERMINATED];
 
 interface Script {
   /** The subscription ID `account show` gives. */
@@ -24,6 +56,11 @@ interface Script {
   readonly states?: readonly string[];
   readonly startTime?: string;
   readonly endTime?: string;
+  /** The workspace's ID, as Resource Manager gives it. */
+  readonly workspace?: unknown;
+  /** The log query's rows, one list per reading, the last one repeated; or a whole answer of another shape. */
+  readonly logs?: readonly (readonly Row[])[];
+  readonly logAnswer?: unknown;
 }
 
 /** An Azure CLI that answers from the script and records every call. */
@@ -31,6 +68,7 @@ class ScriptedAz implements Az {
   readonly calls: (readonly string[])[] = [];
   readonly #script: Script;
   #readings = 0;
+  #logReadings = 0;
 
   constructor(script: Script = {}) {
     this.#script = script;
@@ -44,6 +82,7 @@ class ScriptedAz implements Az {
     this.calls.push(args);
     const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
     const script = this.#script;
+    if (args[0] === 'rest') return json(this.#rest(args));
     const words = args.filter((arg) => !arg.startsWith('-')).slice(0, 4);
     switch (words.join(' ')) {
       case 'account show json':
@@ -81,9 +120,49 @@ class ScriptedAz implements Az {
     }
   }
 
+  /** The workspace, by Resource Manager, and the log query. */
+  #rest(args: readonly string[]): unknown {
+    const script = this.#script;
+    const url = args[args.indexOf('--url') + 1];
+    if (args[2] === 'get') {
+      expect(url).toBe(
+        `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.OperationalInsights/workspaces/log-agentx-stg?api-version=2025-02-01`,
+      );
+      return { properties: { customerId: 'workspace' in script ? script.workspace : WORKSPACE_ID } };
+    }
+    expect(args.slice(0, 3)).toEqual(['rest', '--method', 'post']);
+    expect(url).toBe(`https://api.loganalytics.azure.com/v1/workspaces/${WORKSPACE_ID}/query`);
+    expect(args[args.indexOf('--resource') + 1]).toBe('https://api.loganalytics.io');
+    if ('logAnswer' in script) return script.logAnswer;
+    const readings = script.logs ?? [WHOLE_LOG];
+    const rows = readings[Math.min(this.#logReadings, readings.length - 1)];
+    this.#logReadings += 1;
+    return {
+      tables: [
+        {
+          name: 'PrimaryResult',
+          columns: [
+            { name: 'TimeGenerated', type: 'datetime' },
+            { name: 'Source', type: 'string' },
+            { name: 'Reason', type: 'string' },
+            { name: 'Text', type: 'string' },
+          ],
+          rows,
+        },
+      ],
+    };
+  }
+
   /** The commands, by their first words, in the order they ran. */
   get sequence(): string[] {
     return this.calls.map((call) => call.slice(0, call[2] === 'execution' ? 4 : 3).join(' '));
+  }
+
+  /** What each log query asked for. */
+  get queries(): { query: string; timespan: string }[] {
+    return this.calls
+      .filter((call) => call[2] === 'post')
+      .map((call) => JSON.parse(call[call.indexOf('--body') + 1] ?? '') as { query: string; timespan: string });
   }
 }
 
@@ -108,6 +187,9 @@ async function run(argv: readonly string[], script: Script = {}) {
   );
   return { status: status.value, error: status.error, az, said, slept };
 }
+
+/** The lines a run's state was reported on. */
+const stateLines = (said: readonly string[]): string[] => said.filter((line) => / UTC {2}/.test(line));
 
 describe('parseArguments', () => {
   it('reads the three ways the runner is used, for every job', () => {
@@ -136,6 +218,7 @@ describe('parseArguments', () => {
       [['wait', 'db-setup', 'job-agentx-stg-db-setup-'], /one of its runs/],
       [['wait', 'db-setup', 'job-agentx-stg-db-setup-O2JP673'], /one of its runs/],
       [['wait', 'db-setup', 'job-agentx-stg-db-setup-o2jp673 --args'], /one of its runs/],
+      [['wait', 'db-setup', "job-agentx-stg-db-setup-o2jp673'"], /one of its runs/],
       [['wait', 'db-setup', 'xjob-agentx-stg-db-setup-o2jp673'], /one of its runs/],
       [['wait', 'db-setup', 'job-agentx-stg-db-setup-o2jp673', 'more'], /one of its runs/],
     ] as const) {
@@ -146,7 +229,7 @@ describe('parseArguments', () => {
 });
 
 describe('run', () => {
-  it('checks the job is deployed and idle, starts it, and waits for the run to succeed', async () => {
+  it('checks the job is deployed and idle, starts it, waits for the run to succeed, and shows its log', async () => {
     const done = await run(['run', 'db-setup'], { states: ['Running', 'Running', 'Succeeded'] });
     expect(done.error).toBeUndefined();
     expect(done.status).toBe(0);
@@ -158,6 +241,9 @@ describe('run', () => {
       'containerapp job execution show',
       'containerapp job execution show',
       'containerapp job execution show',
+      'rest --method get',
+      'rest --method post',
+      'rest --method post',
     ]);
     // The subscription signed in to, named on every call.
     const naming = [
@@ -168,8 +254,8 @@ describe('run', () => {
       '--resource-group',
       'rg-agentx-staging',
     ];
-    for (const call of done.az.calls.slice(1)) expect(call.join(' ')).toContain(naming.join(' '));
-    expect(done.az.calls.at(-1)).toEqual([
+    for (const call of done.az.calls.slice(1, 7)) expect(call.join(' ')).toContain(naming.join(' '));
+    expect(done.az.calls[6]).toEqual([
       'containerapp',
       'job',
       'execution',
@@ -182,7 +268,8 @@ describe('run', () => {
     ]);
     // A plain start: the job's own container, never arguments that would replace it.
     expect(done.az.calls[3]).toEqual(['containerapp', 'job', 'start', ...naming, '--output', 'json']);
-    expect(done.slept).toEqual([15_000, 15_000]);
+    // The run's state every 15 s; its log again a minute later, when the first reading can't be the last.
+    expect(done.slept).toEqual([15_000, 15_000, 60_000]);
     expect(done.said).toEqual([
       `Signed in to the subscription "Azure subscription 1" (${SUBSCRIPTION}).`,
       'Started job-agentx-stg-db-setup-o2jp673.',
@@ -190,7 +277,29 @@ describe('run', () => {
       '  05:46:30 UTC  Running',
       '  05:47:00 UTC  Succeeded',
       'job-agentx-stg-db-setup-o2jp673 ended Succeeded: started 05:46:43 UTC, ended 05:47:21 UTC (38 s).',
+      "Reading job-agentx-stg-db-setup-o2jp673's log: Azure delivers a container's lines up to 10 minutes after they are written, so this can take that long...",
+      "job-agentx-stg-db-setup-o2jp673's log, 2 from the platform and 1 from the container:",
+      "  05:46:43  platform  SuccessfulCreate: Successfully created pod for Job Execution 'job-agentx-stg-db-setup-o2jp673'",
+      '  05:47:12  stdout    {"event":"db-setup.done"}',
+      "  05:47:12  platform  ContainerTerminated: Container 'db-setup' was terminated with exit code '0' and reason 'ProcessExited'",
       'In a first deploy, the next is: node deploy/azure/jobs.ts run migrate',
+    ]);
+  });
+
+  it("asks the workspace for this run's lines alone, from just before it started until just after now", async () => {
+    const done = await run(['run', 'db-setup']);
+    expect(done.az.queries).toEqual([
+      {
+        query: [
+          'union',
+          `(ContainerAppSystemLogs | where JobName == 'job-agentx-stg-db-setup' and (ReplicaName startswith_cs 'job-agentx-stg-db-setup-o2jp673-' or Log contains_cs "'job-agentx-stg-db-setup-o2jp673'") | project TimeGenerated, Source = 'platform', Reason, Text = Log),`,
+          `(ContainerAppConsoleLogs | where JobName == 'job-agentx-stg-db-setup' and ContainerGroupName startswith_cs 'job-agentx-stg-db-setup-o2jp673-' | project TimeGenerated, Source = Stream, Reason = '', Text = Log)`,
+          '| order by TimeGenerated asc',
+        ].join('\n'),
+        // Five minutes either side: of the start, and of the run's end or now, whichever is later.
+        timespan: '2026-09-17T05:41:43.000Z/2026-09-17T05:52:21.000Z',
+      },
+      { query: expect.any(String) as unknown, timespan: '2026-09-17T05:41:43.000Z/2026-09-17T05:52:30.000Z' },
     ]);
   });
 
@@ -209,16 +318,19 @@ describe('run', () => {
     ]);
   });
 
-  it('ends with failure, and says to read the logs, for every end but success', async () => {
+  it('ends with failure for every end but success, after showing the log', async () => {
     for (const state of ['Failed', 'Stopped', 'Degraded']) {
       const done = await run(['run', 'zitadel-init'], {
         started: 'job-agentx-stg-zitadel-init-k2m9x1q',
         states: ['Processing', state],
       });
       expect({ state, status: done.status }).toEqual({ state, status: 1 });
-      expect(done.said.slice(-2)).toEqual([
+      expect(done.said).toContain(
         `job-agentx-stg-zitadel-init-k2m9x1q ended ${state}: started 05:46:43 UTC, ended 05:47:21 UTC (38 s).`,
-        'Read its logs before starting anything else.',
+      );
+      expect(done.said.slice(-2)).toEqual([
+        "  05:47:12  platform  ContainerTerminated: Container 'db-setup' was terminated with exit code '0' and reason 'ProcessExited'",
+        'Read the lines above before starting anything else.',
       ]);
     }
   });
@@ -226,8 +338,8 @@ describe('run', () => {
   it('keeps waiting through states that are not an end, a missing one included', async () => {
     const done = await run(['run', 'db-setup'], { states: ['', 'Unknown', 'Processing', 'Running', 'Succeeded'] });
     expect(done.status).toBe(0);
-    expect(done.slept).toHaveLength(4);
-    expect(done.said.filter((line) => line.startsWith('  '))).toEqual([
+    expect(done.slept.filter((ms) => ms === 15_000)).toHaveLength(4);
+    expect(stateLines(done.said)).toEqual([
       '  05:46:30 UTC  no state yet',
       '  05:46:45 UTC  Unknown',
       '  05:47:00 UTC  Processing',
@@ -236,7 +348,7 @@ describe('run', () => {
     ]);
   });
 
-  it('gives up once the job has had its time limit and the start allowance, saying how to wait again', async () => {
+  it('gives up once the job has had its time limit and the start allowance, saying how to wait again, and reads no log', async () => {
     const done = await run(['run', 'db-setup'], { limit: 60, states: ['Running'] });
     expect(done.status).toBe(1);
     // 60 s of the job's limit and 300 s to start: 24 readings 15 s apart, then one at the deadline.
@@ -244,11 +356,138 @@ describe('run', () => {
     expect(done.said.at(-1)).toBe(
       "job-agentx-stg-db-setup-o2jp673 hadn't ended 360 s after the wait began. To wait again: node deploy/azure/jobs.ts wait db-setup job-agentx-stg-db-setup-o2jp673",
     );
+    expect(done.az.sequence).not.toContain('rest --method get');
   });
 
-  it('says the times as Azure gave them when they are not times, with no duration', async () => {
-    const done = await run(['run', 'db-setup'], { startTime: 'soon', endTime: '' });
-    expect(done.said).toContain('job-agentx-stg-db-setup-o2jp673 ended Succeeded: started "soon", ended "".');
+  it('says the times as Azure gave them when they are not times, and then looks for no log', async () => {
+    for (const [startTime, endTime] of [
+      ['soon', ''],
+      ['2026-09-17T05:46:43+00:00', 'later'],
+    ] as const) {
+      const done = await run(['run', 'db-setup'], { startTime, endTime });
+      expect(done.said.at(-1)).toMatch(/^job-agentx-stg-db-setup-o2jp673 ended Succeeded: started .*, ended .*\.$/);
+      expect(done.said.at(-1)).not.toMatch(/ s\)\.$/);
+      expect(done.error).toMatchObject({
+        message: "Azure gave no start and end for job-agentx-stg-db-setup-o2jp673, so its log can't be looked for.",
+      });
+      expect(done.az.sequence).not.toContain('rest --method get');
+    }
+    const odd = await run(['run', 'db-setup'], { startTime: 'soon', endTime: '' });
+    expect(odd.said.at(-1)).toBe('job-agentx-stg-db-setup-o2jp673 ended Succeeded: started "soon", ended "".');
+  });
+});
+
+describe("a run's log", () => {
+  it('is shown once the container has ended and two readings a minute apart hold the same lines', async () => {
+    const done = await run(['run', 'db-setup'], {
+      logs: [
+        [CREATED],
+        [CREATED, TERMINATED],
+        [CREATED, line('db-setup.starting'), TERMINATED],
+        [CREATED, line('db-setup.starting'), line('db-setup.done'), TERMINATED],
+        [CREATED, line('db-setup.starting'), line('db-setup.done'), TERMINATED],
+      ],
+    });
+    expect(done.status).toBe(0);
+    expect(done.az.queries).toHaveLength(5);
+    expect(done.slept.filter((ms) => ms === 60_000)).toHaveLength(4);
+    expect(done.said.filter((said) => said.startsWith('Reading '))).toHaveLength(1);
+    expect(done.said).toContain("job-agentx-stg-db-setup-o2jp673's log, 2 from the platform and 2 from the container:");
+  });
+
+  it('is waited for until 15 minutes after the run ended, then shown as it is, saying what is missing', async () => {
+    const neverEnded = await run(['run', 'db-setup'], { logs: [[CREATED, line('db-setup.starting')]] });
+    expect(neverEnded.status).toBe(0);
+    // The run ended at 05:47:21; readings from 05:46:30 a minute apart, the last at or after 06:02:21.
+    expect(neverEnded.az.queries).toHaveLength(17);
+    expect(neverEnded.az.queries.at(-1)?.timespan).toBe('2026-09-17T05:41:43.000Z/2026-09-17T06:07:30.000Z');
+    // Azure's own word that the run succeeded still stands.
+    expect(neverEnded.said.slice(-5)).toEqual([
+      "job-agentx-stg-db-setup-o2jp673's log, 1 from the platform and 1 from the container:",
+      "  05:46:43  platform  SuccessfulCreate: Successfully created pod for Job Execution 'job-agentx-stg-db-setup-o2jp673'",
+      '  05:47:12  stdout    {"event":"db-setup.starting"}',
+      "Azure logged no end for the container, so these may not be all the run's lines.",
+      'In a first deploy, the next is: node deploy/azure/jobs.ts run migrate',
+    ]);
+    const silent = await run(['run', 'db-setup'], { logs: [[CREATED, TERMINATED]] });
+    expect(silent.az.queries).toHaveLength(17);
+    expect(silent.said).toContain('No line from the container reached the workspace.');
+    // A line more on every reading, the container's end logged from the first.
+    const growing = Array.from({ length: 17 }, (_, count) => [
+      CREATED,
+      ...Array.from({ length: count + 1 }, (__, index) => line(`step.${String(index)}`)),
+      TERMINATED,
+    ]);
+    const stillArriving = await run(['run', 'db-setup'], { logs: growing });
+    expect(stillArriving.status).toBe(0);
+    expect(stillArriving.az.queries).toHaveLength(17);
+    expect(stillArriving.said).toContain(
+      "job-agentx-stg-db-setup-o2jp673's log, 2 from the platform and 17 from the container:",
+    );
+    expect(stillArriving.said.at(-2)).toBe(
+      "The container's lines were still arriving 15 minutes after the run ended, so more may be missing.",
+    );
+    // The same lines on the last two readings, just inside the 15 minutes: nothing is said to be missing.
+    const settledLate = await run(['run', 'db-setup'], { logs: [...growing.slice(0, 15), growing[14] ?? []] });
+    expect(settledLate.az.queries).toHaveLength(16);
+    expect(settledLate.said.filter((said) => said.includes('may be missing'))).toEqual([]);
+  });
+
+  it("of a run that ended long ago is read once, and nothing is said to be missing when it isn't", async () => {
+    const earlier = { startTime: '2026-09-17T05:00:00+00:00', endTime: '2026-09-17T05:31:30+00:00' };
+    const done = await run(['wait', 'db-setup', 'job-agentx-stg-db-setup-o2jp673'], earlier);
+    expect(done.status).toBe(0);
+    expect(done.az.queries).toHaveLength(1);
+    expect(done.said.filter((said) => said.startsWith('Reading '))).toEqual([]);
+    expect(done.said.slice(-2)).toEqual([
+      "  05:47:12  platform  ContainerTerminated: Container 'db-setup' was terminated with exit code '0' and reason 'ProcessExited'",
+      'In a first deploy, the next is: node deploy/azure/jobs.ts run migrate',
+    ]);
+  });
+
+  it('shows a time the workspace gave that is not one as it came', async () => {
+    const done = await run(['run', 'db-setup'], { logs: [[['yesterday', 'stderr', '', 'boom'], TERMINATED]] });
+    expect(done.said).toContain('  yesterday  stderr    boom');
+    // A line on stderr is the container's too, so the second reading settles it.
+    expect(done.az.queries).toHaveLength(2);
+    expect(done.said).toContain("job-agentx-stg-db-setup-o2jp673's log, 1 from the platform and 1 from the container:");
+  });
+
+  it("is refused when the workspace has no ID, or the answer isn't the table asked for", async () => {
+    for (const workspace of [undefined, '', 'log-agentx-stg', `${WORKSPACE_ID} `]) {
+      const done = await run(['run', 'db-setup'], { workspace });
+      expect(done.error).toMatchObject({ message: "Azure gave no ID for log-agentx-stg, so the log can't be read." });
+      expect(done.az.sequence).not.toContain('rest --method post');
+    }
+    const table = (rows: unknown, columns = ['TimeGenerated', 'Source', 'Reason', 'Text']) => ({
+      tables: [{ columns: columns.map((name) => ({ name })), rows }],
+    });
+    for (const [logAnswer, message] of [
+      [{}, "Log Analytics' answer wasn't the table asked for."],
+      [{ tables: [] }, "Log Analytics' answer wasn't the table asked for."],
+      [table(undefined), "Log Analytics' answer wasn't the table asked for."],
+      [table({}), "Log Analytics' answer wasn't the table asked for."],
+      [table([], ['TimeGenerated', 'Source', 'Text']), "Log Analytics' answer wasn't the table asked for."],
+      [table(['not a row']), "Log Analytics' answer held a row that isn't one."],
+    ] as const) {
+      const done = await run(['run', 'db-setup'], { logAnswer });
+      expect(done.error).toMatchObject({ message });
+    }
+  });
+
+  it('reads the columns by name, whatever order they come in', async () => {
+    const done = await run(['run', 'db-setup'], {
+      logAnswer: {
+        tables: [
+          {
+            columns: [{ name: 'Text' }, { name: 'Reason' }, { name: 'TimeGenerated' }, { name: 'Source' }],
+            rows: [["Container 'db-setup' was terminated", 'ContainerTerminated', '2026-09-17T05:47:12Z', 'platform']],
+          },
+        ],
+      },
+      endTime: '2026-09-17T05:00:00+00:00',
+    });
+    expect(done.said).toContain("  05:47:12  platform  ContainerTerminated: Container 'db-setup' was terminated");
   });
 });
 
@@ -297,12 +536,13 @@ describe('start', () => {
     const notList = await run(['start', 'db-setup'], { runs: { value: [] } });
     expect(notList.error).toMatchObject({ message: "Azure's list of job-agentx-stg-db-setup's runs wasn't a list." });
     expect(notList.az.sequence).not.toContain('containerapp job start');
-    // Held to the same shape as a run typed on the command line.
+    // Held to the same shape as a run typed on the command line, since the log query quotes it.
     for (const started of [
       'job-agentx-stg-migrate-o2jp673',
       'job-agentx-stg-db-setup',
       'job-agentx-stg-db-setup-',
       'job-agentx-stg-db-setup-o2jp673 x',
+      "job-agentx-stg-db-setup-o2jp673'",
       '',
     ]) {
       const odd = await run(['run', 'db-setup'], { started });
@@ -315,7 +555,7 @@ describe('start', () => {
 });
 
 describe('wait', () => {
-  it('waits for a run that has started, starting nothing', async () => {
+  it('waits for a run that has started, starting nothing, then shows its log', async () => {
     const done = await run(['wait', 'migrate', 'job-agentx-stg-migrate-p0q1r2s'], { states: ['Running', 'Succeeded'] });
     expect(done.status).toBe(0);
     expect(done.az.sequence).toEqual([
@@ -323,7 +563,11 @@ describe('wait', () => {
       'containerapp job show',
       'containerapp job execution show',
       'containerapp job execution show',
+      'rest --method get',
+      'rest --method post',
+      'rest --method post',
     ]);
+    expect(done.az.queries[0]?.query).toContain("ContainerGroupName startswith_cs 'job-agentx-stg-migrate-p0q1r2s-'");
   });
 });
 
@@ -363,14 +607,8 @@ describe('before anything starts', () => {
     ] as const) {
       for (const request of each) {
         const az = new ScriptedAz(script);
-        const said: string[] = [];
         await expect(
-          jobs(request, {
-            az,
-            say: (line) => said.push(line),
-            now: () => START,
-            sleep: () => Promise.resolve(),
-          }),
+          jobs(request, { az, say: () => undefined, now: () => START, sleep: () => Promise.resolve() }),
         ).rejects.toThrow(message);
         expect(az.sequence).toEqual(['account show --output', 'containerapp job show']);
       }
@@ -398,11 +636,10 @@ describe('main', () => {
   });
 
   it('ends with what the run ended with', async () => {
-    const said: string[] = [];
     await expect(
       main(
         ['start', 'db-setup'],
-        (line) => said.push(line),
+        () => undefined,
         () => new ScriptedAz(),
       ),
     ).resolves.toBe(0);
@@ -410,10 +647,15 @@ describe('main', () => {
 });
 
 describe('the runner and the deployment agree', () => {
-  it('names every job the deployment creates, in the order it lists them', () => {
-    const created = inCopy((dir) => environmentSnapshot(dir, 'staging').together)
-      .predictedResources.filter((resource) => resource.type === 'Microsoft.App/jobs')
-      .map((resource) => resource.name);
-    expect(created).toEqual(JOBS.map((job: Job) => jobName(job)));
+  it('names every job the deployment creates, in the order it lists them, and the workspace they log to', () => {
+    const created = inCopy((dir) => environmentSnapshot(dir, 'staging').together).predictedResources;
+    expect(
+      created.filter((resource) => resource.type === 'Microsoft.App/jobs').map((resource) => resource.name),
+    ).toEqual(JOBS.map((job: Job) => jobName(job)));
+    expect(
+      created
+        .filter((resource) => resource.type === 'Microsoft.OperationalInsights/workspaces')
+        .map((resource) => resource.name),
+    ).toEqual([WORKSPACE]);
   });
 });
