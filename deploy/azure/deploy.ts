@@ -649,16 +649,39 @@ async function deployFoundation(steps: Steps): Promise<number> {
   return 0;
 }
 
-/** The names of the secrets the vault already holds, read through Azure Resource Manager (never their values). */
+/** Where Azure Resource Manager answers: a list's next page must be there too. */
+const ARM = 'https://management.azure.com/';
+
+/** More pages than any vault of ours fills (Azure gives three secrets a page): a list that runs past it isn't trusted. */
+const MAX_PAGES = 100;
+
+/**
+ * The names of the secrets the vault already holds, read through Azure
+ * Resource Manager (never their values). Azure answers three at a time with a
+ * link to the next page, and ends with an empty one (the first real run, S19),
+ * so every page is read: a first page alone showed three of nine, and an empty
+ * one would let `--all` skip its question.
+ */
 function secretsInVault(steps: Steps, subscription: string, vault: string): string[] {
-  const listed = azJson(steps.az, [
-    'rest',
-    '--method',
-    'get',
-    '--url',
-    `https://management.azure.com/subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`,
-  ]);
-  return ((listed as { value?: readonly { name?: unknown }[] }).value ?? []).map((secret) => text(secret.name));
+  const names: string[] = [];
+  let url = `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`;
+  for (let page = 1; url !== ''; page += 1) {
+    if (page > MAX_PAGES) {
+      throw new Error(
+        `Azure's list of the vault's secrets went past ${String(MAX_PAGES)} pages, so it wasn't trusted.`,
+      );
+    }
+    if (!url.startsWith(ARM)) {
+      throw new Error("Azure's list of the vault's secrets led outside Azure Resource Manager, so it wasn't followed.");
+    }
+    const listed = azJson(steps.az, ['rest', '--method', 'get', '--url', url]) as {
+      value?: readonly { name?: unknown }[];
+      nextLink?: unknown;
+    };
+    names.push(...(listed.value ?? []).map((secret) => text(secret.name)));
+    url = text(listed.nextLink);
+  }
+  return names;
 }
 
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
