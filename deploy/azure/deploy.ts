@@ -409,7 +409,8 @@ export function azInvocation(
   return { command: python, prefix: ['-IBm', 'azure.cli'], env };
 }
 
-function realAz(): Az {
+/** The CLI as every command here runs it (jobs.ts too). */
+export function realAz(): Az {
   const invocation = azInvocation(process.platform, process.env, installedBicep());
   return {
     interactive: (args, values) =>
@@ -433,13 +434,13 @@ function realAz(): Az {
 }
 
 /** Runs the CLI for JSON, or says what went wrong. */
-function azJson(az: Az, args: readonly string[]): unknown {
+export function azJson(az: Az, args: readonly string[]): unknown {
   const done = az.run([...args, '--output', 'json']);
   if (done.status !== 0) throw new Error(`az ${args.join(' ')} failed:\n${done.stderr.trim()}`);
   return JSON.parse(done.stdout) as unknown;
 }
 
-const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+export const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 /**
  * A run's values with every secret replaced by a stand-in of the same shape:
@@ -549,17 +550,19 @@ export interface Steps {
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
-function signedIn(steps: Steps): string {
-  const account = azJson(steps.az, ['account', 'show']);
+export function signedIn(az: Az, say: (line: string) => void): string {
+  const account = azJson(az, ['account', 'show']);
   const name = text((account as { name?: unknown }).name);
   const id = text((account as { id?: unknown }).id);
-  steps.terminal.say(`Signed in to the subscription "${name}" (${id}).`);
+  say(`Signed in to the subscription "${name}" (${id}).`);
   return id;
 }
 
 /** The subscription the CLI is signed in to, confirmed by the operator. */
 async function confirmSubscription(steps: Steps): Promise<string> {
-  const id = signedIn(steps);
+  const id = signedIn(steps.az, (line) => {
+    steps.terminal.say(line);
+  });
   if (!yes(await steps.terminal.ask(`Deploy ${ENVIRONMENT} into it? [y/N] `))) throw new Cancelled();
   return id;
 }
@@ -744,7 +747,9 @@ async function alertsReachable(steps: Steps, subscription: string): Promise<bool
 
 /** Says whether the alerts reach their address, changing nothing. */
 async function checkAlerts(steps: Steps): Promise<number> {
-  const subscription = signedIn(steps);
+  const subscription = signedIn(steps.az, (line) => {
+    steps.terminal.say(line);
+  });
   steps.terminal.say(`Reading ${ACTION_GROUP} in ${RESOURCE_GROUP}; nothing is changed.`);
   if (await alertsReachable(steps, subscription)) return 0;
   steps.terminal.say('Until that changes, no alert email reaches you.');
