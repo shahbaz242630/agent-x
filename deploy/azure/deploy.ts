@@ -7,8 +7,11 @@
 // and, later, `secrets --rotate db-app-password [more names]`; `apps
 // --keep-running`, which keeps one replica of each app running, billed, until
 // `apps` runs again without it (for a test, or while something needs the apps
-// up); and `alerts`, which changes nothing and says whether the alerts can
-// reach their address (the foundation ends with the same check).
+// up); `alerts`, which changes nothing and says whether the alerts can reach
+// their address (the foundation ends with the same check); `dns`, which changes
+// nothing and says which DNS records the public doors' hosts still need; and
+// `certificates`, which deploys the doors' managed certificates once those
+// records are in place and the apps are kept running (G2e-3).
 //
 // The two secrets that belong to people — the database admin's password and
 // Zitadel's first admin's — are pasted from the password manager into a prompt
@@ -27,6 +30,7 @@
 // the commit being deployed, named by its digest (ADR-002 Amendment E2).
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { promises as systemDns } from 'node:dns';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -55,6 +59,12 @@ export const APP_VARIABLES = {
   adminEmail: 'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
   minReplicas: 'AGENTX_AZURE_APP_MIN_REPLICAS',
 } as const;
+
+/** The Container Apps environment the foundation creates (names.bicep), which holds the doors; a test holds the two equal. */
+export const APPS_ENVIRONMENT = 'cae-agentx-staging';
+
+/** What the certificates deployment reads from the shell (staging.certificates.bicepparam): the apps' two hosts. */
+export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost: APP_VARIABLES.appHost } as const;
 
 /**
  * Every secret the vault holds, by its name there, with the variable
@@ -97,7 +107,9 @@ export type Request =
   | { readonly command: 'foundation' }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
   | { readonly command: 'apps'; readonly commit: string | undefined; readonly keepRunning: boolean }
-  | { readonly command: 'alerts' };
+  | { readonly command: 'alerts' }
+  | { readonly command: 'dns' }
+  | { readonly command: 'certificates' };
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -111,7 +123,9 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
   node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running]
-  node deploy/azure/deploy.ts alerts`;
+  node deploy/azure/deploy.ts alerts
+  node deploy/azure/deploy.ts dns
+  node deploy/azure/deploy.ts certificates`;
 
 /** `apps`'s options, each at most once, in either order. */
 function parseApps(options: readonly string[]): Request {
@@ -134,13 +148,13 @@ function parseApps(options: readonly string[]): Request {
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...rest] = argv;
-  if (command === 'foundation' || command === 'alerts') {
+  if (command === 'foundation' || command === 'alerts' || command === 'dns' || command === 'certificates') {
     if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
     return { command };
   }
   if (command === 'apps') return parseApps(rest);
   if (command !== 'secrets') {
-    throw new UsageError(`say foundation, secrets, apps or alerts, not ${command ?? 'nothing'}`);
+    throw new UsageError(`say foundation, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`);
   }
   const [mode, ...names] = rest;
   if (mode === '--all') {
@@ -561,6 +575,7 @@ export interface Steps {
   readonly now: () => Date;
   readonly makers?: Makers;
   readonly images?: Images;
+  readonly dns?: DnsLookup;
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
@@ -770,36 +785,46 @@ async function checkAlerts(steps: Steps): Promise<number> {
   return 1;
 }
 
-/** More pages than any vault of ours fills (Azure gives three secrets a page): a list that runs past it isn't trusted. */
+/** More pages than any list of ours fills (Azure gives three secrets a page): a list that runs past it isn't trusted. */
 const MAX_PAGES = 100;
 
 /**
- * The names of the secrets the vault already holds, read through Azure
- * Resource Manager (never their values). Azure answers three at a time with a
- * link to the next page, and ends with an empty one (the first real run, S19),
- * so every page is read: a first page alone showed three of nine, and an empty
- * one would let `--all` skip its question.
+ * Every item of a list read through Azure Resource Manager, `what` naming it
+ * in any message. Azure answers a page at a time with a link to the next, and
+ * may end with an empty one (the vault's secrets, three a page, S19), so every
+ * page is read, and only while the links stay on Resource Manager.
  */
-function secretsInVault(steps: Steps, subscription: string, vault: string): string[] {
-  const names: string[] = [];
-  let url = `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`;
+function armList(steps: Steps, first: string, what: string): unknown[] {
+  const items: unknown[] = [];
+  let url = first;
   for (let page = 1; url !== ''; page += 1) {
     if (page > MAX_PAGES) {
-      throw new Error(
-        `Azure's list of the vault's secrets went past ${String(MAX_PAGES)} pages, so it wasn't trusted.`,
-      );
+      throw new Error(`Azure's list of ${what} went past ${String(MAX_PAGES)} pages, so it wasn't trusted.`);
     }
     if (!url.startsWith(ARM)) {
-      throw new Error("Azure's list of the vault's secrets led outside Azure Resource Manager, so it wasn't followed.");
+      throw new Error(`Azure's list of ${what} led outside Azure Resource Manager, so it wasn't followed.`);
     }
     const listed = azJson(steps.az, ['rest', '--method', 'get', '--url', url]) as {
-      value?: readonly { name?: unknown }[];
+      value?: readonly unknown[];
       nextLink?: unknown;
     };
-    names.push(...(listed.value ?? []).map((secret) => text(secret.name)));
+    items.push(...(listed.value ?? []));
     url = text(listed.nextLink);
   }
-  return names;
+  return items;
+}
+
+/**
+ * The names of the secrets the vault already holds (never their values). A
+ * first page alone showed three of nine, and an empty one would let `--all`
+ * skip its question (S19).
+ */
+function secretsInVault(steps: Steps, subscription: string, vault: string): string[] {
+  return armList(
+    steps,
+    `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`,
+    "the vault's secrets",
+  ).map((secret) => text((secret as { name?: unknown }).name));
 }
 
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
@@ -881,6 +906,247 @@ async function askHost(steps: Steps, question: string): Promise<string> {
   return host;
 }
 
+/** The two doors' hosts, typed by the operator, in lower case, and not the same. */
+async function askHosts(steps: Steps): Promise<{ readonly authHost: string; readonly appHost: string }> {
+  const authHost = await askHost(steps, 'Host for sign-in (Zitadel): ');
+  const appHost = await askHost(steps, 'Host for the app (the API): ');
+  if (authHost === appHost) throw new Error('The two hosts must differ: nothing was deployed.');
+  return { authHost, appHost };
+}
+
+/** Looking a host's records up in public DNS. */
+export interface DnsLookup {
+  /** The host's IPv4 addresses; none when it has none. */
+  addresses(host: string): Promise<readonly string[]>;
+  /** The host's TXT records, each one's strings joined; none when it has none. */
+  texts(host: string): Promise<readonly string[]>;
+}
+
+/** Answers that mean the name has no record of the kind asked: nothing found, not a failure. */
+const NO_RECORD: ReadonlySet<unknown> = new Set(['ENOTFOUND', 'ENODATA']);
+
+/** The machine's own resolver, as a browser on it would see the hosts. */
+export function realDns(resolver: Pick<typeof systemDns, 'resolve4' | 'resolveTxt'> = systemDns): DnsLookup {
+  const found = async <T>(host: string, look: () => Promise<T[]>): Promise<T[]> => {
+    try {
+      return await look();
+    } catch (error) {
+      if (NO_RECORD.has((error as { code?: unknown }).code)) return [];
+      throw new Error(`Looking up ${host} failed: ${String(error)}`, { cause: error });
+    }
+  };
+  return {
+    addresses: (host) => found(host, () => resolver.resolve4(host)),
+    texts: async (host) => (await found(host, () => resolver.resolveTxt(host))).map((strings) => strings.join('')),
+  };
+}
+
+/** What a door's host's DNS records carry: the environment's public address and its verification code. */
+export interface EnvironmentDns {
+  readonly ip: string;
+  readonly verification: string;
+}
+
+/** The API version the apps and jobs are deployed with (apps.bicep), for reading the environment and its certificates. */
+const ENVIRONMENT_API = '2026-01-01';
+
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+const VERIFICATION_CODE = /^[0-9A-F]{64}$/;
+
+const environmentUrl = (subscription: string): string =>
+  `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${APPS_ENVIRONMENT}`;
+
+/** The environment's address and verification code, read through Azure Resource Manager. */
+function environmentDns(steps: Steps, subscription: string): EnvironmentDns {
+  const environment = azJson(steps.az, [
+    'rest',
+    '--method',
+    'get',
+    '--url',
+    `${environmentUrl(subscription)}?api-version=${ENVIRONMENT_API}`,
+  ]) as { properties?: { staticIp?: unknown; customDomainConfiguration?: { customDomainVerificationId?: unknown } } };
+  const ip = text(environment.properties?.staticIp);
+  const verification = text(environment.properties?.customDomainConfiguration?.customDomainVerificationId);
+  if (!IPV4.test(ip) || !VERIFICATION_CODE.test(verification)) {
+    throw new Error(
+      `Azure gave no public address and verification code for ${APPS_ENVIRONMENT}: deploy the foundation first.`,
+    );
+  }
+  return { ip, verification };
+}
+
+export interface DoorRecord {
+  readonly type: 'A' | 'TXT';
+  readonly name: string;
+  readonly value: string;
+  /** What the name answers with now. */
+  readonly answers: readonly string[];
+  readonly ready: boolean;
+}
+
+/**
+ * The two records each door's host needs (Microsoft, for a custom domain on a
+ * route config): an A record for the environment's address, and the only one,
+ * since a certificate's validation could otherwise reach another; and a TXT
+ * record `asuid.<host>` holding the environment's verification code.
+ */
+export async function doorRecords(
+  dns: DnsLookup,
+  hosts: readonly string[],
+  environment: EnvironmentDns,
+): Promise<DoorRecord[]> {
+  const records: DoorRecord[] = [];
+  for (const host of hosts) {
+    const addresses = await dns.addresses(host);
+    records.push({
+      type: 'A',
+      name: host,
+      value: environment.ip,
+      answers: addresses,
+      ready: addresses.length === 1 && addresses[0] === environment.ip,
+    });
+    const texts = await dns.texts(`asuid.${host}`);
+    records.push({
+      type: 'TXT',
+      name: `asuid.${host}`,
+      value: environment.verification,
+      answers: texts,
+      ready: texts.includes(environment.verification),
+    });
+  }
+  return records;
+}
+
+/** Says each record and whether it is in place; true only when all are. */
+function sayRecords(steps: Steps, records: readonly DoorRecord[]): boolean {
+  steps.terminal.say(
+    "The DNS records the public doors need, at the domain's DNS provider (there, a name is the part before the domain):",
+  );
+  for (const record of records) {
+    const now = record.ready
+      ? 'in place'
+      : record.answers.length === 0
+        ? 'MISSING'
+        : `WRONG: it answers ${record.answers.join(', ')}`;
+    steps.terminal.say(`  ${record.type.padEnd(3)}  ${record.name}  ${record.value}  (${now})`);
+  }
+  return records.every((record) => record.ready);
+}
+
+function dnsOf(steps: Steps): DnsLookup {
+  if (steps.dns === undefined) throw new Error('No way to look up DNS was given.');
+  return steps.dns;
+}
+
+/** Says which DNS records the doors' hosts still need, changing nothing. */
+async function checkDns(steps: Steps): Promise<number> {
+  const dns = dnsOf(steps);
+  const subscription = signedIn(steps.az, (line) => {
+    steps.terminal.say(line);
+  });
+  const { authHost, appHost } = await askHosts(steps);
+  steps.terminal.say(`Reading ${APPS_ENVIRONMENT}'s address and the hosts' DNS; nothing is changed.`);
+  const ready = sayRecords(steps, await doorRecords(dns, [appHost, authHost], environmentDns(steps, subscription)));
+  steps.terminal.say(
+    ready
+      ? 'Every record is in place.'
+      : 'Add or fix the records marked above. A new record can take a few minutes to show.',
+  );
+  return ready ? 0 : 1;
+}
+
+/**
+ * The apps that keep no replica running. Microsoft asks for an app to be
+ * running while its certificate is issued ("When the app is stopped, its
+ * ingress doesn't serve the domain validation request"), and whether an app
+ * scaled to zero counts isn't written down, so issuance waits for `apps
+ * --keep-running`. Every app is asked, since the doors reach all three today;
+ * an app no door reaches (the worker, Phase 4) must be left out of this.
+ */
+function appsKeptAtZero(steps: Steps, subscription: string): string[] {
+  const found = azJson(steps.az, [
+    'containerapp',
+    'list',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--query',
+    '[].{name: name, fewest: properties.template.scale.minReplicas}',
+  ]);
+  const apps = Array.isArray(found) ? (found as readonly { name?: unknown; fewest?: unknown }[]) : [];
+  if (apps.length === 0) throw new Error(`${RESOURCE_GROUP} holds no apps: deploy them first.`);
+  return apps.filter((app) => typeof app.fewest !== 'number' || app.fewest < 1).map((app) => text(app.name));
+}
+
+async function deployCertificates(steps: Steps): Promise<number> {
+  const dns = dnsOf(steps);
+  const subscription = await confirmSubscription(steps);
+  confirmBicep(steps);
+  const { authHost, appHost } = await askHosts(steps);
+  const records = await doorRecords(dns, [appHost, authHost], environmentDns(steps, subscription));
+  if (!sayRecords(steps, records)) {
+    throw new Error(
+      'Every record above must be in place first (node deploy/azure/deploy.ts dns says when): nothing was deployed.',
+    );
+  }
+  const idle = appsKeptAtZero(steps, subscription);
+  if (idle.length > 0) {
+    throw new Error(
+      `A certificate is issued only while its app runs, and ${idle.join(', ')} keep no replica running: run apps --keep-running first. Nothing was deployed.`,
+    );
+  }
+  const values = { [CERTIFICATE_VARIABLES.authHost]: authHost, [CERTIFICATE_VARIABLES.appHost]: appHost };
+  checkPolicy(steps, values);
+  const name = deploymentName('certificates', steps.now());
+  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
+  const status = steps.az.interactive(
+    [
+      'deployment',
+      'group',
+      'create',
+      '--subscription',
+      subscription,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--name',
+      name,
+      '--parameters',
+      `${ENVIRONMENT}.certificates.bicepparam`,
+      '--confirm-with-what-if',
+    ],
+    values,
+  );
+  if (status !== 0) return 1;
+  const ended = howItEnded(steps, [
+    'deployment',
+    'group',
+    'show',
+    '--subscription',
+    subscription,
+    '--resource-group',
+    RESOURCE_GROUP,
+    '--name',
+    name,
+  ]);
+  if (!succeeded(steps, name, ended)) return 1;
+  steps.terminal.say('Deployed. The certificates, and how Azure left each:');
+  const certificates = armList(
+    steps,
+    `${environmentUrl(subscription)}/managedCertificates?api-version=${ENVIRONMENT_API}`,
+    "the environment's certificates",
+  ) as readonly { name?: unknown; properties?: { subjectName?: unknown; provisioningState?: unknown } }[];
+  for (const certificate of certificates) {
+    steps.terminal.say(
+      `  ${text(certificate.name)}: ${text(certificate.properties?.subjectName)}, ${text(certificate.properties?.provisioningState)}`,
+    );
+  }
+  steps.terminal.say(
+    'A door answers over https once its certificate has succeeded. Then run apps without --keep-running to stop the billing.',
+  );
+  return 0;
+}
+
 async function deployApps(steps: Steps, commit: string | undefined, keepRunning: boolean): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
@@ -904,9 +1170,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
       : 'Each app will scale to zero while nothing uses it.',
   );
   steps.terminal.say('Zitadel keeps the address it is first set up with, so type the two hosts as they will stay.');
-  const authHost = await askHost(steps, 'Host for sign-in (Zitadel): ');
-  const appHost = await askHost(steps, 'Host for the app (the API): ');
-  if (authHost === appHost) throw new Error('The two hosts must differ: nothing was deployed.');
+  const { authHost, appHost } = await askHosts(steps);
   const adminEmail = await steps.terminal.ask("Zitadel's first admin's address: ");
   if (!EMAIL.test(adminEmail)) throw new Error("That isn't an email address: nothing was deployed.");
   const values = {
@@ -988,6 +1252,10 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
       return deployApps(steps, request.commit, request.keepRunning);
     case 'alerts':
       return checkAlerts(steps);
+    case 'dns':
+      return checkDns(steps);
+    case 'certificates':
+      return deployCertificates(steps);
   }
 }
 
@@ -1027,6 +1295,7 @@ export async function main(
       rangesCurrent,
       now: () => new Date(),
       images: realImages(),
+      dns: realDns(),
     });
   } catch (error) {
     if (!(error instanceof Error)) throw error;

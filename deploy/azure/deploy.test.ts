@@ -15,14 +15,18 @@ import { newPassword } from '../compose/prepare.ts';
 import {
   ACTION_GROUP,
   APP_VARIABLES,
+  APPS_ENVIRONMENT,
   askPassword,
   type Az,
   azInvocation,
   type AzResult,
   Cancelled,
+  CERTIFICATE_VARIABLES,
   deploy,
   deploymentName,
   describePlan,
+  type DnsLookup,
+  doorRecords,
   HiddenLine,
   type Images,
   main,
@@ -31,6 +35,7 @@ import {
   passwordProblems,
   peopleAskedFor,
   policyCheck,
+  realDns,
   realImages,
   RESOURCE_GROUP,
   secretValues,
@@ -85,9 +90,11 @@ const pasted = (...values: readonly string[]): Record<string, string> =>
 const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...label].join(' ') + '-----\n';
 
 describe('parseArguments', () => {
-  it('reads the four ways the tool is run', () => {
+  it('reads the ways the tool is run', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation' });
     expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
+    expect(parseArguments(['dns'])).toEqual({ command: 'dns' });
+    expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
     expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined, keepRunning: false });
     expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({
@@ -127,7 +134,7 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation, secrets, apps or alerts, not deploy/],
+      [['deploy'], /say foundation, secrets, apps, alerts, dns or certificates, not deploy/],
       [['apps', '--commit'], /apps takes --keep-running, and --commit with one full 40-hex commit/],
       [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT.toUpperCase()], /one full 40-hex commit/],
@@ -139,6 +146,8 @@ describe('parseArguments', () => {
       [['apps', '--keep'], /each at most once/],
       [['foundation', '--all'], /foundation takes no options/],
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
+      [['dns', 'app.example.invalid'], /dns takes no options, not app.example.invalid/],
+      [['certificates', '--keep-running'], /certificates takes no options, not --keep-running/],
       [['secrets'], /needs --all .* or --rotate/],
       [['secrets', '--all', 'db-app-password'], /--all takes no names/],
       [['secrets', '--rotate'], /at least one secret name/],
@@ -427,7 +436,58 @@ interface AzAnswers {
   readonly receivers?: readonly (readonly Receiver[])[];
   /** The alert group's own switch, as Azure answers it; on by default, left out when undefined. */
   readonly groupEnabled?: unknown;
+  /** The environment as Azure answers it; by default with its address and verification code. */
+  readonly environment?: unknown;
+  /** Each app's name and replica minimum; by default all three kept running. */
+  readonly apps?: readonly { readonly name: string; readonly fewest?: unknown }[];
+  /** The environment's certificates after the deployment. */
+  readonly certificates?: readonly unknown[];
 }
+
+const ENVIRONMENT_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/managedEnvironments/cae-agentx-staging`;
+/** A made-up address from the documentation range, and a made-up code of the shape Azure gives. */
+const ENVIRONMENT_IP = '192.0.2.10';
+const VERIFICATION = 'AB'.repeat(32);
+const ENVIRONMENT_DNS_PROPERTIES = {
+  staticIp: ENVIRONMENT_IP,
+  customDomainConfiguration: { customDomainVerificationId: VERIFICATION },
+};
+const KEPT_RUNNING = ['ca-agentx-stg-zitadel', 'ca-agentx-stg-api', 'ca-agentx-stg-login'].map((name) => ({
+  name,
+  fewest: 1,
+}));
+
+const APP_HOST = 'app.example.invalid';
+const AUTH_HOST = 'auth.example.invalid';
+
+/** A DNS that answers from a table, as the operator's resolver would, recording what it was asked. */
+class TableDns implements DnsLookup {
+  readonly asked: string[] = [];
+  readonly #a: Readonly<Record<string, readonly string[]>>;
+  readonly #txt: Readonly<Record<string, readonly string[]>>;
+
+  constructor(a: Readonly<Record<string, readonly string[]>>, txt: Readonly<Record<string, readonly string[]>>) {
+    this.#a = a;
+    this.#txt = txt;
+  }
+
+  addresses(host: string): Promise<readonly string[]> {
+    this.asked.push(`A ${host}`);
+    return Promise.resolve(this.#a[host] ?? []);
+  }
+
+  texts(host: string): Promise<readonly string[]> {
+    this.asked.push(`TXT ${host}`);
+    return Promise.resolve(this.#txt[host] ?? []);
+  }
+}
+
+/** Every record both doors need, in place. */
+const readyDns = (): TableDns =>
+  new TableDns(
+    { [APP_HOST]: [ENVIRONMENT_IP], [AUTH_HOST]: [ENVIRONMENT_IP] },
+    { [`asuid.${APP_HOST}`]: [VERIFICATION], [`asuid.${AUTH_HOST}`]: ['other-text', VERIFICATION] },
+  );
 
 /** As Azure answers; a field left undefined is one Azure didn't send. */
 interface Receiver {
@@ -485,11 +545,18 @@ class RecordingAz implements Az {
       case 'keyvault list':
         return json(this.options.vaults ?? ['kv-agentx-stg-abcdef']);
       case 'containerapp list':
+        if (args.some((arg) => arg.includes('fewest'))) return json(this.options.apps ?? KEPT_RUNNING);
         return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
       case 'containerapp job':
         return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
       case 'rest --method': {
         const url = args[args.indexOf('--url') + 1] ?? '';
+        if (url === `${ENVIRONMENT_URL}?api-version=2026-01-01`) {
+          return json(this.options.environment ?? { properties: ENVIRONMENT_DNS_PROPERTIES });
+        }
+        if (url === `${ENVIRONMENT_URL}/managedCertificates?api-version=2026-01-01`) {
+          return json({ value: this.options.certificates ?? [] });
+        }
         if (url.includes('/actionGroups/')) {
           if (url !== ACTION_GROUP_URL) throw new Error(`unexpected action group read ${url}`);
           const readings = this.options.receivers ?? [[CONFIRMED]];
@@ -530,6 +597,7 @@ interface Scenario {
   readonly problems?: readonly string[];
   readonly rangesCurrent?: boolean;
   readonly images?: Images;
+  readonly dns?: DnsLookup;
 }
 
 /** One run of the tool, with everything it touched. */
@@ -548,6 +616,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     now: () => new Date('2026-09-16T16:42:15Z'),
     makers: quickMakers(),
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
+    ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -1017,6 +1086,241 @@ describe('deploy apps', () => {
   });
 });
 
+describe('the records a door needs', () => {
+  const environment = { ip: ENVIRONMENT_IP, verification: VERIFICATION };
+
+  it('asks for an A record and an asuid TXT record per host, in the order given', async () => {
+    const dns = readyDns();
+    const records = await doorRecords(dns, [APP_HOST, AUTH_HOST], environment);
+    expect(records.map((record) => [record.type, record.name, record.value, record.ready])).toEqual([
+      ['A', APP_HOST, ENVIRONMENT_IP, true],
+      ['TXT', `asuid.${APP_HOST}`, VERIFICATION, true],
+      ['A', AUTH_HOST, ENVIRONMENT_IP, true],
+      ['TXT', `asuid.${AUTH_HOST}`, VERIFICATION, true],
+    ]);
+    expect(dns.asked).toEqual([`A ${APP_HOST}`, `TXT asuid.${APP_HOST}`, `A ${AUTH_HOST}`, `TXT asuid.${AUTH_HOST}`]);
+  });
+
+  it('counts an A record ready only when the environment is the one address, and a TXT only when it holds the code', async () => {
+    for (const [addresses, ready] of [
+      [[], false],
+      [['192.0.2.99'], false],
+      [[ENVIRONMENT_IP, '192.0.2.99'], false],
+      [[ENVIRONMENT_IP], true],
+    ] as const) {
+      const [record] = await doorRecords(new TableDns({ [APP_HOST]: addresses }, {}), [APP_HOST], environment);
+      expect({ addresses, ready: record?.ready, answers: record?.answers }).toEqual({
+        addresses,
+        ready,
+        answers: addresses,
+      });
+    }
+    for (const [texts, ready] of [
+      [[], false],
+      [['something else'], false],
+      [[VERIFICATION.toLowerCase()], false],
+      [[`${VERIFICATION} `], false],
+      [['something else', VERIFICATION], true],
+    ] as const) {
+      const [, record] = await doorRecords(new TableDns({}, { [`asuid.${APP_HOST}`]: texts }), [APP_HOST], environment);
+      expect({ texts, ready: record?.ready }).toEqual({ texts, ready });
+    }
+  });
+});
+
+describe('realDns', () => {
+  const failing = (code: string) => () => Promise.reject(Object.assign(new Error(`queryA ${code} host`), { code }));
+
+  it('joins a TXT record’s strings and treats a missing name or record as none', async () => {
+    const dns = realDns({
+      resolve4: (host: string) => Promise.resolve(host === 'one.example.invalid' ? ['192.0.2.1'] : []),
+      resolveTxt: () => Promise.resolve([['AB', 'CD'], ['EF']]),
+    } as unknown as Parameters<typeof realDns>[0]);
+    expect(await dns.addresses('one.example.invalid')).toEqual(['192.0.2.1']);
+    expect(await dns.texts('asuid.one.example.invalid')).toEqual(['ABCD', 'EF']);
+    for (const code of ['ENOTFOUND', 'ENODATA']) {
+      const none = realDns({ resolve4: failing(code), resolveTxt: failing(code) });
+      expect(await none.addresses('gone.example.invalid')).toEqual([]);
+      expect(await none.texts('gone.example.invalid')).toEqual([]);
+    }
+  });
+
+  it('fails, naming the host, when the lookup itself fails', async () => {
+    const broken = realDns({ resolve4: failing('ETIMEOUT'), resolveTxt: failing('ESERVFAIL') });
+    await expect(broken.addresses('slow.example.invalid')).rejects.toThrow(
+      'Looking up slow.example.invalid failed: Error: queryA ETIMEOUT host',
+    );
+    await expect(broken.texts('asuid.slow.example.invalid')).rejects.toThrow(
+      'Looking up asuid.slow.example.invalid failed: Error: queryA ESERVFAIL host',
+    );
+  });
+});
+
+describe('dns', () => {
+  const hosts = ['Auth.Example.invalid', APP_HOST];
+
+  it('says each record is in place, changing nothing, and ends 0', async () => {
+    const dns = readyDns();
+    const done = await run(['dns'], { answers: hosts, dns });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.az.sequence).toEqual(['account show --output', `rest --method get`]);
+    expect(done.az.deployment).toBeUndefined();
+    expect(done.terminal.questions).toEqual(['Host for sign-in (Zitadel): ', 'Host for the app (the API): ']);
+    expect(done.terminal.said.slice(-5)).toEqual([
+      `  A    ${APP_HOST}  ${ENVIRONMENT_IP}  (in place)`,
+      `  TXT  asuid.${APP_HOST}  ${VERIFICATION}  (in place)`,
+      `  A    ${AUTH_HOST}  ${ENVIRONMENT_IP}  (in place)`,
+      `  TXT  asuid.${AUTH_HOST}  ${VERIFICATION}  (in place)`,
+      'Every record is in place.',
+    ]);
+  });
+
+  it('marks a record missing or wrong, and ends 1', async () => {
+    const dns = new TableDns(
+      { [APP_HOST]: ['192.0.2.99', ENVIRONMENT_IP] },
+      { [`asuid.${AUTH_HOST}`]: [VERIFICATION] },
+    );
+    const done = await run(['dns'], { answers: hosts, dns });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said.slice(-5)).toEqual([
+      `  A    ${APP_HOST}  ${ENVIRONMENT_IP}  (WRONG: it answers 192.0.2.99, ${ENVIRONMENT_IP})`,
+      `  TXT  asuid.${APP_HOST}  ${VERIFICATION}  (MISSING)`,
+      `  A    ${AUTH_HOST}  ${ENVIRONMENT_IP}  (MISSING)`,
+      `  TXT  asuid.${AUTH_HOST}  ${VERIFICATION}  (in place)`,
+      'Add or fix the records marked above. A new record can take a few minutes to show.',
+    ]);
+  });
+
+  it('refuses an environment Azure gives no address or code for, and hosts that are no hosts', async () => {
+    for (const environment of [
+      {},
+      { properties: { ...ENVIRONMENT_DNS_PROPERTIES, staticIp: '' } },
+      { properties: { ...ENVIRONMENT_DNS_PROPERTIES, staticIp: '192.0.2.256' } },
+      { properties: { ...ENVIRONMENT_DNS_PROPERTIES, customDomainConfiguration: {} } },
+      {
+        properties: {
+          ...ENVIRONMENT_DNS_PROPERTIES,
+          customDomainConfiguration: { customDomainVerificationId: 'ab'.repeat(32) },
+        },
+      },
+    ]) {
+      const done = await run(['dns'], { answers: hosts, dns: readyDns(), az: new RecordingAz({ environment }) });
+      expect(done.error).toMatchObject({
+        message:
+          'Azure gave no public address and verification code for cae-agentx-staging: deploy the foundation first.',
+      });
+    }
+    const same = await run(['dns'], { answers: [APP_HOST, APP_HOST], dns: readyDns() });
+    expect(same.error).toMatchObject({ message: 'The two hosts must differ: nothing was deployed.' });
+    const none = await run(['dns'], { answers: hosts });
+    expect(none.error).toMatchObject({ message: 'No way to look up DNS was given.' });
+    expect(none.az.calls).toEqual([]);
+  });
+});
+
+describe('deploy certificates', () => {
+  const answers = ['y', AUTH_HOST, APP_HOST];
+  const certificates = [
+    { name: 'mc-agentx-stg-app', properties: { subjectName: APP_HOST, provisioningState: 'Succeeded' } },
+    { name: 'mc-agentx-stg-auth', properties: { subjectName: AUTH_HOST, provisioningState: 'Pending' } },
+  ];
+
+  it('checks the records and the running apps, then deploys with the two hosts alone and lists how each certificate stands', async () => {
+    const done = await run(['certificates'], {
+      answers,
+      dns: readyDns(),
+      az: new RecordingAz({ certificates }),
+    });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.az.sequence).toEqual([
+      'account show --output',
+      'bicep version',
+      'rest --method get',
+      'containerapp list --subscription',
+      'deployment group create',
+      'deployment group show',
+      'rest --method get',
+    ]);
+    const deployment = done.az.deployment;
+    expect(deployment?.args).toContain('staging.certificates.bicepparam');
+    expect(deployment?.args).toContain('--confirm-with-what-if');
+    expect(deployment?.args[deployment.args.indexOf('--name') + 1]).toBe(
+      'agentx-staging-certificates-20260916T164215Z',
+    );
+    expect(deployment?.values).toEqual({ AGENTX_AZURE_AUTH_HOST: AUTH_HOST, AGENTX_AZURE_APP_HOST: APP_HOST });
+    expect(done.checked).toEqual([deployment?.values]);
+    expect(done.terminal.said.slice(-4)).toEqual([
+      'Deployed. The certificates, and how Azure left each:',
+      `  mc-agentx-stg-app: ${APP_HOST}, Succeeded`,
+      `  mc-agentx-stg-auth: ${AUTH_HOST}, Pending`,
+      'A door answers over https once its certificate has succeeded. Then run apps without --keep-running to stop the billing.',
+    ]);
+  });
+
+  it('deploys nothing while a record is missing or an app keeps no replica, and checks no rules first', async () => {
+    const missing = await run(['certificates'], {
+      answers,
+      dns: new TableDns({ [APP_HOST]: [ENVIRONMENT_IP], [AUTH_HOST]: [ENVIRONMENT_IP] }, {}),
+    });
+    expect(missing.error).toMatchObject({
+      message:
+        'Every record above must be in place first (node deploy/azure/deploy.ts dns says when): nothing was deployed.',
+    });
+    expect(missing.terminal.said).toContain(`  TXT  asuid.${APP_HOST}  ${VERIFICATION}  (MISSING)`);
+    for (const apps of [
+      [
+        { name: 'ca-agentx-stg-api', fewest: 1 },
+        { name: 'ca-agentx-stg-login', fewest: 0 },
+        { name: 'ca-agentx-stg-zitadel', fewest: 0 },
+      ],
+      [
+        { name: 'ca-agentx-stg-api' },
+        { name: 'ca-agentx-stg-login', fewest: 1 },
+        { name: 'ca-agentx-stg-zitadel', fewest: '1' },
+      ],
+    ]) {
+      const idle = await run(['certificates'], { answers, dns: readyDns(), az: new RecordingAz({ apps }) });
+      const named = apps.filter((app) => app.fewest !== 1).map((app) => app.name);
+      expect(idle.error).toMatchObject({
+        message: `A certificate is issued only while its app runs, and ${named.join(', ')} keep no replica running: run apps --keep-running first. Nothing was deployed.`,
+      });
+      expect(idle.az.deployment).toBeUndefined();
+      expect(idle.checked).toEqual([]);
+    }
+    const noApps = await run(['certificates'], { answers, dns: readyDns(), az: new RecordingAz({ apps: [] }) });
+    expect(noApps.error).toMatchObject({ message: 'rg-agentx-staging holds no apps: deploy them first.' });
+    // An answer that isn't a list is no apps either.
+    const notAList = await run(['certificates'], {
+      answers,
+      dns: readyDns(),
+      az: new RecordingAz({ apps: { value: KEPT_RUNNING } as unknown as [] }),
+    });
+    expect(notAList.error).toMatchObject({ message: 'rg-agentx-staging holds no apps: deploy them first.' });
+    for (const done of [missing, noApps, notAList]) {
+      expect(done.az.deployment).toBeUndefined();
+      expect(done.checked).toEqual([]);
+    }
+  });
+
+  it('lists nothing when the what-if is declined or the deployment fails, and asks nothing without DNS', async () => {
+    for (const az of [
+      new RecordingAz({ status: 1 }),
+      new RecordingAz({ ended: 'Declined' }),
+      new RecordingAz({ ended: 'Failed' }),
+    ]) {
+      const done = await run(['certificates'], { answers, dns: readyDns(), az });
+      expect(done.status).toBe(1);
+      expect(done.az.sequence.at(-1)).not.toBe('rest --method get');
+      expect(done.terminal.said.join('\n')).not.toContain('The certificates, and how Azure left each');
+    }
+    const none = await run(['certificates'], { answers });
+    expect(none.error).toMatchObject({ message: 'No way to look up DNS was given.' });
+    expect(none.terminal.questions).toEqual([]);
+  });
+});
+
 describe('realImages', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -1160,6 +1464,16 @@ describe('the tool and the deployment agree', () => {
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
+  });
+
+  it('reads the certificates’ hosts from the apps’ variables, and finds the environment the foundation creates', () => {
+    const certificatesText = readFileSync(path.join(AZURE_DIR, 'staging.certificates.bicepparam'), 'utf8');
+    const read = [...certificatesText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
+    expect(read.sort()).toEqual(Object.values(CERTIFICATE_VARIABLES).sort());
+    const environments = snapshot.predictedResources.filter(
+      (resource) => resource.type === 'Microsoft.App/managedEnvironments',
+    );
+    expect(environments.map((environment) => environment.name)).toEqual([APPS_ENVIRONMENT]);
   });
 
   it('deploys into the resource group the foundation creates', () => {
