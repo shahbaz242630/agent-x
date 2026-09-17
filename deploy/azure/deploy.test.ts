@@ -380,6 +380,13 @@ interface AzAnswers {
   /** The secrets the vault holds before the deployment, and after it. */
   readonly before?: readonly string[];
   readonly after?: readonly string[];
+  /**
+   * How Azure pages the vault's list: three a page, as on the first real run
+   * (S19), each page linking to the next, and an empty page last. `emptyFirst`
+   * puts an empty page before the rest; `nextLink` replaces every link; a list
+   * that never ends keeps linking to its first page.
+   */
+  readonly pages?: { readonly emptyFirst?: boolean; readonly nextLink?: string; readonly endless?: boolean };
   /** The status the deployment command ends with: 0, or what a failure returns. */
   readonly status?: number;
   /**
@@ -437,7 +444,15 @@ class RecordingAz implements Az {
         return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
       case 'rest --method': {
         const names = (this.#deployed ? this.options.after : this.options.before) ?? [];
-        return json({ value: names.map((name) => ({ name })) });
+        const pages = this.options.pages ?? {};
+        const url = args[args.indexOf('--url') + 1] ?? '';
+        const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
+        const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
+        if (token === undefined && pages.emptyFirst === true) return json({ value: [], nextLink: link('0') });
+        const from = token === undefined || token === 'first' ? 0 : Number(token);
+        const page = names.slice(from, from + 3).map((name) => ({ name }));
+        if (pages.endless === true) return json({ value: page, nextLink: link('first') });
+        return json(from + 3 <= names.length ? { value: page, nextLink: link(String(from + 3)) } : { value: page });
       }
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
@@ -595,7 +610,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      'rest --method get',
+      // Nine secrets, three a page, and the empty page Azure ends with.
+      ...Array<string>(4).fill('rest --method get'),
     ]);
     const deployment = done.az.deployment;
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
@@ -627,6 +643,36 @@ describe('deploy secrets', () => {
       az: new RecordingAz({ before: nine, after: nine }),
     });
     expect(agreed.status).toBe(0);
+  });
+
+  it('reads every page of the vault, so a first page that happens to be empty still counts as secrets held', async () => {
+    const declined = await run(['secrets', '--all'], {
+      answers: ['y', 'yes'],
+      az: new RecordingAz({ before: nine, pages: { emptyFirst: true } }),
+    });
+    expect(declined.error).toBeInstanceOf(Cancelled);
+    expect(declined.terminal.said).toContainEqual(expect.stringMatching(/^The vault already holds 9 secrets\./));
+    expect(declined.az.deployment).toBeUndefined();
+  });
+
+  it('refuses a vault list that leads outside Azure Resource Manager, or never ends, before deploying', async () => {
+    const elsewhere = 'https://example.invalid/secrets?$skiptoken=3';
+    const outside = await run(['secrets', '--all'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: nine, pages: { nextLink: elsewhere } }),
+    });
+    expect(outside.error).toMatchObject({
+      message: expect.stringMatching(/outside Azure Resource Manager/) as unknown,
+    });
+    expect(outside.az.calls.map((call) => call.args.join(' '))).not.toContainEqual(expect.stringContaining(elsewhere));
+    expect(outside.az.deployment).toBeUndefined();
+    const endless = await run(['secrets', '--all'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: nine, pages: { endless: true } }),
+    });
+    expect(endless.error).toMatchObject({ message: expect.stringMatching(/went past 100 pages/) as unknown });
+    expect(endless.az.sequence.filter((command) => command === 'rest --method get')).toHaveLength(100);
+    expect(endless.az.deployment).toBeUndefined();
   });
 
   it('on a rotation, asks for nothing, writes the named login and the master key, and says to run the set-up job', async () => {
