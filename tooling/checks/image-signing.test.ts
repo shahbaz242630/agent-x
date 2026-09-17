@@ -169,6 +169,18 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect(push?.run).not.toContain('imagetools inspect "${IMAGE}:${COMMIT}"');
   });
 
+  it('tries the push three times before failing, since the registry sometimes refuses one ("unknown blob")', () => {
+    const run = steps('image-publish').find((step) => step.name === 'Push')?.run ?? '';
+    expect(run.match(/docker push /g)).toHaveLength(1);
+    expect(run).toContain(
+      'pushed=false\nfor attempt in 1 2 3; do\n  if docker push --quiet "${IMAGE}:${COMMIT}"; then\n    pushed=true\n    break\n  fi\n',
+    );
+    expect(run).toContain(
+      'if [ "${pushed}" != true ]; then\n  echo "::error::Pushing ${IMAGE}:${COMMIT} failed 3 times."\n  exit 1\nfi\n',
+    );
+    expect(run.indexOf('docker push ')).toBeLessThan(run.indexOf('docker image inspect'));
+  });
+
   it("uses the runner image's own Node, not a same-day download, in the jobs that can sign", () => {
     for (const name of ['image-publish', 'image-attest']) {
       const setupNode = steps(name).find((step) => step.uses?.startsWith('actions/setup-node@') === true);
