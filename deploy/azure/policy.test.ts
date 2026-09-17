@@ -1513,106 +1513,150 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'apps',
     ]);
     // An app the deployment needs, left out. Zitadel's own secrets are then
-    // read by nothing, and the login pages have nothing to sign a call to. The
-    // app door would reach an app this deployment doesn't make.
-    expect(brokenRules(without(APP('api')))).toEqual(['apps', 'public-doors']);
-    expect(brokenRules(without(APP('login')))).toEqual(['apps']);
-    expect(brokenRules(without(APP('zitadel')))).toEqual(['apps']);
+    // read by nothing, and the login pages have nothing to sign a call to. A
+    // door would reach an app this deployment doesn't make.
+    for (const workload of ['api', 'login', 'zitadel']) {
+      expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
+        workload,
+        rules: ['apps', 'public-doors'],
+      });
+    }
   });
 
-  it('public-doors: a door nothing lists or elsewhere, on plain http, rewriting, reaching another app, or missing', () => {
+  it('public-doors: a door nothing lists or elsewhere, on plain http, routing any other way, or missing', () => {
     // The rule's own messages, so a condition another one also catches can't hide.
     const doorProblems = (snapshotted: Snapshot): string[] =>
       policyProblems(snapshotted, STAGING)
         .filter((problem) => problem.rule === 'public-doors')
         .map((problem) => `${problem.resource}: ${problem.message}`);
-    const door = staging.predictedResources.find(DOOR);
+    const APP_DOOR = named(/\/rtagentxstgapp$/);
+    const AUTH_DOOR = named(/\/rtagentxstgauth$/);
+    const appDoor = staging.predictedResources.find(APP_DOOR);
     const environment = staging.predictedResources.find(ENVIRONMENT);
-    const name = 'cae-agentx-staging/rtagentxstgapp';
-    expect(door?.name).toBe(name);
+    const app = 'cae-agentx-staging/rtagentxstgapp';
+    const auth = 'cae-agentx-staging/rtagentxstgauth';
+    expect(staging.predictedResources.filter(DOOR).map((door) => door.name)).toEqual([app, auth]);
     expect(doorProblems(staging)).toEqual([]);
-    // A door PUBLIC_DOORS doesn't name, beside the one it does.
-    expect(doorProblems(withExtra({ ...structuredClone(door), id: `${String(door?.id)}x`, name: `${name}x` }))).toEqual(
-      [
-        `${name}x: isn't a door PUBLIC_DOORS names (app), so it may reach no app`,
-        `${name}x: may reach no app; it reaches ca-agentx-stg-api`,
-      ],
-    );
+    // A door PUBLIC_DOORS doesn't name, beside the ones it does.
+    expect(
+      doorProblems(withExtra({ ...structuredClone(appDoor), id: `${String(appDoor?.id)}x`, name: `${app}x` })),
+    ).toEqual([`${app}x: isn't a door PUBLIC_DOORS names (app, auth), so it may route nothing`]);
     // The same door, but another environment's.
     expect(
       doorProblems(
-        changed(DOOR, (found) => {
-          found.id = `${String(environment?.id)}-second/httpRouteConfigs/rtagentxstgapp`;
+        changed(APP_DOOR, (door) => {
+          door.id = `${String(environment?.id)}-second/httpRouteConfigs/rtagentxstgapp`;
         }),
       ),
-    ).toEqual([`${name}: must be a door of this deployment's Container Apps environment`]);
+    ).toEqual([`${app}: must be a door of this deployment's Container Apps environment`]);
     // No host, or two.
-    expect(doorProblems(changed(DOOR, (found) => (inside(found, 'properties').customDomains = [])))).toEqual([
-      `${name}: must serve exactly one host; it names 0`,
+    expect(doorProblems(changed(AUTH_DOOR, (door) => (inside(door, 'properties').customDomains = [])))).toEqual([
+      `${auth}: must serve exactly one host; it names 0`,
     ]);
     expect(
       doorProblems(
-        changed(DOOR, (found) => {
-          const hosts = at(found, 'properties', 'customDomains') as Mutable[];
-          hosts.push({ name: 'other.example.invalid', bindingType: 'Auto' });
+        changed(APP_DOOR, (door) => {
+          (at(door, 'properties', 'customDomains') as Mutable[]).push({
+            name: 'other.example.invalid',
+            bindingType: 'Auto',
+          });
         }),
       ),
-    ).toEqual([`${name}: must serve exactly one host; it names 2`]);
-    // Plain http alone, said outright or left to Azure.
+    ).toEqual([`${app}: must serve exactly one host; it names 2`]);
+    // Plain http alone, said outright or left to Azure; a certificate it names is as good as a managed one.
+    const hostOf = (door: Mutable): Mutable => first(at(door, 'properties', 'customDomains'));
     for (const change of [
       (host: Mutable) => (host.bindingType = 'Disabled'),
       (host: Mutable) => delete host.bindingType,
     ]) {
-      expect(doorProblems(changed(DOOR, (found) => change(first(at(found, 'properties', 'customDomains')))))).toEqual([
-        `${name}: must bind a certificate to app.example.invalid (Auto or SniEnabled), never plain http alone`,
+      expect(doorProblems(changed(AUTH_DOOR, (door) => change(hostOf(door))))).toEqual([
+        `${auth}: must bind a certificate to auth.example.invalid (Auto or SniEnabled), never plain http alone`,
       ]);
     }
-    // A certificate it names is as good as a managed one.
-    expect(
-      doorProblems(
-        changed(DOOR, (found) => (first(at(found, 'properties', 'customDomains')).bindingType = 'SniEnabled')),
+    expect(doorProblems(changed(APP_DOOR, (door) => (hostOf(door).bindingType = 'SniEnabled')))).toEqual([]);
+    // The routing, which must be exactly the listed lines in order.
+    const listed = {
+      app: 'prefix "/" to api',
+      auth: 'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel',
+    };
+    const routed = (name: string, lines: string): string =>
+      `${name}: must route exactly as PUBLIC_DOORS says, in order: ${name === app ? listed.app : listed.auth}. It routes: ${lines}`;
+    const rulesOf = (door: Mutable): Mutable[] => at(door, 'properties', 'rules') as Mutable[];
+    const routeOf = (door: Mutable, index = 0): Mutable => first(nth(rulesOf(door), index).routes);
+    const targetOf = (door: Mutable, index = 0): Mutable => first(nth(rulesOf(door), index).targets);
+    const authRouting = (change: (door: Mutable) => void): string[] => doorProblems(changed(AUTH_DOOR, change));
+    const appRouting = (change: (door: Mutable) => void): string[] => doorProblems(changed(APP_DOOR, change));
+    // The login pages after `/`, where Zitadel would take them first.
+    expect(authRouting((door) => rulesOf(door).reverse())).toEqual([
+      routed(auth, 'prefix "/" to zitadel; prefix "/ui/v2/login" to login; prefix "/debug" in any case to api'),
+    ]);
+    // The debug pages matched in one case only, or with case left to Azure; `/` in any case.
+    expect(authRouting((door) => (inside(routeOf(door), 'match').caseSensitive = true))).toEqual([
+      routed(auth, 'prefix "/debug" to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel'),
+    ]);
+    expect(authRouting((door) => delete inside(routeOf(door), 'match').caseSensitive)).toEqual([
+      routed(
+        auth,
+        'prefix "/debug" with case left to Azure to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel',
       ),
-    ).toEqual([]);
-    const ruleOf = (found: Mutable): Mutable => first(at(found, 'properties', 'rules'));
-    const routeOf = (found: Mutable): Mutable => first(ruleOf(found).routes);
-    const targetOf = (found: Mutable): Mutable => first(ruleOf(found).targets);
-    // A rule that matches nothing said, a route that matches no path or two ways, and a rewrite.
-    expect(doorProblems(changed(DOOR, (found) => (ruleOf(found).routes = [])))).toEqual([
-      `${name}: must match each rule on at least one path`,
     ]);
-    for (const match of [
-      {},
-      { prefix: '' },
-      { prefix: '/', path: '/health' },
-      { pathSeparatedPrefix: '/', prefix: '/' },
-    ]) {
-      expect({ match, problems: doorProblems(changed(DOOR, (found) => (routeOf(found).match = match))) }).toEqual({
-        match,
-        problems: [`${name}: must match each route on exactly one of prefix, path, pathSeparatedPrefix`],
-      });
-    }
-    for (const match of [{ path: '/health' }, { pathSeparatedPrefix: '/v1' }]) {
-      expect(doorProblems(changed(DOOR, (found) => (routeOf(found).match = match)))).toEqual([]);
-    }
-    expect(doorProblems(changed(DOOR, (found) => (routeOf(found).action = { prefixRewrite: '/debug' })))).toEqual([
-      `${name}: must pass each path on as it came: a rewrite can take a request where no rule sends it`,
+    expect(appRouting((door) => (inside(routeOf(door), 'match').caseSensitive = false))).toEqual([
+      routed(app, 'prefix "/" in any case to api'),
     ]);
-    // Another app of ours, and apps that aren't this deployment's: production's
-    // API is an api, but not one this deployment makes.
-    for (const app of ['ca-agentx-stg-zitadel', 'ca-agentx-stg-login', 'ca-other-api', 'ca-agentx-prd-api']) {
-      expect(doorProblems(changed(DOOR, (found) => (targetOf(found).containerApp = app)))).toEqual([
-        `${name}: may reach only api; it reaches ${app}`,
-      ]);
-    }
+    // Another way of matching, two at once, none, or a rule with no route at all.
+    expect(appRouting((door) => (routeOf(door).match = { path: '/', caseSensitive: true }))).toEqual([
+      routed(app, 'path "/" to api'),
+    ]);
+    expect(
+      appRouting((door) => (routeOf(door).match = { prefix: '/', pathSeparatedPrefix: '/', caseSensitive: true })),
+    ).toEqual([routed(app, 'prefix "/" and pathSeparatedPrefix "/" to api')]);
+    expect(appRouting((door) => (routeOf(door).match = { caseSensitive: true }))).toEqual([
+      routed(app, 'no path to api'),
+    ]);
+    expect(appRouting((door) => (first(rulesOf(door)).routes = []))).toEqual([
+      routed(app, 'no path with case left to Azure to api'),
+    ]);
+    // A rewrite, which can take a request where no rule sends it.
+    expect(appRouting((door) => (routeOf(door).action = { prefixRewrite: '/debug' }))).toEqual([
+      routed(app, 'prefix "/" rewritten by {"prefixRewrite":"/debug"} to api'),
+    ]);
+    // Another app of ours, one this deployment doesn't make (production's API
+    // is an api, but not this deployment's), and none at all.
+    expect(authRouting((door) => (targetOf(door).containerApp = 'ca-agentx-stg-zitadel'))).toEqual([
+      routed(auth, 'prefix "/debug" in any case to zitadel; prefix "/ui/v2/login" to login; prefix "/" to zitadel'),
+    ]);
+    expect(appRouting((door) => (targetOf(door).containerApp = 'ca-agentx-prd-api'))).toEqual([
+      routed(app, `prefix "/" to "ca-agentx-prd-api", which this deployment doesn't make`),
+    ]);
+    expect(appRouting((door) => (first(rulesOf(door)).targets = []))).toEqual([routed(app, 'prefix "/" to no app')]);
     // The right app, pinned to a revision or label.
-    for (const pin of [{ revision: 'ca-agentx-stg-api--0000001' }, { label: 'blue' }]) {
-      expect(doorProblems(changed(DOOR, (found) => Object.assign(targetOf(found), pin)))).toEqual([
-        `${name}: must reach an app's live revision, not a revision or label it pins`,
-      ]);
-    }
-    // The door missing, or there twice.
-    expect(doorProblems(without(DOOR))).toEqual(['the deployment: needs the app door once; the snapshot has 0']);
-    expect(doorProblems(withExtra(structuredClone(door) as unknown as Mutable))).toEqual([
+    expect(appRouting((door) => (targetOf(door).revision = 'ca-agentx-stg-api--0000001'))).toEqual([
+      routed(app, 'prefix "/" to api pinned to revision "ca-agentx-stg-api--0000001"'),
+    ]);
+    expect(authRouting((door) => (targetOf(door, 2).label = 'blue'))).toEqual([
+      routed(
+        auth,
+        'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel pinned to label "blue"',
+      ),
+    ]);
+    // A second target on a rule, a rule too many, and no rules at all.
+    expect(
+      appRouting((door) => (first(rulesOf(door)).targets as Mutable[]).push({ containerApp: 'ca-agentx-stg-login' })),
+    ).toEqual([routed(app, 'prefix "/" to api; prefix "/" to login')]);
+    expect(authRouting((door) => rulesOf(door).push(structuredClone(first(rulesOf(door)))))).toEqual([
+      routed(
+        auth,
+        'prefix "/debug" in any case to api; prefix "/ui/v2/login" to login; prefix "/" to zitadel; prefix "/debug" in any case to api',
+      ),
+    ]);
+    expect(appRouting((door) => (inside(door, 'properties').rules = []))).toEqual([routed(app, 'nothing')]);
+    // A door missing, or there twice.
+    expect(doorProblems(without(AUTH_DOOR))).toEqual(['the deployment: needs the auth door once; the snapshot has 0']);
+    expect(doorProblems(without(DOOR))).toEqual([
+      'the deployment: needs the app door once; the snapshot has 0',
+      'the deployment: needs the auth door once; the snapshot has 0',
+    ]);
+    expect(doorProblems(withExtra(structuredClone(appDoor) as unknown as Mutable))).toEqual([
       'the deployment: needs the app door once; the snapshot has 2',
     ]);
   });

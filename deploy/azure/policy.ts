@@ -209,13 +209,17 @@ const ONE_REPLICA: Readonly<Record<string, string>> = {
 
 /**
  * The public doors (ADR-002 Amendment G2e), by the part of the name `doorName`
- * gives each after the environment's, with the apps each may reach. A route
- * config can reach an app whose ingress is internal, so a door missing from
- * this list, or one reaching an app its entry doesn't name, publishes an app
- * nobody decided to publish.
+ * gives each after the environment's: each door's routing, rule by rule in the
+ * order Azure tries them (the first match wins), as `routeLine` writes a rule.
+ * A route config can reach an app whose ingress is internal, so a door missing
+ * from this list, or one routing any other way, publishes something nobody
+ * decided to publish.
  */
 const PUBLIC_DOORS: Readonly<Record<string, readonly string[]>> = {
-  app: ['api'],
+  app: ['prefix "/" to api'],
+  // Zitadel's debug pages get the API's 404, whatever their case; its login
+  // pages go to the login app; everything else to Zitadel.
+  auth: ['prefix "/debug" in any case to api', 'prefix "/ui/v2/login" to login', 'prefix "/" to zitadel'],
 };
 
 /** How a door binds its host's certificate: a managed one once it exists, or one it names. `Disabled` is plain http. */
@@ -223,6 +227,9 @@ const SECURE_BINDINGS: ReadonlySet<unknown> = new Set(['Auto', 'SniEnabled']);
 
 /** The ways a route matches a path. */
 const PATH_MATCHES = ['prefix', 'path', 'pathSeparatedPrefix'] as const;
+
+/** The two ways a target can hold on to an old revision. */
+const TARGET_PINS = ['revision', 'label'] as const;
 
 /**
  * Zitadel is two programs in two images (ADR-003 Amendment S10), and they are
@@ -1605,12 +1612,53 @@ const publicDoorOf = (name: string): string =>
   name.slice(name.lastIndexOf('/') + 1).replace(/^rtagentx(?:stg|prd)/, '');
 
 /**
+ * One route of a door, to one target, as a line `PUBLIC_DOORS` can hold: how it
+ * matches a path, whether case matters, any rewrite, the app it reaches and any
+ * pin. Whatever a door leaves to Azure (case), sends elsewhere (an app this
+ * deployment doesn't make) or changes on the way (a rewrite, a pinned revision)
+ * reads differently from every listed line.
+ */
+function routeLine(route: unknown, target: unknown, workloadsByApp: ReadonlyMap<unknown, string>): string {
+  const match = at(route, 'match');
+  const paths = PATH_MATCHES.filter((kind) => at(match, kind) !== undefined).map(
+    (kind) => `${kind} ${JSON.stringify(at(match, kind))}`,
+  );
+  const caseSensitive = at(match, 'caseSensitive');
+  const casing = caseSensitive === true ? '' : caseSensitive === false ? ' in any case' : ' with case left to Azure';
+  const action = at(route, 'action');
+  const rewrite = action === undefined ? '' : ` rewritten by ${JSON.stringify(action)}`;
+  const app = at(target, 'containerApp');
+  const reaches =
+    target === undefined
+      ? 'no app'
+      : (workloadsByApp.get(app) ?? `${JSON.stringify(app)}, which this deployment doesn't make`);
+  const pins = TARGET_PINS.filter((pin) => at(target, pin) !== undefined)
+    .map((pin) => ` pinned to ${pin} ${JSON.stringify(at(target, pin))}`)
+    .join('');
+  return `${paths.join(' and ') || 'no path'}${casing}${rewrite} to ${reaches}${pins}`;
+}
+
+/**
+ * A door's routing, a line per route and target, rule by rule in the order
+ * Azure tries them. A rule with no route or no target still gets its line,
+ * since what Azure makes of one isn't written down.
+ */
+const routingOf = (door: PredictedResource, workloadsByApp: ReadonlyMap<unknown, string>): string[] =>
+  list(at(door.properties, 'rules')).flatMap((rule) => {
+    const routes = list(at(rule, 'routes'));
+    const targets = list(at(rule, 'targets'));
+    return (routes.length === 0 ? [undefined] : routes).flatMap((route) =>
+      (targets.length === 0 ? [undefined] : targets).map((target) => routeLine(route, target, workloadsByApp)),
+    );
+  });
+
+/**
  * The public doors (ADR-002 Amendment G2e), the only way in from the internet.
  * Each is a door of this deployment's environment that `PUBLIC_DOORS` names,
  * serves one host with a certificate binding that is never plain http alone,
- * matches every route on exactly one path and passes it on unchanged, and
- * reaches only the apps its entry names, at their live revision. Every door the
- * list names is there once.
+ * and routes exactly as its entry says, rule for rule and in order: which paths,
+ * whether case matters, to which of this deployment's apps, unchanged and at
+ * their live revision. Every door the list names is there once.
  */
 const publicDoors: Check = (snapshot, _expected, add) => {
   const environments = ofType(snapshot, TYPES.environment).map((resource) => resource.id);
@@ -1624,9 +1672,8 @@ const publicDoors: Check = (snapshot, _expected, add) => {
     };
     const listed = PUBLIC_DOORS[publicDoorOf(door.name)];
     if (listed === undefined) {
-      problem(`isn't a door PUBLIC_DOORS names (${Object.keys(PUBLIC_DOORS).join(', ')}), so it may reach no app`);
+      problem(`isn't a door PUBLIC_DOORS names (${Object.keys(PUBLIC_DOORS).join(', ')}), so it may route nothing`);
     }
-    const reaches = listed ?? [];
     if (!environments.some((id) => door.id.startsWith(`${id}/httpRouteConfigs/`))) {
       problem("must be a door of this deployment's Container Apps environment");
     }
@@ -1637,28 +1684,11 @@ const publicDoors: Check = (snapshot, _expected, add) => {
         problem(`must bind a certificate to ${text(at(host, 'name'))} (Auto or SniEnabled), never plain http alone`);
       }
     }
-    for (const rule of list(at(door.properties, 'rules'))) {
-      const routes = list(at(rule, 'routes'));
-      if (routes.length === 0) problem('must match each rule on at least one path');
-      for (const route of routes) {
-        if (PATH_MATCHES.filter((kind) => text(at(route, 'match', kind)) !== '').length !== 1) {
-          problem(`must match each route on exactly one of ${PATH_MATCHES.join(', ')}`);
-        }
-        if (!isEmpty(at(route, 'action'))) {
-          problem('must pass each path on as it came: a rewrite can take a request where no rule sends it');
-        }
-      }
-      for (const target of list(at(rule, 'targets'))) {
-        const app = at(target, 'containerApp');
-        if (!reaches.includes(workloadsByApp.get(app) ?? '')) {
-          problem(
-            `may reach ${reaches.length === 0 ? 'no app' : `only ${reaches.join(' and ')}`}; it reaches ${text(app)}`,
-          );
-        }
-        if (at(target, 'revision') !== undefined || at(target, 'label') !== undefined) {
-          problem("must reach an app's live revision, not a revision or label it pins");
-        }
-      }
+    const routing = routingOf(door, workloadsByApp);
+    if (listed !== undefined && routing.join('\n') !== listed.join('\n')) {
+      problem(
+        `must route exactly as PUBLIC_DOORS says, in order: ${listed.join('; ')}. It routes: ${routing.join('; ') || 'nothing'}`,
+      );
     }
   }
   for (const name of Object.keys(PUBLIC_DOORS)) {

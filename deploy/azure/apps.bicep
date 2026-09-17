@@ -843,20 +843,56 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
 //   certificate is already created for this domain, it is added to the route
 //   automatically"). Until then the host answers over plain http only, so
 //   G2e-3 adds each door's certificate to this same deployment
-// - rules match on a path's prefix, and each sends its matches to the apps it
-//   names, unchanged: no rewrite, no revision or label pinned, so a door always
-//   reaches the app's live revision
+// - each rule matches one path prefix, says outright whether case matters, and
+//   sends its matches to one app, unchanged: no rewrite, no revision or label
+//   pinned, so a door always reaches the app's live revision
+// - the first rule that matches wins (Microsoft: "The order of the routing
+//   rules matters. More specific prefixes need to be before less specific
+//   prefixes"), so a door lists its narrow paths before `/`
 var doors = [
   {
     // The app host: every path to the API, which answers anything it doesn't
     // serve with its own 404 (Product-Documentation/API.md).
     door: 'app'
     host: appHost
-    rules: [
+    routes: [
       {
         description: 'Every path on the app host goes to the API'
-        prefixes: ['/']
-        targets: ['api']
+        prefix: '/'
+        anyCase: false
+        reaches: 'api'
+      }
+    ]
+  }
+  {
+    // The auth host: Zitadel, with its login pages under the base path the
+    // login container is built for, as the compose stack's edge serves them
+    // (deploy/compose/edge/nginx.conf).
+    door: 'auth'
+    host: authHost
+    routes: [
+      {
+        // Zitadel's health and debug pages are the platform's, not the
+        // browser's, and its readiness page queries the database on every
+        // request. The API answers them with its own 404, in any case, so
+        // `/DEBUG` finds nothing either. No trailing slash, unlike the compose
+        // edge's `/debug/`: `/debug` itself is caught too.
+        description: 'Zitadel\'s debug pages on the auth host get the API\'s 404'
+        prefix: '/debug'
+        anyCase: true
+        reaches: 'api'
+      }
+      {
+        description: 'The login pages on the auth host go to the login app'
+        prefix: '/ui/v2/login'
+        anyCase: false
+        reaches: 'login'
+      }
+      {
+        description: 'Every other path on the auth host goes to Zitadel'
+        prefix: '/'
+        anyCase: false
+        reaches: 'zitadel'
       }
     ]
   }
@@ -873,16 +909,21 @@ resource publicDoors 'Microsoft.App/managedEnvironments/httpRouteConfigs@2026-01
           bindingType: 'Auto'
         }
       ]
-      rules: map(door.rules, rule => {
-        description: rule.description
-        routes: map(rule.prefixes, prefix => {
-          match: {
-            prefix: prefix
+      rules: map(door.routes, route => {
+        description: route.description
+        routes: [
+          {
+            match: {
+              prefix: route.prefix
+              caseSensitive: !route.anyCase
+            }
           }
-        })
-        targets: map(rule.targets, workload => {
-          containerApp: appName(environment, workload)
-        })
+        ]
+        targets: [
+          {
+            containerApp: appName(environment, route.reaches)
+          }
+        ]
       })
     }
     // A door names its apps, so they are made first.
