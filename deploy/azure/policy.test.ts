@@ -167,6 +167,7 @@ const JOBS = type('Microsoft.App/jobs');
 /** One job, by the work it does. */
 const JOB = (workload: string) => named(new RegExp(`^job-agentx-[a-z]+-${workload}$`));
 const APPS = type('Microsoft.App/containerApps');
+const DOOR = type('Microsoft.App/managedEnvironments/httpRouteConfigs');
 /** One app, by the work it does. */
 const APP = (workload: string) => named(new RegExp(`^ca-agentx-[a-z]+-${workload}$`));
 const ingressOf = (app: Mutable): Mutable => inside(app, 'properties', 'configuration', 'ingress');
@@ -462,11 +463,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra({ ...structuredClone(workspace), id: `${String(workspace?.id)}-second` }))).toContain(
       'required',
     );
-    // Without the environment there is nowhere of ours for the jobs to run.
+    // Without the environment there is nowhere of ours for the jobs to run, and
+    // the app door is a door of no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
       'jobs',
       'apps',
+      'public-doors',
     ]);
     const environment = staging.predictedResources.find(ENVIRONMENT);
     // A second environment also sends no logs of its own.
@@ -1510,10 +1513,108 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'apps',
     ]);
     // An app the deployment needs, left out. Zitadel's own secrets are then
-    // read by nothing, and the login pages have nothing to sign a call to.
-    expect(brokenRules(without(APP('api')))).toEqual(['apps']);
+    // read by nothing, and the login pages have nothing to sign a call to. The
+    // app door would reach an app this deployment doesn't make.
+    expect(brokenRules(without(APP('api')))).toEqual(['apps', 'public-doors']);
     expect(brokenRules(without(APP('login')))).toEqual(['apps']);
     expect(brokenRules(without(APP('zitadel')))).toEqual(['apps']);
+  });
+
+  it('public-doors: a door nothing lists or elsewhere, on plain http, rewriting, reaching another app, or missing', () => {
+    // The rule's own messages, so a condition another one also catches can't hide.
+    const doorProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'public-doors')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    const door = staging.predictedResources.find(DOOR);
+    const environment = staging.predictedResources.find(ENVIRONMENT);
+    const name = 'cae-agentx-staging/rtagentxstgapp';
+    expect(door?.name).toBe(name);
+    expect(doorProblems(staging)).toEqual([]);
+    // A door PUBLIC_DOORS doesn't name, beside the one it does.
+    expect(doorProblems(withExtra({ ...structuredClone(door), id: `${String(door?.id)}x`, name: `${name}x` }))).toEqual(
+      [
+        `${name}x: isn't a door PUBLIC_DOORS names (app), so it may reach no app`,
+        `${name}x: may reach no app; it reaches ca-agentx-stg-api`,
+      ],
+    );
+    // The same door, but another environment's.
+    expect(
+      doorProblems(
+        changed(DOOR, (found) => {
+          found.id = `${String(environment?.id)}-second/httpRouteConfigs/rtagentxstgapp`;
+        }),
+      ),
+    ).toEqual([`${name}: must be a door of this deployment's Container Apps environment`]);
+    // No host, or two.
+    expect(doorProblems(changed(DOOR, (found) => (inside(found, 'properties').customDomains = [])))).toEqual([
+      `${name}: must serve exactly one host; it names 0`,
+    ]);
+    expect(
+      doorProblems(
+        changed(DOOR, (found) => {
+          const hosts = at(found, 'properties', 'customDomains') as Mutable[];
+          hosts.push({ name: 'other.example.invalid', bindingType: 'Auto' });
+        }),
+      ),
+    ).toEqual([`${name}: must serve exactly one host; it names 2`]);
+    // Plain http alone, said outright or left to Azure.
+    for (const change of [
+      (host: Mutable) => (host.bindingType = 'Disabled'),
+      (host: Mutable) => delete host.bindingType,
+    ]) {
+      expect(doorProblems(changed(DOOR, (found) => change(first(at(found, 'properties', 'customDomains')))))).toEqual([
+        `${name}: must bind a certificate to app.example.invalid (Auto or SniEnabled), never plain http alone`,
+      ]);
+    }
+    // A certificate it names is as good as a managed one.
+    expect(
+      doorProblems(
+        changed(DOOR, (found) => (first(at(found, 'properties', 'customDomains')).bindingType = 'SniEnabled')),
+      ),
+    ).toEqual([]);
+    const ruleOf = (found: Mutable): Mutable => first(at(found, 'properties', 'rules'));
+    const routeOf = (found: Mutable): Mutable => first(ruleOf(found).routes);
+    const targetOf = (found: Mutable): Mutable => first(ruleOf(found).targets);
+    // A rule that matches nothing said, a route that matches no path or two ways, and a rewrite.
+    expect(doorProblems(changed(DOOR, (found) => (ruleOf(found).routes = [])))).toEqual([
+      `${name}: must match each rule on at least one path`,
+    ]);
+    for (const match of [
+      {},
+      { prefix: '' },
+      { prefix: '/', path: '/health' },
+      { pathSeparatedPrefix: '/', prefix: '/' },
+    ]) {
+      expect({ match, problems: doorProblems(changed(DOOR, (found) => (routeOf(found).match = match))) }).toEqual({
+        match,
+        problems: [`${name}: must match each route on exactly one of prefix, path, pathSeparatedPrefix`],
+      });
+    }
+    for (const match of [{ path: '/health' }, { pathSeparatedPrefix: '/v1' }]) {
+      expect(doorProblems(changed(DOOR, (found) => (routeOf(found).match = match)))).toEqual([]);
+    }
+    expect(doorProblems(changed(DOOR, (found) => (routeOf(found).action = { prefixRewrite: '/debug' })))).toEqual([
+      `${name}: must pass each path on as it came: a rewrite can take a request where no rule sends it`,
+    ]);
+    // Another app of ours, and apps that aren't this deployment's: production's
+    // API is an api, but not one this deployment makes.
+    for (const app of ['ca-agentx-stg-zitadel', 'ca-agentx-stg-login', 'ca-other-api', 'ca-agentx-prd-api']) {
+      expect(doorProblems(changed(DOOR, (found) => (targetOf(found).containerApp = app)))).toEqual([
+        `${name}: may reach only api; it reaches ${app}`,
+      ]);
+    }
+    // The right app, pinned to a revision or label.
+    for (const pin of [{ revision: 'ca-agentx-stg-api--0000001' }, { label: 'blue' }]) {
+      expect(doorProblems(changed(DOOR, (found) => Object.assign(targetOf(found), pin)))).toEqual([
+        `${name}: must reach an app's live revision, not a revision or label it pins`,
+      ]);
+    }
+    // The door missing, or there twice.
+    expect(doorProblems(without(DOOR))).toEqual(['the deployment: needs the app door once; the snapshot has 0']);
+    expect(doorProblems(withExtra(structuredClone(door) as unknown as Mutable))).toEqual([
+      'the deployment: needs the app door once; the snapshot has 2',
+    ]);
   });
 
   it('workload-secrets: a job given another job’s secret or identity, a pinned version, or a login in the environment', () => {

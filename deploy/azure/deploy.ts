@@ -967,7 +967,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   for (const each of [...listed('containerapp'), ...listed('containerapp job')]) {
     steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
   }
-  steps.terminal.say('Nothing is reachable from outside yet (G2e).');
+  steps.terminal.say("A public door answers once its host's DNS records point at the environment (G3b).");
   // Most deploys need no job (S21): only a first one needs all four.
   steps.terminal.say(
     'On a first deploy, run the four jobs next, in order (deploy/azure/jobs.ts). Later, run migrate when a release adds a migration, and zitadel-setup when Zitadel moves to a new version.',
