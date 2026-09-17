@@ -79,7 +79,14 @@ function connectionFor(server: TestPostgresServer, role: TestRole, database: str
 }
 
 function poolFor(connection: TestConnection): pg.Pool {
-  return new pg.Pool({ ...connection, ssl: false, max: 4 });
+  const pool = new pg.Pool({ ...connection, ssl: false, max: 4 });
+  // An idle connection the server ends reports why as the pool's 'error'
+  // event, which would stop the test process if nothing listened. The pool has
+  // already let the connection go, and the next query opens a fresh one. A
+  // drop meets this too: pg-pool's end() resolves before its connections have
+  // closed, so DROP ... WITH (FORCE) can end one still closing (PR #43's CI run).
+  pool.on('error', () => undefined);
+  return pool;
 }
 
 /** Runs statements that name the database itself, as the superuser, from the server's maintenance database. */
