@@ -967,7 +967,11 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   for (const each of [...listed('containerapp'), ...listed('containerapp job')]) {
     steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
   }
-  steps.terminal.say('Nothing is reachable from outside yet (G2e). Next, the four jobs, in order.');
+  steps.terminal.say('Nothing is reachable from outside yet (G2e).');
+  // Most deploys need no job (S21): only a first one needs all four.
+  steps.terminal.say(
+    'On a first deploy, run the four jobs next, in order (deploy/azure/jobs.ts). Later, run migrate when a release adds a migration, and zitadel-setup when Zitadel moves to a new version.',
+  );
   if (keepRunning) {
     steps.terminal.say('Each app now keeps one replica running, billed: run apps without --keep-running to stop it.');
   }
