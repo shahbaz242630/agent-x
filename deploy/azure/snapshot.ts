@@ -70,9 +70,10 @@ const standInDigest = (): string => `sha256:${randomBytes(32).toString('hex')}`;
 
 /**
  * Values the parameters files read from the deploying shell: reserved example
- * names for the addresses and the host, a stand-in image and commit, and a
- * fresh stand-in for every secret. Zitadel's master key is exactly 32
- * characters, as secrets.bicep requires.
+ * names for the addresses and the host, a stand-in image and commit, the
+ * replica count a plain `apps` run sets, and a fresh stand-in for every
+ * secret. Zitadel's master key is exactly 32 characters, as secrets.bicep
+ * requires.
  */
 function standInEnvironment(): Record<string, string> {
   return {
@@ -82,6 +83,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
     AGENTX_AZURE_APP_HOST: 'app.example.invalid',
     AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
+    AGENTX_AZURE_APP_MIN_REPLICAS: '0',
     AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_OWNER_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_APP_PASSWORD: standIn(24),

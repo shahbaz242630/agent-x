@@ -7,6 +7,8 @@
 //   `deploy/image/verify.ts` checks a signature for before a deployment (G4)
 // - AGENTX_AZURE_AUTH_HOST: the host name Zitadel is served on
 // - AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: the first admin's address
+// and, from the tool rather than the operator, AGENTX_AZURE_APP_MIN_REPLICAS
+// (below).
 using 'apps.bicep'
 
 param environment = 'staging'
@@ -34,5 +36,7 @@ param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
 
 // ADR-002: "Staging scales to zero when not in use". Nothing is billed while
 // nothing runs; the first request after a quiet spell waits for a cold start,
-// which synthetic traffic can afford. Production sets 1.
-param appMinReplicas = 0
+// which synthetic traffic can afford. Production sets 1. The deploy tool sets
+// 0, or 1 for `apps --keep-running` (AGENTX_AZURE_APP_MIN_REPLICAS), which
+// keeps one replica of each app running, billed, until the next `apps`.
+param appMinReplicas = int(readEnvironmentVariable('AGENTX_AZURE_APP_MIN_REPLICAS'))

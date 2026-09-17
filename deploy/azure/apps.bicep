@@ -25,7 +25,8 @@
 // - the apps scale as the environment allows, within two limits: the API and
 //   Zitadel each hold something one replica's (a rate limit's counts in memory;
 //   Zitadel's projections and its ten database connections), and staging keeps
-//   no replica at all while nothing runs (ADR-002)
+//   no replica at all while nothing runs (ADR-002), unless the operator deploys
+//   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
 //   job holds the server admin's login, and Microsoft treats permission to
 //   start a job as permission to use its secrets, so who may start which job is
@@ -97,7 +98,7 @@ param authHost string
 @minLength(4)
 param appHost string
 
-@description('How many replicas of each app keep running with no traffic. Staging scales to zero (ADR-002): nothing is billed while nothing runs, at the cost of a cold start on the first request.')
+@description('How many replicas of each app keep running with no traffic. Staging scales to zero (ADR-002): nothing is billed while nothing runs, at the cost of a cold start on the first request. The deploy tool sets 1 for `apps --keep-running`.')
 @minValue(0)
 @maxValue(1)
 param appMinReplicas int

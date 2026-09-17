@@ -41,6 +41,7 @@ import {
   UsageError,
   VAULT_SECRETS,
 } from './deploy.ts';
+import { policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
 const AZURE_DIR = import.meta.dirname;
@@ -88,12 +89,30 @@ describe('parseArguments', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation' });
     expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
-    expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined });
-    expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({ command: 'apps', commit: COMMIT });
+    expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined, keepRunning: false });
+    expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({
+      command: 'apps',
+      commit: COMMIT,
+      keepRunning: false,
+    });
     expect(parseArguments(['secrets', '--rotate', 'db-app-password', 'db-owner-password'])).toEqual({
       command: 'secrets',
       plan: rotating('db-app-password', 'db-owner-password'),
     });
+  });
+
+  it("reads apps' two options in either order", () => {
+    expect(parseArguments(['apps', '--keep-running'])).toEqual({
+      command: 'apps',
+      commit: undefined,
+      keepRunning: true,
+    });
+    for (const argv of [
+      ['apps', '--keep-running', '--commit', COMMIT],
+      ['apps', '--commit', COMMIT, '--keep-running'],
+    ]) {
+      expect(parseArguments(argv)).toEqual({ command: 'apps', commit: COMMIT, keepRunning: true });
+    }
   });
 
   it('rotates the login key pair as one thing, whichever half is named', () => {
@@ -109,11 +128,15 @@ describe('parseArguments', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
       [['deploy'], /say foundation, secrets, apps or alerts, not deploy/],
-      [['apps', '--commit'], /apps takes nothing, or --commit/],
+      [['apps', '--commit'], /apps takes --keep-running, and --commit with one full 40-hex commit/],
       [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT.toUpperCase()], /one full 40-hex commit/],
-      [['apps', '--commit', COMMIT, 'extra'], /apps takes nothing/],
-      [['apps', 'latest'], /apps takes nothing/],
+      [['apps', '--commit', COMMIT, 'extra'], /apps takes --keep-running/],
+      [['apps', 'latest'], /apps takes --keep-running/],
+      [['apps', '--commit', '--keep-running', COMMIT], /each at most once/],
+      [['apps', '--commit', COMMIT, '--commit', COMMIT], /each at most once/],
+      [['apps', '--keep-running', '--keep-running'], /each at most once/],
+      [['apps', '--keep'], /each at most once/],
       [['foundation', '--all'], /foundation takes no options/],
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['secrets'], /needs --all .* or --rotate/],
@@ -894,10 +917,42 @@ describe('deploy apps', () => {
       AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
       AGENTX_AZURE_APP_HOST: 'app.example.invalid',
       AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
+      AGENTX_AZURE_APP_MIN_REPLICAS: '0',
     });
     expect(done.checked).toEqual([deployment?.values]);
+    expect(done.terminal.said).toContain('Each app will scale to zero while nothing uses it.');
+    expect(done.terminal.said.join('\n')).not.toContain('--keep-running');
     expect(done.terminal.said).toContain('  ca-agentx-stg-api: Succeeded');
     expect(done.terminal.said).toContain('  job-agentx-stg-db-setup: Succeeded');
+  });
+
+  it('keeps one replica of each app running when asked, and says so before and after', async () => {
+    const done = await run(['apps', '--keep-running'], { answers, images: recordingImages() });
+    expect(done.status).toBe(0);
+    const values = done.az.deployment?.values;
+    expect(values?.AGENTX_AZURE_APP_MIN_REPLICAS).toBe('1');
+    expect(done.checked).toEqual([values]);
+    const said = done.terminal.said;
+    const before = said.indexOf(
+      'Each app will keep one replica running, billed, until apps runs again without --keep-running.',
+    );
+    const after = said.indexOf(
+      'Each app now keeps one replica running, billed: run apps without --keep-running to stop it.',
+    );
+    expect(before).toBeGreaterThan(-1);
+    expect(before).toBeLessThan(said.findIndex((line) => line.startsWith("Azure's what-if follows")));
+    expect(after).toBe(said.length - 1);
+    expect(said).not.toContain('Each app will scale to zero while nothing uses it.');
+  });
+
+  it('says nothing about a running replica when a kept-running deployment fails', async () => {
+    const done = await run(['apps', '--keep-running'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ status: 1 }),
+    });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said.join('\n')).not.toContain('now keeps one replica');
   });
 
   it('deploys the commit it is given, without asking GitHub for the newest', async () => {
@@ -1145,8 +1200,28 @@ describe('the tool and the deployment agree', () => {
       [APP_VARIABLES.authHost]: 'auth.example.invalid',
       [APP_VARIABLES.appHost]: 'app.example.invalid',
       [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
+      [APP_VARIABLES.minReplicas]: '0',
     };
     expect(shapedForPolicy(appValues, randomBytes)).toEqual(appValues);
     expect(policyCheck({ ...values, ...appValues })).toEqual([]);
+  });
+
+  it('runs each app at the replica count the tool sets, 0 or 1, both within the rules', () => {
+    const appsWith = (count: string) =>
+      inCopy((dir) => {
+        const { together } = environmentSnapshot(dir, 'staging', { [APP_VARIABLES.minReplicas]: count });
+        const apps = together.predictedResources.filter((resource) => resource.type === 'Microsoft.App/containerApps');
+        const fewest = (app: (typeof apps)[number]) =>
+          (app.properties as { template?: { scale?: { minReplicas?: unknown } } } | undefined)?.template?.scale
+            ?.minReplicas;
+        return {
+          fewest: apps.map((app) => fewest(app)),
+          problems: policyProblems(together, { region: 'uaenorth', environment: 'staging' }),
+        };
+      });
+    expect(appsWith('0')).toEqual({ fewest: [0, 0, 0], problems: [] });
+    expect(appsWith('1')).toEqual({ fewest: [1, 1, 1], problems: [] });
+    // Anything but a number stops the deployment before Azure sees it.
+    expect(() => appsWith('one')).toThrow(/Failed to evaluate parameter "appMinReplicas"/);
   });
 });
