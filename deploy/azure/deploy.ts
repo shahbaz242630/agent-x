@@ -4,9 +4,11 @@
 //   node deploy/azure/deploy.ts secrets --all
 //   node deploy/azure/deploy.ts apps
 //
-// and, later, `secrets --rotate db-app-password [more names]`; and
-// `alerts`, which changes nothing and says whether the alerts can reach their
-// address (the foundation ends with the same check).
+// and, later, `secrets --rotate db-app-password [more names]`; `apps
+// --keep-running`, which keeps one replica of each app running, billed, until
+// `apps` runs again without it (for a test, or while something needs the apps
+// up); and `alerts`, which changes nothing and says whether the alerts can
+// reach their address (the foundation ends with the same check).
 //
 // The two secrets that belong to people — the database admin's password and
 // Zitadel's first admin's — are pasted from the password manager into a prompt
@@ -51,6 +53,7 @@ export const APP_VARIABLES = {
   authHost: 'AGENTX_AZURE_AUTH_HOST',
   appHost: 'AGENTX_AZURE_APP_HOST',
   adminEmail: 'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
+  minReplicas: 'AGENTX_AZURE_APP_MIN_REPLICAS',
 } as const;
 
 /**
@@ -93,7 +96,7 @@ export type SecretPlan = { readonly kind: 'all' } | { readonly kind: 'rotate'; r
 export type Request =
   | { readonly command: 'foundation' }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
-  | { readonly command: 'apps'; readonly commit: string | undefined }
+  | { readonly command: 'apps'; readonly commit: string | undefined; readonly keepRunning: boolean }
   | { readonly command: 'alerts' };
 
 export class UsageError extends Error {
@@ -107,8 +110,26 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts foundation
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>]
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running]
   node deploy/azure/deploy.ts alerts`;
+
+/** `apps`'s options, each at most once, in either order. */
+function parseApps(options: readonly string[]): Request {
+  let commit: string | undefined;
+  let keepRunning = false;
+  for (let at = 0; at < options.length; at += 1) {
+    const option = options[at];
+    if (option === '--keep-running' && !keepRunning) {
+      keepRunning = true;
+    } else if (option === '--commit' && commit === undefined && COMMIT.test(options[at + 1] ?? '')) {
+      commit = options[at + 1];
+      at += 1;
+    } else {
+      throw new UsageError('apps takes --keep-running, and --commit with one full 40-hex commit, each at most once');
+    }
+  }
+  return { command: 'apps', commit, keepRunning };
+}
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
@@ -117,14 +138,7 @@ export function parseArguments(argv: readonly string[]): Request {
     if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
     return { command };
   }
-  if (command === 'apps') {
-    if (rest.length === 0) return { command, commit: undefined };
-    const [flag, commit, ...extra] = rest;
-    if (flag !== '--commit' || commit === undefined || extra.length > 0 || !COMMIT.test(commit)) {
-      throw new UsageError('apps takes nothing, or --commit and one full 40-hex commit');
-    }
-    return { command, commit };
-  }
+  if (command === 'apps') return parseApps(rest);
   if (command !== 'secrets') {
     throw new UsageError(`say foundation, secrets, apps or alerts, not ${command ?? 'nothing'}`);
   }
@@ -867,7 +881,7 @@ async function askHost(steps: Steps, question: string): Promise<string> {
   return host;
 }
 
-async function deployApps(steps: Steps, commit: string | undefined): Promise<number> {
+async function deployApps(steps: Steps, commit: string | undefined, keepRunning: boolean): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
@@ -884,6 +898,11 @@ async function deployApps(steps: Steps, commit: string | undefined): Promise<num
     throw new Error(`The image was refused (${outcome.reason}), so nothing was deployed:\n${outcome.detail}`);
   }
   steps.terminal.say('Verified.');
+  steps.terminal.say(
+    keepRunning
+      ? 'Each app will keep one replica running, billed, until apps runs again without --keep-running.'
+      : 'Each app will scale to zero while nothing uses it.',
+  );
   steps.terminal.say('Zitadel keeps the address it is first set up with, so type the two hosts as they will stay.');
   const authHost = await askHost(steps, 'Host for sign-in (Zitadel): ');
   const appHost = await askHost(steps, 'Host for the app (the API): ');
@@ -896,6 +915,7 @@ async function deployApps(steps: Steps, commit: string | undefined): Promise<num
     [APP_VARIABLES.authHost]: authHost,
     [APP_VARIABLES.appHost]: appHost,
     [APP_VARIABLES.adminEmail]: adminEmail,
+    [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
   };
   checkPolicy(steps, values);
   const name = deploymentName('apps', steps.now());
@@ -948,6 +968,9 @@ async function deployApps(steps: Steps, commit: string | undefined): Promise<num
     steps.terminal.say(`  ${text(each.name)}: ${text(each.state)}`);
   }
   steps.terminal.say('Nothing is reachable from outside yet (G2e). Next, the four jobs, in order.');
+  if (keepRunning) {
+    steps.terminal.say('Each app now keeps one replica running, billed: run apps without --keep-running to stop it.');
+  }
   return 0;
 }
 
@@ -958,7 +981,7 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
     case 'secrets':
       return deploySecrets(steps, request.plan);
     case 'apps':
-      return deployApps(steps, request.commit);
+      return deployApps(steps, request.commit, request.keepRunning);
     case 'alerts':
       return checkAlerts(steps);
   }
