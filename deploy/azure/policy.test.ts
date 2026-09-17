@@ -1759,6 +1759,8 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE',
       'ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE',
       'ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE',
+      // Google Cloud's metadata server, which Zitadel asks for a machine ID by default (S19).
+      'ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED',
     ]) {
       expect({
         name,
@@ -1876,6 +1878,18 @@ describe('what each job is told', () => {
         },
       });
     }
+    // Each Zitadel process is told apart by its hostname: the private-address
+    // default finds none on Container Apps, and setup panicked without one (S19).
+    for (const workload of ['zitadel-init', 'zitadel-setup', 'zitadel']) {
+      expect({ workload, settings: settingsGiven(workload) }).toMatchObject({
+        workload,
+        settings: {
+          ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED: 'false',
+          ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: 'true',
+          ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'false',
+        },
+      });
+    }
     // Only setup writes an instance, so only setup is given the master key, and
     // it reads it from a file (`--masterkeyFile`), never its environment.
     for (const workload of ['zitadel-init', 'zitadel-setup']) {
@@ -1907,7 +1921,11 @@ describe('what each job is told', () => {
       ZITADEL_DEFAULTINSTANCE_RESTRICTIONS_DISALLOWPUBLICORGREGISTRATION: 'true',
     });
     // The compose stack's test machine user and its token belong to it alone.
-    expect(Object.keys(settingsGiven('zitadel-setup')).filter((name) => name.includes('MACHINE'))).toEqual([]);
+    expect(
+      Object.keys(settingsGiven('zitadel-setup')).filter((name) =>
+        name.startsWith('ZITADEL_FIRSTINSTANCE_ORG_MACHINE'),
+      ),
+    ).toEqual([]);
     expect(Object.keys(settingsGiven('zitadel-setup')).filter((name) => name.includes('PATPATH'))).toEqual([]);
   });
 

@@ -244,7 +244,8 @@ const SECRETS_IN_ENVIRONMENT: readonly {
  * deprecated in favour of, each of which offers an "auto" mode that follows the
  * standard `OTEL_*` variables. Every one of them is already the default; saying
  * so here is what makes the version that changes a default a change to this
- * file rather than a surprise. Read off the defaults the pinned image carries
+ * file rather than a surprise. The one that isn't a default: Zitadel asks
+ * Google Cloud's metadata server for a machine ID unless told not to (S19). Read off the defaults the pinned image carries
  * (G2d-2a); the jobs carry them too, so one list covers every container.
  */
 const TELEMETRY_OFF: readonly {
@@ -260,6 +261,7 @@ const TELEMETRY_OFF: readonly {
       ZITADEL_INSTRUMENTATION_TRACE_EXPORTER_TYPE: 'none',
       ZITADEL_INSTRUMENTATION_METRIC_EXPORTER_TYPE: 'none',
       ZITADEL_INSTRUMENTATION_LOG_EXPORTER_TYPE: 'none',
+      ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: 'false',
     },
   },
   {
