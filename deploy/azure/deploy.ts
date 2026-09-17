@@ -4,7 +4,9 @@
 //   node deploy/azure/deploy.ts secrets --all
 //   node deploy/azure/deploy.ts apps
 //
-// and, later, `secrets --rotate db-app-password [more names]`.
+// and, later, `secrets --rotate db-app-password [more names]`; and
+// `alerts`, which changes nothing and says whether the alerts can reach their
+// address (the foundation ends with the same check).
 //
 // The two secrets that belong to people — the database admin's password and
 // Zitadel's first admin's — are pasted from the password manager into a prompt
@@ -39,6 +41,8 @@ const REGION = 'uaenorth';
 const AZURE_DIR = import.meta.dirname;
 /** The group the foundation creates for staging (names.bicep); a test holds the two equal. */
 export const RESOURCE_GROUP = 'rg-agentx-staging';
+/** The group every alert notifies (names.bicep); a test holds the two equal. */
+export const ACTION_GROUP = 'ag-agentx-stg';
 
 /** What the apps deployment reads from the shell (staging.apps.bicepparam); a test holds the two equal. */
 export const APP_VARIABLES = {
@@ -89,7 +93,8 @@ export type SecretPlan = { readonly kind: 'all' } | { readonly kind: 'rotate'; r
 export type Request =
   | { readonly command: 'foundation' }
   | { readonly command: 'secrets'; readonly plan: SecretPlan }
-  | { readonly command: 'apps'; readonly commit: string | undefined };
+  | { readonly command: 'apps'; readonly commit: string | undefined }
+  | { readonly command: 'alerts' };
 
 export class UsageError extends Error {
   constructor(message: string) {
@@ -102,13 +107,14 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts foundation
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
-  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>]`;
+  node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>]
+  node deploy/azure/deploy.ts alerts`;
 
 /** What the operator asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, ...rest] = argv;
-  if (command === 'foundation') {
-    if (rest.length > 0) throw new UsageError(`foundation takes no options, not ${rest.join(' ')}`);
+  if (command === 'foundation' || command === 'alerts') {
+    if (rest.length > 0) throw new UsageError(`${command} takes no options, not ${rest.join(' ')}`);
     return { command };
   }
   if (command === 'apps') {
@@ -119,7 +125,9 @@ export function parseArguments(argv: readonly string[]): Request {
     }
     return { command, commit };
   }
-  if (command !== 'secrets') throw new UsageError(`say foundation, secrets or apps, not ${command ?? 'nothing'}`);
+  if (command !== 'secrets') {
+    throw new UsageError(`say foundation, secrets, apps or alerts, not ${command ?? 'nothing'}`);
+  }
   const [mode, ...names] = rest;
   if (mode === '--all') {
     if (names.length > 0) throw new UsageError('--all takes no names: it writes every secret');
@@ -540,12 +548,18 @@ export interface Steps {
   readonly images?: Images;
 }
 
-/** The subscription the CLI is signed in to, confirmed by the operator. */
-async function confirmSubscription(steps: Steps): Promise<string> {
+/** The subscription the CLI is signed in to, said to the operator: its ID. */
+function signedIn(steps: Steps): string {
   const account = azJson(steps.az, ['account', 'show']);
   const name = text((account as { name?: unknown }).name);
   const id = text((account as { id?: unknown }).id);
   steps.terminal.say(`Signed in to the subscription "${name}" (${id}).`);
+  return id;
+}
+
+/** The subscription the CLI is signed in to, confirmed by the operator. */
+async function confirmSubscription(steps: Steps): Promise<string> {
+  const id = signedIn(steps);
   if (!yes(await steps.terminal.ask(`Deploy ${ENVIRONMENT} into it? [y/N] `))) throw new Cancelled();
   return id;
 }
@@ -646,11 +660,96 @@ async function deployFoundation(steps: Steps): Promise<number> {
   for (const [key, output] of Object.entries((ended.outputs ?? {}) as Record<string, { value?: unknown }>)) {
     steps.terminal.say(`  ${key}: ${text(output.value)}`);
   }
-  return 0;
+  if (await alertsReachable(steps, subscription)) return 0;
+  steps.terminal.say(
+    'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
+  );
+  return 1;
 }
 
 /** Where Azure Resource Manager answers: a list's next page must be there too. */
 const ARM = 'https://management.azure.com/';
+
+/** The first version of the action group API that says whether an address is confirmed (`verificationStatus`, S20). */
+const ACTION_GROUP_API = '2026-03-01-preview';
+
+/** How many times the operator is asked to confirm the alert address before the run gives up. */
+const CONFIRM_TRIES = 3;
+
+/** Why an alert address gets nothing, or nothing when it gets every alert. */
+function addressProblem(receiver: { readonly status?: unknown; readonly verificationStatus?: unknown }): string {
+  if (receiver.status !== 'Enabled') return `Azure has it switched off (${text(receiver.status) || 'no status'})`;
+  if (receiver.verificationStatus !== 'Verified') {
+    return `it isn't confirmed (${text(receiver.verificationStatus) || 'Azure did not say'})`;
+  }
+  return '';
+}
+
+/**
+ * Each email address the alert group notifies that gets nothing, with why.
+ * A group that is off sends nothing to anyone, whatever its receivers say.
+ */
+function unreachedAddresses(steps: Steps, subscription: string): string[] {
+  const group = azJson(steps.az, [
+    'rest',
+    '--method',
+    'get',
+    '--url',
+    `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Insights/actionGroups/${ACTION_GROUP}?api-version=${ACTION_GROUP_API}`,
+  ]) as {
+    properties?: {
+      enabled?: unknown;
+      emailReceivers?: readonly { emailAddress?: unknown; status?: unknown; verificationStatus?: unknown }[];
+    };
+  };
+  const receivers = group.properties?.emailReceivers ?? [];
+  if (receivers.length === 0) throw new Error(`${ACTION_GROUP} has no email address, so no alert is emailed.`);
+  if (group.properties?.enabled !== true) return [`  every address: ${ACTION_GROUP} itself is switched off`];
+  return receivers
+    .map((receiver) => ({ address: text(receiver.emailAddress), problem: addressProblem(receiver) }))
+    .filter((each) => each.problem !== '')
+    .map((each) => `  ${each.address}: ${each.problem}`);
+}
+
+/**
+ * Whether every alert email reaches its address, the operator asked to
+ * confirm any that doesn't. Azure emails a new address a one-time code when the
+ * group is saved, valid for 30 minutes, and until the code is entered sends the
+ * address nothing, not even a SEV-1, while still calling it Enabled and logging
+ * the group as executed: every alert of the first deploy was lost that way
+ * (S19). A free trial can't send a test notification, so this reading is the
+ * only check short of a real alert (S20).
+ */
+async function alertsReachable(steps: Steps, subscription: string): Promise<boolean> {
+  for (let asked = 0; ; asked += 1) {
+    const unreached = unreachedAddresses(steps, subscription);
+    if (unreached.length === 0) {
+      steps.terminal.say('Alert email: confirmed, so every alert reaches it.');
+      return true;
+    }
+    steps.terminal.say(['No alert email reaches:', ...unreached].join('\n'));
+    if (asked === CONFIRM_TRIES) return false;
+    if (asked === 0) {
+      steps.terminal.say(
+        `Azure emails a one-time code, valid for 30 minutes, when the alert group is saved (from azure-noreply@microsoft.com; look in Junk too). In the Azure portal open Monitor, Alerts, Action groups, ${ACTION_GROUP}, and select Resend if the code has expired or never came.`,
+      );
+    }
+    if (
+      (await steps.terminal.ask('Press Enter once the address is confirmed, or type skip: ')).toLowerCase() === 'skip'
+    ) {
+      return false;
+    }
+  }
+}
+
+/** Says whether the alerts reach their address, changing nothing. */
+async function checkAlerts(steps: Steps): Promise<number> {
+  const subscription = signedIn(steps);
+  steps.terminal.say(`Reading ${ACTION_GROUP} in ${RESOURCE_GROUP}; nothing is changed.`);
+  if (await alertsReachable(steps, subscription)) return 0;
+  steps.terminal.say('Until that changes, no alert email reaches you.');
+  return 1;
+}
 
 /** More pages than any vault of ours fills (Azure gives three secrets a page): a list that runs past it isn't trusted. */
 const MAX_PAGES = 100;
@@ -855,6 +954,8 @@ export async function deploy(request: Request, steps: Steps): Promise<number> {
       return deploySecrets(steps, request.plan);
     case 'apps':
       return deployApps(steps, request.commit);
+    case 'alerts':
+      return checkAlerts(steps);
   }
 }
 

@@ -13,6 +13,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
 import {
+  ACTION_GROUP,
   APP_VARIABLES,
   askPassword,
   type Az,
@@ -83,8 +84,9 @@ const pasted = (...values: readonly string[]): Record<string, string> =>
 const pemHeader = (...label: readonly string[]): string => ['-----BEGIN', ...label].join(' ') + '-----\n';
 
 describe('parseArguments', () => {
-  it('reads the three ways the tool is run', () => {
+  it('reads the four ways the tool is run', () => {
     expect(parseArguments(['foundation'])).toEqual({ command: 'foundation' });
+    expect(parseArguments(['alerts'])).toEqual({ command: 'alerts' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
     expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined });
     expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({ command: 'apps', commit: COMMIT });
@@ -106,13 +108,14 @@ describe('parseArguments', () => {
   it('refuses anything else, saying why', () => {
     for (const [argv, reason] of [
       [[], /not nothing/],
-      [['deploy'], /say foundation, secrets or apps, not deploy/],
+      [['deploy'], /say foundation, secrets, apps or alerts, not deploy/],
       [['apps', '--commit'], /apps takes nothing, or --commit/],
       [['apps', '--commit', 'baca38b'], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT.toUpperCase()], /one full 40-hex commit/],
       [['apps', '--commit', COMMIT, 'extra'], /apps takes nothing/],
       [['apps', 'latest'], /apps takes nothing/],
       [['foundation', '--all'], /foundation takes no options/],
+      [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['secrets'], /needs --all .* or --rotate/],
       [['secrets', '--all', 'db-app-password'], /--all takes no names/],
       [['secrets', '--rotate'], /at least one secret name/],
@@ -394,13 +397,33 @@ interface AzAnswers {
    * exists, as when the operator answers no — the CLI still ends with 0.
    */
   readonly ended?: string;
+  /**
+   * The alert group's email receivers, one list per reading, the last one
+   * repeated; by default one address, switched on and confirmed.
+   */
+  readonly receivers?: readonly (readonly Receiver[])[];
+  /** The alert group's own switch, as Azure answers it; on by default, left out when undefined. */
+  readonly groupEnabled?: unknown;
 }
+
+/** As Azure answers; a field left undefined is one Azure didn't send. */
+interface Receiver {
+  readonly emailAddress?: string;
+  readonly status?: string | undefined;
+  readonly verificationStatus?: string | undefined;
+}
+
+const CONFIRMED: Receiver = { emailAddress: 'ops@example.invalid', status: 'Enabled', verificationStatus: 'Verified' };
+const PENDING: Receiver = { ...CONFIRMED, verificationStatus: 'VerificationPending' };
+
+const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/actionGroups/ag-agentx-stg?api-version=2026-03-01-preview`;
 
 /** An Azure CLI that answers from the options and records every call. */
 class RecordingAz implements Az {
   readonly calls: Call[] = [];
   readonly options: AzAnswers;
   #deployed = false;
+  #readings = 0;
 
   constructor(options: AzAnswers = {}) {
     this.options = options;
@@ -443,9 +466,17 @@ class RecordingAz implements Az {
       case 'containerapp job':
         return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
       case 'rest --method': {
+        const url = args[args.indexOf('--url') + 1] ?? '';
+        if (url.includes('/actionGroups/')) {
+          if (url !== ACTION_GROUP_URL) throw new Error(`unexpected action group read ${url}`);
+          const readings = this.options.receivers ?? [[CONFIRMED]];
+          const reading = readings[Math.min(this.#readings, readings.length - 1)];
+          this.#readings += 1;
+          const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
+          return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
+        }
         const names = (this.#deployed ? this.options.after : this.options.before) ?? [];
         const pages = this.options.pages ?? {};
-        const url = args[args.indexOf('--url') + 1] ?? '';
         const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
         const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
         if (token === undefined && pages.emptyFirst === true) return json({ value: [], nextLink: link('0') });
@@ -513,6 +544,7 @@ describe('deploy foundation', () => {
       'bicep version',
       'deployment sub create',
       'deployment sub show',
+      'rest --method get',
     ]);
     const deployment = done.az.deployment;
     expect(deployment?.args).toEqual([
@@ -538,6 +570,50 @@ describe('deploy foundation', () => {
     for (const call of done.az.calls) expect(call.args.join(' ')).not.toContain(admin);
     done.terminal.neverSaid([admin]);
     expect(done.terminal.said).toContain('  databaseHost: db.example.invalid');
+    expect(done.terminal.said.at(-1)).toBe('Alert email: confirmed, so every alert reaches it.');
+    expect(done.terminal.questions).toHaveLength(2);
+  });
+
+  it('waits for a new alert address to be confirmed, since Azure sends it nothing until then', async () => {
+    const admin = aPaste();
+    const done = await run(['foundation'], {
+      answers: ['y', 'ops@example.invalid', ''],
+      hidden: [admin, admin],
+      az: new RecordingAz({ receivers: [[PENDING], [CONFIRMED]] }),
+    });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.said).toContain(
+      "No alert email reaches:\n  ops@example.invalid: it isn't confirmed (VerificationPending)",
+    );
+    expect(done.terminal.said.join('\n')).toMatch(/one-time code, valid for 30 minutes.*Action groups, ag-agentx-stg/s);
+    expect(done.terminal.questions.at(-1)).toBe('Press Enter once the address is confirmed, or type skip: ');
+    expect(done.terminal.said.at(-1)).toBe('Alert email: confirmed, so every alert reaches it.');
+    expect(done.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(2);
+  });
+
+  it('ends with failure, the deployment kept, when the address is still unconfirmed or the operator skips', async () => {
+    const admin = aPaste();
+    const unconfirmed = await run(['foundation'], {
+      answers: ['y', 'ops@example.invalid', '', '', ''],
+      hidden: [admin, admin],
+      az: new RecordingAz({ receivers: [[PENDING]] }),
+    });
+    expect(unconfirmed.error).toBeUndefined();
+    expect(unconfirmed.status).toBe(1);
+    expect(unconfirmed.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(4);
+    expect(unconfirmed.terminal.said.at(-1)).toBe(
+      'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
+    );
+    // The instructions are given once, not on every reading.
+    expect(unconfirmed.terminal.said.filter((line) => line.includes('one-time code'))).toHaveLength(1);
+    const skipped = await run(['foundation'], {
+      answers: ['y', 'ops@example.invalid', 'SKIP'],
+      hidden: [admin, admin],
+      az: new RecordingAz({ receivers: [[PENDING], [CONFIRMED]] }),
+    });
+    expect(skipped.status).toBe(1);
+    expect(skipped.az.sequence.filter((call) => call === 'rest --method get')).toHaveLength(1);
   });
 
   it('stops before asking for anything when the operator declines the subscription', async () => {
@@ -587,6 +663,73 @@ describe('deploy foundation', () => {
     });
     expect(done.status).toBe(1);
     expect(done.az.sequence).not.toContain('deployment sub show');
+  });
+});
+
+describe('alerts', () => {
+  it('reads the alert group without asking to deploy or for any secret, and sends nothing', async () => {
+    const done = await run(['alerts']);
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.az.sequence).toEqual(['account show --output', 'rest --method get']);
+    expect(done.az.deployment).toBeUndefined();
+    expect(done.terminal.questions).toEqual([]);
+    expect(done.terminal.hiddenQuestions).toEqual([]);
+    expect(done.terminal.said).toEqual([
+      `Signed in to the subscription "Azure subscription 1" (${SUBSCRIPTION}).`,
+      'Reading ag-agentx-stg in rg-agentx-staging; nothing is changed.',
+      'Alert email: confirmed, so every alert reaches it.',
+    ]);
+  });
+
+  it('names each address that gets nothing, and why, leaving out the ones that are fine', async () => {
+    const other = { ...CONFIRMED, emailAddress: 'second@example.invalid' };
+    const done = await run(['alerts'], {
+      answers: ['skip'],
+      az: new RecordingAz({
+        receivers: [
+          [
+            CONFIRMED,
+            { ...other, status: 'Disabled' },
+            { ...other, emailAddress: 'third@example.invalid', verificationStatus: undefined },
+            { ...other, emailAddress: 'fourth@example.invalid', status: undefined },
+          ],
+        ],
+      }),
+    });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said).toContain(
+      [
+        'No alert email reaches:',
+        '  second@example.invalid: Azure has it switched off (Disabled)',
+        "  third@example.invalid: it isn't confirmed (Azure did not say)",
+        '  fourth@example.invalid: Azure has it switched off (no status)',
+      ].join('\n'),
+    );
+    expect(done.terminal.said.at(-1)).toBe('Until that changes, no alert email reaches you.');
+  });
+
+  it('counts an address switched off as unreached even when it is confirmed', async () => {
+    const done = await run(['alerts'], {
+      answers: ['skip'],
+      az: new RecordingAz({ receivers: [[{ ...CONFIRMED, status: 'Disabled' }]] }),
+    });
+    expect(done.status).toBe(1);
+  });
+
+  it('counts every address unreached when the group itself is off, or Azure does not say it is on', async () => {
+    for (const groupEnabled of [false, undefined, 'true']) {
+      const done = await run(['alerts'], { answers: ['skip'], az: new RecordingAz({ groupEnabled }) });
+      expect({ groupEnabled, status: done.status }).toEqual({ groupEnabled, status: 1 });
+      expect(done.terminal.said).toContain(
+        'No alert email reaches:\n  every address: ag-agentx-stg itself is switched off',
+      );
+    }
+  });
+
+  it('refuses a group with no email address', async () => {
+    const done = await run(['alerts'], { az: new RecordingAz({ receivers: [[]] }) });
+    expect(done.error).toMatchObject({ message: 'ag-agentx-stg has no email address, so no alert is emailed.' });
   });
 });
 
@@ -961,6 +1104,15 @@ describe('the tool and the deployment agree', () => {
       (resource) => resource.type === 'Microsoft.Resources/resourceGroups',
     );
     expect(groups.map((group) => group.name)).toEqual([RESOURCE_GROUP]);
+  });
+
+  it('reads the alert group the foundation creates', () => {
+    const actionGroups = snapshot.predictedResources.filter(
+      (resource) => resource.type === 'Microsoft.Insights/actionGroups',
+    );
+    expect(actionGroups.map((group) => group.name)).toEqual([ACTION_GROUP]);
+    expect(ACTION_GROUP_URL).toContain(`/resourceGroups/${RESOURCE_GROUP}/`);
+    expect(ACTION_GROUP_URL).toContain(`/actionGroups/${ACTION_GROUP}?`);
   });
 
   it('compiles with a multi-line key in the environment, and the snapshot never holds it', () => {
