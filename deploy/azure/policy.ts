@@ -252,6 +252,10 @@ const TOKEN_EXCHANGE = 'api://AzureADTokenExchange';
 const releaseSubject = (environment: string): string =>
   `repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}`;
 
+/** CI's identity in an environment, as names.bicep names it. */
+const releaseIdentityName = (environment: string): string =>
+  `id-agentx-${environment === 'production' ? 'prd' : 'stg'}-release`;
+
 /**
  * Everything CI's role allows (G4): an app's and a job's own reads and writes,
  * their revisions and runs, starting a run, and the two linked actions a write
@@ -1494,7 +1498,8 @@ const actionSet = (actions: readonly unknown[]): string =>
 
 /**
  * CI's identity (G4). The deployment trusts GitHub for exactly one identity,
- * the one names.bicep calls release, and only for GitHub's issuer, this
+ * the one names.bicep calls release, which no app or job runs as, and only
+ * for GitHub's issuer, this
  * environment's subject and the token exchange: no other identity can be
  * signed in to from outside Azure. And it defines exactly one custom role,
  * which allows RELEASE_ACTIONS and no data action, and can be given in this
@@ -1506,9 +1511,15 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
     add({ rule: 'release-identity', resource, message });
   };
   // One at most, since the name is one resource's: what matters is that it's there.
-  const releases = ofType(snapshot, TYPES.identity).filter((identity) => workloadOf(identity.name) === 'release');
-  if (releases.length === 0) {
-    problem('the deployment', 'needs an identity for CI (id-agentx-<environment>-release)');
+  const name = releaseIdentityName(expected.environment);
+  const releases = ofType(snapshot, TYPES.identity).filter((identity) => identity.name === name);
+  if (releases.length === 0) problem('the deployment', `needs an identity for CI (${name})`);
+  // Nothing runs as it, so its role stays CI's alone.
+  for (const workload of [...ofType(snapshot, TYPES.job), ...ofType(snapshot, TYPES.app)]) {
+    const assigned = Object.keys(at(workload.identity, 'userAssignedIdentities') ?? {});
+    if (assigned.some((id) => id.slice(id.lastIndexOf('/') + 1) === name)) {
+      problem(workload.name, "must not run as CI's identity, whose role is CI's alone");
+    }
   }
   const trusts = ofType(snapshot, TYPES.trust);
   for (const trust of trusts) {

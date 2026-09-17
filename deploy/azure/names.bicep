@@ -103,7 +103,9 @@ func resourceNames(environment string, nameSuffix string) object => {
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
   identities: map(workloads, workload => identityName(environment, workload))
   jobs: map(jobWorkloads, workload => jobName(environment, workload))
-  // CI's identity and the one role it may be given (G4), which runs nothing itself.
+  // CI's identity and the one role it may be given (G4); nothing runs as it. A
+  // custom role's name is the whole directory's and outlives its resource group,
+  // so it carries the suffix too.
   release: identityName(environment, 'release')
-  releaseRole: 'Agent X release (${environment})'
+  releaseRole: 'Agent X release (${environment} ${nameSuffix})'
 }

@@ -126,6 +126,26 @@ const withExtra = (resource: Mutable): Snapshot => ({
   diagnostics: [],
 });
 
+/**
+ * Staging's resources as production's would name them: their tags and CI's
+ * identity, and (unless a test wants it left) CI's GitHub subject.
+ */
+function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
+  const copy = changed(
+    (resource) => resource.tags !== undefined,
+    (resource) => (inside(resource, 'tags').environment = 'production'),
+  );
+  for (const resource of copy.predictedResources as unknown as Mutable[]) {
+    resource.id = String(resource.id).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
+    resource.name = String(resource.name).replace(/^id-agentx-stg-release/, 'id-agentx-prd-release');
+    if (subject && resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
+      const trust = resource.properties as Mutable;
+      trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
+    }
+  }
+  return copy;
+}
+
 const brokenRules = (snapshotted: Snapshot, expected = STAGING): RuleId[] => [
   ...new Set(policyProblems(snapshotted, expected).map((problem) => problem.rule)),
 ];
@@ -683,17 +703,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(SERVER, (server) => (inside(server, 'properties', 'backup').backupRetentionDays = 5))),
     ).toEqual(['database-backup']);
-    const production = changed(
-      (resource) => resource.tags !== undefined,
-      (resource) => (inside(resource, 'tags').environment = 'production'),
-    );
-    // Production's CI signs in from GitHub's production environment.
-    for (const resource of production.predictedResources) {
-      if (resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
-        const trust = resource.properties as Mutable;
-        trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
-      }
-    }
+    const production = productionLike({ subject: true });
     expect(brokenRules(production, { region: 'uaenorth', environment: 'production' })).toEqual(['database-backup']);
   });
 
@@ -1288,8 +1298,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
         `${trust}: must trust ${subject} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(other)}`,
       ]);
     }
-    // Production's deployment must name production's GitHub environment.
-    expect(releaseProblems(staging, { region: 'uaenorth', environment: 'production' })).toEqual([
+    // Production's deployment must name production's GitHub environment, and staging's identity isn't production's.
+    const production = { region: 'uaenorth', environment: 'production' } as const;
+    expect(releaseProblems(productionLike({ subject: false }), production)).toEqual([
+      `id-agentx-prd-release/github: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
+    ]);
+    expect(releaseProblems(productionLike({ subject: true }), production)).toEqual([]);
+    expect(releaseProblems(staging, production)).toEqual([
+      'the deployment: needs an identity for CI (id-agentx-prd-release)',
+      `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
       `${trust}: must trust ${subject.replace(/staging$/, 'production')} alone (a job in this environment's GitHub environment); it trusts ${JSON.stringify(subject)}`,
     ]);
     // Another issuer, or an audience besides the token exchange.
@@ -1324,9 +1341,32 @@ describe('SEC-OPS-09 each rule can fail', () => {
       "the deployment: needs one trust, for CI's identity; the snapshot has 2",
     ]);
     expect(releaseProblems(without(RELEASE))).toEqual([
-      'the deployment: needs an identity for CI (id-agentx-<environment>-release)',
+      'the deployment: needs an identity for CI (id-agentx-stg-release)',
       `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
     ]);
+    // Only this environment's name counts: production's CI identity, or one named plainly, is not staging's.
+    for (const other of ['id-agentx-prd-release', 'release']) {
+      const moved = changed(RELEASE, (identity) => {
+        identity.name = other;
+        identity.id = String(identity.id).replace(/id-agentx-stg-release$/, other);
+      });
+      for (const found of moved.predictedResources.filter(TRUST)) {
+        (found as unknown as Mutable).id = found.id.replace('/id-agentx-stg-release/', `/${other}/`);
+      }
+      expect(releaseProblems(moved)).toEqual([
+        'the deployment: needs an identity for CI (id-agentx-stg-release)',
+        `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+      ]);
+    }
+    // An app or a job running as CI's identity would hold CI's role.
+    for (const pick of [JOB('migrate'), APP('api')]) {
+      const running = changed(pick, (workload) => {
+        const assigned = inside(workload, 'identity', 'userAssignedIdentities');
+        assigned[String(release?.id)] = {};
+      });
+      const name = String(staging.predictedResources.find(pick)?.name);
+      expect(releaseProblems(running)).toEqual([`${name}: must not run as CI's identity, whose role is CI's alone`]);
+    }
 
     // The role: an action more (a secret's list, a shell, a door), one less, or every action.
     const wanted = at(

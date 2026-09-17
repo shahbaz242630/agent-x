@@ -6,8 +6,10 @@
 // resources CI may touch (G4-2b); nothing here grants anything.
 //
 // - the trust names one GitHub subject: a job of this repository in the GitHub
-//   environment of this environment's name, which GitHub lets only main use.
-//   Azure compares it exactly, and a wrong subject fails without an error
+//   environment of this environment's name. GitHub must let only main use that
+//   environment before the role is given anywhere (G4-2b): a job on any other
+//   branch that names it gets the same subject. Azure compares the subject
+//   exactly, and a wrong one fails without an error
 // - the role lists what an image update and a migration run need, and nothing
 //   that reads a secret, opens a shell in a container, changes a door, or
 //   grants access (policy rule `release-identity`)
@@ -49,7 +51,8 @@ resource github 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdent
 // so the role holds the two linked actions as well, and G4-2b gives it on
 // those resources alone.
 resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  name: guid(resourceGroup().id, roleName)
+  // Named from a fixed word, so a new display name updates this role rather than orphaning it.
+  name: guid(resourceGroup().id, 'release')
   properties: {
     roleName: roleName
     description: 'CI after a merge: update our image in the API and the migration job, and run the migration. Nothing else.'
