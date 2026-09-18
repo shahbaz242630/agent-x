@@ -4,9 +4,11 @@
 // here are GitHub's digests of the release files, reviewed in the repository;
 // a download that doesn't match is refused before it is installed, and the
 // installed binary is checked against its pin every time it is used.
-// Installed under .tools/ (git-ignored) by `corepack pnpm tools:cosign`, which
-// CI never runs: its image jobs install cosign their own way, and the release
-// file for Windows is 200 MB.
+// Installed under .tools/ (git-ignored) by `corepack pnpm tools:cosign` on a
+// machine that deploys. CI's image jobs install cosign their own way
+// (cosign-installer); CI's release job runs this same install (G4-4c), so a
+// release checks an image with the same pinned binary wherever it runs. The
+// release file for Windows is 200 MB.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 

@@ -482,23 +482,27 @@ jobs:
   # in GitHub's `staging` environment, which only main may use, and the
   # identity's one role is given on the API and the migration job alone.
   #
-  # For now (G4-4a) it only checks, reading and changing nothing: what a release
-  # of this commit would do (deploy/azure/release.ts). A merge that needs a hand
-  # deploy (hand-deployed.json) turns it red; the release itself follows (G4-4c).
+  # It releases this commit (deploy/azure/release.ts, G4-4c): checks the image
+  # itself, then updates and runs the migration job, and only once that run has
+  # succeeded updates the API and waits until its new revision serves. A merge
+  # that needs a hand deploy (hand-deployed.json) turns it red, changing nothing.
   #
   # - one at a time across merges, never cancelling one that has started (a
   #   release cancelled part-way leaves the migration job updated); GitHub keeps
   #   one waiting and drops older waiting ones, whose commits the newer covers
-  # - the whole history, which the check reads its gate from
+  # - the whole history, which the release reads its gate from
+  # - an hour at most: the release's own waits end within about 46 minutes (10
+  #   to settle each update, the job's 15 and 5 more for its run, 5 to serve),
+  #   and Azure's sign-in token isn't refreshed, so it is taken just before
   # - the three IDs are the GitHub environment's variables, not secrets (none
   #   of them is one, and this workflow runs on pull requests, which may hold no
   #   secret); each is masked in the log before anything could print it
   release:
-    name: Release to staging (main) - check
+    name: Release to staging (main)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [image-publish, image-attest]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     environment: staging
     concurrency:
       group: release-staging
@@ -537,17 +541,22 @@ jobs:
       - name: Install the pinned Bicep compiler
         run: node tooling/bicep/install.ts
 
+      # The release checks the image itself with cosign, the pinned one an
+      # operator's machine uses, checked against its SHA-256 as it arrives.
+      - name: Install the pinned cosign
+        run: node tooling/cosign/install.ts
+
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: What a release of this commit would do (reads only)
+      - name: Release this commit to staging
         env:
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
-        run: node deploy/azure/release.ts check "${COMMIT}" "${DIGEST}"
+        run: node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"
 
       # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.
       - name: Sign out of Azure

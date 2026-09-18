@@ -1,5 +1,5 @@
 // `corepack pnpm tools:cosign`: installs the pinned cosign into .tools/, once,
-// on a machine that deploys. CI never runs it (tooling/cosign/cosign.ts).
+// on a machine that deploys, and in CI's release job (tooling/cosign/cosign.ts).
 import { ensureCosign } from './cosign.ts';
 
 try {

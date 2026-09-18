@@ -77,10 +77,14 @@ describe('the pinned cosign', () => {
     expect(() => binaryFor('win32', 'arm64')).toThrow('No cosign binary is pinned for win32-arm64.');
   });
 
-  it('is installed by its own command, which CI never runs', () => {
+  it('is installed by its own command, which CI runs in the release job alone (the image jobs use cosign-installer)', () => {
     const scripts = (JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> }).scripts;
     expect(scripts['tools:cosign']).toBe('node tooling/cosign/install.ts');
-    expect(readFileSync('.github/workflows/ci.yml', 'utf8')).not.toContain('tools:cosign');
+    const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+    expect(ci).not.toContain('tools:cosign');
+    // Once, and inside the release job, the last job in the file.
+    expect(ci.split('node tooling/cosign/install.ts')).toHaveLength(2);
+    expect(ci.indexOf('node tooling/cosign/install.ts')).toBeGreaterThan(ci.indexOf('\n  release:\n'));
   });
 });
 
