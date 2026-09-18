@@ -6,6 +6,7 @@
   "exports": {
     "./config": "./src/config/index.ts",
     "./db": "./src/db/index.ts",
+    "./keys": "./src/keys/index.ts",
     "./observability": "./src/observability/index.ts",
     "./outbound": "./src/outbound/index.ts"
   },
