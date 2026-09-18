@@ -513,7 +513,14 @@ describe('check', () => {
   });
 
   it('refuses an account that names no subscription, reading nothing more', () => {
-    for (const account of [{ name: 'x' }, { name: 'x', id: 'not-a-subscription' }, null]) {
+    // No ID, one that isn't a subscription's, none at all, or a sign-in to a tenant alone (its "ID" the tenant's).
+    const tenant = '00000000-0000-0000-0000-00000000000d';
+    for (const account of [
+      { name: 'x' },
+      { name: 'x', id: 'not-a-subscription' },
+      null,
+      { name: 'x', id: tenant, tenantId: tenant },
+    ]) {
       const { error, calls } = checked(staging(OLD), history([OLD, NEW]), account);
       expect(error).toMatchObject({ message: "The Azure CLI named no subscription it's signed in to." });
       expect(calls).toHaveLength(1);
@@ -528,119 +535,229 @@ interface Write {
   readonly body: unknown;
 }
 
+const TENANT = '00000000-0000-0000-0000-00000000000c';
+
+/** An error as `az rest` prints it: the HTTP reason, then Azure's answer, which names the subscription and quotes the host. */
+const azRestError = (reason: string, code: string): string =>
+  `ERROR: ${reason}(${JSON.stringify({ error: { code, message: `The client may not perform action(s) on /subscriptions/${SUBSCRIPTION}/x with https://${HOST}` } })})`;
+
+type State = 'Succeeded' | 'Failed' | 'Canceled' | 'InProgress';
+
+/** One of the two workloads as the stand-in holds it. */
+interface Held {
+  release: string;
+  image: string;
+  state: State;
+  command: readonly string[];
+}
+
+/** A revision of the API: what it runs, and how Azure describes it. */
+interface Held_Revision {
+  image: string;
+  release: string;
+  provisioningState: string;
+  active: boolean;
+  trafficWeight: number;
+  healthState: string;
+}
+
 /**
  * A stand-in for staging as a release sees it: the migration job and its runs,
- * the API and its revisions, each changed by the writes a release sends and
- * settling over later reads, with knobs for every way it can go wrong. Time
- * moves only when the release sleeps.
+ * the API and its revisions, each changed by what a release sends and settling
+ * over later reads, with a knob for every way the review found Azure can
+ * behave. Time moves only when the release sleeps.
  */
 class Staging {
   readonly calls: string[][] = [];
   readonly writes: Write[] = [];
   clock = new Date('2026-09-18T12:00:00Z').getTime();
-  job = { release: OLD, image: OLD_IMAGE, state: 'Succeeded', limit: 900 as unknown, settling: 0 };
-  app = {
+  account: unknown = { name: 'Azure subscription 1', id: SUBSCRIPTION, tenantId: TENANT };
+  job: Held & { limit: unknown } = {
     release: OLD,
     image: OLD_IMAGE,
     state: 'Succeeded',
-    latest: 'ca-agentx-stg-api--0000007',
-    ready: 'ca-agentx-stg-api--0000007',
-    settling: 0,
-    unready: 0,
+    command: ['node'],
+    limit: 900,
+  };
+  app: Held & { suffix: unknown; env: readonly unknown[] } = {
+    release: OLD,
+    image: OLD_IMAGE,
+    state: 'Succeeded',
+    command: ['node'],
+    suffix: '',
     env: builtAt(OLD),
   };
-  runs: { name: string; status: string; polls: number }[] = [
-    { name: 'job-agentx-stg-migrate-aocy0fb', status: 'Succeeded', polls: 0 },
+  latest = 'ca-agentx-stg-api--0000007';
+  ready = 'ca-agentx-stg-api--0000007';
+  revisions = new Map<string, Held_Revision>([
+    [
+      'ca-agentx-stg-api--0000007',
+      {
+        image: OLD_IMAGE,
+        release: OLD,
+        provisioningState: 'Provisioned',
+        active: true,
+        trafficWeight: 100,
+        healthState: 'Healthy',
+      },
+    ],
+  ]);
+  runs: { name: string; status: string; image: string; polls: number }[] = [
+    { name: 'job-agentx-stg-migrate-aocy0fb', status: 'Succeeded', image: OLD_IMAGE, polls: 0 },
   ];
-  revision: Record<string, unknown> = {
-    provisioningState: 'Provisioned',
-    active: true,
-    trafficWeight: 100,
-    healthState: 'Healthy',
-  };
-  /**
-   * How an update is taken up: first, for `lag` reads, Azure still shows
-   * what was there, marked Succeeded; then it settles as `settleAs` after
-   * `settleAfter` more; the API's new revision is named after `revisionLag`
-   * more, as `newRevision`. How the new run is named and ends, and how many a
-   * start makes.
-   */
+
+  /** After a PATCH, for `lag` reads Azure still shows what was there, marked `lagState`; then `settleAfter` reads InProgress; then `settleAs`. */
   lag = 1;
-  settleAs = 'Succeeded';
+  lagState: State = 'Succeeded';
   settleAfter = 1;
+  settleAs: State = 'Succeeded';
+  /** The API's settling alone, when it differs from the job's. */
+  apiSettleAs: State | undefined;
+  /** Once the API has settled, its new revision is named after `revisionLag` reads, then ready after `readyAfter`. */
   revisionLag = 0;
-  newRevision = 'ca-agentx-stg-api--0000008';
-  newRunName: string | undefined;
-  private pending: { readonly workload: Workload; readonly apply: () => void } | undefined;
-  runEndsAs = 'Succeeded';
-  runPolls = 2;
-  newRuns = 1;
   readyAfter = 1;
-  refuse: { readonly method: string; readonly stderr: string } | undefined;
+  newRevision = 'ca-agentx-stg-api--0000008';
+  /** The new revision takes traffic, and is active, after `trafficAfter` reads of it. */
+  trafficAfter = 1;
+  newRevisionHealth = 'Healthy';
+  newRevisionImage: string | undefined;
+  newRevisionRelease: string | undefined;
+  newRevisionState = 'Provisioned';
+  /** Where the new revision ends up once it takes traffic: each can fall short on its own. */
+  newRevisionActive = true;
+  newRevisionTraffic = 100;
+  /** How a start goes: how many runs it makes, whether it names one, when it is listed, how the run ends, of which image. */
+  newRuns = 1;
+  startNames: 'nothing' | 'its run' | 'another' = 'nothing';
+  listLag = 0;
+  runPolls = 2;
+  runEndsAs = 'Succeeded';
+  runImage: string | undefined;
+  newRunName: string | undefined;
+  /** The door: what it answers each time it is asked. */
   probes: (number | undefined)[] = [undefined, 200];
-  /** Something else deploys between the release's first read of a workload and its second. */
+  answered = false;
+  /** A write Azure refuses, a read it fails from the nth of its kind, and another deploy between two reads of a workload. */
+  refuse: { readonly method: string; readonly stderr: string } | undefined;
+  failRead: { readonly what: RegExp; readonly from: number } | undefined;
   meddle: ((staging: Staging) => void) | undefined;
 
-  /** Takes an update up once Azure has shown what was there for `lag` reads. */
-  private takeUp(workload: Workload): void {
-    if (this.pending?.workload !== workload) return;
-    if (this.lag > 0) {
-      this.lag -= 1;
+  private pending: { workload: Workload; lag: number; settling: number; apply: () => void } | undefined;
+  private lists = 0;
+  /** Whether the API was updated: only an update makes a new revision. */
+  private updated = false;
+
+  private held(workload: Workload): Held {
+    return workload === 'migrate' ? this.job : this.app;
+  }
+
+  private resource(workload: Workload): unknown {
+    const held = this.held(workload);
+    let state: State = held.state;
+    const pending = this.pending?.workload === workload ? this.pending : undefined;
+    if (pending !== undefined && pending.lag > 0) {
+      pending.lag -= 1;
+      state = this.lagState;
+    } else if (pending !== undefined) {
+      pending.apply();
+      if (pending.settling > 0) {
+        pending.settling -= 1;
+        state = 'InProgress';
+      } else {
+        this.pending = undefined;
+        state = held.state;
+      }
+    }
+    if (workload === 'api' && this.pending === undefined) this.renameAndReady();
+    const container = azureContainer(WORKLOADS[workload].container, {
+      image: held.image,
+      command: held.command,
+      env: workload === 'api' ? this.app.env : builtAt(held.release),
+    });
+    return {
+      properties: {
+        provisioningState: state,
+        ...(workload === 'migrate'
+          ? { configuration: { replicaTimeout: this.job.limit }, template: { containers: [container] } }
+          : {
+              latestRevisionName: this.latest,
+              latestReadyRevisionName: this.ready,
+              template: { revisionSuffix: this.app.suffix, containers: [container] },
+            }),
+      },
+    };
+  }
+
+  /** Once the API holds a new build, its new revision is named, then made ready, over later reads. */
+  private renameAndReady(): void {
+    if (!this.updated || this.app.state !== 'Succeeded' || this.revisions.has(this.newRevision)) {
+      if (this.latest !== this.ready) {
+        if (this.readyAfter > 0) this.readyAfter -= 1;
+        else this.ready = this.latest;
+      }
       return;
     }
-    this.pending.apply();
-    this.pending = undefined;
-  }
-
-  private jobResource(): unknown {
-    this.takeUp('migrate');
-    const settling = this.job.settling > 0;
-    if (settling) this.job.settling -= 1;
-    return {
-      properties: {
-        provisioningState: settling ? 'InProgress' : this.job.state,
-        configuration: { replicaTimeout: this.job.limit },
-        template: {
-          containers: [azureContainer('migrate', { image: this.job.image, env: builtAt(this.job.release) })],
-        },
-      },
-    };
-  }
-
-  private appResource(): unknown {
-    this.takeUp('api');
-    const settling = this.app.settling > 0;
-    // Once the update is taken up and has succeeded, the new revision is named
-    // after `revisionLag` more reads; until then the old one is still the latest.
-    const renaming = this.app.release === NEW && this.app.state === 'Succeeded' && this.app.latest !== this.newRevision;
-    if (settling) this.app.settling -= 1;
-    else if (renaming && this.revisionLag > 0) this.revisionLag -= 1;
-    else if (renaming) this.app.latest = this.newRevision;
-    else if (this.app.unready > 0) this.app.unready -= 1;
-    else this.app.ready = this.app.latest;
-    return {
-      properties: {
-        provisioningState: settling ? 'InProgress' : this.app.state,
-        latestRevisionName: this.app.latest,
-        latestReadyRevisionName: this.app.ready,
-        template: { containers: [azureContainer('api', { image: this.app.image, env: this.app.env })] },
-      },
-    };
+    if (this.revisionLag > 0) {
+      this.revisionLag -= 1;
+      return;
+    }
+    this.revisions.set(this.newRevision, {
+      image: this.newRevisionImage ?? this.app.image,
+      release: this.newRevisionRelease ?? this.app.release,
+      provisioningState: this.newRevisionState,
+      active: false,
+      trafficWeight: 0,
+      healthState: 'None',
+    });
+    this.latest = this.newRevision;
   }
 
   private patched(workload: Workload, body: string | undefined): void {
     const sent = JSON.parse(body ?? '{}') as {
-      properties: { template: { containers: { image: string; env: { name: string; value?: string }[] }[] } };
+      properties: {
+        template: { containers: { image: string; command: string[]; env: { name: string; value?: string }[] }[] };
+      };
     };
     const [container] = sent.properties.template.containers;
     const build = container?.env.find((entry) => entry.name === 'AGENTX_RELEASE')?.value ?? '';
-    const settle = { image: container?.image, release: build, state: this.settleAs, settling: this.settleAfter };
+    const settleAs = workload === 'api' ? (this.apiSettleAs ?? this.settleAs) : this.settleAs;
     this.pending = {
       workload,
-      apply:
-        workload === 'migrate'
-          ? () => Object.assign(this.job, settle)
-          : () => Object.assign(this.app, settle, { env: container?.env, unready: this.readyAfter }),
+      lag: this.lag,
+      settling: this.settleAfter,
+      apply: () => {
+        Object.assign(this.held(workload), {
+          image: container?.image,
+          release: build,
+          command: container?.command,
+          state: settleAs,
+        });
+        if (workload === 'api') {
+          this.app.env = container?.env ?? [];
+          this.updated = true;
+        }
+      },
+    };
+  }
+
+  private revision(name: string): unknown {
+    const found = this.revisions.get(name);
+    if (found === undefined) return undefined;
+    if (name === this.newRevision) {
+      if (this.trafficAfter > 0) this.trafficAfter -= 1;
+      else Object.assign(found, { active: this.newRevisionActive, trafficWeight: this.newRevisionTraffic });
+      found.healthState = this.answered ? this.newRevisionHealth : 'None';
+    }
+    return {
+      properties: {
+        provisioningState: found.provisioningState,
+        active: found.active,
+        trafficWeight: found.trafficWeight,
+        healthState: found.healthState,
+        template: {
+          containers: [azureContainer('api', { image: found.image, command: ['node'], env: builtAt(found.release) })],
+        },
+      },
     };
   }
 
@@ -656,7 +773,7 @@ class Staging {
       },
       run: (args) => {
         this.calls.push([...args]);
-        if (args[0] === 'account') return answer({ name: 'Azure subscription 1', id: SUBSCRIPTION });
+        if (args[0] === 'account') return answer(this.account);
         const [, , method = '', , url = '', flag, body] = args;
         if (method !== 'get') {
           this.writes.push({
@@ -665,37 +782,57 @@ class Staging {
             body: flag === '--body' ? (JSON.parse(String(body)) as unknown) : undefined,
           });
           if (this.refuse?.method === method) return { status: 1, stdout: '', stderr: this.refuse.stderr };
+        } else if (this.failRead?.what.test(url) === true) {
+          const seen = this.calls.filter((call) => call.includes(url)).length;
+          if (seen >= this.failRead.from)
+            return { status: 1, stdout: '', stderr: azRestError('Too Many Requests', 'TooManyRequests') };
         }
         const workload = ORDER.find((each) => url === workloadUrl(SUBSCRIPTION, each));
         if (method === 'get' && workload !== undefined) {
           if (this.calls.filter((call) => call.includes(url)).length === 2) this.meddle?.(this);
-          return answer(workload === 'migrate' ? this.jobResource() : this.appResource());
+          return answer(this.resource(workload));
         }
         if (method === 'patch' && workload !== undefined) {
           this.patched(workload, body);
           return done;
         }
         if (method === 'get' && url === `${jobBase}/executions${query}`) {
-          return answer({ value: this.runs.map(({ name, status }) => ({ name, properties: { status } })) });
+          this.lists += 1;
+          const listed = this.runs.filter(
+            (run) => run.polls >= 0 && (this.lists > this.listLag || !run.name.includes('new')),
+          );
+          return answer({ value: listed.map(({ name, status }) => ({ name, properties: { status } })) });
         }
         if (method === 'post' && url === `${jobBase}/start${query}`) {
-          for (let made = 0; made < this.newRuns; made += 1) {
+          this.lists = 0;
+          const made: string[] = [];
+          for (let index = 0; index < this.newRuns; index += 1) {
+            const name = this.newRunName ?? `job-agentx-stg-migrate-new${String(index)}x`;
+            made.push(name);
             this.runs.unshift({
-              name: this.newRunName ?? `job-agentx-stg-migrate-new${String(made)}x`,
+              name,
               status: 'Running',
+              image: this.runImage ?? this.job.image,
               polls: this.runPolls,
             });
           }
+          if (this.startNames === 'its run') return answer({ name: made[0] });
+          if (this.startNames === 'another') return answer({ name: 'job-agentx-stg-migrate-other1' });
           return done;
         }
         const run = this.runs.find((each) => url === `${jobBase}/executions/${each.name}${query}`);
         if (method === 'get' && run !== undefined) {
           if (run.polls > 0) run.polls -= 1;
           else if (run.status === 'Running') run.status = this.runEndsAs;
-          return answer({ name: run.name, properties: { status: run.status } });
+          return answer({
+            name: run.name,
+            properties: { status: run.status, template: { containers: [{ name: 'migrate', image: run.image }] } },
+          });
         }
-        if (method === 'get' && url === `${appBase}/revisions/${this.app.latest}${query}`) {
-          return answer({ properties: this.revision });
+        const revision = /\/revisions\/([^?]+)\?/.exec(url)?.[1];
+        if (method === 'get' && url.startsWith(`${appBase}/revisions/`) && revision !== undefined) {
+          const found = this.revision(revision);
+          if (found !== undefined) return answer(found);
         }
         return { status: 1, stdout: '', stderr: `unexpected: az ${args.join(' ')}` };
       },
@@ -720,7 +857,9 @@ class Staging {
           : { verified: false, reason: 'SIGNATURE_REFUSED', detail: 'not signed by CI on main' },
       probe: (url) => {
         expect(url).toBe(`https://${HOST}/health`);
-        return Promise.resolve(this.probes.length > 1 ? this.probes.shift() : this.probes[0]);
+        const status = this.probes.length > 1 ? this.probes.shift() : this.probes[0];
+        if (status === 200) this.answered = true;
+        return Promise.resolve(status);
       },
     };
   }
@@ -731,53 +870,61 @@ const RELEASE_NEW = { command: 'release', commit: NEW, digest: digest('2') } as 
 /** A release of NEW from OLD on a history where nothing a person deploys changed. */
 const ordinary = (): History => history([OLD, NEW], { [OLD]: ['apps/api/src/main.ts'] });
 
-/** What a release printed and threw, together, for looking through. */
-const printed = (said: readonly string[], error?: unknown): string =>
-  [...said, error instanceof Error ? error.message : ''].join('\n');
-
-/** The error a release ended with, or nothing. */
-const failure = (running_: Promise<number>): Promise<unknown> =>
-  running_.then(
-    () => undefined,
-    (thrown: unknown) => thrown,
+/** A release's outcome: its status or error, what it said, and both together for looking through. */
+async function outcome(azure: Staging, line = ordinary()) {
+  const steps = azure.steps(line);
+  const ended_ = await release(RELEASE_NEW, steps).then(
+    (status) => ({ status, error: undefined as unknown }),
+    (error: unknown) => ({ status: undefined, error }),
   );
+  const message = ended_.error instanceof Error ? ended_.error.message : '';
+  return { ...ended_, said: steps.said, message, printed: [...steps.said, message].join('\n') };
+}
+
+const methods = (azure: Staging): string[] => azure.writes.map((write) => write.method);
 
 describe('release', () => {
   it('checks the image, updates and runs the migration, then updates the API and waits for it to serve', async () => {
     const azure = new Staging();
-    const steps = azure.steps(ordinary());
-    expect(await release(RELEASE_NEW, steps)).toBe(0);
+    const { status, said, printed } = await outcome(azure);
+    expect(status).toBe(0);
     // Exactly three writes, in order: the job's containers, its start (no body), the API's containers.
     expect(azure.writes).toEqual([
       {
         method: 'patch',
         url: workloadUrl(SUBSCRIPTION, 'migrate'),
-        body: { properties: { template: { containers: [released(running('migrate'), NEW_IMAGE, NEW)] } } },
+        body: {
+          properties: {
+            template: { containers: [released(running('migrate', { command: ['node'] }), NEW_IMAGE, NEW)] },
+          },
+        },
       },
       { method: 'post', url: workloadUrl(SUBSCRIPTION, 'migrate').replace('?', '/start?'), body: undefined },
       {
         method: 'patch',
         url: workloadUrl(SUBSCRIPTION, 'api'),
-        body: { properties: { template: { containers: [released(running('api'), NEW_IMAGE, NEW)] } } },
+        body: {
+          properties: { template: { containers: [released(running('api', { command: ['node'] }), NEW_IMAGE, NEW)] } },
+        },
       },
     ]);
-    expect(steps.said).toEqual([
+    expect(said).toEqual([
       `Checking ${NEW_IMAGE} was signed by CI on main at ${NEW}, with its SBOM...`,
       'Signed in to the subscription "Azure subscription 1".',
       `migrate runs ${OLD} (${OLD_IMAGE}).`,
       `api runs ${OLD} (${OLD_IMAGE}).`,
       `Updating migrate: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}.`,
-      `migrate runs ${NEW}.`,
+      `migrate holds ${NEW}.`,
       'Started job-agentx-stg-migrate-new0x.',
       '  job-agentx-stg-migrate-new0x: Running',
       '  job-agentx-stg-migrate-new0x: Succeeded',
       `Updating api: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}.`,
-      `api runs ${NEW}.`,
-      "The API's new revision ca-agentx-stg-api--0000008 takes all traffic; asking it for /health...",
-      `Released ${NEW}: job-agentx-stg-migrate-new0x succeeded, and the API serves it from ca-agentx-stg-api--0000008.`,
+      `api holds ${NEW}.`,
+      "The API's new revision ca-agentx-stg-api--0000008 takes all traffic; asking the door for /health...",
+      `Released ${NEW}: job-agentx-stg-migrate-new0x succeeded, and the API's revision ca-agentx-stg-api--0000008 holds it, takes all traffic and is healthy; its door answered /health.`,
     ]);
-    expect(printed(steps.said)).not.toContain(HOST);
-    expect(printed(steps.said)).not.toContain(SUBSCRIPTION);
+    expect(printed).not.toContain(HOST);
+    expect(printed).not.toContain(SUBSCRIPTION);
   });
 
   it('reads and changes nothing when the image is refused', async () => {
@@ -790,7 +937,7 @@ describe('release', () => {
     );
   });
 
-  it('writes nothing when there is nothing to do, or a person must deploy it', async () => {
+  it('writes nothing when a person must deploy it, or staging is already past it', async () => {
     const cases: [History, number, string][] = [
       [
         history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] }),
@@ -801,21 +948,71 @@ describe('release', () => {
     ];
     for (const [line, status, last] of cases) {
       const azure = new Staging();
-      const steps = azure.steps(line);
-      expect(await release(RELEASE_NEW, steps)).toBe(status);
-      expect(steps.said.at(-1)).toBe(last);
+      const ended_ = await outcome(azure, line);
+      expect(ended_.status).toBe(status);
+      expect(ended_.said.at(-1)).toBe(last);
       expect(azure.writes).toEqual([]);
     }
   });
 
-  it('writes nothing when what it needs later is missing: a way to check the API, a time limit, an idle job', async () => {
+  it('has nothing to do when both hold the commit and the API serves it; red when it holds it but does not', async () => {
+    const holding = (): Staging => {
+      const azure = new Staging();
+      Object.assign(azure.job, { release: NEW, image: NEW_IMAGE });
+      Object.assign(azure.app, { release: NEW, image: NEW_IMAGE, env: builtAt(NEW) });
+      return azure;
+    };
+    const serving = holding();
+    serving.revisions.set('ca-agentx-stg-api--0000007', {
+      image: NEW_IMAGE,
+      release: NEW,
+      provisioningState: 'Provisioned',
+      active: true,
+      trafficWeight: 100,
+      healthState: 'Healthy',
+    });
+    const served_ = await outcome(serving);
+    expect(served_.status).toBe(0);
+    expect(served_.said.at(-1)).toBe(
+      `Both already run ${NEW}, and the API serves it from ca-agentx-stg-api--0000007: a release has nothing to do.`,
+    );
+    // A release that stopped after the API's update: its template holds the commit, the old revision serves.
+    const stopped = holding();
+    const red = await outcome(stopped);
+    expect(red.status).toBe(1);
+    expect(red.said.at(-1)).toBe(
+      `Both hold ${NEW}, but the API doesn't serve it: it runs ${OLD} (${OLD_IMAGE}), not this release. Look at its revisions, then deploy by hand (apps).`,
+    );
+    const unready = holding();
+    unready.latest = 'ca-agentx-stg-api--0000009';
+    const notReady = await outcome(unready);
+    expect(notReady.said.at(-1)).toBe(
+      `Both hold ${NEW}, but the API doesn't serve it: its latest revision ca-agentx-stg-api--0000009 isn't the ready one (ca-agentx-stg-api--0000007). Look at its revisions, then deploy by hand (apps).`,
+    );
+    // The same image under another build is not this release either.
+    const otherBuild = holding();
+    otherBuild.revisions.set('ca-agentx-stg-api--0000007', {
+      image: NEW_IMAGE,
+      release: LATER,
+      provisioningState: 'Provisioned',
+      active: true,
+      trafficWeight: 100,
+      healthState: 'Healthy',
+    });
+    expect((await outcome(otherBuild)).said.at(-1)).toBe(
+      `Both hold ${NEW}, but the API doesn't serve it: it runs ${LATER} (${NEW_IMAGE}), not this release. Look at its revisions, then deploy by hand (apps).`,
+    );
+    for (const azure of [serving, stopped, unready, otherBuild]) expect(azure.writes).toEqual([]);
+  });
+
+  it('writes nothing when what it needs later is missing or staging is mid-change, saying nothing was changed', async () => {
     const origin = (value: string) => (azure: Staging) => {
       azure.app.env = builtAt(OLD).map((entry) =>
         (entry as { name: string }).name === 'AGENTX_PUBLIC_ORIGIN' ? { name: 'AGENTX_PUBLIC_ORIGIN', value } : entry,
       );
     };
-    const noOrigin =
-      'The API names no https origin (AGENTX_PUBLIC_ORIGIN) to check it through once released: nothing was changed.';
+    const noOrigin = 'The API names no https origin (AGENTX_PUBLIC_ORIGIN) to check it through once released.';
+    const noLimit = 'Azure gave no time limit for migrate, so how long to wait for its run is unknown.';
     const cases: [string, (azure: Staging) => void][] = [
       [
         noOrigin,
@@ -825,179 +1022,307 @@ describe('release', () => {
       ],
       [noOrigin, origin(`http://${HOST}`)],
       [noOrigin, origin(`https://${HOST}/path`)],
-      [noOrigin, origin(`https://${HOST}\n`)],
+      [noLimit, (azure) => (azure.job.limit = undefined)],
+      [noLimit, (azure) => (azure.job.limit = 0)],
+      [noLimit, (azure) => (azure.job.limit = 1.5)],
       [
-        'Azure gave no time limit for migrate, so how long to wait for its run is unknown: nothing was changed.',
-        (azure) => (azure.job.limit = undefined),
+        "migrate has runs that haven't ended (job-agentx-stg-migrate-busy1 Running).",
+        (azure) =>
+          azure.runs.unshift({ name: 'job-agentx-stg-migrate-busy1', status: 'Running', image: OLD_IMAGE, polls: 99 }),
       ],
       [
-        'Azure gave no time limit for migrate, so how long to wait for its run is unknown: nothing was changed.',
-        (azure) => (azure.job.limit = 0),
+        'migrate is Failed from an earlier change, so nothing was sent: look at it first.',
+        (azure) => (azure.job.state = 'Failed'),
       ],
       [
-        'Azure gave no time limit for migrate, so how long to wait for its run is unknown: nothing was changed.',
-        (azure) => (azure.job.limit = 1.5),
+        'api is InProgress from an earlier change, so nothing was sent: look at it first.',
+        (azure) => (azure.app.state = 'InProgress'),
       ],
       [
-        "migrate has runs that haven't ended (job-agentx-stg-migrate-busy1 Running), so nothing was changed.",
-        (azure) => azure.runs.unshift({ name: 'job-agentx-stg-migrate-busy1', status: 'Running', polls: 99 }),
+        'The API has the revision suffix "hand" set, which a release would send again.',
+        (azure) => (azure.app.suffix = 'hand'),
       ],
     ];
     for (const [message, arrange] of cases) {
       const azure = new Staging();
       arrange(azure);
-      await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(message);
+      const ended_ = await outcome(azure);
+      expect(ended_.message).toBe(`${message}\nLeft: nothing was changed.`);
       expect(azure.writes).toEqual([]);
     }
   });
 
-  it('leaves the API as it was when the migration fails, saying how to read its log', async () => {
+  it('runs the migration again without resending the job when it already holds the commit', async () => {
+    const azure = new Staging();
+    Object.assign(azure.job, { release: NEW, image: NEW_IMAGE });
+    const { status, said } = await outcome(azure, history([OLD, NEW]));
+    expect(status).toBe(0);
+    expect(said).toContain(`migrate already holds ${NEW}: nothing to send.`);
+    expect(methods(azure)).toEqual(['post', 'patch']);
+  });
+
+  it('leaves the API as it was when the migration fails, saying what it left and how to read the log', async () => {
     for (const ending of ['Failed', 'Stopped', 'Degraded']) {
       const azure = new Staging();
       azure.runEndsAs = ending;
-      const steps = azure.steps(ordinary());
-      expect(await release(RELEASE_NEW, steps)).toBe(1);
-      expect(azure.writes.map((write) => write.method)).toEqual(['patch', 'post']);
-      expect(steps.said.at(-1)).toBe(
-        `job-agentx-stg-migrate-new0x ended ${ending}, so the API was left on ${OLD}. Read its log: node deploy/azure/jobs.ts wait migrate job-agentx-stg-migrate-new0x`,
+      const ended_ = await outcome(azure);
+      expect(ended_.status).toBe(1);
+      expect(methods(azure)).toEqual(['patch', 'post']);
+      expect(ended_.said.at(-1)).toBe(
+        `job-agentx-stg-migrate-new0x ended ${ending}, so the API wasn't updated. Read its log: node deploy/azure/jobs.ts wait migrate job-agentx-stg-migrate-new0x\nLeft: migrate holds ${NEW}; the API is on ${OLD}.`,
       );
     }
   });
 
-  it("shows Azure's refusal of a write by its code alone, never its message, which can quote the settings", async () => {
-    const cases: [string, string, string, number][] = [
-      [
-        'patch',
-        'LinkedAuthorizationFailed',
-        "Azure refused the update of migrate (LinkedAuthorizationFailed). Its message isn't shown here",
-        1,
-      ],
-      ['post', 'AuthorizationFailed', 'Azure refused to start migrate (AuthorizationFailed).', 2],
+  it("names a refusal by Azure's HTTP reason and code alone, never its message or the subscription, and says what it left", async () => {
+    const cases: [string, number, string, string][] = [
+      ['patch', 0, 'Azure refused the update of migrate (Forbidden, LinkedAuthorizationFailed)', 'nothing'],
+      ['post', 1, 'Azure refused to start migrate (Forbidden, AuthorizationFailed)', `migrate holds ${NEW}, not run`],
     ];
-    for (const [method, code, message, writes] of cases) {
+    for (const [method, writesBefore, message, left] of cases) {
       const azure = new Staging();
       azure.refuse = {
         method,
-        stderr: `ERROR: (${code}) Code: ${code} Message: sent https://${HOST} to /subscriptions/${SUBSCRIPTION}`,
+        stderr: azRestError('Forbidden', writesBefore === 0 ? 'LinkedAuthorizationFailed' : 'AuthorizationFailed'),
       };
-      const steps = azure.steps(ordinary());
-      const error = await failure(release(RELEASE_NEW, steps));
-      expect(error).toMatchObject({ message: expect.stringContaining(message) as unknown });
-      expect(printed(steps.said, error)).not.toContain(HOST);
-      expect(printed(steps.said, error)).not.toContain(SUBSCRIPTION);
-      expect(azure.writes).toHaveLength(writes);
+      const ended_ = await outcome(azure);
+      expect(ended_.message).toContain(message);
+      expect(ended_.message).toContain(`\nLeft: ${left === 'nothing' ? `migrate may hold ${NEW}, not run` : left}`);
+      expect(ended_.printed).not.toContain(HOST);
+      expect(ended_.printed).not.toContain(SUBSCRIPTION);
+      expect(azure.writes).toHaveLength(writesBefore + 1);
     }
-    const azure = new Staging();
-    azure.refuse = { method: 'patch', stderr: 'ERROR: something went wrong' };
-    await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(
-      "Azure refused the update of migrate (no code given). Its message isn't shown here, since it can quote the settings sent: run this release from your own terminal to read it.",
+    // The API's update refused: the migration ran, and the API is left on the old build.
+    const api = new Staging();
+    let patches = 0;
+    const refusing = api.az();
+    const steps = { ...api.steps(ordinary()) };
+    const az: Az = {
+      interactive: (args, values) => refusing.interactive(args, values),
+      run: (args) => {
+        if (args[2] === 'patch' && (patches += 1) === 2)
+          return { status: 1, stdout: '', stderr: azRestError('Conflict', 'ContainerAppOperationInProgress') };
+        return refusing.run(args);
+      },
+    };
+    await expect(release(RELEASE_NEW, { ...steps, az })).rejects.toThrow(
+      `Azure refused the update of api (Conflict, ContainerAppOperationInProgress). Its message isn't shown, since it can quote the settings sent: the resource group's activity log has it.\nLeft: migrate ran ${NEW}; the API is on ${OLD}.`,
     );
+    // An error in no known shape still names none of it.
+    const unknown = new Staging();
+    unknown.refuse = { method: 'patch', stderr: `ERROR: something about /subscriptions/${SUBSCRIPTION}` };
+    const odd = await outcome(unknown);
+    expect(odd.message).toContain('Azure refused the update of migrate (no reason given).');
+    expect(odd.printed).not.toContain(SUBSCRIPTION);
+  });
+
+  it('names a failed read by what it was reading alone, never the URL or the subscription, and says what it left', async () => {
+    const cases: [RegExp, number, string][] = [
+      [
+        /jobs\/job-agentx-stg-migrate\?/,
+        3,
+        `Azure didn't answer the read of migrate (Too Many Requests, TooManyRequests).\nLeft: migrate may hold ${NEW}, not run; the API is on ${OLD}.`,
+      ],
+      [
+        /executions\/job-agentx-stg-migrate-new0x/,
+        1,
+        `Azure didn't answer the read of job-agentx-stg-migrate-new0x (Too Many Requests, TooManyRequests).\nLeft: migrate holds ${NEW}, its run job-agentx-stg-migrate-new0x not seen to end; the API is on ${OLD}.`,
+      ],
+      [
+        /revisions\/ca-agentx-stg-api--0000008/,
+        1,
+        `Azure didn't answer the read of ca-agentx-stg-api--0000008 (Too Many Requests, TooManyRequests).\nLeft: migrate ran ${NEW}; the API's template holds ${NEW}, and until a new revision serves it the old one does.`,
+      ],
+    ];
+    for (const [what, from, message] of cases) {
+      const azure = new Staging();
+      azure.failRead = { what, from };
+      const ended_ = await outcome(azure);
+      expect(ended_.message).toBe(message);
+      expect(ended_.printed).not.toContain(SUBSCRIPTION);
+      expect(ended_.printed).not.toContain(HOST);
+    }
   });
 
   it('stops without writing over another deploy that came between its read and its write', async () => {
     for (const meddle of [
       (staging: Staging) => (staging.job.release = LATER),
       (staging: Staging) => (staging.job.image = NEW_IMAGE),
+      // A settings change that stamps nothing is another deploy's too.
+      (staging: Staging) => (staging.job.command = ['node', 'other.ts']),
     ]) {
       const azure = new Staging();
       azure.meddle = meddle;
-      await expect(release(RELEASE_NEW, azure.steps(history([OLD, NEW, LATER])))).rejects.toThrow(
-        /^migrate changed while this release ran \(it now runs [0-9a-f]{40}\): another deploy is going on, so nothing more was changed\.$/,
+      const ended_ = await outcome(azure, history([OLD, NEW, LATER]));
+      expect(ended_.message).toMatch(
+        /^migrate changed while this release ran \(it now runs [0-9a-f]{40}, ghcr\.io\/shahbaz242630\/agent-x@sha256:[0-9a-f]{64}\): another deploy is going on, so it wasn't updated\.\nLeft: migrate may hold/,
       );
       expect(azure.writes).toEqual([]);
     }
   });
 
-  it('stops when an update fails or never settles', async () => {
-    const cases: [(azure: Staging) => void, string][] = [
-      [(azure) => (azure.settleAs = 'Failed'), "Azure's update of migrate ended Failed."],
-      [(azure) => (azure.settleAs = 'Canceled'), "Azure's update of migrate ended Canceled."],
+  it('waits past Azure still showing the old container, or its old state, before an update is its own', async () => {
+    for (const lagState of ['Succeeded', 'Failed', 'InProgress'] as const) {
+      const azure = new Staging();
+      azure.lag = 2;
+      azure.lagState = lagState;
+      expect((await outcome(azure)).status).toBe(0);
+    }
+  });
+
+  it('stops when an update fails or never settles, the job or the API, saying what it left', async () => {
+    const cases: [(azure: Staging) => void, string, string[]][] = [
+      [
+        (azure) => (azure.settleAs = 'Failed'),
+        `Azure's update of migrate ended Failed.\nLeft: migrate may hold ${NEW}, not run; the API is on ${OLD}.`,
+        ['patch'],
+      ],
+      [
+        (azure) => (azure.settleAs = 'Canceled'),
+        `Azure's update of migrate ended Canceled.\nLeft: migrate may hold ${NEW}, not run; the API is on ${OLD}.`,
+        ['patch'],
+      ],
       [
         (azure) => (azure.settleAfter = 1000),
-        "Azure hadn't settled the update of migrate after 10 minutes (InProgress).",
+        `Azure hadn't settled the update of migrate after 10 minutes (InProgress).\nLeft: migrate may hold ${NEW}, not run; the API is on ${OLD}.`,
+        ['patch'],
+      ],
+      [
+        (azure) => (azure.lag = 1000),
+        `Azure hadn't settled the update of migrate after 10 minutes (Succeeded, not yet holding it).\nLeft: migrate may hold ${NEW}, not run; the API is on ${OLD}.`,
+        ['patch'],
+      ],
+      [
+        (azure) => (azure.apiSettleAs = 'Failed'),
+        `Azure's update of api ended Failed.\nLeft: migrate ran ${NEW}; the API's template holds ${NEW}, and until a new revision serves it the old one does.`,
+        ['patch', 'post', 'patch'],
+      ],
+    ];
+    for (const [arrange, message, writes] of cases) {
+      const azure = new Staging();
+      arrange(azure);
+      expect((await outcome(azure)).message).toBe(message);
+      expect(methods(azure)).toEqual(writes);
+    }
+  });
+
+  it('finds its run however Azure answers the start: named or not, listed at once or a little later', async () => {
+    for (const [startNames, listLag] of [
+      ['nothing', 2],
+      ['its run', 0],
+      ['its run', 2],
+    ] as const) {
+      const azure = new Staging();
+      azure.startNames = startNames;
+      azure.listLag = listLag;
+      const ended_ = await outcome(azure);
+      expect(ended_.status).toBe(0);
+      expect(ended_.said).toContain('Started job-agentx-stg-migrate-new0x.');
+    }
+  });
+
+  it("refuses a run it can't be sure is its own, or of its image, and a start that lists nothing in time", async () => {
+    const left = `migrate holds ${NEW}, not run (a start that failed late may still have begun one: look at migrate's runs); the API is on ${OLD}.`;
+    const cases: [(azure: Staging) => void, string][] = [
+      [
+        (azure) => (azure.newRuns = 2),
+        "migrate was started, but 2 new runs are listed, so which is this release's is unknown.",
+      ],
+      [(azure) => (azure.newRuns = 0), 'migrate was started, but no new run was listed within 2 minutes.'],
+      [
+        (azure) => (azure.startNames = 'another'),
+        'Azure listed migrate\'s new run as "job-agentx-stg-migrate-new0x" and started "job-agentx-stg-migrate-other1", which isn\'t this release\'s run.',
+      ],
+      [
+        (azure) => (azure.newRunName = 'job-agentx-stg-db-setup-new0x'),
+        "Azure listed migrate's new run as \"job-agentx-stg-db-setup-new0x\", which isn't this release's run.",
       ],
     ];
     for (const [arrange, message] of cases) {
       const azure = new Staging();
       arrange(azure);
-      await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(message);
-      expect(azure.writes).toHaveLength(1);
+      expect((await outcome(azure)).message).toBe(`${message}\nLeft: ${left}`);
+      expect(methods(azure)).toEqual(['patch', 'post']);
     }
+    const other = new Staging();
+    other.runImage = `${REPOSITORY}@${digest('9')}`;
+    expect((await outcome(other)).message).toBe(
+      `job-agentx-stg-migrate-new0x runs ${REPOSITORY}@${digest('9')}, not this release's image: another release started it.\nLeft: migrate holds ${NEW}, its run job-agentx-stg-migrate-new0x not seen to end; the API is on ${OLD}.`,
+    );
+    expect(methods(other)).toEqual(['patch', 'post']);
   });
 
-  it('gives up on a run that does not end in time, saying how to wait for it, and leaves the API', async () => {
+  it('gives up on a run that does not end in time, saying how to wait for it and what it left', async () => {
     const azure = new Staging();
     azure.runPolls = 1000;
-    await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(
-      "job-agentx-stg-migrate-new0x hadn't ended 1200 s after it started, so the API was left as it was. To wait for it: node deploy/azure/jobs.ts wait migrate job-agentx-stg-migrate-new0x",
+    expect((await outcome(azure)).message).toBe(
+      `job-agentx-stg-migrate-new0x hadn't ended 1200 s after it started. To wait for it: node deploy/azure/jobs.ts wait migrate job-agentx-stg-migrate-new0x\nLeft: migrate holds ${NEW}, its run job-agentx-stg-migrate-new0x not seen to end; the API is on ${OLD}.`,
     );
-    expect(azure.writes.map((write) => write.method)).toEqual(['patch', 'post']);
+    expect(methods(azure)).toEqual(['patch', 'post']);
   });
 
-  it("waits past the old revision still named latest after the API's update, and says which revision serves", async () => {
+  it("waits for the API's new revision: named after the old, taking traffic over time, healthy once it has answered", async () => {
     const azure = new Staging();
     azure.revisionLag = 2;
-    const steps = azure.steps(ordinary());
-    expect(await release(RELEASE_NEW, steps)).toBe(0);
-    expect(steps.said.at(-1)).toBe(
-      `Released ${NEW}: job-agentx-stg-migrate-new0x succeeded, and the API serves it from ca-agentx-stg-api--0000008.`,
-    );
+    azure.readyAfter = 2;
+    azure.trafficAfter = 3;
+    azure.probes = [undefined, 503, 200];
+    const ended_ = await outcome(azure);
+    expect(ended_.status).toBe(0);
+    expect(ended_.said.at(-1)).toContain("the API's revision ca-agentx-stg-api--0000008 holds it");
   });
 
-  it("refuses a run or a revision Azure names in a shape that isn't one of theirs, before it goes into a URL", async () => {
-    const run = new Staging();
-    run.newRunName = 'job-agentx-stg-db-setup-new0x';
-    await expect(release(RELEASE_NEW, run.steps(ordinary()))).rejects.toThrow(
-      `Azure named migrate's new run "job-agentx-stg-db-setup-new0x", which isn't one of its runs: the API was left as it was.`,
-    );
-    expect(run.writes.map((write) => write.method)).toEqual(['patch', 'post']);
-    const revision = new Staging();
-    revision.newRevision = 'ca-agentx-stg-login--0000008';
-    await expect(release(RELEASE_NEW, revision.steps(ordinary()))).rejects.toThrow(
-      `Azure named the API's new revision "ca-agentx-stg-login--0000008", which isn't one of its revisions.`,
-    );
-  });
-
-  it('refuses to guess which run is its own when the start lists none, or two', async () => {
-    for (const count of [0, 2]) {
-      const azure = new Staging();
-      azure.newRuns = count;
-      await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(
-        `migrate was started, but ${String(count)} new runs are listed, so which is this release's is unknown: the API was left as it was.`,
-      );
-      expect(azure.writes.map((write) => write.method)).toEqual(['patch', 'post']);
-    }
-  });
-
-  it("stops when the API's new revision isn't ready, serving, answering or healthy in time", async () => {
+  it("stops when the API's new revision isn't this release, isn't ready, serving, answering or healthy in time", async () => {
+    const left = `\nLeft: migrate ran ${NEW}; the API's template holds ${NEW}, and until a new revision serves it the old one does.`;
     const cases: [string, (azure: Staging) => void][] = [
       ["The API's new revision wasn't ready 5 minutes after its update.", (azure) => (azure.readyAfter = 1000)],
       [
-        "The API's new revision ca-agentx-stg-api--0000008 isn't serving (Provisioned, active false, 100% of traffic).",
-        (azure) => (azure.revision.active = false),
+        `The API's new revision ca-agentx-stg-api--0000008 doesn't serve this release: it runs ${NEW} (${REPOSITORY}@${digest('9')}), not this release.`,
+        (azure) => (azure.newRevisionImage = `${REPOSITORY}@${digest('9')}`),
       ],
       [
-        "The API's new revision ca-agentx-stg-api--0000008 isn't serving (Failed, active true, 100% of traffic).",
-        (azure) => (azure.revision.provisioningState = 'Failed'),
+        `The API's new revision ca-agentx-stg-api--0000008 doesn't serve this release: it runs ${LATER} (${NEW_IMAGE}), not this release.`,
+        (azure) => (azure.newRevisionRelease = LATER),
       ],
       [
-        "The API's new revision ca-agentx-stg-api--0000008 isn't serving (Provisioned, active true, 0% of traffic).",
-        (azure) => (azure.revision.trafficWeight = 0),
+        "The API's new revision ca-agentx-stg-api--0000008 doesn't serve this release: Failed, active false, 0% of traffic, None.",
+        (azure) => (azure.newRevisionState = 'Failed'),
+      ],
+      [
+        "The API's new revision wasn't serving 5 minutes after its update. (Provisioned, active false, 0% of traffic, None)",
+        (azure) => (azure.trafficAfter = 1000),
+      ],
+      // Each of the three falling short alone: still provisioning, inactive, or without all the traffic.
+      [
+        "The API's new revision wasn't serving 5 minutes after its update. (Provisioning, active true, 100% of traffic, None)",
+        (azure) => (azure.newRevisionState = 'Provisioning'),
+      ],
+      [
+        "The API's new revision wasn't serving 5 minutes after its update. (Provisioned, active false, 100% of traffic, None)",
+        (azure) => (azure.newRevisionActive = false),
+      ],
+      [
+        "The API's new revision wasn't serving 5 minutes after its update. (Provisioned, active true, 50% of traffic, None)",
+        (azure) => (azure.newRevisionTraffic = 50),
       ],
       [
         "The API's new revision wasn't answering /health 5 minutes after its update.",
         (azure) => (azure.probes = [503]),
       ],
       [
-        "The API's new revision ca-agentx-stg-api--0000008 answered, but Azure calls it Unhealthy.",
-        (azure) => (azure.revision.healthState = 'Unhealthy'),
+        "The API's new revision wasn't healthy once it answered 5 minutes after its update. (Provisioned, active true, 100% of traffic, Unhealthy)",
+        (azure) => (azure.newRevisionHealth = 'Unhealthy'),
+      ],
+      [
+        'Azure named the API\'s revision "ca-agentx-stg-login--0000008", which isn\'t one of its revisions.',
+        (azure) => (azure.newRevision = 'ca-agentx-stg-login--0000008'),
       ],
     ];
     for (const [message, arrange] of cases) {
       const azure = new Staging();
       arrange(azure);
-      await expect(release(RELEASE_NEW, azure.steps(ordinary()))).rejects.toThrow(message);
-      expect(azure.writes.map((write) => write.method)).toEqual(['patch', 'post', 'patch']);
+      expect((await outcome(azure)).message).toBe(`${message}${left}`);
+      expect(methods(azure)).toEqual(['patch', 'post', 'patch']);
     }
   });
 });
@@ -1016,7 +1341,7 @@ describe('main', () => {
     const said: string[] = [];
     const failing: Az = {
       interactive: () => 0,
-      run: () => ({ status: 1, stdout: '', stderr: 'ERROR: not signed in' }),
+      run: () => ({ status: 1, stdout: '', stderr: azRestError('Unauthorized', 'ExpiredAuthenticationToken') }),
     };
     expect(
       await main(
@@ -1026,7 +1351,7 @@ describe('main', () => {
         () => history([NEW]),
       ),
     ).toBe(1);
-    expect(said).toEqual(['az account show failed:\nERROR: not signed in']);
+    expect(said).toEqual(["The Azure CLI isn't signed in (Unauthorized, ExpiredAuthenticationToken)."]);
   });
 
   it('checks, or releases, and ends with its status', async () => {
