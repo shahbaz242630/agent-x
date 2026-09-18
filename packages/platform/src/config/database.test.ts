@@ -22,8 +22,14 @@ const APP: Env = {
   AGENTX_TRUSTED_PROXIES: '10.0.0.0/23',
   AGENTX_DB_HOST: 'db.internal.example',
   AGENTX_DB_PASSWORD: APP_LOGIN,
+  AGENTX_KEYS_DIR: '/mnt/secrets',
 };
-const LOCAL_APP: Env = { AGENTX_ENV: 'development', AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: APP_LOGIN };
+const LOCAL_APP: Env = {
+  AGENTX_ENV: 'development',
+  AGENTX_DB_HOST: 'db',
+  AGENTX_DB_PASSWORD: APP_LOGIN,
+  AGENTX_KEYS_DIR: '/mnt/secrets',
+};
 const JOB: Env = {
   AGENTX_ENV: 'production',
   AGENTX_RELEASE: 'r-1',

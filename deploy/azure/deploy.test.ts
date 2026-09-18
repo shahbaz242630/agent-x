@@ -12,8 +12,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { BICEP_VERSION } from '../../tooling/bicep/bicep.ts';
 import { newPassword } from '../compose/prepare.ts';
+import { APP_KEYS } from './app-keys.ts';
 import {
   ACTION_GROUP,
+  APP_KEYS_VARIABLE,
   APP_VARIABLES,
   APPS_ENVIRONMENT,
   askPassword,
@@ -26,6 +28,7 @@ import {
   deploymentName,
   describePlan,
   type DnsLookup,
+  keyProblems,
   doorRecords,
   HiddenLine,
   type Images,
@@ -60,6 +63,7 @@ const DIGEST = `sha256:${'b'.repeat(64)}`;
 const aPaste = (): string => ['Str0ng', 'Enough', '#', randomBytes(8).toString('hex')].join('');
 
 const all = { kind: 'all' } as const;
+const keysOnly = { kind: 'keys' } as const;
 const rotating = (...names: string[]) => ({ kind: 'rotate', names: new Set(names) }) as const;
 
 /** Makers that are quick and tell their outputs apart. */
@@ -97,6 +101,7 @@ describe('parseArguments', () => {
     expect(parseArguments(['dns'])).toEqual({ command: 'dns' });
     expect(parseArguments(['certificates'])).toEqual({ command: 'certificates' });
     expect(parseArguments(['secrets', '--all'])).toEqual({ command: 'secrets', plan: all });
+    expect(parseArguments(['secrets', '--keys'])).toEqual({ command: 'secrets', plan: keysOnly });
     expect(parseArguments(['apps'])).toEqual({ command: 'apps', commit: undefined, keepRunning: false });
     expect(parseArguments(['apps', '--commit', COMMIT])).toEqual({
       command: 'apps',
@@ -149,8 +154,14 @@ describe('parseArguments', () => {
       [['alerts', '--fix'], /alerts takes no options, not --fix/],
       [['dns', 'app.example.invalid'], /dns takes no options, not app.example.invalid/],
       [['certificates', '--keep-running'], /certificates takes no options, not --keep-running/],
-      [['secrets'], /needs --all .* or --rotate/],
+      [['secrets'], /needs --all \(the first run\), --rotate <names> or --keys/],
       [['secrets', '--all', 'db-app-password'], /--all takes no names/],
+      [['secrets', '--keys', 'key-audit-mac-v1'], /--keys takes no names/],
+      // What a key sealed or signed needs it as it was: a key gets a new version instead.
+      [
+        ['secrets', '--rotate', 'key-audit-mac-v1'],
+        /key-audit-mac-v1 is never written again: .* a new version in app-keys.json, then secrets --keys/,
+      ],
       [['secrets', '--rotate'], /at least one secret name/],
       [['secrets', '--rotate', 'db-typo-password'], /isn't a secret the vault holds/],
       // Zitadel can't read what it encrypted with another master key.
@@ -174,9 +185,7 @@ describe('the secrets a run writes', () => {
     const zitadelPaste = aPaste();
     const values = secretValues(all, pasted(adminPaste, zitadelPaste), quickMakers());
     expect(Object.keys(values).sort()).toEqual(
-      Object.values(VAULT_SECRETS)
-        .map((s) => s.variable)
-        .sort(),
+      [...Object.values(VAULT_SECRETS).map((s) => s.variable), APP_KEYS_VARIABLE].sort(),
     );
     expect(values[variableOf('db-admin-password')]).toBe(adminPaste);
     expect(values[variableOf('zitadel-admin-password')]).toBe(zitadelPaste);
@@ -188,6 +197,26 @@ describe('the secrets a run writes', () => {
     expect(values[variableOf('zitadel-masterkey')]).toMatch(/^[0-9a-f]{32}$/);
     expect(values[variableOf('login-client-private-key')]).toBe('PRIVATE-HALF-PEM');
     expect(values[variableOf('login-client-public-key')]).toBe('PUBLIC-HALF-PEM');
+  });
+
+  it("makes every one of the app's keys fresh on every run, 32 bytes each as base64url, each its own", () => {
+    for (const plan of [all, rotating('db-app-password'), keysOnly]) {
+      const keys = JSON.parse(
+        secretValues(plan, pasted(aPaste(), aPaste()), quickMakers())[APP_KEYS_VARIABLE] ?? '{}',
+      ) as Record<string, string>;
+      expect(Object.keys(keys)).toEqual([...APP_KEYS]);
+      for (const key of Object.values(keys)) expect(Buffer.from(key, 'base64url')).toHaveLength(32);
+      expect(new Set(Object.values(keys)).size).toBe(APP_KEYS.length);
+    }
+  });
+
+  it('writes nothing but the keys and the master key on a keys run, and asks nobody', () => {
+    const values = secretValues(keysOnly, {}, quickMakers());
+    const written = Object.entries(values)
+      .filter(([, value]) => value !== '')
+      .map(([variable]) => variable);
+    expect(written.sort()).toEqual([APP_KEYS_VARIABLE, variableOf('zitadel-masterkey')].sort());
+    expect(peopleAskedFor(keysOnly)).toEqual([]);
   });
 
   it('makes a real key pair whose halves belong together, in the forms Zitadel reads', () => {
@@ -205,7 +234,9 @@ describe('the secrets a run writes', () => {
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
-    expect(written.sort()).toEqual([variableOf('db-app-password'), variableOf('zitadel-masterkey')].sort());
+    expect(written.sort()).toEqual(
+      [variableOf('db-app-password'), variableOf('zitadel-masterkey'), APP_KEYS_VARIABLE].sort(),
+    );
     const pair = secretValues(rotating('login-client-private-key', 'login-client-public-key'), {}, quickMakers());
     expect(pair[variableOf('login-client-private-key')]).toBe('PRIVATE-HALF-PEM');
     expect(pair[variableOf('login-client-public-key')]).toBe('PUBLIC-HALF-PEM');
@@ -229,8 +260,10 @@ describe('the secrets a run writes', () => {
       '  login-client-private-key: kept as the vault has it',
       '  login-client-public-key: kept as the vault has it',
       '  zitadel-masterkey: written only if the vault has none yet',
+      ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
     ]);
     expect(describePlan(all)).toContain('  zitadel-admin-password: written, from what you paste');
+    expect(describePlan(keysOnly).filter((line) => line.includes(': written,'))).toEqual([]);
   });
 });
 
@@ -408,14 +441,26 @@ interface Call {
   readonly values?: Readonly<Record<string, string>>;
 }
 
+/** A secret in the vault: its name, or its name and current version. */
+type Held = string | { readonly name: string; readonly version: string };
+
+/** How the vault lists a secret: its name and its current version's URL, never its value. */
+const listed = (held: Held) => {
+  const { name, version } = typeof held === 'string' ? { name: held, version: '1' } : held;
+  return { name, properties: { secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}` } };
+};
+
 interface AzAnswers {
   /** What `az bicep version` prints. */
   readonly bicep?: string;
   /** The key vaults the resource group holds. */
   readonly vaults?: readonly string[];
-  /** The secrets the vault holds before the deployment, and after it. */
-  readonly before?: readonly string[];
-  readonly after?: readonly string[];
+  /**
+   * The secrets the vault holds before the deployment, and after it: a name,
+   * or a name and its current version (by default `1`, the same before and after).
+   */
+  readonly before?: readonly Held[];
+  readonly after?: readonly Held[];
   /**
    * How Azure pages the vault's list: three a page, as on the first real run
    * (S19), each page linking to the next, and an empty page last. `emptyFirst`
@@ -572,7 +617,7 @@ class RecordingAz implements Az {
         const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
         if (token === undefined && pages.emptyFirst === true) return json({ value: [], nextLink: link('0') });
         const from = token === undefined || token === 'first' ? 0 : Number(token);
-        const page = names.slice(from, from + 3).map((name) => ({ name }));
+        const page = names.slice(from, from + 3).map(listed);
         if (pages.endless === true) return json({ value: page, nextLink: link('first') });
         return json(from + 3 <= names.length ? { value: page, nextLink: link(String(from + 3)) } : { value: page });
       }
@@ -829,8 +874,34 @@ describe('alerts', () => {
   });
 });
 
+describe("what a secrets run did to the app's keys", () => {
+  const vault = (versions: Readonly<Record<string, string>>) =>
+    Object.entries(versions).map(([name, version]) => ({ name, version }));
+  const every = (version: string) => Object.fromEntries(APP_KEYS.map((key) => [key, version]));
+
+  it('accepts every key there, each the version it was, or new', () => {
+    expect(keyProblems(vault(every('v1')), vault(every('v1')))).toEqual([]);
+    expect(keyProblems([], vault(every('v1')))).toEqual([]);
+    // Another secret written again is no key's business.
+    const other = 'zitadel-masterkey';
+    expect(keyProblems(vault({ [other]: 'v1' }), vault({ ...every('v1'), [other]: 'v2' }))).toEqual([]);
+  });
+
+  it('names each key missing, and each written again', () => {
+    const { 'key-audit-anchor-v1': _gone, ...rest } = every('v1');
+    expect(keyProblems([], vault(rest))).toEqual([
+      "key-audit-anchor-v1 isn't in the vault, so the API won't start: run secrets --keys again",
+    ]);
+    expect(keyProblems(vault(every('v1')), vault({ ...every('v1'), 'key-payee-index-v1': 'v2' }))).toEqual([
+      'key-payee-index-v1 was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"',
+    ]);
+  });
+});
+
 describe('deploy secrets', () => {
   const nine = Object.keys(VAULT_SECRETS);
+  /** Every secret a deployment leaves: the nine and the app's keys. */
+  const everything = [...nine, ...APP_KEYS];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -838,7 +909,7 @@ describe('deploy secrets', () => {
     const done = await run(['secrets', '--all'], {
       answers: ['y'],
       hidden: [admin, admin, zitadel, zitadel],
-      az: new RecordingAz({ before: [], after: nine }),
+      az: new RecordingAz({ before: [], after: everything }),
     });
     expect(done.error).toBeUndefined();
     expect(done.status).toBe(0);
@@ -849,8 +920,8 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Nine secrets, three a page, and the empty page Azure ends with.
-      ...Array<string>(4).fill('rest --method get'),
+      // Fifteen secrets, three a page, and the empty page Azure ends with.
+      ...Array<string>(6).fill('rest --method get'),
     ]);
     const deployment = done.az.deployment;
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
@@ -863,7 +934,10 @@ describe('deploy secrets', () => {
       for (const value of Object.values(values)) expect(call.args.join(' ')).not.toContain(value);
     }
     done.terminal.neverSaid(Object.values(values));
-    expect(done.terminal.said.slice(-9)).toEqual([...nine].sort().map((name) => `  ${name}`));
+    expect(done.terminal.said.slice(-16, -1)).toEqual([...everything].sort().map((name) => `  ${name}`));
+    expect(done.terminal.said.at(-1)).toBe(
+      "The app's 6 keys are there, and none that was there before was written again.",
+    );
   });
 
   it('on a vault that already has secrets, --all goes on only when the operator types the words', async () => {
@@ -879,7 +953,7 @@ describe('deploy secrets', () => {
     const agreed = await run(['secrets', '--all'], {
       answers: ['y', 'rotate everything'],
       hidden: [admin, admin, zitadel, zitadel],
-      az: new RecordingAz({ before: nine, after: nine }),
+      az: new RecordingAz({ before: nine, after: everything }),
     });
     expect(agreed.status).toBe(0);
   });
@@ -917,7 +991,7 @@ describe('deploy secrets', () => {
   it('on a rotation, asks for nothing, writes the named login and the master key, and says to run the set-up job', async () => {
     const done = await run(['secrets', '--rotate', 'db-app-password'], {
       answers: ['y'],
-      az: new RecordingAz({ before: nine, after: nine }),
+      az: new RecordingAz({ before: everything, after: everything }),
     });
     expect(done.status).toBe(0);
     expect(done.terminal.hiddenQuestions).toEqual([]);
@@ -925,8 +999,56 @@ describe('deploy secrets', () => {
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable)
       .sort();
-    expect(written).toEqual(['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    expect(written).toEqual([
+      'AGENTX_AZURE_APP_KEYS',
+      'AGENTX_AZURE_DB_APP_PASSWORD',
+      'AGENTX_AZURE_ZITADEL_MASTERKEY',
+    ]);
     expect(done.terminal.said.at(-1)).toMatch(/start the set-up job now/);
+  });
+
+  it('on a keys run, asks for nothing, writes only the keys and the master key, and checks every key is there', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: nine, after: everything }),
+    });
+    expect(done.status).toBe(0);
+    expect(done.terminal.hiddenQuestions).toEqual([]);
+    expect(done.terminal.said).not.toContainEqual(expect.stringMatching(/already holds/));
+    const written = Object.entries(done.az.deployment?.values ?? {})
+      .filter(([, value]) => value !== '')
+      .map(([variable]) => variable)
+      .sort();
+    expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
+    expect(done.terminal.said.at(-1)).toBe(
+      "The app's 6 keys are there, and none that was there before was written again.",
+    );
+  });
+
+  it('ends red when a key the vault held was written again, naming it and never a value', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({
+        before: everything,
+        after: everything.map((name) => (name === 'key-audit-mac-v1' ? { name, version: '2' } : name)),
+      }),
+    });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said.at(-1)).toBe(
+      'key-audit-mac-v1 was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"',
+    );
+  });
+
+  it('ends red when a key is missing after the run, since the API would refuse to start', async () => {
+    const done = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: nine, after: everything.filter((name) => name !== 'key-audit-anchor-v1') }),
+    });
+    expect(done.status).toBe(1);
+    expect(done.terminal.said.at(-1)).toBe(
+      "key-audit-anchor-v1 isn't in the vault, so the API won't start: run secrets --keys again",
+    );
   });
 
   it('refuses before asking anything when the foundation has no vault', async () => {
@@ -1476,13 +1598,11 @@ describe('the tool and the deployment agree', () => {
     const created = snapshot.predictedResources
       .filter((resource) => resource.type === 'Microsoft.KeyVault/vaults/secrets')
       .map((resource) => resource.name.split('/').at(-1));
-    expect(created.sort()).toEqual(Object.keys(VAULT_SECRETS).sort());
+    expect(created.sort()).toEqual([...Object.keys(VAULT_SECRETS), ...APP_KEYS].sort());
     const paramsText = readFileSync(path.join(AZURE_DIR, 'staging.secrets.bicepparam'), 'utf8');
     const read = [...paramsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
     expect(read.sort()).toEqual(
-      Object.values(VAULT_SECRETS)
-        .map((secret) => secret.variable)
-        .sort(),
+      [...Object.values(VAULT_SECRETS).map((secret) => secret.variable), APP_KEYS_VARIABLE].sort(),
     );
     const appsText = readFileSync(path.join(AZURE_DIR, 'staging.apps.bicepparam'), 'utf8');
     const appsRead = [...appsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
@@ -1529,10 +1649,15 @@ describe('the tool and the deployment agree', () => {
   it('checks a first run by the same rules CI runs, with stand-ins of the same shape in place of every secret', () => {
     const values = secretValues(all, pasted(aPaste(), aPaste()));
     const shaped = shapedForPolicy({ ...values, AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' }, randomBytes);
-    for (const [variable, value] of Object.entries(values)) {
+    for (const [variable, value] of Object.entries(values).filter(([name]) => name !== APP_KEYS_VARIABLE)) {
       expect(shaped[variable]).not.toBe(value);
       expect(shaped[variable]?.length).toBe(variable === 'AGENTX_AZURE_ZITADEL_MASTERKEY' ? 32 : 48);
     }
+    // The keys stay one JSON value with a key each, every one of them a stand-in.
+    const given = JSON.parse(values[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
+    const standIns = JSON.parse(shaped[APP_KEYS_VARIABLE] ?? '{}') as Record<string, string>;
+    expect(Object.keys(standIns)).toEqual([...APP_KEYS]);
+    for (const key of APP_KEYS) expect(standIns[key]).not.toBe(given[key]);
     expect(shaped.AGENTX_AZURE_ALERT_EMAIL).toBe('ops@example.invalid');
     const rotation = shapedForPolicy(secretValues(rotating('db-app-password'), {}, quickMakers()), randomBytes);
     expect(
@@ -1540,7 +1665,7 @@ describe('the tool and the deployment agree', () => {
         .filter(([, value]) => value !== '')
         .map(([variable]) => variable)
         .sort(),
-    ).toEqual(['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    ).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
     // The apps' values too, which are no secrets and pass through as given.
     const appValues = {
       [APP_VARIABLES.digest]: DIGEST,

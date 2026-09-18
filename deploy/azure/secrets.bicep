@@ -15,13 +15,15 @@
 //   parameters file says how a run sets them). Every app that reads a secret
 //   restarts with its new version within 30 minutes (Microsoft)
 // - Zitadel's master key is created once and never overwritten, whatever a
-//   later run brings: Zitadel can't read what it encrypted with another key
+//   later run brings: Zitadel can't read what it encrypted with another key.
+//   So is each of the app's keys (appKeys in names.bicep): what a key sealed
+//   or signed needs it as it was, so a rotation adds a version instead
 // - each identity reads only the secrets listed for it below (Key Vault
 //   Secrets User on that one secret, modules/secret-access.bicep); the policy
 //   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
-import { resourceNames, uniqueSuffix } from 'names.bicep'
+import { appKeys, resourceNames, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -74,6 +76,11 @@ param loginClientPrivateKey string
 @description('The public half, for Zitadel\'s system user setting, base64 of its PEM text.')
 @secure()
 param loginClientPublicKey string
+
+@description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
+@minLength(2)
+@secure()
+param appKeyValues string
 
 var names = resourceNames(environment, nameSuffix)
 
@@ -128,11 +135,20 @@ var masterKey = {
   readers: ['zitadel-setup', 'zitadel']
 }
 
-// Every secret and who reads it, the master key included.
-var access = concat(map(secrets, secret => {
-  name: secret.name
-  readers: secret.readers
-}), [masterKey])
+// Every secret and who reads it, the master key and the app's keys included.
+var access = concat(
+  map(secrets, secret => {
+    name: secret.name
+    readers: secret.readers
+  }),
+  [masterKey],
+  map(appKeys, key => {
+    name: key
+    readers: ['api']
+  })
+)
+
+var keyValues = json(appKeyValues)
 
 resource vault 'Microsoft.KeyVault/vaults@2025-05-01' existing = {
   name: names.vault
@@ -157,6 +173,18 @@ resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   }
 }
 
+// The app's keys, each created once (appKeys).
+@onlyIfNotExists()
+resource keys 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
+  for key in appKeys: {
+    parent: vault
+    name: key
+    properties: {
+      value: keyValues[key]
+    }
+  }
+]
+
 // Who reads what, in a template of its own: Azure refuses one that both writes
 // a secret and looks it up, and each grant needs its secret looked up as its
 // scope (modules/secret-access.bicep).
@@ -170,5 +198,6 @@ module readAccess 'modules/secret-access.bicep' = {
   dependsOn: [
     written
     created
+    keys
   ]
 }

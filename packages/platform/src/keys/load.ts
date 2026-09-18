@@ -71,7 +71,7 @@ export function loadKeys(settings: KeySettings): KeyProvider {
   try {
     names = readdirSync(settings.directory);
   } catch {
-    throw new ConfigError(["the keys directory can't be read"]);
+    throw new ConfigError(["AGENTX_KEYS_DIR names a folder that can't be read"]);
   }
 
   const problems: string[] = [];

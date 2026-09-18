@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { APP_KEYS } from './app-keys.ts';
 import {
   at,
   bicepGuid,
@@ -297,6 +298,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'zitadelAdminPassword',
       'loginClientPrivateKey',
       'loginClientPublicKey',
+      'appKeyValues',
     ]);
     for (const [environment, { together }] of deployed) {
       expect({
@@ -387,7 +389,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ]);
   });
 
-  it('writes the secrets, each only when given but the master key, and lets each app and job read its own', () => {
+  it("writes the secrets, each only when given but the master key and the app's keys, and lets each app and job read its own", () => {
     const part = stagingPart('staging.secrets.bicepparam').predictedResources;
     const label = (resource: PredictedResource): string =>
       SECRETS(resource)
@@ -404,6 +406,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `login-client-private-key ${givenOnly('loginClientPrivateKey')}`,
       `login-client-public-key ${givenOnly('loginClientPublicKey')}`,
       'zitadel-masterkey once',
+      ...APP_KEYS.map((key) => `${key} once`),
       ...[
         'db-setup reads db-admin-password',
         'db-setup reads db-owner-password',
@@ -420,6 +423,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads login-client-public-key',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
+        ...APP_KEYS.map((key) => `api reads ${key}`),
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
   });
@@ -427,18 +431,18 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(9);
+    expect(variables).toHaveLength(10);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
-    // fresh 32 characters, which Azure leaves alone once one exists. Empty values reach Bicep from Node, as G3's tool sends them.
-    const kept = Object.fromEntries(
-      variables
-        .filter((name) => !['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY'].includes(name))
-        .map((name) => [name, '']),
-    );
+    // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
+    // reach Bicep from Node, as G3's tool sends them.
+    const everyRun = ['AGENTX_AZURE_DB_APP_PASSWORD', 'AGENTX_AZURE_ZITADEL_MASTERKEY', 'AGENTX_AZURE_APP_KEYS'];
+    const kept = Object.fromEntries(variables.filter((name) => !everyRun.includes(name)).map((name) => [name, '']));
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(9);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(9 + APP_KEYS.length);
+      // The keys must come every run too: without them the run stops before Azure.
+      expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_ZITADEL_MASTERKEY: '' })).toThrow(
         /minimum allowable length is 32/,
@@ -562,6 +566,35 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(
       brokenRules(changed(APP('api'), (app) => (first(at(configurationOf(app), 'secrets')).value = literal))),
     ).toEqual(['no-secret-literals', 'workload-secrets']);
+  });
+
+  it("no-secret-literals and vault-secrets: each of the app's keys holds its own value and is created once", () => {
+    // Names built here, so no line pairs a secret-named call with a key's vault name (scanner bait, PR #67).
+    const keyNamed = (purpose: string): string => `key-${purpose}-v1`;
+    const auditMac = SECRET(keyNamed('audit-mac'));
+    const member = (name: string): string => `[json(parameters('appKeyValues'))['${name}']]`;
+    // Another key's value would make two keys one; a value in the code is no key at all.
+    expect(
+      brokenRules(
+        changed(auditMac, (secret) => (inside(secret, 'properties').value = member(keyNamed('request-hash')))),
+      ),
+    ).toEqual(['no-secret-literals']);
+    expect(
+      brokenRules(changed(auditMac, (secret) => (inside(secret, 'properties').value = 'written in the code'))),
+    ).toEqual(['no-secret-literals']);
+    // The form is the keys' alone: a login still comes from a parameter of its own.
+    expect(
+      brokenRules(
+        changed(
+          SECRET('db-app-password'),
+          (secret) => (inside(secret, 'properties').value = member('db-app-password')),
+        ),
+      ),
+    ).toEqual(['no-secret-literals']);
+    // Written whenever a value is given, as a login is, a key would change on every run.
+    expect(
+      brokenRules(changed(auditMac, (secret) => (secret.condition = "[not(empty(parameters('appKeyValues')))]"))),
+    ).toEqual(['vault-secrets']);
   });
 
   it('no-secret-literals in a parameters file: a secure value written down, or given a default', () => {
@@ -1692,6 +1725,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['@onlyIfNotExists()\nresource created', 'resource created'],
       // The master key overwritten by every staging run: a condition the snapshot settles and drops (security review, S15).
       [master, "resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = if (environment == 'staging') {"],
+      // The app's keys overwritten by every run, or whenever a run brings values for them.
+      ['@onlyIfNotExists()\nresource keys', 'resource keys'],
+      ['  for key in appKeys: {', '  for key in appKeys: if (!empty(appKeyValues)) {'],
       // Every other secret overwritten by every run, given or not, or whenever a secret has a name.
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: {'],
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: if (!empty(secret.name)) {'],

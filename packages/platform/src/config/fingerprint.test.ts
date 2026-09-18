@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { KeyDescription } from '../keys/key-provider.ts';
 import { type Config, loadConfig } from './config.ts';
 import { configFingerprint, fingerprintedSettings, WATCHED_VARIABLES } from './fingerprint.ts';
 
@@ -15,7 +16,21 @@ const SETTINGS: Env = {
   AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
   AGENTX_DB_HOST: 'db.internal.example',
   AGENTX_DB_PASSWORD: DB_LOGIN,
+  AGENTX_KEYS_DIR: '/mnt/secrets',
 };
+
+/** What a KeyProvider describes: versions and check values, never keys. */
+const AUDIT_MAC: KeyDescription = {
+  purpose: 'audit-mac',
+  current: 1,
+  versions: [{ version: 1, check: '0123456789abcdef0123456789abcdef' }],
+};
+const AUDIT_ANCHOR: KeyDescription = {
+  purpose: 'audit-anchor',
+  current: 1,
+  versions: [{ version: 1, check: 'fedcba9876543210fedcba9876543210', publicKey: 'a-public-key-for-these-tests' }],
+};
+const KEYS: readonly KeyDescription[] = [AUDIT_MAC, AUDIT_ANCHOR];
 
 /** Every leaf of a config, as `path: value` strings. */
 function leaves(value: unknown, prefix = ''): string[] {
@@ -28,7 +43,8 @@ function leaves(value: unknown, prefix = ''): string[] {
 }
 
 /** The fingerprint of a process started with these variables and no Node flags. */
-const fingerprintOf = (env: Env, flags: readonly string[] = []) => configFingerprint(loadConfig(env), env, flags);
+const fingerprintOf = (env: Env, flags: readonly string[] = [], keys = KEYS) =>
+  configFingerprint(loadConfig(env), keys, env, flags);
 const hashOf = (env: Env, flags: readonly string[] = []): string => fingerprintOf(env, flags).configHash;
 
 /** The same config, with its fields (and its sections' fields) in reverse order. */
@@ -60,8 +76,8 @@ describe('SEC-OPS-05 the config fingerprint', () => {
   it('is the same for a config whose fields were built in a different order', () => {
     const config = loadConfig(SETTINGS);
     expect(Object.keys(reversed(config))).not.toEqual(Object.keys(config));
-    expect(configFingerprint(reversed(config), SETTINGS, []).configHash).toBe(
-      configFingerprint(config, SETTINGS, []).configHash,
+    expect(configFingerprint(reversed(config), KEYS, SETTINGS, []).configHash).toBe(
+      configFingerprint(config, KEYS, SETTINGS, []).configHash,
     );
   });
 
@@ -85,12 +101,38 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the port', { AGENTX_HTTP_PORT: '8081' }],
     ['the rate limit', { AGENTX_RATE_LIMIT_PER_MINUTE: '200' }],
     ['the log cap', { AGENTX_LOG_EVENT_CAP_PER_MINUTE: '1200' }],
+    ['the keys folder', { AGENTX_KEYS_DIR: '/mnt/keys' }],
+    ["a key's current version", { AGENTX_KEYS_CURRENT: 'audit-mac:2' }],
   ])('changes when %s changes', (_what, change) => {
     expect(hashOf({ ...SETTINGS, ...change })).not.toBe(hashOf(SETTINGS));
   });
 
+  it.each([
+    [
+      'a key swapped under the same version',
+      [{ ...AUDIT_MAC, versions: [{ version: 1, check: '1'.repeat(32) }] }, AUDIT_ANCHOR],
+    ],
+    [
+      'a version added',
+      [{ ...AUDIT_MAC, versions: [...AUDIT_MAC.versions, { version: 2, check: '2'.repeat(32) }] }, AUDIT_ANCHOR],
+    ],
+    ['a new current version', [{ ...AUDIT_MAC, current: 2 }, AUDIT_ANCHOR]],
+    ['a key gone', [AUDIT_MAC]],
+  ])('changes when the keys loaded change: %s', (_what, keys: readonly KeyDescription[]) => {
+    expect(fingerprintOf(SETTINGS, [], keys).configHash).not.toBe(hashOf(SETTINGS));
+  });
+
+  it('lists the keys it hashed, as the provider described them', () => {
+    expect(fingerprintOf(SETTINGS).keys).toEqual(KEYS);
+  });
+
   it('changes when the TLS mode changes (in test, where disable is allowed)', () => {
-    const local = { AGENTX_ENV: 'test', AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN };
+    const local = {
+      AGENTX_ENV: 'test',
+      AGENTX_DB_HOST: 'db',
+      AGENTX_DB_PASSWORD: DB_LOGIN,
+      AGENTX_KEYS_DIR: '/mnt/secrets',
+    };
     expect(hashOf({ ...local, AGENTX_DB_TLS: 'disable' })).not.toBe(hashOf(local));
   });
 
@@ -111,7 +153,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
 
   it('reads the live environment and Node flags when none are given', () => {
     const config = loadConfig(SETTINGS);
-    expect(configFingerprint(config).configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(configFingerprint(config, KEYS).configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('is frozen', () => {

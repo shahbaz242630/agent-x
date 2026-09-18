@@ -95,7 +95,7 @@ describe('reading the keys from the files the platform mounts', () => {
   it("refuses a directory that can't be read, without naming its path", () => {
     const missing = join(keysDirectory(), 'nowhere');
 
-    expect(problemsOf(missing)).toEqual(["the keys directory can't be read"]);
+    expect(problemsOf(missing)).toEqual(["AGENTX_KEYS_DIR names a folder that can't be read"]);
   });
 
   it('refuses an empty directory, naming every missing key', () => {

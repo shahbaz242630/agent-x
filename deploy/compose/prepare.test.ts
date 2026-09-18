@@ -1,11 +1,13 @@
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
+import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import {
+  APP_KEYS,
   ENV_FILE,
   generate,
   HalfKeyPair,
@@ -18,6 +20,7 @@ import {
   newPassword,
   PASSWORDS,
   prepare,
+  prepareAppKeys,
   prepareEnv,
   prepareKeys,
   renderEnv,
@@ -200,7 +203,60 @@ describe('the login key pair is two files, the shape Zitadel and the login conta
   it('one run does both, and says which of the two was already there', () => {
     const file = path.join(dir, 'both.env');
     const made = keysDir('both');
-    expect(prepare(file, made, bytes(0x08), wordsPair)).toEqual({ env: 'created', keys: 'created' });
-    expect(prepare(file, made, bytes(0x09), wordsPair)).toEqual({ env: 'kept', keys: 'kept' });
+    expect(prepare(file, made, bytes(0x08), wordsPair)).toEqual({
+      env: 'created',
+      keys: 'created',
+      appKeys: 'created',
+    });
+    expect(prepare(file, made, bytes(0x09), wordsPair)).toEqual({ env: 'kept', keys: 'kept', appKeys: 'kept' });
+    expect(readdirSync(path.join(made, APP_KEYS))).toHaveLength(PURPOSES.length);
+  });
+});
+
+describe("the app's keys (ADR-011 §2): one file per key, as the API reads them", () => {
+  /** A byte source that counts up, so each key is its own, as the API requires. */
+  const counting = () => {
+    let next = 0;
+    return (count: number) => Buffer.alloc(count, (next += 1));
+  };
+
+  it('writes a version 1 key for every purpose: 32 random bytes as base64url, on one line', () => {
+    const made = keysDir('app-keys');
+    expect(prepareAppKeys(made, counting())).toBe('created');
+    expect(readdirSync(made).sort()).toEqual(PURPOSES.map((purpose) => `key-${purpose}-v1`).sort());
+    PURPOSES.forEach((purpose, index) => {
+      const text = readFileSync(path.join(made, `key-${purpose}-v1`), 'utf8');
+      expect(text).toBe(`${Buffer.alloc(32, index + 1).toString('base64url')}\n`);
+    });
+  });
+
+  it("keeps every key it finds, since the stack's data is sealed with them, and writes only the missing ones", () => {
+    const made = keysDir('app-keys-kept');
+    prepareAppKeys(made, counting());
+    const before = readFileSync(path.join(made, 'key-audit-mac-v1'), 'utf8');
+    rmSync(path.join(made, 'key-field-encryption-v1'));
+
+    expect(prepareAppKeys(made, bytes(0x7f))).toBe('created');
+    expect(readFileSync(path.join(made, 'key-audit-mac-v1'), 'utf8')).toBe(before);
+    expect(readFileSync(path.join(made, 'key-field-encryption-v1'), 'utf8')).toBe(
+      `${Buffer.alloc(32, 0x7f).toString('base64url')}\n`,
+    );
+    expect(prepareAppKeys(made, bytes(0x7e))).toBe('kept');
+  });
+
+  it('refuses a folder where a key belongs, which is what starting the stack first can make', () => {
+    const made = keysDir('app-keys-folder');
+    mkdirSync(path.join(made, 'key-audit-mac-v1'));
+
+    expect(() => prepareAppKeys(made, counting())).toThrow(NotAKeyFile);
+  });
+
+  it('is readable by the API, which runs as its own user with no capability to override a mode', () => {
+    const made = keysDir('app-keys-mode');
+    prepareAppKeys(made, counting());
+    if (process.platform === 'win32') return;
+    for (const purpose of PURPOSES) {
+      expect(statSync(path.join(made, `key-${purpose}-v1`)).mode & 0o777).toBe(0o644);
+    }
   });
 });
