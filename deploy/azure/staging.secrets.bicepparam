@@ -7,7 +7,8 @@
 // - Windows PowerShell 5.1 deletes a variable set to empty, so a run goes
 //   through G3's tool or Git Bash, which keep it
 // - Zitadel's master key takes a fresh 32 characters every run, never the real
-//   one again: only the first run's is kept
+//   one again: only the first run's is kept. So do the app's keys, as one JSON
+//   value: a key the vault already holds keeps its value
 using 'secrets.bicep'
 
 param environment = 'staging'
@@ -20,3 +21,4 @@ param zitadelMasterKey = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_MASTERKEY
 param zitadelAdminPassword = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD')
 param loginClientPrivateKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY')
 param loginClientPublicKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY')
+param appKeyValues = readEnvironmentVariable('AGENTX_AZURE_APP_KEYS')

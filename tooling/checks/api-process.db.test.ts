@@ -10,12 +10,15 @@ import path from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
-import { findLeaks } from '../../packages/testing/src/log-scan.ts';
+import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import { createTestDatabase, type TestDatabase } from '../../packages/testing/src/db/test-database.ts';
+import { writeTestKeys } from '../../packages/testing/src/keys.ts';
+import { findLeaks } from '../../packages/testing/src/log-scan.ts';
 
 const MAIN = path.resolve('apps/api/src/main.ts');
 const PUBLIC_ORIGIN = 'http://localhost:8080';
 const server = inject('postgres');
+const keys = writeTestKeys(PURPOSES);
 
 /** The parent's environment without any AGENTX_ or PG setting, plus a test run's, against the test database. */
 function childEnv(database: TestDatabase): NodeJS.ProcessEnv {
@@ -34,6 +37,7 @@ function childEnv(database: TestDatabase): NodeJS.ProcessEnv {
     AGENTX_DB_USER: connection.user,
     AGENTX_DB_PASSWORD: connection.password,
     AGENTX_DB_TLS: 'disable',
+    AGENTX_KEYS_DIR: keys.directory,
   };
 }
 
@@ -79,6 +83,7 @@ afterAll(async () => {
   child.kill();
   await new Promise((resolve) => child.once('exit', resolve));
   await database.drop();
+  keys.remove();
 });
 
 function lines(): Line[] {

@@ -1,7 +1,7 @@
 # The local stack (ADR-001 layout; ADR-010 §7, the portability proof): the
 # whole product from one command, with no cloud account and no internet.
 #
-#   node deploy/compose/prepare.ts        # once: the logins into .env, the login key pair into secrets/
+#   node deploy/compose/prepare.ts        # once: the logins into .env, the login key pair and the app's keys into secrets/
 #   docker compose -f deploy/compose/compose.yaml up --build --wait
 #
 # Then http://localhost:8080/health is the API and http://localhost:8081 the
@@ -18,7 +18,8 @@
 #   .env, which prepare generates: a missing one stops the stack (SEC-OPS-08).
 #   The login container's key pair comes from secrets/ instead, a file each,
 #   because that is how Zitadel and the login container read a key — the same
-#   two file names Azure mounts from Key Vault
+#   two file names Azure mounts from Key Vault. The app's own keys come from
+#   secrets/app-keys, a folder the API alone mounts, where Azure mounts them
 # - the app image is built from the repository root's Dockerfile
 name: agentx
 
@@ -129,6 +130,10 @@ services:
       AGENTX_DB_USER: agentx_app
       AGENTX_DB_PASSWORD: ${AGENTX_LOCAL_DB_APP_PASSWORD:?}
       AGENTX_DB_TLS: disable
+      # The app's keys (ADR-011 §2), one file per key, which prepare writes.
+      AGENTX_KEYS_DIR: /mnt/secrets
+    volumes:
+      - ./secrets/app-keys:/mnt/secrets:ro
     depends_on:
       db:
         condition: service_healthy

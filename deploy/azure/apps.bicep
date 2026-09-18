@@ -41,6 +41,7 @@
 //   (G4), and Zitadel's two by the same pinned references the compose stack runs
 //   (`tooling/checks/images.test.ts` keeps them equal)
 import {
+  appKeys
   appName
   appsPrefix
   appWorkloads
@@ -504,13 +505,25 @@ var apps = [
     // Longer than the API's own 25-second stop deadline (API.md), so the log's
     // held-back counts are still written.
     stopSeconds: 30
-    files: [
-      {
-        reads: 'db-app-password'
-        setting: 'AGENTX_DB_PASSWORD_FILE'
-      }
-    ]
+    // Its login, and each of the app's keys (ADR-011 §2), which it finds by
+    // name in the folder AGENTX_KEYS_DIR names rather than one setting each.
+    files: concat(
+      [
+        {
+          reads: 'db-app-password'
+          setting: 'AGENTX_DB_PASSWORD_FILE'
+        }
+      ],
+      map(appKeys, key => {
+        reads: key
+        setting: ''
+      })
+    )
     settings: concat(ourSettings, [
+      {
+        name: 'AGENTX_KEYS_DIR'
+        value: secretsPath
+      }
       {
         name: 'AGENTX_HTTP_HOST'
         value: '0.0.0.0'

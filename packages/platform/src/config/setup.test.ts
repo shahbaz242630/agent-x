@@ -241,7 +241,9 @@ describe("SEC-AV-03 the other jobs refuse the set-up job's settings", () => {
         }
       };
       const base = { AGENTX_ENV: 'development', AGENTX_DB_HOST: 'db', [name]: 'x' };
-      expect(refusal(() => loadConfig({ ...base, AGENTX_DB_PASSWORD: 'app login' }))).toEqual([
+      expect(
+        refusal(() => loadConfig({ ...base, AGENTX_DB_PASSWORD: 'app login', AGENTX_KEYS_DIR: '/mnt/secrets' })),
+      ).toEqual([
         `${name} belongs to the database set-up job (apps/db-setup); the running app holds no login but its own role's (ADR-005 §3)`,
       ]);
       expect(refusal(() => loadMigrationConfig({ ...base, AGENTX_DB_MIGRATION_PASSWORD: 'owner login' }))).toEqual([

@@ -3,14 +3,23 @@
 // reported without the login, and a stop closes every connection.
 import { EventEmitter } from 'node:events';
 
+import { PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
-import { createTestDatabase, findLeaks, LogCapture, type TestDatabase, type TestRole } from '@agentx/testing';
+import {
+  createTestDatabase,
+  findLeaks,
+  LogCapture,
+  type TestDatabase,
+  type TestRole,
+  writeTestKeys,
+} from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type ApiProcess, runApi } from './main.ts';
 
 const server = inject('postgres');
+const keys = writeTestKeys(PURPOSES);
 let database: TestDatabase;
 
 beforeAll(async () => {
@@ -19,6 +28,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await database.drop();
+  keys.remove();
 });
 
 class FakeProcess extends EventEmitter implements ApiProcess {
@@ -44,6 +54,7 @@ function envFor(role: TestRole, overrides: Record<string, string> = {}): Record<
     AGENTX_DB_USER: connection.user,
     AGENTX_DB_PASSWORD: connection.password,
     AGENTX_DB_TLS: 'disable',
+    AGENTX_KEYS_DIR: keys.directory,
     ...overrides,
   };
 }

@@ -12,6 +12,7 @@
 // point only at what the foundation creates.
 import { createHash } from 'node:crypto';
 
+import { APP_KEYS } from './app-keys.ts';
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
@@ -157,9 +158,11 @@ const TELEMETRY_SETTINGS = [
  * again here so that changing who reads what takes both. A sentence each,
  * because GitGuardian read an app's name beside a secret's name as a password,
  * whichever held which (PRs #27 and #28). The set-up job reads every database
- * login, since each of its runs sets them all.
+ * login, since each of its runs sets them all. The API alone reads each of the
+ * app's keys (ADR-011 §2), from the one list of them (app-keys.json).
  */
 const GRANTS: ReadonlySet<string> = new Set([
+  ...APP_KEYS.map((key) => `api reads ${key}`),
   'api reads db-app-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
@@ -400,8 +403,12 @@ const AZURE_DNS = '168.63.129.16';
 /** The longest a job's one run may take, so a stuck run can't hold a replica for a day. */
 const LONGEST_RUN_SECONDS = 3600;
 
-/** Secrets created once and never written again: Zitadel can't read what it encrypted with another master key. */
-const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey']);
+/**
+ * Secrets created once and never written again: Zitadel can't read what it
+ * encrypted with another master key, and what one of the app's keys sealed or
+ * signed needs that key as it was (a rotation adds a version instead).
+ */
+const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS]);
 
 /** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
 const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
@@ -648,10 +655,24 @@ const parameterOf = (value: unknown): string | undefined =>
   typeof value === 'string' ? PARAMETER_REFERENCE.exec(value)?.[1] : undefined;
 
 /**
+ * One of the app's keys, as secrets.bicep writes it: its own member of the one
+ * secure parameter the keys arrive in as JSON, named for the secret it's
+ * written to, so no key is ever given another's value.
+ */
+const KEY_MEMBER_REFERENCE = /^\[json\(parameters\('[^']+'\)\)\['([^']+)'\]\]$/;
+
+/** Whether a vault secret's value is its own key member: only for one of the app's keys. */
+const isOwnKeyMember = (secret: PredictedResource, value: unknown): boolean =>
+  typeof value === 'string' &&
+  APP_KEYS.includes(secretNameOf(secret)) &&
+  KEY_MEMBER_REFERENCE.exec(value)?.[1] === secretNameOf(secret);
+
+/**
  * A secret holds a parameter reference, never a value written in the code:
  * any property whose name ends in "password" or "secret" (a switch named after
  * one, like `passwordAuth`, doesn't), a key vault secret's value, and the value
- * of every entry in a `secrets` list (Container Apps' own secrets).
+ * of every entry in a `secrets` list (Container Apps' own secrets). One of the
+ * app's keys holds its own member of the parameter they arrive in.
  */
 const noSecretLiterals: Check = (snapshot, _expected, add) => {
   const refuse = (resource: PredictedResource, where: string): void => {
@@ -676,7 +697,10 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
     }
   };
   for (const resource of snapshot.predictedResources) {
-    if (resource.type === TYPES.vaultSecret && literal(at(resource.properties, 'value'))) refuse(resource, 'value');
+    const value = at(resource.properties, 'value');
+    if (resource.type === TYPES.vaultSecret && literal(value) && !isOwnKeyMember(resource, value)) {
+      refuse(resource, 'value');
+    }
     walk(resource, resource.properties, '');
   }
 };
@@ -709,9 +733,9 @@ export function paramsFileProblems(file: string, text: string, secureParameters:
  * it writes is written either only when its own value is given (a condition
  * exactly `not(empty(<its value>))`) or only if it doesn't exist yet
  * (`@onlyIfNotExists()`), never both and never on every run. With
- * `vault-secrets`, that leaves Zitadel's master key created once, even under a
- * condition that would vanish from the snapshot (security review, S15), and
- * every other secret written only when given. A module's own template is read
+ * `vault-secrets`, that leaves Zitadel's master key and the app's keys created
+ * once, even under a condition that would vanish from the snapshot (security
+ * review, S15), and every other secret written only when given. A module's own template is read
  * the same way.
  *
  * A template that writes secrets looks none up: Azure refuses a template that
@@ -741,7 +765,7 @@ export function templateProblems(file: string, template: unknown): Problem[] {
     const problem = (message: string): Problem[] => [{ rule: 'vault-secrets', resource: `${file}: ${name}`, message }];
     if (once && condition !== undefined) {
       return problem(
-        "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, the master key @onlyIfNotExists() alone",
+        "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, one created once (the master key, the app's keys) @onlyIfNotExists() alone",
       );
     }
     if (!once && !whenGiven) {
