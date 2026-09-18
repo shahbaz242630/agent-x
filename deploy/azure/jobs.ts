@@ -32,17 +32,17 @@ export type Job = (typeof JOBS)[number];
 export const jobName = (job: Job): string => `job-agentx-stg-${job}`;
 
 /** How a run can end (Container Apps' execution states); any other state hasn't ended. */
-const ENDED: ReadonlySet<string> = new Set(['Succeeded', 'Failed', 'Stopped', 'Degraded']);
+export const ENDED: ReadonlySet<string> = new Set(['Succeeded', 'Failed', 'Stopped', 'Degraded']);
 
 /** How often a run's state is read while it goes. */
-const POLL_MS = 15_000;
+export const POLL_MS = 15_000;
 
 /**
  * How long past the job's own time limit a run is waited for: the limit counts
  * from the container's start, and before that the platform schedules the
  * replica and pulls the image.
  */
-const START_ALLOWANCE_SECONDS = 300;
+export const START_ALLOWANCE_SECONDS = 300;
 
 /** The workspace the apps and jobs log to (names.bicep); a test holds the two equal. */
 export const WORKSPACE = 'log-agentx-stg';
@@ -98,7 +98,7 @@ const RUN_SUFFIX = /^[a-z0-9]+$/;
  * Whether a name is one of the job's runs. A fixed pattern and a prefix, never
  * a pattern built from what was typed (CodeQL js/regex-injection).
  */
-const isRunOf = (job: Job, execution: string): boolean => {
+export const isRunOf = (job: Job, execution: string): boolean => {
   const prefix = `${jobName(job)}-`;
   return execution.startsWith(prefix) && RUN_SUFFIX.test(execution.slice(prefix.length));
 };
