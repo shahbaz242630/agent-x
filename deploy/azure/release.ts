@@ -5,10 +5,16 @@
 // that needs a hand deploy stops the release, red.
 //
 //   node deploy/azure/release.ts check <commit> <digest>
+//   node deploy/azure/release.ts release <commit> <digest>
 //
 // `check` (G4-3a) reads what staging runs and says what a release of that
 // commit would do, changing nothing: whether a person must deploy it instead,
-// and what each update would change. The release itself follows (G4-3b).
+// and what each update would change. `release` (G4-3b) does it: the image
+// checked by verify.ts first; the migration job updated, then run (a run of
+// this image), and waited for; only once that run has succeeded, the API
+// updated, and waited for until a new revision of this image takes all
+// traffic, the door answers /health, and Azure calls the revision healthy.
+// CI runs `release` after every merge to main (G4-4), one release at a time.
 //
 // - what staging runs is read from the API and the job themselves (their
 //   AGENTX_RELEASE), never from the previous merge: a release that stopped red
@@ -22,14 +28,21 @@
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
 //   Each container is Azure's own, with the image and AGENTX_RELEASE changed
 //   and nothing else; a field this tool doesn't know is refused, not guessed at
-// - only images, commits and file names are printed: the settings name the
-//   domain, and the subscription is Azure's, both kept out of CI's public logs
+// - only images, commits, file names and Azure's own names are printed: the
+//   settings name the domain, and the subscription is Azure's, both kept out
+//   of CI's public logs. An error Azure gives is shown by its HTTP reason and
+//   code alone, and never with the URL asked (both can name the subscription;
+//   its message can quote what was sent); the activity log has the rest
+// - everything knowable before the first write is settled before it; every
+//   wait has an end; a stop after the first write says what it left. The API
+//   is updated only after a run of this release's image has succeeded
 import { readFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 
-import { IMAGE_REPOSITORY } from '../image/verify.ts';
-import { ARM, type Az, azJson, realAz, RESOURCE_GROUP } from './deploy.ts';
+import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
+import { ARM, type Az, realAz, realImages, RESOURCE_GROUP } from './deploy.ts';
 import { type History, realHistory } from './git.ts';
-import { JOBS_API } from './jobs.ts';
+import { ENDED, isRunOf, JOBS_API, POLL_MS, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
 export interface HandDeployed {
@@ -125,11 +138,12 @@ export class UsageError extends Error {
 }
 
 export const USAGE = `Usage:
-  node deploy/azure/release.ts check <commit> <digest>   say what a release of that commit would do, changing nothing
+  node deploy/azure/release.ts check <commit> <digest>     say what a release of that commit would do, changing nothing
+  node deploy/azure/release.ts release <commit> <digest>   do it: run the migration, then update the API
 <commit> is a full commit; <digest> is its image's, sha256:<64 hex>.`;
 
 export interface Request {
-  readonly command: 'check';
+  readonly command: 'check' | 'release';
   readonly commit: string;
   readonly digest: string;
 }
@@ -137,14 +151,16 @@ export interface Request {
 /** What was asked for, or a UsageError saying why it can't be done. */
 export function parseArguments(argv: readonly string[]): Request {
   const [command, commit, digest, ...rest] = argv;
-  if (command !== 'check') throw new UsageError(`say check, not ${command ?? 'nothing'}`);
+  if (command !== 'check' && command !== 'release') {
+    throw new UsageError(`say check or release, not ${command ?? 'nothing'}`);
+  }
   if (commit === undefined || !COMMIT.test(commit)) {
     throw new UsageError(`${commit ?? 'nothing'} isn't a full commit (40 lower-case hex)`);
   }
   if (digest === undefined || !DIGEST.test(digest)) {
     throw new UsageError(`${digest ?? 'nothing'} isn't an image digest (sha256: and 64 lower-case hex)`);
   }
-  if (rest.length > 0) throw new UsageError(`check takes a commit and a digest, not ${rest.join(' ')} as well`);
+  if (rest.length > 0) throw new UsageError(`${command} takes a commit and a digest, not ${rest.join(' ')} as well`);
   return { command, commit, digest };
 }
 
@@ -299,19 +315,66 @@ export function decide(
 export const workloadUrl = (subscription: string, workload: Workload): string =>
   `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/${WORKLOADS[workload].path}?api-version=${JOBS_API}`;
 
-/** The subscription the CLI is signed in to, said by its name alone: its ID stays out of CI's public logs. */
+/**
+ * Why Azure refused, from what `az rest` printed: the HTTP reason and the
+ * error's code (`ERROR: Forbidden({"error":{"code":"AuthorizationFailed",…}})`).
+ * Nothing else is shown: the message can quote what was sent, the settings
+ * among them, and names the subscription, and CI's log is public. The
+ * resource group's activity log holds the whole of it.
+ */
+function azureRefusal(stderr: string): string {
+  const reason = /ERROR:\s*([A-Za-z][A-Za-z ]*?)\s*\(/.exec(stderr)?.[1];
+  const code = /"code"\s*:\s*"([A-Za-z0-9.]+)"/.exec(stderr)?.[1];
+  const said = [reason, code].filter((part) => part !== undefined);
+  return said.length > 0 ? said.join(', ') : 'no reason given';
+}
+
+/** An answer the CLI printed, as JSON, or an error naming what it was for (never the answer itself). */
+function parsed(stdout: string, what: string): Readonly<Record<string, unknown>> {
+  try {
+    return record(JSON.parse(stdout));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`Azure's answer for ${what} wasn't JSON.`, { cause: error });
+    throw error;
+  }
+}
+
+/**
+ * What Azure answers a GET, or an error naming what was read and why it
+ * failed: never the URL, which names the subscription, nor Azure's message.
+ */
+function get(az: Az, url: string, what: string): Readonly<Record<string, unknown>> {
+  const done = az.run(['rest', '--method', 'get', '--url', url, '--output', 'json']);
+  if (done.status !== 0) throw new Error(`Azure didn't answer the read of ${what} (${azureRefusal(done.stderr)}).`);
+  return parsed(done.stdout, what);
+}
+
+/**
+ * The subscription the CLI is signed in to, said by its name alone: its ID
+ * stays out of CI's public logs. A sign-in to a tenant alone, whose "ID" is the
+ * tenant's, is none.
+ */
 function signedIn(az: Az, say: (line: string) => void): string {
-  const account = record(azJson(az, ['account', 'show']));
+  const done = az.run(['account', 'show', '--output', 'json']);
+  if (done.status !== 0) throw new Error(`The Azure CLI isn't signed in (${azureRefusal(done.stderr)}).`);
+  const account = parsed(done.stdout, 'the account');
   const id = typeof account.id === 'string' ? account.id : '';
-  if (!GUID.test(id)) throw new Error("The Azure CLI named no subscription it's signed in to.");
+  if (!GUID.test(id) || id === account.tenantId)
+    throw new Error("The Azure CLI named no subscription it's signed in to.");
   say(`Signed in to the subscription "${String(account.name)}".`);
   return id;
 }
 
-/** What a workload runs, read from Azure. */
-function readRunning(az: Az, subscription: string, workload: Workload): Running {
-  const shown = record(azJson(az, ['rest', '--method', 'get', '--url', workloadUrl(subscription, workload)]));
-  return runningIn(workload, record(record(shown.properties).template).containers);
+/** A workload as Azure has it: its properties, and what it runs. */
+interface Read {
+  readonly properties: Readonly<Record<string, unknown>>;
+  readonly running: Running;
+}
+
+/** A workload, read from Azure. */
+function readWorkload(az: Az, subscription: string, workload: Workload): Read {
+  const properties = record(get(az, workloadUrl(subscription, workload), workload).properties);
+  return { properties, running: runningIn(workload, record(properties.template).containers) };
 }
 
 /** The build a container names in AGENTX_RELEASE, or nothing. */
@@ -319,6 +382,9 @@ const buildOf = (container: Container): string => {
   const found = container.env.find((setting) => setting.name === RELEASE_SETTING);
   return found !== undefined && 'value' in found ? found.value : '';
 };
+
+/** Whether two containers are the same, field for field. */
+const same = (one: Container, other: Container): boolean => JSON.stringify(one) === JSON.stringify(other);
 
 /**
  * What changed in a container, in words: its image and its build, the two a
@@ -332,32 +398,56 @@ export function changes(before: Container, after: Container): string[] {
   return said;
 }
 
-export interface ReleaseSteps {
+export interface CheckSteps {
   readonly az: Az;
   readonly history: History;
   readonly say: (line: string) => void;
 }
 
-/** `check`: what a release would do, said; 0 when it could go ahead (or has nothing to do), 1 when it needs a hand deploy. */
-export function check(request: Request, steps: ReleaseSteps): number {
+/** What a release of the commit would do, read from Azure and the history, with what each runs said. */
+interface Plan {
+  readonly subscription: string;
+  readonly image: string;
+  readonly reads: ReadonlyMap<Workload, Read>;
+  readonly running: ReadonlyMap<Workload, Running>;
+  readonly decision: Decision;
+}
+
+function plan(request: Request, steps: CheckSteps): Plan {
   const subscription = signedIn(steps.az, steps.say);
   const image = `${IMAGE_REPOSITORY}@${request.digest}`;
-  const running = new Map(ORDER.map((workload) => [workload, readRunning(steps.az, subscription, workload)] as const));
+  const reads = new Map(ORDER.map((workload) => [workload, readWorkload(steps.az, subscription, workload)] as const));
+  const running = new Map([...reads].map(([workload, read]) => [workload, read.running] as const));
   for (const [workload, found] of running) steps.say(`${workload} runs ${found.release} (${found.image}).`);
-  const decision = decide(running, request.commit, image, steps.history);
+  return { subscription, image, reads, running, decision: decide(running, request.commit, image, steps.history) };
+}
+
+/**
+ * A decision that leaves nothing to update, said: the status to end with, or
+ * nothing when there are updates to make.
+ */
+function settled(decision: Decision, commit: string, say: (line: string) => void): number | undefined {
   if (decision.kind === 'current') {
-    steps.say(`Both already run ${request.commit}: a release has nothing to do.`);
+    say(`Both already run ${commit}: a release has nothing to do.`);
     return 0;
   }
   if (decision.kind === 'past') {
-    steps.say(`Staging already runs a later commit than ${request.commit}: a release of it has nothing to do.`);
+    say(`Staging already runs a later commit than ${commit}: a release of it has nothing to do.`);
     return 0;
   }
   if (decision.kind === 'by-hand') {
-    steps.say(`A release of ${request.commit} would stop, red: this needs a hand deploy.`);
-    for (const reason of decision.reasons) steps.say(`  ${reason}`);
+    say(`A release of ${commit} stops here, red: this needs a hand deploy.`);
+    for (const reason of decision.reasons) say(`  ${reason}`);
     return 1;
   }
+  return undefined;
+}
+
+/** `check`: what a release would do, said; 0 when it could go ahead (or has nothing to do), 1 when it needs a hand deploy. */
+export function check(request: Request, steps: CheckSteps): number {
+  const { running, decision } = plan(request, steps);
+  const stop = settled(decision, request.commit, steps.say);
+  if (stop !== undefined || decision.kind !== 'release') return stop ?? 1;
   steps.say(`A release of ${request.commit} would update, in order:`);
   for (const [workload, after] of decision.updates) {
     const before = running.get(workload)?.container;
@@ -367,12 +457,476 @@ export function check(request: Request, steps: ReleaseSteps): number {
   return 0;
 }
 
-export function main(
+export interface ReleaseSteps extends CheckSteps {
+  readonly now: () => Date;
+  readonly sleep: (ms: number) => Promise<void>;
+  /** verify.ts's answer for the image, by digest, at the commit. */
+  readonly verify: (image: string, commit: string) => Outcome;
+  /** The status a GET of the URL answers, or nothing when nothing answers. */
+  readonly probe: (url: string) => Promise<number | undefined>;
+}
+
+/** How long an update of a workload may take to settle. */
+const UPDATE_WAIT_MS = 10 * 60_000;
+
+/** How long a started run may take to be listed. */
+const LIST_WAIT_MS = 2 * 60_000;
+
+/** How long the API's new revision may take to serve, and then to answer through its door (cold starts ~25 s, S22). */
+const SERVE_WAIT_MS = 5 * 60_000;
+
+/**
+ * Where a release stopped leaves staging, said with its error: every stop
+ * after the first write says what now holds what, and what still serves.
+ */
+async function leaving<T>(left: string, step: () => T | Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (error instanceof Error) throw new Error(`${error.message}\nLeft: ${left}`, { cause: error });
+    throw error;
+  }
+}
+
+/** What must hold of a workload before the release writes: settled, from no earlier change still going or failed. */
+function settledBefore(workload: Workload, read: Read): void {
+  const state = String(read.properties.provisioningState);
+  if (state !== 'Succeeded') {
+    throw new Error(`${workload} is ${state} from an earlier change, so nothing was sent: look at it first.`);
+  }
+}
+
+/** The address the API is served at, from its own setting (never printed: it names the domain). */
+function publicOrigin(api: Running): string {
+  const origin = api.container.env.find((setting) => setting.name === 'AGENTX_PUBLIC_ORIGIN');
+  const value = origin !== undefined && 'value' in origin ? origin.value : '';
+  if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
+    throw new Error('The API names no https origin (AGENTX_PUBLIC_ORIGIN) to check it through once released.');
+  }
+  return value;
+}
+
+/**
+ * A revision suffix set by hand would be sent again with CI's update and
+ * refused as taken, after the migration had run: so none may be set.
+ */
+function noSuffix(api: Read): void {
+  const suffix = record(api.properties.template).revisionSuffix;
+  if (suffix !== undefined && suffix !== '') {
+    throw new Error(`The API has the revision suffix ${JSON.stringify(suffix)} set, which a release would send again.`);
+  }
+}
+
+/** How long migrate's one run may take, in seconds (apps.bicep). */
+function timeLimit(job: Read): number {
+  const limit = record(job.properties.configuration).replicaTimeout;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+    throw new Error('Azure gave no time limit for migrate, so how long to wait for its run is unknown.');
+  }
+  return limit;
+}
+
+/**
+ * Sends the update: the containers alone, as a PATCH (release.bicep), once
+ * the workload is read again and found exactly as it was when the release was
+ * decided: anything else there since means another deploy, not to be
+ * overwritten. A workload already holding the update is sent nothing.
+ */
+function update(steps: ReleaseSteps, subscription: string, workload: Workload, seen: Running, after: Container): Read {
+  const now = readWorkload(steps.az, subscription, workload);
+  if (!same(now.running.container, seen.container)) {
+    throw new Error(
+      `${workload} changed while this release ran (it now runs ${now.running.release}, ${now.running.image}): another deploy is going on, so it wasn't updated.`,
+    );
+  }
+  if (same(seen.container, after)) {
+    steps.say(`${workload} already holds ${buildOf(after)}: nothing to send.`);
+    return now;
+  }
+  const body = JSON.stringify({ properties: { template: { containers: [after] } } });
+  const done = steps.az.run([
+    'rest',
+    '--method',
+    'patch',
+    '--url',
+    workloadUrl(subscription, workload),
+    '--body',
+    body,
+  ]);
+  if (done.status !== 0) {
+    throw new Error(
+      `Azure refused the update of ${workload} (${azureRefusal(done.stderr)}). Its message isn't shown, since it can quote the settings sent: the resource group's activity log has it.`,
+    );
+  }
+  steps.say(`Updating ${workload}: ${changes(seen.container, after).join('; ')}.`);
+  return now;
+}
+
+/**
+ * Waits for Azure to settle an update. Settled is Azure holding what was sent,
+ * marked Succeeded: just after the PATCH it can still show what was there
+ * before, marked with the state that had, so a failure counts only once it is
+ * this update's.
+ */
+async function settledUpdate(
+  steps: ReleaseSteps,
+  subscription: string,
+  workload: Workload,
+  after: Container,
+): Promise<Read> {
+  const deadline = steps.now().getTime() + UPDATE_WAIT_MS;
+  for (;;) {
+    const now = readWorkload(steps.az, subscription, workload);
+    const state = String(now.properties.provisioningState);
+    const taken = same(now.running.container, after);
+    if (taken && state === 'Succeeded') {
+      steps.say(`${workload} holds ${buildOf(after)}.`);
+      return now;
+    }
+    if (taken && (state === 'Failed' || state === 'Canceled')) {
+      throw new Error(`Azure's update of ${workload} ended ${state}.`);
+    }
+    if (steps.now().getTime() >= deadline) {
+      throw new Error(
+        `Azure hadn't settled the update of ${workload} after ${String(UPDATE_WAIT_MS / 60_000)} minutes (${state}${taken ? '' : ', not yet holding it'}).`,
+      );
+    }
+    await steps.sleep(POLL_MS);
+  }
+}
+
+/** One run of the migration job, as Azure lists it. */
+interface Run {
+  readonly name: string;
+  readonly status: string;
+}
+
+const jobUrl = (subscription: string, suffix: string): string =>
+  workloadUrl(subscription, 'migrate').replace('?api-version=', `${suffix}?api-version=`);
+
+function runs(steps: ReleaseSteps, subscription: string): Run[] {
+  const listed = get(steps.az, jobUrl(subscription, '/executions'), "migrate's runs");
+  if (!Array.isArray(listed.value)) throw new Error("Azure's list of migrate's runs wasn't a list.");
+  return listed.value.map((entry) => {
+    const found = record(entry);
+    return { name: String(found.name), status: String(record(found.properties).status) };
+  });
+}
+
+/** migrate's runs, once none is still going: two would race (apps.bicep). */
+function idle(steps: ReleaseSteps, subscription: string): Run[] {
+  const listed = runs(steps, subscription);
+  const going = listed.filter((run) => !ENDED.has(run.status));
+  if (going.length > 0) {
+    throw new Error(
+      `migrate has runs that haven't ended (${going.map((run) => `${run.name} ${run.status}`).join(', ')}).`,
+    );
+  }
+  return listed;
+}
+
+/**
+ * Starts the migration job as it is now deployed, with no template of its own
+ * (a POST with no body), once none of its runs is still going. Azure may take
+ * the start before it lists the run, or without naming it, so the run is the
+ * one new run listed within LIST_WAIT_MS, and the one the start named if it
+ * named one.
+ */
+async function startMigration(steps: ReleaseSteps, subscription: string): Promise<string> {
+  const known = new Set(idle(steps, subscription).map((run) => run.name));
+  const done = steps.az.run(['rest', '--method', 'post', '--url', jobUrl(subscription, '/start')]);
+  if (done.status !== 0) throw new Error(`Azure refused to start migrate (${azureRefusal(done.stderr)}).`);
+  const named = done.stdout.trim() === '' ? undefined : String(parsed(done.stdout, "migrate's start").name);
+  const deadline = steps.now().getTime() + LIST_WAIT_MS;
+  for (;;) {
+    const fresh = runs(steps, subscription).filter((run) => !known.has(run.name));
+    const [started] = fresh;
+    if (fresh.length > 1) {
+      throw new Error(
+        `migrate was started, but ${String(fresh.length)} new runs are listed, so which is this release's is unknown.`,
+      );
+    }
+    if (started !== undefined) {
+      // Azure's own name for it, held to the job's runs before it goes into a URL.
+      if (!isRunOf('migrate', started.name) || (named !== undefined && named !== started.name)) {
+        throw new Error(
+          `Azure listed migrate's new run as "${started.name}"${named === undefined ? '' : ` and started "${named}"`}, which isn't this release's run.`,
+        );
+      }
+      steps.say(`Started ${started.name}.`);
+      return started.name;
+    }
+    if (steps.now().getTime() >= deadline) {
+      throw new Error(
+        `migrate was started, but no new run was listed within ${String(LIST_WAIT_MS / 60_000)} minutes.`,
+      );
+    }
+    await steps.sleep(POLL_MS);
+  }
+}
+
+/**
+ * Waits for the run to end, within the job's own time limit and the start
+ * allowance: how it ended. The run must be of this release's image, or it is
+ * another release's.
+ */
+async function ended(
+  steps: ReleaseSteps,
+  subscription: string,
+  name: string,
+  image: string,
+  limit: number,
+): Promise<string> {
+  const deadline = steps.now().getTime() + (limit + START_ALLOWANCE_SECONDS) * 1000;
+  let last = '';
+  for (;;) {
+    const run = record(get(steps.az, jobUrl(subscription, `/executions/${name}`), name).properties);
+    const [container] = Array.isArray(record(run.template).containers)
+      ? (record(run.template).containers as unknown[])
+      : [];
+    const ran = String(record(container).image);
+    if (ran !== image) throw new Error(`${name} runs ${ran}, not this release's image: another release started it.`);
+    const status = String(run.status);
+    if (status !== last) {
+      steps.say(`  ${name}: ${status}`);
+      last = status;
+    }
+    if (ENDED.has(status)) return status;
+    if (steps.now().getTime() >= deadline) {
+      throw new Error(
+        `${name} hadn't ended ${String(limit + START_ALLOWANCE_SECONDS)} s after it started. To wait for it: node deploy/azure/jobs.ts wait migrate ${name}`,
+      );
+    }
+    await steps.sleep(POLL_MS);
+  }
+}
+
+/** A revision of the API as Azure has it, and what it runs. */
+interface Revision {
+  readonly properties: Readonly<Record<string, unknown>>;
+  readonly running: Running;
+}
+
+function readRevision(steps: ReleaseSteps, subscription: string, name: string): Revision {
+  const url = workloadUrl(subscription, 'api').replace('?api-version=', `/revisions/${name}?api-version=`);
+  const properties = record(get(steps.az, url, name).properties);
+  return { properties, running: runningIn('api', record(properties.template).containers) };
+}
+
+/**
+ * Why a revision doesn't serve the release yet, or nothing when it does: this
+ * image and build, provisioned, active, all traffic, and (once it has answered,
+ * since a revision no replica has started yet may not say) healthy.
+ */
+function notServing(revision: Revision, image: string, commit: string, answered: boolean): string | undefined {
+  const { properties, running } = revision;
+  if (running.image !== image || running.release !== commit) {
+    return `it runs ${running.release} (${running.image}), not this release`;
+  }
+  const state = [
+    String(properties.provisioningState),
+    `active ${String(properties.active)}`,
+    `${String(properties.trafficWeight)}% of traffic`,
+    String(properties.healthState),
+  ].join(', ');
+  const serving =
+    properties.provisioningState === 'Provisioned' &&
+    properties.active === true &&
+    properties.trafficWeight === 100 &&
+    (!answered || properties.healthState === 'Healthy');
+  return serving ? undefined : state;
+}
+
+/** Azure's own name for one of the API's revisions, held to that shape before it goes into a URL. */
+function revisionName(name: unknown): string {
+  const revision = String(name);
+  if (!/^ca-agentx-stg-api--[a-z0-9]+$/.test(revision)) {
+    throw new Error(`Azure named the API's revision "${revision}", which isn't one of its revisions.`);
+  }
+  return revision;
+}
+
+/**
+ * Waits until the API serves the release: a new revision is the ready one;
+ * it holds this image and build, is provisioned, active, takes all traffic and
+ * is healthy; and the door answers /health while it does (which starts a
+ * replica, from zero). Each is waited for, not read once, within the wait.
+ */
+async function served(
+  steps: ReleaseSteps,
+  subscription: string,
+  before: string,
+  target: { readonly origin: string; readonly image: string; readonly commit: string },
+): Promise<string> {
+  const deadline = steps.now().getTime() + SERVE_WAIT_MS;
+  const late = (what: string): Error =>
+    new Error(`The API's new revision wasn't ${what} ${String(SERVE_WAIT_MS / 60_000)} minutes after its update.`);
+  const wait = async (): Promise<void> => {
+    await steps.sleep(POLL_MS);
+  };
+  const ready = async (): Promise<string> => {
+    for (;;) {
+      const { properties } = readWorkload(steps.az, subscription, 'api');
+      const latest = properties.latestRevisionName;
+      if (latest !== before && latest === properties.latestReadyRevisionName) return revisionName(latest);
+      if (steps.now().getTime() >= deadline) throw late('ready');
+      await wait();
+    }
+  };
+  const revision = await ready();
+  const serving = async (answered: boolean): Promise<void> => {
+    const what = answered ? 'healthy once it answered' : 'serving';
+    for (;;) {
+      const found = readRevision(steps, subscription, revision);
+      const why = notServing(found, target.image, target.commit, answered);
+      if (why === undefined) return;
+      // Another image or build is another deploy's revision, and a failed one won't recover: neither is waited for.
+      const ours = found.running.image === target.image && found.running.release === target.commit;
+      if (!ours || found.properties.provisioningState === 'Failed') {
+        throw new Error(`The API's new revision ${revision} doesn't serve this release: ${why}.`);
+      }
+      if (steps.now().getTime() >= deadline) throw new Error(`${late(what).message} (${why})`);
+      await wait();
+    }
+  };
+  await serving(false);
+  steps.say(`The API's new revision ${revision} takes all traffic; asking the door for /health...`);
+  for (;;) {
+    if ((await steps.probe(`${target.origin}/health`)) === 200) break;
+    if (steps.now().getTime() >= deadline) throw late('answering /health');
+    await wait();
+  }
+  await serving(true);
+  return revision;
+}
+
+/**
+ * When both already hold the commit: nothing to do only if the API's ready
+ * revision serves it. A release that stopped after the API's update (its new
+ * revision never ready) leaves the template holding the commit while the old
+ * revision serves, and a run again must say so, red, not green.
+ */
+function alreadyServed(steps: ReleaseSteps, subscription: string, api: Read, image: string, commit: string): number {
+  const latest = api.properties.latestRevisionName;
+  const ready = api.properties.latestReadyRevisionName;
+  const why =
+    latest !== ready
+      ? `its latest revision ${String(latest)} isn't the ready one (${String(ready)})`
+      : notServing(readRevision(steps, subscription, revisionName(latest)), image, commit, true);
+  if (why !== undefined) {
+    steps.say(
+      `Both hold ${commit}, but the API doesn't serve it: ${why}. Look at its revisions, then deploy by hand (apps).`,
+    );
+    return 1;
+  }
+  steps.say(`Both already run ${commit}, and the API serves it from ${String(latest)}: a release has nothing to do.`);
+  return 0;
+}
+
+/**
+ * `release`: checks the image, then does what `check` says: the migration job
+ * updated and run to success, then the API updated and serving. 0 when it is
+ * released or had nothing to do, 1 when it stopped, saying where and what it
+ * left.
+ */
+export async function release(request: Request, steps: ReleaseSteps): Promise<number> {
+  const { commit } = request;
+  const image = `${IMAGE_REPOSITORY}@${request.digest}`;
+  steps.say(`Checking ${image} was signed by CI on main at ${commit}, with its SBOM...`);
+  const outcome = steps.verify(image, commit);
+  if (!outcome.verified) {
+    steps.say(`The image was refused (${outcome.reason}), so nothing was read or changed:\n${outcome.detail}`);
+    return 1;
+  }
+  const { subscription, reads, decision } = plan(request, steps);
+  const job = reads.get('migrate');
+  const api = reads.get('api');
+  if (job === undefined || api === undefined) throw new Error('The release lost track of a workload.');
+  if (decision.kind === 'current') return alreadyServed(steps, subscription, api, image, commit);
+  const stop = settled(decision, commit, steps.say);
+  if (stop !== undefined || decision.kind !== 'release') return stop ?? 1;
+  const migrateAfter = decision.updates.get('migrate');
+  const apiAfter = decision.updates.get('api');
+  if (migrateAfter === undefined || apiAfter === undefined) throw new Error('The release lost track of a workload.');
+  const old = api.running.release;
+
+  // Everything knowable before the first write is settled before it.
+  const { origin, limit } = await leaving('nothing was changed.', () => {
+    settledBefore('migrate', job);
+    settledBefore('api', api);
+    noSuffix(api);
+    idle(steps, subscription);
+    return { origin: publicOrigin(api.running), limit: timeLimit(job) };
+  });
+
+  await leaving(`migrate may hold ${commit}, not run; the API is on ${old}.`, async () => {
+    update(steps, subscription, 'migrate', job.running, migrateAfter);
+    await settledUpdate(steps, subscription, 'migrate', migrateAfter);
+  });
+  const name = await leaving(
+    `migrate holds ${commit}, not run (a start that failed late may still have begun one: look at migrate's runs); the API is on ${old}.`,
+    () => startMigration(steps, subscription),
+  );
+  const status = await leaving(`migrate holds ${commit}, its run ${name} not seen to end; the API is on ${old}.`, () =>
+    ended(steps, subscription, name, image, limit),
+  );
+  if (status !== 'Succeeded') {
+    steps.say(
+      `${name} ended ${status}, so the API wasn't updated. Read its log: node deploy/azure/jobs.ts wait migrate ${name}\nLeft: migrate holds ${commit}; the API is on ${old}.`,
+    );
+    return 1;
+  }
+
+  const before = await leaving(`migrate ran ${commit}; the API is on ${old}.`, () =>
+    update(steps, subscription, 'api', api.running, apiAfter),
+  );
+  const revision = await leaving(
+    `migrate ran ${commit}; the API's template holds ${commit}, and until a new revision serves it the old one does.`,
+    async () => {
+      await settledUpdate(steps, subscription, 'api', apiAfter);
+      return served(steps, subscription, String(before.properties.latestRevisionName), { origin, image, commit });
+    },
+  );
+  steps.say(
+    `Released ${commit}: ${name} succeeded, and the API's revision ${revision} holds it, takes all traffic and is healthy; its door answered /health.`,
+  );
+  return 0;
+}
+
+/** What a release needs besides Azure and the history: time, the image check, and the door. */
+export interface Extras {
+  readonly now: () => Date;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly verify: (image: string, commit: string) => Outcome;
+  readonly probe: (url: string) => Promise<number | undefined>;
+}
+
+/** The real ones: the clock, cosign through verify.ts, and a GET of the door. */
+function realExtras(): Extras {
+  return {
+    now: () => new Date(),
+    sleep: (ms) => sleep(ms),
+    verify: (image, commit) => realImages().verify(image, commit),
+    probe: async (url) => {
+      try {
+        const answer = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000) });
+        return answer.status;
+      } catch (error) {
+        // Nothing answered in time (a cold start, a reset): the caller asks again until its own deadline.
+        if (error instanceof Error) return undefined;
+        throw error;
+      }
+    },
+  };
+}
+
+export async function main(
   argv: readonly string[],
   say: (line: string) => void = console.log,
   az: () => Az = realAz,
   history: () => History = realHistory,
-): number {
+  extras: () => Extras = realExtras,
+): Promise<number> {
   let request: Request;
   try {
     request = parseArguments(argv);
@@ -382,7 +936,8 @@ export function main(
     return 2;
   }
   try {
-    return check(request, { az: az(), history: history(), say });
+    const steps = { az: az(), history: history(), say };
+    return request.command === 'check' ? check(request, steps) : await release(request, { ...steps, ...extras() });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     say(error.message);
@@ -390,4 +945,4 @@ export function main(
   }
 }
 
-if (import.meta.main) process.exitCode = main(process.argv.slice(2));
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
