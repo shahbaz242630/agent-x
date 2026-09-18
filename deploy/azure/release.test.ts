@@ -1,25 +1,23 @@
-// The release tool's check (G4-3a). Nothing here reaches Azure: the CLI is a
-// stand-in that answers from a script and records each call, and the history
-// is either a stand-in or a throwaway repository made here.
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+// The release tool's check (G4-3a). Nothing here reaches Azure or git: the CLI
+// is a stand-in that answers from a script and records each call, and the
+// history is a line of made-up commits (git.test.ts reads a real one).
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import type { Az, AzResult } from './deploy.ts';
+import type { History } from './git.ts';
 import { JOBS_API } from './jobs.ts';
 import {
   changes,
   check,
   decide,
   HAND_DEPLOYED,
-  type History,
+  handDeployedList,
   main,
   ORDER,
   parseArguments,
-  realHistory,
   released,
   type Running,
   runningIn,
@@ -39,8 +37,12 @@ const commit = (fill: string): string => fill.repeat(40);
 const digest = (fill: string): string => `sha256:${fill.repeat(64)}`;
 const OLD = commit('a');
 const NEW = commit('b');
+const LATER = commit('e');
 const OLD_IMAGE = `${REPOSITORY}@${digest('1')}`;
 const NEW_IMAGE = `${REPOSITORY}@${digest('2')}`;
+
+/** The host the settings name, which nothing printed may show (CI's logs are public). */
+const HOST = 'app.example.invalid';
 
 /** A setting's name assembled from its words, so no line pairs a secret's name with a value (PRs #27 and #28). */
 const setting = (...words: readonly string[]): string => words.join('_');
@@ -54,7 +56,7 @@ const azureContainer = (name: string, overrides: Readonly<Record<string, unknown
   env: [
     { name: 'AGENTX_ENV', value: 'staging' },
     { name: 'AGENTX_RELEASE', value: OLD },
-    { name: 'AGENTX_DB_HOST', value: 'db.example.invalid' },
+    { name: 'AGENTX_PUBLIC_ORIGIN', value: `https://${HOST}` },
     { name: setting('AGENTX', 'DB', 'PASSWORD', 'FILE'), value: '/mnt/secrets/login' },
     { name: 'AGENTX_FROM_VAULT', secretRef: 'a-secret' },
   ],
@@ -63,6 +65,12 @@ const azureContainer = (name: string, overrides: Readonly<Record<string, unknown
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
   ...overrides,
 });
+
+/** A container's settings with its build replaced. */
+const builtAt = (release: string): readonly unknown[] =>
+  (azureContainer('x').env as readonly { name: string }[]).map((entry) =>
+    entry.name === 'AGENTX_RELEASE' ? { name: 'AGENTX_RELEASE', value: release } : entry,
+  );
 
 const running = (workload: Workload, overrides: Readonly<Record<string, unknown>> = {}): Running =>
   runningIn(workload, [azureContainer(WORKLOADS[workload].container, overrides)]);
@@ -90,6 +98,54 @@ describe('parseArguments', () => {
   });
 });
 
+describe('what only a person deploys', () => {
+  it('is read from hand-deployed.json beside the Bicep, each area with why and what to run', () => {
+    expect(HAND_DEPLOYED.map(({ prefix, except }) => [prefix, except])).toEqual([
+      ['deploy/azure/', '.ts'],
+      ['db/bootstrap/', undefined],
+      ['apps/db-setup/', undefined],
+      ['packages/platform/src/db/server-setup.ts', undefined],
+      ['packages/platform/src/db/scram.ts', undefined],
+      ['packages/platform/src/config/setup.ts', undefined],
+    ]);
+    for (const { why } of HAND_DEPLOYED) expect(why).toMatch(/foundation|apps/);
+  });
+
+  it('names files and folders that exist, so a rename leaves no area guarding nothing', () => {
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    for (const { prefix } of HAND_DEPLOYED)
+      expect({ prefix, found: existsSync(`${root}${prefix}`) }).toEqual({ prefix, found: true });
+  });
+
+  it('refuses a list that is not one', () => {
+    const list = (entries: unknown) => () => handDeployedList(entries);
+    expect(list({})).toThrow('hand-deployed.json must be a list of areas');
+    expect(list([])).toThrow('hand-deployed.json must be a list of areas');
+    for (const entry of [
+      { why: 'x' },
+      { prefix: '', why: 'x' },
+      { prefix: 'a/' },
+      { prefix: 'a/', why: 'x', more: 'y' },
+      null,
+    ]) {
+      expect(list([entry])).toThrow(
+        'each area in hand-deployed.json is a prefix and a reason, and at most an ending it excepts',
+      );
+    }
+    expect(list([{ prefix: 'a/', why: 'x', except: '' }])).toThrow("a/'s exception must be an ending");
+    expect(list([{ prefix: 'a/', why: 'x', except: 1 }])).toThrow("a/'s exception must be an ending");
+    expect(
+      handDeployedList([
+        { prefix: 'a/', why: 'x', except: '.ts' },
+        { prefix: 'b/', why: 'y' },
+      ]),
+    ).toEqual([
+      { prefix: 'a/', why: 'x', except: '.ts' },
+      { prefix: 'b/', why: 'y' },
+    ]);
+  });
+});
+
 describe('what a workload runs', () => {
   it("is read from its one container, keeping Azure's own fields but the disk Azure works out", () => {
     for (const workload of ORDER) {
@@ -97,9 +153,13 @@ describe('what a workload runs', () => {
       const found = running(workload);
       expect(found.image).toBe(OLD_IMAGE);
       expect(found.release).toBe(OLD);
-      const { ephemeralStorage: _disk, ...size } = azureContainer(container).resources as Record<string, unknown>;
-      expect(found.container).toEqual({ ...azureContainer(container), resources: size });
+      expect(found.container).toEqual({ ...azureContainer(container), resources: { cpu: 0.5, memory: '1Gi' } });
     }
+    // A size without the disk is read the same.
+    expect(running('api', { resources: { cpu: 0.5, memory: '1Gi' } }).container.resources).toEqual({
+      cpu: 0.5,
+      memory: '1Gi',
+    });
   });
 
   it("refuses anything that isn't the workload a release knows, saying why, so it is deployed by hand", () => {
@@ -136,10 +196,18 @@ describe('what a workload runs', () => {
     refused(with_({ resources: { cpu: '0.5', memory: '1Gi' } }), 'its size is not given');
     refused(with_({ resources: { cpu: 0.5 } }), 'its size is not given');
     refused(with_({ resources: undefined }), 'its size is not given');
+    refused(
+      with_({ resources: { cpu: 0.5, memory: '1Gi', gpu: 1 } }),
+      "its size has gpu, which a release doesn't copy",
+    );
     refused(withSettings(undefined as never), 'its settings are not a list');
     refused(with_({ env: {} }), 'its settings are not a list');
     refused(withSettings([...env, { value: 'x' }]), 'a setting has no name');
     refused(withSettings([...env, null]), 'a setting has no name');
+    refused(
+      withSettings([...env, { name: 'AGENTX_MORE', value: 'x', note: 'y' }]),
+      'the setting AGENTX_MORE has more than a name and its value',
+    );
     refused(
       withSettings([...env, { name: 'AGENTX_BOTH', value: 'x', secretRef: 'a-secret' }]),
       'the setting AGENTX_BOTH has neither a value nor a secret reference alone',
@@ -208,13 +276,15 @@ describe('a released container', () => {
   });
 });
 
-/** A history in which `ancestors` are in the new commit's and `changed` differ from each. */
-function history(changed: Readonly<Record<string, readonly string[]>>, ancestors = Object.keys(changed)): History {
+/**
+ * A history along one line of commits, oldest first: one is in another's
+ * history when it comes no later; a commit off the line is in none. `changed`
+ * lists what differs from each commit to NEW.
+ */
+function history(line: readonly string[], changed: Readonly<Record<string, readonly string[]>> = {}): History {
   return {
-    isAncestor: (ancestor, target) => {
-      expect(target).toBe(NEW);
-      return ancestors.includes(ancestor);
-    },
+    isAncestor: (ancestor, target) =>
+      line.includes(ancestor) && line.includes(target) && line.indexOf(ancestor) <= line.indexOf(target),
     changedFiles: (from, to) => {
       expect(to).toBe(NEW);
       return changed[from] ?? [];
@@ -228,19 +298,29 @@ const both = (api: Running, migrate: Running): ReadonlyMap<Workload, Running> =>
     ['api', api],
   ]);
 
+const at =
+  (release: string, image = OLD_IMAGE) =>
+  (workload: Workload) =>
+    running(workload, { image, env: builtAt(release) });
+
 describe('deciding a release', () => {
   it('does nothing when both already run the commit, as that image', () => {
-    const current = (workload: Workload): Running =>
-      running(workload, {
-        image: NEW_IMAGE,
-        env: [{ name: 'AGENTX_RELEASE', value: NEW }],
-      });
-    expect(decide(both(current('api'), current('migrate')), NEW, NEW_IMAGE, history({}))).toEqual({
+    const current = at(NEW, NEW_IMAGE);
+    expect(decide(both(current('api'), current('migrate')), NEW, NEW_IMAGE, history([NEW]))).toEqual({
       kind: 'current',
     });
-    // The same build under another image is not the same release.
-    expect(decide(both(current('api'), current('migrate')), NEW, OLD_IMAGE, history({ [NEW]: [] })).kind).toBe(
-      'release',
+    // The same build under another image is not the same release, nor one already past.
+    expect(decide(both(current('api'), current('migrate')), NEW, OLD_IMAGE, history([NEW])).kind).toBe('release');
+  });
+
+  it('does nothing when both run a later commit that has it: a release run again after a newer one', () => {
+    const later = at(LATER);
+    expect(decide(both(later('api'), later('migrate')), NEW, NEW_IMAGE, history([OLD, NEW, LATER]))).toEqual({
+      kind: 'past',
+    });
+    // Only one of them past it is no reason to skip the other.
+    expect(decide(both(later('api'), at(OLD)('migrate')), NEW, NEW_IMAGE, history([OLD, NEW, LATER])).kind).toBe(
+      'by-hand',
     );
   });
 
@@ -249,7 +329,14 @@ describe('deciding a release', () => {
       both(running('api'), running('migrate')),
       NEW,
       NEW_IMAGE,
-      history({ [OLD]: ['apps/api/src/main.ts', 'db/migrations/0002_next.sql', 'deploy/azure/release.ts'] }),
+      history([OLD, NEW], {
+        [OLD]: [
+          'apps/api/src/main.ts',
+          'db/migrations/0002_next.sql',
+          'deploy/azure/release.ts',
+          'packages/platform/src/db/server-setup.test.ts',
+        ],
+      }),
     );
     expect(decided.kind).toBe('release');
     if (decided.kind !== 'release') return;
@@ -258,27 +345,39 @@ describe('deciding a release', () => {
     expect(decided.updates.get('migrate')).toEqual(released(running('migrate'), NEW_IMAGE, NEW));
   });
 
-  it('stops for a hand deploy when what a person deploys changed, saying each file and why', () => {
-    const why = (prefix: string): string => HAND_DEPLOYED.find((rule) => rule.prefix === prefix)?.why ?? '';
+  it('stops for a hand deploy when what a person deploys changed, whatever its case, saying each file and why', () => {
+    const why = (prefix: string): string => HAND_DEPLOYED.find((area) => area.prefix === prefix)?.why ?? '';
     for (const [file, prefix] of [
       ['deploy/azure/apps.bicep', 'deploy/azure/'],
       ['deploy/azure/staging.apps.bicepparam', 'deploy/azure/'],
       ['deploy/azure/github-ranges.json', 'deploy/azure/'],
+      ['deploy/azure/hand-deployed.json', 'deploy/azure/'],
       ['deploy/azure/modules/release.bicep', 'deploy/azure/'],
+      // Where a Windows checkout puts it all the same, and an ending the exception doesn't match.
+      ['Deploy/Azure/apps.bicep', 'deploy/azure/'],
+      ['deploy/azure/tool.TS', 'deploy/azure/'],
       ['db/bootstrap/roles.sql', 'db/bootstrap/'],
       ['apps/db-setup/src/main.ts', 'apps/db-setup/'],
+      ['packages/platform/src/db/server-setup.ts', 'packages/platform/src/db/server-setup.ts'],
+      ['packages/platform/src/db/scram.ts', 'packages/platform/src/db/scram.ts'],
+      ['packages/platform/src/config/setup.ts', 'packages/platform/src/config/setup.ts'],
     ] as const) {
       expect(
-        decide(both(running('api'), running('migrate')), NEW, NEW_IMAGE, history({ [OLD]: ['README.md', file] })),
+        decide(
+          both(running('api'), running('migrate')),
+          NEW,
+          NEW_IMAGE,
+          history([OLD, NEW], { [OLD]: ['README.md', file] }),
+        ),
       ).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${why(prefix)}`] });
     }
   });
 
   it('stops for a hand deploy when what either runs is not in the commit, and reads the changes since each', () => {
     const older = commit('c');
-    const migrate = running('migrate', { env: [{ name: 'AGENTX_RELEASE', value: older }] });
+    const migrate = at(older)('migrate');
     // What the API runs isn't in the commit's history: nothing it changed can be read, so a person deploys it.
-    expect(decide(both(running('api'), migrate), NEW, NEW_IMAGE, history({ [older]: [] }, [older]))).toEqual({
+    expect(decide(both(running('api'), migrate), NEW, NEW_IMAGE, history([older, NEW]))).toEqual({
       kind: 'by-hand',
       reasons: [`staging runs ${OLD}, which isn't in ${NEW}'s history`],
     });
@@ -288,7 +387,7 @@ describe('deciding a release', () => {
         both(running('api'), migrate),
         NEW,
         NEW_IMAGE,
-        history({ [older]: ['deploy/azure/apps.bicep'], [OLD]: [] }),
+        history([older, OLD, NEW], { [older]: ['deploy/azure/apps.bicep'], [OLD]: [] }),
       ),
     ).toEqual({
       kind: 'by-hand',
@@ -298,7 +397,11 @@ describe('deciding a release', () => {
 });
 
 /** A stand-in CLI: the account and the two workloads, recording each call. */
-function fakeAz(containers: Readonly<Record<Workload, unknown>>, calls: string[][]): Az {
+function fakeAz(
+  containers: Readonly<Record<Workload, unknown>>,
+  calls: string[][],
+  account: unknown = { name: 'Azure subscription 1', id: SUBSCRIPTION },
+): Az {
   const answer = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
   return {
     interactive: () => {
@@ -306,7 +409,7 @@ function fakeAz(containers: Readonly<Record<Workload, unknown>>, calls: string[]
     },
     run: (args) => {
       calls.push([...args]);
-      if (args[0] === 'account') return answer({ name: 'Azure subscription 1', id: SUBSCRIPTION });
+      if (args[0] === 'account') return answer(account);
       const workload = ORDER.find((each) => args.includes(workloadUrl(SUBSCRIPTION, each)));
       if (args[0] === 'rest' && workload !== undefined) {
         return answer({ id: 'x', properties: { template: { containers: containers[workload] } } });
@@ -316,23 +419,37 @@ function fakeAz(containers: Readonly<Record<Workload, unknown>>, calls: string[]
   };
 }
 
-describe('check', () => {
-  const both_ = { api: [azureContainer('api')], migrate: [azureContainer('migrate')] };
+/** Both workloads at a build, as the stand-in CLI answers them. */
+const staging = (release: string, image = OLD_IMAGE): Readonly<Record<Workload, unknown>> => ({
+  api: [azureContainer('api', { image, env: builtAt(release) })],
+  migrate: [azureContainer('migrate', { image, env: builtAt(release) })],
+});
 
-  it('reads the two from Resource Manager, and says what a release would change in each, changing nothing', () => {
-    const calls: string[][] = [];
-    const said: string[] = [];
+/** A check of NEW against staging, with what it said and did. */
+function checked(
+  containers: Readonly<Record<Workload, unknown>>,
+  line: History,
+  account?: unknown,
+): { status: number | undefined; said: string[]; calls: string[][]; error: unknown } {
+  const said: string[] = [];
+  const calls: string[][] = [];
+  try {
     const status = check(
       { command: 'check', commit: NEW, digest: digest('2') },
-      {
-        az: fakeAz(both_, calls),
-        history: history({ [OLD]: ['apps/api/src/main.ts'] }),
-        say: (line) => said.push(line),
-      },
+      { az: fakeAz(containers, calls, account), history: line, say: (said_) => said.push(said_) },
     );
+    return { status, said, calls, error: undefined };
+  } catch (error) {
+    return { status: undefined, said, calls, error };
+  }
+}
+
+describe('check', () => {
+  it('reads the two from Resource Manager, and says what a release would change in each, changing nothing', () => {
+    const { status, said, calls } = checked(staging(OLD), history([OLD, NEW], { [OLD]: ['apps/api/src/main.ts'] }));
     expect(status).toBe(0);
     expect(said).toEqual([
-      `Signed in to the subscription "Azure subscription 1" (${SUBSCRIPTION}).`,
+      'Signed in to the subscription "Azure subscription 1".',
       `migrate runs ${OLD} (${OLD_IMAGE}).`,
       `api runs ${OLD} (${OLD_IMAGE}).`,
       `A release of ${NEW} would update, in order:`,
@@ -354,40 +471,47 @@ describe('check', () => {
     ]);
   });
 
-  it('says so when a release has nothing to do', () => {
-    const said: string[] = [];
-    const current = (name: string): unknown => [
-      azureContainer(name, { image: NEW_IMAGE, env: [{ name: 'AGENTX_RELEASE', value: NEW }] }),
-    ];
-    expect(
-      check(
-        { command: 'check', commit: NEW, digest: digest('2') },
-        {
-          az: fakeAz({ api: current('api'), migrate: current('migrate') }, []),
-          history: history({}),
-          say: (line) => said.push(line),
-        },
-      ),
-    ).toBe(0);
-    expect(said.at(-1)).toBe(`Both already run ${NEW}: a release has nothing to do.`);
+  it('says so when a release has nothing to do, or staging is already past the commit', () => {
+    const current = checked(staging(NEW, NEW_IMAGE), history([NEW]));
+    expect(current.status).toBe(0);
+    expect(current.said.at(-1)).toBe(`Both already run ${NEW}: a release has nothing to do.`);
+    const past = checked(staging(LATER), history([NEW, LATER]));
+    expect(past.status).toBe(0);
+    expect(past.said.at(-1)).toBe(
+      `Staging already runs a later commit than ${NEW}: a release of it has nothing to do.`,
+    );
   });
 
   it('ends with failure when it needs a hand deploy, giving each reason', () => {
-    const said: string[] = [];
-    expect(
-      check(
-        { command: 'check', commit: NEW, digest: digest('2') },
-        {
-          az: fakeAz(both_, []),
-          history: history({ [OLD]: ['db/bootstrap/roles.sql'] }),
-          say: (line) => said.push(line),
-        },
-      ),
-    ).toBe(1);
+    const { status, said } = checked(staging(OLD), history([OLD, NEW], { [OLD]: ['db/bootstrap/roles.sql'] }));
+    expect(status).toBe(1);
     expect(said.slice(-2)).toEqual([
       `A release of ${NEW} would stop, red: this needs a hand deploy.`,
       `  db/bootstrap/roles.sql changed since ${OLD}: ${HAND_DEPLOYED[1]?.why ?? ''}`,
     ]);
+  });
+
+  it('never prints the subscription or the host the settings name, whatever it ends with', () => {
+    const outcomes = [
+      checked(staging(OLD), history([OLD, NEW])),
+      checked(staging(NEW, NEW_IMAGE), history([NEW])),
+      checked(staging(LATER), history([NEW, LATER])),
+      checked(staging(OLD), history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] })),
+      checked({ ...staging(OLD), api: [azureContainer('api', { probes: [] })] }, history([OLD, NEW])),
+    ];
+    for (const { said, error } of outcomes) {
+      const printed = [...said, error instanceof Error ? error.message : ''].join('\n');
+      expect(printed).not.toContain(SUBSCRIPTION);
+      expect(printed).not.toContain(HOST);
+    }
+  });
+
+  it('refuses an account that names no subscription, reading nothing more', () => {
+    for (const account of [{ name: 'x' }, { name: 'x', id: 'not-a-subscription' }, null]) {
+      const { error, calls } = checked(staging(OLD), history([OLD, NEW]), account);
+      expect(error).toMatchObject({ message: "The Azure CLI named no subscription it's signed in to." });
+      expect(calls).toHaveLength(1);
+    }
   });
 });
 
@@ -412,7 +536,7 @@ describe('main', () => {
         ['check', NEW, digest('2')],
         (line) => said.push(line),
         () => failing,
-        () => history({}),
+        () => history([NEW]),
       ),
     ).toBe(1);
     expect(said).toEqual(['az account show failed:\nERROR: not signed in']);
@@ -424,93 +548,10 @@ describe('main', () => {
       main(
         ['check', NEW, digest('2')],
         (line) => said.push(line),
-        () => fakeAz({ api: [azureContainer('api')], migrate: [azureContainer('migrate')] }, []),
-        () => history({ [OLD]: [] }),
+        () => fakeAz(staging(OLD), []),
+        () => history([OLD, NEW]),
       ),
     ).toBe(0);
     expect(said.at(-1)).toMatch(/^ {2}api: image /);
-  });
-});
-
-describe('the history, from git', () => {
-  let dir: string;
-  const made: Record<'first' | 'tool' | 'bicep', string> = { first: '', tool: '', bicep: '' };
-
-  // A throwaway repository, with this machine's git settings (signing, hooks)
-  // kept out of it: they are for our own repository, not a fixture.
-  beforeAll(() => {
-    dir = mkdtempSync(path.join(tmpdir(), 'agentx-release-'));
-    const empty = path.join(dir, 'no-config');
-    writeFileSync(empty, '');
-    const env = {
-      ...process.env,
-      GIT_CONFIG_GLOBAL: empty,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_AUTHOR_NAME: 'Fixture',
-      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
-      GIT_COMMITTER_NAME: 'Fixture',
-      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
-    };
-    const repository = path.join(dir, 'repository');
-    mkdirSync(repository);
-    const git = (...args: readonly string[]): string => {
-      const done = spawnSync('git', args, { cwd: repository, env, encoding: 'utf8', windowsHide: true });
-      if (done.status !== 0) throw new Error(`git ${args.join(' ')}: ${done.stderr}`);
-      return done.stdout.trim();
-    };
-    const commitFile = (file: string): string => {
-      mkdirSync(path.dirname(path.join(repository, file)), { recursive: true });
-      writeFileSync(path.join(repository, file), `${file}\n`);
-      git('add', '--all');
-      git('commit', '--quiet', '--message', file);
-      return git('rev-parse', 'HEAD');
-    };
-    git('init', '--quiet');
-    made.first = commitFile('README.md');
-    made.tool = commitFile('deploy/azure/release.ts');
-    made.bicep = commitFile('deploy/azure/apps.bicep');
-  });
-
-  afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it('knows which commits are in which history, and a commit it does not have is in none', () => {
-    const git = realHistory(path.join(dir, 'repository'));
-    expect(git.isAncestor(made.first, made.bicep)).toBe(true);
-    expect(git.isAncestor(made.bicep, made.bicep)).toBe(true);
-    expect(git.isAncestor(made.bicep, made.first)).toBe(false);
-    expect(git.isAncestor(commit('d'), made.bicep)).toBe(false);
-    // A commit to compare with that it doesn't have is an error, not an answer.
-    expect(() => git.isAncestor(made.first, commit('d'))).toThrow(
-      `git couldn't compare ${made.first} and ${commit('d')}`,
-    );
-  });
-
-  it('lists the files that changed between two commits', () => {
-    const git = realHistory(path.join(dir, 'repository'));
-    expect(git.changedFiles(made.first, made.bicep)).toEqual(['deploy/azure/apps.bicep', 'deploy/azure/release.ts']);
-    expect(git.changedFiles(made.tool, made.bicep)).toEqual(['deploy/azure/apps.bicep']);
-    expect(git.changedFiles(made.bicep, made.bicep)).toEqual([]);
-    expect(() => git.changedFiles(commit('d'), made.bicep)).toThrow(
-      `git couldn't list the changes from ${commit('d')} to ${made.bicep}`,
-    );
-  });
-
-  it('reads the fixture as a release would: the tool changed alone goes ahead, the Bicep needs a hand deploy', () => {
-    const git = realHistory(path.join(dir, 'repository'));
-    const at = (release: string): Running => running('api', { env: [{ name: 'AGENTX_RELEASE', value: release }] });
-    const fromTool = (target: string) =>
-      decide(
-        both(at(made.first), running('migrate', { env: [{ name: 'AGENTX_RELEASE', value: made.first }] })),
-        target,
-        NEW_IMAGE,
-        git,
-      );
-    expect(fromTool(made.tool).kind).toBe('release');
-    expect(fromTool(made.bicep)).toEqual({
-      kind: 'by-hand',
-      reasons: [`deploy/azure/apps.bicep changed since ${made.first}: ${HAND_DEPLOYED[0]?.why ?? ''}`],
-    });
   });
 });

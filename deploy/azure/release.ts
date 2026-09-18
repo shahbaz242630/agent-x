@@ -12,44 +12,69 @@
 //
 // - what staging runs is read from the API and the job themselves (their
 //   AGENTX_RELEASE), never from the previous merge: a release that stopped red
-//   stays red, however many merges follow, until a hand deploy catches up
+//   stays red, however many merges follow, until a hand deploy stamps a later
+//   commit. `apps` stamps one, and deploy.ts sends it only from a clean
+//   checkout of that very commit, so the stamp says what Azure was built from.
+//   The other hand deploys stamp nothing, so a red says what to run, and the
+//   person runs all of it
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
 //   Each container is Azure's own, with the image and AGENTX_RELEASE changed
 //   and nothing else; a field this tool doesn't know is refused, not guessed at
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+// - only images, commits and file names are printed: the settings name the
+//   domain, and the subscription is Azure's, both kept out of CI's public logs
+import { readFileSync } from 'node:fs';
 
 import { IMAGE_REPOSITORY } from '../image/verify.ts';
-import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn } from './deploy.ts';
+import { ARM, type Az, azJson, realAz, RESOURCE_GROUP } from './deploy.ts';
+import { type History, realHistory } from './git.ts';
 import { JOBS_API } from './jobs.ts';
 
-/**
- * What only a person deploys (partner, S23), each with why: a merge that
- * changes any of them since what staging runs stops the release, red. In
- * deploy/azure that is what Azure is built from, the Bicep and the files it
- * reads; the TypeScript there (this tool, the deploy tool, the rules) changes
- * how a deploy is done, not what Azure holds.
- */
-export const HAND_DEPLOYED: readonly {
+/** Something only a person deploys, by the start of its path, and why. */
+export interface HandDeployed {
   readonly prefix: string;
+  /** An ending that doesn't count, under the prefix. */
   readonly except?: string;
   readonly why: string;
-}[] = [
-  {
-    prefix: 'deploy/azure/',
-    except: '.ts',
-    why: "Azure's own set-up, Zitadel's images among it, deployed with a what-if read",
-  },
-  { prefix: 'db/bootstrap/', why: "the database's roles, which the set-up job sets with the server admin's login" },
-  { prefix: 'apps/db-setup/', why: 'the set-up job, which only a person runs' },
-];
+}
 
-/** The hand-deployed thing a file belongs to, if any. */
-const handDeployed = (file: string): (typeof HAND_DEPLOYED)[number] | undefined =>
+/** A list of HandDeployed, or an error saying why the file isn't one. */
+export function handDeployedList(parsed: unknown): readonly HandDeployed[] {
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('hand-deployed.json must be a list of areas');
+  return parsed.map((entry): HandDeployed => {
+    const { prefix, except, why, ...other } = record(entry);
+    if (typeof prefix !== 'string' || prefix === '' || typeof why !== 'string' || Object.keys(other).length > 0) {
+      throw new Error('each area in hand-deployed.json is a prefix and a reason, and at most an ending it excepts');
+    }
+    if (except === undefined) return { prefix, why };
+    if (typeof except !== 'string' || except === '') throw new Error(`${prefix}'s exception must be an ending`);
+    return { prefix, except, why };
+  });
+}
+
+/**
+ * What only a person deploys (partner, S23), each with why and what to run: a
+ * merge that changes any of it since what staging runs stops the release, red.
+ * In deploy/azure that is what Azure is built from, the Bicep and the files it
+ * reads, not the TypeScript there (the tools, this one among them). The list is
+ * a data file beside the Bicep for that reason: changing it counts as changing
+ * Azure's set-up, so a change to the gate itself goes red once. The set-up
+ * job's own files count too, wherever they are: only a person runs it.
+ */
+export const HAND_DEPLOYED: readonly HandDeployed[] = handDeployedList(
+  JSON.parse(readFileSync(new URL('./hand-deployed.json', import.meta.url), 'utf8')) as unknown,
+);
+
+/**
+ * The hand-deployed area a file belongs to, if any. The start is compared
+ * without case, since the partner's Windows checkout puts `Deploy/Azure/x`
+ * where `deploy/azure/x` goes; the exception with it, so `.TS` still counts.
+ */
+const handDeployed = (file: string): HandDeployed | undefined =>
   HAND_DEPLOYED.find(
-    ({ prefix, except }) => file.startsWith(prefix) && (except === undefined || !file.endsWith(except)),
+    ({ prefix, except }) =>
+      file.toLowerCase().startsWith(prefix.toLowerCase()) && (except === undefined || !file.endsWith(except)),
   );
 
 /** The two things a release changes, as Azure names them and the one container each runs (apps.bicep). */
@@ -59,17 +84,20 @@ export const WORKLOADS = {
 } as const;
 export type Workload = keyof typeof WORKLOADS;
 
-/** The order a release updates them in: the migration first, so the API never runs ahead of its tables. */
+/** The order a release updates them in: the migration first, and the API only once its run has succeeded (G4-3b). */
 export const ORDER: readonly Workload[] = ['migrate', 'api'];
 
 /** The setting that names the build on every log line. */
 const RELEASE_SETTING = 'AGENTX_RELEASE';
 
-/** A commit on main, as git writes it in full. */
+/** A commit, as git writes it in full. */
 const COMMIT = /^[0-9a-f]{40}$/;
 
 /** An image digest, as ghcr.io gives it. */
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+/** A subscription's ID, as Azure writes it. */
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Our image by digest, the only form a deployment names it in (SEC-SC-02). */
 const isOurImage = (image: string): boolean =>
@@ -86,6 +114,9 @@ const CONTAINER_FIELDS: ReadonlySet<string> = new Set([
   'volumeMounts',
 ]);
 
+/** A container's size as Azure gives it: the two we set, and the disk it works out from them. */
+const SIZE_FIELDS: ReadonlySet<string> = new Set(['cpu', 'memory', 'ephemeralStorage']);
+
 export class UsageError extends Error {
   constructor(message: string) {
     super(message);
@@ -95,7 +126,7 @@ export class UsageError extends Error {
 
 export const USAGE = `Usage:
   node deploy/azure/release.ts check <commit> <digest>   say what a release of that commit would do, changing nothing
-<commit> is a full commit on main; <digest> is its image's, sha256:<64 hex>.`;
+<commit> is a full commit; <digest> is its image's, sha256:<64 hex>.`;
 
 export interface Request {
   readonly command: 'check';
@@ -142,14 +173,16 @@ export interface Running {
 const isStrings = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
 
-const record = (value: unknown): Readonly<Record<string, unknown>> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+function record(value: unknown): Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
 
 /**
  * What a workload runs, read from its containers as Azure gives them, or an
  * error saying why this isn't the workload a release knows: exactly one
  * container, named as apps.bicep names it, running our image by digest, with
- * one AGENTX_RELEASE naming a commit, and no field this tool doesn't copy.
+ * one AGENTX_RELEASE naming a commit, and no field this tool doesn't copy, in
+ * the container, its size, a setting or a mount.
  */
 export function runningIn(workload: Workload, containers: unknown): Running {
   const { container: expected, path } = WORKLOADS[workload];
@@ -166,10 +199,13 @@ export function runningIn(workload: Workload, containers: unknown): Running {
   if (!isStrings(command) || !isStrings(args)) return refuse('its command or arguments are not lists of words');
   const size = record(resources);
   if (typeof size.cpu !== 'number' || typeof size.memory !== 'string') return refuse('its size is not given');
+  const sized = Object.keys(size).filter((field) => !SIZE_FIELDS.has(field));
+  if (sized.length > 0) return refuse(`its size has ${sized.join(', ')}, which a release doesn't copy`);
   if (!Array.isArray(env)) return refuse('its settings are not a list');
   const settings = env.map((entry): Setting => {
-    const { name: setting, value, secretRef } = record(entry);
+    const { name: setting, value, secretRef, ...other } = record(entry);
     if (typeof setting !== 'string') return refuse('a setting has no name');
+    if (Object.keys(other).length > 0) return refuse(`the setting ${setting} has more than a name and its value`);
     if (typeof value === 'string' && secretRef === undefined) return { name: setting, value };
     if (typeof secretRef === 'string' && value === undefined) return { name: setting, secretRef };
     return refuse(`the setting ${setting} has neither a value nor a secret reference alone`);
@@ -195,7 +231,7 @@ export function runningIn(workload: Workload, containers: unknown): Running {
       command,
       args,
       env: settings,
-      // Azure also reports the disk it gives the size (ephemeralStorage), which is its to work out, not ours to send.
+      // The disk Azure gives the size (ephemeralStorage) is its to work out, not ours to send.
       resources: { cpu: size.cpu, memory: size.memory },
       volumeMounts: mounts,
     },
@@ -213,23 +249,17 @@ export const released = (running: Running, image: string, commit: string): Conta
   ),
 });
 
-/** Reading the repository's history, which CI checks out whole. */
-export interface History {
-  /** Whether `ancestor` is `commit` or in its history. */
-  isAncestor(ancestor: string, commit: string): boolean;
-  /** The files that differ between the two commits. */
-  changedFiles(from: string, to: string): readonly string[];
-}
-
 export type Decision =
   | { readonly kind: 'current' }
+  | { readonly kind: 'past' }
   | { readonly kind: 'by-hand'; readonly reasons: readonly string[] }
   | { readonly kind: 'release'; readonly updates: ReadonlyMap<Workload, Container> };
 
 /**
  * What a release of `commit` would do, given what each workload runs: nothing
- * when both already run it; a hand deploy when what either runs isn't in the
- * commit's history, or anything a person deploys changed since; otherwise
+ * when both already run it, or both run a later commit that has it (a release
+ * run again after a newer one); a hand deploy when what either runs isn't in
+ * the commit's history, or anything a person deploys changed since; otherwise
  * the update for each.
  */
 export function decide(
@@ -244,6 +274,9 @@ export function decide(
     return [workload, found] as const;
   });
   if (all.every(([, found]) => found.release === commit && found.image === image)) return { kind: 'current' };
+  if (all.every(([, found]) => found.release !== commit && history.isAncestor(commit, found.release))) {
+    return { kind: 'past' };
+  }
   const reasons = new Set<string>();
   for (const release of new Set(all.map(([, found]) => found.release))) {
     if (!history.isAncestor(release, commit)) {
@@ -251,8 +284,8 @@ export function decide(
       continue;
     }
     for (const file of history.changedFiles(release, commit)) {
-      const rule = handDeployed(file);
-      if (rule !== undefined) reasons.add(`${file} changed since ${release}: ${rule.why}`);
+      const area = handDeployed(file);
+      if (area !== undefined) reasons.add(`${file} changed since ${release}: ${area.why}`);
     }
   }
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
@@ -265,6 +298,15 @@ export function decide(
 /** A workload's URL in Resource Manager, at the version apps.bicep deploys it with. */
 export const workloadUrl = (subscription: string, workload: Workload): string =>
   `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/${WORKLOADS[workload].path}?api-version=${JOBS_API}`;
+
+/** The subscription the CLI is signed in to, said by its name alone: its ID stays out of CI's public logs. */
+function signedIn(az: Az, say: (line: string) => void): string {
+  const account = record(azJson(az, ['account', 'show']));
+  const id = typeof account.id === 'string' ? account.id : '';
+  if (!GUID.test(id)) throw new Error("The Azure CLI named no subscription it's signed in to.");
+  say(`Signed in to the subscription "${String(account.name)}".`);
+  return id;
+}
 
 /** What a workload runs, read from Azure. */
 function readRunning(az: Az, subscription: string, workload: Workload): Running {
@@ -307,6 +349,10 @@ export function check(request: Request, steps: ReleaseSteps): number {
     steps.say(`Both already run ${request.commit}: a release has nothing to do.`);
     return 0;
   }
+  if (decision.kind === 'past') {
+    steps.say(`Staging already runs a later commit than ${request.commit}: a release of it has nothing to do.`);
+    return 0;
+  }
   if (decision.kind === 'by-hand') {
     steps.say(`A release of ${request.commit} would stop, red: this needs a hand deploy.`);
     for (const reason of decision.reasons) steps.say(`  ${reason}`);
@@ -319,31 +365,6 @@ export function check(request: Request, steps: ReleaseSteps): number {
     steps.say(`  ${workload}: ${said.length > 0 ? said.join('; ') : 'nothing'}, and nothing else`);
   }
   return 0;
-}
-
-/** The repository this file is in: git runs there, whatever the shell's folder. */
-const REPOSITORY = fileURLToPath(new URL('../../', import.meta.url));
-
-/** git itself, run with its arguments as a list, never through a shell. */
-export function realHistory(repository = REPOSITORY): History {
-  const git = (args: readonly string[]) =>
-    spawnSync('git', args, { cwd: repository, encoding: 'utf8', windowsHide: true });
-  return {
-    isAncestor: (ancestor, commit) => {
-      // A commit this clone doesn't have is in no history it can see: a hand deploy, not an error.
-      if (git(['cat-file', '-e', `${ancestor}^{commit}`]).status !== 0) return false;
-      const done = git(['merge-base', '--is-ancestor', ancestor, commit]);
-      // 1 means "not an ancestor"; anything else (an unknown commit, 128) is an error, not an answer.
-      if (done.status === 0 || done.status === 1) return done.status === 0;
-      throw new Error(`git couldn't compare ${ancestor} and ${commit}:\n${done.stderr.trim()}`);
-    },
-    changedFiles: (from, to) => {
-      const done = git(['diff', '--name-only', '--no-renames', from, to]);
-      if (done.status !== 0)
-        throw new Error(`git couldn't list the changes from ${from} to ${to}:\n${done.stderr.trim()}`);
-      return done.stdout.split('\n').filter((file) => file !== '');
-    },
-  };
 }
 
 export function main(

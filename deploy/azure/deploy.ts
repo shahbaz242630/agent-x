@@ -27,7 +27,9 @@
 // same rules CI runs, with stand-ins in place of every secret; and Azure's own
 // what-if is shown, the deployment waiting for a "y" (`--confirm-with-what-if`).
 // The apps run only an image that verify.ts has found signed by CI on main at
-// the commit being deployed, named by its digest (ADR-002 Amendment E2).
+// the commit being deployed, named by its digest (ADR-002 Amendment E2), and
+// only from a clean checkout of that commit: the apps are stamped with it,
+// and CI's release job reads the stamp as what Azure was built from (G4-3).
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as systemDns } from 'node:dns';
@@ -39,6 +41,7 @@ import { BICEP_VERSION, installedBicep } from '../../tooling/bicep/bicep.ts';
 import { installedCosign } from '../../tooling/cosign/cosign.ts';
 import { type KeyPair, newKeyPair, newMasterKey, newPassword, type Random } from '../compose/prepare.ts';
 import { IMAGE_REPOSITORY, type Outcome, runCosign, SOURCE_REPOSITORY, verifyImage } from '../image/verify.ts';
+import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
 
@@ -576,6 +579,8 @@ export interface Steps {
   readonly makers?: Makers;
   readonly images?: Images;
   readonly dns?: DnsLookup;
+  /** The folder this runs from, which apps sends the Bicep of (git.ts). */
+  readonly checkout?: () => Checkout;
 }
 
 /** The subscription the CLI is signed in to, said to the operator: its ID. */
@@ -1154,6 +1159,16 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   confirmBicep(steps);
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
+  // The apps are stamped with the release, and CI's release job takes the stamp
+  // to say which commit Azure's set-up was built from (release.ts): so the
+  // Bicep sent must be that commit's, exactly.
+  if (steps.checkout === undefined) throw new Error('No way to read this folder was given.');
+  const here = steps.checkout();
+  if (here.head !== release || !here.clean) {
+    throw new Error(
+      `This folder is at ${here.head}${here.clean ? '' : ' with changes not committed'}, but the image is for ${release}. apps sends this folder's Bicep and stamps the apps with ${release}, so the two must be the same commit, with nothing changed (git switch main, then git pull). Nothing was deployed.`,
+    );
+  }
   const digest = await images.digestOf(release);
   if (!DIGEST.test(digest)) throw new Error(`ghcr.io gave ${digest} as the image's digest, which isn't one.`);
   const image = `${IMAGE_REPOSITORY}@${digest}`;
@@ -1296,6 +1311,7 @@ export async function main(
       now: () => new Date(),
       images: realImages(),
       dns: realDns(),
+      checkout: () => realCheckout(),
     });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
