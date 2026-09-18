@@ -46,6 +46,7 @@ import {
   UsageError,
   VAULT_SECRETS,
 } from './deploy.ts';
+import type { Checkout } from './git.ts';
 import { policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy, type Snapshot } from './snapshot.ts';
 
@@ -598,6 +599,8 @@ interface Scenario {
   readonly rangesCurrent?: boolean;
   readonly images?: Images;
   readonly dns?: DnsLookup;
+  /** The folder the run is in: at COMMIT with nothing changed unless given, and no way to read it for null. */
+  readonly checkout?: Checkout | null;
 }
 
 /** One run of the tool, with everything it touched. */
@@ -617,6 +620,7 @@ async function run(argv: readonly string[], scenario: Scenario = {}) {
     makers: quickMakers(),
     ...(scenario.images === undefined ? {} : { images: scenario.images }),
     ...(scenario.dns === undefined ? {} : { dns: scenario.dns }),
+    ...(scenario.checkout === null ? {} : { checkout: () => scenario.checkout ?? { head: COMMIT, clean: true } }),
   };
   const outcome = await deploy(parseArguments(argv), steps).then(
     (status) => ({ status, error: undefined }),
@@ -1035,10 +1039,32 @@ describe('deploy apps', () => {
   it('deploys the commit it is given, without asking GitHub for the newest', async () => {
     const other = 'c'.repeat(40);
     const images = recordingImages();
-    const done = await run(['apps', '--commit', other], { answers, images });
+    const done = await run(['apps', '--commit', other], { answers, images, checkout: { head: other, clean: true } });
     expect(done.status).toBe(0);
     expect(images.asked[0]).toBe(`digest ${other}`);
     expect(done.az.deployment?.values?.AGENTX_AZURE_RELEASE).toBe(other);
+  });
+
+  it("sends nothing unless this folder is exactly the commit the apps are stamped with, since CI's release reads the stamp", async () => {
+    const other = 'c'.repeat(40);
+    for (const [checkout, where] of [
+      [{ head: other, clean: true }, other],
+      [{ head: COMMIT, clean: false }, `${COMMIT} with changes not committed`],
+      [{ head: other, clean: false }, `${other} with changes not committed`],
+    ] as const) {
+      const images = recordingImages();
+      const done = await run(['apps'], { answers, images, checkout });
+      expect(done.error).toMatchObject({
+        message: `This folder is at ${where}, but the image is for ${COMMIT}. apps sends this folder's Bicep and stamps the apps with ${COMMIT}, so the two must be the same commit, with nothing changed (git switch main, then git pull). Nothing was deployed.`,
+      });
+      // Nothing asked past the subscription, and the image not even looked up.
+      expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+      expect(images.asked).toEqual(['latest']);
+      expect(done.az.deployment).toBeUndefined();
+    }
+    const done = await run(['apps'], { answers, images: recordingImages(), checkout: null });
+    expect(done.error).toMatchObject({ message: 'No way to read this folder was given.' });
+    expect(done.az.deployment).toBeUndefined();
   });
 
   it('asks nothing and sends nothing when the image is refused, or the registry or GitHub answer nonsense', async () => {

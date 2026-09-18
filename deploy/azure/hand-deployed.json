@@ -1,0 +1,27 @@
+[
+  {
+    "prefix": "deploy/azure/",
+    "except": ".ts",
+    "why": "Azure's own set-up, Zitadel's images among it: deploy the part that changed by hand (foundation, secrets, apps or certificates), each what-if read, then apps"
+  },
+  {
+    "prefix": "db/bootstrap/",
+    "why": "the database's roles: apps, then jobs.ts run db-setup, which holds the server admin's login"
+  },
+  {
+    "prefix": "apps/db-setup/",
+    "why": "the set-up job, which only a person runs: apps, then jobs.ts run db-setup"
+  },
+  {
+    "prefix": "packages/platform/src/db/server-setup.ts",
+    "why": "the set-up job's roles and rights: apps, then jobs.ts run db-setup"
+  },
+  {
+    "prefix": "packages/platform/src/db/scram.ts",
+    "why": "the set-up job's password hashing: apps, then jobs.ts run db-setup"
+  },
+  {
+    "prefix": "packages/platform/src/config/setup.ts",
+    "why": "the set-up job's settings: apps, then jobs.ts run db-setup"
+  }
+]
