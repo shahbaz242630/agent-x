@@ -8,12 +8,18 @@ import {
   main,
   MANIFESTS,
   MAX_PAGES,
+  MAX_REMOVALS,
+  type Package,
   OWNER,
   PACKAGE,
   PAGE_SIZE,
+  PAUSE_MS,
   planPrune,
+  prune,
   realPackage,
+  removalOrder,
   REGISTRY_TOKEN,
+  Stopped,
   USAGE,
   type Version,
   VERSIONS_API,
@@ -71,7 +77,7 @@ const ids = (versions: readonly { id: number }[]): number[] => versions.map(({ i
 const idsOf = (...ns: number[]): number[] => ids(ns.flatMap((n) => at(n).all));
 
 /** Main's history in the fixture: commit n comes after every commit below it; any other isn't known. */
-const ORDER = new Map(Array.from({ length: 20 }, (_, k) => [commit(k + 1), k + 1]));
+const ORDER = new Map(Array.from({ length: 60 }, (_, k) => [commit(k + 1), k + 1]));
 const HISTORY = {
   isAncestor: (ancestor: string, of: string): boolean => {
     const before = ORDER.get(ancestor);
@@ -330,13 +336,16 @@ interface Call {
 }
 
 /** A fetch that answers from a handler and records every request. */
-function recording(handler: (url: string) => Response | Promise<Response>): { http: typeof fetch; calls: Call[] } {
+function recording(handler: (url: string, method: string) => Response | Promise<Response>): {
+  http: typeof fetch;
+  calls: Call[];
+} {
   const calls: Call[] = [];
   const http: typeof fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
-    const headers = new Headers(init?.headers);
-    calls.push({ url, method: init?.method ?? 'GET', authorization: headers.get('authorization') });
-    return handler(url);
+    const method = init?.method ?? 'GET';
+    calls.push({ url, method, authorization: new Headers(init?.headers).get('authorization') });
+    return handler(url, method);
   };
   return { http, calls };
 }
@@ -347,12 +356,32 @@ const PULL_WORD = 'otherword';
 const ACTOR = 'someone';
 const BASIC = `Basic ${Buffer.from(`${ACTOR}:${JOB_WORD}`).toString('base64')}`;
 
-/** The package served as GitHub would: versions in pages, the registry's sign-in, and each image's index. */
-function serving(versions: readonly Version[], indexes: ReadonlyMap<string, readonly string[] | undefined>) {
-  return recording((url) => {
+/**
+ * The package served as GitHub would: versions in pages, the registry's
+ * sign-in, each image's index, and removals, refused after `allowed` of them.
+ */
+function serving(
+  versions: readonly Version[],
+  indexes: ReadonlyMap<string, readonly string[] | undefined>,
+  allowed = Number.POSITIVE_INFINITY,
+) {
+  let listed = [...versions];
+  let removed = 0;
+  return recording((url, method) => {
+    if (method === 'DELETE') {
+      const id = Number(url.slice(`${VERSIONS_API}/`.length));
+      if (!url.startsWith(`${VERSIONS_API}/`) || removed >= allowed) {
+        return new Response(null, { status: 403, statusText: 'Forbidden' });
+      }
+      if (!listed.some((version) => version.id === id))
+        return new Response(null, { status: 404, statusText: 'Not Found' });
+      listed = listed.filter((version) => version.id !== id);
+      removed += 1;
+      return new Response(null, { status: 204 });
+    }
     if (url.startsWith(`${VERSIONS_API}?`)) {
       const page = Number(new URL(url).searchParams.get('page'));
-      return json(versions.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(apiEntry));
+      return json(listed.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(apiEntry));
     }
     if (url === REGISTRY_TOKEN) return json({ token: PULL_WORD });
     const found = [...indexes].find(([image]) => url === `${MANIFESTS}/${indexTag(image)}`);
@@ -453,12 +482,197 @@ describe('realPackage', () => {
     );
   });
 
+  it('removes a version by its id, as the job, and counts nothing but success', async () => {
+    const { http, calls } = recording(() => new Response(null, { status: 204 }));
+    await realPackage(JOB_WORD, ACTOR, http).remove(indexOf(8));
+    expect(calls).toEqual([
+      { url: `${VERSIONS_API}/${String(indexOf(8).id)}`, method: 'DELETE', authorization: `Bearer ${JOB_WORD}` },
+    ]);
+    for (const [status, statusText] of [
+      [404, 'Not Found'],
+      [403, 'Forbidden'],
+      [429, 'Too Many Requests'],
+    ] as const) {
+      const refusing = recording(() => new Response(null, { status, statusText }));
+      await expect(realPackage(JOB_WORD, ACTOR, refusing.http).remove(indexOf(8))).rejects.toThrow(
+        `removing ${indexOf(8).digest}, the package API answered ${String(status)} ${statusText}`,
+      );
+    }
+  });
+
+  it('removes nothing by an id that is not one', async () => {
+    const { http, calls } = recording(() => new Response(null, { status: 204 }));
+    for (const id of [0, -84, 1.5, Number.NaN]) {
+      await expect(realPackage(JOB_WORD, ACTOR, http).remove({ ...indexOf(8), id })).rejects.toThrow(
+        `not a version's id: ${String(id)}`,
+      );
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("refuses when the registry's sign-in fails or sends no pull credential", async () => {
     const signingIn = (answer: Response) =>
       realPackage(JOB_WORD, ACTOR, recording(() => answer).http).bundles(at(8).image.digest);
     await expect(signingIn(json({}, 401))).rejects.toThrow(/^the registry's sign-in answered 401$/);
     await expect(signingIn(json({ token: '' }))).rejects.toThrow("the registry's sign-in sent no token");
     await expect(signingIn(json(['token']))).rejects.toThrow('sent no token');
+  });
+});
+
+describe('removalOrder', () => {
+  it('takes the oldest first, the lower id first at the same moment, and no more than a run may', () => {
+    const many = Array.from({ length: MAX_REMOVALS + 5 }, (_, k): Version => ({
+      id: 1_000 - k,
+      digest: digest(1_000 - k),
+      created: T0 + (k % 7) * MINUTE,
+      tags: [],
+    }));
+    const order = removalOrder(many);
+    expect(order).toHaveLength(MAX_REMOVALS);
+    for (const [index, version] of order.entries()) {
+      const next = order[index + 1];
+      if (next === undefined) continue;
+      expect(version.created < next.created || (version.created === next.created && version.id < next.id)).toBe(true);
+    }
+    const all = removalOrder([...many].reverse());
+    expect(all.map(({ id }) => id)).toEqual(order.map(({ id }) => id));
+  });
+});
+
+/** A package held in memory; `listing` can change what a read after the first sends. */
+function held(
+  initial: readonly Version[],
+  options: {
+    readonly refuseAt?: number;
+    readonly keepsRemoved?: boolean;
+    readonly listing?: (versions: Version[], read: number) => Promise<Version[]>;
+  } = {},
+) {
+  let versions = [...initial];
+  let reads = 0;
+  const events: string[] = [];
+  const source: Package = {
+    versions: () => {
+      reads += 1;
+      const now = [...versions];
+      return options.listing === undefined ? Promise.resolve(now) : options.listing(now, reads);
+    },
+    bundles: (image) => Promise.resolve(BUNDLES.get(image)),
+    remove: (version) => {
+      if (events.filter((event) => event.startsWith('remove')).length === options.refuseAt) {
+        return Promise.reject(new Error('the package API answered 403 Forbidden'));
+      }
+      events.push(`remove ${String(version.id)}`);
+      if (options.keepsRemoved !== true) versions = versions.filter(({ id }) => id !== version.id);
+      return Promise.resolve();
+    },
+  };
+  const pause = (ms: number): Promise<void> => {
+    events.push(`pause ${String(ms)}`);
+    return Promise.resolve();
+  };
+  return { source, events, pause, remaining: () => versions };
+}
+
+describe('prune', () => {
+  const pruning = async (store: ReturnType<typeof held>, n = 8) => {
+    const lines: string[] = [];
+    await prune(own(n), store.source, HISTORY, (line) => lines.push(line), store.pause);
+    return lines;
+  };
+  const removedIds = (events: readonly string[]): number[] =>
+    ids(events.filter((event) => event.startsWith('remove ')).map((event) => ({ id: Number(event.slice(7)) })));
+
+  it('removes what the plan names, oldest first with a pause between each, then finds every kept image there', async () => {
+    const store = held(VERSIONS);
+    const lines = await pruning(store);
+    const order = removalOrder(
+      planPrune(VERSIONS, imagesToKeep(VERSIONS, own(8), HISTORY), BUNDLES, own(8).digest).remove,
+    );
+    expect(store.events).toEqual(
+      order.flatMap((version, index) => [
+        ...(index > 0 ? [`pause ${String(PAUSE_MS)}`] : []),
+        `remove ${String(version.id)}`,
+      ]),
+    );
+    expect(removedIds(store.events)).toEqual(idsOf(1, 2, 3));
+    expect(ids(store.remaining())).toEqual(idsOf(4, 5, 6, 7, 8));
+    expect(lines).toContain(
+      'Removing 3 images and 12 other versions (their signatures and SBOMs, and indexes nothing reads):',
+    );
+    expect(lines.slice(-2)).toEqual([
+      'Removed 15 versions.',
+      'The package now holds 25 versions, every kept image among them.',
+    ]);
+  });
+
+  it('leaves what is past a run’s limit to the next run', async () => {
+    const fifty = Array.from({ length: 50 }, (_, k) => published(k + 1));
+    const versions = fifty.flatMap(({ all }) => all);
+    const bundles = new Map(fifty.map(({ image, bundles: listed }) => [image.digest, listed]));
+    const store = held(versions);
+    const source: Package = { ...store.source, bundles: (image) => Promise.resolve(bundles.get(image)) };
+    const lines: string[] = [];
+    const last = { commit: commit(50), digest: fifty[49]?.image.digest ?? '' };
+    await prune(last, source, HISTORY, (line) => lines.push(line), store.pause);
+    expect(lines).toContain(`Removed ${String(MAX_REMOVALS)} versions.`);
+    expect(lines).toContain(`25 more are left for the next run (at most ${String(MAX_REMOVALS)} a run).`);
+    await prune(last, source, HISTORY, (line) => lines.push(line), store.pause);
+    expect(lines).toContain('Removed 25 versions.');
+    expect(store.remaining()).toHaveLength(25);
+  });
+
+  it('stops at a removal GitHub refuses, saying how many it had removed', async () => {
+    const store = held(VERSIONS, { refuseAt: 4 });
+    const stopped = pruning(store);
+    await expect(stopped).rejects.toBeInstanceOf(Stopped);
+    await expect(stopped).rejects.toMatchObject({ removed: 4, message: 'the package API answered 403 Forbidden' });
+    expect(store.remaining()).toHaveLength(VERSIONS.length - 4);
+  });
+
+  it('stops when a kept image is missing afterwards', async () => {
+    const store = held(VERSIONS, {
+      listing: (versions, read) =>
+        Promise.resolve(read === 1 ? versions : versions.filter(({ id }) => id !== at(6).image.id)),
+    });
+    await expect(pruning(store)).rejects.toMatchObject({
+      name: 'Stopped',
+      removed: 15,
+      message: `kept images are missing afterwards: ${commit(6)}`,
+    });
+  });
+
+  it('stops when a version it removed is still listed afterwards', async () => {
+    const store = held(VERSIONS, { keepsRemoved: true });
+    await expect(pruning(store)).rejects.toMatchObject({
+      removed: 15,
+      message: '15 of the versions removed are still listed',
+    });
+  });
+
+  it('stops, saying so, when the package can’t be read again afterwards', async () => {
+    const store = held(VERSIONS, {
+      listing: (versions, read) =>
+        read === 1 ? Promise.resolve(versions) : Promise.reject(new Error('the package API answered 502 Bad Gateway')),
+    });
+    await expect(pruning(store)).rejects.toMatchObject({
+      removed: 15,
+      message: 'the package API answered 502 Bad Gateway',
+    });
+  });
+
+  it('removes nothing when the plan can’t be made', async () => {
+    const store = held(VERSIONS);
+    const refused = prune(
+      { commit: commit(8), digest: digest(999) },
+      store.source,
+      HISTORY,
+      () => undefined,
+      store.pause,
+    );
+    await expect(refused).rejects.not.toBeInstanceOf(Stopped);
+    await expect(refused).rejects.toThrow("isn't in the package");
+    expect(store.events).toEqual([]);
   });
 });
 
@@ -471,13 +685,24 @@ describe('main', () => {
     http = serving(VERSIONS, BUNDLES),
   ) => {
     const lines: string[] = [];
-    const code = await main(argv, env, http.http, HISTORY, (line) => lines.push(line));
-    return { code, lines, calls: http.calls };
+    const pauses: number[] = [];
+    const code = await main(
+      argv,
+      env,
+      http.http,
+      HISTORY,
+      (line) => lines.push(line),
+      (ms) => {
+        pauses.push(ms);
+        return Promise.resolve();
+      },
+    );
+    return { code, lines, calls: http.calls, pauses };
   };
 
   it('says what a prune would remove, and only reads', async () => {
     const { code, lines, calls } = await run(['plan', commit(8), at(8).image.digest]);
-    expect(code).toBe(EXIT.PLANNED);
+    expect(code).toBe(EXIT.DONE);
     expect(lines).toEqual([
       `${IMAGE_REPOSITORY}: 40 versions (8 images, 8 signature indexes, 24 untagged).`,
       'Keeping 5 images:',
@@ -490,7 +715,7 @@ describe('main', () => {
       `  ${commit(3)}  2026-09-10 03:00`,
       `  ${commit(2)}  2026-09-10 02:00`,
       `  ${commit(1)}  2026-09-10 01:00`,
-      'Nothing was removed: this is the plan alone (G4-5a).',
+      'Nothing was removed: this is the plan alone.',
     ]);
     expect(calls.every(({ method }) => method === 'GET')).toBe(true);
     // The job's own credential goes to GitHub's API and the registry's sign-in alone.
@@ -500,6 +725,31 @@ describe('main', () => {
       else expect([`Bearer ${JOB_WORD}`, BASIC]).toContain(sent);
     }
     expect(calls.filter(({ url }) => url.startsWith(`${MANIFESTS}/`))).toHaveLength(5);
+  });
+
+  it('prunes as the job: every write a removal of a version the plan names, and it reads the package again', async () => {
+    const { code, lines, calls, pauses } = await run(['prune', commit(8), at(8).image.digest]);
+    expect(code).toBe(EXIT.DONE);
+    const writes = calls.filter(({ method }) => method !== 'GET');
+    expect(writes.map(({ method }) => method)).toEqual(Array.from({ length: 15 }, () => 'DELETE'));
+    expect(ids(writes.map(({ url }) => ({ id: Number(url.slice(`${VERSIONS_API}/`.length)) })))).toEqual(
+      idsOf(1, 2, 3),
+    );
+    for (const write of writes) expect(write.authorization).toBe(`Bearer ${JOB_WORD}`);
+    expect(pauses).toEqual(Array.from({ length: 14 }, () => PAUSE_MS));
+    expect(lines.at(-1)).toBe('The package now holds 25 versions, every kept image among them.');
+    expect(calls.at(-1)?.url).toBe(`${VERSIONS_API}?per_page=100&page=1`);
+  });
+
+  it('says how far it got when GitHub refuses a removal', async () => {
+    const { code, lines } = await run(['prune', commit(8), at(8).image.digest], ENV, serving(VERSIONS, BUNDLES, 2));
+    expect(code).toBe(EXIT.REFUSED);
+    const third = removalOrder(
+      idsOf(1, 2, 3).map((id) => VERSIONS.find((version) => version.id === id) ?? at(1).image),
+    )[2];
+    expect(lines.at(-1)).toBe(
+      `Stopped after removing 2 versions: removing ${third?.digest ?? ''}, the package API answered 403 Forbidden.`,
+    );
   });
 
   it('refuses, removing nothing, when the plan cannot be made', async () => {
@@ -530,11 +780,11 @@ describe('main', () => {
     }
   });
 
-  it('knows one command, with a commit and its digest', async () => {
+  it('knows two commands, each with a commit and its digest', async () => {
     for (const argv of [
       [],
       ['plan'],
-      ['prune', commit(8), at(8).image.digest],
+      ['remove', commit(8), at(8).image.digest],
       ['plan', at(8).image.digest],
       ['plan', commit(8)],
       ['plan', at(8).image.digest, commit(8)],

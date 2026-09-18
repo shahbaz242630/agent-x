@@ -566,20 +566,24 @@ jobs:
   # Old image versions (G4-5; partner, S25: the 5 newest images are kept, and
   # the one staging runs). Only after a release has gone green, which leaves
   # staging on this run's image or a later commit's; the prune keeps both, and
-  # reads which commits are later from the whole history. For now it only says
-  # what it would remove (G4-5a), so it may only read the package; one at a time.
+  # reads which commits are later from the whole history. One at a time.
+  #
+  # Its `packages: write` removes versions (G4-5b). It could push too, but
+  # nothing it pushed would pass the deploy check: it can't ask for a signing
+  # token, and it runs no code but ours (image-signing.test.ts).
   image-prune:
-    name: Image (main) - what pruning would remove
+    name: Image (main) - prune old versions
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [image-publish, release]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # At most 200 removals a run, one a second (prune.ts).
+    timeout-minutes: 15
     concurrency:
       group: image-prune
       cancel-in-progress: false
     permissions:
       contents: read # to check out the prune tool and read the history
-      packages: read # to list the package's versions and read its indexes
+      packages: write # to remove old versions (it lists them and reads their indexes too)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -593,9 +597,9 @@ jobs:
           check-latest: false
           package-manager-cache: false
 
-      - name: What pruning would remove (reads only)
+      - name: Prune old image versions
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT: ${{ github.sha }}
           DIGEST: ${{ needs.image-publish.outputs.digest }}
-        run: node deploy/image/prune.ts plan "${COMMIT}" "${DIGEST}"
+        run: node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"
