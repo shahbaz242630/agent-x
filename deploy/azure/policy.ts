@@ -10,6 +10,8 @@
 // simply missing, not only one that is switched off. An environment's parts
 // (secrets.bicep) are checked together with its foundation, so they too may
 // point only at what the foundation creates.
+import { createHash } from 'node:crypto';
+
 import { readRanges } from './github-ranges.ts';
 import type { PredictedResource, Snapshot } from './snapshot.ts';
 
@@ -42,6 +44,7 @@ export type RuleId =
   | 'app-errors-alert'
   | 'identities'
   | 'release-identity'
+  | 'release-access'
   | 'vault-secrets'
   | 'secret-access'
   | 'jobs'
@@ -256,12 +259,41 @@ const releaseSubject = (environment: string): string =>
 const releaseIdentityName = (environment: string): string =>
   `id-agentx-${environment === 'production' ? 'prd' : 'stg'}-release`;
 
+/** The namespace Bicep's and ARM's `guid()` makes its version-5 UUIDs in. */
+const BICEP_GUID_NAMESPACE = Buffer.from('11fb06fb712d4ddd98c7e71bbd588830', 'hex');
+
+/**
+ * Bicep's `guid(...)`: a version-5 UUID of its arguments joined by `-`, as
+ * UTF-8, in BICEP_GUID_NAMESPACE (checked against a snapshot's own value in
+ * policy.test.ts).
+ */
+export function bicepGuid(...parts: readonly string[]): string {
+  const hash = createHash('sha1')
+    .update(Buffer.concat([BICEP_GUID_NAMESPACE, Buffer.from(parts.join('-'), 'utf8')]))
+    .digest()
+    .subarray(0, 16);
+  hash.writeUInt8(((hash.readUInt8(6) & 0x0f) | 0x50) >>> 0, 6);
+  hash.writeUInt8(((hash.readUInt8(8) & 0x3f) | 0x80) >>> 0, 8);
+  const hex = hash.toString('hex');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
+
+/**
+ * CI's role's name (G4), as names.bicep's `releaseRoleName` makes it from the
+ * resource group. A custom role's name is a GUID the template chooses, so
+ * holding it to this one keeps any other GUID, a built-in role's among them
+ * (Owner's), from passing as CI's.
+ */
+const releaseRoleName = (groupId: string): string => bicepGuid(groupId, 'release');
+
 /**
  * Everything CI's role allows (G4): an app's and a job's own reads and writes,
- * their revisions and runs, starting a run, and the two linked actions a write
- * needs because the app runs as its own identity in the environment. Nothing
- * that lists secrets, opens a shell or a log stream, stops or deletes, writes a
- * door, or grants access. The apps deployment says which resources it covers.
+ * their revisions and runs, and starting a run. Nothing that lists secrets,
+ * opens a shell or a log stream, stops or deletes, writes a door, or grants
+ * access. No linked action either (`managedEnvironments/join`,
+ * `userAssignedIdentities/assign`): CI's partial update is expected not to
+ * need them (release.bicep), which its first run proves (G4-4). The apps
+ * deployment says which resources it covers (rule `release-access`).
  */
 const RELEASE_ACTIONS: readonly string[] = [
   'Microsoft.App/containerApps/read',
@@ -272,8 +304,16 @@ const RELEASE_ACTIONS: readonly string[] = [
   'Microsoft.App/jobs/start/action',
   'Microsoft.App/jobs/executions/read',
   'Microsoft.App/jobs/execution/read',
-  'Microsoft.App/managedEnvironments/join/action',
-  'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
+];
+
+/**
+ * What CI's role is given on (G4-2b): the API app, which a merge updates, and
+ * the migration job, which it updates and runs. Not Zitadel, its login pages or
+ * the set-up job, which holds the server admin's login.
+ */
+const RELEASE_TARGETS: readonly { readonly type: string; readonly workload: string }[] = [
+  { type: TYPES.app, workload: 'api' },
+  { type: TYPES.job, workload: 'migrate' },
 ];
 
 /**
@@ -1440,40 +1480,96 @@ const workloadOf = (identityName: string): string => identityName.replace(/^id-a
 
 const REFERENCED_PRINCIPAL = /^\[reference\('([^']+)', '[^']+'\)\.principalId\]$/;
 
+/** What a role assignment is given on: its id up to the assignment's own part. */
+const scopeOf = (assignment: PredictedResource): string =>
+  assignment.id.slice(0, assignment.id.lastIndexOf(`/providers/${TYPES.roleAssignment}/`));
+
+/**
+ * Who a role assignment gives its role to: the identity of this deployment it
+ * names, as a service principal, or undefined for anyone else.
+ */
+const principalOf = (snapshot: Snapshot, assignment: PredictedResource): PredictedResource | undefined => {
+  const principal = REFERENCED_PRINCIPAL.exec(String(at(assignment.properties, 'principalId')))?.[1];
+  const identity = ofType(snapshot, TYPES.identity).find((found) => found.id === principal);
+  return at(assignment.properties, 'principalType') === 'ServicePrincipal' ? identity : undefined;
+};
+
+/** A role assignment's role, as Azure compares ids: without case. */
+const roleOf = (assignment: PredictedResource): string =>
+  String(at(assignment.properties, 'roleDefinitionId')).toLowerCase();
+
+/** The resource group the deployment creates (a snapshot of an environment has one), or nothing for none. */
+const groupOf = (snapshot: Snapshot): string => ofType(snapshot, TYPES.group)[0]?.id ?? '';
+
+/** CI's identity's id, without case: its name in the deployment's resource group, so a namesake elsewhere isn't it. */
+const releaseIdentityId = (snapshot: Snapshot, environment: string): string =>
+  `${groupOf(snapshot)}/providers/${TYPES.identity}/${releaseIdentityName(environment)}`.toLowerCase();
+
+/**
+ * CI's role as a role assignment names it, without case: at the subscription,
+ * the form Azure keeps a custom role under wherever it may be given (G4-2b),
+ * and by the one name it may have (`releaseRoleName`).
+ */
+const releaseRoleId = (snapshot: Snapshot): string => {
+  const group = groupOf(snapshot);
+  const subscription = /^\/subscriptions\/[^/]+/.exec(group)?.[0] ?? '';
+  return `${subscription}/providers/${TYPES.roleDefinition}/${releaseRoleName(group)}`.toLowerCase();
+};
+
+/**
+ * Anything that could grant access but a role assignment or CI's role written
+ * exactly so: a type in another case, the older `<resource>/providers/
+ * roleAssignments` form, or another Microsoft.Authorization type (a PIM
+ * request). The rules read role assignments by their exact type, so any of
+ * these would pass them unread.
+ */
+const ACCESS_TYPE = /authorization|roleassignment|roledefinition/i;
+
 /**
  * Who reads what (ADR-002 Amendment G2c). Every role assignment in the
- * deployment gives Key Vault Secrets User on one secret it writes, to an
- * identity it creates, named a service principal: no other role, and nothing
- * at the vault, the resource group or the subscription. Together they are
- * exactly GRANTS, so no identity reads another's secret and each can read its
- * own.
+ * deployment but CI's role's (`release-access`) gives Key Vault Secrets User on
+ * one secret it writes, to an identity it creates, named a service principal:
+ * no other role, and nothing at the vault, the resource group or the
+ * subscription. Together they are exactly GRANTS, so no identity reads
+ * another's secret and each can read its own; CI's identity isn't in GRANTS,
+ * so it reads none. Nothing else in the deployment grants access (ACCESS_TYPE).
  */
 const secretAccess: Check = (snapshot, _expected, add) => {
+  for (const resource of snapshot.predictedResources) {
+    if (
+      ACCESS_TYPE.test(resource.type) &&
+      resource.type !== TYPES.roleAssignment &&
+      resource.type !== TYPES.roleDefinition
+    ) {
+      add({
+        rule: 'secret-access',
+        resource: resource.name,
+        message: `is a ${resource.type}, which no rule reads: access is given only as ${TYPES.roleAssignment}, written exactly so`,
+      });
+    }
+  }
   const secrets = new Map(ofType(snapshot, TYPES.vaultSecret).map((secret) => [secret.id, secretNameOf(secret)]));
-  const identities = new Map(ofType(snapshot, TYPES.identity).map((identity) => [identity.id, identity.name]));
-  const marker = `/providers/${TYPES.roleAssignment}/`;
+  const release = releaseRoleId(snapshot);
   const granted = new Set<string>();
   for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
-    const properties = assignment.properties;
-    const secret = secrets.get(assignment.id.slice(0, assignment.id.lastIndexOf(marker)));
-    const principal = REFERENCED_PRINCIPAL.exec(String(at(properties, 'principalId')))?.[1];
-    const identity = principal === undefined ? undefined : identities.get(principal);
-    const role = String(at(properties, 'roleDefinitionId')).toLowerCase();
+    const role = roleOf(assignment);
+    if (role === release) continue;
+    const secret = secrets.get(scopeOf(assignment));
+    const identity = principalOf(snapshot, assignment);
     if (
       !role.endsWith(`/providers/microsoft.authorization/roledefinitions/${VAULT_READER_ROLE}`) ||
       secret === undefined ||
-      identity === undefined ||
-      at(properties, 'principalType') !== 'ServicePrincipal'
+      identity === undefined
     ) {
       add({
         rule: 'secret-access',
         resource: assignment.name,
         message:
-          'must give Key Vault Secrets User on one secret this deployment writes to an identity it creates (principalType ServicePrincipal): no other role, and nothing at the vault, the resource group or the subscription',
+          "must give Key Vault Secrets User on one secret this deployment writes to an identity it creates (principalType ServicePrincipal), or be CI's role (release-access): no other role, and nothing at the vault, the resource group or the subscription",
       });
       continue;
     }
-    const grant = `${workloadOf(identity)} reads ${secret}`;
+    const grant = `${workloadOf(identity.name)} reads ${secret}`;
     granted.add(grant);
     if (!GRANTS.has(grant)) {
       add({
@@ -1502,22 +1598,23 @@ const actionSet = (actions: readonly unknown[]): string =>
  * for GitHub's issuer, this
  * environment's subject and the token exchange: no other identity can be
  * signed in to from outside Azure. And it defines exactly one custom role,
- * which allows RELEASE_ACTIONS and no data action, and can be given in this
- * deployment's resource group only. Where that role is given is the apps
- * deployment's to say (G4-2b).
+ * named as `releaseRoleName` names it, which allows RELEASE_ACTIONS and no data
+ * action, and can be given in this deployment's resource group only. Where that role is given is the apps
+ * deployment's to say (G4-2b), and `release-access`'s to check.
  */
 const releaseIdentity: Check = (snapshot, expected, add) => {
   const problem = (resource: string, message: string): void => {
     add({ rule: 'release-identity', resource, message });
   };
-  // One at most, since the name is one resource's: what matters is that it's there.
+  // One at most, since the id is one resource's: what matters is that it's there.
   const name = releaseIdentityName(expected.environment);
-  const releases = ofType(snapshot, TYPES.identity).filter((identity) => identity.name === name);
+  const ci = releaseIdentityId(snapshot, expected.environment);
+  const releases = ofType(snapshot, TYPES.identity).filter((identity) => identity.id.toLowerCase() === ci);
   if (releases.length === 0) problem('the deployment', `needs an identity for CI (${name})`);
-  // Nothing runs as it, so its role stays CI's alone.
+  // Nothing runs as it, so its role stays CI's alone. Azure reads an id in any case.
   for (const workload of [...ofType(snapshot, TYPES.job), ...ofType(snapshot, TYPES.app)]) {
     const assigned = Object.keys(at(workload.identity, 'userAssignedIdentities') ?? {});
-    if (assigned.some((id) => id.slice(id.lastIndexOf('/') + 1) === name)) {
+    if (assigned.some((id) => id.toLowerCase() === ci)) {
       problem(workload.name, "must not run as CI's identity, whose role is CI's alone");
     }
   }
@@ -1548,7 +1645,14 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
 
   const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
   const roles = ofType(snapshot, TYPES.roleDefinition);
+  const roleName = releaseRoleName(groupOf(snapshot));
   for (const role of roles) {
+    if (role.name !== roleName) {
+      problem(
+        role.name,
+        `must be named ${roleName} (names.bicep's releaseRoleName), so that no other role, a built-in one among them, passes as CI's`,
+      );
+    }
     const scopes = list(at(role.properties, 'assignableScopes'));
     if (scopes.length !== 1 || !groups.includes(String(scopes[0]))) {
       problem(
@@ -1574,7 +1678,6 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
   }
 };
 
-/** A job's workload: its name without `job-agentx-<environment>-` (names.bicep). */
 /** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
 const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
 
@@ -1586,6 +1689,55 @@ const workloadsIn = (snapshot: Snapshot): readonly PredictedResource[] => [
   ...ofType(snapshot, TYPES.job),
   ...ofType(snapshot, TYPES.app),
 ];
+
+/**
+ * Where CI's role is given (G4-2b): on each of RELEASE_TARGETS in the
+ * deployment's resource group once, to CI's identity as a service principal,
+ * and nowhere else: not on another app or job, the environment, a door, the
+ * vault, the resource group or the subscription, and never to an app's or a
+ * job's identity. That CI's identity holds no other role is `secret-access`'s:
+ * the one other role it allows is Key Vault Secrets User, to the readers
+ * GRANTS names, which CI isn't.
+ */
+const releaseAccess: Check = (snapshot, expected, add) => {
+  const role = releaseRoleId(snapshot);
+  const ci = releaseIdentityId(snapshot, expected.environment);
+  const inGroup = `${groupOf(snapshot)}/providers/`.toLowerCase();
+  const targets = new Map(
+    workloadsIn(snapshot)
+      .filter(
+        (workload) =>
+          workload.id.toLowerCase().startsWith(inGroup) &&
+          RELEASE_TARGETS.some(
+            (target) => target.type === workload.type && target.workload === jobWorkloadOf(workload.name),
+          ),
+      )
+      .map((workload) => [workload.id, { name: workload.name, given: 0 }]),
+  );
+  for (const assignment of ofType(snapshot, TYPES.roleAssignment)) {
+    if (roleOf(assignment) !== role) continue;
+    const target = targets.get(scopeOf(assignment));
+    if (target === undefined || principalOf(snapshot, assignment)?.id.toLowerCase() !== ci) {
+      add({
+        rule: 'release-access',
+        resource: assignment.name,
+        message:
+          "must give CI's role to CI's identity (principalType ServicePrincipal) on the API app or the migration job alone",
+      });
+      continue;
+    }
+    target.given += 1;
+  }
+  for (const { name, given } of targets.values()) {
+    if (given !== 1) {
+      add({
+        rule: 'release-access',
+        resource: 'the deployment',
+        message: `must give CI's role on ${name} once; it gives it ${String(given)} times`,
+      });
+    }
+  }
+};
 
 /** An image named by digest: a tag can be moved to another image, a digest can't (SEC-SC-02). */
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
@@ -2034,6 +2186,7 @@ const CHECKS: readonly Check[] = [
   appErrorsAlert,
   identities,
   releaseIdentity,
+  releaseAccess,
   vaultSecrets,
   secretAccess,
   jobs,

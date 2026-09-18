@@ -14,6 +14,8 @@
 //   that reads a secret, opens a shell in a container, changes a door, or
 //   grants access (policy rule `release-identity`)
 
+import { releaseRoleName } from '../names.bicep'
+
 param location string
 param tags object
 param identityName string
@@ -46,13 +48,20 @@ resource github 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdent
   }
 }
 
-// Assignable in this resource group only. Updating an app or a job that runs as
-// its own identity is a write that names that identity and the environment,
-// so the role holds the two linked actions as well, and G4-2b gives it on
-// those resources alone.
+// Assignable in this resource group only, and given on the API and the
+// migration job alone (apps.bicep, policy rule `release-access`). No linked
+// action (`managedEnvironments/join`, `userAssignedIdentities/assign`):
+// - Azure checks a linked action for a linked property a request carries, on
+//   the linked resource itself. CI's partial update (a PATCH of the template
+//   alone, never a body read back from Azure) carries neither the environment
+//   nor an identity, so it is expected to need neither: a reported REST PATCH
+//   of the containers alone did without `join` (microsoft/azure-container-apps
+//   issue 530). Nothing public shows a job's PATCH either way
+// - CI's first run proves it (G4-4), failing closed if not. If they are
+//   needed, they go on the environment and the two identities, not on the
+//   app and the job, where they would satisfy nothing
 resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  // Named from a fixed word, so a new display name updates this role rather than orphaning it.
-  name: guid(resourceGroup().id, 'release')
+  name: releaseRoleName(resourceGroup().id)
   properties: {
     roleName: roleName
     description: 'CI after a merge: update our image in the API and the migration job, and run the migration. Nothing else.'
@@ -71,8 +80,6 @@ resource role 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
           'Microsoft.App/jobs/start/action'
           'Microsoft.App/jobs/executions/read'
           'Microsoft.App/jobs/execution/read'
-          'Microsoft.App/managedEnvironments/join/action'
-          'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action'
         ]
         notActions: []
         dataActions: []

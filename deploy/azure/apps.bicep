@@ -28,8 +28,8 @@
 //   with `apps --keep-running` for a while
 // - manual trigger only: no *job* here runs on a clock or an event. The set-up
 //   job holds the server admin's login, and Microsoft treats permission to
-//   start a job as permission to use its secrets, so who may start which job is
-//   settled with the deploy job (G4)
+//   start a job as permission to use its secrets, so CI may start the
+//   migration job alone (G4-2b, after the apps below)
 // - one replica per run and no automatic retry: the work is one replica's, two of
 //   them would race, and a retry would hide why the first attempt failed.
 //   Container Apps has no lock between runs, so runs are started one at a time
@@ -49,6 +49,7 @@ import {
   jobName
   jobWorkloads
   networkAddressSpace
+  releaseRoleName
   resourceNames
   resourceTags
   uniqueSuffix
@@ -832,6 +833,50 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
     }
   }
 ]
+
+// CI's way in (G4-2b): the one role the foundation defines for it (release.bicep),
+// given to its identity on the two things a merge changes, the API and the
+// migration job, and nowhere else (policy rule `release-access`):
+// - by the role's subscription-level id, the form Azure keeps a custom role
+//   under wherever it may be given
+// - on the resources themselves, never the resource group: CI can't touch
+//   Zitadel, its login pages, the set-up job (which holds the server admin's
+//   login) or a door, and holds no Key Vault role
+// - what the role allows is wider than what CI's release tool does (G4-3):
+//   writing the API or the job, or starting a run with a template of its own
+//   (Microsoft: permission to start a job is permission to use its secrets),
+//   can change the command and settings too, not only the image. The ceiling
+//   is what the two run as: the API's and the migration's database logins
+//   (ADR-002 "Deploying"; the handoff's residual risk, decided before
+//   production)
+resource releaseIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: names.release
+}
+
+var releaseRole = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', releaseRoleName(resourceGroup().id))
+
+resource releaseUpdatesApi 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: deployedApps[indexOf(map(apps, app => app.workload), 'api')]
+  name: guid(deployedApps[indexOf(map(apps, app => app.workload), 'api')].id, releaseIdentity.id, releaseRole)
+  properties: {
+    description: 'CI updates the API to a new image (deploy/azure/apps.bicep)'
+    roleDefinitionId: releaseRole
+    principalId: releaseIdentity.properties.principalId
+    // Said outright, so Azure needn't look the identity up first.
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource releaseRunsMigrate 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: deployedJobs[indexOf(map(jobs, job => job.workload), 'migrate')]
+  name: guid(deployedJobs[indexOf(map(jobs, job => job.workload), 'migrate')].id, releaseIdentity.id, releaseRole)
+  properties: {
+    description: 'CI updates the migration job to a new image and runs it (deploy/azure/apps.bicep)'
+    roleDefinitionId: releaseRole
+    principalId: releaseIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
 
 // The public doors (G2e): the only way in from the internet. A route config can
 // send traffic to an app whose ingress is internal, so each door names the apps

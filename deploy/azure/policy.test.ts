@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import {
   at,
+  bicepGuid,
   describeProblem,
   type Expectations,
   kqlStages,
@@ -128,7 +129,8 @@ const withExtra = (resource: Mutable): Snapshot => ({
 
 /**
  * Staging's resources as production's would name them: their tags and CI's
- * identity, and (unless a test wants it left) CI's GitHub subject.
+ * identity (where it is and whom its role is given to), and (unless a test
+ * wants it left) CI's GitHub subject.
  */
 function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
   const copy = changed(
@@ -138,6 +140,10 @@ function productionLike({ subject }: { readonly subject: boolean }): Snapshot {
   for (const resource of copy.predictedResources as unknown as Mutable[]) {
     resource.id = String(resource.id).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
     resource.name = String(resource.name).replace(/^id-agentx-stg-release/, 'id-agentx-prd-release');
+    if (resource.type === 'Microsoft.Authorization/roleAssignments') {
+      const grant = resource.properties as Mutable;
+      grant.principalId = String(grant.principalId).replace('/id-agentx-stg-release', '/id-agentx-prd-release');
+    }
     if (subject && resource.type === 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials') {
       const trust = resource.properties as Mutable;
       trust.subject = String(trust.subject).replace(/:environment:staging$/, ':environment:production');
@@ -1332,6 +1338,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
         ),
       ).toEqual([`${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`]);
     }
+    // Nor on CI's identity's namesake in another resource group.
+    const namesake = String(release?.id).replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/elsewhere/');
+    const onNamesake = withExtra({ ...structuredClone(release), id: namesake });
+    for (const found of onNamesake.predictedResources.filter(TRUST)) {
+      (found as unknown as Mutable).id = `${namesake}/federatedIdentityCredentials/github`;
+    }
+    expect(releaseProblems(onNamesake)).toEqual([
+      `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
+    ]);
     // No trust, two, or no identity for CI.
     expect(releaseProblems(without(TRUST))).toEqual([
       "the deployment: needs one trust, for CI's identity; the snapshot has 0",
@@ -1358,14 +1373,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
         `${trust}: must be on CI's identity: no other identity is signed in to from outside Azure`,
       ]);
     }
-    // An app or a job running as CI's identity would hold CI's role.
-    for (const pick of [JOB('migrate'), APP('api')]) {
-      const running = changed(pick, (workload) => {
-        const assigned = inside(workload, 'identity', 'userAssignedIdentities');
-        assigned[String(release?.id)] = {};
-      });
-      const name = String(staging.predictedResources.find(pick)?.name);
-      expect(releaseProblems(running)).toEqual([`${name}: must not run as CI's identity, whose role is CI's alone`]);
+    // An app or a job running as CI's identity would hold CI's role, whatever case its id is written in.
+    for (const pick of [JOB('migrate'), APP('api'), APP('zitadel')]) {
+      for (const id of [String(release?.id), String(release?.id).toUpperCase()]) {
+        const running = changed(pick, (workload) => {
+          const assigned = inside(workload, 'identity', 'userAssignedIdentities');
+          assigned[id] = {};
+        });
+        const name = String(staging.predictedResources.find(pick)?.name);
+        expect(releaseProblems(running)).toEqual([`${name}: must not run as CI's identity, whose role is CI's alone`]);
+      }
     }
 
     // The role: an action more (a secret's list, a shell, a door), one less, or every action.
@@ -1378,6 +1395,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [...wanted, 'Microsoft.App/containerApps/exec/action'],
       [...wanted, 'Microsoft.App/managedEnvironments/httpRouteConfigs/write'],
       [...wanted, 'Microsoft.Authorization/roleAssignments/write'],
+      // The two linked actions, which CI's partial update doesn't ask for.
+      [...wanted, 'Microsoft.App/managedEnvironments/join/action'],
+      [...wanted, 'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action'],
       wanted.slice(1),
       ['*'],
       ['Microsoft.App/*', 'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action'],
@@ -1424,6 +1444,193 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(RELEASE, (found) => (inside(found, 'properties').isolationScope = 'None')))).toEqual([
       'identities',
     ]);
+  });
+
+  it('release-access: CI given its role on anything but the API app and the migration job, to anyone else, or not once', () => {
+    // The rule's own messages, so a condition another one also catches can't hide.
+    const accessProblems = (snapshotted: Snapshot): string[] =>
+      policyProblems(snapshotted, STAGING)
+        .filter((problem) => problem.rule === 'release-access')
+        .map((problem) => `${problem.resource}: ${problem.message}`);
+    // A lookup that finds nothing fails here, so no case below passes on a scope or principal that isn't there.
+    const idOf = (pick: (resource: PredictedResource) => boolean): string => {
+      const found = staging.predictedResources.find(pick);
+      if (found === undefined) throw new Error('the snapshot has no such resource');
+      return found.id;
+    };
+    const group = idOf(type('Microsoft.Resources/resourceGroups'));
+    const subscription = group.slice(0, group.indexOf('/resourceGroups/'));
+    const role = String(staging.predictedResources.find(type('Microsoft.Authorization/roleDefinitions'))?.name);
+    const roleId = `${subscription}/providers/Microsoft.Authorization/roleDefinitions/${role}`;
+    const marker = '/providers/Microsoft.Authorization/roleAssignments/';
+    const scopeOf = (assignment: PredictedResource): string => assignment.id.slice(0, assignment.id.indexOf(marker));
+    const GIVES_ROLE = (resource: PredictedResource) =>
+      ASSIGNMENTS(resource) && at(resource.properties, 'roleDefinitionId') === roleId;
+    const GRANT_ON = (pick: (resource: PredictedResource) => boolean) => (resource: PredictedResource) =>
+      GIVES_ROLE(resource) && scopeOf(resource) === idOf(pick);
+    const API_GRANT = GRANT_ON(APP('api'));
+    const MIGRATE_GRANT = GRANT_ON(JOB('migrate'));
+    const properties = (assignment: Mutable): Mutable => inside(assignment, 'properties');
+    const principal = (identity: string): string =>
+      `[reference('${idOf(named(new RegExp(`^${identity}$`)))}', '2024-11-30').principalId]`;
+    const scoped = (scope: string) => (assignment: Mutable) =>
+      (assignment.id = `${scope}${marker}${String(assignment.name)}`);
+    const grantName = String(staging.predictedResources.find(API_GRANT)?.name);
+    const alone = (name: string): string =>
+      `${name}: must give CI's role to CI's identity (principalType ServicePrincipal) on the API app or the migration job alone`;
+    const given = (name: string, times: number): string =>
+      `the deployment: must give CI's role on ${name} once; it gives it ${String(times)} times`;
+
+    // On the API app and the migration job, to CI's identity, by the role's subscription-level id.
+    expect(
+      Object.fromEntries(
+        staging.predictedResources.filter(GIVES_ROLE).map((found) => [scopeOf(found), found.properties]),
+      ),
+    ).toEqual({
+      [idOf(APP('api'))]: {
+        description: 'CI updates the API to a new image (deploy/azure/apps.bicep)',
+        roleDefinitionId: roleId,
+        principalId: principal('id-agentx-stg-release'),
+        principalType: 'ServicePrincipal',
+      },
+      [idOf(JOB('migrate'))]: {
+        description: 'CI updates the migration job to a new image and runs it (deploy/azure/apps.bicep)',
+        roleDefinitionId: roleId,
+        principalId: principal('id-agentx-stg-release'),
+        principalType: 'ServicePrincipal',
+      },
+    });
+    expect(accessProblems(staging)).toEqual([]);
+
+    // Given anywhere else: Zitadel, its login pages, the set-up job (the server
+    // admin's login), Zitadel's setup, the environment, a door, the vault, a
+    // secret, an identity, the resource group, the subscription.
+    for (const scope of [
+      idOf(APP('zitadel')),
+      idOf(APP('login')),
+      idOf(JOB('db-setup')),
+      idOf(JOB('zitadel-setup')),
+      idOf(ENVIRONMENT),
+      idOf(DOOR),
+      idOf(VAULT),
+      idOf(SECRET('db-owner-password')),
+      idOf(named(/^id-agentx-stg-api$/)),
+      group,
+      subscription,
+    ]) {
+      expect(accessProblems(changed(API_GRANT, scoped(scope)))).toEqual([
+        alone(grantName),
+        given('ca-agentx-stg-api', 0),
+      ]);
+    }
+    // To anyone but CI: the API's own identity (which would then update itself),
+    // the migration job's, someone outside, or as a user.
+    for (const change of [
+      (grant: Mutable) => (properties(grant).principalId = principal('id-agentx-stg-api')),
+      (grant: Mutable) => (properties(grant).principalId = principal('id-agentx-stg-migrate')),
+      (grant: Mutable) => (properties(grant).principalId = '00000000-0000-0000-0000-00000000abcd'),
+      (grant: Mutable) => (properties(grant).principalType = 'User'),
+      (grant: Mutable) => delete properties(grant).principalType,
+    ]) {
+      expect(accessProblems(changed(API_GRANT, change))).toEqual([alone(grantName), given('ca-agentx-stg-api', 0)]);
+    }
+    // An app named like the migration job isn't it: the grant belongs on the job.
+    const lookalike = changed(APP('zitadel'), (app) => {
+      app.name = 'ca-agentx-stg-migrate';
+      app.id = String(app.id).replace(/ca-agentx-stg-zitadel$/, 'ca-agentx-stg-migrate');
+    });
+    const migrateGrant = lookalike.predictedResources.find(MIGRATE_GRANT) as unknown as Mutable;
+    scoped(String(lookalike.predictedResources.find(APP('migrate'))?.id))(migrateGrant);
+    expect(accessProblems(lookalike)).toEqual([alone(String(migrateGrant.name)), given('job-agentx-stg-migrate', 0)]);
+    // Not given, or given twice.
+    expect(accessProblems(without(MIGRATE_GRANT))).toEqual([given('job-agentx-stg-migrate', 0)]);
+    const twice = structuredClone(staging.predictedResources.find(API_GRANT)) as unknown as Mutable;
+    twice.name = 'a-second-grant';
+    scoped(idOf(APP('api')))(twice);
+    expect(accessProblems(withExtra(twice))).toEqual([given('ca-agentx-stg-api', 2)]);
+    // The role by the id its resource group would give it, which isn't the one
+    // Azure keeps it under: then it's no role of ours, and `secret-access` refuses it.
+    const groupForm = changed(API_GRANT, (grant) => {
+      properties(grant).roleDefinitionId = `${group}/providers/Microsoft.Authorization/roleDefinitions/${role}`;
+    });
+    expect(accessProblems(groupForm)).toEqual([given('ca-agentx-stg-api', 0)]);
+    expect(brokenRules(groupForm)).toEqual(['release-access', 'secret-access']);
+    // Azure compares ids without case.
+    expect(
+      brokenRules(changed(API_GRANT, (grant) => (properties(grant).roleDefinitionId = roleId.toUpperCase()))),
+    ).toEqual([]);
+
+    // The policy works out the role's name as Bicep's guid() does: the role's
+    // one argument after the group, and each grant's three (scope, identity, role).
+    const release = idOf(named(/^id-agentx-stg-release$/));
+    expect(role).toBe(bicepGuid(group, 'release'));
+    expect(grantName).toBe(bicepGuid(idOf(APP('api')), release, roleId));
+    // A built-in role passed off as CI's: the role defined under Owner's id, and given by it.
+    const owner = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635';
+    const asOwner = changed(
+      (resource) => resource.type === 'Microsoft.Authorization/roleDefinitions' || GIVES_ROLE(resource),
+      (resource) => {
+        if (resource.type === 'Microsoft.Authorization/roleDefinitions') {
+          resource.name = owner;
+          resource.id = String(resource.id).replace(role, owner);
+        } else properties(resource).roleDefinitionId = roleId.replace(role, owner);
+      },
+    );
+    expect(policyProblems(asOwner, STAGING).map(describeProblem)).toEqual(
+      expect.arrayContaining([
+        `${owner} [release-identity] must be named ${role} (names.bicep's releaseRoleName), so that no other role, a built-in one among them, passes as CI's`,
+        `the deployment [release-access] ${given('ca-agentx-stg-api', 0).replace('the deployment: ', '')}`,
+      ]),
+    );
+    expect(brokenRules(asOwner)).toEqual(['release-identity', 'release-access', 'secret-access']);
+    // A second custom role, wider, given to CI on the API in place of CI's own.
+    const wider = structuredClone(staging.predictedResources.find(type('Microsoft.Authorization/roleDefinitions')));
+    const other = bicepGuid(group, 'wider');
+    const widened = withExtra({
+      ...wider,
+      name: other,
+      id: String(wider?.id).replace(role, other),
+      properties: { ...(wider?.properties as Mutable), permissions: [{ actions: ['*'] }] },
+    });
+    const apiGrant = widened.predictedResources.find(API_GRANT) as unknown as Mutable;
+    properties(apiGrant).roleDefinitionId = roleId.replace(role, other);
+    expect(accessProblems(widened)).toEqual([given('ca-agentx-stg-api', 0)]);
+    expect(brokenRules(widened)).toEqual(['release-identity', 'release-access', 'secret-access']);
+    // CI's identity's namesake in another resource group isn't CI's identity.
+    const namesake = release.replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/elsewhere/');
+    const toNamesake = withExtra({
+      ...structuredClone(staging.predictedResources.find(named(/^id-agentx-stg-release$/))),
+      id: namesake,
+    });
+    properties(toNamesake.predictedResources.find(API_GRANT) as unknown as Mutable).principalId =
+      `[reference('${namesake}', '2024-11-30').principalId]`;
+    expect(accessProblems(toNamesake)).toEqual([alone(grantName), given('ca-agentx-stg-api', 0)]);
+    // Nor is the API's namesake in another resource group the API.
+    const elsewhere = idOf(APP('api')).replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/elsewhere/');
+    const onNamesake = withExtra({ ...structuredClone(staging.predictedResources.find(APP('api'))), id: elsewhere });
+    scoped(elsewhere)(onNamesake.predictedResources.find(API_GRANT) as unknown as Mutable);
+    expect(accessProblems(onNamesake)).toEqual([alone(grantName), given('ca-agentx-stg-api', 0)]);
+    // Access given in a form the rules don't read: the type in another case, the
+    // older form under a resource, or a PIM request. `secret-access` refuses it.
+    for (const kind of [
+      'microsoft.authorization/roleAssignments',
+      'Microsoft.App/containerApps/providers/roleAssignments',
+    ]) {
+      const unread = changed(API_GRANT, (grant) => (grant.type = kind));
+      expect(policyProblems(unread, STAGING).map(describeProblem)).toEqual(
+        expect.arrayContaining([
+          `${grantName} [secret-access] is a ${kind}, which no rule reads: access is given only as Microsoft.Authorization/roleAssignments, written exactly so`,
+        ]),
+      );
+      expect(brokenRules(unread)).toEqual(['release-access', 'secret-access']);
+    }
+    const pim = {
+      type: 'Microsoft.Authorization/roleAssignmentScheduleRequests',
+      name: 'pim',
+      id: `${group}/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/pim`,
+      apiVersion: '2022-04-01',
+    };
+    expect(brokenRules(withExtra(pim))).toEqual(['secret-access']);
   });
 
   it('SEC-OPS-11 vault-secrets: a secret written on every run or on another condition, missing, doubled, unread, or elsewhere', () => {
@@ -1574,6 +1781,18 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(API_READS, change))).toEqual(['secret-access']);
     }
+    // CI's identity, which reads no secret: refused as a reader GRANTS doesn't name, not as someone unknown.
+    expect(
+      policyProblems(
+        changed(API_READS, (assignment) => (properties(assignment).principalId = principal('release'))),
+        STAGING,
+      )
+        .filter((problem) => problem.rule === 'secret-access')
+        .map((problem) => problem.message),
+    ).toEqual([
+      "lets release read db-app-password, which isn't one of its secrets (GRANTS)",
+      'must let api read db-app-password, which it needs (GRANTS)',
+    ]);
     // A wider scope is refused as that, not only as a reader the list doesn't name.
     for (const scope of [
       staging.predictedResources.find(VAULT)?.id,
@@ -1654,9 +1873,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['jobs']);
-    // A job the deployment needs, left out.
+    // A job the deployment needs, left out. CI's role would then be given on
+    // a migration job this deployment doesn't make.
     for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup']) {
-      expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({ workload, rules: ['jobs'] });
+      expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
+        workload,
+        rules: workload === 'migrate' ? ['release-access', 'jobs'] : ['jobs'],
+      });
     }
   });
 
@@ -1725,11 +1948,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // An app the deployment needs, left out. Zitadel's own secrets are then
     // read by nothing, and the login pages have nothing to sign a call to. A
-    // door would reach an app this deployment doesn't make.
+    // door would reach an app this deployment doesn't make, and so would CI's role.
     for (const workload of ['api', 'login', 'zitadel']) {
       expect({ workload, rules: brokenRules(without(APP(workload))) }).toEqual({
         workload,
-        rules: ['apps', 'public-doors'],
+        rules: workload === 'api' ? ['release-access', 'apps', 'public-doors'] : ['apps', 'public-doors'],
       });
     }
   });

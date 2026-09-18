@@ -54,6 +54,10 @@ func appName(environment string, workload string) string => 'ca-agentx-${shortNa
 func releaseSubject(environment string) string => 'repo:shahbaz242630@205810405/agent-x@1368211207:environment:${environment}'
 
 @export()
+@description('CI\'s role (G4), by the resource group it may be given in: a custom role is named by a GUID, made here from a fixed word so a new display name updates the role rather than orphaning it. The foundation defines it by this name and the apps deployment gives it by this name.')
+func releaseRoleName(groupId string) string => guid(groupId, 'release')
+
+@export()
 @description('A public door (G2e): a route config of the environment, by the host it serves. Azure allows lower-case letters and digits only, starting with a letter.')
 func doorName(environment string, door string) string => 'rtagentx${shortName(environment)}${door}'
 
