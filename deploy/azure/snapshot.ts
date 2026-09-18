@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { installedBicep } from '../../tooling/bicep/bicep.ts';
+import { newAppKeys } from './app-keys.ts';
 
 /** One resource as the snapshot predicts it. Values Azure only knows at deploy time stay as ARM expressions. */
 export interface PredictedResource {
@@ -93,6 +94,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY: standIn(24),
     AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY: standIn(24),
+    AGENTX_AZURE_APP_KEYS: newAppKeys(),
   };
 }
 
@@ -116,7 +118,7 @@ function runBicep(args: readonly string[], cwd: string, env: Record<string, stri
 }
 
 /** The JSON files the Bicep compiler reads, which a throwaway copy must keep. */
-const BICEP_READS: ReadonlySet<string> = new Set(['bicepconfig.json', 'github-ranges.json']);
+const BICEP_READS: ReadonlySet<string> = new Set(['bicepconfig.json', 'github-ranges.json', 'app-keys.json']);
 
 /** A throwaway copy of a deploy/azure folder, removed after `use` returns. */
 export function inCopy<T>(use: (dir: string) => T, source = AZURE_DIR): T {
@@ -124,9 +126,9 @@ export function inCopy<T>(use: (dir: string) => T, source = AZURE_DIR): T {
   try {
     cpSync(source, dir, {
       recursive: true,
-      // The checks and their snapshots stay out of the copy, but the two JSON
-      // files Bicep itself reads come with it: its linter settings, and the
-      // GitHub ranges network.bicep loads at build time (G2d-3).
+      // The checks and their snapshots stay out of the copy, but the JSON files
+      // Bicep itself reads come with it: its linter settings, the GitHub
+      // ranges network.bicep loads at build time (G2d-3), and the app's keys.
       filter: (file) => !/\.(?:ts|json)$/.test(file) || BICEP_READS.has(path.basename(file)),
     });
     return use(dir);

@@ -111,6 +111,11 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['a word under a double-quoted password key', join('  "db_pass', 'word": "some-', 'thing-long",')],
     [
+      'a quoted name given to a variable named key, through a call (PR #66)',
+      join('    const ', 'key = SECRET(', q, 'key-audit-', 'mac-v1', q, ');'),
+    ],
+    ['a quoted name given to a variable named key', join('let ', 'key = ', q, 'field-', 'encryption', q, ';')],
+    [
       'a quoted reader keying a list of password-named secrets (PR #28)',
       join('  ', q, 'zitadel-init', q, ': [', q, 'db-zitadel-pass', 'word', q, '],'),
     ],
@@ -159,6 +164,12 @@ describe('text the secret scanners mistake for a secret', () => {
       join('READS(', q, 'migrate', q, ', ', q, 'db-owner-pass', 'word', q, ')'),
     ],
     ['a short word under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, 'none', q, ',')],
+    ['a variable named for the key it picks', join('    const auditMac = SECRET(', q, 'key-audit-', 'mac-v1', q, ');')],
+    [
+      'a variable named key given no quoted name',
+      'const key = Object.keys(table).find((prefix) => url.startsWith(prefix));',
+    ],
+    ['a variable named key given a short quoted name', join('const key = pick(', q, 'mac', q, ');')],
     ['a reference under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, '${DB_PASS}', q, ',')],
   ])('leaves alone %s', (_name, line) => {
     expect(rulesOf('a.ts', line)).toEqual([]);

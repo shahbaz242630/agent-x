@@ -80,6 +80,14 @@ const PASSWORD_NAMED_KEY_WITH_WORD = /(['"`])[A-Za-z0-9_.-]*passw(?:or)?d\1\s*:\
 const WORD_KEY_WITH_PASSWORD_NAMED =
   /(['"`])[A-Za-z0-9_.-]{8,}\1\s*:\s*\[?[^:]*?(['"`])[A-Za-z0-9_.-]*passw(?:or)?d[A-Za-z0-9_.-]*\2/i;
 
+/**
+ * A variable named `key` given a quoted name, even through a call, which
+ * GitGuardian read as a generic high-entropy secret: a test's pick of one of
+ * the app's keys by its vault name (PR #66, S27). Name the variable for what it
+ * holds (`auditMac`).
+ */
+const KEY_NAMED_WITH_QUOTED_TEXT = /\b(?:const|let|var)\s+key\s*=\s*[^;\n]*?(['"`])[A-Za-z0-9_.-]{10,}\1/i;
+
 /** A required-variable placeholder with a message, which GitGuardian paired with a user name (PR #16, S10). */
 const PLACEHOLDER_WITH_MESSAGE = /\$\{[A-Za-z0-9_]+:\?[^}]+\}/;
 const YAML_FILE = /\.ya?ml$/i;
@@ -165,6 +173,12 @@ export function lineProblems(file: string, line: number, text: string): Problem[
     add(
       'scanner-bait',
       'a quoted word paired with a quoted password-named name; GitGuardian reads the word as the password. Write the pair as one string ("api reads db-app-password")',
+    );
+  }
+  if (KEY_NAMED_WITH_QUOTED_TEXT.test(text)) {
+    add(
+      'scanner-bait',
+      'a variable named key given a quoted name; GitGuardian reads the name as a secret. Name the variable for what it holds',
     );
   }
   if (YAML_FILE.test(file) && PLACEHOLDER_WITH_MESSAGE.test(text)) {

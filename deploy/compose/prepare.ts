@@ -1,5 +1,5 @@
 // Prepares the local stack's logins, once: `node deploy/compose/prepare.ts`.
-// The stack ships no passwords (SEC-OPS-08). This writes two things, both of
+// The stack ships no passwords (SEC-OPS-08). This writes three things, all of
 // which git ignores:
 //
 // - deploy/compose/.env, with a fresh random password for every login the
@@ -15,10 +15,15 @@
 //   `SYSTEM_USER_PRIVATE_KEY_FILE`, both of which name a file holding PEM
 //   text. Azure mounts the same two names from Key Vault at the same path
 //   (deploy/azure, G2d-2), so the settings are the same string in both
+// - deploy/compose/secrets/app-keys, with the app's own keys (ADR-011 §2), one
+//   file per key as the API reads them (`key-<purpose>-v1`, 32 random bytes as
+//   base64url). A key once written is kept: the stack's data depends on it
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 
 /** Where compose reads the file from: its own folder. */
 export const ENV_FILE = fileURLToPath(new URL('./.env', import.meta.url));
@@ -50,6 +55,12 @@ export const LOGIN_CLIENT_KEYS = {
   public: 'login-client-public-key',
   private: 'login-client-private-key',
 } as const;
+
+/**
+ * The app's keys, in a folder of their own that compose mounts into the API
+ * alone, at the path Azure mounts them (AGENTX_KEYS_DIR is /mnt/secrets in both).
+ */
+export const APP_KEYS = 'app-keys';
 
 /** Every variable the .env file holds, in the order it's written. */
 export const VARIABLES: readonly string[] = [...PASSWORDS, MASTER_KEY];
@@ -187,6 +198,32 @@ export function prepareKeys(dir: string = SECRETS_DIR, keyPair: KeyPair = newKey
 }
 
 /**
+ * One version 1 key for each of the app's purposes, written only where there
+ * is none: the stack's data is sealed with the keys it has, so a key is never
+ * replaced. Readable by anyone on this machine for the same reason as the key
+ * pair: the API runs as its own unprivileged user.
+ */
+export function prepareAppKeys(
+  dir: string = path.join(SECRETS_DIR, APP_KEYS),
+  random: Random = randomBytes,
+): 'created' | 'kept' {
+  mkdirSync(dir, { recursive: true });
+  let created = false;
+  for (const purpose of PURPOSES) {
+    const file = path.join(dir, `key-${purpose}-v1`);
+    // `wx` lets the file system decide, in one step, whether a key is already there.
+    try {
+      writeFileSync(file, `${random(32).toString('base64url')}\n`, { mode: 0o644, flag: 'wx' });
+      created = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (!statSync(file).isFile()) throw new NotAKeyFile(file);
+    }
+  }
+  return created ? 'created' : 'kept';
+}
+
+/**
  * Writes the .env file unless it exists: `wx` lets the file system decide, so
  * two runs at once can't both write it. An existing file keeps every value it
  * has, and any gap throws IncompleteEnvFile. Returns what happened, never a value.
@@ -204,20 +241,25 @@ export function prepareEnv(file: string = ENV_FILE, random: Random = randomBytes
   return 'kept';
 }
 
-/** What one run did to each of the two, so the operator is told which was already there. */
+/** What one run did to each of the three, so the operator is told which was already there. */
 export interface Prepared {
   readonly env: 'created' | 'kept';
   readonly keys: 'created' | 'kept';
+  readonly appKeys: 'created' | 'kept';
 }
 
-/** Both halves of the preparation: the logins, then the login key pair. */
+/** The whole preparation: the logins, the login key pair, then the app's keys. */
 export function prepare(
   file: string = ENV_FILE,
   dir: string = SECRETS_DIR,
   random: Random = randomBytes,
   keyPair: KeyPair = newKeyPair,
 ): Prepared {
-  return { env: prepareEnv(file, random), keys: prepareKeys(dir, keyPair) };
+  return {
+    env: prepareEnv(file, random),
+    keys: prepareKeys(dir, keyPair),
+    appKeys: prepareAppKeys(path.join(dir, APP_KEYS), random),
+  };
 }
 
 if (import.meta.main) {
@@ -232,6 +274,11 @@ if (import.meta.main) {
       done.keys === 'created'
         ? `Wrote the login container's key pair to ${SECRETS_DIR}.`
         : `Kept the login container's key pair in ${SECRETS_DIR}.`,
+    );
+    console.log(
+      done.appKeys === 'created'
+        ? `Wrote the app's missing keys to ${path.join(SECRETS_DIR, APP_KEYS)}.`
+        : `Kept the app's keys in ${path.join(SECRETS_DIR, APP_KEYS)}.`,
     );
   } catch (error) {
     const told = error instanceof IncompleteEnvFile || error instanceof HalfKeyPair || error instanceof NotAKeyFile;

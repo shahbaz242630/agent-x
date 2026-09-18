@@ -14,8 +14,12 @@
 // The config holds a secret (the database password), so the fields that count
 // towards the hash are listed one by one below, and the password is not among
 // them: a hash of a weak secret can be guessed offline.
+//
+// The keys the process loaded count too, by version and check value, never
+// the keys themselves: a key swapped under the same version changes the hash.
 import { createHash } from 'node:crypto';
 
+import type { KeyDescription } from '../keys/key-provider.ts';
 import type { Config } from './config.ts';
 
 export const WATCHED_VARIABLES = [
@@ -44,6 +48,8 @@ export const WATCHED_VARIABLES = [
 export interface ConfigFingerprint {
   /** `sha256:` and 64 hex digits. */
   readonly configHash: string;
+  /** Each key's versions, current version and check values (KeyProvider.describe), which count towards the hash. */
+  readonly keys: readonly KeyDescription[];
   /** Which watched variables are set, by name. Never their values. */
   readonly watchedVariables: readonly string[];
   /** The flags Node was started with, by name only (`--use-system-ca`, not what follows `=`). */
@@ -79,11 +85,13 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     },
     outbound: { allowedOrigins: config.outbound.allowedOrigins },
     payees: { coolingOffHours: config.payees.coolingOffHours },
+    keys: { directory: config.keys.directory, current: config.keys.current },
   };
 }
 
 export function configFingerprint(
   config: Config,
+  keys: readonly KeyDescription[],
   env: Env = process.env,
   nodeArguments: readonly string[] = process.execArgv,
 ): ConfigFingerprint {
@@ -92,12 +100,13 @@ export function configFingerprint(
   const watched = Object.fromEntries(
     WATCHED_VARIABLES.flatMap((name) => (env[name] === undefined ? [] : [[name, env[name]]])),
   );
-  const hash = createHash('sha256').update(JSON.stringify({ settings, watched, nodeArguments })).digest('hex');
+  const hash = createHash('sha256').update(JSON.stringify({ settings, keys, watched, nodeArguments })).digest('hex');
   const flags = [
     ...new Set(nodeArguments.filter((argument) => argument.startsWith('-')).map((flag) => flag.replace(/=.*$/s, ''))),
   ];
   return Object.freeze({
     configHash: `sha256:${hash}`,
+    keys,
     watchedVariables: Object.freeze(Object.keys(watched)),
     nodeFlags: Object.freeze(flags),
   });
