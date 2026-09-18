@@ -67,17 +67,29 @@ const expecting = (code: number) => (step: Step) => step.env?.EXPECTED_EXIT === 
 const running = (command: string) => (step: Step) => step.run?.includes(command) === true;
 
 describe('SEC-SC-02 the image is signed only by CI on main, and verified before deploy', () => {
-  it('lets only the publishing and attesting jobs push packages or ask for a signing token', () => {
+  it('lets only the publishing and attesting jobs push packages or ask for a signing token, and the prune remove them', () => {
     const holding = (scope: string) =>
       workflows.flatMap(({ file, workflow }) =>
         Object.entries(workflow.jobs)
           .filter(([, candidate]) => candidate.permissions?.[scope] === 'write')
           .map(([name]) => `${file}: ${name}`),
       );
+    // The prune job holds it too, to remove old versions (G4-5b): it asks for no signing token (below),
+    // runs no code but ours, and never logs in to the registry, so nothing it could push would verify.
     expect(holding('packages').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,
+      `${SIGNING_WORKFLOW}: image-prune`,
       `${SIGNING_WORKFLOW}: image-publish`,
     ]);
+    expect(
+      steps('image-prune').some((step) =>
+        /cosign|docker|oras|crane|curl|wget|\bgh\b/.test(`${step.uses ?? ''} ${step.run ?? ''}`),
+      ),
+    ).toBe(false);
+    expect(steps('image-prune').filter((step) => step.run !== undefined)).toHaveLength(1);
+    expect(steps('image-prune').find((step) => step.run !== undefined)?.run).toMatch(
+      /^node deploy\/image\/prune\.ts prune /,
+    );
     // The release job asks for a token too, but Azure's (release-job.test.ts): it pushes nothing and signs nothing.
     expect(holding('id-token').sort()).toEqual([
       `${SIGNING_WORKFLOW}: image-attest`,

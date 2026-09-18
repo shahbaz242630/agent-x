@@ -2,8 +2,8 @@
 // kept, and the one staging runs). What keeps it safe is held here: it runs
 // only on a push to main, only after the release has gone green (staging then
 // runs this run's image or a later commit's, and the prune keeps both, read
-// from the whole history), one at a time, and for now (G4-5a) it may only
-// read the package and says what it would remove.
+// from the whole history), one at a time, and it removes versions (G4-5b) with
+// no power to sign and no code but ours.
 import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
@@ -22,6 +22,7 @@ interface Step {
 interface Job {
   if?: string;
   needs?: string[] | string;
+  'timeout-minutes'?: number;
   environment?: unknown;
   concurrency?: unknown;
   permissions?: Record<string, string>;
@@ -44,11 +45,15 @@ describe('the image prune job', () => {
     expect(prune.concurrency).toEqual({ group: 'image-prune', 'cancel-in-progress': false });
   });
 
-  it('may only read the code and the package while it only plans (G4-5a)', () => {
-    expect(prune.permissions).toEqual({ contents: 'read', packages: 'read' });
+  it('may read the code and remove package versions, and ask for no signing token', () => {
+    expect(prune.permissions).toEqual({ contents: 'read', packages: 'write' });
   });
 
-  it('runs the plan alone, with the job token and the published digest, and nothing from outside', () => {
+  it('has time for a run’s 200 removals, one a second', () => {
+    expect(prune['timeout-minutes']).toBe(15);
+  });
+
+  it('runs the prune alone, with the job token and the published digest, and nothing from outside', () => {
     expect(steps.map((step) => step.uses?.replace(/@.*/, '') ?? 'run')).toEqual([
       'actions/checkout',
       'actions/setup-node',
@@ -59,13 +64,13 @@ describe('the image prune job', () => {
     expect(steps[0]?.with).toEqual({ 'persist-credentials': false, 'fetch-depth': 0 });
     expect(steps[1]?.with?.['check-latest']).toBe(false);
     expect(steps[2]).toEqual({
-      name: 'What pruning would remove (reads only)',
+      name: 'Prune old image versions',
       env: {
         GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
         COMMIT: '${{ github.sha }}',
         DIGEST: '${{ needs.image-publish.outputs.digest }}',
       },
-      run: 'node deploy/image/prune.ts plan "${COMMIT}" "${DIGEST}"',
+      run: 'node deploy/image/prune.ts prune "${COMMIT}" "${DIGEST}"',
     });
   });
 });

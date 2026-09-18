@@ -3,12 +3,21 @@
 // staging runs is kept whatever its age.
 //
 //   node deploy/image/prune.ts plan <commit> <digest of its image>
+//   node deploy/image/prune.ts prune <commit> <digest of its image>
 //
 // `plan` (G4-5a) reads the package and says what a prune would remove,
-// changing nothing. CI runs it after each release that went green, with the
-// commit the run is for and the digest its image job published, as the job's
-// own token (GITHUB_TOKEN and GITHUB_ACTOR, which Actions sets; `packages:
-// read`), in a checkout of the whole history.
+// changing nothing. `prune` (G4-5b) does it: the plan, then each version
+// removed, oldest first, one a second and at most 200 a run (GitHub allows 80
+// writes a minute and 500 an hour; what a run leaves, the next removes), then
+// the package read again to show every kept image still there and every
+// removed version gone. Only GitHub's success counts: a removal it answers any
+// other way stops the prune, red. A removed version can be restored for 30
+// days (the package's settings on GitHub).
+//
+// CI runs `prune` after each release that went green, with the commit the run
+// is for and the digest its image job published, as the job's own token
+// (GITHUB_TOKEN and GITHUB_ACTOR, which Actions sets; `packages: write`), in a
+// checkout of the whole history.
 //
 // A green release leaves staging on this run's image, or on a later commit's
 // when it was run again after a newer one (release.ts: "past"). So the prune
@@ -38,6 +47,8 @@
 // Everything else goes, which also clears what an earlier prune left half
 // done. This run's image must be in the package, tagged with its commit and
 // with its index, or nothing is removed.
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { type History, realHistory } from '../azure/git.ts';
 import { IMAGE_REPOSITORY } from './verify.ts';
 
@@ -60,13 +71,16 @@ export const MANIFESTS = `https://ghcr.io/v2/${OWNER}/${PACKAGE}/manifests`;
 export const PAGE_SIZE = 100;
 /** An end to the listing whatever the API sends: 5,000 versions is far past any real package. */
 export const MAX_PAGES = 50;
+/** At most this many removals a run, and this long between two: under GitHub's 500 writes an hour and 80 a minute. */
+export const MAX_REMOVALS = 200;
+export const PAUSE_MS = 1_000;
 
 const INDEX_MEDIA_TYPE = 'application/vnd.oci.image.index.v1+json';
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const INDEX_TAG = /^sha256-(?<hex>[0-9a-f]{64})$/;
 
-export const EXIT = { PLANNED: 0, REFUSED: 1, USAGE: 2 } as const;
+export const EXIT = { DONE: 0, REFUSED: 1, USAGE: 2 } as const;
 
 /** One version of the package, as the package API lists it. */
 export interface Version {
@@ -205,11 +219,12 @@ export function planPrune(
   return { kept, remove, removedImages: imagesIn(remove) };
 }
 
-/** Where the prune reads the package: GitHub's package API and its registry. */
+/** Where the prune reads the package, and removes from it: GitHub's package API and its registry. */
 export interface Package {
   readonly versions: () => Promise<Version[]>;
   /** The bundles an image's index lists, or nothing when it has no index. */
   readonly bundles: (image: string) => Promise<readonly string[] | undefined>;
+  readonly remove: (version: Version) => Promise<void>;
 }
 
 /** Why a request failed, by its status alone: never the headers sent, which hold the token. */
@@ -242,17 +257,18 @@ export function realPackage(token: string, actor: string, http: typeof fetch = f
     if (typeof pull !== 'string' || pull === '') throw new Error("the registry's sign-in sent no token");
     return pull;
   };
+  const api = {
+    accept: 'application/vnd.github+json',
+    authorization: `Bearer ${token}`,
+    'x-github-api-version': '2022-11-28',
+  };
   return {
     versions: async () => {
       // A version pushed while the pages are read can shift one onto the next page twice.
       const all = new Map<number, Version>();
       for (let page = 1; page <= MAX_PAGES; page += 1) {
         const response = await http(`${VERSIONS_API}?per_page=${String(PAGE_SIZE)}&page=${String(page)}`, {
-          headers: {
-            accept: 'application/vnd.github+json',
-            authorization: `Bearer ${token}`,
-            'x-github-api-version': '2022-11-28',
-          },
+          headers: api,
         });
         if (!response.ok) throw failed('the package API', response);
         const versions = versionsIn(await response.json());
@@ -274,6 +290,14 @@ export function realPackage(token: string, actor: string, http: typeof fetch = f
       }
       return bundlesIn(await response.json(), image);
     },
+    remove: async (version) => {
+      if (!Number.isSafeInteger(version.id) || version.id <= 0) {
+        throw new Error(`not a version's id: ${String(version.id)}`);
+      }
+      // Success only: GitHub can answer 404 for a version it won't let this token touch.
+      const response = await http(`${VERSIONS_API}/${String(version.id)}`, { method: 'DELETE', headers: api });
+      if (!response.ok) throw new Error(`removing ${version.digest}, ${failed('the package API', response).message}`);
+    },
   };
 }
 
@@ -285,6 +309,7 @@ export async function plan(
   source: Package,
   history: Pick<History, 'isAncestor'>,
   say: (line: string) => void,
+  removing = false,
 ): Promise<Plan> {
   const versions = await source.versions();
   const kept = imagesToKeep(versions, own, history);
@@ -303,7 +328,7 @@ export async function plan(
     say(`  ${image.commit}  ${when(image.created)}${image.digest === own.digest ? '  (this run)' : ''}`);
   }
   say(
-    `Would remove ${String(pruned.removedImages.length)} images and ` +
+    `${removing ? 'Removing' : 'Would remove'} ${String(pruned.removedImages.length)} images and ` +
       `${String(pruned.remove.length - pruned.removedImages.length)} other versions ` +
       '(their signatures and SBOMs, and indexes nothing reads):',
   );
@@ -311,7 +336,66 @@ export async function plan(
   return pruned;
 }
 
-export const USAGE = 'Usage: node deploy/image/prune.ts plan <40-hex commit> <sha256 digest of its image>';
+/** A prune that stopped once it had begun removing, and how many it had removed. */
+export class Stopped extends Error {
+  readonly removed: number;
+
+  constructor(message: string, removed: number, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'Stopped';
+    this.removed = removed;
+  }
+}
+
+/** The versions a run removes: the oldest first, and no more than a run may. */
+export const removalOrder = (remove: readonly Version[]): Version[] =>
+  [...remove].sort((one, other) => one.created - other.created || one.id - other.id).slice(0, MAX_REMOVALS);
+
+/**
+ * The plan, then each version it names removed, one at a time with a pause
+ * between; then the package read again, which must still hold every kept image
+ * and none of the versions removed.
+ */
+export async function prune(
+  own: Own,
+  source: Package,
+  history: Pick<History, 'isAncestor'>,
+  say: (line: string) => void,
+  pause: (ms: number) => Promise<unknown>,
+): Promise<void> {
+  const planned = await plan(own, source, history, say, true);
+  const now = removalOrder(planned.remove);
+  let removed = 0;
+  const stopped = (error: unknown): never => {
+    if (!(error instanceof Error)) throw error;
+    throw new Stopped(error.message, removed, { cause: error });
+  };
+  for (const version of now) {
+    if (removed > 0) await pause(PAUSE_MS);
+    await source.remove(version).catch(stopped);
+    removed += 1;
+  }
+  say(`Removed ${String(removed)} versions.`);
+  const left = planned.remove.length - now.length;
+  if (left > 0) say(`${String(left)} more are left for the next run (at most ${String(MAX_REMOVALS)} a run).`);
+
+  const after = await source.versions().catch(stopped);
+  const listed = new Set(after.map((version) => version.digest));
+  const missing = planned.kept.images.filter((image) => !listed.has(image.digest));
+  if (missing.length > 0) {
+    throw new Stopped(
+      `kept images are missing afterwards: ${missing.map((image) => image.commit).join(', ')}`,
+      removed,
+    );
+  }
+  const still = now.filter((version) => listed.has(version.digest));
+  if (still.length > 0) {
+    throw new Stopped(`${String(still.length)} of the versions removed are still listed`, removed);
+  }
+  say(`The package now holds ${String(after.length)} versions, every kept image among them.`);
+}
+
+export const USAGE = 'Usage: node deploy/image/prune.ts plan|prune <40-hex commit> <sha256 digest of its image>';
 
 export async function main(
   argv: readonly string[],
@@ -319,10 +403,11 @@ export async function main(
   http: typeof fetch = fetch,
   history: Pick<History, 'isAncestor'> = realHistory(),
   say: (line: string) => void = console.log,
+  pause: (ms: number) => Promise<unknown> = sleep,
 ): Promise<number> {
   const [command, commit, digest, ...rest] = argv;
   if (
-    command !== 'plan' ||
+    (command !== 'plan' && command !== 'prune') ||
     commit === undefined ||
     !COMMIT.test(commit) ||
     digest === undefined ||
@@ -337,15 +422,24 @@ export async function main(
     say('Refused: GITHUB_TOKEN and GITHUB_ACTOR must be set (Actions sets both). Nothing was removed.');
     return EXIT.REFUSED;
   }
+  const source = realPackage(token, actor, http);
   try {
-    await plan({ commit, digest }, realPackage(token, actor, http), history, say);
+    if (command === 'plan') {
+      await plan({ commit, digest }, source, history, say);
+      say('Nothing was removed: this is the plan alone.');
+    } else {
+      await prune({ commit, digest }, source, history, say, pause);
+    }
   } catch (error) {
+    if (error instanceof Stopped) {
+      say(`Stopped after removing ${String(error.removed)} versions: ${error.message}.`);
+      return EXIT.REFUSED;
+    }
     if (!(error instanceof Error)) throw error;
     say(`Refused: ${error.message}. Nothing was removed.`);
     return EXIT.REFUSED;
   }
-  say('Nothing was removed: this is the plan alone (G4-5a).');
-  return EXIT.PLANNED;
+  return EXIT.DONE;
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
