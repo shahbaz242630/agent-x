@@ -1,10 +1,14 @@
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
+import { PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
-import { findLeaks, LogCapture } from '@agentx/testing';
+import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type ApiProcess, runApi } from './main.ts';
 import type { buildServer } from './server.ts';
@@ -74,8 +78,32 @@ const MISPLACED = 'value that must never be printed';
 /** Plain words standing in for the database login. */
 const DB_LOGIN = 'stand-in login for these tests';
 
+/** Stand-in keys, one per purpose, as the platform mounts real ones. */
+const KEYS = writeTestKeys(PURPOSES);
+afterAll(() => {
+  KEYS.remove();
+});
+
 /** A test run: any free port, on this machine only. */
-const ENV = { AGENTX_ENV: 'test', AGENTX_HTTP_PORT: '0', AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN };
+const ENV = {
+  AGENTX_ENV: 'test',
+  AGENTX_HTTP_PORT: '0',
+  AGENTX_DB_HOST: 'db',
+  AGENTX_DB_PASSWORD: DB_LOGIN,
+  AGENTX_KEYS_DIR: KEYS.directory,
+};
+
+/** A keys folder holding these files, removed after the test. */
+function keysFolder(files: Readonly<Record<string, string>>): string {
+  const directory = mkdtempSync(path.join(tmpdir(), 'agentx-api-keys-'));
+  for (const [name, contents] of Object.entries(files)) writeFileSync(path.join(directory, name), contents);
+  folders.push(directory);
+  return directory;
+}
+const folders: string[] = [];
+afterEach(() => {
+  for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true });
+});
 
 class FakeProcess extends EventEmitter implements ApiProcess {
   readonly written: string[] = [];
@@ -138,6 +166,40 @@ describe('SEC-AV-03 the API refuses to start on a bad config', () => {
     ]);
     expect(findLeaks(capture.text, [MISPLACED])).toEqual([]);
     expect(fake.created).toEqual([]);
+  });
+
+  it('refuses to start without its keys, naming each missing key file, before it opens the database', async () => {
+    const { host, server, capture } = await start({ ...ENV, AGENTX_KEYS_DIR: keysFolder({}) });
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBe(1);
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({
+        event: 'api.start_refused',
+        problems: PURPOSES.map((purpose) => `${purpose} has no key for its current version 1 (key-${purpose}-v1)`),
+      }),
+    ]);
+    expect(fake.created).toEqual([]);
+  });
+
+  it('refuses a key file that holds no key, without showing what it holds', async () => {
+    const good = Object.fromEntries(
+      PURPOSES.map((purpose, index) => [`key-${purpose}-v1`, Buffer.alloc(32, index + 100).toString('base64url')]),
+    );
+    const { server, capture } = await start({
+      ...ENV,
+      AGENTX_KEYS_DIR: keysFolder({ ...good, 'key-audit-mac-v1': MISPLACED }),
+    });
+    expect(server).toBeUndefined();
+    expect(capture.lines()).toEqual([
+      expect.objectContaining({
+        event: 'api.start_refused',
+        problems: [
+          'key-audit-mac-v1 must hold one key: 32 random bytes written as base64url, 43 characters',
+          'audit-mac has no key for its current version 1 (key-audit-mac-v1)',
+        ],
+      }),
+    ]);
+    expect(findLeaks(capture.text, [MISPLACED])).toEqual([]);
   });
 
   it('logs an unexpected error while reading the config as a refusal too', async () => {
@@ -253,11 +315,30 @@ describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', 
         nodeFlags: expect.any(Array) as unknown,
       }),
     );
+    // Each key's versions and check value, so a key swapped under the same version shows.
+    expect(starting?.keys).toEqual(
+      PURPOSES.map((purpose): unknown =>
+        expect.objectContaining({
+          purpose,
+          current: 1,
+          versions: [
+            expect.objectContaining({ version: 1, check: expect.stringMatching(/^[0-9a-f]{32}$/) as unknown }),
+          ],
+        }),
+      ),
+    );
     expect(listening).toEqual(
       expect.objectContaining({ event: 'api.listening', ports: server?.addresses().map((address) => address.port) }),
     );
     expect(listening?.ports).toEqual([expect.any(Number)]);
     expect((await server?.inject('/health'))?.json()).toEqual({ status: 'ok' });
+  });
+
+  it('never writes a key to the log', async () => {
+    const { capture } = await start();
+    const keys = PURPOSES.map((_purpose, index) => Buffer.alloc(32, index + 1));
+    const written = keys.flatMap((key) => [key.toString('base64url'), key.toString('base64'), key.toString('hex')]);
+    expect(findLeaks(capture.text, written)).toEqual([]);
   });
 
   it('names the watched variables that are set, never their values', async () => {

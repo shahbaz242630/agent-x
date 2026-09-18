@@ -11,6 +11,8 @@ const PROXIES = '10.0.0.0/23';
 const DB_HOST = 'db.internal.example';
 /** Plain words, so secret scanners ignore it. */
 const DB_LOGIN = 'app login for these tests';
+/** Where the platform mounts the keys; loadConfig checks the setting, and loadKeys reads the files. */
+const KEYS_DIR = '/mnt/secrets';
 const MINIMAL: Env = {
   AGENTX_ENV: 'production',
   AGENTX_RELEASE: RELEASE,
@@ -18,6 +20,7 @@ const MINIMAL: Env = {
   AGENTX_TRUSTED_PROXIES: PROXIES,
   AGENTX_DB_HOST: DB_HOST,
   AGENTX_DB_PASSWORD: DB_LOGIN,
+  AGENTX_KEYS_DIR: KEYS_DIR,
 };
 const DB_DEFAULTS = {
   host: DB_HOST,
@@ -29,7 +32,7 @@ const DB_DEFAULTS = {
   poolMax: 10,
 };
 /** The database settings a local run can't do without, for tests of the other settings' local defaults. */
-const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN };
+const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN, AGENTX_KEYS_DIR: KEYS_DIR };
 
 /** The problems loadConfig reports, or [] when it accepts the config. */
 function problemsWith(env: Env): readonly string[] {
@@ -43,7 +46,7 @@ function problemsWith(env: Env): readonly string[] {
 }
 
 describe('config: a correct config loads', () => {
-  it('needs only the environment, the release and the public origin, and fills in the defaults', () => {
+  it('needs only the environment, the release, the public origin and where the keys are, and fills in the defaults', () => {
     expect(loadConfig(MINIMAL)).toEqual({
       environment: 'production',
       release: RELEASE,
@@ -58,6 +61,7 @@ describe('config: a correct config loads', () => {
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
       payees: { coolingOffHours: 24 },
+      keys: { directory: KEYS_DIR, current: {} },
     });
   });
 
@@ -86,6 +90,8 @@ describe('config: a correct config loads', () => {
       AGENTX_DB_PASSWORD: DB_LOGIN,
       AGENTX_DB_TLS: 'verify-full',
       AGENTX_DB_POOL_MAX: '25',
+      AGENTX_KEYS_DIR: '/mnt/keys',
+      AGENTX_KEYS_CURRENT: 'field-encryption:3,audit-mac:2,request-hash:1',
     });
     expect(config).toEqual({
       environment: 'staging',
@@ -109,7 +115,10 @@ describe('config: a correct config loads', () => {
       },
       outbound: { allowedOrigins: ['https://api.partner.example:8443', 'https://telemetry.example'] },
       payees: { coolingOffHours: 48 },
+      keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
     });
+    // In the keys' own order, whatever order they were set in, so the fingerprint doesn't depend on it.
+    expect(Object.keys(config.keys.current)).toEqual(['request-hash', 'audit-mac', 'field-encryption']);
   });
 
   it('ignores variables that are not AGENTX_ settings', () => {
@@ -130,6 +139,8 @@ describe('config: a correct config loads', () => {
     expect(Object.isFrozen(config.outbound.allowedOrigins)).toBe(true);
     expect(Object.isFrozen(config.payees)).toBe(true);
     expect(Object.isFrozen(config.db)).toBe(true);
+    expect(Object.isFrozen(config.keys)).toBe(true);
+    expect(Object.isFrozen(config.keys.current)).toBe(true);
     expect(() => (config.outbound.allowedOrigins as string[]).push('https://evil.example')).toThrow(TypeError);
     expect(() => (config.http.trustedProxies as string[]).push('0.0.0.0/0')).toThrow(TypeError);
   });
@@ -139,6 +150,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   it('refuses a missing environment: the app must know if it is in production', () => {
     expect(problemsWith({})).toEqual([
       'AGENTX_ENV: is required',
+      'AGENTX_KEYS_DIR: is required',
       'AGENTX_DB_HOST: is required',
       expect.stringMatching(/^AGENTX_DB_PASSWORD is required/),
     ]);
@@ -162,6 +174,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_RATE_LIMIT_PER_MINUTE',
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
+    'AGENTX_KEYS_DIR',
+    'AGENTX_KEYS_CURRENT',
     'AGENTX_DB_HOST',
     'AGENTX_DB_PORT',
     'AGENTX_DB_NAME',
@@ -188,6 +202,54 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       ]);
     },
   );
+
+  describe("the app's keys (ADR-011 §2)", () => {
+    it.each(['development', 'test', 'staging', 'production'])('needs to know where they are in %s', (environment) => {
+      const { AGENTX_KEYS_DIR: _keys, ...withoutKeys } = MINIMAL;
+      expect(problemsWith({ ...withoutKeys, AGENTX_ENV: environment })).toEqual(['AGENTX_KEYS_DIR: is required']);
+    });
+
+    it.each(['secrets', './secrets', 'mnt/secrets'])(
+      'refuses %s, a folder named relative to where the app started',
+      (folder) => {
+        expect(problemsWith({ ...MINIMAL, AGENTX_KEYS_DIR: folder })).toEqual([
+          'AGENTX_KEYS_DIR: must be an absolute path, such as /mnt/secrets',
+        ]);
+      },
+    );
+
+    it.each([
+      ['a purpose alone', 'audit-mac'],
+      ['version 0', 'audit-mac:0'],
+      ['a leading zero', 'audit-mac:02'],
+      ['a v before the version', 'audit-mac:v2'],
+      ['a space', 'audit-mac: 2'],
+      ['a purpose the app has no key for', 'api-token:2'],
+      ['a trailing comma', 'audit-mac:2,'],
+      ['an equals sign', 'audit-mac=2'],
+    ])("refuses a key's current version written with %s", (_what, value) => {
+      const problems = problemsWith({ ...MINIMAL, AGENTX_KEYS_CURRENT: `request-hash:2,${value}` });
+      expect(problems).toEqual([
+        expect.stringMatching(
+          /^AGENTX_KEYS_CURRENT: entry [23] is not a key's current version\. Write each as <purpose>:<version>, /,
+        ),
+      ]);
+    });
+
+    it('names every purpose it knows, so the operator can see the right spelling', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_KEYS_CURRENT: 'audit:2' })).toEqual([
+        "AGENTX_KEYS_CURRENT: entry 1 is not a key's current version. Write each as <purpose>:<version>, " +
+          'the purpose one of agent-key-pepper, request-hash, audit-mac, payee-index, field-encryption, audit-anchor ' +
+          'and the version a whole number from 1, comma-separated with no spaces',
+      ]);
+    });
+
+    it('refuses one key given two current versions', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_KEYS_CURRENT: 'audit-mac:2,request-hash:2,audit-mac:3' })).toEqual([
+        'AGENTX_KEYS_CURRENT: names a key more than once: give each key one current version',
+      ]);
+    });
+  });
 
   describe('payee cooling-off (ADR-012 safety minimum: 24 hours)', () => {
     it.each(['0', '23'])('refuses %s hours, below the minimum', (hours) => {
@@ -271,6 +333,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
         AGENTX_LOG_EVENT_CAP_PER_MINUTE: '5',
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'api.partner.example',
         AGENTX_PAYEE_COOLING_OFF_HOURS: '1',
+        AGENTX_KEYS_DIR: 'keys',
+        AGENTX_KEYS_CURRENT: 'audit-mac:0',
         AGENTX_LOG_LEVLE: 'debug',
         NODE_TLS_REJECT_UNAUTHORIZED: '0',
       }),
@@ -283,6 +347,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       expect.stringMatching(/^AGENTX_LOG_EVENT_CAP_PER_MINUTE: /),
       expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: /),
       expect.stringMatching(/^AGENTX_PAYEE_COOLING_OFF_HOURS: /),
+      expect.stringMatching(/^AGENTX_KEYS_DIR: /),
+      expect.stringMatching(/^AGENTX_KEYS_CURRENT: /),
       expect.stringMatching(/^AGENTX_DB_HOST: is required$/),
       expect.stringMatching(/^AGENTX_DB_PASSWORD is required, or AGENTX_DB_PASSWORD_FILE /),
     ]);
@@ -316,6 +382,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://api.partner.example',
         AGENTX_DB_HOST: DB_HOST,
         AGENTX_DB_PASSWORD: DB_LOGIN,
+        AGENTX_KEYS_DIR: KEYS_DIR,
       }),
     ).toEqual([
       expect.stringMatching(/^AGENTX_OUTBOUND_ALLOWED_ORIGINS: plain http/),
@@ -333,6 +400,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
         AGENTX_PAYEE_COOLING_OFF_HOURS: '1',
         AGENTX_DB_HOST: DB_HOST,
         AGENTX_DB_PASSWORD: DB_LOGIN,
+        AGENTX_KEYS_DIR: KEYS_DIR,
       }),
     ).toThrow(
       'Refusing to start: 2 config problem(s).\n' +
@@ -356,6 +424,8 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
       AGENTX_RATE_LIMIT_PER_MINUTE: misplaced,
       AGENTX_OUTBOUND_ALLOWED_ORIGINS: `https://api.partner.example,${misplaced}`,
       AGENTX_PAYEE_COOLING_OFF_HOURS: misplaced,
+      AGENTX_KEYS_DIR: misplaced,
+      AGENTX_KEYS_CURRENT: misplaced,
       AGENTX_DB_HOST: misplaced,
       AGENTX_DB_PORT: misplaced,
       AGENTX_DB_NAME: misplaced,
@@ -370,7 +440,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     };
     const problems = problemsWith(env);
     // Every variable but the app's password, which any text may be. The migration login is refused by name.
-    expect(problems).toHaveLength(21);
+    expect(problems).toHaveLength(23);
     expect(problems.filter((problem) => problem.toLowerCase().includes(misplaced))).toEqual([]);
   });
 });

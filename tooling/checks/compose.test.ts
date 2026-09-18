@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { LOGIN_CLIENT_KEYS, VARIABLES } from '../../deploy/compose/prepare.ts';
+import { APP_KEYS, LOGIN_CLIENT_KEYS, VARIABLES } from '../../deploy/compose/prepare.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
 
@@ -216,6 +216,21 @@ const mountersOf = (secret: string): string[] =>
 /** Exactly how one service mounts it, so a writable or wrongly placed mount fails. */
 const mountIn = (service: string, secret: string): string | undefined =>
   (file.services[service]?.volumes ?? []).find((volume) => volume.startsWith(`./secrets/${secret}:`));
+
+describe("ADR-011 §2: the app's keys, as Azure mounts them", () => {
+  it('mounts the folder prepare writes them to into the API alone, where it cannot write, at the path Azure uses', () => {
+    const mounting = services
+      .filter(([, service]) => (service.volumes ?? []).some((volume) => volume.startsWith(`./secrets/${APP_KEYS}:`)))
+      .map(([name]) => name);
+    expect(mounting).toEqual(['api']);
+    expect(mountIn('api', APP_KEYS)).toBe(`./secrets/${APP_KEYS}:${SECRETS_PATH}:ro`);
+    expect(file.services.api?.environment?.AGENTX_KEYS_DIR).toBe(SECRETS_PATH);
+  });
+
+  it('gives the API nothing else from the secrets folder: the login key pair stays with the login service', () => {
+    expect(file.services.api?.volumes).toEqual([`./secrets/${APP_KEYS}:${SECRETS_PATH}:ro`]);
+  });
+});
 
 describe('ADR-003 and ADR-013: the login service as Azure runs it', () => {
   it('gives each half of the key pair to one container only, as a file it cannot write', () => {

@@ -111,6 +111,11 @@ describe('text the secret scanners mistake for a secret', () => {
     ],
     ['a word under a double-quoted password key', join('  "db_pass', 'word": "some-', 'thing-long",')],
     [
+      'a call named for a secret given a name with a digit (PRs #66, #67)',
+      join('    const auditMac = SEC', 'RET(', q, 'key-audit-', 'mac-v1', q, ');'),
+    ],
+    ['the same in lower case', join('pick(sec', 'ret(', q, 'db-', '2', q, '));')],
+    [
       'a quoted reader keying a list of password-named secrets (PR #28)',
       join('  ', q, 'zitadel-init', q, ': [', q, 'db-zitadel-pass', 'word', q, '],'),
     ],
@@ -159,6 +164,14 @@ describe('text the secret scanners mistake for a secret', () => {
       join('READS(', q, 'migrate', q, ', ', q, 'db-owner-pass', 'word', q, ')'),
     ],
     ['a short word under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, 'none', q, ',')],
+    [
+      'a call named for a secret given a name without a digit',
+      join('    SEC', 'RET(', q, 'db-app-pass', 'word', q, '),'),
+    ],
+    [
+      'a call named for a secret given a name built when the test runs',
+      join('    SEC', 'RET(keyNamed(', q, 'audit-mac', q, ')),'),
+    ],
     ['a reference under a quoted password key', join('  ', q, 'pass', 'word', q, ': ', q, '${DB_PASS}', q, ',')],
   ])('leaves alone %s', (_name, line) => {
     expect(rulesOf('a.ts', line)).toEqual([]);

@@ -14,5 +14,6 @@ export {
 } from './db/test-database.ts';
 export type { TestLogin, TestPostgresServer } from './db/test-server.ts';
 export { SequentialIds } from './ids.ts';
+export { type TestKeys, writeTestKeys } from './keys.ts';
 export { findLeaks, type Leak, LogCapture, SENSITIVE_SAMPLES } from './log-scan.ts';
 export { BarrierBroken, failures, race, type RaceOptions, successes } from './race.ts';

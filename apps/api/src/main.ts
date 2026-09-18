@@ -1,8 +1,8 @@
 // The API process: start-up, shutdown and crash handling around the server.
 // Run it with `node apps/api/src/main.ts`. In order, it:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
-// 2. reads the config, or refuses to start and says why (SEC-AV-03)
-// 3. logs the config fingerprint (SEC-OPS-05)
+// 2. reads the config and the keys, or refuses to start and says why (SEC-AV-03)
+// 3. logs the config fingerprint, the keys' versions and check values among it (SEC-OPS-05)
 // 4. opens the database pool as the app's role and refuses to run as one that
 //    could get round the tenant walls (ADR-005 §3, APP-02)
 // 5. listens, and stops cleanly on SIGTERM or SIGINT: HTTP first, so every
@@ -12,6 +12,7 @@
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
 import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
+import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import {
   createLogger,
   createStartupLogger,
@@ -136,10 +137,12 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const { destination } = options;
 
   let config: Config;
+  let keys: KeyProvider;
   try {
     config = loadConfig(options.env);
+    keys = loadKeys(config.keys);
   } catch (error) {
-    // A ConfigError's problems name each variable and rule, never a value.
+    // A ConfigError's problems name each variable, key file and rule, never a value.
     const startup = createStartupLogger({ service: SERVICE, destination });
     startup.error('api.start_refused', error instanceof ConfigError ? { problems: error.problems } : { err: error });
     startup.flush();
@@ -153,7 +156,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     logger.flush();
     host.exit(1);
   });
-  logger.info('api.starting', { ...configFingerprint(config, options.env) });
+  logger.info('api.starting', { ...configFingerprint(config, keys.describe(), options.env) });
 
   const database = await connectDatabase(config, logger);
   if (database === undefined) {

@@ -4,7 +4,9 @@
 //   node deploy/azure/deploy.ts secrets --all
 //   node deploy/azure/deploy.ts apps
 //
-// and, later, `secrets --rotate db-app-password [more names]`; `apps
+// and, later, `secrets --rotate db-app-password [more names]`; `secrets
+// --keys`, which creates the app's keys the vault doesn't hold yet (a new one,
+// or a new version) and changes nothing else; `apps
 // --keep-running`, which keeps one replica of each app running, billed, until
 // `apps` runs again without it (for a test, or while something needs the apps
 // up); `alerts`, which changes nothing and says whether the alerts can reach
@@ -15,8 +17,8 @@
 //
 // The two secrets that belong to people — the database admin's password and
 // Zitadel's first admin's — are pasted from the password manager into a prompt
-// that doesn't show what is typed. The six that belong to machines are made
-// here, in memory. Every one of them reaches Azure only through the
+// that doesn't show what is typed. The six that belong to machines, and the
+// app's keys, are made here, in memory. Every one of them reaches Azure only through the
 // environment of the child process that runs the deployment: never printed,
 // never written to a file, never on a command line, where the process list
 // would show it.
@@ -41,6 +43,7 @@ import { BICEP_VERSION, installedBicep } from '../../tooling/bicep/bicep.ts';
 import { installedCosign } from '../../tooling/cosign/cosign.ts';
 import { type KeyPair, newKeyPair, newMasterKey, newPassword, type Random } from '../compose/prepare.ts';
 import { IMAGE_REPOSITORY, type Outcome, runCosign, SOURCE_REPOSITORY, verifyImage } from '../image/verify.ts';
+import { APP_KEYS, newAppKeys } from './app-keys.ts';
 import { type Checkout, realCheckout } from './git.ts';
 import { describeProblem, policyProblems } from './policy.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
@@ -92,6 +95,13 @@ export const VAULT_SECRETS: Readonly<
   'zitadel-masterkey': { variable: 'AGENTX_AZURE_ZITADEL_MASTERKEY', source: 'once' },
 };
 
+/**
+ * The app's keys (app-keys.json), fresh on every run as one JSON value
+ * (staging.secrets.bicepparam). Each is created once: a key the vault holds
+ * keeps its value, whatever a run brings.
+ */
+export const APP_KEYS_VARIABLE = 'AGENTX_AZURE_APP_KEYS';
+
 const ADMIN_PASSWORD = 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD';
 const ALERT_EMAIL = 'AGENTX_AZURE_ALERT_EMAIL';
 
@@ -104,7 +114,11 @@ const PERSON_LABELS: Readonly<Record<string, string>> = {
   'zitadel-admin-password': "Zitadel's first admin's password",
 };
 
-export type SecretPlan = { readonly kind: 'all' } | { readonly kind: 'rotate'; readonly names: ReadonlySet<string> };
+/** Every secret (`all`), the ones named (`rotate`), or only the app's keys the vault lacks (`keys`). */
+export type SecretPlan =
+  | { readonly kind: 'all' }
+  | { readonly kind: 'rotate'; readonly names: ReadonlySet<string> }
+  | { readonly kind: 'keys' };
 
 export type Request =
   | { readonly command: 'foundation' }
@@ -125,6 +139,7 @@ export const USAGE = `Usage, from your own terminal window:
   node deploy/azure/deploy.ts foundation
   node deploy/azure/deploy.ts secrets --all
   node deploy/azure/deploy.ts secrets --rotate <secret name> [...]
+  node deploy/azure/deploy.ts secrets --keys
   node deploy/azure/deploy.ts apps [--commit <40-hex commit on main>] [--keep-running]
   node deploy/azure/deploy.ts alerts
   node deploy/azure/deploy.ts dns
@@ -164,9 +179,21 @@ export function parseArguments(argv: readonly string[]): Request {
     if (names.length > 0) throw new UsageError('--all takes no names: it writes every secret');
     return { command, plan: { kind: 'all' } };
   }
-  if (mode !== '--rotate') throw new UsageError('secrets needs --all (the first run) or --rotate <names>');
+  if (mode === '--keys') {
+    if (names.length > 0)
+      throw new UsageError('--keys takes no names: it creates every key in app-keys.json the vault lacks');
+    return { command, plan: { kind: 'keys' } };
+  }
+  if (mode !== '--rotate') {
+    throw new UsageError('secrets needs --all (the first run), --rotate <names> or --keys');
+  }
   if (names.length === 0) throw new UsageError('--rotate needs at least one secret name');
   for (const name of names) {
+    if (APP_KEYS.includes(name)) {
+      throw new UsageError(
+        `${name} is never written again: what it sealed or signed needs it as it was. A key rotates by a new version in app-keys.json, then secrets --keys (Azure.md)`,
+      );
+    }
     const secret = VAULT_SECRETS[name];
     if (secret === undefined) {
       throw new UsageError(`${name} isn't a secret the vault holds: ${Object.keys(VAULT_SECRETS).join(', ')}`);
@@ -184,7 +211,8 @@ export function parseArguments(argv: readonly string[]): Request {
   return { command, plan: { kind: 'rotate', names: rotated } };
 }
 
-const planIncludes = (plan: SecretPlan, name: string): boolean => plan.kind === 'all' || plan.names.has(name);
+const planIncludes = (plan: SecretPlan, name: string): boolean =>
+  plan.kind === 'all' || (plan.kind === 'rotate' && plan.names.has(name));
 
 /** The people's secrets a run must ask for. */
 export const peopleAskedFor = (plan: SecretPlan): string[] =>
@@ -201,7 +229,8 @@ export interface Makers {
  * Every variable a secrets run sets: a value for each secret the plan writes,
  * and an empty one for each it leaves as the vault has it (the parameters file
  * refuses a missing one, so a misspelt name can't pass for a rotation). The
- * master key always goes, fresh; Azure keeps only the first.
+ * master key and the app's keys always go, fresh; Azure keeps only the first
+ * of each.
  */
 export function secretValues(
   plan: SecretPlan,
@@ -235,18 +264,20 @@ export function secretValues(
         break;
     }
   }
+  values[APP_KEYS_VARIABLE] = newAppKeys(makers.random);
   return values;
 }
 
 /** One line per secret: what the run does with it. Names only, never a value. */
 export function describePlan(plan: SecretPlan): string[] {
-  return Object.entries(VAULT_SECRETS).map(([name, secret]) => {
+  const secrets = Object.entries(VAULT_SECRETS).map(([name, secret]) => {
     if (secret.source === 'once') return `  ${name}: written only if the vault has none yet`;
     if (!planIncludes(plan, name)) return `  ${name}: kept as the vault has it`;
     return secret.source === 'person'
       ? `  ${name}: written, from what you paste`
       : `  ${name}: written, made fresh by this run`;
   });
+  return [...secrets, ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`)];
 }
 
 /**
@@ -476,13 +507,19 @@ export const text = (value: unknown): string => (typeof value === 'string' ? val
 /**
  * A run's values with every secret replaced by a stand-in of the same shape:
  * an empty one stays empty, since that is what decides whether a secret is
- * written, and the master key stays 32 characters. Everything else is as given.
+ * written, the master key stays 32 characters, and the app's keys stay one
+ * JSON value with a key each. Everything else is as given.
  */
 export function shapedForPolicy(values: Readonly<Record<string, string>>, random: Random): Record<string, string> {
   const shaped: Record<string, string> = {};
   for (const [name, value] of Object.entries(values)) {
     const bytes = name === VAULT_SECRETS['zitadel-masterkey']?.variable ? 16 : 24;
-    shaped[name] = SECRET_VARIABLES.has(name) && value !== '' ? random(bytes).toString('hex') : value;
+    shaped[name] =
+      name === APP_KEYS_VARIABLE
+        ? newAppKeys(random)
+        : SECRET_VARIABLES.has(name) && value !== ''
+          ? random(bytes).toString('hex')
+          : value;
   }
   return shaped;
 }
@@ -819,17 +856,45 @@ function armList(steps: Steps, first: string, what: string): unknown[] {
   return items;
 }
 
+/** A secret as the vault lists it: its name, and its current version's URL (never its value). */
+interface Listed {
+  readonly name: string;
+  readonly version: string;
+}
+
 /**
- * The names of the secrets the vault already holds (never their values). A
- * first page alone showed three of nine, and an empty one would let `--all`
- * skip its question (S19).
+ * The secrets the vault already holds. A first page alone showed three of
+ * nine, and an empty one would let `--all` skip its question (S19).
  */
-function secretsInVault(steps: Steps, subscription: string, vault: string): string[] {
+function secretsInVault(steps: Steps, subscription: string, vault: string): Listed[] {
   return armList(
     steps,
     `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`,
     "the vault's secrets",
-  ).map((secret) => text((secret as { name?: unknown }).name));
+  ).map((secret) => {
+    const listed = secret as { name?: unknown; properties?: { secretUriWithVersion?: unknown } };
+    return { name: text(listed.name), version: text(listed.properties?.secretUriWithVersion) };
+  });
+}
+
+/**
+ * What a run did to the app's keys, from the vault's list before and after it:
+ * every key must be there, and one the vault held before must still be the
+ * version it was. A key written again would leave what it sealed unreadable
+ * and what it signed unchecked, so every run checks that `@onlyIfNotExists()`
+ * held for each key in the list.
+ */
+export function keyProblems(before: readonly Listed[], after: readonly Listed[]): string[] {
+  return APP_KEYS.flatMap((key) => {
+    const now = after.find((secret) => secret.name === key);
+    if (now === undefined) return [`${key} isn't in the vault, so the API won't start: run secrets --keys again`];
+    const was = before.find((secret) => secret.name === key);
+    return was !== undefined && was.version !== now.version
+      ? [
+          `${key} was written again, so what it sealed may not open and what it signed may not check: stop, and follow Azure.md, "A key written again"`,
+        ]
+      : [];
+  });
 }
 
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
@@ -896,8 +961,15 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
     name,
   ]);
   if (!succeeded(steps, name, ended)) return 1;
+  const now = secretsInVault(steps, subscription, vault);
   steps.terminal.say('Deployed. The vault now holds:');
-  for (const secret of secretsInVault(steps, subscription, vault).sort()) steps.terminal.say(`  ${secret}`);
+  for (const secret of now.map((listed) => listed.name).sort()) steps.terminal.say(`  ${secret}`);
+  const problems = keyProblems(existing, now);
+  for (const problem of problems) steps.terminal.say(problem);
+  if (problems.length > 0) return 1;
+  steps.terminal.say(
+    `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
+  );
   if (plan.kind === 'rotate' && [...plan.names].some((secret) => secret.startsWith('db-'))) {
     steps.terminal.say('A database login changed: start the set-up job now, so the server takes it.');
   }

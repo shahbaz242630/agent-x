@@ -4,8 +4,11 @@
 // database set-up job (loadSetupConfig, setup.ts). Each knows every
 // registered name, so a variable meant for another job is refused by name
 // rather than mistaken for a typo.
+import { isAbsolute } from 'node:path';
+
 import { z } from 'zod';
 
+import { isKeyPurpose, type KeyPurpose, PURPOSES } from '../keys/purposes.ts';
 import {
   DEFAULT_LOG,
   type Env,
@@ -69,6 +72,43 @@ const proxyList = text.transform((raw, ctx) => {
   return [...new Set(entries)].sort();
 });
 
+/** A folder the platform mounts: an absolute path, so it can't depend on where the process was started. */
+const mountedFolder = text.refine(isAbsolute, { error: 'must be an absolute path, such as /mnt/secrets' });
+
+/** One key's current version, as `<purpose>:<version>`. */
+const KEY_VERSION = /^([a-z-]+):([1-9][0-9]{0,5})$/;
+
+function parseKeyVersion(entry: string): readonly [KeyPurpose, number] | undefined {
+  const [, purpose = '', version = ''] = KEY_VERSION.exec(entry) ?? [];
+  return isKeyPurpose(purpose) ? [purpose, Number(version)] : undefined;
+}
+
+const keyVersionList = text.transform((raw, ctx): Partial<Record<KeyPurpose, number>> => {
+  const entries = raw.split(',').map(parseKeyVersion);
+  const bad = entries.flatMap((entry, index) => (entry === undefined ? [index + 1] : []));
+  if (bad.length > 0) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        `entry ${bad.join(', ')} is not a key's current version. Write each as <purpose>:<version>, ` +
+        `the purpose one of ${PURPOSES.join(', ')} and the version a whole number from 1, comma-separated with no spaces`,
+    });
+    return z.NEVER;
+  }
+  const current = new Map(entries.filter((entry) => entry !== undefined));
+  if (current.size < entries.length) {
+    ctx.addIssue({ code: 'custom', message: 'names a key more than once: give each key one current version' });
+    return z.NEVER;
+  }
+  // In PURPOSES' order, so the same versions always read, and fingerprint, the same.
+  return Object.fromEntries(
+    PURPOSES.flatMap((purpose) => {
+      const version = current.get(purpose);
+      return version === undefined ? [] : [[purpose, version] as const];
+    }),
+  );
+});
+
 /**
  * Each AGENTX_ variable a process reads. A default is written as the text an
  * operator would set, so it goes through the same checks as a set value. A
@@ -122,6 +162,10 @@ const SETTINGS = {
     }),
     default: '24',
   },
+  // The app's keys (ADR-011 §2): one file per key version, mounted by the
+  // platform, and each key's current version where it isn't 1.
+  AGENTX_KEYS_DIR: { schema: mountedFolder },
+  AGENTX_KEYS_CURRENT: { schema: keyVersionList.optional() },
   // The database (ADR-002: one per environment; ADR-005 §3: the app's own role).
   AGENTX_DB_HOST: { schema: databaseHost },
   AGENTX_DB_PORT: { schema: wholeNumber({ min: 1, max: 65_535 }), default: '5432' },
@@ -183,6 +227,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
+      'AGENTX_KEYS_DIR',
+      'AGENTX_KEYS_CURRENT',
       ...LOCATION,
       'AGENTX_DB_USER',
       'AGENTX_DB_PASSWORD',

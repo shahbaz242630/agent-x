@@ -29,6 +29,14 @@ var jobWorkloads = [
 @export()
 var workloads = concat(appWorkloads, jobWorkloads)
 
+// The app's keys (ADR-011 §2), one vault secret per key version, named as the
+// API reads them: key-<purpose>-v<version>. Each is created once and never
+// written again, and the API alone reads them: secrets.bicep creates them,
+// apps.bicep mounts them. A rotation adds a version to the list (Azure.md).
+// The list is JSON so the deploy tool and the checks read the same one.
+@export()
+var appKeys = loadJsonContent('app-keys.json')
+
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')
 func shortName(environment string) string => environment == 'production' ? 'prd' : 'stg'

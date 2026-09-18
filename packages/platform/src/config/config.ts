@@ -6,6 +6,7 @@
 // to another job, a PG* variable, or TLS certificate checks turned off.
 // Problems name the variable and the rule, never the value, so a secret pasted
 // into the wrong variable can't leak through the error.
+import type { KeySettings } from '../keys/load.ts';
 import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
 import { checkLocation, pgVariableProblems, secretSetting, tlsModeProblems } from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
@@ -69,6 +70,8 @@ export interface Config {
   readonly outbound: { readonly allowedOrigins: readonly string[] };
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
+  /** ADR-011 §2: where the platform mounts the app's keys, and each key's current version where it isn't 1. */
+  readonly keys: KeySettings;
 }
 
 function plainHttpProblems(name: SettingName, environment: Environment, origins: readonly string[]): string[] {
@@ -144,6 +147,8 @@ export function loadConfig(env: Env = process.env): Config {
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
+    keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
+    keysCurrent: setting(env, 'AGENTX_KEYS_CURRENT'),
     dbHost: location.host,
     dbPort: location.port,
     dbName: location.database,
@@ -200,5 +205,9 @@ export function loadConfig(env: Env = process.env): Config {
     }),
     outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
+    keys: Object.freeze({
+      directory: checks.keysDirectory.value,
+      current: Object.freeze(checks.keysCurrent.value ?? {}),
+    }),
   });
 }
