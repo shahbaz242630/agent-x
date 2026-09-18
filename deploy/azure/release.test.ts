@@ -626,6 +626,11 @@ class Staging {
   /** Where the new revision ends up once it takes traffic: each can fall short on its own. */
   newRevisionActive = true;
   newRevisionTraffic = 100;
+  /** How every revision's container is recorded: its name, and whether it carries its build. */
+  revisionContainer: { readonly name: string; readonly stamped: boolean; readonly sidecar?: boolean } = {
+    name: 'api',
+    stamped: true,
+  };
   /** How a start goes: how many runs it makes, whether it names one, when it is listed, how the run ends, of which image. */
   newRuns = 1;
   startNames: 'nothing' | 'its run' | 'another' = 'nothing';
@@ -754,8 +759,25 @@ class Staging {
         active: found.active,
         trafficWeight: found.trafficWeight,
         healthState: found.healthState,
+        // A revision's container as Azure records it (the first real release, S24):
+        // its own defaults filled in (`probes: []`), and no `args`.
         template: {
-          containers: [azureContainer('api', { image: found.image, command: ['node'], env: builtAt(found.release) })],
+          containers: [
+            Object.fromEntries(
+              Object.entries({
+                ...azureContainer(this.revisionContainer.name, {
+                  image: found.image,
+                  command: ['node'],
+                  env: builtAt(found.release).filter(
+                    (entry) => this.revisionContainer.stamped || (entry as { name: string }).name !== 'AGENTX_RELEASE',
+                  ),
+                }),
+                probes: [],
+              }).filter(([field]) => field !== 'args'),
+            ),
+            // A second container, such as a sidecar added by hand: never one CI sends.
+            ...(this.revisionContainer.sidecar ? [{ name: 'sidecar', image: 'ghcr.io/example/sidecar:1' }] : []),
+          ],
         },
       },
     };
@@ -1002,6 +1024,28 @@ describe('release', () => {
     expect((await outcome(otherBuild)).said.at(-1)).toBe(
       `Both hold ${NEW}, but the API doesn't serve it: it runs ${LATER} (${NEW_IMAGE}), not this release. Look at its revisions, then deploy by hand (apps).`,
     );
+    // A revision whose container isn't the API's, carries no build, or has another beside it, is never taken as serving this release.
+    const shapes: [{ readonly name: string; readonly stamped: boolean; readonly sidecar?: boolean }, string][] = [
+      [{ name: 'other', stamped: true }, 'it runs none (no container named api), not this release'],
+      [{ name: 'api', stamped: false }, `it runs none (${NEW_IMAGE}), not this release`],
+      [{ name: 'api', stamped: true, sidecar: true }, 'it runs none (no container named api), not this release'],
+    ];
+    for (const [revisionContainer, why] of shapes) {
+      const odd = holding();
+      odd.revisionContainer = revisionContainer;
+      odd.revisions.set('ca-agentx-stg-api--0000007', {
+        image: NEW_IMAGE,
+        release: NEW,
+        provisioningState: 'Provisioned',
+        active: true,
+        trafficWeight: 100,
+        healthState: 'Healthy',
+      });
+      expect((await outcome(odd)).said.at(-1)).toBe(
+        `Both hold ${NEW}, but the API doesn't serve it: ${why}. Look at its revisions, then deploy by hand (apps).`,
+      );
+      expect(odd.writes).toEqual([]);
+    }
     for (const azure of [serving, stopped, unready, otherBuild]) expect(azure.writes).toEqual([]);
   });
 

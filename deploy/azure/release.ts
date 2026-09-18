@@ -701,16 +701,34 @@ async function ended(
   }
 }
 
-/** A revision of the API as Azure has it, and what it runs. */
+/** A revision of the API as Azure has it, and the image and build it runs. */
 interface Revision {
   readonly properties: Readonly<Record<string, unknown>>;
-  readonly running: Running;
+  readonly running: { readonly image: string; readonly release: string };
+}
+
+/**
+ * The image and build of a revision's one container, and nothing more: a
+ * revision's template is Azure's own record, filled with its defaults (`probes:
+ * []`, no `args`; the first real release, S24), and nothing is ever sent back
+ * from it, so it isn't held to what runningIn holds a template to. A shape that
+ * names neither reads as another release's, which is never served as this one.
+ */
+function revisionRuns(containers: unknown): Revision['running'] {
+  const listed: readonly unknown[] = Array.isArray(containers) && containers.length === 1 ? containers : [];
+  const container = record(listed[0]);
+  if (container.name !== WORKLOADS.api.container) return { image: 'no container named api', release: 'none' };
+  const builds = (Array.isArray(container.env) ? container.env : [])
+    .map(record)
+    .filter((setting) => setting.name === RELEASE_SETTING);
+  const release = builds.length === 1 ? String(builds[0]?.value) : 'none';
+  return { image: String(container.image), release };
 }
 
 function readRevision(steps: ReleaseSteps, subscription: string, name: string): Revision {
   const url = workloadUrl(subscription, 'api').replace('?api-version=', `/revisions/${name}?api-version=`);
   const properties = record(get(steps.az, url, name).properties);
-  return { properties, running: runningIn('api', record(properties.template).containers) };
+  return { properties, running: revisionRuns(record(properties.template).containers) };
 }
 
 /**
