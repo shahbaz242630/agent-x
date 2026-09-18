@@ -73,7 +73,7 @@ describe('reading the keys from the files the platform mounts', () => {
   it('holds the same key as the file, whatever line ending the file has', () => {
     const withLineFeed = loadKeys({ directory: keysDirectory(), current: {} });
     const files = Object.fromEntries(
-      Object.entries(everyPurpose()).map(([name, text]) => [name, text.replace('\n', '\r\n')]),
+      Object.entries(everyPurpose()).map(([name, text]) => [name, text.replace(/\n$/, '\r\n')]),
     );
     const withCarriageReturn = loadKeys({ directory: keysDirectory(files), current: {} });
     const bare = loadKeys({
