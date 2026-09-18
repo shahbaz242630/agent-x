@@ -68,15 +68,25 @@ const running = (command: string) => (step: Step) => step.run?.includes(command)
 
 describe('SEC-SC-02 the image is signed only by CI on main, and verified before deploy', () => {
   it('lets only the publishing and attesting jobs push packages or ask for a signing token', () => {
-    const powerful = workflows.flatMap(({ file, workflow }) =>
-      Object.entries(workflow.jobs)
-        .filter(([, candidate]) => {
-          const permissions = candidate.permissions ?? {};
-          return permissions.packages === 'write' || permissions['id-token'] === 'write';
-        })
-        .map(([name]) => `${file}: ${name}`),
-    );
-    expect(powerful.sort()).toEqual([`${SIGNING_WORKFLOW}: image-attest`, `${SIGNING_WORKFLOW}: image-publish`]);
+    const holding = (scope: string) =>
+      workflows.flatMap(({ file, workflow }) =>
+        Object.entries(workflow.jobs)
+          .filter(([, candidate]) => candidate.permissions?.[scope] === 'write')
+          .map(([name]) => `${file}: ${name}`),
+      );
+    expect(holding('packages').sort()).toEqual([
+      `${SIGNING_WORKFLOW}: image-attest`,
+      `${SIGNING_WORKFLOW}: image-publish`,
+    ]);
+    // The release job asks for a token too, but Azure's (release-job.test.ts): it pushes nothing and signs nothing.
+    expect(holding('id-token').sort()).toEqual([
+      `${SIGNING_WORKFLOW}: image-attest`,
+      `${SIGNING_WORKFLOW}: image-publish`,
+      `${SIGNING_WORKFLOW}: release`,
+    ]);
+    expect(
+      steps('release').some((step) => /cosign|docker (?:push|login)/.test(`${step.uses ?? ''} ${step.run ?? ''}`)),
+    ).toBe(false);
   });
 
   it('gives every push its own run, so no merged commit is left without a signed image', () => {
@@ -92,16 +102,19 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     for (const name of IMAGE_JOBS) expect(job(name).if).toBe(MAIN_PUSH_ONLY);
   });
 
-  it('publishes nothing until every other job on a push has passed', () => {
+  it('publishes nothing until every other job on a push has passed, and releases only what it published', () => {
+    // The release job comes after the image jobs, releasing what they published (release-job.test.ts).
     const others = Object.entries(jobs)
       .filter(
-        ([name, candidate]) => !IMAGE_JOBS.includes(name) && candidate.if !== "github.event_name == 'pull_request'",
+        ([name, candidate]) =>
+          !IMAGE_JOBS.includes(name) && name !== 'release' && candidate.if !== "github.event_name == 'pull_request'",
       )
       .map(([name]) => name);
     expect(others.length).toBeGreaterThanOrEqual(5);
     expect([job('image-publish').needs ?? []].flat().sort()).toEqual(others.sort());
     expect([job('image-sbom').needs ?? []].flat()).toEqual(['image-publish']);
     expect([job('image-attest').needs ?? []].flat().sort()).toEqual(['image-publish', 'image-sbom']);
+    expect([job('release').needs ?? []].flat().sort()).toEqual(['image-attest', 'image-publish']);
   });
 
   it('keeps the SBOM scanner, outside code, in a job that can only read the image', () => {

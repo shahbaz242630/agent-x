@@ -3,8 +3,9 @@
 # Every job that runs on a pull request is a required status check on the main
 # ruleset. The three image jobs run only on a push to main, after every other
 # job passed, so they can't gate a PR: they publish and sign the image that
-# deployments run (SEC-SC-02). All actions are pinned to full commit SHAs, the
-# default token is read-only, and no job keeps git credentials after checkout.
+# deployments run (SEC-SC-02). The release job then releases that image to
+# staging (G4). All actions are pinned to full commit SHAs, the default token
+# is read-only, and no job keeps git credentials after checkout.
 name: CI
 
 on:
@@ -474,3 +475,81 @@ jobs:
       - name: Log out of the registry
         if: always()
         run: docker logout ghcr.io
+
+  # The release to staging (G4; ADR-002 "Deploying"), after every merge to main,
+  # once the image is published, signed and its SBOM attached. It signs in to
+  # Azure by OIDC as CI's identity, with no stored credential: Azure trusts a job
+  # in GitHub's `staging` environment, which only main may use, and the
+  # identity's one role is given on the API and the migration job alone.
+  #
+  # For now (G4-4a) it only checks, reading and changing nothing: what a release
+  # of this commit would do (deploy/azure/release.ts). A merge that needs a hand
+  # deploy (hand-deployed.json) turns it red; the release itself follows (G4-4c).
+  #
+  # - one at a time across merges, never cancelling one that has started (a
+  #   release cancelled part-way leaves the migration job updated); GitHub keeps
+  #   one waiting and drops older waiting ones, whose commits the newer covers
+  # - the whole history, which the check reads its gate from
+  # - the three IDs are the GitHub environment's variables, not secrets (none
+  #   of them is one, and this workflow runs on pull requests, which may hold no
+  #   secret); each is masked in the log before anything could print it
+  release:
+    name: Release to staging (main) - check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish, image-attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    concurrency:
+      group: release-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read # to check out the release tool and read the history
+      id-token: write # for the token Azure takes in place of a credential (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in image-publish. It installs no packages.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Mask the Azure IDs in the log
+        env:
+          CLIENT: ${{ vars.AZURE_CLIENT_ID }}
+          TENANT: ${{ vars.AZURE_TENANT_ID }}
+          SUBSCRIPTION: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          for id in "${CLIENT}" "${TENANT}" "${SUBSCRIPTION}"; do
+            if [ -z "${id}" ]; then
+              echo "::error::The staging environment is missing one of its three Azure IDs."
+              exit 1
+            fi
+            echo "::add-mask::${id}"
+          done
+
+      # The Azure CLI the release tool runs uses this pinned compiler, never one it downloads.
+      - name: Install the pinned Bicep compiler
+        run: node tooling/bicep/install.ts
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What a release of this commit would do (reads only)
+        env:
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: node deploy/azure/release.ts check "${COMMIT}" "${DIGEST}"
+
+      # Forgets every Azure sign-in on the runner, whether or not the one above succeeded.
+      - name: Sign out of Azure
+        if: always()
+        run: az account clear

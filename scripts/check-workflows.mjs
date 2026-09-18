@@ -31,6 +31,10 @@ export const ALLOWED_ACTIONS = new Set([
   'sigstore/cosign-installer',
   // SEC-SC-02: hands the published image's SBOM from the job that makes it to the job that signs it.
   'actions/download-artifact',
+  // G4 (ADR-002 "Deploying"): the release job signs in to Azure by OIDC, as the
+  // identity whose one role is given on the API and the migration job alone;
+  // no credential is stored, and only a main job in `staging` is trusted.
+  'azure/login',
 ]);
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;
