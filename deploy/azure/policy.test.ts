@@ -1721,6 +1721,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['@onlyIfNotExists()\nresource created', 'resource created'],
       // The master key overwritten by every staging run: a condition the snapshot settles and drops (security review, S15).
       [master, "resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = if (environment == 'staging') {"],
+      // The app's keys overwritten by every run, or whenever a run brings values for them.
+      ['@onlyIfNotExists()\nresource keys', 'resource keys'],
+      ['  for key in appKeys: {', '  for key in appKeys: if (!empty(appKeyValues)) {'],
       // Every other secret overwritten by every run, given or not, or whenever a secret has a name.
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: {'],
       ['for secret in secrets: if (!empty(secret.value)) {', 'for secret in secrets: if (!empty(secret.name)) {'],
