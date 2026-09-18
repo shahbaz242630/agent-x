@@ -562,3 +562,40 @@ jobs:
       - name: Sign out of Azure
         if: always()
         run: az account clear
+
+  # Old image versions (G4-5; partner, S25: the 5 newest images are kept, and
+  # the one staging runs). Only after a release has gone green, which leaves
+  # staging on this run's image or a later commit's; the prune keeps both, and
+  # reads which commits are later from the whole history. For now it only says
+  # what it would remove (G4-5a), so it may only read the package; one at a time.
+  image-prune:
+    name: Image (main) - what pruning would remove
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: image-prune
+      cancel-in-progress: false
+    permissions:
+      contents: read # to check out the prune tool and read the history
+      packages: read # to list the package's versions and read its indexes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The runner image's own Node 24, as in image-publish. It installs no packages.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      - name: What pruning would remove (reads only)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT: ${{ github.sha }}
+          DIGEST: ${{ needs.image-publish.outputs.digest }}
+        run: node deploy/image/prune.ts plan "${COMMIT}" "${DIGEST}"

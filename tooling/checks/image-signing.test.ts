@@ -106,11 +106,14 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
   });
 
   it('publishes nothing until every other job on a push has passed, and releases only what it published', () => {
-    // The release job comes after the image jobs, releasing what they published (release-job.test.ts).
+    // The release job comes after the image jobs, releasing what they published (release-job.test.ts),
+    // and the prune after the release (image-prune.test.ts).
     const others = Object.entries(jobs)
       .filter(
         ([name, candidate]) =>
-          !IMAGE_JOBS.includes(name) && name !== 'release' && candidate.if !== "github.event_name == 'pull_request'",
+          !IMAGE_JOBS.includes(name) &&
+          !['release', 'image-prune'].includes(name) &&
+          candidate.if !== "github.event_name == 'pull_request'",
       )
       .map(([name]) => name);
     expect(others.length).toBeGreaterThanOrEqual(5);
