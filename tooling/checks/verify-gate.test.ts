@@ -35,7 +35,7 @@ const END_TO_END = { e2e: 'vitest run --config vitest.e2e.config.ts' } as const;
  * git hooks set-up (Security-Handoff §7), the one-time install of the pinned
  * Bicep compiler, which Verify also runs before its tests (tooling/bicep), and
  * the one-time install of the pinned cosign on a machine that deploys, which
- * CI never runs (tooling/cosign).
+ * CI's release job alone also runs (tooling/cosign).
  */
 const OTHER_SCRIPTS = {
   format: 'prettier --write .',

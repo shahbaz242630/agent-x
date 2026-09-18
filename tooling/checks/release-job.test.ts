@@ -3,7 +3,8 @@
 // after the image is published and attested, in GitHub's `staging` environment
 // (the only subject Azure trusts, and only main may use it), one at a time,
 // with no permission but reading the code and asking for Azure's token, and
-// with nothing of Azure's printed. For now it only checks (G4-4a).
+// with nothing of Azure's printed. It releases (G4-4c): the image checked, the
+// migration run, then the API updated and waited for (deploy/azure/release.ts).
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -118,19 +119,31 @@ describe('the release job', () => {
     expect(JSON.stringify(release)).not.toMatch(/secrets\./);
   });
 
-  it('checks the commit it runs for, with the digest the image job published, and signs out whatever happens', () => {
-    const checking = steps.filter((step) => step.run?.startsWith('node deploy/azure/release.ts ') === true);
-    expect(checking).toEqual([
+  it('releases the commit it runs for, with the digest the image job published, and signs out whatever happens', () => {
+    const releasing = steps.filter((step) => step.run?.startsWith('node deploy/azure/release.ts ') === true);
+    expect(releasing).toEqual([
       {
-        name: 'What a release of this commit would do (reads only)',
+        name: 'Release this commit to staging',
         env: { COMMIT: '${{ github.sha }}', DIGEST: '${{ needs.image-publish.outputs.digest }}' },
-        run: 'node deploy/azure/release.ts check "${COMMIT}" "${DIGEST}"',
+        run: 'node deploy/azure/release.ts release "${COMMIT}" "${DIGEST}"',
       },
     ]);
     expect(steps.at(-1)).toMatchObject({ if: 'always()', run: 'az account clear' });
   });
 
-  it('has an end', () => {
-    expect(release['timeout-minutes']).toBe(15);
+  it('has the pinned Bicep and cosign in hand, and signs in just before it releases, its token fresh', () => {
+    const at = (found: (step: Step) => boolean): number => steps.findIndex(found);
+    const bicep = at((step) => step.run === 'node tooling/bicep/install.ts');
+    const cosign = at((step) => step.run === 'node tooling/cosign/install.ts');
+    const signingIn = at((step) => AZURE_LOGIN.test(step.uses ?? ''));
+    const releasing = at((step) => step.run?.startsWith('node deploy/azure/release.ts release ') === true);
+    expect(bicep).toBeGreaterThan(0);
+    expect(cosign).toBeGreaterThan(0);
+    expect(Math.max(bicep, cosign)).toBeLessThan(signingIn);
+    expect(releasing).toBe(signingIn + 1);
+  });
+
+  it('has an end past every wait of the release, within the sign-in token’s life', () => {
+    expect(release['timeout-minutes']).toBe(60);
   });
 });

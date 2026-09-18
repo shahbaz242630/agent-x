@@ -84,8 +84,11 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       `${SIGNING_WORKFLOW}: image-publish`,
       `${SIGNING_WORKFLOW}: release`,
     ]);
+    // It checks the image with the pinned cosign (release.ts), and never signs, attests or pushes one.
     expect(
-      steps('release').some((step) => /cosign|docker (?:push|login)/.test(`${step.uses ?? ''} ${step.run ?? ''}`)),
+      steps('release').some((step) =>
+        /cosign (?:sign|attest)|cosign-installer|docker (?:push|login)/.test(`${step.uses ?? ''} ${step.run ?? ''}`),
+      ),
     ).toBe(false);
   });
 
