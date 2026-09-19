@@ -9,6 +9,7 @@ export {
   type ChainProblemReason,
   type ChainReport,
   ChainSealError,
+  entryIsSealed,
   GENESIS_HASH,
   linkHash,
   type StoredEntry,
@@ -24,3 +25,12 @@ export {
   sealedFields,
   verifyChain,
 } from './store.ts';
+export {
+  sealState,
+  type StateFacts,
+  type StateSeal,
+  type StateSealDetails,
+  stateSealDetails,
+  stateSealIn,
+  stateSealMatches,
+} from './signed-state.ts';

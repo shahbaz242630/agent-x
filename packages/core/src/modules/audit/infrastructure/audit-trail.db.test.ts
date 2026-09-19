@@ -10,7 +10,15 @@ import {
   type TestDatabase,
   type TestSession,
 } from '@agentx/testing';
-import { ChainBroken, type ChainReport, linkHash } from '@agentx/platform/audit-chain';
+import {
+  ChainBroken,
+  type ChainReport,
+  linkHash,
+  sealState,
+  type StateFacts,
+  stateSealDetails,
+  stateSealMatches,
+} from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -750,5 +758,205 @@ describe('a long chain', () => {
     expect(await verify(org)).toMatchObject({ ok: true, seq: 1000n });
     await attacker.query(`update audit.events set details = '{"step":0}' where org_id = $1 and seq = 777`, [org]);
     expect(await problemOf(org)).toEqual({ reason: 'hash', seq: 777n });
+  });
+});
+
+describe("ADR-012 §2 an object's latest signed state, read from the log itself", () => {
+  const AGENT = '0199a0f0-0000-7000-8000-0000000000a1';
+  const OTHER_AGENT = '0199a0f0-0000-7000-8000-0000000000a2';
+
+  /** The agent's state at `version`, as A3b-2's row side will seal it. */
+  const facts = (orgId: string, version: number, status: string, id = AGENT): StateFacts => ({
+    orgId,
+    subject: { type: 'agent', id, version },
+    fields: [['status', status]],
+  });
+
+  /** An event that signs the agent's state: its details carry the seal. */
+  const signed = (orgId: string, version: number, status: string, id = AGENT, type = 'agent'): AuditEvent => ({
+    actor: { type: 'user', id: USER },
+    action: `${type}.status_changed`,
+    subject: { type, id, version },
+    details: { status, ...stateSealDetails(sealState(keys, facts(orgId, version, status, id))) },
+  });
+
+  /** An event about the agent that signs nothing, such as a rename. */
+  const unsigned = (version: number): AuditEvent => ({
+    actor: { type: 'user', id: USER },
+    action: 'agent.renamed',
+    subject: { type: 'agent', id: AGENT, version },
+    details: {},
+  });
+
+  const latest = (orgId: string, subject = { type: 'agent', id: AGENT }) =>
+    withTenant(app, orgId, (tx) => trail.latestSignedState(tx, orgId, subject));
+
+  /** Runs one statement as the attacker; the organisation is $1 wherever the statement names it. */
+  const tamper = (statement: string): Promise<unknown> =>
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
+    attacker.query(statement, statement.includes('$1') ? [org] : []);
+
+  it('finds none for an object no event has signed', async () => {
+    expect(await latest(org)).toEqual({ kind: 'none' });
+    await record(org, unsigned(1));
+    expect(await latest(org)).toEqual({ kind: 'none' });
+  });
+
+  it('finds the signed event, and its seal matches the state it signed', async () => {
+    const [recorded] = await record(org, signed(org, 1, 'ACTIVE'));
+    const found = await latest(org);
+
+    expect(found).toEqual({
+      kind: 'signed',
+      seq: recorded?.seq,
+      recordedAt: recorded?.recordedAt,
+      version: 1,
+      seal: sealState(keys, facts(org, 1, 'ACTIVE')),
+    });
+    if (found.kind !== 'signed') throw new Error('The test expected a signed state');
+    expect(stateSealMatches(keys, facts(org, 1, 'ACTIVE'), found.seal)).toBe(true);
+    expect(stateSealMatches(keys, facts(org, 1, 'REVOKED'), found.seal)).toBe(false);
+  });
+
+  it('finds the newest of several, and passes over newer events that sign nothing', async () => {
+    await record(org, signed(org, 1, 'ACTIVE'), signed(org, 2, 'SUSPENDED'), unsigned(2), event(1));
+
+    expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 2n, version: 2 });
+  });
+
+  it("keeps each object's apart: another ID, another type with the same ID, another organisation", async () => {
+    const other = newOrg();
+    await record(org, signed(org, 1, 'ACTIVE'));
+    await record(org, signed(org, 5, 'REVOKED', OTHER_AGENT), signed(org, 7, 'REVOKED', AGENT, 'agent_key'));
+    await record(other, signed(other, 9, 'REVOKED'));
+
+    expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 1n, version: 1 });
+    expect(await latest(org, { type: 'agent', id: OTHER_AGENT })).toMatchObject({ version: 5 });
+    expect(await latest(org, { type: 'agent_key', id: AGENT })).toMatchObject({ version: 7 });
+    expect(await latest(other)).toMatchObject({ kind: 'signed', version: 9 });
+  });
+
+  it('finds an object by its ID in any case', async () => {
+    await record(org, signed(org, 1, 'ACTIVE'));
+
+    expect(await latest(org, { type: 'agent', id: AGENT.toUpperCase() })).toMatchObject({ kind: 'signed' });
+  });
+
+  it("refuses to look from another organisation's transaction, where the object would look unsigned", async () => {
+    await record(org, signed(org, 1, 'ACTIVE'));
+
+    await expect(
+      withTenant(app, newOrg(), (tx) => trail.latestSignedState(tx, org, { type: 'agent', id: AGENT })),
+    ).rejects.toBeInstanceOf(TenantContextError);
+  });
+
+  it.each([
+    ['a type written wrong', { type: 'Agent', id: AGENT }, 'subject.type must be lower-case words joined by _'],
+    ['an ID that is not a UUID', { type: 'agent', id: 'agent-1' }, 'subject.id must be a UUID'],
+  ])('refuses to look for %s', async (_what, subject, problem) => {
+    await expect(latest(org, subject)).rejects.toEqual(new AuditEventRefused([problem]));
+  });
+
+  it.each([
+    ['only a fingerprint', { stateFingerprint: 'ab'.repeat(32) }],
+    ['only a key version', { stateKeyVersion: 1 }],
+    ['a fingerprint that is not one', { stateFingerprint: 'not-a-fingerprint', stateKeyVersion: 1 }],
+  ])('refuses to record details carrying %s, and writes nothing', async (_what, details) => {
+    await expect(record(org, { ...unsigned(1), details })).rejects.toEqual(
+      new AuditEventRefused([
+        'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
+      ]),
+    );
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 0n });
+  });
+
+  describe('FX-TAMPER: a signed event changed past the app is not believed', () => {
+    beforeEach(async () => {
+      await record(org, signed(org, 1, 'ACTIVE'), signed(org, 2, 'REVOKED'));
+    });
+
+    it.each([
+      [
+        'its details edited, the seal kept',
+        `update audit.events set details = replace(details, 'REVOKED', 'ACTIVE') where org_id = $1 and seq = 2`,
+      ],
+      ['its version wound back', 'update audit.events set subject_version = 1 where org_id = $1 and seq = 2'],
+      [
+        "the older state's seal copied onto it",
+        `update audit.events set details = (select details from audit.events where org_id = $1 and seq = 1) where org_id = $1 and seq = 2`,
+      ],
+      [
+        'its MAC replaced',
+        `update audit.events set mac = pg_catalog.decode('00', 'hex') where org_id = $1 and seq = 2`,
+      ],
+      [
+        'its time moved off a whole millisecond',
+        `update audit.events set recorded_at = recorded_at + interval '1 microsecond' where org_id = $1 and seq = 2`,
+      ],
+    ])('%s', async (_change, statement) => {
+      await tamper(statement);
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 2n });
+    });
+
+    it("a signed event forged with the chain's real hashes but no key, as the newest", async () => {
+      const [head] = await attacker.query<{ hash: Buffer }>('select hash from audit.heads where org_id = $1', [org]);
+      if (head === undefined) throw new Error('The chain has no head');
+      const forged = signed(org, 3, 'ACTIVE');
+      const detailsText = canonicalDetails({ ...forged.details, stateFingerprint: 'ab'.repeat(32) });
+      const entry = {
+        seq: 3n,
+        id: '0199a0f0-0000-7000-8000-0000000000fe',
+        recordedAt: new Date('2026-09-19T08:00:00.000Z'),
+        content: eventContent(forged, detailsText),
+      };
+      await attacker.query(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         values ($1, 3, $2, $3, 'user', $4, 'agent.status_changed', 'agent', $5, 3, $6, $7, $8, $9, 1)`,
+        [
+          org,
+          entry.id,
+          entry.recordedAt,
+          USER,
+          AGENT,
+          detailsText,
+          head.hash,
+          linkHash({ kind: 'organisation', orgId: org }, head.hash, entry),
+          Buffer.alloc(32),
+        ],
+      );
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 3n });
+    });
+
+    it('details that are not JSON at all, with the rule that keeps them JSON dropped', async () => {
+      await tamper('alter table audit.events drop constraint events_details_check');
+      try {
+        await tamper(`update audit.events set details = '{"stateFingerprint": broken' where org_id = $1 and seq = 2`);
+
+        expect(await latest(org)).toEqual({ kind: 'broken', seq: 2n });
+      } finally {
+        await tamper(`delete from audit.events where org_id = $1`);
+        await tamper(
+          `alter table audit.events add constraint events_details_check check (pg_catalog.jsonb_typeof(details::jsonb) = 'object')`,
+        );
+      }
+    });
+
+    // The limits, which the chain's check and its anchor cover (ADR-012 §2): an event
+    // deleted, or edited so it no longer reads as signed, leaves the older one latest.
+    it.each([
+      ['deleted', 'delete from audit.events where org_id = $1 and seq = 2'],
+      [
+        'edited so it no longer carries a seal',
+        `update audit.events set details = '{"status":"REVOKED"}' where org_id = $1 and seq = 2`,
+      ],
+    ])('the newest signed event %s: the older one is found, and the chain check fails', async (_change, statement) => {
+      await tamper(statement);
+
+      expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 1n, version: 1 });
+      expect(await verify(org)).toMatchObject({ ok: false });
+    });
   });
 });

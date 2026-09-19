@@ -11,6 +11,12 @@
 // changed any of it, or its column types. Each event's details are stored as
 // the exact JSON text that was sealed, so a change that keeps their meaning
 // (a key moved, a number written another way) still shows.
+//
+// An event whose details carry a state seal is a signed-state event (ADR-012
+// §2, @agentx/platform/audit-chain/signed-state): the latest one for an object
+// is what the object's authority fields must equal. It is found by the object
+// in the log itself, never from a pointer the row keeps, and its seal is
+// checked on its own before it is believed.
 import {
   type AnchorPoint,
   appendEvent,
@@ -18,8 +24,11 @@ import {
   type ChainReader,
   type ChainReport,
   type ChainWriter,
+  entryIsSealed,
   headFields,
   sealedFields,
+  type StateSeal,
+  stateSealIn,
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
@@ -29,7 +38,15 @@ import { hidesField } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
-import { type ActorType, type AuditEvent, AuditEventRefused, checkedEvent, eventContent } from '../domain/event.ts';
+import {
+  type ActorType,
+  type AuditEvent,
+  AuditEventRefused,
+  type AuditSubjectKey,
+  checkedEvent,
+  eventContent,
+  subjectKeyProblems,
+} from '../domain/event.ts';
 import type { AuditTables } from './tables.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -42,6 +59,25 @@ export interface RecordedAuditEvent {
   readonly seq: bigint;
   readonly recordedAt: Date;
 }
+
+/**
+ * An object's latest signed state, as the log holds it:
+ * - `none`: no event about the object carries a state seal
+ * - `signed`: the latest one, whole: its seal, the version it made, where it is
+ * - `broken`: the latest one can't be believed: its row can't be read, its own
+ *   hash or MAC fails, or the seal in its details is malformed. Someone past
+ *   the app changed or forged it.
+ */
+export type LatestSignedState =
+  | { readonly kind: 'none' }
+  | {
+      readonly kind: 'signed';
+      readonly seq: bigint;
+      readonly recordedAt: Date;
+      readonly version: number;
+      readonly seal: StateSeal;
+    }
+  | { readonly kind: 'broken'; readonly seq: bigint };
 
 export interface AuditTrail {
   /**
@@ -61,6 +97,15 @@ export interface AuditTrail {
    * row security would show its chain as empty.
    */
   verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * The object's latest signed state (ADR-012 §2): of the events about it,
+   * the newest whose details carry a state seal, checked on its own. It says
+   * nothing of the events around it: a newer signed event deleted, or edited
+   * so it no longer reads as one, leaves an older one latest here, and only
+   * the chain's check and its anchor show that. Only in withTenant's
+   * transaction for that organisation, like `verify`.
+   */
+  latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -70,6 +115,25 @@ function chainOf(orgId: string): Chain & { readonly kind: 'organisation' } {
 }
 
 const isText = (value: unknown): value is string => typeof value === 'string';
+
+/**
+ * Finds a signed-state event by its details' text: canonical JSON, where the
+ * key can only appear as a key, since quotes inside a value are escaped.
+ */
+const HAS_STATE_SEAL = '"stateFingerprint":';
+
+/** The details' JSON text as an object, or nothing if it isn't one. */
+function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (typeof text !== 'string') return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Readonly<Record<string, unknown>>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** What the chain sealed for a stored event, from its own columns, or nothing if one can't be read. */
 function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content'] | undefined {
@@ -201,6 +265,11 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
   return Object.freeze({
     async record(tx: AuditTransaction, orgId: string, input: AuditEvent): Promise<RecordedAuditEvent> {
       const event = checkedEvent(input, hidesField);
+      if (stateSealIn(event.details) === 'malformed') {
+        throw new AuditEventRefused([
+          'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
+        ]);
+      }
       const chain = chainOf(orgId);
       const details = canonicalDetails(event.details);
       const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details), {
@@ -214,6 +283,46 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       return verifyChain(keys, chain, readerFor(tx, chain.orgId), anchor);
+    },
+
+    async latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState> {
+      const problems = subjectKeyProblems(subject);
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const row = await tx
+        .selectFrom('audit.events')
+        .selectAll()
+        .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
+        .where('org_id', '=', chain.orgId)
+        .where('subject_type', '=', subject.type)
+        .where('subject_id', '=', subject.id)
+        .where(sql<boolean>`pg_catalog.strpos(details, ${HAS_STATE_SEAL}) > 0`)
+        .orderBy('seq', 'desc')
+        .limit(1)
+        .executeTakeFirst();
+      if (row === undefined) return { kind: 'none' };
+
+      const sealed = sealedFields(row);
+      const content = contentOf(row);
+      const details = detailsObject(row.details);
+      const seal = details === undefined ? undefined : stateSealIn(details);
+      if (
+        sealed === undefined ||
+        content === undefined ||
+        seal === undefined ||
+        seal === 'malformed' ||
+        !entryIsSealed(keys, chain, { ...sealed, content })
+      ) {
+        return { kind: 'broken', seq: typeof row.seq === 'bigint' ? row.seq : 0n };
+      }
+      return Object.freeze({
+        kind: 'signed',
+        seq: sealed.seq,
+        recordedAt: sealed.recordedAt,
+        version: row.subject_version,
+        seal,
+      });
     },
   });
 }
