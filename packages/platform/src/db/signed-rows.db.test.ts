@@ -123,7 +123,7 @@ const EXPECTED_FIELDS = [
 ];
 
 /** The expected fields, one of them changed. */
-const fieldsWith = (column: string, value: string) =>
+const fieldsWith = (column: string, value: string | null) =>
   EXPECTED_FIELDS.map(([name, expected]) => [name, name === column ? value : expected]);
 
 async function rowOf(id: string): Promise<Record<string, unknown> | undefined> {
@@ -235,6 +235,7 @@ describe('reading a time as canonical text', () => {
     ],
     ['as infinity, which to_char has no text for', 'infinity', 'infinity'],
     ['as minus infinity', '-infinity', '-infinity'],
+    ['as no time at all', null, null],
   ])('reads a time %s as text no other time reads as', async (_, stored, text) => {
     const id = await newGrant();
     await admin.query('update probe.grants set expires_at = $3 where org_id = $1 and id = $2', [ORG, id, stored]);
@@ -341,23 +342,24 @@ describe('writing a signed row', () => {
 
   it('moves it to its next version, writes the fields named, points it nowhere, and reads back what it wrote', async () => {
     const id = await newGrant(ORG, EVENT);
+    const holder = '0199A0F0-0000-7000-8000-0000000000DD';
 
-    const moved = await write(id, { version: 1, eventId: EVENT.toUpperCase() }, { role: 'owner', amount: 7n });
+    const moved = await write(
+      id,
+      { version: 1, eventId: EVENT.toUpperCase() },
+      { holder, amount: 7n, expires_at: new Date('2027-01-02T03:04:05.678Z'), role: 'owner' },
+    );
 
+    // Each value written reads back as the column now reads, for every type.
+    const written = [
+      ['holder', holder.toLowerCase()],
+      ['amount', '7'],
+      ['expires_at', '2027-01-02T03:04:05.678000Z'],
+      ['role', 'owner'],
+    ];
     expect(moved).toEqual({
-      row: {
-        outcome: 'found',
-        version: 2,
-        eventId: null,
-        fields: EXPECTED_FIELDS.map(([name, value]) => [
-          name,
-          name === 'role' ? 'owner' : name === 'amount' ? '7' : value,
-        ]),
-      },
-      written: [
-        ['amount', '7'],
-        ['role', 'owner'],
-      ],
+      row: { outcome: 'found', version: 2, eventId: null, fields: [['status', 'ACTIVE'], ...written] },
+      written,
     });
     expect(await rowOf(id)).toMatchObject({ state_version: 2, state_event_id: null });
   });

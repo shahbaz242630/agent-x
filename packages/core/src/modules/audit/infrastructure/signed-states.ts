@@ -183,6 +183,12 @@ const MISSING = Object.freeze({ outcome: 'missing' as const });
 /** The status column, which only changeStatus writes on a row that exists. */
 const STATUS = 'status';
 
+const lockOrder = (): SignedStateFailed =>
+  new SignedStateFailed(
+    'lock_order',
+    "A row read for a decision isn't read again for a change in the same transaction: lock it for the change first (ADR-006 §6)",
+  );
+
 const sameFields = (row: readonly FieldText[], expected: (column: string) => string | null | undefined): boolean =>
   row.every(([column, value]) => value === expected(column));
 
@@ -263,12 +269,7 @@ export function createSignedStates({
     const rows = heldIn(tx);
     const name = rowName(table, key);
     const held = rows.get(name);
-    if (held?.lock === 'share' && lock === 'change') {
-      throw new SignedStateFailed(
-        'lock_order',
-        "A row read for a decision isn't read again for a change in the same transaction: lock it for the change first (ADR-006 §6)",
-      );
-    }
+    if (held?.lock === 'share' && lock === 'change') throw lockOrder();
     let row = await readSignedRow(tx, table, key, lock);
     rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
     if (row.outcome === 'unreadable') return alarm(table, key, 'row');
@@ -303,6 +304,7 @@ export function createSignedStates({
     const rows = heldIn(tx);
     const name = rowName(table, key);
     if (from === 'new') {
+      if (rows.get(name)?.lock === 'share') throw lockOrder();
       const read = await readSignedRow(tx, table, key, 'change');
       if (read.outcome === 'unreadable') {
         alarm(table, key, 'row');
@@ -310,6 +312,13 @@ export function createSignedStates({
       }
       if (read.outcome !== 'found' || read.version !== 1 || read.eventId !== null) {
         throw new SignedStateFailed('basis', 'A new signed row is at version 1 and points at no event yet');
+      }
+      // The status guard let the row in only in its machine's first status;
+      // any other would be a move no machine decided. (A status is text, so
+      // its canonical text is the value itself.)
+      const inserted = new Map(read.fields).get(STATUS);
+      if (Object.hasOwn(set, STATUS) && set[STATUS] !== inserted) {
+        throw new RangeError('A new row keeps the status it was inserted in; it moves only through changeStatus');
       }
       if ((await latestOf(tx, table, key)).kind !== 'none') {
         alarm(table, key, 'log');

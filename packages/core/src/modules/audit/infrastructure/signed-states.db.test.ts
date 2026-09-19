@@ -417,6 +417,37 @@ describe('what a signed state is recorded from', () => {
     expect(recorded).toMatchObject({ version: 2 });
   });
 
+  it('refuses a new row sealed in another status than it was inserted in, which no machine decided', async () => {
+    const id = newId();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
+        return states.record(
+          tx,
+          AGENTS,
+          { orgId: org, id },
+          'new',
+          { ...NEW_AGENT, status: 'REVOKED' },
+          change('agent.x'),
+        );
+      }),
+    ).rejects.toThrow(/keeps the status it was inserted in/);
+    expect(await rowOf(id)).toBeUndefined();
+  });
+
+  it('refuses to create a row it read for a decision in the same transaction (ADR-006 §6)', async () => {
+    const id = newId();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        expect(await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')).toEqual({ outcome: 'missing' });
+        await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      }),
+    ).rejects.toEqual(refusedFor('lock_order'));
+  });
+
   it('refuses a status written by record: it moves only through changeStatus, along its machine', async () => {
     const id = await newAgent();
 
@@ -693,6 +724,24 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
       );
       expect(alarms()).toEqual([alarmFor(id, 'row')]);
       expect(await rowOf(id)).toMatchObject({ status: 'ACTIVE', state_version: 1 });
+    });
+
+    it("raises the alarm on any failed status change of a verified row, such as a status its machine doesn't know", async () => {
+      const id = await newAgent();
+      await changeStatus(id, 'suspend');
+      const unaware = defineStateMachine({
+        name: 'agent',
+        states: ['ACTIVE', 'REVOKED'],
+        initial: 'ACTIVE',
+        events: { revoke: { from: ['ACTIVE'], to: 'REVOKED' } },
+      });
+
+      await expect(
+        withTenant(app, org, (tx) =>
+          states.changeStatus(tx, { ...AGENTS, rules: unaware }, { orgId: org, id }, 'revoke', change('agent.revoke')),
+        ),
+      ).rejects.toEqual(expect.objectContaining({ name: 'StatusChangeFailed', reason: 'unreadable' }));
+      expect(alarms()).toEqual([alarmFor(id, 'status')]);
     });
 
     /** A trigger that raises every agent it touches to admin. */

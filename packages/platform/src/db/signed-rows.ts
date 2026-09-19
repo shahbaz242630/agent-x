@@ -99,12 +99,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 const TABLE = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
 const COLUMN = /^[a-z][a-z0-9_]{0,62}$/;
-/** The column types each declared type may be, as pg_typeof names them. */
-const COLUMN_TYPES: Readonly<Record<SignedFieldType, readonly string[]>> = {
-  text: ['text'],
-  uuid: ['uuid'],
-  integer: ['smallint', 'integer', 'bigint'],
-  timestamptz: ['timestamp with time zone'],
+/**
+ * The column types each declared type may be, by the built-in types' fixed
+ * IDs (pg_type's oid), which no name on the search path can stand in for:
+ * text; uuid; smallint, integer, bigint; timestamp with time zone.
+ */
+const COLUMN_TYPES: Readonly<Record<SignedFieldType, readonly number[]>> = {
+  text: [25],
+  uuid: [2950],
+  integer: [21, 23, 20],
+  timestamptz: [1184],
 };
 /** The signed-state columns themselves: sealing the pointer would need the event's ID before the event exists. */
 const OWN_COLUMNS: ReadonlySet<string> = new Set(['state_version', 'state_event_id']);
@@ -190,7 +194,7 @@ function columnsOf({ fields }: SignedStateTable): RawBuilder<unknown> {
       const value = sql.ref(`target.${column}`);
       return [
         sql`${canonical(type, value)} as ${sql.id(`f${index.toString()}`)}`,
-        sql`pg_catalog.pg_typeof(${value})::text as ${sql.id(`t${index.toString()}`)}`,
+        sql`pg_catalog.pg_typeof(${value})::oid as ${sql.id(`t${index.toString()}`)}`,
       ];
     }),
   ]);
@@ -207,7 +211,10 @@ function rowOf({ fields }: SignedStateTable, rows: readonly Readonly<Record<stri
   if (row === undefined) return { outcome: 'missing' };
   const { state_version: version, state_event_id: eventId } = row;
   const values = fields.map(({ column }, index): readonly [string, unknown] => [column, row[`f${index.toString()}`]]);
-  const typesHeld = fields.every(({ type }, index) => COLUMN_TYPES[type].includes(String(row[`t${index.toString()}`])));
+  const typesHeld = fields.every(({ type }, index) => {
+    const held = row[`t${index.toString()}`];
+    return typeof held === 'number' && COLUMN_TYPES[type].includes(held);
+  });
   if (
     others.length > 0 ||
     !typesHeld ||
