@@ -124,6 +124,15 @@ function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, detai
     },
 
     async append(sealed, head, previous) {
+      const moved = await tx
+        .updateTable('audit.heads')
+        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
+        .where('org_id', '=', orgId)
+        .where('seq', '=', previous.seq)
+        .where('hash', '=', previous.hash)
+        .executeTakeFirst();
+      // The head first: the event is written only once it has a place, so a refused one leaves nothing behind.
+      if (moved.numUpdatedRows !== 1n) return false;
       await tx
         .insertInto('audit.events')
         .values({
@@ -144,14 +153,7 @@ function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, detai
           mac_key_version: sealed.macKeyVersion,
         })
         .execute();
-      const moved = await tx
-        .updateTable('audit.heads')
-        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
-        .where('org_id', '=', orgId)
-        .where('seq', '=', previous.seq)
-        .where('hash', '=', previous.hash)
-        .executeTakeFirst();
-      return moved.numUpdatedRows === 1n;
+      return true;
     },
   };
 }

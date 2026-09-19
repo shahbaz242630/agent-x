@@ -291,6 +291,18 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     );
   });
 
+  it('raises the integrity alarm when the platform chain itself is broken, and refuses to start', async () => {
+    const { ChainBroken } = await import('@agentx/platform/audit-chain');
+    startRecord.result = () => Promise.reject(new ChainBroken({ kind: 'platform' }));
+    const { host, capture } = await start();
+
+    expect(host.exitCode).toBe(1);
+    expect(capture.lines().slice(-2)).toEqual([
+      expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', chain: 'platform', check: 'start' }),
+      expect.objectContaining({ level: 'error', event: 'api.start_not_recorded' }),
+    ]);
+  });
+
   it('refuses to start when the start cannot be recorded, closes the pool, and builds nothing', async () => {
     startRecord.result = () => Promise.reject(new Error('the platform chain fails its check at the head'));
     const serversBefore = built.length;
@@ -307,6 +319,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     );
     expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
     expect(built.length).toBe(serversBefore);
+    expect(capture.lines().map((line) => line.event)).not.toContain('audit.integrity_failed');
   });
 
   it('refuses to start as a role that could bypass the tenant walls, naming the reasons, and closes the pool', async () => {

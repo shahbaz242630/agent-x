@@ -20,7 +20,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { sql, type Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkedPlatformEvent, type PlatformEvent, platformEventContent } from '../domain/event.ts';
@@ -43,6 +43,14 @@ export interface PlatformChain {
    * if the chain fails its check at the head or holds events past it.
    */
   record(tx: PlatformTransaction, event: PlatformEvent): Promise<RecordedPlatformEvent>;
+  /**
+   * Records the event in a transaction of its own, as a process does when it
+   * starts, waiting at most 10 seconds for the head's lock. Anything else
+   * holding it (a session left open by hand, a stuck operator action) would
+   * otherwise hold the start up with no line saying why, until the platform
+   * gave up on the container; this way the start is refused, and says so.
+   */
+  recordAlone(db: Kysely<PlatformControlsTables>, event: PlatformEvent): Promise<RecordedPlatformEvent>;
   /** Checks the platform chain up to its head (SEC-EVD-02). Reads only. */
   verify(tx: PlatformTransaction): Promise<ChainReport>;
 }
@@ -102,6 +110,14 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
     },
 
     async append(sealed, head, previous) {
+      const moved = await tx
+        .updateTable('platform_controls.audit_head')
+        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
+        .where('seq', '=', previous.seq)
+        .where('hash', '=', previous.hash)
+        .executeTakeFirst();
+      // The head first: the event is written only once it has a place, so a refused one leaves nothing behind.
+      if (moved.numUpdatedRows !== 1n) return false;
       await tx
         .insertInto('platform_controls.audit_events')
         .values({
@@ -118,13 +134,7 @@ function writerFor(tx: PlatformTransaction, event: PlatformEvent, details: strin
           mac_key_version: sealed.macKeyVersion,
         })
         .execute();
-      const moved = await tx
-        .updateTable('platform_controls.audit_head')
-        .set({ seq: head.seq, hash: head.hash, mac: head.mac, mac_key_version: head.macKeyVersion })
-        .where('seq', '=', previous.seq)
-        .where('hash', '=', previous.hash)
-        .executeTakeFirst();
-      return moved.numUpdatedRows === 1n;
+      return true;
     },
   };
 }
@@ -174,15 +184,27 @@ export function createPlatformChain({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
 }): PlatformChain {
+  const record = async (tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> => {
+    const event = checkedPlatformEvent(input, hidesField);
+    const details = canonicalDetails(event.details);
+    const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details), {
+      nextId: () => ids.next(),
+      content: platformEventContent(event, details),
+    });
+    return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
+  };
+
   return Object.freeze({
-    async record(tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> {
-      const event = checkedPlatformEvent(input, hidesField);
-      const details = canonicalDetails(event.details);
-      const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details), {
-        nextId: () => ids.next(),
-        content: platformEventContent(event, details),
-      });
-      return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
+    record,
+
+    recordAlone(db: Kysely<PlatformControlsTables>, event: PlatformEvent): Promise<RecordedPlatformEvent> {
+      return db
+        .transaction()
+        .setIsolationLevel('read committed')
+        .execute(async (tx) => {
+          await sql`set local lock_timeout = '10s'`.execute(tx);
+          return record(tx, event);
+        });
     },
 
     verify(tx: PlatformTransaction): Promise<ChainReport> {

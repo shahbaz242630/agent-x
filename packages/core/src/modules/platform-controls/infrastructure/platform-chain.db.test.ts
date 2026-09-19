@@ -119,6 +119,31 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
   });
 });
 
+describe('recording in a transaction of its own, as a process start does', () => {
+  it('records the event and commits it', async () => {
+    const recorded = await chain.recordAlone(app, started(1));
+
+    expect(recorded.seq).toBe(1n);
+    expect(await verify()).toMatchObject({ ok: true, seq: 1n });
+  });
+
+  it("gives up after 10 seconds when something else holds the head's lock, rather than hang", async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select * from platform_controls.audit_head for update');
+    try {
+      const began = performance.now();
+      await expect(chain.recordAlone(app, started(2))).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    expect(await verify()).toMatchObject({ ok: true, seq: 1n });
+  });
+});
+
 describe('SEC-EVD-01 the app role only adds to and reads the platform chain', () => {
   // Postgres checks the table right before anything else.
   // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.

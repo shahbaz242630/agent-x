@@ -217,11 +217,14 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(await start(envFor('app')));
     await database.as('admin').query('update platform_controls.audit_head set seq = seq + 5');
     try {
-      const { host, api, events } = await start(envFor('app'));
+      const { host, api, events, capture } = await start(envFor('app'));
 
       expect(api).toBeUndefined();
       expect(host.exitCode).toBe(1);
       expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_not_recorded']);
+      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed')).toEqual(
+        expect.objectContaining({ level: 'error', chain: 'platform', check: 'start' }),
+      );
       await expectNoApiConnections();
     } finally {
       await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');

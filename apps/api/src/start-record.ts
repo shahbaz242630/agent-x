@@ -14,23 +14,21 @@ export interface StartFacts {
   readonly release: string;
 }
 
-/** Writes `platform.started` in a transaction of its own, and gives back its place in the chain. */
+/**
+ * Writes `platform.started` in a transaction of its own, waiting only so long
+ * for the chain's head (PlatformChain.recordAlone), and gives back its place in
+ * the chain.
+ */
 export async function recordStart(
   database: Database<PlatformControlsTables>,
   keys: KeyProvider,
   ids: IdGenerator,
   facts: StartFacts,
 ): Promise<bigint> {
-  const chain = createPlatformChain({ keys, ids });
-  const recorded = await database
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute((tx) =>
-      chain.record(tx, {
-        actor: { type: 'system', id: 'api' },
-        action: 'platform.started',
-        details: { configHash: facts.configHash, release: facts.release },
-      }),
-    );
+  const recorded = await createPlatformChain({ keys, ids }).recordAlone(database, {
+    actor: { type: 'system', id: 'api' },
+    action: 'platform.started',
+    details: { configHash: facts.configHash, release: facts.release },
+  });
   return recorded.seq;
 }
