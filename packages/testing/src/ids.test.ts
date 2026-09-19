@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
+import type { IdGenerator } from '../../core/src/shared-kernel/index.ts';
 import { SequentialIds } from './ids.ts';
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 describe('SequentialIds', () => {
+  it("fits core's IdGenerator", () => {
+    expectTypeOf<SequentialIds>().toExtend<IdGenerator>();
+  });
+
   it('counts up from 1 in the last group', () => {
     const ids = new SequentialIds();
 

@@ -4,9 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./modules/audit": "./src/modules/audit/index.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"
   },
   "dependencies": {
+    "@agentx/platform": "workspace:*",
+    "kysely": "0.29.5",
     "uuid": "14.0.2"
+  },
+  "devDependencies": {
+    "@agentx/testing": "workspace:*"
   }
 }

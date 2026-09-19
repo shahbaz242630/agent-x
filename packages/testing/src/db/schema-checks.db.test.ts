@@ -17,10 +17,16 @@ const server = inject('postgres');
 const major = Number(server.version.split('.')[0]);
 
 const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'] };
+/**
+ * The migrated database's own decisions (tooling/schema-policy.ts), so a
+ * fixture starts with no problems. The fixtures' own append-only tables go in
+ * schema `journal`, apart from the real audit tables.
+ */
+const REAL_EXCEPTIONS = { 'audit.heads': "Each organisation's chain head" };
 const POLICY: SchemaPolicy = {
   globalTables: { 'migrations.applied': LEDGER },
-  appendOnlySchemas: ['audit'],
-  appendOnlyExceptions: {},
+  appendOnlySchemas: ['audit', 'journal'],
+  appendOnlyExceptions: REAL_EXCEPTIONS,
 };
 
 const TENANT_POLICY =
@@ -142,15 +148,15 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
       ...TENANT_TABLE,
       'grant usage on schema t to agentx_app',
       'grant select, insert, update, delete on t.items to agentx_app',
-      'create schema audit',
-      'grant usage on schema audit to agentx_app, agentx_backup',
-      'create table audit.events (org_id uuid not null, id uuid not null, body text not null, primary key (org_id, id))',
-      ...walls('audit.events'),
-      'grant insert, select on audit.events to agentx_app',
-      'grant select on audit.events to agentx_backup',
+      'create schema journal',
+      'grant usage on schema journal to agentx_app, agentx_backup',
+      'create table journal.events (org_id uuid not null, id uuid not null, body text not null, primary key (org_id, id))',
+      ...walls('journal.events'),
+      'grant insert, select on journal.events to agentx_app',
+      'grant select on journal.events to agentx_backup',
       // Drawing numbers for new rows changes no existing row.
-      'create sequence audit.event_numbers',
-      'grant usage on sequence audit.event_numbers to agentx_app',
+      'create sequence journal.event_numbers',
+      'grant usage on sequence journal.event_numbers to agentx_app',
     ];
     expect(await problemsAfter(statements)).toEqual([]);
   });
@@ -722,52 +728,60 @@ describe('CI-06 each rule fails on a broken fixture', () => {
   });
 
   describe('SEC-EVD-01: the app role only adds to and reads an append-only table', () => {
-    it('fails UPDATE, DELETE or TRUNCATE for the app role on an audit table, or UPDATE on one of its columns', async () => {
+    it('fails UPDATE, DELETE or TRUNCATE for the app role on an append-only table, or UPDATE on one of its columns', async () => {
       const statements = [
-        'create schema audit',
-        'grant usage on schema audit to agentx_app',
-        'create table audit.events (org_id uuid not null, id uuid not null, body text not null, primary key (org_id, id))',
-        ...walls('audit.events'),
-        'grant select, insert, update, delete, truncate on audit.events to agentx_app',
-        'grant update (body) on audit.events to agentx_app',
+        'create schema journal',
+        'grant usage on schema journal to agentx_app',
+        'create table journal.events (org_id uuid not null, id uuid not null, body text not null, primary key (org_id, id))',
+        ...walls('journal.events'),
+        'grant select, insert, update, delete, truncate on journal.events to agentx_app',
+        'grant update (body) on journal.events to agentx_app',
       ];
       const appends = 'on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)';
       expect(await problemsAfter(statements)).toEqual([
-        `column audit.events.body: agentx_app has UPDATE ${appends}`,
-        `table audit.events: agentx_app has DELETE ${appends}`,
-        `table audit.events: agentx_app has TRUNCATE ${appends}`,
-        `table audit.events: agentx_app has UPDATE ${appends}`,
+        `column journal.events.body: agentx_app has UPDATE ${appends}`,
+        `table journal.events: agentx_app has DELETE ${appends}`,
+        `table journal.events: agentx_app has TRUNCATE ${appends}`,
+        `table journal.events: agentx_app has UPDATE ${appends}`,
       ]);
     });
 
     const CHAIN_HEADS = [
-      'create schema audit',
-      'grant usage on schema audit to agentx_app',
-      'create table audit.heads (org_id uuid not null, sequence bigint not null, primary key (org_id))',
-      ...walls('audit.heads'),
+      'create schema journal',
+      'grant usage on schema journal to agentx_app',
+      'create table journal.heads (org_id uuid not null, sequence bigint not null, primary key (org_id))',
+      ...walls('journal.heads'),
       // The app locks the head FOR NO KEY UPDATE and moves it on (ADR-006 §6), which needs UPDATE.
-      'grant select, insert, update on audit.heads to agentx_app',
+      'grant select, insert, update on journal.heads to agentx_app',
     ];
 
     it('lets the app change a table on the exception list, with its reason', async () => {
-      const policy = { ...POLICY, appendOnlyExceptions: { 'audit.heads': 'One chain head per organisation' } };
+      const policy = {
+        ...POLICY,
+        appendOnlyExceptions: { ...REAL_EXCEPTIONS, 'journal.heads': 'One chain head per organisation' },
+      };
       expect(await problemsAfter(CHAIN_HEADS, policy)).toEqual([]);
     });
 
     it('fails the same table off the exception list', async () => {
       expect(await problemsAfter(CHAIN_HEADS)).toEqual([
-        'table audit.heads: agentx_app has UPDATE on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)',
+        'table journal.heads: agentx_app has UPDATE on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)',
       ]);
     });
 
     it('fails an exception with no reason, for a missing table, or outside an append-only schema', async () => {
       const policy = {
         ...POLICY,
-        appendOnlyExceptions: { 'audit.heads': ' ', 'audit.gone': 'Removed', 'migrations.applied': 'Not audit' },
+        appendOnlyExceptions: {
+          ...REAL_EXCEPTIONS,
+          'journal.heads': ' ',
+          'journal.gone': 'Removed',
+          'migrations.applied': 'Not audit',
+        },
       };
       expect(await problemsAfter(CHAIN_HEADS, policy)).toEqual([
-        'audit.heads: the append-only exception list gives no reason for it',
-        'audit.gone: is on the append-only exception list, but no such table exists',
+        'journal.heads: the append-only exception list gives no reason for it',
+        'journal.gone: is on the append-only exception list, but no such table exists',
         "migrations.applied: is on the append-only exception list, but its schema isn't append-only",
       ]);
     });

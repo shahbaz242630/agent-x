@@ -1,0 +1,18 @@
+export {
+  type Chain,
+  type ChainEntry,
+  type ChainHead,
+  type ChainLink,
+  type ChainProblem,
+  type ChainProblemReason,
+  type ChainReport,
+  ChainSealError,
+  type ChainVerifier,
+  createChainVerifier,
+  GENESIS_HASH,
+  genesisHead,
+  headIsSealed,
+  linkHash,
+  sealNext,
+  type StoredEntry,
+} from './chain.ts';

@@ -1,5 +1,3 @@
-import type { IdGenerator } from '@agentx/core/shared-kernel';
-
 /** The last UUID group has 12 hex digits. */
 const MAX_SEQUENCE = 0xffff_ffff_ffff;
 
@@ -7,9 +5,10 @@ const MAX_SEQUENCE = 0xffff_ffff_ffff;
  * Deterministic IDs for tests: valid, ordered UUIDv7 strings with a counter in
  * the last group (`00000000-0000-7000-8000-000000000001`, then `…002`), so a
  * test can write the expected IDs by hand. `startAfter` gives two generators
- * separate ranges.
+ * separate ranges. It fits core's `IdGenerator` (checked in its test); it
+ * doesn't import it, since core's own tests use this package.
  */
-export class SequentialIds implements IdGenerator {
+export class SequentialIds {
   #sequence: number;
 
   constructor(startAfter = 0) {

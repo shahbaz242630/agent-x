@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./audit-chain": "./src/audit-chain/index.ts",
     "./config": "./src/config/index.ts",
     "./db": "./src/db/index.ts",
     "./keys": "./src/keys/index.ts",

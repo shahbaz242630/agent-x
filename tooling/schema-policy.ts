@@ -21,5 +21,8 @@ export const SCHEMA_POLICY: SchemaPolicy = {
   },
   // The audit module's schema (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
   appendOnlySchemas: ['audit'],
-  appendOnlyExceptions: {},
+  appendOnlyExceptions: {
+    'audit.heads':
+      "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
+  },
 };

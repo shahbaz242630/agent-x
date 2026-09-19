@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
+import type { Clock } from '../../core/src/shared-kernel/index.ts';
 import { FixedClock } from './clock.ts';
 
 const START = new Date('2026-09-13T20:00:00.000Z');
 
 describe('FixedClock', () => {
+  it("fits core's Clock", () => {
+    expectTypeOf<FixedClock>().toExtend<Clock>();
+  });
+
   it('stays at its start time until moved', () => {
     const clock = new FixedClock(START);
 
