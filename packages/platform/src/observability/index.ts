@@ -8,5 +8,5 @@ export {
   type LoggerOptions,
   type LogMethod,
 } from './logger.ts';
-export { type NameRule, ruleForName } from './names.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
+export { hidesField } from './redact.ts';

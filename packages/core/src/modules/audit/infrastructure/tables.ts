@@ -1,5 +1,3 @@
-import type { ColumnType } from 'kysely';
-
 /** The audit schema's tables (db/migrations/0002_audit.sql), as Kysely sees them. */
 export interface AuditTables {
   'audit.events': EventsTable;
@@ -17,8 +15,8 @@ interface EventsTable {
   subject_type: string;
   subject_id: string;
   subject_version: number;
-  /** jsonb: written as the canonical JSON text, read back parsed. */
-  details: ColumnType<unknown, string, never>;
+  /** The canonical JSON text that was sealed, kept exactly. */
+  details: string;
   prev_hash: Buffer;
   hash: Buffer;
   mac: Buffer;

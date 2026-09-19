@@ -68,10 +68,18 @@ function isSafeConstant(value: unknown): boolean {
   return typeof value === 'number' || typeof value === 'boolean' || value === null;
 }
 
-function cleanField(name: string, value: unknown, walk: Walk, depth: number): Json {
+/**
+ * Whether the logger hides a field's value, by the field's name and, for a
+ * `code` or `state`, whether the value is a plain constant. The audit trail
+ * uses the same rule to refuse the fields it must never keep (ADR-014 §3).
+ */
+export function hidesField(name: string, value: unknown): boolean {
   const rule = ruleForName(name);
-  if (rule === 'redact' || (rule === 'redact-unless-constant' && !isSafeConstant(value))) return REDACTED;
-  return cleanValue(value, walk, depth + 1);
+  return rule === 'redact' || (rule === 'redact-unless-constant' && !isSafeConstant(value));
+}
+
+function cleanField(name: string, value: unknown, walk: Walk, depth: number): Json {
+  return hidesField(name, value) ? REDACTED : cleanValue(value, walk, depth + 1);
 }
 
 /**

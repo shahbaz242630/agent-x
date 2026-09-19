@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { TenantContextError, withTenant } from './tenant.ts';
+import { assertTenant, TenantContextError, withTenant } from './tenant.ts';
 
 interface ProbeSchema {
   'probe.items': { org_id: string; id: string; label: string };
@@ -339,6 +339,26 @@ describe('withTenant', () => {
       // eslint-disable-next-line agentx/no-string-built-sql -- Test cleanup, as above.
       await database.as('admin').query(`alter role agentx_app in database ${database.name} reset all`);
     }
+  });
+});
+
+describe('assertTenant', () => {
+  it('passes inside withTenant for the same organisation, however its ID is written', async () => {
+    await withTenant(app, ORG_A, async (tx) => {
+      await expect(assertTenant(tx, ORG_A)).resolves.toBeUndefined();
+      await expect(assertTenant(tx, ORG_A.toUpperCase())).resolves.toBeUndefined();
+    });
+  });
+
+  it("refuses another organisation's transaction, a transaction with no tenant, and an ID that isn't a UUID", async () => {
+    const refused = new TenantContextError("the transaction isn't withTenant's for this organisation");
+    await withTenant(app, ORG_B, async (tx) => {
+      await expect(assertTenant(tx, ORG_A)).rejects.toThrow(refused);
+      await expect(assertTenant(tx, 'org-b')).rejects.toThrow(refused);
+    });
+    await app.transaction().execute(async (tx) => {
+      await expect(assertTenant(tx, ORG_A)).rejects.toThrow(refused);
+    });
   });
 });
 

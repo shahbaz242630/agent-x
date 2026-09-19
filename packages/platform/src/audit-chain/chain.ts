@@ -14,7 +14,9 @@
 //
 // Every hash and MAC names its chain, so an event or head copied into another
 // chain fails, and starts with a label naming what it is, so a MAC made for
-// one thing can never stand for another.
+// one thing can never stand for another. Along a chain the MAC key's version
+// never goes down: once a key is rotated out, whoever may have copied it can't
+// add events after the rotation.
 import { createHash } from 'node:crypto';
 
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
@@ -159,9 +161,10 @@ export function sealNext(
  * - `gap`: the event numbered `seq` is missing
  * - `link`: the event doesn't point at the one before it
  * - `hash`: the event's content doesn't match its hash
- * - `mac`: the event's MAC is missing or wrong, or made with a key the app doesn't hold
+ * - `mac`: the event's MAC is missing or wrong, made with a key the app doesn't hold, or made with an
+ *   older key version than an event before it
  * - `unreadable`: the stored event can't be read as an event at all
- * - `head`: the head's MAC is wrong, or it isn't at the last event
+ * - `head`: the head's MAC is wrong, it isn't at the last event, or the store holds events it doesn't count
  */
 export type ChainProblemReason = 'gap' | 'link' | 'hash' | 'mac' | 'unreadable' | 'head';
 
@@ -177,15 +180,17 @@ export type ChainReport =
   | { readonly ok: false; readonly problem: ChainProblem };
 
 /**
- * Where a chain's store stands: its head, and the highest event number it
- * holds (0 for none), read in one statement so both come from the same moment.
- * An event and the head that points at it are written in one transaction, so
- * the two agree unless someone went round the app: an event added past the
- * head, or the tail deleted and the head left.
+ * Where a chain's store stands: its head, and how many events it holds, read
+ * in one statement so both come from the same moment. An event and the head
+ * that points at it are written in one transaction, so the head's number is
+ * the count unless someone went round the app: an event added past the head,
+ * or at a number the check never reads, or the tail deleted and the head left.
+ * With the count equal to the head's number and events 1 to that number all
+ * found in turn, there is no room for any other.
  */
 export interface ChainState {
   readonly head: ChainHead;
-  readonly lastSeq: bigint;
+  readonly stored: bigint;
 }
 
 /**
@@ -203,11 +208,13 @@ export interface ChainVerifier {
   finish(): ChainReport;
 }
 
-export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, lastSeq }: ChainState): ChainVerifier {
+export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, stored }: ChainState): ChainVerifier {
   let seq = 0n;
   let hash: Buffer = GENESIS_HASH;
-  let problem: ChainProblem | undefined =
-    lastSeq === head.seq && headIsSealed(keys, chain, head) ? undefined : { reason: 'head', seq: head.seq };
+  let keyVersion = 0;
+  let problem: ChainProblem | undefined = headIsSealed(keys, chain, head)
+    ? undefined
+    : { reason: 'head', seq: head.seq };
 
   const problemWith = (entry: StoredEntry): ChainProblem | undefined => {
     const expected = seq + 1n;
@@ -215,7 +222,9 @@ export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, las
     if (!entry.prevHash.equals(hash)) return { reason: 'link', seq: expected };
     if (!linkHash(chain, entry.prevHash, entry).equals(entry.hash)) return { reason: 'hash', seq: expected };
     const message = eventMacMessage(chain, entry.seq, entry.id, entry.hash);
-    if (!macMatches(keys, entry.macKeyVersion, message, entry.mac)) return { reason: 'mac', seq: expected };
+    if (entry.macKeyVersion < keyVersion || !macMatches(keys, entry.macKeyVersion, message, entry.mac)) {
+      return { reason: 'mac', seq: expected };
+    }
     return undefined;
   };
 
@@ -226,6 +235,7 @@ export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, las
       if (problem === undefined) {
         seq = entry.seq;
         hash = entry.hash;
+        keyVersion = entry.macKeyVersion;
       }
       return problem;
     },
@@ -234,8 +244,12 @@ export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, las
       return problem;
     },
     finish() {
-      // The hash alone settles it: a hash covers its event's number, and a head can't be sealed without the key.
-      if (problem === undefined && !hash.equals(head.hash)) problem = { reason: 'head', seq: head.seq };
+      // Compared last, so a missing event is reported where it is missing. The hash settles where the chain
+      // ended (it covers its event's number, and a head can't be sealed without the key); the count, that
+      // the store holds nothing else.
+      if (problem === undefined && (stored !== head.seq || !hash.equals(head.hash))) {
+        problem = { reason: 'head', seq: head.seq };
+      }
       return problem === undefined ? { ok: true, seq, hash } : { ok: false, problem };
     },
   };

@@ -9,7 +9,9 @@
 // (SEC-EVD-01); the head is the one row it changes.
 //
 // Everything read back is checked as untrusted: the database owner could have
-// changed any of it, or its column types.
+// changed any of it, or its column types. Each event's details are stored as
+// the exact JSON text that was sealed, so a change that keeps their meaning
+// (a key moved, a number written another way) still shows.
 import {
   type Chain,
   type ChainHead,
@@ -21,14 +23,14 @@ import {
   sealNext,
   type StoredEntry,
 } from '@agentx/platform/audit-chain';
+import { assertTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import { ruleForName } from '@agentx/platform/observability';
+import { hidesField } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import {
   type ActorType,
-  type AuditDetails,
   type AuditEvent,
   AuditEventRefused,
   canonicalDetails,
@@ -56,20 +58,24 @@ export interface AuditTrail {
    * Adds the event to the organisation's chain, in the caller's transaction:
    * it commits or rolls back with the change it records. Takes the chain
    * head's lock, which comes last (ADR-006 §6). Throws AuditEventRefused for
-   * an event that breaks the rules, and AuditChainBroken if the head fails its
-   * check, so nothing more is added to a chain someone has tampered with.
+   * an event that breaks the rules, and AuditChainBroken if the chain fails its
+   * check at the head, so nothing more is added to a chain someone has tampered with.
    */
   record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent>;
-  /** Checks the organisation's whole chain up to its head (SEC-EVD-02). Reads only. */
+  /**
+   * Checks the organisation's whole chain up to its head (SEC-EVD-02). Reads
+   * only, and only in withTenant's transaction for that organisation: in any
+   * other, row security would show its chain as empty.
+   */
   verify(tx: AuditTransaction, orgId: string): Promise<ChainReport>;
 }
 
-/** The chain's head fails its check: an event can't be added until someone has looked into it. */
+/** The chain fails its check at the head: an event can't be added until someone has looked into it. */
 export class AuditChainBroken extends Error {
   readonly orgId: string;
 
   constructor(orgId: string) {
-    super("The organisation's audit chain head fails its check, so no event can be added to it");
+    super("The organisation's audit chain fails its check at the head, so no event can be added to it");
     this.name = 'AuditChainBroken';
     this.orgId = orgId;
   }
@@ -81,8 +87,8 @@ function chainOf(orgId: string): Chain & { readonly kind: 'organisation' } {
   return { kind: 'organisation', orgId: orgId.toLowerCase() };
 }
 
-/** Events with no head: the head row was removed, or can't be read. */
-const HEAD_MISSING: ChainReport = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
+/** Events with no usable head: the head row was removed, or can't be read. */
+const NO_HEAD: ChainReport = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
 
 const isBytes = (value: unknown): value is Buffer => Buffer.isBuffer(value);
 const isText = (value: unknown): value is string => typeof value === 'string';
@@ -96,29 +102,35 @@ function headFrom(row: Readonly<Record<string, unknown>>): ChainHead | undefined
   return { seq, hash, mac, macKeyVersion };
 }
 
-/** An event row as the chain checks it, or nothing if a field is missing or of the wrong type. */
+/**
+ * An event row as the chain checks it, or nothing if a field is missing or of
+ * the wrong type, or its time isn't one the app could have written: a real
+ * time (one past JavaScript's range arrives as an Invalid Date, 'infinity' as
+ * a number) and a whole millisecond, as `whole_ms` says.
+ */
 function storedEntry(row: Readonly<Record<string, unknown>>): StoredEntry | undefined {
-  const { seq, id, recorded_at: recordedAt, action, details, prev_hash: prevHash, hash, mac } = row;
+  const { seq, id, recorded_at: recordedAt, whole_ms: wholeMs, action, details, prev_hash: prevHash } = row;
   const { actor_type: actorType, actor_id: actorId, subject_type: subjectType, subject_id: subjectId } = row;
-  const { subject_version: subjectVersion, mac_key_version: macKeyVersion } = row;
-  // A timestamp of 'infinity' arrives as a number, not a Date, so every Date here is a real time.
+  const { subject_version: subjectVersion, hash, mac, mac_key_version: macKeyVersion } = row;
   const readable =
     typeof seq === 'bigint' &&
     isText(id) &&
     recordedAt instanceof Date &&
-    [actorType, actorId, action, subjectType, subjectId].every(isText) &&
+    Number.isFinite(recordedAt.getTime()) &&
+    wholeMs === true &&
+    [actorType, actorId, action, subjectType, subjectId, details].every(isText) &&
     typeof subjectVersion === 'number' &&
-    typeof details === 'object' &&
-    details !== null &&
     [prevHash, hash, mac].every(isBytes) &&
     typeof macKeyVersion === 'number';
   if (!readable) return undefined;
-  const content = eventContent({
-    actor: { type: actorType as ActorType, id: actorId as string },
-    action: action as string,
-    subject: { type: subjectType as string, id: subjectId as string, version: subjectVersion },
-    details: details as AuditDetails,
-  });
+  const content = eventContent(
+    {
+      actor: { type: actorType as ActorType, id: actorId as string },
+      action: action as string,
+      subject: { type: subjectType as string, id: subjectId as string, version: subjectVersion },
+    },
+    details as string,
+  );
   return {
     seq,
     id,
@@ -132,23 +144,18 @@ function storedEntry(row: Readonly<Record<string, unknown>>): StoredEntry | unde
 }
 
 export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; readonly ids: IdGenerator }): AuditTrail {
-  /**
-   * Locks the head and reads it, with the transaction's time to the
-   * millisecond (ADR-006 §3: "recorded at" is the database's). Nothing if the
-   * chain hasn't started; a head of undefined if its row can't be read.
-   */
+  /** Locks the head and reads it: nothing if the chain hasn't started, a head of undefined if its row can't be read. */
   const lockHead = async (
     tx: AuditTransaction,
     orgId: string,
-  ): Promise<{ readonly head: ChainHead | undefined; readonly now: Date } | undefined> => {
+  ): Promise<{ head: ChainHead | undefined } | undefined> => {
     const row = await tx
       .selectFrom('audit.heads')
       .select(['seq', 'hash', 'mac', 'mac_key_version'])
-      .select(sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.now())`.as('now'))
       .where('org_id', '=', orgId)
       .forNoKeyUpdate()
       .executeTakeFirst();
-    return row === undefined ? undefined : { head: headFrom(row), now: row.now };
+    return row === undefined ? undefined : { head: headFrom(row) };
   };
 
   /**
@@ -170,21 +177,60 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       .execute();
   };
 
+  /**
+   * Whether the organisation has events. Asked only with a head at 0 locked:
+   * no one else can then have added one, so any found were there before the
+   * head was removed or wound back, and the chain must not start again.
+   */
+  const hasEvents = async (tx: AuditTransaction, orgId: string): Promise<boolean> =>
+    (await tx.selectFrom('audit.events').select('seq').where('org_id', '=', orgId).limit(1).executeTakeFirst()) !==
+    undefined;
+
+  /**
+   * The time the event is recorded: the database's (ADR-006 §3), read once
+   * the head's lock is held, so times rise with the events' numbers (unless
+   * the server's clock is set back). Cut to the millisecond, as JavaScript
+   * keeps it.
+   */
+  const recordedAt = async (tx: AuditTransaction): Promise<Date> => {
+    const { now } = await tx
+      .selectNoFrom(sql<Date>`pg_catalog.date_trunc('milliseconds', pg_catalog.clock_timestamp())`.as('now'))
+      .executeTakeFirstOrThrow();
+    return now;
+  };
+
+  /** The next event ID, in lower case as Postgres returns a uuid, so the stored row hashes the same. */
+  const nextId = (): string => {
+    const id = ids.next().toLowerCase();
+    if (!UUID.test(id)) throw new RangeError('The ID generator gave an ID that is not a UUID');
+    return id;
+  };
+
   return Object.freeze({
     async record(tx: AuditTransaction, orgId: string, input: AuditEvent): Promise<RecordedAuditEvent> {
-      const event = checkedEvent(input, (name) => ruleForName(name) !== 'keep');
+      const event = checkedEvent(input, hidesField);
       const chain = chainOf(orgId);
       let locked = await lockHead(tx, chain.orgId);
       if (locked === undefined) {
         await startChain(tx, chain);
         locked = await lockHead(tx, chain.orgId);
       }
-      if (locked?.head === undefined || !headIsSealed(keys, chain, locked.head)) {
+      if (
+        locked?.head === undefined ||
+        !headIsSealed(keys, chain, locked.head) ||
+        (locked.head.seq === 0n && (await hasEvents(tx, chain.orgId)))
+      ) {
         throw new AuditChainBroken(chain.orgId);
       }
-      const { head, now } = locked;
+      const { head } = locked;
 
-      const entry = { seq: head.seq + 1n, id: ids.next(), recordedAt: now, content: eventContent(event) };
+      const details = canonicalDetails(event.details);
+      const entry = {
+        seq: head.seq + 1n,
+        id: nextId(),
+        recordedAt: await recordedAt(tx),
+        content: eventContent(event, details),
+      };
       const { link, head: next } = sealNext(keys, chain, head, entry);
       await tx
         .insertInto('audit.events')
@@ -199,7 +245,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
           subject_type: event.subject.type,
           subject_id: event.subject.id,
           subject_version: event.subject.version,
-          details: canonicalDetails(event.details),
+          details,
           prev_hash: link.prevHash,
           hash: link.hash,
           mac: link.mac,
@@ -215,30 +261,32 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     },
 
     async verify(tx: AuditTransaction, orgId: string): Promise<ChainReport> {
+      await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      // One statement, so the head and the last event number come from the same moment.
+      // One statement, so the head and the count of events come from the same moment.
       const { rows } = await sql<Record<string, unknown>>`
-        select (select pg_catalog.max(e.seq) from audit.events e where e.org_id = ${chain.orgId}) as last_seq,
+        select (select pg_catalog.count(*) from audit.events e where e.org_id = ${chain.orgId}) as stored,
                h.seq, h.hash, h.mac, h.mac_key_version, h.org_id is not null as has_head
         from (values (1)) as one (x)
         left join audit.heads h on h.org_id = ${chain.orgId}
       `.execute(tx);
       const state = rows[0] ?? {};
-      const lastSeq = typeof state.last_seq === 'bigint' ? state.last_seq : 0n;
+      const stored = typeof state.stored === 'bigint' ? state.stored : 0n;
       if (state.has_head !== true) {
         // A chain that was never started is empty; events with no head mean the head was removed.
-        return lastSeq === 0n ? { ok: true, seq: 0n, hash: GENESIS_HASH } : HEAD_MISSING;
+        return stored === 0n ? { ok: true, seq: 0n, hash: GENESIS_HASH } : NO_HEAD;
       }
       const head = headFrom(state);
-      if (head === undefined) return HEAD_MISSING;
+      if (head === undefined) return NO_HEAD;
 
-      const verifier = createChainVerifier(keys, chain, { head, lastSeq });
+      const verifier = createChainVerifier(keys, chain, { head, stored });
       // Each full batch moves `after` on, and a short or empty one ends the reading, so this always stops.
       let after = 0n;
       for (let full = true; full;) {
         const batch = await tx
           .selectFrom('audit.events')
           .selectAll()
+          .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
           .where('org_id', '=', chain.orgId)
           .where('seq', '>', after)
           .where('seq', '<=', head.seq)
@@ -246,8 +294,8 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
           .limit(BATCH)
           .execute();
         for (const row of batch) {
-          const stored = storedEntry(row);
-          const problem = stored === undefined ? verifier.unreadable() : verifier.check(stored);
+          const entry = storedEntry(row);
+          const problem = entry === undefined ? verifier.unreadable() : verifier.check(entry);
           if (problem !== undefined) return { ok: false, problem };
           after = row.seq;
         }

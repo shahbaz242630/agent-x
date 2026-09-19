@@ -71,9 +71,9 @@ function nth<T>(list: readonly T[], index: number): T {
   return item;
 }
 
-/** Checks `events` as a store holding exactly them would give them: its last number is theirs. */
+/** Checks `events` as a store holding exactly them would give them. */
 function verify(keys: KeyProvider, head: ChainHead, events: readonly StoredEntry[], chain: Chain = CHAIN) {
-  const verifier = createChainVerifier(keys, chain, { head, lastSeq: events.at(-1)?.seq ?? 0n });
+  const verifier = createChainVerifier(keys, chain, { head, stored: BigInt(events.length) });
   for (const event of events) verifier.check(event);
   return verifier.finish();
 }
@@ -204,6 +204,20 @@ describe('SEC-EVD-02 the chain check', () => {
     expect(verify(keys, genesisHead(keys, CHAIN), [])).toEqual({ ok: true, seq: 0n, hash: GENESIS_HASH });
   });
 
+  it("finds an event sealed with an older key version than one before it: a rotated-out key can't add events", () => {
+    const rotated = provider({ 'audit-mac': rotatedMacKey() });
+    const newer = sealedChain(rotated, 2);
+    // Sealed with version 1, which the app still holds to check older events: a copy of it is all an attacker needs.
+    const older = provider();
+    const next = entry(3n);
+    const after = sealNext(older, CHAIN, newer.head, next);
+
+    expect(verify(rotated, after.head, [...newer.events, { ...next, ...after.link }])).toEqual({
+      ok: false,
+      problem: { reason: 'mac', seq: 3n },
+    });
+  });
+
   it('passes events sealed before a key rotation, and after it', () => {
     const before = sealedChain(keys, 2);
     const rotated = provider({ 'audit-mac': rotatedMacKey() });
@@ -259,7 +273,8 @@ describe('SEC-EVD-02 the chain check', () => {
       ok: false,
       problem: { reason: 'head', seq: 5n },
     });
-    expect(verify(keys, head, [...events, appended])).toEqual({ ok: false, problem: { reason: 'head', seq: 4n } });
+    // With the head left where it was, the event is still read here, and its own MAC fails.
+    expect(verify(keys, head, [...events, appended])).toEqual({ ok: false, problem: { reason: 'mac', seq: 5n } });
   });
 
   it("finds another organisation's events copied in, with their MACs and head", () => {
@@ -287,7 +302,7 @@ describe('SEC-EVD-02 the chain check', () => {
   });
 
   it('stops at the first problem and keeps reporting it', () => {
-    const verifier = createChainVerifier(keys, CHAIN, { head, lastSeq: 4n });
+    const verifier = createChainVerifier(keys, CHAIN, { head, stored: 4n });
 
     expect(verifier.check(nth(events, 1))).toEqual({ reason: 'gap', seq: 1n });
     expect(verifier.check(nth(events, 0))).toEqual({ reason: 'gap', seq: 1n });
@@ -296,7 +311,7 @@ describe('SEC-EVD-02 the chain check', () => {
   });
 
   it('reports a row that cannot be read at its place', () => {
-    const verifier = createChainVerifier(keys, CHAIN, { head, lastSeq: 4n });
+    const verifier = createChainVerifier(keys, CHAIN, { head, stored: 4n });
     verifier.check(nth(events, 0));
 
     expect(verifier.unreadable()).toEqual({ reason: 'unreadable', seq: 2n });
@@ -304,24 +319,21 @@ describe('SEC-EVD-02 the chain check', () => {
   });
 
   it('reports a head whose MAC is wrong before reading any event', () => {
-    const verifier = createChainVerifier(keys, CHAIN, { head: { ...head, mac: Buffer.alloc(32) }, lastSeq: 4n });
+    const verifier = createChainVerifier(keys, CHAIN, { head: { ...head, mac: Buffer.alloc(32) }, stored: 4n });
 
     expect(verifier.check(nth(events, 0))).toEqual({ reason: 'head', seq: 4n });
   });
 
-  it('reports a head that has events past it, or is past its events, before reading any', () => {
-    expect(createChainVerifier(keys, CHAIN, { head, lastSeq: 5n }).check(nth(events, 0))).toEqual({
-      reason: 'head',
-      seq: 4n,
-    });
-    expect(createChainVerifier(keys, CHAIN, { head, lastSeq: 3n }).finish()).toEqual({
-      ok: false,
-      problem: { reason: 'head', seq: 4n },
-    });
+  it('reports a store holding more events than the head counts, once its events all check out', () => {
+    // An event at a number the check never reads (0, say, or a second event 4) is still counted.
+    const verifier = createChainVerifier(keys, CHAIN, { head, stored: 5n });
+    for (const event of events) expect(verifier.check(event)).toBeUndefined();
+
+    expect(verifier.finish()).toEqual({ ok: false, problem: { reason: 'head', seq: 4n } });
   });
 
   it('reports a head the events stop short of', () => {
-    expect(createChainVerifier(keys, CHAIN, { head, lastSeq: 4n }).finish()).toEqual({
+    expect(createChainVerifier(keys, CHAIN, { head, stored: 4n }).finish()).toEqual({
       ok: false,
       problem: { reason: 'head', seq: 4n },
     });

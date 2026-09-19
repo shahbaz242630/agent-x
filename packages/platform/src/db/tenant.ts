@@ -76,6 +76,22 @@ export async function withTenant<Schema, Result>(
   }
 }
 
+/**
+ * Refuses unless the transaction is withTenant's for this organisation. Row
+ * security shows another tenant's rows as no rows at all, so work that only
+ * reads, such as checking an audit chain, would take a wrong tenant's view for
+ * an empty record.
+ */
+export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: string): Promise<void> {
+  const { rows } = await sql<{ org_id: string | null }>`
+    select pg_catalog.current_setting('app.org_id', true) as org_id
+  `.execute(tx);
+  const tenant = rows[0]?.org_id ?? '';
+  if (!UUID.test(orgId) || tenant.toLowerCase() !== orgId.toLowerCase()) {
+    throw new TenantContextError("the transaction isn't withTenant's for this organisation");
+  }
+}
+
 /** The tenant the connection carries: its `app.org_id` setting, or '' for none. */
 async function tenantOn(client: pg.ClientBase): Promise<string> {
   const { rows } = await client.query<{ org_id: string | null }>(

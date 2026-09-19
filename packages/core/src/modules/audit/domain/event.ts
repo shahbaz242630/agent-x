@@ -61,7 +61,46 @@ const CONTROL = /[\u0000-\u001f\u007f]/;
 const ACTION_LENGTH = 100;
 const DETAILS_COUNT = 32;
 const DETAIL_TEXT_LENGTH = 1024;
+/** Postgres's integer, the subject_version column's type. */
+const MAX_VERSION = 2_147_483_647;
 const ACTOR_TYPES: ReadonlySet<string> = new Set<ActorType>(['user', 'agent', 'system']);
+
+type DetailEntry = readonly [string, unknown];
+
+/**
+ * The event's fields, each read from the caller's objects once. Every check,
+ * and the event kept, use this copy: a getter can't show the check one value
+ * and the record another.
+ */
+interface Snapshot {
+  readonly actor: AuditActor;
+  readonly action: string;
+  readonly subject: AuditSubject;
+  /** The details' entries, or nothing if the details aren't a plain object. */
+  readonly details: readonly DetailEntry[] | undefined;
+}
+
+/** Takes what the caller passed, whatever its type claims: a caller the compiler can't see could pass anything. */
+function plainEntries(details: unknown): readonly DetailEntry[] | undefined {
+  if (
+    typeof details !== 'object' ||
+    details === null ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(details) as object | null)
+  ) {
+    return undefined;
+  }
+  return Object.entries(details);
+}
+
+function snapshotOf(event: AuditEvent): Snapshot {
+  const { actor, action, subject, details } = event;
+  return {
+    actor: { type: actor.type, id: actor.id },
+    action,
+    subject: { type: subject.type, id: subject.id, version: subject.version },
+    details: plainEntries(details),
+  };
+}
 
 function actorProblems(actor: AuditActor): string[] {
   if (!ACTOR_TYPES.has(actor.type)) return ['actor.type must be user, agent or system'];
@@ -75,8 +114,8 @@ function subjectProblems(subject: AuditSubject): string[] {
   const problems: string[] = [];
   if (!SUBJECT_TYPE.test(subject.type)) problems.push('subject.type must be lower-case words joined by _');
   if (!UUID.test(subject.id)) problems.push('subject.id must be a UUID');
-  if (!Number.isSafeInteger(subject.version) || subject.version < 1) {
-    problems.push('subject.version must be a whole number from 1');
+  if (!Number.isSafeInteger(subject.version) || subject.version < 1 || subject.version > MAX_VERSION) {
+    problems.push(`subject.version must be a whole number from 1 to ${MAX_VERSION}`);
   }
   return problems;
 }
@@ -94,16 +133,8 @@ function detailValueProblem(key: string, value: unknown): string | undefined {
   return undefined;
 }
 
-/** Takes what the caller passed, whatever its type claims: a caller the compiler can't see could pass anything. */
-function detailsProblems(details: unknown): string[] {
-  if (
-    typeof details !== 'object' ||
-    details === null ||
-    ![Object.prototype, null].includes(Object.getPrototypeOf(details) as object | null)
-  ) {
-    return ['details must be a plain object'];
-  }
-  const entries = Object.entries(details);
+function detailsProblems(entries: readonly DetailEntry[] | undefined): string[] {
+  if (entries === undefined) return ['details must be a plain object'];
   if (entries.length > DETAILS_COUNT) return [`details has more than ${DETAILS_COUNT} entries`];
   return entries.flatMap(([key, value]) => {
     if (!DETAIL_KEY.test(key)) return ['details has a key that is not a camelCase name'];
@@ -111,56 +142,56 @@ function detailsProblems(details: unknown): string[] {
   });
 }
 
+/** Code-unit order of the keys, whatever order they were written in. */
+const byKey = ([a]: DetailEntry, [b]: DetailEntry): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /**
  * The event in its canonical form, frozen, or an AuditEventRefused listing
- * every problem. `isSensitive` says which detail names hold what an audit row
- * must never keep (the logger's own list of secret and personal field names).
+ * every problem. `isSensitive` says which details hold what an audit row must
+ * never keep, by name and value (the logger's own rule for what it hides).
  */
-export function checkedEvent(event: AuditEvent, isSensitive: (name: string) => boolean): AuditEvent {
+export function checkedEvent(
+  event: AuditEvent,
+  isSensitive: (name: string, value: AuditDetailValue) => boolean,
+): AuditEvent {
+  const { actor, action, subject, details } = snapshotOf(event);
   const problems = [
-    ...actorProblems(event.actor),
-    ...(ACTION.test(event.action) && event.action.length <= ACTION_LENGTH
+    ...actorProblems(actor),
+    ...(ACTION.test(action) && action.length <= ACTION_LENGTH
       ? []
       : [`action must be dotted lower-case words, at most ${ACTION_LENGTH} characters`]),
-    ...subjectProblems(event.subject),
-    ...detailsProblems(event.details),
+    ...subjectProblems(subject),
+    ...detailsProblems(details),
   ];
-  // Checked apart from the rest, and only once every key is a plain name, so a problem can quote it.
+  // Checked apart from the rest, and only once every key is a plain name and every value a plain fact.
+  const facts = (details ?? []) as readonly (readonly [string, AuditDetailValue])[];
   if (problems.length === 0) {
-    for (const key of Object.keys(event.details).filter(isSensitive)) {
-      problems.push(`details.${key} names a secret or personal data, which audit rows never hold (ADR-014 §3)`);
+    for (const [key] of facts.filter(([name, value]) => isSensitive(name, value))) {
+      problems.push(`details.${key} looks like a secret or personal data, which audit rows never hold (ADR-014 §3)`);
     }
   }
   if (problems.length > 0) throw new AuditEventRefused(problems);
 
   const lower = (id: string): string => id.toLowerCase();
   return Object.freeze({
-    actor: Object.freeze({
-      type: event.actor.type,
-      id: event.actor.type === 'system' ? event.actor.id : lower(event.actor.id),
-    }),
-    action: event.action,
-    subject: Object.freeze({ type: event.subject.type, id: lower(event.subject.id), version: event.subject.version }),
-    details: Object.freeze(inOrder(event.details)),
+    actor: Object.freeze({ type: actor.type, id: actor.type === 'system' ? actor.id : lower(actor.id) }),
+    action,
+    subject: Object.freeze({ type: subject.type, id: lower(subject.id), version: subject.version }),
+    details: Object.freeze(Object.fromEntries([...facts].sort(byKey))),
   });
-}
-
-/** The details with their keys in code-unit order, whatever order they were written in. */
-function inOrder(details: AuditDetails): Record<string, AuditDetailValue> {
-  return Object.fromEntries(Object.entries(details).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /** The details as JSON with their keys in order: the same facts always give the same text. */
 export function canonicalDetails(details: AuditDetails): string {
-  return JSON.stringify(inOrder(details));
+  return JSON.stringify(Object.fromEntries(Object.entries(details).sort(byKey)));
 }
 
 /**
- * What the chain hashes and MACs for an event, as labelled parts. It is
- * computed from the event before it is stored and again from the stored row,
- * so both must give the same parts.
+ * What the chain hashes and MACs for an event, as labelled parts, with its
+ * details as their JSON text. A new event's text is canonicalDetails; a stored
+ * event's is the text stored, taken exactly as it is, so any change to it shows.
  */
-export function eventContent(event: AuditEvent): readonly [string, ...string[]] {
+export function eventContent(event: Omit<AuditEvent, 'details'>, detailsJson: string): readonly [string, ...string[]] {
   return [
     'actor',
     event.actor.type,
@@ -172,6 +203,6 @@ export function eventContent(event: AuditEvent): readonly [string, ...string[]] 
     event.subject.id,
     event.subject.version.toString(),
     'details',
-    canonicalDetails(event.details),
+    detailsJson,
   ];
 }

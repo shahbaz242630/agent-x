@@ -11,12 +11,12 @@ import {
   type TestSession,
 } from '@agentx/testing';
 import { type ChainReport, linkHash } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
+import { type AuditEvent, AuditEventRefused, canonicalDetails, eventContent } from '../domain/event.ts';
 import { AuditChainBroken, type AuditTrail, createAuditTrail } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
@@ -120,7 +120,7 @@ describe('recording audit events (ADR-011 §3)', () => {
       subject_type: 'probe',
       subject_id: USER,
       subject_version: 1,
-      details: { alpha: 1, zeta: 'z' },
+      details: '{"alpha":1,"zeta":"z"}',
       mac_key_version: 1,
     });
     expect(row?.recorded_at).toEqual(recorded?.recordedAt);
@@ -186,9 +186,31 @@ describe('recording audit events (ADR-011 §3)', () => {
   it("refuses details named like the logger's secret and personal fields (ADR-014 §3)", async () => {
     await expect(record(org, { ...event(1), details: { contactEmail: 'x' } })).rejects.toThrow(
       new AuditEventRefused([
-        'details.contactEmail names a secret or personal data, which audit rows never hold (ADR-014 §3)',
+        'details.contactEmail looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
       ]),
     );
+  });
+
+  it('keeps a detail named like a code when its value is a plain constant, as the logger does', async () => {
+    await record(org, { ...event(1), details: { reasonCode: 'DUPLICATE_ORDER_REFERENCE' } });
+
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 1n });
+  });
+
+  it("stores the ID generator's IDs in lower case, so the chain checks out whatever case they came in", async () => {
+    const shouting = createAuditTrail({ keys, ids: { next: () => ids.next().toUpperCase() } });
+    await withTenant(app, org, (tx) => shouting.record(tx, org, event(1)));
+
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 1n });
+  });
+
+  it('refuses an ID from the generator that is not a UUID, and writes nothing', async () => {
+    const broken = createAuditTrail({ keys, ids: { next: () => 'not-a-uuid' } });
+
+    await expect(withTenant(app, org, (tx) => broken.record(tx, org, event(1)))).rejects.toThrow(
+      new RangeError('The ID generator gave an ID that is not a UUID'),
+    );
+    expect(await attacker.query('select 1 from audit.events where org_id = $1', [org])).toEqual([]);
   });
 
   it('refuses an organisation ID that is not a UUID', async () => {
@@ -196,7 +218,7 @@ describe('recording audit events (ADR-011 §3)', () => {
       await expect(trail.record(tx, 'org-1', event(1))).rejects.toThrow(
         new AuditEventRefused(['the organisation ID must be a UUID']),
       );
-      await expect(trail.verify(tx, 'org-1')).rejects.toThrow(AuditEventRefused);
+      await expect(trail.verify(tx, 'org-1')).rejects.toThrow(TenantContextError);
     });
   });
 });
@@ -205,8 +227,18 @@ describe('the tenant walls (SEC-TEN-01 on the audit tables)', () => {
   it("keeps one organisation's chain out of another's sight", async () => {
     await record(org, event(1), event(2));
     const other = newOrg();
+    const seen = await withTenant(app, other, (tx) =>
+      tx.selectFrom('audit.events').select('seq').where('org_id', '=', org).execute(),
+    );
 
-    expect(await withTenant(app, other, (tx) => trail.verify(tx, org))).toMatchObject({ ok: true, seq: 0n });
+    expect(seen).toEqual([]);
+  });
+
+  it("refuses to check a chain from another organisation's transaction, where it would look empty", async () => {
+    await record(org, event(1));
+    const other = newOrg();
+
+    await expect(withTenant(app, other, (tx) => trail.verify(tx, org))).rejects.toThrow(TenantContextError);
   });
 
   it("refuses to record into another organisation's chain", async () => {
@@ -257,6 +289,13 @@ describe('FX-RACE recording at the same time', () => {
         .sort((a, b) => Number(a - b)),
     ).toEqual(Array.from({ length: 10 }, (_, i) => BigInt(i + 2)));
     expect(await verify(org)).toMatchObject({ ok: true, seq: 11n });
+    // Each time is read once the head's lock is held, so the times rise with the numbers.
+    const times = await attacker.query<{ recorded_at: Date }>(
+      'select recorded_at from audit.events where org_id = $1 order by seq',
+      [org],
+    );
+    const ms = times.map((row) => row.recorded_at.getTime());
+    expect(ms).toEqual([...ms].sort((a, b) => a - b));
   });
 
   it("starts a new organisation's chain once when its first events race", async () => {
@@ -306,8 +345,6 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
   const restoreRules = (): Promise<void> =>
     tamper(
       ...EVENT_COLUMNS.map((column) => `alter table audit.events alter column ${column} set not null`),
-      'alter table audit.events drop constraint if exists events_details_check',
-      `alter table audit.events add constraint events_details_check check (pg_catalog.jsonb_typeof(details) = 'object')`,
       ...['seq', 'hash', 'mac', 'mac_key_version'].map(
         (column) => `alter table audit.heads alter column ${column} set not null`,
       ),
@@ -326,6 +363,47 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     expect(await problemOf(org)).toEqual({ reason: 'hash', seq: 3n });
   });
 
+  it("an event's details rewritten with the same meaning", async () => {
+    await tamper(`update audit.events set details = '{"step": 3}' where org_id = $1 and seq = 3`);
+
+    expect(await problemOf(org)).toEqual({ reason: 'hash', seq: 3n });
+  });
+
+  it('an event forged at a number the check never reads, 0', async () => {
+    await tamper(
+      'alter table audit.events drop constraint events_seq_check',
+      `insert into audit.events
+         select org_id, 0, '0199a0f0-0000-7000-8000-0000000000fe', recorded_at, actor_type, actor_id, 'probe.forged',
+                subject_type, subject_id, subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 1`,
+    );
+    try {
+      expect(await problemOf(org)).toEqual({ reason: 'head', seq: 4n });
+    } finally {
+      await tamper(
+        'delete from audit.events where org_id = $1',
+        'alter table audit.events add constraint events_seq_check check (seq >= 1)',
+      );
+    }
+  });
+
+  it("another organisation's events copied in, under that organisation's own sealed head", async () => {
+    // The target has a real head for four events of its own; its events are swapped for ours, MACs and all.
+    const other = newOrg();
+    await record(other, event(1), event(2), event(3), event(4));
+    await attacker.query('delete from audit.events where org_id = $1', [other]);
+    await attacker.query(
+      `insert into audit.events
+         select $2::uuid, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id, subject_version,
+                details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1`,
+      [org, other],
+    );
+
+    // Every event's hash names the chain it was made for.
+    expect(await problemOf(other)).toEqual({ reason: 'hash', seq: 1n });
+  });
+
   it('a correctly chained event appended with no valid MAC, and the head moved to it', async () => {
     // The attacker can compute every hash: the format is public. Only the MAC needs the key.
     const [head] = await attacker.query<{ hash: Buffer }>('select hash from audit.heads where org_id = $1', [org]);
@@ -335,7 +413,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
       seq: 5n,
       id: '0199a0f0-0000-7000-8000-0000000000ff',
       recordedAt: new Date('2026-09-19T08:00:00.000Z'),
-      content: eventContent(forged),
+      content: eventContent(forged, canonicalDetails(forged.details)),
     };
     const hash = linkHash({ kind: 'organisation', orgId: org }, head.hash, entry);
     await attacker.query(
@@ -401,6 +479,14 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     ],
     ['recorded_at at infinity', ["update audit.events set recorded_at = 'infinity' where org_id = $1 and seq = 2"]],
     [
+      "recorded_at past JavaScript's range",
+      ["update audit.events set recorded_at = '290000-01-01' where org_id = $1 and seq = 2"],
+    ],
+    [
+      'recorded_at off a whole millisecond',
+      ["update audit.events set recorded_at = recorded_at + interval '500 microseconds' where org_id = $1 and seq = 2"],
+    ],
+    [
       'actor_type',
       [
         'alter table audit.events alter column actor_type drop not null',
@@ -447,13 +533,6 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
       [
         'alter table audit.events alter column details drop not null',
         'update audit.events set details = null where org_id = $1 and seq = 2',
-      ],
-    ],
-    [
-      'details not an object',
-      [
-        'alter table audit.events drop constraint events_details_check',
-        `update audit.events set details = '"text"' where org_id = $1 and seq = 2`,
       ],
     ],
     [
@@ -535,11 +614,18 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     }
   });
 
-  it('the head deleted: the events are left headless, and the next record fails', async () => {
+  it('the head deleted: the events are left headless, and nothing more is recorded on them', async () => {
     await tamper('delete from audit.heads where org_id = $1');
 
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
-    await expect(record(org, event(5))).rejects.toThrow(/duplicate key/);
+    await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+  });
+
+  it('the head and the first event deleted: the chain does not start again on the rest', async () => {
+    await tamper('delete from audit.heads where org_id = $1', 'delete from audit.events where org_id = $1 and seq = 1');
+
+    await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+    expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
   });
 
   it('the tail deleted and the head wound back to its earlier sealed value: the chain alone looks whole (the anchor check, A2c, catches this)', async () => {
@@ -571,7 +657,7 @@ describe('checking a chain while events are added', () => {
     let added = false;
     const racing = app.withPlugin({
       transformQuery: ({ node, queryId }) => {
-        if (node.kind === 'RawNode' && node.sqlFragments.join('').includes('last_seq')) headReads.add(queryId);
+        if (node.kind === 'RawNode' && node.sqlFragments.join('').includes('has_head')) headReads.add(queryId);
         return node;
       },
       transformResult: async ({ result, queryId }) => {
@@ -590,6 +676,26 @@ describe('checking a chain while events are added', () => {
 });
 
 describe('a long chain', () => {
+  it('counts an event hidden as a second copy at the end of a batch, which the batches never read', async () => {
+    await record(org, ...Array.from({ length: 501 }, (_, i) => event(i + 1)));
+    await attacker.query('alter table audit.events drop constraint events_pkey');
+    try {
+      await attacker.query(
+        `insert into audit.events
+           select org_id, seq, '0199a0f0-0000-7000-8000-0000000000fd', recorded_at, actor_type, actor_id,
+                  'probe.forged', subject_type, subject_id, subject_version, details, prev_hash, hash, mac,
+                  mac_key_version
+           from audit.events where org_id = $1 and seq = 500`,
+        [org],
+      );
+
+      expect(await problemOf(org)).toEqual({ reason: 'head', seq: 501n });
+    } finally {
+      await attacker.query('delete from audit.events where org_id = $1', [org]);
+      await attacker.query('alter table audit.events add constraint events_pkey primary key (org_id, seq)');
+    }
+  });
+
   it('is checked in batches, and a problem deep in it is found', async () => {
     await record(org, ...Array.from({ length: 1000 }, (_, i) => event(i + 1)));
 

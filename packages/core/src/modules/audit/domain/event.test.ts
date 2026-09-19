@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   type AuditDetails,
+  type AuditDetailValue,
   type AuditEvent,
   AuditEventRefused,
   canonicalDetails,
@@ -22,11 +23,13 @@ const EVENT: AuditEvent = {
 /** Nothing counts as sensitive, unless a test says otherwise. */
 const nothingSensitive = (): boolean => false;
 
-const check = (event: AuditEvent, isSensitive: (name: string) => boolean = nothingSensitive): AuditEvent =>
+type Sensitive = (name: string, value: AuditDetailValue) => boolean;
+
+const check = (event: AuditEvent, isSensitive: Sensitive = nothingSensitive): AuditEvent =>
   checkedEvent(event, isSensitive);
 
 /** The problems an event is refused for, or none. */
-function problemsOf(event: AuditEvent, isSensitive: (name: string) => boolean = nothingSensitive): readonly string[] {
+function problemsOf(event: AuditEvent, isSensitive: Sensitive = nothingSensitive): readonly string[] {
   try {
     check(event, isSensitive);
     return [];
@@ -88,6 +91,30 @@ describe('an audit event in its canonical form', () => {
     expect(problemsOf(withDetails(Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`k${i}`, i]))))).toEqual([]);
     expect(problemsOf(withDetails(Object.assign(Object.create(null) as object, { a: 1 })))).toEqual([]);
     expect(problemsOf({ ...EVENT, action: `a.${'b'.repeat(98)}` })).toEqual([]);
+    expect(problemsOf({ ...EVENT, subject: { ...EVENT.subject, version: 2_147_483_647 } })).toEqual([]);
+  });
+
+  it('reads each field once, so a getter cannot show the check one value and the record another', () => {
+    let reads = 0;
+    const details = {
+      get note(): unknown {
+        reads += 1;
+        return reads === 1 ? 'fine' : { nested: 'changed after the check' };
+      },
+    };
+    let actorReads = 0;
+    const actor = {
+      type: 'user' as const,
+      get id(): string {
+        actorReads += 1;
+        return actorReads === 1 ? USER : 'not a uuid';
+      },
+    };
+    const checked = check({ ...EVENT, actor, details: details as unknown as AuditDetails });
+
+    expect(checked.details).toEqual({ note: 'fine' });
+    expect(checked.actor.id).toBe(USER);
+    expect([reads, actorReads]).toEqual([1, 1]);
   });
 });
 
@@ -118,9 +145,18 @@ describe('an audit event refused', () => {
     ['a type in capitals', { type: 'Organisation' }, 'subject.type must be lower-case words joined by _'],
     ['a type with a dot', { type: 'organisation.x' }, 'subject.type must be lower-case words joined by _'],
     ['an ID that is not a UUID', { id: 'org-1' }, 'subject.id must be a UUID'],
-    ['version 0', { version: 0 }, 'subject.version must be a whole number from 1'],
-    ['a version with a fraction', { version: 1.5 }, 'subject.version must be a whole number from 1'],
-    ['a version past safe integers', { version: 2 ** 53 }, 'subject.version must be a whole number from 1'],
+    ['version 0', { version: 0 }, 'subject.version must be a whole number from 1 to 2147483647'],
+    ['a version with a fraction', { version: 1.5 }, 'subject.version must be a whole number from 1 to 2147483647'],
+    [
+      'a version past safe integers',
+      { version: 2 ** 53 },
+      'subject.version must be a whole number from 1 to 2147483647',
+    ],
+    [
+      'a version past Postgres integers',
+      { version: 2 ** 31 },
+      'subject.version must be a whole number from 1 to 2147483647',
+    ],
   ])('for a subject with %s', (_case, change, problem) => {
     expect(problemsOf({ ...EVENT, subject: { ...EVENT.subject, ...change } })).toEqual([problem]);
   });
@@ -164,12 +200,29 @@ describe('an audit event refused', () => {
     expect(problemsOf(withDetails({ value }))).toEqual([problem]);
   });
 
+  it('asks about each detail by name and value, so a constant code can stay and anything else goes', () => {
+    const asked: [string, AuditDetailValue][] = [];
+    const sensitive = (name: string, value: AuditDetailValue): boolean => {
+      asked.push([name, value]);
+      return name === 'reasonCode' && value !== 'DUPLICATE_ORDER_REFERENCE';
+    };
+
+    expect(problemsOf(withDetails({ reasonCode: 'DUPLICATE_ORDER_REFERENCE' }), sensitive)).toEqual([]);
+    expect(problemsOf(withDetails({ reasonCode: 'k3Jx9-random' }), sensitive)).toEqual([
+      'details.reasonCode looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
+    ]);
+    expect(asked).toEqual([
+      ['reasonCode', 'DUPLICATE_ORDER_REFERENCE'],
+      ['reasonCode', 'k3Jx9-random'],
+    ]);
+  });
+
   it('for a detail whose name marks a secret or personal data (ADR-014 §3)', () => {
     const sensitive = (name: string): boolean => ['email', 'iban'].includes(name);
 
     expect(problemsOf(withDetails({ email: 'a@b.example', iban: 'AE07', plan: 'x' }), sensitive)).toEqual([
-      'details.email names a secret or personal data, which audit rows never hold (ADR-014 §3)',
-      'details.iban names a secret or personal data, which audit rows never hold (ADR-014 §3)',
+      'details.email looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
+      'details.iban looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
     ]);
   });
 
@@ -205,7 +258,9 @@ describe('an audit event refused', () => {
 
 describe('what the chain seals for an event', () => {
   it('is the labelled fields, with the details as JSON in key order', () => {
-    expect(eventContent(check(withDetails({ seats: 3, plan: 'pilot' })))).toEqual([
+    const checked = check(withDetails({ seats: 3, plan: 'pilot' }));
+
+    expect(eventContent(checked, canonicalDetails(checked.details))).toEqual([
       'actor',
       'user',
       USER,
