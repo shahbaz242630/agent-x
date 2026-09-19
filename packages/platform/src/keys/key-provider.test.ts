@@ -56,6 +56,23 @@ describe('SEC-DATA-07 keyed hashes (HMAC-SHA-256)', () => {
     expect(result).toEqual({ keyVersion: 1, mac: expected });
   });
 
+  it('stays on a newer version it is asked for, never an older one', () => {
+    // Current is 1 here, with version 2 held: a process rolled back after a rotation.
+    const keys = provider({ 'request-hash': rotated(2, 9, 1) });
+    const withKey = (fill: number): Buffer => createHmac('sha256', key(fill)).update(encodeMessage(REQUEST)).digest();
+
+    expect(keys.mac('request-hash', REQUEST, 2)).toEqual({ keyVersion: 2, mac: withKey(9) });
+    expect(keys.mac('request-hash', REQUEST, 1)).toEqual({ keyVersion: 1, mac: withKey(2) });
+    expect(provider({ 'request-hash': rotated(2, 9) }).mac('request-hash', REQUEST, 1)).toEqual({
+      keyVersion: 2,
+      mac: withKey(9),
+    });
+  });
+
+  it('refuses a newer version it does not hold', () => {
+    expect(() => provider().mac('request-hash', REQUEST, 3)).toThrow(new KeyError('request-hash has no version 3'));
+  });
+
   it('gives the same message the same hash, and another message another hash', () => {
     const keys = provider();
 

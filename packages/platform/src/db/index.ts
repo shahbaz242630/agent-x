@@ -14,4 +14,4 @@ export {
   type SetupLogins,
   setUpServer,
 } from './server-setup.ts';
-export { TenantContextError, withTenant } from './tenant.ts';
+export { assertTenant, TenantContextError, withTenant } from './tenant.ts';

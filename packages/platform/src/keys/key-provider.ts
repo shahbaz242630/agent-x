@@ -93,8 +93,14 @@ export interface KeyDescription {
 }
 
 export interface KeyProvider {
-  /** A keyed hash of the message with the current key. */
-  mac(purpose: MacPurpose, message: Message): Mac;
+  /**
+   * A keyed hash of the message with the current key, or with version
+   * `atLeast` where that is newer. Something sealed in a line, like an audit
+   * chain, stays on the newest version it has reached, whatever this process
+   * has as current: a release rolled back, or two running side by side during
+   * a rotation. Throws a KeyError if that version isn't held.
+   */
+  mac(purpose: MacPurpose, message: Message, atLeast?: number): Mac;
   /** Whether `mac` is the keyed hash of the message with that version, compared in constant time. */
   verifyMac(purpose: MacPurpose, keyVersion: number, message: Message, mac: Uint8Array): boolean;
   /**
@@ -228,9 +234,10 @@ export function createKeyProvider(material: KeyMaterial): KeyProvider {
     createHmac('sha256', key).update(encodeMessage(message)).digest();
 
   return Object.freeze({
-    mac(purpose: MacPurpose, message: Message): Mac {
-      const { version, key } = currentOf(purpose, 'mac');
-      return Object.freeze({ keyVersion: version, mac: hmac(key, message) });
+    mac(purpose: MacPurpose, message: Message, atLeast?: number): Mac {
+      const { current } = heldAs(purpose, 'mac');
+      const version = atLeast !== undefined && atLeast > current ? atLeast : current;
+      return Object.freeze({ keyVersion: version, mac: hmac(keyFor(purpose, 'mac', version), message) });
     },
 
     verifyMac(purpose: MacPurpose, keyVersion: number, message: Message, mac: Uint8Array): boolean {

@@ -9,3 +9,4 @@ export {
   type LogMethod,
 } from './logger.ts';
 export { guardOutputs, type Output } from './output-guard.ts';
+export { hidesField } from './redact.ts';

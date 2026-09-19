@@ -2,7 +2,7 @@ import { findLeaks, SENSITIVE_SAMPLES as SAMPLES } from '@agentx/testing';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
-import { LIMITS, REDACTED, redactJson, redactLine } from './redact.ts';
+import { hidesField, LIMITS, REDACTED, redactJson, redactLine } from './redact.ts';
 
 /** A marker value that must never come out. Plain words, so secret scanners ignore it. */
 const PLANTED = 'planted value that must not appear';
@@ -72,6 +72,21 @@ describe('SEC-DATA-05 redaction by field name, at any depth (names.ts has the fu
       }),
       RUNS,
     );
+  });
+});
+
+describe('hidesField: the same rule, for code that must refuse such fields', () => {
+  it.each([
+    ['password', 'x', true],
+    ['contactEmail', 'x', true],
+    ['reasonCode', 'DUPLICATE_ORDER_REFERENCE', false],
+    ['toState', 'ACTIVE', false],
+    ['reasonCode', 'k3Jx9-random.Mixed', true],
+    ['state', { nested: true }, true],
+    ['plan', 'pilot', false],
+  ])('%s = %j: hidden %s', (name, value, hidden) => {
+    expect(hidesField(name, value)).toBe(hidden);
+    expect(redacted({ [name]: value })).toEqual({ [name]: hidden ? REDACTED : value });
   });
 });
 

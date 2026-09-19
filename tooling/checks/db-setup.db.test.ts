@@ -491,7 +491,8 @@ describe(`the database set-up job on an Azure-like server (Postgres ${server.ver
   });
 
   it('refuses a half-made set of roles rather than guess', async () => {
-    await asSuperuser('revoke connect on database agentx from agentx_backup');
+    // Its rights on the migrated tables go first, as a real repair would take them: DROP OWNED also revokes CONNECT.
+    await asSuperuser('drop owned by agentx_backup', APP_DATABASE);
     await asSuperuser('drop role agentx_backup');
     await expect(setUp(cloudAdmin(), logins)).rejects.toEqual(
       new ServerSetupRefused([
