@@ -126,6 +126,9 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       }
       await assertTenant(tx, orgId);
       const log = logger.child({ orgId });
+      // Both statements filter by org_id too, though row security and the
+      // check above already confine them to it: ADR-005 §7 asks every query
+      // to, so a table whose walls were ever lowered still isn't crossed.
       const facts = { machine: rules.name, statusEvent: event, objectId: id };
 
       const { rows } = await sql<{ status: unknown }>`
