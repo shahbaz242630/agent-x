@@ -43,6 +43,7 @@ export type RuleId =
   | 'apps-egress'
   | 'apps-logs'
   | 'app-errors-alert'
+  | 'audit-integrity-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -122,6 +123,14 @@ const LOG_LINE_START = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} U
  * any case, since Zitadel's newer lines write "ERROR" (`in~` ignores case).
  */
 const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal", "panic")';
+
+/**
+ * The integrity alarm's events (ADR-012 §2): an audit chain that failed its
+ * check, and a check that broke. Our logger writes each event name exactly, so
+ * the match keeps its case.
+ */
+const INTEGRITY_LINES =
+  'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -540,6 +549,16 @@ export function singleSummaryColumn(query: string): string | undefined {
 }
 
 /**
+ * Whether a SEV-1 alert sees every minute and fires on the first window with a
+ * match: its window is as long as the time between runs, so no minute goes
+ * unwatched, and one failing window is enough, so it never waits for more.
+ */
+const watchesEveryWindow = (alert: PredictedResource, criterion: unknown): boolean =>
+  at(alert.properties, 'windowSize') === at(alert.properties, 'evaluationFrequency') &&
+  at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+  at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1;
+
+/**
  * Whether a query is exactly `table | stage | … | summarize Name = aggregation`:
  * the same stages, in order, whatever the spacing around its pipes.
  */
@@ -867,14 +886,16 @@ const database: Check = (snapshot, expected, add) => {
         at(alert.properties, 'severity') === 1 &&
         at(alert.properties, 'autoMitigate') === false &&
         list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-        list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
-          queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()'),
+        list(at(alert.properties, 'criteria', 'allOf')).some(
+          (criterion) =>
+            queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+            watchesEveryWindow(alert, criterion),
         ),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the workspace fires when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -1211,7 +1232,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-F]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-H]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -1424,6 +1445,39 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
         rule: 'app-errors-alert',
         resource: environment.name,
         message: "needs an enabled alert on this deployment's workspace that counts the apps' error events",
+      });
+    }
+  }
+};
+
+/**
+ * An enabled, stateless SEV-1 alert on the workspace counts every integrity
+ * alarm the apps log (ADR-012 §2, SEC-DB-11): one line is enough to fire it,
+ * and it notifies again every window the alarm goes on.
+ */
+const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
+  const workspaces = workspaceIds(snapshot);
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = ofType(snapshot, TYPES.alert).some(
+      (alert) =>
+        at(alert.properties, 'enabled') === true &&
+        at(alert.properties, 'severity') === 1 &&
+        at(alert.properties, 'autoMitigate') === false &&
+        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
+        list(at(alert.properties, 'criteria', 'allOf')).some(
+          (criterion) =>
+            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
+            at(criterion, 'operator') === 'GreaterThan' &&
+            at(criterion, 'threshold') === 0 &&
+            watchesEveryWindow(alert, criterion),
+        ),
+    );
+    if (!alerted) {
+      add({
+        rule: 'audit-integrity-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
       });
     }
   }
@@ -2208,6 +2262,7 @@ const CHECKS: readonly Check[] = [
   appsEnvironment,
   appsLogs,
   appErrorsAlert,
+  auditIntegrityAlert,
   identities,
   releaseIdentity,
   releaseAccess,

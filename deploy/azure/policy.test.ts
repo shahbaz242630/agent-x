@@ -175,6 +175,7 @@ const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
 const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
 const APP_LOGS = named(/^app-logs-to-workspace$/);
 const ERRORS_ALERT = named(/-app-errors$/);
+const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
@@ -208,6 +209,13 @@ const settingsOf = (job: Mutable): Mutable[] => at(containerOf(job), 'env') as M
 const secretNamed = (job: Mutable, name: string): Mutable =>
   declaredSecrets(job).find((secret) => secret.name === name) ?? {};
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
+/** Changes to a SEV-1 alert's timing that leave minutes unwatched, or make it wait for more than one window. */
+const LATE_OR_BLIND: readonly ((alert: Mutable) => void)[] = [
+  (alert) => (inside(alert, 'properties').windowSize = 'PT5M'),
+  (alert) => (inside(alert, 'properties').evaluationFrequency = 'PT30M'),
+  (alert) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 3),
+  (alert) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 3),
+];
 const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
 /** One rule of a group, by name, for changing it in place. */
 const ruleNamed = (group: Mutable, name: string): Mutable =>
@@ -381,6 +389,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       ),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-audit-integrity',
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-release',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
       expect.stringMatching(
@@ -686,6 +695,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').severity = 2)))).toEqual(
       expect.arrayContaining(['database-logins']),
     );
+    for (const change of LATE_OR_BLIND) {
+      expect(brokenRules(changed(LOGIN_ALERT, change))).toEqual(['database-logins']);
+    }
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').autoMitigate = true)))).toEqual([
       'database-logins',
       'alert-delivery',
@@ -906,6 +918,17 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
+    // The playbook's sections run from A to H.
+    expect(
+      brokenRules(
+        changed(CAP_ALERT, (alert) => {
+          properties(alert).description = String(properties(alert).description).replace(
+            /section [A-H]\.$/,
+            'section I.',
+          );
+        }),
+      ),
+    ).toEqual(['alert-runbook']);
   });
 
   it('alert-delivery: an alert switched off, sent nowhere, or to a group that is off or tells nobody', () => {
@@ -1283,6 +1306,44 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
     // A higher threshold is a choice, not a break.
     expect(brokenRules(changed(ERRORS_ALERT, (alert) => (criterion(alert).threshold = 5)))).toEqual([]);
+  });
+
+  it("audit-integrity-alert: no alert on the integrity alarm, or one that can't fire, or fires too late or too quietly", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const counted = (filter: string) => query(`ContainerAppConsoleLogs | ${filter} | summarize Events = count()`);
+    expect(brokenRules(without(INTEGRITY_ALERT))).toEqual(['audit-integrity-alert']);
+    for (const change of [
+      // A check that broke is the alarm too, not just a chain that failed.
+      counted('where tostring(parse_json(Log).event) == "audit.integrity_failed"'),
+      counted('where tostring(parse_json(Log).event) in ("audit.anchor_check_crashed")'),
+      counted(
+        'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | where ContainerAppName == "api"',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()',
+      ),
+      // One line is enough, seen in any minute.
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(INTEGRITY_ALERT, change))).toEqual(['audit-integrity-alert']);
+    }
+    // Quieter than SEV-1, or stateful, or off: the general alert rules object too.
+    expect(brokenRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'audit-integrity-alert',
+    ]);
+    expect(brokenRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'audit-integrity-alert',
+    ]);
+    expect(brokenRules(changed(INTEGRITY_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'audit-integrity-alert',
+    ]);
   });
 
   it('identities: one usable in any region', () => {

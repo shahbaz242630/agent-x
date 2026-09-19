@@ -113,6 +113,7 @@ func resourceNames(environment string, nameSuffix string) object => {
   databaseHost: '${serverName(environment, nameSuffix)}.postgres.database.azure.com'
   appsEnvironment: 'cae-agentx-${environment}'
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
+  auditIntegrity: 'alert-agentx-${shortName(environment)}-audit-integrity'
   identities: map(workloads, workload => identityName(environment, workload))
   jobs: map(jobWorkloads, workload => jobName(environment, workload))
   // CI's identity and the one role it may be given (G4); nothing runs as it. A
