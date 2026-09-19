@@ -48,6 +48,13 @@ const APPLICATION_NAME = 'agentx-api';
  */
 const STOP_DEADLINE_MS = 25_000;
 
+/**
+ * How long the anchor check of one chain may take before it counts as not
+ * completed (anchor-check.ts). Each of its statements has 10 seconds at most
+ * (verifyAlone); this bounds the whole check, whatever the database does.
+ */
+const ANCHOR_CHECK_DEADLINE_MS = 120_000;
+
 /** The parts of `process` the API uses. Tests pass a stand-in. */
 export interface ApiProcess {
   readonly stdout: Output;
@@ -230,6 +237,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
       // Three missed checks in a row are the alarm, not just a warning.
       staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     }),
     config.audit.anchorSeconds * 1000,
   );

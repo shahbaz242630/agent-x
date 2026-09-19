@@ -98,13 +98,21 @@ vi.mock('./start-record.ts', () => ({
 const anchorChecks = vi.hoisted(() => ({
   intervals: [] as number[],
   staleAfter: [] as number[],
+  deadlines: [] as number[],
   chains: [] as unknown[],
+  verifies: [] as ((anchor: unknown) => Promise<unknown>)[],
 }));
 
 vi.mock('./anchor-check.ts', () => ({
-  createAnchorCheck: (options: { chains: readonly { chain: unknown }[]; staleAfterMs: number }) => {
+  createAnchorCheck: (options: {
+    chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
+    staleAfterMs: number;
+    deadlineMs: number;
+  }) => {
     anchorChecks.chains.push(...options.chains.map((one) => one.chain));
+    anchorChecks.verifies.push(...options.chains.map((one) => one.verify));
     anchorChecks.staleAfter.push(options.staleAfterMs);
+    anchorChecks.deadlines.push(options.deadlineMs);
     return { run: () => Promise.resolve() };
   },
   scheduleAnchorCheck: (_check: unknown, intervalMs: number) => {
@@ -123,6 +131,23 @@ vi.mock('./anchor-check.ts', () => ({
     };
   },
 }));
+
+/** The platform chain as it is, but for its check on its own, which main.db.test.ts runs for real. */
+const platformChecks = vi.hoisted(() => [] as { database: unknown; anchor: unknown }[]);
+
+vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
+  return {
+    ...actual,
+    createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => ({
+      ...actual.createPlatformChain(...args),
+      verifyAlone: (database: unknown, anchor: { seq: bigint; hash: Buffer }) => {
+        platformChecks.push({ database, anchor });
+        return Promise.resolve({ ok: true, seq: anchor.seq, hash: anchor.hash });
+      },
+    }),
+  };
+});
 
 /** Plain words standing in for a secret put in the wrong setting, so secret scanners ignore it. */
 const MISPLACED = 'value that must never be printed';
@@ -179,7 +204,10 @@ beforeEach(() => {
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
   anchorChecks.staleAfter.length = 0;
+  anchorChecks.deadlines.length = 0;
   anchorChecks.chains.length = 0;
+  anchorChecks.verifies.length = 0;
+  platformChecks.length = 0;
 });
 
 afterEach(async () => {
@@ -325,6 +353,17 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
     // Three intervals without a completed check are the alarm.
     expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
+    expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+  });
+
+  it("checks the platform chain in a transaction of its own, with the database's limits on each statement", async () => {
+    await start();
+    const [verify] = anchorChecks.verifies;
+    if (verify === undefined) throw new Error('the check should cover the platform chain');
+    const anchor = { seq: 3n, hash: Buffer.alloc(32, 3) };
+
+    await expect(verify(anchor)).resolves.toEqual({ ok: true, seq: 3n, hash: anchor.hash });
+    expect(platformChecks).toEqual([{ database: fake.created[0], anchor }]);
   });
 
   it("SEC-OPS-05 writes the fingerprint's hash and the release to the platform chain, and logs its place", async () => {

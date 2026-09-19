@@ -20,6 +20,7 @@ const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';
 const AT = new Date('2026-09-19T09:00:00.000Z');
 const STALE_MS = 900_000;
+const DEADLINE_MS = 120_000;
 
 const ok = (seq: bigint, fill = Number(seq)): ChainReport => ({ ok: true, seq, hash: Buffer.alloc(32, fill) });
 const unreachable = (): Error => new Error('connect ECONNREFUSED');
@@ -50,7 +51,15 @@ function checking(chains: readonly CheckedChain[], anchors: AnchorStore = create
     destination: capture,
   });
   const clock = new FixedClock(AT);
-  const check = createAnchorCheck({ chains, keys, clock, logger, staleAfterMs: STALE_MS, anchors });
+  const check = createAnchorCheck({
+    chains,
+    keys,
+    clock,
+    logger,
+    staleAfterMs: STALE_MS,
+    deadlineMs: DEADLINE_MS,
+    anchors,
+  });
   /** Each chain's lines, without the run's closing line. */
   const events = () =>
     capture
@@ -301,18 +310,155 @@ describe('the anchor check (ADR-012 §2, SEC-DB-11)', () => {
   });
 });
 
+describe('the anchor check when a check does not finish', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A chain whose check never ends, and how often it was started. */
+  function hanging(chain: CheckedChain['chain'] = { kind: 'platform' }) {
+    const started = { count: 0 };
+    const checked: CheckedChain = {
+      chain,
+      verify: () => {
+        started.count += 1;
+        return new Promise<never>(() => undefined);
+      },
+    };
+    return { checked, started };
+  }
+
+  it('counts a check past its deadline as not completed, and never starts a second on the same chain meanwhile', async () => {
+    vi.useFakeTimers();
+    const { checked, started } = hanging();
+    const { check, events, done, capture, clock } = checking([checked]);
+    const run = check.run();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS - 1);
+    expect(done()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await run;
+
+    expect(events()).toEqual([warning]);
+    expect(capture.lines().find((line) => line.event === 'audit.anchor_check_failed')?.err).toEqual(
+      expect.objectContaining({ message: `the check did not finish within ${String(DEADLINE_MS)} ms` }),
+    );
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    expect(events()).toEqual([warning, warning, alarm('unchecked')]);
+    expect(
+      capture
+        .lines()
+        .filter((line) => line.event === 'audit.anchor_check_failed')
+        .at(-1)?.err,
+    ).toEqual(expect.objectContaining({ message: 'the last check of this chain has not finished' }));
+    expect(started.count).toBe(1);
+  });
+
+  it.each([
+    [
+      'with a report',
+      (settle: { resolve: (report: ChainReport) => void }) => {
+        settle.resolve(ok(1n));
+      },
+    ],
+    [
+      'with an error, which goes unhandled nowhere',
+      (settle: { reject: (error: Error) => void }) => {
+        settle.reject(new Error('connection lost'));
+      },
+    ],
+  ])('checks the chain again once the late check has ended %s', async (_, end) => {
+    vi.useFakeTimers();
+    const settle: { resolve: (report: ChainReport) => void; reject: (error: Error) => void } = {
+      resolve: () => undefined,
+      reject: () => undefined,
+    };
+    let turn = 0;
+    const late: CheckedChain = {
+      chain: { kind: 'platform' },
+      verify: () => {
+        turn += 1;
+        return turn === 1
+          ? new Promise<ChainReport>((resolve, reject) => {
+              Object.assign(settle, { resolve, reject });
+            })
+          : Promise.resolve(ok(2n));
+      },
+    };
+    const { check, events } = checking([late]);
+    const run = check.run();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    await run;
+    end(settle);
+    await vi.advanceTimersByTimeAsync(0);
+    await check.run();
+
+    expect(events().map((line) => line.event)).toEqual(['audit.anchor_check_failed', 'audit.anchored']);
+    expect(turn).toBe(2);
+    // Each check's deadline is cleared once it ends.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves nothing listening on the stop signal once a check ends, however many runs share it', async () => {
+    const listening = new Set<unknown>();
+    const signal = {
+      aborted: false,
+      addEventListener: (_type: string, listener: unknown) => listening.add(listener),
+      removeEventListener: (_type: string, listener: unknown) => listening.delete(listener),
+    } as unknown as AbortSignal;
+    const { checked } = chainGiving([ok(1n)]);
+    const { check } = checking([checked]);
+    await check.run(signal);
+    await check.run(signal);
+
+    expect(listening.size).toBe(0);
+  });
+
+  it('ends at once when stopped mid-check, raising nothing, and checks no more chains', async () => {
+    const { checked } = hanging();
+    const next = chainGiving([ok(1n)], { kind: 'organisation', orgId: ORG });
+    const { check, events, done } = checking([checked, next.checked]);
+    const stopping = new AbortController();
+    const run = check.run(stopping.signal);
+    stopping.abort();
+    await run;
+
+    expect(events()).toEqual([]);
+    expect(next.given).toEqual([]);
+    expect(done()).toEqual([{ level: 'info', chains: 1, anchored: 0, unchanged: 0, failed: 0, unchecked: 1 }]);
+  });
+
+  it('checks nothing in a run stopped before it began', async () => {
+    const { checked, started } = hanging();
+    const { check, done } = checking([checked]);
+    await check.run(AbortSignal.abort());
+
+    expect(started.count).toBe(0);
+    expect(done()).toEqual([{ level: 'info', chains: 0, anchored: 0, unchanged: 0, failed: 0, unchecked: 0 }]);
+  });
+});
+
 describe('the anchor check schedule', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  /** A check that counts its runs, each taking as long as the test says. */
-  function counting(runMs = 0): AnchorCheck & { runs: number } {
+  /** A check that counts its runs, each taking as long as the test says unless it is stopped first. */
+  function counting(runMs = 0): AnchorCheck & { runs: number; signals: AbortSignal[] } {
     const check = {
       runs: 0,
-      run: async () => {
+      signals: [] as AbortSignal[],
+      run: async (signal?: AbortSignal) => {
         check.runs += 1;
-        if (runMs > 0) await new Promise((resolve) => setTimeout(resolve, runMs));
+        if (signal !== undefined) check.signals.push(signal);
+        if (runMs === 0) return;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, runMs);
+          signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
       },
     };
     return check;
@@ -355,21 +501,39 @@ describe('the anchor check schedule', () => {
     expect(check.runs).toBe(1);
   });
 
-  it('stops: waits for a run in flight, then runs no more', async () => {
+  it('stops: ends a run in flight at once and waits for it to end, then runs no more', async () => {
     vi.useFakeTimers();
     const check = counting(5_000);
+    const schedule = scheduleAnchorCheck(check, 60_000);
+    expect(check.signals.map((signal) => signal.aborted)).toEqual([false]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await schedule.stop();
+
+    expect(check.signals.map((signal) => signal.aborted)).toEqual([true]);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(check.runs).toBe(1);
+  });
+
+  it('stops: waits for a run in flight that is slow to end', async () => {
+    vi.useFakeTimers();
+    let end: () => void = () => undefined;
+    const check: AnchorCheck = {
+      run: () =>
+        new Promise<void>((resolve) => {
+          end = resolve;
+        }),
+    };
     const schedule = scheduleAnchorCheck(check, 60_000);
     let stopped = false;
     const stopping = schedule.stop().then(() => {
       stopped = true;
     });
-    await vi.advanceTimersByTimeAsync(4_999);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(stopped).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
+    end();
     await stopping;
 
     expect(stopped).toBe(true);
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(check.runs).toBe(1);
   });
 });

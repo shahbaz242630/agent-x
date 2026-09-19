@@ -10,11 +10,11 @@
 // also try to stop the check from finishing, and wait for a restart to empty
 // this memory: so a database that refuses the check (a right, a table or a
 // column gone) is the alarm too, and so is a chain left unchecked for three
-// intervals. Anything else that stops a check (the database unreachable) is a
-// warning until then. Every run ends with one line, so a check that has
-// stopped can be told from one with nothing to say. The platform chain is
-// checked from the start; the organisations' chains join when organisations
-// exist (B1).
+// intervals. Anything else that stops a check (the database unreachable, or
+// a check past its deadline) is a warning until then. Every run ends with one
+// line, so a check that has stopped can be told from one with nothing to say.
+// The platform chain is checked from the start; the organisations' chains
+// join when organisations exist (B1).
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type AnchorPoint,
@@ -35,8 +35,11 @@ export interface CheckedChain {
 }
 
 export interface AnchorCheck {
-  /** Checks every chain once, one after another. Never throws: every outcome is logged. */
-  run(): Promise<void>;
+  /**
+   * Checks every chain once, one after another, and ends at once when `signal`
+   * aborts. Never throws: every outcome is logged.
+   */
+  run(signal?: AbortSignal): Promise<void>;
 }
 
 export interface AnchorCheckOptions {
@@ -46,6 +49,12 @@ export interface AnchorCheckOptions {
   readonly logger: Logger;
   /** How long a chain may go without a completed check before that is the alarm too. */
   readonly staleAfterMs: number;
+  /**
+   * How long one chain's check may take. Postgres's own limits can be got round
+   * by someone who owns the database, and a connection can die without a word,
+   * so the app keeps its own: a check past it has not completed.
+   */
+  readonly deadlineMs: number;
   readonly anchors?: AnchorStore;
 }
 
@@ -61,23 +70,55 @@ const refusedByDatabase = (error: unknown): boolean =>
 
 type Outcome = 'anchored' | 'unchanged' | 'failed' | 'unchecked';
 
+/** The run was stopped while a chain's check was under way. */
+class Stopped extends Error {}
+
+/** The check, or a rejection once the deadline passes or the run is stopped, whichever comes first. */
+async function withinDeadline<T>(
+  checking: Promise<T>,
+  deadlineMs: number,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stop: (() => void) | undefined;
+  const cut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`the check did not finish within ${String(deadlineMs)} ms`));
+    }, deadlineMs);
+    stop = () => {
+      reject(new Stopped('the check was stopped'));
+    };
+    signal?.addEventListener('abort', stop, { once: true });
+  });
+  try {
+    return await Promise.race([checking, cut]);
+  } finally {
+    clearTimeout(timer);
+    if (stop !== undefined) signal?.removeEventListener('abort', stop);
+  }
+}
+
 export function createAnchorCheck({
   chains,
   keys,
   clock,
   logger,
   staleAfterMs,
+  deadlineMs,
   anchors = createMemoryAnchorStore(),
 }: AnchorCheckOptions): AnchorCheck {
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
   const lastChecked = new Map<string, number>();
   const keyOf = (chain: Chain): string => (chain.kind === 'platform' ? 'platform' : chain.orgId);
+  // Chains whose check is still under way past its deadline: one each at most, so a hung database can't take every connection.
+  const inFlight = new Set<string>();
 
-  const checkOne = async ({ chain, verify }: CheckedChain): Promise<Outcome> => {
+  const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
+    // An organisation's ID goes on the line as the logger's own field, which an event can't set.
+    const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
+    const key = keyOf(chain);
     try {
-      // An organisation's ID goes on the line as the logger's own field, which an event can't set.
-      const log = chain.kind === 'platform' ? logger : logger.child({ orgId: chain.orgId });
       const last = anchors.latest(chain);
       const alarm = (reason: string, seq?: bigint): Outcome => {
         log.error('audit.integrity_failed', {
@@ -91,15 +132,24 @@ export function createAnchorCheck({
       };
       let report: ChainReport;
       try {
-        report = await verify(last);
+        if (inFlight.has(key)) throw new Error('the last check of this chain has not finished');
+        inFlight.add(key);
+        const checking = Promise.resolve().then(() => verify(last));
+        // Handled here too, so a check that ends after its deadline never goes unhandled.
+        void checking.then(
+          () => inFlight.delete(key),
+          () => inFlight.delete(key),
+        );
+        report = await withinDeadline(checking, deadlineMs, signal);
       } catch (error) {
+        if (error instanceof Stopped) return 'unchecked';
         // A store that breaks its contract may be a hostile database too (a planted operator, a view for a table).
         if (error instanceof ChainStoreError || refusedByDatabase(error)) return alarm('store');
         log.warn('audit.anchor_check_failed', { chain: chain.kind, err: error });
-        const since = clock.now().getTime() - (lastChecked.get(keyOf(chain)) ?? started);
+        const since = clock.now().getTime() - (lastChecked.get(key) ?? started);
         return since >= staleAfterMs ? alarm('unchecked') : 'unchecked';
       }
-      lastChecked.set(keyOf(chain), clock.now().getTime());
+      lastChecked.set(key, clock.now().getTime());
       if (!report.ok) return alarm(report.problem.reason, report.problem.seq);
       // The check compared the anchored event already; this backs it up should a store not pass the anchor on.
       if (
@@ -120,15 +170,18 @@ export function createAnchorCheck({
       return 'anchored';
     } catch (error) {
       // Nothing may escape a run: the schedule would stop, and an unhandled rejection would end the process.
-      logger.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
+      log.error('audit.anchor_check_crashed', { chain: chain.kind, err: error });
       return 'unchecked';
     }
   };
 
   return Object.freeze({
-    async run(): Promise<void> {
+    async run(signal?: AbortSignal): Promise<void> {
       const outcomes: Outcome[] = [];
-      for (const one of chains) outcomes.push(await checkOne(one));
+      for (const one of chains) {
+        if (signal?.aborted === true) break;
+        outcomes.push(await checkOne(one, signal));
+      }
       const count = (outcome: Outcome): number => outcomes.filter((each) => each === outcome).length;
       logger.info('audit.anchor_check_done', {
         chains: outcomes.length,
@@ -143,16 +196,17 @@ export function createAnchorCheck({
 
 /**
  * Runs the check now and then `intervalMs` after each run ends, so runs never
- * overlap. `stop` waits for a run in flight, so the pool it uses can be
- * closed after it.
+ * overlap. `stop` ends a run in flight at once and waits for it to end; a
+ * statement it had begun is left to the database's own limit, which closing
+ * the pool waits for.
  */
 export function scheduleAnchorCheck(check: AnchorCheck, intervalMs: number): { stop(): Promise<void> } {
-  let stopped = false;
+  const stopping = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> = Promise.resolve();
   const tick = (): void => {
-    running = check.run().then(() => {
-      if (stopped) return;
+    running = check.run(stopping.signal).then(() => {
+      if (stopping.signal.aborted) return;
       timer = setTimeout(tick, intervalMs);
       // The server keeps the process alive; the check alone shouldn't.
       timer.unref();
@@ -161,7 +215,7 @@ export function scheduleAnchorCheck(check: AnchorCheck, intervalMs: number): { s
   tick();
   return Object.freeze({
     async stop(): Promise<void> {
-      stopped = true;
+      stopping.abort();
       clearTimeout(timer);
       await running;
     },

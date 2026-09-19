@@ -157,14 +157,14 @@ describe('checking in a transaction of its own, as the anchor check does', () =>
     });
   });
 
-  it('gives up after 10 seconds when the table is locked against it, rather than hang', async () => {
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
     await record(started(1));
     const holder = await database.connect('admin');
     await holder.query('begin');
     await holder.query('lock table platform_controls.audit_events in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(chain.verifyAlone(app, undefined)).rejects.toThrow(/lock timeout/);
+      await expect(chain.verifyAlone(app, undefined)).rejects.toThrow(/statement timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');

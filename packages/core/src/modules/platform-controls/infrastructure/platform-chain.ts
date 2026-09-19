@@ -56,9 +56,10 @@ export interface PlatformChain {
   verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport>;
   /**
    * The same check in a transaction of its own, as the anchor check runs it,
-   * each lock waited for at most 10 seconds and each statement run for at most
-   * 30: a held lock or a stalled query then fails the check, which says so,
-   * rather than hanging it with nothing logged.
+   * each statement given 10 seconds at most, a wait for a lock included: a
+   * held lock or a stalled query then fails the check, which says so. The
+   * anchor check keeps its own deadline too, since someone who owns the
+   * database can get round this one.
    */
   verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport>;
 }
@@ -224,8 +225,8 @@ export function createPlatformChain({
         .transaction()
         .setIsolationLevel('read committed')
         .execute(async (tx) => {
-          await sql`set local lock_timeout = '10s'`.execute(tx);
-          await sql`set local statement_timeout = '30s'`.execute(tx);
+          // Each statement, waits for locks included, so the pool can be closed soon after a stop.
+          await sql`set local statement_timeout = '10s'`.execute(tx);
           return verifyChain(keys, CHAIN, readerFor(tx), anchor);
         });
     },
