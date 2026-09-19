@@ -111,7 +111,7 @@ describe('appending an event', () => {
     expect([first.seq, second.seq]).toEqual([1n, 2n]);
     expect(second.prevHash).toEqual(first.hash);
     expect(first.recordedAt).toBe(NOW);
-    expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: true, seq: 2n, hash: second.hash });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({ ok: true, seq: 2n, hash: second.hash });
   });
 
   it('reads the time only once the head is locked and found clean, then writes', async () => {
@@ -218,7 +218,36 @@ describe('appending an event', () => {
 
 describe('checking a chain', () => {
   it('passes a chain that was never started as empty', async () => {
-    expect(await verifyChain(keys, CHAIN, new MemoryChain())).toEqual({ ok: true, seq: 0n, hash: GENESIS_HASH });
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), undefined)).toEqual({
+      ok: true,
+      seq: 0n,
+      hash: GENESIS_HASH,
+    });
+  });
+
+  it('reports a chain emptied after it was anchored, where the chain alone would look new', async () => {
+    const anchored = { seq: 3n, hash: Buffer.alloc(32, 3) };
+
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), anchored)).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), { seq: 0n, hash: GENESIS_HASH })).toMatchObject({
+      ok: true,
+      seq: 0n,
+    });
+  });
+
+  it('checks the chain against its anchor as it reads it', async () => {
+    const memory = await chainOf(3);
+    const at2 = memory.rows[1];
+    if (at2 === undefined) throw new Error('The chain is shorter than the test expects');
+
+    expect(await verifyChain(keys, CHAIN, memory, { seq: 2n, hash: at2.hash })).toMatchObject({ ok: true, seq: 3n });
+    expect(await verifyChain(keys, CHAIN, memory, { seq: 2n, hash: Buffer.alloc(32, 7) })).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 2n },
+    });
   });
 
   it('reports events left with no head, and a head that cannot be read, at 0', async () => {
@@ -228,25 +257,31 @@ describe('checking a chain', () => {
     unreadable.head = 'unreadable';
 
     for (const memory of [headless, unreadable]) {
-      expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'head', seq: 0n } });
+      expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+        ok: false,
+        problem: { reason: 'head', seq: 0n },
+      });
     }
   });
 
   it('reads a long chain in batches of 500, and finds a problem deep in it', async () => {
     const memory = await chainOf(1001);
 
-    expect(await verifyChain(keys, CHAIN, memory)).toMatchObject({ ok: true, seq: 1001n });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toMatchObject({ ok: true, seq: 1001n });
     const at = memory.rows[776];
     if (at === undefined) throw new Error('The chain is shorter than the test expects');
     memory.rows[776] = { ...at, content: ['action', 'probe.edited'] };
-    expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'hash', seq: 777n } });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: false,
+      problem: { reason: 'hash', seq: 777n },
+    });
   });
 
   it('asks for no page once it has reached the head', async () => {
     const small = await chainOf(3);
     const full = await chainOf(500);
-    await verifyChain(keys, CHAIN, small);
-    await verifyChain(keys, CHAIN, full);
+    await verifyChain(keys, CHAIN, small, undefined);
+    await verifyChain(keys, CHAIN, full, undefined);
 
     expect([small.pages, full.pages]).toEqual([1, 1]);
   });
@@ -255,14 +290,17 @@ describe('checking a chain', () => {
     const memory = await chainOf(250);
     memory.pageSize = 100;
 
-    expect(await verifyChain(keys, CHAIN, memory)).toMatchObject({ ok: true, seq: 250n });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toMatchObject({ ok: true, seq: 250n });
   });
 
   it('stops reading when the store runs out of events before the head, and reports the head', async () => {
     const memory = await chainOf(3);
     memory.head = (await chainOf(5)).head;
 
-    expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'head', seq: 5n } });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: false,
+      problem: { reason: 'head', seq: 5n },
+    });
   });
 
   it('refuses a store that gives events past the head it was asked to read up to', async () => {
@@ -274,7 +312,7 @@ describe('checking a chain', () => {
       events: (after, _upTo, limit) => memory.events(after, 99n, limit),
     };
 
-    await expect(verifyChain(keys, CHAIN, broken)).rejects.toThrow(
+    await expect(verifyChain(keys, CHAIN, broken, undefined)).rejects.toThrow(
       new ChainStoreError('it gave an event past the head it was asked to read up to'),
     );
   });
@@ -286,7 +324,7 @@ describe('checking a chain', () => {
       events: (after, upTo) => memory.events(after, upTo, 501),
     };
 
-    await expect(verifyChain(keys, CHAIN, broken)).rejects.toThrow(
+    await expect(verifyChain(keys, CHAIN, broken, undefined)).rejects.toThrow(
       new ChainStoreError('it gave 501 events where at most 500 were asked for'),
     );
   });
@@ -295,7 +333,10 @@ describe('checking a chain', () => {
     const memory = await chainOf(3);
     memory.unreadable.add(2n);
 
-    expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'unreadable', seq: 2n } });
+    expect(await verifyChain(keys, CHAIN, memory, undefined)).toEqual({
+      ok: false,
+      problem: { reason: 'unreadable', seq: 2n },
+    });
   });
 });
 

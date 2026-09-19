@@ -8,6 +8,7 @@
 // rights drop that key and add a second head, the chain counts as having no
 // readable head: recording is refused and the check fails.
 import {
+  type AnchorPoint,
   appendEvent,
   type Chain,
   type ChainReader,
@@ -51,8 +52,16 @@ export interface PlatformChain {
    * gave up on the container; this way the start is refused, and says so.
    */
   recordAlone(db: Kysely<PlatformControlsTables>, event: PlatformEvent): Promise<RecordedPlatformEvent>;
-  /** Checks the platform chain up to its head (SEC-EVD-02). Reads only. */
-  verify(tx: PlatformTransaction): Promise<ChainReport>;
+  /** Checks the platform chain up to its head (SEC-EVD-02), and that it still holds its last anchor if given one (SEC-DB-11). Reads only. */
+  verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * The same check in a transaction of its own, as the anchor check runs it,
+   * each statement given 10 seconds at most, a wait for a lock included: a
+   * held lock or a stalled query then fails the check, which says so. The
+   * anchor check keeps its own deadline too, since someone who owns the
+   * database can get round this one.
+   */
+  verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport>;
 }
 
 const CHAIN: Chain = { kind: 'platform' };
@@ -207,8 +216,19 @@ export function createPlatformChain({
         });
     },
 
-    verify(tx: PlatformTransaction): Promise<ChainReport> {
-      return verifyChain(keys, CHAIN, readerFor(tx));
+    verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport> {
+      return verifyChain(keys, CHAIN, readerFor(tx), anchor);
+    },
+
+    verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport> {
+      return db
+        .transaction()
+        .setIsolationLevel('read committed')
+        .execute(async (tx) => {
+          // Each statement, waits for locks included, so the pool can be closed soon after a stop.
+          await sql`set local statement_timeout = '10s'`.execute(tx);
+          return verifyChain(keys, CHAIN, readerFor(tx), anchor);
+        });
     },
   });
 }

@@ -50,7 +50,7 @@ const record = (...events: PlatformEvent[]) =>
     return recorded;
   });
 
-const verify = (): Promise<ChainReport> => app.transaction().execute((tx) => chain.verify(tx));
+const verify = (): Promise<ChainReport> => app.transaction().execute((tx) => chain.verify(tx, undefined));
 
 const problem = async (): Promise<unknown> => {
   const report = await verify();
@@ -144,6 +144,35 @@ describe('recording in a transaction of its own, as a process start does', () =>
   });
 });
 
+describe('checking in a transaction of its own, as the anchor check does', () => {
+  it('checks the chain against the anchor it is given', async () => {
+    await record(started(1), started(2));
+    const report = await chain.verifyAlone(app, undefined);
+    if (!report.ok) throw new Error('The chain should check out');
+
+    expect(report.seq).toBe(2n);
+    expect(await chain.verifyAlone(app, { seq: 2n, hash: Buffer.alloc(32, 7) })).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 2n },
+    });
+  });
+
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table platform_controls.audit_events in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(chain.verifyAlone(app, undefined)).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
 describe('SEC-EVD-01 the app role only adds to and reads the platform chain', () => {
   // Postgres checks the table right before anything else.
   // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
@@ -206,7 +235,10 @@ describe('FX-RACE recording at the same time', () => {
       },
     });
 
-    expect(await racing.transaction().execute((tx) => chain.verify(tx))).toMatchObject({ ok: true, seq: 2n });
+    expect(await racing.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
+      ok: true,
+      seq: 2n,
+    });
     expect(added).toBe(true);
     expect(await verify()).toMatchObject({ ok: true, seq: 3n });
   });
@@ -329,6 +361,27 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
         'alter table platform_controls.audit_head alter column mac set not null',
       );
     }
+  });
+
+  it('SEC-DB-11 the whole chain wound back, then grown again: whole and sealed, but not what was anchored', async () => {
+    const [earlier] = await attacker.query('select seq, hash, mac, mac_key_version from platform_controls.audit_head');
+    if (earlier === undefined) throw new Error('The chain has no head');
+    await record(started(4));
+    const anchored = await verify();
+    if (!anchored.ok) throw new Error('The chain should have checked out before the tampering');
+    const anchor = { seq: anchored.seq, hash: anchored.hash };
+    await tamper('delete from platform_controls.audit_events where seq = 4');
+    await attacker.query(
+      'update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4',
+      [earlier.seq, earlier.hash, earlier.mac, earlier.mac_key_version],
+    );
+    const against = () => app.transaction().execute((tx) => chain.verify(tx, anchor));
+
+    expect(await verify()).toMatchObject({ ok: true, seq: 3n });
+    expect(await against()).toEqual({ ok: false, problem: { reason: 'anchor', seq: 4n } });
+    await record(started(5), started(6));
+    expect(await verify()).toMatchObject({ ok: true, seq: 5n });
+    expect(await against()).toEqual({ ok: false, problem: { reason: 'anchor', seq: 4n } });
   });
 
   it('the head deleted: the events are left headless, and nothing more is recorded on them', async () => {

@@ -7,12 +7,13 @@
 //    could get round the tenant walls (ADR-005 §3, APP-02)
 // 5. writes the fingerprint's hash to the platform audit chain, or refuses to
 //    start (SEC-OPS-05)
-// 6. listens, and stops cleanly on SIGTERM or SIGINT: HTTP first, so every
-//    request in flight is answered, then the pool those requests were using
+// 6. listens, and starts the audit chains' anchor check (ADR-012 §2)
+// 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
+//    request in flight is answered, then the anchor check, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
-import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
-import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
 import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
@@ -27,6 +28,7 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
+import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
@@ -45,6 +47,13 @@ const APPLICATION_NAME = 'agentx-api';
  * platform kills the process.
  */
 const STOP_DEADLINE_MS = 25_000;
+
+/**
+ * How long the anchor check of one chain may take before it counts as not
+ * completed (anchor-check.ts). Each of its statements has 10 seconds at most
+ * (verifyAlone); this bounds the whole check, whatever the database does.
+ */
+const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
 /** The parts of `process` the API uses. Tests pass a stand-in. */
 export interface ApiProcess {
@@ -68,7 +77,13 @@ export interface RunOptions {
  * stay on: without one, Node's default for a second SIGTERM would end the
  * process at once, before the counts are written.
  */
-function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Database<ApiTables>, logger: Logger): void {
+function onStopSignals(
+  host: ApiProcess,
+  server: FastifyInstance,
+  anchorCheck: { stop(): Promise<void> },
+  database: Database<ApiTables>,
+  logger: Logger,
+): void {
   let stopping = false;
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     if (stopping) return;
@@ -82,8 +97,9 @@ function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Data
     }, STOP_DEADLINE_MS);
     try {
       // Requests are still answered while the server stops (return503OnClosing is
-      // off), so the pool closes only once the last of them has finished with it.
-      await server.close();
+      // off), so the pool closes only once the last of them, and the anchor
+      // check, have finished with it.
+      await Promise.all([server.close(), anchorCheck.stop()]);
       await database.destroy();
       logger.info('api.stopped');
       logger.flush();
@@ -207,7 +223,25 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     return undefined;
   }
   logger.info('api.listening', { ports: server.addresses().map((address) => address.port) });
-  onStopSignals(host, server, database, logger);
+  const platform = createPlatformChain({ keys, ids: uuidV7Ids });
+  const anchorCheck = scheduleAnchorCheck(
+    createAnchorCheck({
+      chains: [
+        {
+          chain: { kind: 'platform' },
+          verify: (anchor) => platform.verifyAlone(database, anchor),
+        },
+      ],
+      keys,
+      clock: systemClock,
+      logger,
+      // Three missed checks in a row are the alarm, not just a warning.
+      staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    }),
+    config.audit.anchorSeconds * 1000,
+  );
+  onStopSignals(host, server, anchorCheck, database, logger);
   return server;
 }
 

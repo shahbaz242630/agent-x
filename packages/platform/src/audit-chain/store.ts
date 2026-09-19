@@ -14,6 +14,7 @@
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import {
+  type AnchorPoint,
   type Chain,
   type ChainHead,
   type ChainLink,
@@ -154,19 +155,28 @@ export async function appendEvent(
 const NO_HEAD: ChainReport = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
 
 /**
- * Checks the whole chain up to its head (SEC-EVD-02). The head and the count
- * come from one moment; events added while the check runs are past the head,
- * so they aren't read, and raise no false alarm.
+ * Checks the whole chain up to its head (SEC-EVD-02), and, given the last
+ * anchor, that the chain still holds it (ADR-012 §2, SEC-DB-11). The head and
+ * the count come from one moment; events added while the check runs are past
+ * the head, so they aren't read, and raise no false alarm.
  */
-export async function verifyChain(keys: KeyProvider, chain: Chain, reader: ChainReader): Promise<ChainReport> {
+export async function verifyChain(
+  keys: KeyProvider,
+  chain: Chain,
+  reader: ChainReader,
+  anchor: AnchorPoint | undefined,
+): Promise<ChainReport> {
   const { head, stored } = await reader.state();
   if (head === 'none') {
-    // A chain that was never started is empty; events with no head mean the head was removed.
-    return stored === 0n ? { ok: true, seq: 0n, hash: GENESIS_HASH } : NO_HEAD;
+    // A chain that was never started is empty, unless it had been anchored; events with no head mean the head was removed.
+    if (stored !== 0n) return NO_HEAD;
+    return anchor !== undefined && anchor.seq > 0n
+      ? { ok: false, problem: { reason: 'anchor', seq: anchor.seq } }
+      : { ok: true, seq: 0n, hash: GENESIS_HASH };
   }
   if (head === 'unreadable') return NO_HEAD;
 
-  const verifier = createChainVerifier(keys, chain, { head, stored });
+  const verifier = createChainVerifier(keys, chain, { head, stored, anchor });
   // Reads until the head is reached; every batch that isn't empty moves `after` on, and an empty one ends the reading.
   let after = 0n;
   while (after < head.seq) {

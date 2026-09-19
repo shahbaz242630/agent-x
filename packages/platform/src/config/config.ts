@@ -70,6 +70,8 @@ export interface Config {
   readonly outbound: { readonly allowedOrigins: readonly string[] };
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
+  /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
+  readonly audit: { readonly anchorSeconds: number };
   /** ADR-011 §2: where the platform mounts the app's keys, and each key's current version where it isn't 1. */
   readonly keys: KeySettings;
 }
@@ -147,6 +149,7 @@ export function loadConfig(env: Env = process.env): Config {
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
+    anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
     keysCurrent: setting(env, 'AGENTX_KEYS_CURRENT'),
     dbHost: location.host,
@@ -205,6 +208,7 @@ export function loadConfig(env: Env = process.env): Config {
     }),
     outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
+    audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
     keys: Object.freeze({
       directory: checks.keysDirectory.value,
       current: Object.freeze(checks.keysCurrent.value ?? {}),

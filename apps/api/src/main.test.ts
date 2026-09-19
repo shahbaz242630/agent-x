@@ -90,6 +90,65 @@ vi.mock('./start-record.ts', () => ({
   },
 }));
 
+/**
+ * A stand-in for the anchor check, proven in anchor-check.test.ts: these tests
+ * see only how it is set up, and when it starts and stops. Stopping takes a
+ * moment, as it does when a run is in flight.
+ */
+const anchorChecks = vi.hoisted(() => ({
+  intervals: [] as number[],
+  staleAfter: [] as number[],
+  deadlines: [] as number[],
+  chains: [] as unknown[],
+  verifies: [] as ((anchor: unknown) => Promise<unknown>)[],
+}));
+
+vi.mock('./anchor-check.ts', () => ({
+  createAnchorCheck: (options: {
+    chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
+    staleAfterMs: number;
+    deadlineMs: number;
+  }) => {
+    anchorChecks.chains.push(...options.chains.map((one) => one.chain));
+    anchorChecks.verifies.push(...options.chains.map((one) => one.verify));
+    anchorChecks.staleAfter.push(options.staleAfterMs);
+    anchorChecks.deadlines.push(options.deadlineMs);
+    return { run: () => Promise.resolve() };
+  },
+  scheduleAnchorCheck: (_check: unknown, intervalMs: number) => {
+    fake.steps.push('anchor check started');
+    anchorChecks.intervals.push(intervalMs);
+    return {
+      stop: () => {
+        fake.steps.push('anchor check stopping');
+        return new Promise<void>((resolve) => {
+          setTimeout(() => {
+            fake.steps.push('anchor check stopped');
+            resolve();
+          }, 20);
+        });
+      },
+    };
+  },
+}));
+
+/** The platform chain as it is, but for its check on its own, which main.db.test.ts runs for real. */
+const platformChecks = vi.hoisted(() => [] as { database: unknown; anchor: unknown }[]);
+
+vi.mock('@agentx/core/modules/platform-controls', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/platform-controls')>();
+  return {
+    ...actual,
+    createPlatformChain: (...args: Parameters<typeof actual.createPlatformChain>) => ({
+      ...actual.createPlatformChain(...args),
+      verifyAlone: (database: unknown, anchor: { seq: bigint; hash: Buffer }) => {
+        platformChecks.push({ database, anchor });
+        return Promise.resolve({ ok: true, seq: anchor.seq, hash: anchor.hash });
+      },
+    }),
+  };
+});
+
 /** Plain words standing in for a secret put in the wrong setting, so secret scanners ignore it. */
 const MISPLACED = 'value that must never be printed';
 /** Plain words standing in for the database login. */
@@ -143,6 +202,12 @@ beforeEach(() => {
   fake.destroy = closePool;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
+  anchorChecks.intervals.length = 0;
+  anchorChecks.staleAfter.length = 0;
+  anchorChecks.deadlines.length = 0;
+  anchorChecks.chains.length = 0;
+  anchorChecks.verifies.length = 0;
+  platformChecks.length = 0;
 });
 
 afterEach(async () => {
@@ -273,11 +338,32 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
   it('checks the role, logs that the database is ready, records the start, and only then listens', async () => {
     const { events, capture } = await start();
-    expect(fake.steps).toEqual(['role checked', 'start recorded']);
+    expect(fake.steps).toEqual(['role checked', 'start recorded', 'anchor check started']);
     expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
     );
+  });
+
+  it('starts the anchor check of the platform chain once it listens, at the configured interval (ADR-012 §2)', async () => {
+    await start();
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '600' });
+
+    expect(anchorChecks.chains).toEqual([{ kind: 'platform' }, { kind: 'platform' }]);
+    expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
+    // Three intervals without a completed check are the alarm.
+    expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
+    expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+  });
+
+  it("checks the platform chain in a transaction of its own, with the database's limits on each statement", async () => {
+    await start();
+    const [verify] = anchorChecks.verifies;
+    if (verify === undefined) throw new Error('the check should cover the platform chain');
+    const anchor = { seq: 3n, hash: Buffer.alloc(32, 3) };
+
+    await expect(verify(anchor)).resolves.toEqual({ ok: true, seq: 3n, hash: anchor.hash });
+    expect(platformChecks).toEqual([{ database: fake.created[0], anchor }]);
   });
 
   it("SEC-OPS-05 writes the fingerprint's hash and the release to the platform chain, and logs its place", async () => {
@@ -434,11 +520,18 @@ describe('the API stops cleanly on a signal', () => {
         expect.objectContaining({ event: 'api.stopping', signal }),
       );
       expect(server?.server.listening).toBe(false);
-      expect(fake.steps).toEqual(['role checked', 'start recorded', 'pool closed']);
+      expect(fake.steps).toEqual([
+        'role checked',
+        'start recorded',
+        'anchor check started',
+        'anchor check stopping',
+        'anchor check stopped',
+        'pool closed',
+      ]);
     },
   );
 
-  it('closes the pool only after HTTP has stopped, so requests in flight still have it', async () => {
+  it('stops HTTP and the anchor check together, and closes the pool only after both, so work in flight still has it', async () => {
     const { host, server } = await start();
     if (server === undefined) throw new Error('the server should have started');
     const close = server.close.bind(server);
@@ -453,7 +546,15 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps).toEqual(['role checked', 'start recorded', 'http closing', 'http closed', 'pool closed']);
+    expect(fake.steps.slice(0, 5)).toEqual([
+      'role checked',
+      'start recorded',
+      'anchor check started',
+      'http closing',
+      'anchor check stopping',
+    ]);
+    expect(fake.steps.slice(5, 7)).toEqual(expect.arrayContaining(['http closed', 'anchor check stopped']));
+    expect(fake.steps.slice(7)).toEqual(['pool closed']);
   });
 
   it.each([

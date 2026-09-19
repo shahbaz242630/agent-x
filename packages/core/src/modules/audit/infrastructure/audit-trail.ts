@@ -12,6 +12,7 @@
 // the exact JSON text that was sealed, so a change that keeps their meaning
 // (a key moved, a number written another way) still shows.
 import {
+  type AnchorPoint,
   appendEvent,
   type Chain,
   type ChainReader,
@@ -53,11 +54,13 @@ export interface AuditTrail {
    */
   record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent>;
   /**
-   * Checks the organisation's whole chain up to its head (SEC-EVD-02). Reads
-   * only, and only in withTenant's transaction for that organisation: in any
-   * other, row security would show its chain as empty.
+   * Checks the organisation's whole chain up to its head (SEC-EVD-02), and
+   * that it still holds its last anchor, which the caller must pass, undefined
+   * only for a chain never anchored (SEC-DB-11). Reads only,
+   * and only in withTenant's transaction for that organisation: in any other,
+   * row security would show its chain as empty.
    */
-  verify(tx: AuditTransaction, orgId: string): Promise<ChainReport>;
+  verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -207,10 +210,10 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
     },
 
-    async verify(tx: AuditTransaction, orgId: string): Promise<ChainReport> {
+    async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      return verifyChain(keys, chain, readerFor(tx, chain.orgId));
+      return verifyChain(keys, chain, readerFor(tx, chain.orgId), anchor);
     },
   });
 }
