@@ -59,7 +59,8 @@ export interface AuditTrail {
    * it commits or rolls back with the change it records. Takes the chain
    * head's lock, which comes last (ADR-006 §6). Throws AuditEventRefused for
    * an event that breaks the rules, and AuditChainBroken if the chain fails its
-   * check at the head, so nothing more is added to a chain someone has tampered with.
+   * check at the head or holds events past it, so nothing more is added to a
+   * chain someone has tampered with.
    */
   record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent>;
   /**
@@ -70,12 +71,18 @@ export interface AuditTrail {
   verify(tx: AuditTransaction, orgId: string): Promise<ChainReport>;
 }
 
-/** The chain fails its check at the head: an event can't be added until someone has looked into it. */
+/**
+ * The chain fails its check at the head: tampered with, or sealed with a key
+ * version this process doesn't hold (a new key made current before it was
+ * installed everywhere). An event can't be added until someone has looked into it.
+ */
 export class AuditChainBroken extends Error {
   readonly orgId: string;
 
   constructor(orgId: string) {
-    super("The organisation's audit chain fails its check at the head, so no event can be added to it");
+    super(
+      "The organisation's audit chain fails its check at the head (tampered with, or sealed with a key version this process doesn't hold), so no event can be added to it",
+    );
     this.name = 'AuditChainBroken';
     this.orgId = orgId;
   }
@@ -178,13 +185,18 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
   };
 
   /**
-   * Whether the organisation has events. Asked only with a head at 0 locked:
-   * no one else can then have added one, so any found were there before the
-   * head was removed or wound back, and the chain must not start again.
+   * Whether the organisation has events past the head. Asked with the head
+   * locked, so no one else can be adding one: any found were there before the
+   * head was removed or wound back, and nothing more may be added on top.
    */
-  const hasEvents = async (tx: AuditTransaction, orgId: string): Promise<boolean> =>
-    (await tx.selectFrom('audit.events').select('seq').where('org_id', '=', orgId).limit(1).executeTakeFirst()) !==
-    undefined;
+  const hasEventsPast = async (tx: AuditTransaction, orgId: string, seq: bigint): Promise<boolean> =>
+    (await tx
+      .selectFrom('audit.events')
+      .select('seq')
+      .where('org_id', '=', orgId)
+      .where('seq', '>', seq)
+      .limit(1)
+      .executeTakeFirst()) !== undefined;
 
   /**
    * The time the event is recorded: the database's (ADR-006 §3), read once
@@ -218,7 +230,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       if (
         locked?.head === undefined ||
         !headIsSealed(keys, chain, locked.head) ||
-        (locked.head.seq === 0n && (await hasEvents(tx, chain.orgId)))
+        (await hasEventsPast(tx, chain.orgId, locked.head.seq))
       ) {
         throw new AuditChainBroken(chain.orgId);
       }

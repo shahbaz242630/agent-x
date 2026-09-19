@@ -15,8 +15,13 @@
 // Every hash and MAC names its chain, so an event or head copied into another
 // chain fails, and starts with a label naming what it is, so a MAC made for
 // one thing can never stand for another. Along a chain the MAC key's version
-// never goes down: once a key is rotated out, whoever may have copied it can't
-// add events after the rotation.
+// never goes down: an event is sealed with the chain's version when this
+// process's current one is older (a release rolled back, or an old one still
+// running during a rotation), and the check refuses an event older than the
+// one before it. So once a key is rotated out, whoever may have copied it
+// can't add events after the rotation. Every process that records needs every
+// version the chains have reached: new keys are installed before one is made
+// current.
 import { createHash } from 'node:crypto';
 
 import { KeyError, type KeyProvider } from '../keys/key-provider.ts';
@@ -103,8 +108,8 @@ const headMacMessage = (chain: Chain, seq: bigint, hash: Uint8Array): Message =>
 ];
 
 /** A head with its MAC, made with the current key. */
-function sealHead(keys: KeyProvider, chain: Chain, seq: bigint, hash: Buffer): ChainHead {
-  const { mac, keyVersion } = keys.mac('audit-mac', headMacMessage(chain, seq, hash));
+function sealHead(keys: KeyProvider, chain: Chain, seq: bigint, hash: Buffer, atLeast?: number): ChainHead {
+  const { mac, keyVersion } = keys.mac('audit-mac', headMacMessage(chain, seq, hash), atLeast);
   return Object.freeze({ seq, hash, mac, macKeyVersion: keyVersion });
 }
 
@@ -134,8 +139,9 @@ export function headIsSealed(keys: KeyProvider, chain: Chain, head: ChainHead): 
 
 /**
  * Seals the event that follows `head`: its link and MAC, and the chain's new
- * head. The caller checks the head first (headIsSealed) and holds its lock, so
- * no other event can take the same place.
+ * head, with the head's key version where it is newer than the current one.
+ * The caller checks the head first (headIsSealed) and holds its lock, so no
+ * other event can take the same place.
  */
 export function sealNext(
   keys: KeyProvider,
@@ -149,10 +155,14 @@ export function sealNext(
     );
   }
   const hash = linkHash(chain, head.hash, entry);
-  const { mac, keyVersion } = keys.mac('audit-mac', eventMacMessage(chain, entry.seq, entry.id, hash));
+  const { mac, keyVersion } = keys.mac(
+    'audit-mac',
+    eventMacMessage(chain, entry.seq, entry.id, hash),
+    head.macKeyVersion,
+  );
   return Object.freeze({
     link: Object.freeze({ prevHash: head.hash, hash, mac, macKeyVersion: keyVersion }),
-    head: sealHead(keys, chain, entry.seq, hash),
+    head: sealHead(keys, chain, entry.seq, hash, keyVersion),
   });
 }
 

@@ -2,7 +2,13 @@ import { createHash, createHmac } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
-import { createKeyProvider, type KeyMaterial, type KeyProvider, type PurposeKeys } from '../keys/key-provider.ts';
+import {
+  createKeyProvider,
+  KeyError,
+  type KeyMaterial,
+  type KeyProvider,
+  type PurposeKeys,
+} from '../keys/key-provider.ts';
 import { encodeMessage, type Message } from '../keys/message.ts';
 import { byPurpose, type KeyPurpose, PURPOSES } from '../keys/purposes.ts';
 import {
@@ -207,15 +213,37 @@ describe('SEC-EVD-02 the chain check', () => {
   it("finds an event sealed with an older key version than one before it: a rotated-out key can't add events", () => {
     const rotated = provider({ 'audit-mac': rotatedMacKey() });
     const newer = sealedChain(rotated, 2);
-    // Sealed with version 1, which the app still holds to check older events: a copy of it is all an attacker needs.
-    const older = provider();
+    // Made with version 1, which the app still holds to check older events: a copy of it is all an attacker needs.
     const next = entry(3n);
-    const after = sealNext(older, CHAIN, newer.head, next);
+    const hash = linkHash(CHAIN, newer.head.hash, next);
+    const mac = createHmac('sha256', key(AUDIT_MAC))
+      .update(encodeMessage(['audit-event', `organisation:${ORG}`, '3', next.id, hash]))
+      .digest();
+    const forged: StoredEntry = { ...next, prevHash: newer.head.hash, hash, mac, macKeyVersion: 1 };
 
-    expect(verify(rotated, after.head, [...newer.events, { ...next, ...after.link }])).toEqual({
+    expect(verify(rotated, newer.head, [...newer.events, forged])).toEqual({
       ok: false,
       problem: { reason: 'mac', seq: 3n },
     });
+  });
+
+  it("seals with the chain's newer version when this process's current one is older: a rollback raises no alarm", () => {
+    const newer = sealedChain(provider({ 'audit-mac': rotatedMacKey() }), 2);
+    const rolledBack = provider({ 'audit-mac': { ...rotatedMacKey(), current: 1 } });
+    const next = entry(3n);
+    const after = sealNext(rolledBack, CHAIN, newer.head, next);
+
+    expect(after.link.macKeyVersion).toBe(2);
+    expect(after.head.macKeyVersion).toBe(2);
+    expect(verify(rolledBack, after.head, [...newer.events, { ...next, ...after.link }])).toMatchObject({ ok: true });
+  });
+
+  it("refuses to seal where the chain has reached a version this process doesn't hold", () => {
+    const newer = sealedChain(provider({ 'audit-mac': rotatedMacKey() }), 2);
+
+    expect(() => sealNext(provider(), CHAIN, newer.head, entry(3n))).toThrow(
+      new KeyError('audit-mac has no version 2'),
+    );
   });
 
   it('passes events sealed before a key rotation, and after it', () => {

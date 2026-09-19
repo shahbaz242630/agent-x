@@ -40,6 +40,15 @@ function keysWith(auditMac?: { current: number; versions: Map<number, Buffer> })
 }
 
 const keys = keysWith();
+
+/** The audit MAC key rotated: version 1 as every other test's, and version 2 made current. */
+const ROTATED_MAC = {
+  current: 2,
+  versions: new Map([
+    [1, Buffer.alloc(32, PURPOSES.indexOf('audit-mac') + 1)],
+    [2, Buffer.alloc(32, 99)],
+  ]),
+};
 const ids = new SequentialIds(0x100);
 const trail: AuditTrail = createAuditTrail({ keys, ids });
 
@@ -157,16 +166,7 @@ describe('recording audit events (ADR-011 §3)', () => {
 
   it('keeps checking events sealed before a key rotation, and seals new ones with the new key', async () => {
     await record(org, event(1));
-    const rotated = createAuditTrail({
-      keys: keysWith({
-        current: 2,
-        versions: new Map([
-          [1, Buffer.alloc(32, PURPOSES.indexOf('audit-mac') + 1)],
-          [2, Buffer.alloc(32, 99)],
-        ]),
-      }),
-      ids,
-    });
+    const rotated = createAuditTrail({ keys: keysWith(ROTATED_MAC), ids });
     await withTenant(app, org, (tx) => rotated.record(tx, org, event(2)));
 
     expect(await verify(org, rotated)).toMatchObject({ ok: true, seq: 2n });
@@ -175,6 +175,18 @@ describe('recording audit events (ADR-011 §3)', () => {
       [org],
     );
     expect(versions.map((row) => row.mac_key_version)).toEqual([1, 2]);
+
+    // A process still on version 1 as current, but holding version 2 (a release rolled back, or the old
+    // revision still running), stays on 2 for this chain, so the check raises no alarm.
+    const rolledBack = createAuditTrail({
+      keys: keysWith({ current: 1, versions: new Map([...ROTATED_MAC.versions]) }),
+      ids,
+    });
+    await withTenant(app, org, (tx) => rolledBack.record(tx, org, event(3)));
+    expect(await verify(org, rotated)).toMatchObject({ ok: true, seq: 3n });
+
+    // A process that doesn't hold version 2 at all can't add to the chain: new keys go everywhere first.
+    await expect(withTenant(app, org, (tx) => trail.record(tx, org, event(4)))).rejects.toThrow(AuditChainBroken);
   });
 
   it('refuses an event that breaks the rules, and writes nothing', async () => {
@@ -621,6 +633,24 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
   });
 
+  it('the head wound back to an earlier sealed value, with events left after it: nothing more is recorded', async () => {
+    const [earlier] = await attacker.query(
+      'select seq, hash, mac, mac_key_version from audit.heads where org_id = $1',
+      [org],
+    );
+    if (earlier === undefined) throw new Error('The chain has no head');
+    await record(org, event(5), event(6));
+    // Event 5 deleted, event 6 left: the next record would otherwise take place 5 and carry on from there.
+    await tamper('delete from audit.events where org_id = $1 and seq = 5');
+    await attacker.query(
+      'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+      [org, earlier.seq, earlier.hash, earlier.mac, earlier.mac_key_version],
+    );
+
+    await expect(record(org, event(7))).rejects.toThrow(AuditChainBroken);
+    expect(await problemOf(org)).toEqual({ reason: 'head', seq: 4n });
+  });
+
   it('the head and the first event deleted: the chain does not start again on the rest', async () => {
     await tamper('delete from audit.heads where org_id = $1', 'delete from audit.events where org_id = $1 and seq = 1');
 
@@ -679,20 +709,18 @@ describe('a long chain', () => {
   it('counts an event hidden as a second copy at the end of a batch, which the batches never read', async () => {
     await record(org, ...Array.from({ length: 501 }, (_, i) => event(i + 1)));
     await attacker.query('alter table audit.events drop constraint events_pkey');
+    await attacker.query('alter table audit.events drop constraint events_org_id_id_key');
     try {
-      await attacker.query(
-        `insert into audit.events
-           select org_id, seq, '0199a0f0-0000-7000-8000-0000000000fd', recorded_at, actor_type, actor_id,
-                  'probe.forged', subject_type, subject_id, subject_version, details, prev_hash, hash, mac,
-                  mac_key_version
-           from audit.events where org_id = $1 and seq = 500`,
-        [org],
-      );
+      // An exact copy, so whichever of the two Postgres returns first, the batches read one and skip the other.
+      await attacker.query('insert into audit.events select * from audit.events where org_id = $1 and seq = 500', [
+        org,
+      ]);
 
       expect(await problemOf(org)).toEqual({ reason: 'head', seq: 501n });
     } finally {
       await attacker.query('delete from audit.events where org_id = $1', [org]);
       await attacker.query('alter table audit.events add constraint events_pkey primary key (org_id, seq)');
+      await attacker.query('alter table audit.events add constraint events_org_id_id_key unique (org_id, id)');
     }
   });
 

@@ -77,10 +77,11 @@ export async function withTenant<Schema, Result>(
 }
 
 /**
- * Refuses unless the transaction is withTenant's for this organisation. Row
- * security shows another tenant's rows as no rows at all, so work that only
- * reads, such as checking an audit chain, would take a wrong tenant's view for
- * an empty record.
+ * Refuses unless the transaction carries this organisation as its tenant,
+ * which only withTenant sets (lint keeps the setting's name in this file).
+ * Row security shows another tenant's rows as no rows at all, so work that
+ * only reads, such as checking an audit chain, would take a wrong tenant's
+ * view for an empty record.
  */
 export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: string): Promise<void> {
   const { rows } = await sql<{ org_id: string | null }>`
