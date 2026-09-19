@@ -158,8 +158,11 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
         where org_id = ${orgId} and id = ${id} and status = ${from}
         returning status
       `.execute(tx);
-      const [written] = updated.rows;
-      if (written?.status !== to) {
+      // One row, and in the status decided. Two can match here though the lock
+      // found one: a duplicate key inserted past the app while this change
+      // waited is outside the lock's snapshot, but not the update's.
+      const [written, ...alsoWritten] = updated.rows;
+      if (written?.status !== to || alsoWritten.length > 0) {
         log.error('status.change_not_applied', { ...facts, from, to });
         throw new StatusChangeFailed(
           'not_applied',

@@ -545,6 +545,38 @@ describe('FX-TAMPER a table changed past the app is refused, not trusted', () =>
     }
   });
 
+  it('a second row under the same key, inserted while the change waits for the lock: both would be updated', async () => {
+    const id = await thingIn('ACTIVE');
+    await admin.query('alter table probe.parts drop constraint parts_org_id_thing_id_fkey');
+    await admin.query('alter table probe.things drop constraint things_pkey');
+    const holder = await database.connect('admin');
+    try {
+      await holder.query('begin');
+      await holder.query('select 1 from probe.things where org_id = $1 and id = $2 for no key update', [ORG, id]);
+      const changing = change(id, 'suspend');
+      await waitUntilQueued(admin, 1);
+      // Committed while the change waits: its locking read has its snapshot already, its update won't.
+      await admin.query("insert into probe.things (org_id, id, status) values ($1, $2, 'ACTIVE')", [ORG, id]);
+      await holder.query('commit');
+
+      await expect(changing).rejects.toMatchObject({ reason: 'not_applied' });
+      expect(await admin.query('select status from probe.things where id = $1', [id])).toEqual([
+        { status: 'ACTIVE' },
+        { status: 'ACTIVE' },
+      ]);
+    } finally {
+      await holder.end();
+      await admin.query(
+        'delete from probe.things where id = $1 and ctid <> (select min(ctid) from probe.things where id = $1)',
+        [id],
+      );
+      await admin.query('alter table probe.things add primary key (org_id, id)');
+      await admin.query(
+        'alter table probe.parts add constraint parts_org_id_thing_id_fkey foreign key (org_id, thing_id) references probe.things (org_id, id)',
+      );
+    }
+  });
+
   // Postgres runs a table's BEFORE ROW triggers in name order: `aaa_` before the guard, `zzz_` after it.
   it.each([
     ['swallows the update', 'aaa_planted', 'return null;'],
