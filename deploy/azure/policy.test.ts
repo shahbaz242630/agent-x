@@ -209,6 +209,13 @@ const settingsOf = (job: Mutable): Mutable[] => at(containerOf(job), 'env') as M
 const secretNamed = (job: Mutable, name: string): Mutable =>
   declaredSecrets(job).find((secret) => secret.name === name) ?? {};
 const criterion = (alert: Mutable): Mutable => first(at(alert, 'properties', 'criteria', 'allOf'));
+/** Changes to a SEV-1 alert's timing that leave minutes unwatched, or make it wait for more than one window. */
+const LATE_OR_BLIND: readonly ((alert: Mutable) => void)[] = [
+  (alert) => (inside(alert, 'properties').windowSize = 'PT5M'),
+  (alert) => (inside(alert, 'properties').evaluationFrequency = 'PT30M'),
+  (alert) => (inside(criterion(alert), 'failingPeriods').minFailingPeriodsToAlert = 3),
+  (alert) => (inside(criterion(alert), 'failingPeriods').numberOfEvaluationPeriods = 3),
+];
 const rules = (group: Mutable): Mutable[] => at(group, 'properties', 'securityRules') as Mutable[];
 /** One rule of a group, by name, for changing it in place. */
 const ruleNamed = (group: Mutable, name: string): Mutable =>
@@ -688,6 +695,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').severity = 2)))).toEqual(
       expect.arrayContaining(['database-logins']),
     );
+    for (const change of LATE_OR_BLIND) {
+      expect(brokenRules(changed(LOGIN_ALERT, change))).toEqual(['database-logins']);
+    }
     expect(brokenRules(changed(LOGIN_ALERT, (alert) => (inside(alert, 'properties').autoMitigate = true)))).toEqual([
       'database-logins',
       'alert-delivery',
@@ -1313,8 +1323,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       query(
         'ContainerAppSystemLogs | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()',
       ),
-      // One line is enough.
+      // One line is enough, seen in any minute.
       (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {

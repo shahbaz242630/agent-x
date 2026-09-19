@@ -549,6 +549,16 @@ export function singleSummaryColumn(query: string): string | undefined {
 }
 
 /**
+ * Whether a SEV-1 alert sees every minute and fires on the first window with a
+ * match: its window is as long as the time between runs, so no minute goes
+ * unwatched, and one failing window is enough, so it never waits for more.
+ */
+const watchesEveryWindow = (alert: PredictedResource, criterion: unknown): boolean =>
+  at(alert.properties, 'windowSize') === at(alert.properties, 'evaluationFrequency') &&
+  at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
+  at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1;
+
+/**
  * Whether a query is exactly `table | stage | … | summarize Name = aggregation`:
  * the same stages, in order, whatever the spacing around its pipes.
  */
@@ -876,14 +886,16 @@ const database: Check = (snapshot, expected, add) => {
         at(alert.properties, 'severity') === 1 &&
         at(alert.properties, 'autoMitigate') === false &&
         list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-        list(at(alert.properties, 'criteria', 'allOf')).some((criterion) =>
-          queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()'),
+        list(at(alert.properties, 'criteria', 'allOf')).some(
+          (criterion) =>
+            queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+            watchesEveryWindow(alert, criterion),
         ),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
         'database-logins',
-        `logs every login, and an enabled, stateless SEV-1 alert on the workspace fires when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
+        `logs every login, and an enabled, stateless SEV-1 alert on the workspace, watching every minute, fires on the first window when ${admin} or ${BACKUP_ROLE} logs in (ADR-012 §2)`,
       );
     }
   }
@@ -1456,7 +1468,8 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
           (criterion) =>
             queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
             at(criterion, 'operator') === 'GreaterThan' &&
-            at(criterion, 'threshold') === 0,
+            at(criterion, 'threshold') === 0 &&
+            watchesEveryWindow(alert, criterion),
         ),
     );
     if (!alerted) {
@@ -1464,7 +1477,7 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         rule: 'audit-integrity-alert',
         resource: environment.name,
         message:
-          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line (ADR-012 §2)",
+          "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
       });
     }
   }
