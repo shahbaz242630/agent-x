@@ -10,14 +10,15 @@ import {
   type TestDatabase,
   type TestSession,
 } from '@agentx/testing';
-import { type ChainReport, linkHash } from '@agentx/platform/audit-chain';
+import { ChainBroken, type ChainReport, linkHash } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, type KeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditEvent, AuditEventRefused, canonicalDetails, eventContent } from '../domain/event.ts';
-import { AuditChainBroken, type AuditTrail, createAuditTrail } from './audit-trail.ts';
+import { canonicalDetails } from '../../../shared-kernel/index.ts';
+import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
+import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -186,7 +187,7 @@ describe('recording audit events (ADR-011 §3)', () => {
     expect(await verify(org, rotated)).toMatchObject({ ok: true, seq: 3n });
 
     // A process that doesn't hold version 2 at all can't add to the chain: new keys go everywhere first.
-    await expect(withTenant(app, org, (tx) => trail.record(tx, org, event(4)))).rejects.toThrow(AuditChainBroken);
+    await expect(withTenant(app, org, (tx) => trail.record(tx, org, event(4)))).rejects.toThrow(ChainBroken);
   });
 
   it('refuses an event that breaks the rules, and writes nothing', async () => {
@@ -589,7 +590,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     await tamper('update audit.heads set seq = 9 where org_id = $1');
 
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 9n });
-    await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+    await expect(record(org, event(5))).rejects.toThrow(ChainBroken);
   });
 
   it.each([
@@ -619,7 +620,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     await tamper(...statements);
     try {
       expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
-      await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+      await expect(record(org, event(5))).rejects.toThrow(ChainBroken);
     } finally {
       await tamper('delete from audit.events where org_id = $1', 'delete from audit.heads where org_id = $1');
       await restoreRules();
@@ -630,7 +631,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     await tamper('delete from audit.heads where org_id = $1');
 
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
-    await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+    await expect(record(org, event(5))).rejects.toThrow(ChainBroken);
   });
 
   it('the head wound back to an earlier sealed value, with events left after it: nothing more is recorded', async () => {
@@ -647,14 +648,14 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
       [org, earlier.seq, earlier.hash, earlier.mac, earlier.mac_key_version],
     );
 
-    await expect(record(org, event(7))).rejects.toThrow(AuditChainBroken);
+    await expect(record(org, event(7))).rejects.toThrow(ChainBroken);
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 4n });
   });
 
   it('the head and the first event deleted: the chain does not start again on the rest', async () => {
     await tamper('delete from audit.heads where org_id = $1', 'delete from audit.events where org_id = $1 and seq = 1');
 
-    await expect(record(org, event(5))).rejects.toThrow(AuditChainBroken);
+    await expect(record(org, event(5))).rejects.toThrow(ChainBroken);
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
   });
 

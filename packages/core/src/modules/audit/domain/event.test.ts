@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
+import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import {
   type AuditDetails,
   type AuditDetailValue,
   type AuditEvent,
   AuditEventRefused,
-  canonicalDetails,
   checkedEvent,
   eventContent,
 } from './event.ts';
@@ -70,28 +70,14 @@ describe('an audit event in its canonical form', () => {
     });
   });
 
-  it('puts the details in key order, whatever order they were written in', () => {
-    const checked = check(withDetails({ zeta: 1, alpha: true, mid: null }));
+  it('puts the details in key order, and keeps a version at the limit', () => {
+    const checked = check({
+      ...withDetails({ zeta: 1, alpha: true }),
+      subject: { ...EVENT.subject, version: 2_147_483_647 },
+    });
 
-    expect(Object.keys(checked.details)).toEqual(['alpha', 'mid', 'zeta']);
-  });
-
-  it('accepts every kind of detail value, at the limits', () => {
-    const details = {
-      text: 'x'.repeat(1024),
-      emoji: 'paid 💸',
-      big: Number.MAX_SAFE_INTEGER,
-      small: Number.MIN_SAFE_INTEGER,
-      yes: true,
-      no: false,
-      none: null,
-    };
-
-    expect(problemsOf(withDetails(details))).toEqual([]);
-    expect(problemsOf(withDetails(Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`k${i}`, i]))))).toEqual([]);
-    expect(problemsOf(withDetails(Object.assign(Object.create(null) as object, { a: 1 })))).toEqual([]);
-    expect(problemsOf({ ...EVENT, action: `a.${'b'.repeat(98)}` })).toEqual([]);
-    expect(problemsOf({ ...EVENT, subject: { ...EVENT.subject, version: 2_147_483_647 } })).toEqual([]);
+    expect(Object.keys(checked.details)).toEqual(['alpha', 'zeta']);
+    expect(checked.subject.version).toBe(2_147_483_647);
   });
 
   it('reads each field once, so a getter cannot show the check one value and the record another', () => {
@@ -128,16 +114,13 @@ describe('an audit event refused', () => {
     expect(problemsOf({ ...EVENT, ...change } as AuditEvent)).toEqual([problem]);
   });
 
-  it.each([
-    'created',
-    'Organisation.created',
-    'organisation.',
-    'organisation..created',
-    'org-x.created',
-    `a.${'b'.repeat(99)}`,
-  ])('for the action %j', (action) => {
-    expect(problemsOf({ ...EVENT, action })).toEqual([
+  it('for an action or details that break the shared rules (shared-kernel/event-facts.ts)', () => {
+    expect(problemsOf({ ...EVENT, action: 'created' })).toEqual([
       'action must be dotted lower-case words, at most 100 characters',
+    ]);
+    expect(problemsOf(withDetails(null))).toEqual(['details must be a plain object']);
+    expect(problemsOf(withDetails({ contactEmail: 'x' }), (name) => name === 'contactEmail')).toEqual([
+      'details.contactEmail looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
     ]);
   });
 
@@ -161,71 +144,6 @@ describe('an audit event refused', () => {
     expect(problemsOf({ ...EVENT, subject: { ...EVENT.subject, ...change } })).toEqual([problem]);
   });
 
-  it.each([
-    ['null', null],
-    ['an array', ['a']],
-    ['a date', new Date(0)],
-    ['a map', new Map()],
-    ['text', 'plan=pilot'],
-    ['missing', undefined],
-  ])('for details that are %s, not a plain object', (_case, details) => {
-    expect(problemsOf(withDetails(details))).toEqual(['details must be a plain object']);
-  });
-
-  it('for more than 32 details', () => {
-    const details = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`k${i}`, i]));
-
-    expect(problemsOf(withDetails(details))).toEqual(['details has more than 32 entries']);
-  });
-
-  it.each(['snake_case', 'Capital', '1st', '', 'with-dash', `k${'x'.repeat(63)}`])('for the detail key %j', (key) => {
-    expect(problemsOf(withDetails({ [key]: 1 }))).toEqual(['details has a key that is not a camelCase name']);
-  });
-
-  it.each([
-    ['a fraction', 1.5, 'details.value must be a whole number'],
-    ['NaN', Number.NaN, 'details.value must be a whole number'],
-    ['infinity', Number.POSITIVE_INFINITY, 'details.value must be a whole number'],
-    ['a number past safe integers', 2 ** 53, 'details.value must be a whole number'],
-    ['an object', { nested: 1 }, 'details.value must be text, a whole number, true, false or null'],
-    ['a list', [1], 'details.value must be text, a whole number, true, false or null'],
-    ['nothing at all', undefined, 'details.value must be text, a whole number, true, false or null'],
-    ['a bigint', 1n, 'details.value must be text, a whole number, true, false or null'],
-    ['over-long text', 'x'.repeat(1025), 'details.value is longer than 1024 characters'],
-    ['a NUL', 'a\u0000b', 'details.value holds control characters or broken Unicode'],
-    ['a new line', 'a\nb', 'details.value holds control characters or broken Unicode'],
-    ['a DEL', 'a\u007fb', 'details.value holds control characters or broken Unicode'],
-    ['half a surrogate pair', 'a\ud800b', 'details.value holds control characters or broken Unicode'],
-  ])('for a detail value that is %s', (_case, value, problem) => {
-    expect(problemsOf(withDetails({ value }))).toEqual([problem]);
-  });
-
-  it('asks about each detail by name and value, so a constant code can stay and anything else goes', () => {
-    const asked: [string, AuditDetailValue][] = [];
-    const sensitive = (name: string, value: AuditDetailValue): boolean => {
-      asked.push([name, value]);
-      return name === 'reasonCode' && value !== 'DUPLICATE_ORDER_REFERENCE';
-    };
-
-    expect(problemsOf(withDetails({ reasonCode: 'DUPLICATE_ORDER_REFERENCE' }), sensitive)).toEqual([]);
-    expect(problemsOf(withDetails({ reasonCode: 'k3Jx9-random' }), sensitive)).toEqual([
-      'details.reasonCode looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
-    ]);
-    expect(asked).toEqual([
-      ['reasonCode', 'DUPLICATE_ORDER_REFERENCE'],
-      ['reasonCode', 'k3Jx9-random'],
-    ]);
-  });
-
-  it('for a detail whose name marks a secret or personal data (ADR-014 §3)', () => {
-    const sensitive = (name: string): boolean => ['email', 'iban'].includes(name);
-
-    expect(problemsOf(withDetails({ email: 'a@b.example', iban: 'AE07', plan: 'x' }), sensitive)).toEqual([
-      'details.email looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
-      'details.iban looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
-    ]);
-  });
-
   it('lists every problem at once, and quotes none of the values', () => {
     const marker = 'planted marker words';
     const error = (() => {
@@ -246,14 +164,6 @@ describe('an audit event refused', () => {
     expect((error as AuditEventRefused).problems).toHaveLength(6);
     expect((error as AuditEventRefused).message).not.toContain(marker);
   });
-
-  it('checks detail names for secrets only once everything else passes, so a problem never quotes a strange key', () => {
-    const everything = (): boolean => true;
-
-    expect(problemsOf({ ...EVENT, action: 'bad' }, everything)).toEqual([
-      'action must be dotted lower-case words, at most 100 characters',
-    ]);
-  });
 });
 
 describe('what the chain seals for an event', () => {
@@ -273,10 +183,5 @@ describe('what the chain seals for an event', () => {
       'details',
       '{"plan":"pilot","seats":3}',
     ]);
-  });
-
-  it('gives the same details the same text in any order', () => {
-    expect(canonicalDetails({ b: 2, a: 'x', c: null })).toBe(canonicalDetails({ c: null, a: 'x', b: 2 }));
-    expect(canonicalDetails({ b: 2, a: 'x', c: null })).toBe('{"a":"x","b":2,"c":null}');
   });
 });

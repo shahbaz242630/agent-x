@@ -11,7 +11,6 @@ export {
   type AuditSubject,
 } from './domain/event.ts';
 export {
-  AuditChainBroken,
   type AuditTrail,
   type AuditTransaction,
   createAuditTrail,
