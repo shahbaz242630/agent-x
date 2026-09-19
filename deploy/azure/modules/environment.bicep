@@ -16,6 +16,7 @@
 //   and full URL, which our own request logs leave out (ADR-011 §7)
 // - every error event the apps write is counted by an alert, and a saved query
 //   in the workspace lists them by type
+// - an audit chain that fails its check raises a SEV-1 alert of its own
 
 param location string
 param name string
@@ -29,6 +30,7 @@ param workspaceId string
 param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
+param integrityAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -157,6 +159,51 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     // Stateful: it fires once and resolves after a quiet window, rather than
     // notifying every 15 minutes through a long incident.
     autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The integrity alarm (ADR-012 §2, SEC-DB-11): the API's anchor check found an
+// audit chain changed, removed or wound back, or couldn't check it for three
+// intervals, or the check itself broke (`audit.integrity_failed`,
+// `audit.anchor_check_crashed`). A start refused on a broken platform chain
+// logs the first too. Only the count leaves the workspace; the lines say
+// which chain and why.
+resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: integrityAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Audit: a chain failed its integrity check'
+    description: 'SEV-1. The API found an audit chain changed, removed or wound back, could not check it for three intervals, or its check broke (audit.integrity_failed, audit.anchor_check_crashed). Runbook: Incident-Response-Playbook.md section H.'
+    severity: 1
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless: every 15 minutes the check still fails notifies again.
+    autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]
     }
