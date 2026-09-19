@@ -9,6 +9,7 @@
 // checks, which read those, would see it from every other database.
 import { afterEach, describe, expect, inject, it } from 'vitest';
 
+import { SCHEMA_POLICY } from '../../../../tooling/schema-policy.ts';
 import { type SchemaPolicy, schemaProblems } from './schema-checks.ts';
 import { createTenantProbe } from './tenant-probe.ts';
 import { createTestDatabase, type TestDatabase, type TestRole } from './test-database.ts';
@@ -16,18 +17,22 @@ import { createTestDatabase, type TestDatabase, type TestRole } from './test-dat
 const server = inject('postgres');
 const major = Number(server.version.split('.')[0]);
 
-const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'] };
 /**
  * The migrated database's own decisions (tooling/schema-policy.ts), so a
  * fixture starts with no problems. The fixtures' own append-only tables go in
  * schema `journal`, apart from the real audit tables.
  */
-const REAL_EXCEPTIONS = { 'audit.heads': "Each organisation's chain head" };
+const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'] };
+const REAL_EXCEPTIONS = SCHEMA_POLICY.appendOnlyExceptions;
 const POLICY: SchemaPolicy = {
-  globalTables: { 'migrations.applied': LEDGER },
-  appendOnlySchemas: ['audit', 'journal'],
+  globalTables: { ...SCHEMA_POLICY.globalTables, 'migrations.applied': LEDGER },
+  appendOnlySchemas: [...SCHEMA_POLICY.appendOnlySchemas, 'journal'],
   appendOnlyExceptions: REAL_EXCEPTIONS,
 };
+/** The real global tables but the ledger, for the fixtures about the ledger alone. */
+const OTHER_GLOBALS = Object.fromEntries(
+  Object.entries(SCHEMA_POLICY.globalTables).filter(([name]) => name !== 'migrations.applied'),
+);
 
 const TENANT_POLICY =
   "using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid) with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)";
@@ -245,7 +250,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
 
     it('treats a table left off the global-table list as a tenant table', async () => {
-      expect(await problemsAfter([], { ...POLICY, globalTables: {} })).toEqual([
+      expect(await problemsAfter([], { ...POLICY, globalTables: OTHER_GLOBALS })).toEqual([
         'migrations.applied: row-level security is off (ADR-005 §2)',
         'migrations.applied: a tenant table needs an org_id column (ADR-005 §1)',
         'migrations.applied: has 0 policies; a tenant table has exactly one, the tenant policy (ADR-005 §2)',
@@ -570,7 +575,10 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     it('fails an entry with no reason, or a column named twice', async () => {
       const policy = {
         ...POLICY,
-        globalTables: { 'migrations.applied': { reason: ' ', columns: ['name', 'name', 'checksum', 'applied_at'] } },
+        globalTables: {
+          ...OTHER_GLOBALS,
+          'migrations.applied': { reason: ' ', columns: ['name', 'name', 'checksum', 'applied_at'] },
+        },
       };
       expect(await problemsAfter([], policy)).toEqual([
         'migrations.applied: the global-table list gives no reason for it',
@@ -581,7 +589,10 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     it('fails a column the list does not name, and a listed column the table lacks', async () => {
       const policy = {
         ...POLICY,
-        globalTables: { 'migrations.applied': { ...LEDGER, columns: ['name', 'checksum', 'applied_on'] } },
+        globalTables: {
+          ...OTHER_GLOBALS,
+          'migrations.applied': { ...LEDGER, columns: ['name', 'checksum', 'applied_on'] },
+        },
       };
       expect(await problemsAfter([], policy)).toEqual([
         'migrations.applied: column applied_at is not on the global-table list, so no one has reviewed it (SEC-TEN-08)',

@@ -5,10 +5,13 @@
 // 3. logs the config fingerprint, the keys' versions and check values among it (SEC-OPS-05)
 // 4. opens the database pool as the app's role and refuses to run as one that
 //    could get round the tenant walls (ADR-005 §3, APP-02)
-// 5. listens, and stops cleanly on SIGTERM or SIGINT: HTTP first, so every
+// 5. writes the fingerprint's hash to the platform audit chain, or refuses to
+//    start (SEC-OPS-05)
+// 6. listens, and stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the pool those requests were using
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
+import type { PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
 import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
@@ -24,6 +27,10 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { buildServer } from './server.ts';
+import { recordStart } from './start-record.ts';
+
+/** Every table the API reaches, module by module. */
+type ApiTables = PlatformControlsTables;
 
 const SERVICE = 'api';
 
@@ -60,7 +67,7 @@ export interface RunOptions {
  * stay on: without one, Node's default for a second SIGTERM would end the
  * process at once, before the counts are written.
  */
-function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Database, logger: Logger): void {
+function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Database<ApiTables>, logger: Logger): void {
   let stopping = false;
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     if (stopping) return;
@@ -98,8 +105,8 @@ function onStopSignals(host: ApiProcess, server: FastifyInstance, database: Data
  * can't be reached is reported as unavailable. Either way the pool is closed
  * and nothing is returned.
  */
-async function connectDatabase(config: Config, logger: Logger): Promise<Database | undefined> {
-  const database = createDatabase(
+async function connectDatabase(config: Config, logger: Logger): Promise<Database<ApiTables> | undefined> {
+  const database = createDatabase<ApiTables>(
     {
       host: config.db.host,
       port: config.db.port,
@@ -156,7 +163,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     logger.flush();
     host.exit(1);
   });
-  logger.info('api.starting', { ...configFingerprint(config, keys.describe(), options.env) });
+  const fingerprint = configFingerprint(config, keys.describe(), options.env);
+  logger.info('api.starting', { ...fingerprint });
 
   const database = await connectDatabase(config, logger);
   if (database === undefined) {
@@ -164,6 +172,23 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     host.exitCode = 1;
     return undefined;
   }
+
+  let recorded: bigint;
+  try {
+    recorded = await recordStart(database, keys, uuidV7Ids, {
+      configHash: fingerprint.configHash,
+      release: config.release,
+    });
+  } catch (error) {
+    // The platform chain refused the event (someone tampered with it) or the
+    // database did: either way no one could later account for this start.
+    logger.error('api.start_not_recorded', { err: error });
+    await database.destroy();
+    logger.flush();
+    host.exitCode = 1;
+    return undefined;
+  }
+  logger.info('api.start_recorded', { seq: recorded });
 
   // A failure to build the server is a bug, so it goes to the crash handler above.
   const server = await buildServer({ config, logger, ids: uuidV7Ids, healthChecks: [] });

@@ -36,7 +36,7 @@ interface RoleFacts {
  * from PGOPTIONS, could make current_user look safe while the login role can
  * switch back. Role names are listed, never other values.
  */
-export async function runtimeRoleProblems(db: Kysely<unknown>): Promise<string[]> {
+export async function runtimeRoleProblems<Schema>(db: Kysely<Schema>): Promise<string[]> {
   const { rows } = await sql<RoleFacts>`
     select
       session_user <> current_user as switched_role,
@@ -85,7 +85,7 @@ export async function runtimeRoleProblems(db: Kysely<unknown>): Promise<string[]
 }
 
 /** Throws UnsafeDatabaseRole, listing every problem, unless the role is safe. Run it at start-up. */
-export async function assertRuntimeRole(db: Kysely<unknown>): Promise<void> {
+export async function assertRuntimeRole<Schema>(db: Kysely<Schema>): Promise<void> {
   const problems = await runtimeRoleProblems(db);
   if (problems.length > 0) throw new UnsafeDatabaseRole(problems);
 }
