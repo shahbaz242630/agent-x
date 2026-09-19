@@ -7,12 +7,18 @@ export {
   type ChainProblemReason,
   type ChainReport,
   ChainSealError,
-  type ChainVerifier,
-  createChainVerifier,
   GENESIS_HASH,
-  genesisHead,
-  headIsSealed,
   linkHash,
-  sealNext,
   type StoredEntry,
 } from './chain.ts';
+export {
+  appendEvent,
+  ChainBroken,
+  type ChainReader,
+  ChainStoreError,
+  type ChainWriter,
+  headFields,
+  type SealedEvent,
+  sealedFields,
+  verifyChain,
+} from './store.ts';
