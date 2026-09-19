@@ -8,6 +8,7 @@ import {
   appendEvent,
   ChainBroken,
   type ChainReader,
+  ChainStoreError,
   type ChainWriter,
   headFields,
   sealedFields,
@@ -39,6 +40,12 @@ class MemoryChain implements ChainWriter, ChainReader {
   calls: string[] = [];
   /** A store that never shows the head it was given, to test a start that doesn't take. */
   loses = false;
+  /** Someone else moves the head between the lock and the write, as with a store that didn't lock. */
+  racedBy: ChainHead | undefined;
+  /** The most events one page gives, whatever was asked: a store that pages differently. */
+  pageSize = Number.POSITIVE_INFINITY;
+  /** How many pages of events the check has asked for. */
+  pages = 0;
 
   lockHead(): Promise<{ head: ChainHead | undefined } | undefined> {
     this.calls.push('lockHead');
@@ -62,11 +69,16 @@ class MemoryChain implements ChainWriter, ChainReader {
     return Promise.resolve(NOW);
   }
 
-  append(event: Omit<StoredEntry, 'content'>, head: ChainHead): Promise<void> {
+  append(event: Omit<StoredEntry, 'content'>, head: ChainHead, previous: ChainHead): Promise<boolean> {
     this.calls.push('append');
+    if (this.racedBy !== undefined) this.head = this.racedBy;
     this.rows.push({ ...event, content: CONTENT });
+    const current = this.head;
+    if (typeof current === 'string' || current.seq !== previous.seq || !current.hash.equals(previous.hash)) {
+      return Promise.resolve(false);
+    }
     this.head = head;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   state(): Promise<{ head: ChainHead | 'none' | 'unreadable'; stored: bigint }> {
@@ -74,10 +86,11 @@ class MemoryChain implements ChainWriter, ChainReader {
   }
 
   events(after: bigint, upTo: bigint, limit: number): Promise<(StoredEntry | undefined)[]> {
+    this.pages += 1;
     const rows = this.rows
       .filter((event) => event.seq > after && event.seq <= upTo)
       .sort((a, b) => Number(a.seq - b.seq))
-      .slice(0, limit);
+      .slice(0, Math.min(limit, this.pageSize));
     return Promise.resolve(rows.map((event) => (this.unreadable.has(event.seq) ? undefined : event)));
   }
 }
@@ -85,15 +98,15 @@ class MemoryChain implements ChainWriter, ChainReader {
 /** A chain of `count` events appended through the steps under test. */
 async function chainOf(count: number): Promise<MemoryChain> {
   const memory = new MemoryChain();
-  for (let n = 1; n <= count; n += 1) await appendEvent(keys, CHAIN, memory, { id: id(n), content: CONTENT });
+  for (let n = 1; n <= count; n += 1) await appendEvent(keys, CHAIN, memory, { nextId: () => id(n), content: CONTENT });
   return memory;
 }
 
 describe('appending an event', () => {
   it('starts the chain, takes the next place, and checks out', async () => {
     const memory = new MemoryChain();
-    const first = await appendEvent(keys, CHAIN, memory, { id: id(1), content: CONTENT });
-    const second = await appendEvent(keys, CHAIN, memory, { id: id(2), content: CONTENT });
+    const first = await appendEvent(keys, CHAIN, memory, { nextId: () => id(1), content: CONTENT });
+    const second = await appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT });
 
     expect([first.seq, second.seq]).toEqual([1n, 2n]);
     expect(second.prevHash).toEqual(first.hash);
@@ -104,24 +117,51 @@ describe('appending an event', () => {
   it('reads the time only once the head is locked and found clean, then writes', async () => {
     const memory = await chainOf(1);
     memory.calls = [];
-    await appendEvent(keys, CHAIN, memory, { id: id(2), content: CONTENT });
+    await appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT });
 
     expect(memory.calls).toEqual(['lockHead', 'hasEventsPast', 'now', 'append']);
   });
 
   it('writes the ID in lower case, as Postgres returns a uuid', async () => {
-    const sealed = await appendEvent(keys, CHAIN, new MemoryChain(), { id: id(1).toUpperCase(), content: CONTENT });
+    const sealed = await appendEvent(keys, CHAIN, new MemoryChain(), {
+      nextId: () => id(1).toUpperCase(),
+      content: CONTENT,
+    });
 
     expect(sealed.id).toBe(id(1));
   });
 
-  it('refuses an ID that is not a UUID before touching the chain', async () => {
+  it('draws the ID once the head is locked and found clean, so IDs rise with the numbers', async () => {
+    const memory = await chainOf(1);
+    memory.calls = [];
+    await appendEvent(keys, CHAIN, memory, {
+      nextId: () => {
+        memory.calls.push('nextId');
+        return id(2);
+      },
+      content: CONTENT,
+    });
+
+    expect(memory.calls).toEqual(['lockHead', 'hasEventsPast', 'nextId', 'now', 'append']);
+  });
+
+  it('refuses an ID that is not a UUID, and writes nothing', async () => {
     const memory = new MemoryChain();
 
-    await expect(appendEvent(keys, CHAIN, memory, { id: 'not-a-uuid', content: CONTENT })).rejects.toThrow(
+    await expect(appendEvent(keys, CHAIN, memory, { nextId: () => 'not-a-uuid', content: CONTENT })).rejects.toThrow(
       new RangeError('The ID generator gave an ID that is not a UUID'),
     );
-    expect(memory.calls).toEqual([]);
+    expect(memory.calls).not.toContain('append');
+  });
+
+  it('refuses when the head moved after it was read, as with a store that did not lock it', async () => {
+    const memory = await chainOf(1);
+    const other = await chainOf(2);
+    memory.racedBy = other.head as ChainHead;
+
+    await expect(appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT })).rejects.toThrow(
+      new ChainBroken(CHAIN),
+    );
   });
 
   it.each([
@@ -154,7 +194,7 @@ describe('appending an event', () => {
     tamper(memory);
     memory.calls = [];
 
-    await expect(appendEvent(keys, CHAIN, memory, { id: id(3), content: CONTENT })).rejects.toThrow(
+    await expect(appendEvent(keys, CHAIN, memory, { nextId: () => id(3), content: CONTENT })).rejects.toThrow(
       new ChainBroken(CHAIN),
     );
     expect(memory.calls).not.toContain('append');
@@ -164,7 +204,9 @@ describe('appending an event', () => {
     const memory = new MemoryChain();
     memory.loses = true;
 
-    await expect(appendEvent(keys, CHAIN, memory, { id: id(1), content: CONTENT })).rejects.toThrow(ChainBroken);
+    await expect(appendEvent(keys, CHAIN, memory, { nextId: () => id(1), content: CONTENT })).rejects.toThrow(
+      ChainBroken,
+    );
   });
 
   it("names the chain in its refusal: an organisation's, or the platform's", () => {
@@ -197,6 +239,55 @@ describe('checking a chain', () => {
     if (at === undefined) throw new Error('The chain is shorter than the test expects');
     memory.rows[776] = { ...at, content: ['action', 'probe.edited'] };
     expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'hash', seq: 777n } });
+  });
+
+  it('asks for no page once it has reached the head', async () => {
+    const small = await chainOf(3);
+    const full = await chainOf(500);
+    await verifyChain(keys, CHAIN, small);
+    await verifyChain(keys, CHAIN, full);
+
+    expect([small.pages, full.pages]).toEqual([1, 1]);
+  });
+
+  it('reads on until the head, whatever page size the store gives', async () => {
+    const memory = await chainOf(250);
+    memory.pageSize = 100;
+
+    expect(await verifyChain(keys, CHAIN, memory)).toMatchObject({ ok: true, seq: 250n });
+  });
+
+  it('stops reading when the store runs out of events before the head, and reports the head', async () => {
+    const memory = await chainOf(3);
+    memory.head = (await chainOf(5)).head;
+
+    expect(await verifyChain(keys, CHAIN, memory)).toEqual({ ok: false, problem: { reason: 'head', seq: 5n } });
+  });
+
+  it('refuses a store that gives events past the head it was asked to read up to', async () => {
+    // The head counts two events; the store hands over its third as well.
+    const memory = await chainOf(3);
+    const shorter = (await chainOf(2)).head as ChainHead;
+    const broken: ChainReader = {
+      state: () => Promise.resolve({ head: shorter, stored: 3n }),
+      events: (after, _upTo, limit) => memory.events(after, 99n, limit),
+    };
+
+    await expect(verifyChain(keys, CHAIN, broken)).rejects.toThrow(
+      new ChainStoreError('it gave an event past the head it was asked to read up to'),
+    );
+  });
+
+  it('refuses a store that gives more events than it was asked for', async () => {
+    const memory = await chainOf(501);
+    const broken: ChainReader = {
+      state: () => memory.state(),
+      events: (after, upTo) => memory.events(after, upTo, 501),
+    };
+
+    await expect(verifyChain(keys, CHAIN, broken)).rejects.toThrow(
+      new ChainStoreError('it gave 501 events where at most 500 were asked for'),
+    );
   });
 
   it('reports a row that cannot be read at its place, and reads no further', async () => {

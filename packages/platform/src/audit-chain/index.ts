@@ -15,6 +15,7 @@ export {
   appendEvent,
   ChainBroken,
   type ChainReader,
+  ChainStoreError,
   type ChainWriter,
   headFields,
   type SealedEvent,

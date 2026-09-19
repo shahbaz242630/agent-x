@@ -124,6 +124,15 @@ describe('an audit event refused', () => {
     ]);
   });
 
+  it('lists a sensitive detail beside a problem with the actor: the details are judged on their own', () => {
+    const event = { ...withDetails({ contactEmail: 'x' }), actor: { type: 'user' as const, id: 'alice' } };
+
+    expect(problemsOf(event, (name) => name === 'contactEmail')).toEqual([
+      "actor.id must be the user's UUID",
+      'details.contactEmail looks like a secret or personal data, which audit rows never hold (ADR-014 §3)',
+    ]);
+  });
+
   it.each([
     ['a type in capitals', { type: 'Organisation' }, 'subject.type must be lower-case words joined by _'],
     ['a type with a dot', { type: 'organisation.x' }, 'subject.type must be lower-case words joined by _'],
