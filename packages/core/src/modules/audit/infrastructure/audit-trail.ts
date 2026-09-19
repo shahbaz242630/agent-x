@@ -30,10 +30,10 @@
 // owner-login alert cover that.
 //
 // Events about an authority object are its state changes, few in its life;
-// activity goes against other subjects (signed-states.ts's rule). So the read is capped:
-// past that many later events it throws rather than slow every decision, and
-// rather than report the object broken, which would raise an alarm over
-// nothing but volume.
+// activity goes against other subjects (the rule in signed-states.ts). So the
+// read is capped: past that many later events it throws rather than slow
+// every decision, and rather than report the object broken, which would raise
+// an alarm over nothing but volume.
 import {
   type AnchorPoint,
   appendEvent,

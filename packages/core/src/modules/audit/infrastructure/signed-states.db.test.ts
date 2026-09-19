@@ -122,6 +122,8 @@ const newId = (): string => {
 let org: string;
 
 const USER = '0199a0f0-0000-7000-8000-0000000000aa';
+/** A new agent's authority fields, as the module declares them. */
+const NEW_AGENT = { status: 'ACTIVE', role: 'reader' };
 const change = (action: string) => ({
   actor: { type: 'user' as const, id: USER },
   action,
@@ -132,13 +134,13 @@ const change = (action: string) => ({
 async function newAgent(role = 'reader', id = newId()): Promise<string> {
   await withTenant(app, org, async (tx) => {
     await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role }).execute();
-    await states.record(tx, AGENTS, { orgId: org, id }, 'new', change('agent.created'));
+    await states.record(tx, AGENTS, { orgId: org, id }, 'new', { status: 'ACTIVE', role }, change('agent.created'));
   });
   return id;
 }
 
-const check = (id: string, using = states) =>
-  withTenant(app, org, (tx) => using.verifiedState(tx, AGENTS, { orgId: org, id }, 'share'));
+const check = (id: string, using = states, lock: 'share' | 'change' = 'share') =>
+  withTenant(app, org, (tx) => using.verifiedState(tx, AGENTS, { orgId: org, id }, lock));
 
 const changeStatus = (id: string, event: 'suspend' | 'reactivate' | 'revoke') =>
   withTenant(app, org, (tx) => states.changeStatus(tx, AGENTS, { orgId: org, id }, event, change(`agent.${event}`)));
@@ -244,13 +246,7 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
     const recorded = await withTenant(app, org, async (tx) => {
       const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
       if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
-      await tx
-        .updateTable('probe.agents')
-        .set({ role: 'admin' })
-        .where('org_id', '=', org)
-        .where('id', '=', id)
-        .execute();
-      return states.record(tx, AGENTS, { orgId: org, id }, current, change('agent.role_changed'));
+      return states.record(tx, AGENTS, { orgId: org, id }, current, { role: 'admin' }, change('agent.role_changed'));
     });
 
     expect(recorded).toMatchObject({ version: 2, seq: 2n });
@@ -304,11 +300,12 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
 });
 
 describe('what a signed state is recorded from', () => {
+  const TOUCH = { role: 'writer' };
   const recordFrom = (id: string, lock: 'share' | 'change') =>
     withTenant(app, org, async (tx) => {
       const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, lock);
       if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
-      return states.record(tx, AGENTS, { orgId: org, id }, current, change('agent.touched'));
+      return states.record(tx, AGENTS, { orgId: org, id }, current, TOUCH, change('agent.touched'));
     });
 
   const refusedFor = (reason: SignedStateFailed['reason']): unknown =>
@@ -327,13 +324,15 @@ describe('what a signed state is recorded from', () => {
     if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
 
     await expect(
-      withTenant(app, org, (tx) => states.record(tx, AGENTS, { orgId: org, id }, current, change('agent.touched'))),
+      withTenant(app, org, (tx) =>
+        states.record(tx, AGENTS, { orgId: org, id }, current, TOUCH, change('agent.touched')),
+      ),
     ).rejects.toEqual(refusedFor('basis'));
     const second = await withTenant(app, org, async (tx) => {
       const again = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
       if (again.outcome !== 'verified') throw new Error('The test expected a verified state');
-      await states.record(tx, AGENTS, { orgId: org, id }, again, change('agent.touched'));
-      return states.record(tx, AGENTS, { orgId: org, id }, again, change('agent.touched')).then(
+      await states.record(tx, AGENTS, { orgId: org, id }, again, TOUCH, change('agent.touched'));
+      return states.record(tx, AGENTS, { orgId: org, id }, again, TOUCH, change('agent.touched')).then(
         () => 'recorded twice',
         (error: unknown) => error,
       );
@@ -350,16 +349,102 @@ describe('what a signed state is recorded from', () => {
       withTenant(app, org, async (tx) => {
         const current = await states.verifiedState(tx, AGENTS, { orgId: org, id: one }, 'change');
         if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
-        return states.record(tx, AGENTS, { orgId: org, id: two }, current, change('agent.touched'));
+        return states.record(tx, AGENTS, { orgId: org, id: two }, current, TOUCH, change('agent.touched'));
       }),
     ).rejects.toEqual(refusedFor('basis'));
   });
 
-  it('refuses `new` for a row that already has its signed state', async () => {
+  it("refuses the same row's state through another table object, which could seal fields never verified", async () => {
+    const id = await newAgent();
+    const wider = { ...AGENTS, fields: [...AGENTS.fields, { column: 'label', type: 'text' }] } as const;
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+        if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+        return states.record(tx, wider, { orgId: org, id }, current, TOUCH, change('agent.touched'));
+      }),
+    ).rejects.toEqual(refusedFor('basis'));
+  });
+
+  it("refuses a state verified for the row in one organisation to record another organisation's", async () => {
     const id = await newAgent();
 
     await expect(
-      withTenant(app, org, (tx) => states.record(tx, AGENTS, { orgId: org, id }, 'new', change('agent.created'))),
+      withTenant(app, org, async (tx) => {
+        const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+        if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+        return states.record(tx, AGENTS, { orgId: newId(), id }, current, TOUCH, change('agent.touched'));
+      }),
+    ).rejects.toEqual(refusedFor('basis'));
+  });
+
+  it('refuses an older verified state once the row is verified again for change, with no alarm', async () => {
+    const id = await newAgent();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        const first = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+        if (first.outcome !== 'verified') throw new Error('The test expected a verified state');
+        await states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+        return states.record(tx, AGENTS, { orgId: org, id }, first, TOUCH, change('agent.touched'));
+      }),
+    ).rejects.toEqual(refusedFor('basis'));
+    expect(alarms()).toEqual([]);
+  });
+
+  it('refuses to lock a row for a change after reading it for a decision in the same transaction (ADR-006 §6)', async () => {
+    const id = await newAgent();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share');
+        return states.changeStatus(tx, AGENTS, { orgId: org, id }, 'suspend', change('agent.suspend'));
+      }),
+    ).rejects.toEqual(refusedFor('lock_order'));
+  });
+
+  it('lets a row locked for a change be read again for a decision, and still records from its state', async () => {
+    const id = await newAgent();
+
+    const recorded = await withTenant(app, org, async (tx) => {
+      const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+      expect(await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')).toMatchObject({ version: 1 });
+      return states.record(tx, AGENTS, { orgId: org, id }, current, TOUCH, change('agent.touched'));
+    });
+
+    expect(recorded).toMatchObject({ version: 2 });
+  });
+
+  it('refuses a status written by record: it moves only through changeStatus, along its machine', async () => {
+    const id = await newAgent();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+        if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+        return states.record(tx, AGENTS, { orgId: org, id }, current, { status: 'SUSPENDED' }, change('agent.x'));
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it.each([
+    ['already has its signed state', null],
+    ['is at another version', 2],
+  ])('refuses `new` for a row that %s', async (_, version) => {
+    const id = version === null ? await newAgent() : newId();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        if (version !== null) {
+          await tx
+            .insertInto('probe.agents')
+            .values({ org_id: org, id, status: 'ACTIVE', role: 'reader', state_version: version })
+            .execute();
+        }
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      }),
     ).rejects.toEqual(refusedFor('basis'));
   });
 
@@ -369,7 +454,7 @@ describe('what a signed state is recorded from', () => {
     await expect(
       withTenant(app, org, async (tx) => {
         await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'reader' }).execute();
-        return states.record(tx, AGENTS, { orgId: org, id }, 'new', {
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, {
           ...change('agent.created'),
           details: { stateKeyVersion: 1 },
         });
@@ -406,9 +491,11 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
   /** An edit to the agent's events that keeps each seal where it was: only their own MACs can tell. */
   const EDIT_EVENT = `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`;
 
+  /** Denied the same way read for a decision and read for a change, each with its alarm. */
   const deniedWith = async (id: string, sign: TamperSign) => {
     expect(await check(id)).toEqual({ outcome: 'tampered', sign });
-    expect(alarms()).toEqual([alarmFor(id, sign)]);
+    expect(await check(id, states, 'change')).toEqual({ outcome: 'tampered', sign });
+    expect(alarms()).toEqual([alarmFor(id, sign), alarmFor(id, sign)]);
   };
 
   it('a status flipped along a move the guard allows: the fields no longer match the seal', async () => {
@@ -521,23 +608,49 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
     await expect(
       withTenant(app, org, async (tx) => {
         await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE', role: 'admin' }).execute();
-        return states.record(tx, AGENTS, { orgId: org, id }, 'new', change('agent.created'));
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
       }),
     ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'tampered' }));
     expect(alarms()).toEqual([alarmFor(id, 'log')]);
     expect(await rowOf(id)).toBeUndefined();
   });
 
+  it('a new row not as the app writes one: nothing is recorded, and the alarm is raised', async () => {
+    const id = newId();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await tx
+          .insertInto('probe.agents')
+          .values({ org_id: org, id, status: 'ACTIVE', role: 'reader', state_version: 0 })
+          .execute();
+        return states.record(tx, AGENTS, { orgId: org, id }, 'new', NEW_AGENT, change('agent.created'));
+      }),
+    ).rejects.toEqual(expect.objectContaining({ name: 'SignedStateFailed', reason: 'tampered' }));
+    expect(alarms()).toEqual([alarmFor(id, 'row')]);
+    expect(await rowOf(id)).toBeUndefined();
+  });
+
   describe('a trigger planted by the owner', () => {
-    /** Adds a BEFORE UPDATE trigger running `body` for the test, and drops it after. */
-    async function withTrigger(body: string, work: () => Promise<void>): Promise<void> {
+    /** Adds a BEFORE UPDATE (or INSERT) trigger running `body` for the test, and drops it after. */
+    async function withTrigger(
+      body: string,
+      work: () => Promise<void>,
+      on: 'update' | 'insert' = 'update',
+    ): Promise<void> {
       // eslint-disable-next-line agentx/no-string-built-sql -- The bodies are fixed text, written in the tests below.
       await attacker.query(
         `create function probe.planted() returns trigger language plpgsql as $$ begin ${body} end; $$`,
       );
-      await attacker.query(
-        'create trigger planted before update on probe.agents for each row execute function probe.planted()',
-      );
+      if (on === 'update') {
+        await attacker.query(
+          'create trigger planted before update on probe.agents for each row execute function probe.planted()',
+        );
+      } else {
+        await attacker.query(
+          'create trigger planted before insert on probe.agents for each row execute function probe.planted()',
+        );
+      }
       try {
         await work();
       } finally {
@@ -576,6 +689,53 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
           await expect(changeStatus(id, 'suspend')).rejects.toEqual(
             expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }),
           );
+        },
+      );
+      expect(alarms()).toEqual([alarmFor(id, 'row')]);
+      expect(await rowOf(id)).toMatchObject({ status: 'ACTIVE', state_version: 1 });
+    });
+
+    /** A trigger that raises every agent it touches to admin. */
+    const RAISE_ROLE = "new.role := 'admin'; return new;";
+    const notApplied = expect.objectContaining({ name: 'SignedStateFailed', reason: 'not_applied' }) as unknown;
+
+    it("raising a role while a status changes: the role isn't sealed as if the app wrote it, and the alarm is raised", async () => {
+      const id = await newAgent('reader');
+
+      await withTrigger(RAISE_ROLE, async () => {
+        await expect(changeStatus(id, 'suspend')).rejects.toEqual(notApplied);
+      });
+      expect(alarms()).toEqual([alarmFor(id, 'row')]);
+      expect(await rowOf(id)).toMatchObject({ status: 'ACTIVE', state_version: 1 });
+      expect(await eventsAbout(id)).toHaveLength(1);
+      expect(await check(id)).toMatchObject({ outcome: 'verified', fields: new Map(Object.entries(NEW_AGENT)) });
+    });
+
+    it('raising a role as its first fields are written: nothing is created, and the alarm is raised', async () => {
+      const id = newId();
+
+      await withTrigger(RAISE_ROLE, async () => {
+        await expect(newAgent('reader', id)).rejects.toEqual(notApplied);
+      });
+      expect(alarms()).toEqual([alarmFor(id, 'row')]);
+      expect(await rowOf(id)).toBeUndefined();
+    });
+
+    it('raising a role as a row is inserted: its signed state holds what the app declared', async () => {
+      const id = newId();
+
+      await withTrigger(RAISE_ROLE, () => newAgent('reader', id).then(() => undefined), 'insert');
+      expect(await check(id)).toMatchObject({ outcome: 'verified', fields: new Map(Object.entries(NEW_AGENT)) });
+      expect(alarms()).toEqual([]);
+    });
+
+    it('raising a role as the row takes its pointer: nothing is recorded, and the alarm is raised', async () => {
+      const id = await newAgent('reader');
+
+      await withTrigger(
+        "if old.state_event_id is null and new.state_event_id is not null then new.role := 'admin'; end if; return new;",
+        async () => {
+          await expect(changeStatus(id, 'suspend')).rejects.toEqual(notApplied);
         },
       );
       expect(alarms()).toEqual([alarmFor(id, 'row')]);

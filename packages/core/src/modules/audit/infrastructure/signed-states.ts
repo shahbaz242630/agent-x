@@ -13,28 +13,36 @@
 // integrity hold on the organisation joins it when organisations exist (B1).
 //
 // The read locks the row (ADR-006 §6): `share` for a decision, `change` when
-// the transaction will change it. A change must commit before a reader can
-// lock the row, and it records its event in the same transaction, so a check
-// never meets a row and a log from either side of one change.
+// the transaction will change it, never one and then the other. A change must
+// commit before a reader can lock the row, and it records its event in the
+// same transaction, so a check never meets a row and a log from either side
+// of one change.
 //
-// Every change records the new state: the row moves to its next version, its
-// fields are read and sealed, the event goes to the audit chain (ADR-007 §1.3's
-// history row, ADR-014 §8) and the row points at it. A change starts from a
-// state verified for change in the same transaction, so a field tampered with
-// can't be changed and sealed as if it were real. Events about an authority
-// object are its state changes only: activity goes against other subjects.
+// Every change records the new state: record writes the authority fields the
+// change names, moving the row to its next version, and reads the row back. It
+// must hold exactly the verified state with those values written: a trigger or
+// rule planted in the table that changed any field on the way is caught there,
+// before anything is sealed, rather than sealed as if the app had written it.
+// Then the fields are sealed, the event goes to the audit chain (ADR-007
+// §1.3's history row, ADR-014 §8) and the row points at it. A change starts
+// from a state verified for change in the same transaction, so a field
+// tampered with before it can't be changed and sealed as if it were real.
+// Events about an authority object are its state changes only: activity goes
+// against other subjects.
 import { sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/audit-chain';
 import {
-  advanceSignedRow,
   createStatusChanger,
+  type FieldText,
   pointSignedRow,
   readSignedRow,
   type RowLock,
+  type SignedFieldValues,
   type SignedRow,
   type SignedRowKey,
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
+  writeSignedRow,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -45,7 +53,7 @@ import type { AuditTrail, AuditTransaction, LatestSignedState } from './audit-tr
 /**
  * Where a row and its signed state part:
  * - `row`: the row can't be read as the app writes it, or, locked for a
- *   change, didn't take its new version or pointer as written
+ *   change, didn't hold exactly what the change wrote
  * - `deleted`: the row is gone but its signed state is in the log (the app
  *   role can't delete)
  * - `unsigned`: the row exists but no event about it carries a seal
@@ -54,7 +62,8 @@ import type { AuditTrail, AuditTransaction, LatestSignedState } from './audit-tr
  * - `pointer`: the row points at another event than the latest signed one
  * - `version`: the row's version isn't the latest signed event's
  * - `seal`: the row's fields aren't the ones sealed
- * - `status`: a status change was rewritten on its way into the row
+ * - `status`: a status change on a verified row failed as only something
+ *   past the app could make it fail
  */
 export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status';
 
@@ -68,8 +77,10 @@ export interface VerifiedState {
 }
 
 /**
- * The row verified; no such row in this organisation; or tampered with, which
- * the caller denies (the alarm is already raised).
+ * The row verified; no such row in this organisation; or tampered with (the
+ * alarm is already raised). The caller denies both of the last two: a missing
+ * row never means "no limit", so a hold or a freeze is a status on a row that
+ * always exists, never a row whose absence lifts it.
  */
 export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -101,17 +112,20 @@ export type SignedStatusChange<State extends string> =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * A signed state couldn't be recorded:
- * - `basis`: record was given a state not verified for change in this
- *   transaction for this row (or used once already), or `new` for a row that
- *   isn't new
- * - `not_applied`: the row didn't move or take its pointer as the change
- *   decided (the alarm is raised: the row was locked)
- * - `tampered`: the log already holds a signed state for a row being created
+ * A signed state couldn't be read or recorded as asked:
+ * - `basis`: record was given a state that isn't the latest verified for
+ *   change on this row, with this table, in this transaction (or was used
+ *   once already), or `new` for a row that isn't new
+ * - `lock_order`: a row read for a decision (`share`) was then read for a
+ *   change in the same transaction, a lock upgrade ADR-006 §6 forbids
+ * - `not_applied`: the row didn't hold what the change wrote, or didn't take
+ *   its pointer (the alarm is raised: the row was locked)
+ * - `tampered`: a row being created can't be read, or the log already holds
+ *   a signed state for it (the alarm is raised)
  * The caller's transaction must roll back: throwing out of withTenant does.
  */
 export class SignedStateFailed extends Error {
-  readonly reason: 'basis' | 'not_applied' | 'tampered';
+  readonly reason: 'basis' | 'lock_order' | 'not_applied' | 'tampered';
 
   constructor(reason: SignedStateFailed['reason'], message: string) {
     super(message);
@@ -128,17 +142,19 @@ export interface SignedStates {
    */
   verifiedState(tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey, lock: RowLock): Promise<StateCheck>;
   /**
-   * Records the row's new state, after the caller changed its fields in this
-   * transaction: from `basis`, the state verifiedState gave for change here
-   * (each one used once), or `new` for a row the transaction has just
-   * inserted at version 1, pointing nowhere. Takes the audit head's lock,
-   * which comes last (ADR-006 §6).
+   * Writes the authority fields `set` names and records the row's new state,
+   * in this transaction. From `from`: the state verifiedState last gave for
+   * change on this row, with this same table, here (each one used once); or
+   * `new`, for a row the transaction has just inserted, where `set` names
+   * every field. A status changes only through changeStatus. Takes the audit
+   * head's lock, which comes last (ADR-006 §6).
    */
   record(
     tx: AuditTransaction,
     table: SignedStateTable,
     key: SignedRowKey,
-    basis: VerifiedState | 'new',
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
     change: SignedChange,
   ): Promise<RecordedState>;
   /**
@@ -157,19 +173,24 @@ export interface SignedStates {
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
 
-/** What a verified state was verified for: the transaction and row record may use it on. */
-interface Issued {
-  readonly tx: AuditTransaction;
-  readonly table: string;
-  readonly orgId: string;
-  readonly id: string;
+/** A row this transaction has read: the lock it holds, and the state it may record a change from. */
+interface Held {
+  lock: RowLock;
+  from?: { readonly table: SignedStateTable; readonly state: VerifiedState };
 }
 
 const MISSING = Object.freeze({ outcome: 'missing' as const });
+/** The status column, which only changeStatus writes on a row that exists. */
+const STATUS = 'status';
+
+const sameFields = (row: readonly FieldText[], expected: (column: string) => string | null | undefined): boolean =>
+  row.every(([column, value]) => value === expected(column));
 
 /**
- * Build it from the request's or job's logger, a child carrying its
- * correlation ID (Rule Book §8); each alarm adds the organisation.
+ * Build one from the request's or job's logger, a child carrying its
+ * correlation ID (Rule Book §8); each alarm adds the organisation. What it
+ * knows of each transaction's rows (locks and verified states) is its own:
+ * use one for the whole transaction.
  */
 export function createSignedStates({
   keys,
@@ -181,8 +202,15 @@ export function createSignedStates({
   readonly logger: Logger;
 }): SignedStates {
   const statuses = createStatusChanger({ logger });
-  /** States verified for change and not yet used, each with where it may be used. */
-  const issued = new WeakMap<VerifiedState, Issued>();
+  const rowsHeld = new WeakMap<AuditTransaction, Map<string, Held>>();
+
+  const heldIn = (tx: AuditTransaction): Map<string, Held> => {
+    const known = rowsHeld.get(tx) ?? new Map<string, Held>();
+    rowsHeld.set(tx, known);
+    return known;
+  };
+  const rowName = (table: SignedStateTable, { orgId, id }: SignedRowKey): string =>
+    `${table.table}|${orgId.toLowerCase()}|${id.toLowerCase()}`;
 
   const alarm = (table: SignedStateTable, key: SignedRowKey, sign: TamperSign, seq?: bigint) => {
     logger.child({ orgId: key.orgId }).error('audit.integrity_failed', {
@@ -194,6 +222,12 @@ export function createSignedStates({
       ...(seq === undefined ? {} : { seq }),
     });
     return Object.freeze({ outcome: 'tampered' as const, sign });
+  };
+
+  /** Raises the alarm and fails: the locked row didn't hold what was just written to it. */
+  const notApplied = (table: SignedStateTable, key: SignedRowKey, what: string): never => {
+    alarm(table, key, 'row');
+    throw new SignedStateFailed('not_applied', what);
   };
 
   const latestOf = (tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey): Promise<LatestSignedState> =>
@@ -226,7 +260,17 @@ export function createSignedStates({
     key: SignedRowKey,
     lock: RowLock,
   ): Promise<StateCheck> => {
+    const rows = heldIn(tx);
+    const name = rowName(table, key);
+    const held = rows.get(name);
+    if (held?.lock === 'share' && lock === 'change') {
+      throw new SignedStateFailed(
+        'lock_order',
+        "A row read for a decision isn't read again for a change in the same transaction: lock it for the change first (ADR-006 §6)",
+      );
+    }
     let row = await readSignedRow(tx, table, key, lock);
+    rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
     if (row.outcome === 'unreadable') return alarm(table, key, 'row');
     let latest = await latestOf(tx, table, key);
     if (row.outcome === 'missing') {
@@ -240,60 +284,74 @@ export function createSignedStates({
       latest = await latestOf(tx, table, key);
     }
     const checked = compare(table, key, row, latest);
-    if (checked.outcome === 'verified' && lock === 'change') {
-      issued.set(checked, { tx, table: table.table, orgId: key.orgId.toLowerCase(), id: key.id.toLowerCase() });
-    }
+    if (checked.outcome === 'verified' && lock === 'change') rows.set(name, { lock, from: { table, state: checked } });
     return checked;
   };
 
-  /** The row at its new version, from the basis it moves on from. */
-  const nextRow = async (
+  /**
+   * Writes the change and gives back the row at its new version, once it
+   * holds exactly the state it was verified in (or, for a new row, nothing
+   * yet) with the values written.
+   */
+  const written = async (
     tx: AuditTransaction,
     table: SignedStateTable,
     key: SignedRowKey,
-    basis: VerifiedState | 'new',
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
   ): Promise<FoundRow> => {
-    if (basis === 'new') {
-      const row = await readSignedRow(tx, table, key, 'change');
-      if (row.outcome !== 'found' || row.version !== 1 || row.eventId !== null) {
+    const rows = heldIn(tx);
+    const name = rowName(table, key);
+    if (from === 'new') {
+      const read = await readSignedRow(tx, table, key, 'change');
+      if (read.outcome === 'unreadable') {
+        alarm(table, key, 'row');
+        throw new SignedStateFailed('tampered', 'A row being created is not as the app writes one');
+      }
+      if (read.outcome !== 'found' || read.version !== 1 || read.eventId !== null) {
         throw new SignedStateFailed('basis', 'A new signed row is at version 1 and points at no event yet');
       }
       if ((await latestOf(tx, table, key)).kind !== 'none') {
         alarm(table, key, 'log');
         throw new SignedStateFailed('tampered', 'The log already holds a signed state for a row being created');
       }
-      return row;
+      rows.set(name, { lock: 'change' });
+    } else {
+      const held = rows.get(name);
+      if (held?.from?.state !== from || held.from.table !== table) {
+        throw new SignedStateFailed(
+          'basis',
+          'A change is recorded from the state last verified for change on its row, with its table, here',
+        );
+      }
+      rows.set(name, { lock: 'change' });
     }
-    const use = issued.get(basis);
-    if (
-      use?.tx !== tx ||
-      use.table !== table.table ||
-      use.orgId !== key.orgId.toLowerCase() ||
-      use.id !== key.id.toLowerCase()
-    ) {
-      throw new SignedStateFailed('basis', 'A change is recorded from a state verified for change on its row, here');
+    const { row, written: values } = await writeSignedRow(tx, table, key, from, set);
+    const expectedVersion = from === 'new' ? 1 : from.version + 1;
+    if (row.outcome !== 'found' || row.version !== expectedVersion || row.eventId !== null) {
+      return notApplied(table, key, "The row didn't move on from the state it was verified in");
     }
-    issued.delete(basis);
-    const row = await advanceSignedRow(tx, table, key, basis);
-    if (row.outcome !== 'found' || row.version !== basis.version + 1 || row.eventId !== null) {
-      // Locked since it was verified, so something past this step changed it.
-      alarm(table, key, 'row');
-      throw new SignedStateFailed('not_applied', "The row didn't move on from the version it was verified at");
+    const wrote = new Map(values);
+    const expected = (column: string) =>
+      wrote.has(column) ? wrote.get(column) : from === 'new' ? undefined : from.fields.get(column);
+    if (!sameFields(row.fields, expected)) {
+      return notApplied(table, key, "The row didn't hold what the change wrote, over the state it was verified in");
     }
     return row;
   };
 
-  const record = async (
+  const recordChange = async (
     tx: AuditTransaction,
     table: SignedStateTable,
     key: SignedRowKey,
-    basis: VerifiedState | 'new',
+    from: VerifiedState | 'new',
+    set: SignedFieldValues,
     change: SignedChange,
   ): Promise<RecordedState> => {
     if (Object.hasOwn(change.details, 'stateFingerprint') || Object.hasOwn(change.details, 'stateKeyVersion')) {
       throw new AuditEventRefused(['details.stateFingerprint and details.stateKeyVersion are the seal, added here']);
     }
-    const row = await nextRow(tx, table, key, basis);
+    const row = await written(tx, table, key, from, set);
     const subject = { type: table.subject, id: key.id, version: row.version };
     const seal = sealState(keys, { orgId: key.orgId, subject, fields: row.fields });
     const recorded = await trail.record(tx, key.orgId, {
@@ -302,16 +360,36 @@ export function createSignedStates({
       subject,
       details: { ...change.details, ...stateSealDetails(seal) },
     });
-    if (!(await pointSignedRow(tx, table, key, { version: row.version, eventId: recorded.id }))) {
-      alarm(table, key, 'row');
-      throw new SignedStateFailed('not_applied', "The row didn't take the pointer to its new state's event");
+    const pointed = await pointSignedRow(tx, table, key, { version: row.version, eventId: recorded.id });
+    const sealed = new Map(row.fields);
+    if (
+      pointed.outcome !== 'found' ||
+      pointed.version !== row.version ||
+      pointed.eventId !== recorded.id.toLowerCase() ||
+      !sameFields(pointed.fields, (column) => sealed.get(column))
+    ) {
+      return notApplied(table, key, "The row didn't take the pointer to its new state's event as sealed");
     }
     return Object.freeze({ version: row.version, eventId: recorded.id, seq: recorded.seq });
   };
 
   return Object.freeze({
     verifiedState,
-    record,
+
+    async record(
+      tx: AuditTransaction,
+      table: SignedStateTable,
+      key: SignedRowKey,
+      from: VerifiedState | 'new',
+      set: SignedFieldValues,
+      change: SignedChange,
+    ): Promise<RecordedState> {
+      // A status moves only along its machine, which changeStatus decides.
+      if (from !== 'new' && Object.hasOwn(set, STATUS)) {
+        throw new RangeError('A status changes through changeStatus');
+      }
+      return recordChange(tx, table, key, from, set, change);
+    },
 
     async changeStatus<State extends string, Event extends string>(
       tx: AuditTransaction,
@@ -321,24 +399,29 @@ export function createSignedStates({
       change: SignedChange,
     ): Promise<SignedStatusChange<State>> {
       // An unsealed status could be flipped unseen.
-      if (!table.fields.some(({ column }) => column === 'status')) {
+      if (!table.fields.some(({ column }) => column === STATUS)) {
         throw new RangeError('A signed status table seals its status');
       }
       const current = await verifiedState(tx, table, key, 'change');
       if (current.outcome !== 'verified') return current;
       const moved = await statuses.change(tx, table, key, event).catch((error: unknown) => {
-        // The locked row's update left another status: a trigger at work, past the app.
-        if (error instanceof StatusChangeFailed && error.reason === 'not_applied') alarm(table, key, 'status');
+        // The row is verified and locked: its status can't be unreadable or
+        // left unchanged unless something past the app is at work on it.
+        if (error instanceof StatusChangeFailed) alarm(table, key, 'status');
         throw error;
       });
       if (moved.outcome === 'refused') return moved;
       if (moved.outcome === 'missing') {
-        throw new SignedStateFailed('not_applied', 'The row verified and locked for change was missing when changed');
+        return notApplied(table, key, 'The row verified and locked for change was missing when changed');
       }
-      const recorded = await record(tx, table, key, current, {
-        ...change,
-        details: { ...change.details, statusFrom: moved.from, statusTo: moved.to },
-      });
+      const recorded = await recordChange(
+        tx,
+        table,
+        key,
+        current,
+        { [STATUS]: moved.to },
+        { ...change, details: { ...change.details, statusFrom: moved.from, statusTo: moved.to } },
+      );
       return Object.freeze({
         outcome: 'changed',
         from: moved.from,

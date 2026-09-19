@@ -15,15 +15,19 @@ export {
   setUpServer,
 } from './server-setup.ts';
 export {
-  advanceSignedRow,
+  type FieldText,
   pointSignedRow,
   readSignedRow,
   type RowLock,
   type SignedField,
   type SignedFieldType,
+  type SignedFieldValue,
+  type SignedFieldValues,
   type SignedRow,
   type SignedRowKey,
   type SignedStateTable,
+  type WrittenRow,
+  writeSignedRow,
 } from './signed-rows.ts';
 export { assertTenant, TenantContextError, withTenant } from './tenant.ts';
 export {

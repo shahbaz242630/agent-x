@@ -15,7 +15,13 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
-import { advanceSignedRow, pointSignedRow, readSignedRow, type SignedStateTable } from './signed-rows.ts';
+import {
+  pointSignedRow,
+  readSignedRow,
+  type SignedFieldValues,
+  type SignedStateTable,
+  writeSignedRow,
+} from './signed-rows.ts';
 import { TenantContextError, withTenant } from './tenant.ts';
 
 const TENANT_POLICY =
@@ -36,7 +42,7 @@ const FIXTURE = [
   ]),
   'grant usage on schema probe to agentx_app',
   'grant select, insert on probe.grants, probe.loose to agentx_app',
-  'grant update (status, role, label, state_version, state_event_id) on probe.grants, probe.loose to agentx_app',
+  'grant update (status, holder, amount, expires_at, role, label, state_version, state_event_id) on probe.grants, probe.loose to agentx_app',
 ];
 
 interface GrantsTable {
@@ -219,7 +225,35 @@ describe('reading a signed row (ADR-012 §2)', () => {
   });
 });
 
+describe('reading a time as canonical text', () => {
+  it.each([
+    ['in our era', '2026-09-26 12:00:00+00', '2026-09-26T12:00:00.000000Z'],
+    [
+      'before year 1, which to_char writes without its era',
+      '2026-09-26 12:00:00+00 BC',
+      '2026-09-26T12:00:00.000000Z BC',
+    ],
+    ['as infinity, which to_char has no text for', 'infinity', 'infinity'],
+    ['as minus infinity', '-infinity', '-infinity'],
+  ])('reads a time %s as text no other time reads as', async (_, stored, text) => {
+    const id = await newGrant();
+    await admin.query('update probe.grants set expires_at = $3 where org_id = $1 and id = $2', [ORG, id, stored]);
+
+    expect(await read(GRANTS, id)).toMatchObject({ fields: fieldsWith('expires_at', text) });
+  });
+});
+
 describe('reading a row changed past the app', () => {
+  it.each<[string, SignedStateTable['fields']]>([
+    ['a time declared as text, whose text the session decides', [{ column: 'expires_at', type: 'text' }]],
+    ['text declared as a UUID', [{ column: 'status', type: 'uuid' }]],
+    ['a big whole number declared as text', [{ column: 'amount', type: 'text' }]],
+  ])("reports a field whose column isn't of its declared type as unreadable: %s", async (_, fields) => {
+    const id = await newGrant();
+
+    expect(await read({ ...GRANTS, fields }, id)).toEqual({ outcome: 'unreadable' });
+  });
+
   it('reports a version the app never writes as unreadable', async () => {
     const id = await newGrant();
     await admin.query('update probe.grants set state_version = 0 where org_id = $1 and id = $2', [ORG, id]);
@@ -301,44 +335,96 @@ describe('ADR-006 §6 the lock a read takes', () => {
   });
 });
 
-describe('moving a signed row on', () => {
-  it('moves it to its next version, from the version and pointer it holds, and points it nowhere', async () => {
+describe('writing a signed row', () => {
+  const write = (id: string, from: Parameters<typeof writeSignedRow>[3], set: SignedFieldValues) =>
+    withTenant(app, ORG, (tx) => writeSignedRow(tx, GRANTS, { orgId: ORG, id }, from, set));
+
+  it('moves it to its next version, writes the fields named, points it nowhere, and reads back what it wrote', async () => {
     const id = await newGrant(ORG, EVENT);
 
-    const moved = await withTenant(app, ORG, async (tx) => {
-      await tx
-        .updateTable('probe.grants')
-        .set({ role: 'owner' })
-        .where('org_id', '=', ORG)
-        .where('id', '=', id)
-        .execute();
-      return advanceSignedRow(tx, GRANTS, { orgId: ORG, id }, { version: 1, eventId: EVENT.toUpperCase() });
+    const moved = await write(id, { version: 1, eventId: EVENT.toUpperCase() }, { role: 'owner', amount: 7n });
+
+    expect(moved).toEqual({
+      row: {
+        outcome: 'found',
+        version: 2,
+        eventId: null,
+        fields: EXPECTED_FIELDS.map(([name, value]) => [
+          name,
+          name === 'role' ? 'owner' : name === 'amount' ? '7' : value,
+        ]),
+      },
+      written: [
+        ['amount', '7'],
+        ['role', 'owner'],
+      ],
+    });
+    expect(await rowOf(id)).toMatchObject({ state_version: 2, state_event_id: null });
+  });
+
+  it('writes every field of a new row, at version 1, each read back as the column reads it', async () => {
+    const id = await newGrant();
+
+    const written = await write(id, 'new', {
+      status: 'ACTIVE',
+      holder: HOLDER,
+      amount: 12_345_678_901_234n,
+      expires_at: new Date('2026-09-19T06:11:12.345Z'),
+      role: null,
     });
 
-    expect(moved).toEqual({ outcome: 'found', version: 2, eventId: null, fields: fieldsWith('role', 'owner') });
-    expect(await rowOf(id)).toMatchObject({ state_version: 2, state_event_id: null });
+    expect(written.row).toMatchObject({ outcome: 'found', version: 1, eventId: null });
+    expect(written.written).toEqual([
+      ['status', 'ACTIVE'],
+      ['holder', HOLDER.toLowerCase()],
+      ['amount', '12345678901234'],
+      ['expires_at', '2026-09-19T06:11:12.345000Z'],
+      ['role', null],
+    ]);
+    expect(written.row.outcome === 'found' ? written.row.fields : []).toEqual(written.written);
   });
 
   it.each([
     ['another version', { version: 2, eventId: EVENT }],
     ['another pointer', { version: 1, eventId: NEXT_EVENT }],
+    ['new, though it points at an event', 'new' as const],
   ])('leaves a row that holds %s as it is', async (_, from) => {
     const id = await newGrant(ORG, EVENT);
+    const every = { status: 'ACTIVE', holder: null, amount: null, expires_at: null, role: 'owner' };
 
-    expect(await withTenant(app, ORG, (tx) => advanceSignedRow(tx, GRANTS, { orgId: ORG, id }, from))).toEqual({
-      outcome: 'missing',
-    });
+    expect((await write(id, from, every)).row).toEqual({ outcome: 'missing' });
     expect(await rowOf(id)).toMatchObject({ state_version: 1, state_event_id: EVENT });
   });
 
-  it('points a row at its version’s event only while it points nowhere', async () => {
+  const EVERY = { status: 'ACTIVE', holder: null, amount: null, expires_at: null, role: null };
+  const NOT_A_VALUE = /written as text, a whole number, a valid time, or null/;
+
+  it.each<[string, SignedFieldValues, RegExp]>([
+    ['a field left out of a new row', { status: 'ACTIVE' }, /names every field/],
+    ['a column that is not an authority field', { ...EVERY, label: 'x' }, /Only the authority fields/],
+    ['a value that is no field value', { ...EVERY, role: {} as unknown as string }, NOT_A_VALUE],
+    ['a number with a fraction', { ...EVERY, amount: 1.5 }, NOT_A_VALUE],
+    ['a time that is not one', { ...EVERY, expires_at: new Date(Number.NaN) }, NOT_A_VALUE],
+  ])('refuses %s, before any SQL', async (_, set, problem) => {
+    const id = await newGrant();
+
+    await expect(write(id, 'new', set)).rejects.toThrow(problem);
+    expect(await rowOf(id)).toMatchObject({ state_version: 1, state_event_id: null });
+  });
+
+  it('points a row at its version’s event only while it points nowhere, and reads it back', async () => {
     const id = await newGrant();
     const point = (version: number, eventId: string) =>
       withTenant(app, ORG, (tx) => pointSignedRow(tx, GRANTS, { orgId: ORG, id }, { version, eventId }));
 
-    expect(await point(2, EVENT)).toBe(false);
-    expect(await point(1, EVENT.toUpperCase())).toBe(true);
-    expect(await point(1, NEXT_EVENT)).toBe(false);
+    expect(await point(2, EVENT)).toEqual({ outcome: 'missing' });
+    expect(await point(1, EVENT.toUpperCase())).toEqual({
+      outcome: 'found',
+      version: 1,
+      eventId: EVENT,
+      fields: EXPECTED_FIELDS,
+    });
+    expect(await point(1, NEXT_EVENT)).toEqual({ outcome: 'missing' });
     expect(await rowOf(id)).toMatchObject({ state_version: 1, state_event_id: EVENT });
   });
 
@@ -347,10 +433,10 @@ describe('moving a signed row on', () => {
     const from = { version: 1, eventId: EVENT };
 
     await withTenant(app, ORG, async (tx) => {
-      await expect(advanceSignedRow(tx, { ...GRANTS, table: 'x' }, { orgId: ORG, id }, from)).rejects.toThrow(
+      await expect(writeSignedRow(tx, { ...GRANTS, table: 'x' }, { orgId: ORG, id }, from, {})).rejects.toThrow(
         RangeError,
       );
-      await expect(advanceSignedRow(tx, GRANTS, { orgId: ORG, id: 'x' }, from)).rejects.toThrow(RangeError);
+      await expect(writeSignedRow(tx, GRANTS, { orgId: ORG, id: 'x' }, from, {})).rejects.toThrow(RangeError);
       await expect(pointSignedRow(tx, { ...GRANTS, fields: [] }, { orgId: ORG, id }, from)).rejects.toThrow(RangeError);
       await expect(pointSignedRow(tx, GRANTS, { orgId: 'x', id }, from)).rejects.toThrow(RangeError);
     });
