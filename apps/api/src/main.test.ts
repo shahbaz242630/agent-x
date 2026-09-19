@@ -73,6 +73,23 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
   };
 });
 
+/**
+ * A stand-in for the platform chain: start-record.ts is proven against a real
+ * database in main.db.test.ts. `result` is what the write gives back.
+ */
+const startRecord = vi.hoisted(() => ({
+  written: [] as unknown[],
+  result: (): Promise<bigint> => Promise.resolve(7n),
+}));
+
+vi.mock('./start-record.ts', () => ({
+  recordStart: (_database: unknown, _keys: unknown, _ids: unknown, facts: unknown) => {
+    fake.steps.push('start recorded');
+    startRecord.written.push(facts);
+    return startRecord.result();
+  },
+}));
+
 /** Plain words standing in for a secret put in the wrong setting, so secret scanners ignore it. */
 const MISPLACED = 'value that must never be printed';
 /** Plain words standing in for the database login. */
@@ -124,6 +141,8 @@ beforeEach(() => {
   fake.steps.length = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
+  startRecord.written.length = 0;
+  startRecord.result = () => Promise.resolve(7n);
 });
 
 afterEach(async () => {
@@ -252,13 +271,55 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     ]);
   });
 
-  it('checks the role, logs that the database is ready, and only then listens', async () => {
+  it('checks the role, logs that the database is ready, records the start, and only then listens', async () => {
     const { events, capture } = await start();
-    expect(fake.steps).toEqual(['role checked']);
-    expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.listening']);
+    expect(fake.steps).toEqual(['role checked', 'start recorded']);
+    expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
     );
+  });
+
+  it("SEC-OPS-05 writes the fingerprint's hash and the release to the platform chain, and logs its place", async () => {
+    const { capture } = await start();
+    const starting = capture.lines().find((line) => line.event === 'api.starting');
+
+    expect(startRecord.written).toEqual([{ configHash: starting?.configHash, release: starting?.release }]);
+    expect(starting?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(capture.lines().find((line) => line.event === 'api.start_recorded')).toEqual(
+      expect.objectContaining({ level: 'info', seq: '7' }),
+    );
+  });
+
+  it('raises the integrity alarm when the platform chain itself is broken, and refuses to start', async () => {
+    const { ChainBroken } = await import('@agentx/platform/audit-chain');
+    startRecord.result = () => Promise.reject(new ChainBroken({ kind: 'platform' }));
+    const { host, capture } = await start();
+
+    expect(host.exitCode).toBe(1);
+    expect(capture.lines().slice(-2)).toEqual([
+      expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', chain: 'platform', check: 'start' }),
+      expect.objectContaining({ level: 'error', event: 'api.start_not_recorded' }),
+    ]);
+  });
+
+  it('refuses to start when the start cannot be recorded, closes the pool, and builds nothing', async () => {
+    startRecord.result = () => Promise.reject(new Error('the platform chain fails its check at the head'));
+    const serversBefore = built.length;
+    const { host, server, capture } = await start();
+
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBe(1);
+    expect(capture.lines().at(-1)).toEqual(
+      expect.objectContaining({
+        level: 'error',
+        event: 'api.start_not_recorded',
+        err: expect.objectContaining({ message: 'the platform chain fails its check at the head' }) as unknown,
+      }),
+    );
+    expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
+    expect(built.length).toBe(serversBefore);
+    expect(capture.lines().map((line) => line.event)).not.toContain('audit.integrity_failed');
   });
 
   it('refuses to start as a role that could bypass the tenant walls, naming the reasons, and closes the pool', async () => {
@@ -306,7 +367,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', () => {
   it('logs the fingerprint, listens on the port it was given, and answers', async () => {
     const { server, capture } = await start();
-    const [starting, , listening] = capture.lines().filter((line) => String(line.event).startsWith('api.'));
+    const [starting, , , listening] = capture.lines().filter((line) => String(line.event).startsWith('api.'));
     expect(starting).toEqual(
       expect.objectContaining({
         event: 'api.starting',
@@ -373,7 +434,7 @@ describe('the API stops cleanly on a signal', () => {
         expect.objectContaining({ event: 'api.stopping', signal }),
       );
       expect(server?.server.listening).toBe(false);
-      expect(fake.steps).toEqual(['role checked', 'pool closed']);
+      expect(fake.steps).toEqual(['role checked', 'start recorded', 'pool closed']);
     },
   );
 
@@ -392,7 +453,7 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps).toEqual(['role checked', 'http closing', 'http closed', 'pool closed']);
+    expect(fake.steps).toEqual(['role checked', 'start recorded', 'http closing', 'http closed', 'pool closed']);
   });
 
   it.each([

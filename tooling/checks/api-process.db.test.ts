@@ -94,11 +94,11 @@ function lines(): Line[] {
 }
 
 describe(`the API process (Postgres ${server.version})`, () => {
-  it('SEC-OPS-05 logs its config fingerprint, connects as the app role, then listens', () => {
+  it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', () => {
     const events = lines()
       .map((line) => String(line.event))
       .filter((event) => event.startsWith('api.'));
-    expect(events).toEqual(['api.starting', 'api.database_connected', 'api.listening']);
+    expect(events).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 

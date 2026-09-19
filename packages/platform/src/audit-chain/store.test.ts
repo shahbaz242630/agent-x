@@ -72,12 +72,12 @@ class MemoryChain implements ChainWriter, ChainReader {
   append(event: Omit<StoredEntry, 'content'>, head: ChainHead, previous: ChainHead): Promise<boolean> {
     this.calls.push('append');
     if (this.racedBy !== undefined) this.head = this.racedBy;
-    this.rows.push({ ...event, content: CONTENT });
     const current = this.head;
     if (typeof current === 'string' || current.seq !== previous.seq || !current.hash.equals(previous.hash)) {
       return Promise.resolve(false);
     }
     this.head = head;
+    this.rows.push({ ...event, content: CONTENT });
     return Promise.resolve(true);
   }
 
@@ -162,6 +162,7 @@ describe('appending an event', () => {
     await expect(appendEvent(keys, CHAIN, memory, { nextId: () => id(2), content: CONTENT })).rejects.toThrow(
       new ChainBroken(CHAIN),
     );
+    expect(memory.rows).toHaveLength(1);
   });
 
   it.each([

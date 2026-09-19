@@ -52,9 +52,10 @@ export interface ChainWriter {
   /** The database's clock, to the millisecond, read at the moment it is asked, not the transaction's start. */
   now(): Promise<Date>;
   /**
-   * Stores the event (exactly the sealed ID and time, and the fields its
-   * content was made from), then moves the head to `head`, but only if it is
-   * still `previous`. Says whether the head moved.
+   * Moves the head to `head`, but only if it is still `previous`, and then,
+   * only if it moved, stores the event (exactly the sealed ID and time, and the
+   * fields its content was made from). Says whether it did: a refused event
+   * leaves nothing behind, even for a caller that goes on to commit.
    */
   append(event: SealedEvent, head: ChainHead, previous: ChainHead): Promise<boolean>;
 }

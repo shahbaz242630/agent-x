@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./modules/audit": "./src/modules/audit/index.ts",
+    "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"
   },
   "dependencies": {

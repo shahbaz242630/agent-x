@@ -44,13 +44,13 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     expect(await serviceLogs('db-setup')).toContain('"event":"db_setup.done"');
   });
 
-  it('ran the migration job to completion before the API started', async () => {
+  it('ran the migration job to completion before the API started, which recorded its start (SEC-OPS-05)', async () => {
     expect(await serviceState('migrate')).toMatchObject({ State: 'exited', ExitCode: 0 });
     const migrateLog = await serviceLogs('migrate');
     expect(migrateLog).toContain('"event":"migrate.done"');
     const { lines } = await apiLog();
     const own = lines.map((line) => String(line.event)).filter((event) => event.startsWith('api.'));
-    expect(own.slice(0, 3)).toEqual(['api.starting', 'api.database_connected', 'api.listening']);
+    expect(own.slice(0, 4)).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
   });
 
   it('writes only JSON lines, with none of the generated logins in them', async () => {

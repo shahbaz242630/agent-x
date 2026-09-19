@@ -3,8 +3,11 @@
 // reported without the login, and a stop closes every connection.
 import { EventEmitter } from 'node:events';
 
-import { PURPOSES } from '@agentx/platform/keys';
-import type { Output } from '@agentx/platform/observability';
+import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { uuidV7Ids } from '@agentx/core/shared-kernel';
+import { createDatabase } from '@agentx/platform/db';
+import { loadKeys, PURPOSES } from '@agentx/platform/keys';
+import { createLogger, type Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   findLeaks,
@@ -83,6 +86,14 @@ async function start(env: Record<string, string>) {
   };
 }
 
+/** Stops a started API as the platform would, with SIGTERM, and waits for it to exit. */
+async function stop(run: { readonly host: FakeProcess }): Promise<void> {
+  run.host.emit('SIGTERM', 'SIGTERM');
+  await vi.waitFor(() => {
+    expect(run.host.exits).toEqual([0]);
+  });
+}
+
 /** The connections named agentx-api open to this test database: who holds them, and what they are doing. */
 async function apiConnections(): Promise<{ usename: string; state: string | null }[]> {
   return database
@@ -107,7 +118,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   it('starts as the app role, answers, and closes every connection when it stops', async () => {
     const { host, api, events } = await start(envFor('app'));
     expect(api).toBeDefined();
-    expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.listening']);
+    expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect((await api?.inject('/health'))?.json()).toEqual({ status: 'ok' });
     // The role check opened at least one connection, named for Postgres's own views, as the app role.
     expect(await apiConnections()).toEqual(
@@ -151,6 +162,73 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     expect(host.exitCode).toBe(1);
     expect(events()).toEqual(['api.starting', 'api.database_unavailable']);
     expect(findLeaks(capture.text, [wrong, database.connection('app').password])).toEqual([]);
+  });
+
+  it('SEC-OPS-05 writes each start to the platform audit chain, with the hash it logged, in order', async () => {
+    await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    const first = await start(envFor('app'));
+    await stop(first);
+    const second = await start(envFor('app', { AGENTX_RELEASE: 'r-second' }));
+    await stop(second);
+    const logged = [first, second].map(
+      ({ capture }) => capture.lines().find((line) => line.event === 'api.starting')?.configHash,
+    );
+    const rows = await database
+      .as('admin')
+      .query<{ seq: string; actor_id: string; action: string; details: string }>(
+        'select seq, actor_id, action, details from platform_controls.audit_events order by seq',
+      );
+
+    expect(rows).toEqual([
+      {
+        seq: '1',
+        actor_id: 'api',
+        action: 'platform.started',
+        details: JSON.stringify({ configHash: logged[0], release: 'local' }),
+      },
+      {
+        seq: '2',
+        actor_id: 'api',
+        action: 'platform.started',
+        details: JSON.stringify({ configHash: logged[1], release: 'r-second' }),
+      },
+    ]);
+    expect(first.capture.lines().find((line) => line.event === 'api.start_recorded')?.seq).toBe('1');
+
+    // The chain checks out with the keys the API loaded.
+    const reader = createDatabase<PlatformControlsTables>(
+      database.connection('app'),
+      createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+        destination: new LogCapture(),
+      }),
+    );
+    try {
+      const chain = createPlatformChain({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
+      expect(await reader.transaction().execute((tx) => chain.verify(tx))).toMatchObject({ ok: true, seq: 2n });
+    } finally {
+      await reader.destroy();
+    }
+  });
+
+  it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
+    // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
+    await stop(await start(envFor('app')));
+    await database.as('admin').query('update platform_controls.audit_head set seq = seq + 5');
+    try {
+      const { host, api, events, capture } = await start(envFor('app'));
+
+      expect(api).toBeUndefined();
+      expect(host.exitCode).toBe(1);
+      expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_not_recorded']);
+      expect(capture.lines().find((line) => line.event === 'audit.integrity_failed')).toEqual(
+        expect.objectContaining({ level: 'error', chain: 'platform', check: 'start' }),
+      );
+      await expectNoApiConnections();
+    } finally {
+      await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    }
   });
 
   it('reports a database that is not there as unavailable, with the address redacted', async () => {
