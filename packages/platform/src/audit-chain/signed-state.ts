@@ -43,7 +43,12 @@ export interface StateSealDetails {
 
 const FINGERPRINT = /^[0-9a-f]{64}$/;
 
-function stateMessage({ orgId, subject, fields }: StateFacts): Message {
+/**
+ * The seal's message, or nothing for facts no row could hold: a seal over no
+ * fields would match any row, and a version is a whole number from 1.
+ */
+function stateMessage({ orgId, subject, fields }: StateFacts): Message | undefined {
+  if (fields.length === 0 || !Number.isSafeInteger(subject.version) || subject.version < 1) return undefined;
   return [
     'signed-state',
     orgId.toLowerCase(),
@@ -55,20 +60,25 @@ function stateMessage({ orgId, subject, fields }: StateFacts): Message {
   ];
 }
 
-/** Seals the state with the current key, or with version `atLeast` where that is newer. */
-export function sealState(keys: KeyProvider, facts: StateFacts, atLeast?: number): StateSeal {
-  const { mac, keyVersion } = keys.mac('audit-mac', stateMessage(facts), atLeast);
+/** Seals the state with the current key. Throws a RangeError for facts no row could hold. */
+export function sealState(keys: KeyProvider, facts: StateFacts): StateSeal {
+  const message = stateMessage(facts);
+  if (message === undefined) throw new RangeError('A state seal needs at least one field and a version from 1');
+  const { mac, keyVersion } = keys.mac('audit-mac', message);
   return Object.freeze({ fingerprint: mac, keyVersion });
 }
 
 /**
  * Whether the seal is the one for this state. A key version the app doesn't
- * hold, or a fingerprint of the wrong length, is simply a mismatch: what the
- * database hands back can't be trusted to be well formed.
+ * hold, a fingerprint of the wrong length, or facts no row could hold, is
+ * simply a mismatch: what the database hands back can't be trusted to be well
+ * formed.
  */
 export function stateSealMatches(keys: KeyProvider, facts: StateFacts, seal: StateSeal): boolean {
+  const message = stateMessage(facts);
+  if (message === undefined) return false;
   try {
-    return keys.verifyMac('audit-mac', seal.keyVersion, stateMessage(facts), seal.fingerprint);
+    return keys.verifyMac('audit-mac', seal.keyVersion, message, seal.fingerprint);
   } catch (error) {
     if (error instanceof KeyError) return false;
     throw error;

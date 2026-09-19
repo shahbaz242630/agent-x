@@ -808,6 +808,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
 
     expect(found).toEqual({
       kind: 'signed',
+      id: recorded?.id,
       seq: recorded?.seq,
       recordedAt: recorded?.recordedAt,
       version: 1,
@@ -872,7 +873,56 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
 
   describe('FX-TAMPER: a signed event changed past the app is not believed', () => {
     beforeEach(async () => {
-      await record(org, signed(org, 1, 'ACTIVE'), signed(org, 2, 'REVOKED'));
+      await record(org, signed(org, 1, 'ACTIVE'), signed(org, 2, 'REVOKED'), signed(org, 1, 'ACTIVE', OTHER_AGENT));
+    });
+
+    it("another object's signed event moved onto it, newer than its own", async () => {
+      await tamper(
+        `update audit.events set subject_id = '0199a0f0-0000-7000-8000-0000000000a1' where org_id = $1 and seq = 3`,
+      );
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 3n });
+    });
+
+    it('a later event about the object that signs nothing, edited', async () => {
+      await record(org, unsigned(2));
+      await tamper(`update audit.events set details = '{"note":"x"}' where org_id = $1 and seq = 4`);
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 4n });
+    });
+
+    it.each([
+      ["the head's MAC replaced", `update audit.heads set mac = pg_catalog.decode('00', 'hex') where org_id = $1`],
+      ['the head deleted', 'delete from audit.heads where org_id = $1'],
+    ])('%s: nothing about the chain can be believed', async (_change, statement) => {
+      await tamper(statement);
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 2n });
+    });
+
+    it('a sealed signed event past the head, as a leaked old key would let someone add: the head wound back under it', async () => {
+      const [saved] = await attacker.query<{ seq: bigint; hash: Buffer; mac: Buffer }>(
+        'select seq, hash, mac from audit.heads where org_id = $1',
+        [org],
+      );
+      if (saved === undefined) throw new Error('The chain has no head');
+      await record(org, signed(org, 3, 'ACTIVE'));
+      await attacker.query('update audit.heads set seq = $2, hash = $3, mac = $4 where org_id = $1', [
+        org,
+        saved.seq,
+        saved.hash,
+        saved.mac,
+      ]);
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 4n });
+    });
+
+    it("another organisation's signed event about the object moved in, past the head", async () => {
+      const other = newOrg();
+      await record(other, signed(other, 9, 'ACTIVE'));
+      await attacker.query('update audit.events set org_id = $1, seq = 9 where org_id = $2 and seq = 1', [org, other]);
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 9n });
     });
 
     it.each([
@@ -893,6 +943,18 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
         'its time moved off a whole millisecond',
         `update audit.events set recorded_at = recorded_at + interval '1 microsecond' where org_id = $1 and seq = 2`,
       ],
+      [
+        'stripped of its seal, so an older one would look latest',
+        `update audit.events set details = '{"status":"REVOKED"}' where org_id = $1 and seq = 2`,
+      ],
+      [
+        'its seal renamed by one letter',
+        `update audit.events set details = replace(details, '"stateFingerprint"', '"stateFingerprinx"') where org_id = $1 and seq = 2`,
+      ],
+      [
+        'its seal spaced out, so the search misses it',
+        `update audit.events set details = replace(details, '"stateFingerprint":', '"stateFingerprint" :') where org_id = $1 and seq = 2`,
+      ],
     ])('%s', async (_change, statement) => {
       await tamper(statement);
 
@@ -905,7 +967,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       const forged = signed(org, 3, 'ACTIVE');
       const detailsText = canonicalDetails({ ...forged.details, stateFingerprint: 'ab'.repeat(32) });
       const entry = {
-        seq: 3n,
+        seq: 4n,
         id: '0199a0f0-0000-7000-8000-0000000000fe',
         recordedAt: new Date('2026-09-19T08:00:00.000Z'),
         content: eventContent(forged, detailsText),
@@ -913,7 +975,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       await attacker.query(
         `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
            subject_version, details, prev_hash, hash, mac, mac_key_version)
-         values ($1, 3, $2, $3, 'user', $4, 'agent.status_changed', 'agent', $5, 3, $6, $7, $8, $9, 1)`,
+         values ($1, 4, $2, $3, 'user', $4, 'agent.status_changed', 'agent', $5, 3, $6, $7, $8, $9, 1)`,
         [
           org,
           entry.id,
@@ -927,7 +989,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
         ],
       );
 
-      expect(await latest(org)).toEqual({ kind: 'broken', seq: 3n });
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 4n });
     });
 
     it('details that are not JSON at all, with the rule that keeps them JSON dropped', async () => {
@@ -944,16 +1006,10 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       }
     });
 
-    // The limits, which the chain's check and its anchor cover (ADR-012 §2): an event
-    // deleted, or edited so it no longer reads as signed, leaves the older one latest.
-    it.each([
-      ['deleted', 'delete from audit.events where org_id = $1 and seq = 2'],
-      [
-        'edited so it no longer carries a seal',
-        `update audit.events set details = '{"status":"REVOKED"}' where org_id = $1 and seq = 2`,
-      ],
-    ])('the newest signed event %s: the older one is found, and the chain check fails', async (_change, statement) => {
-      await tamper(statement);
+    // The limit, which the chain's check and its anchor cover (ADR-012 §2): an event
+    // deleted leaves the older one latest.
+    it('the newest signed event deleted: the older one is found, and the chain check fails', async () => {
+      await tamper('delete from audit.events where org_id = $1 and seq = 2');
 
       expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 1n, version: 1 });
       expect(await verify(org)).toMatchObject({ ok: false });

@@ -213,10 +213,7 @@ describe('one event checked on its own (entryIsSealed)', () => {
     ['its time edited', { ...middle, recordedAt: new Date(RECORDED_AT.getTime() + 1) }],
     ['its ID edited', { ...middle, id: nth(events, 0).id }],
     ['moved to another place', { ...middle, seq: 7n }],
-    [
-      'pointed at another previous hash, its hash recomputed without the key',
-      { ...middle, prevHash: Buffer.alloc(32, 7) },
-    ],
+    ['pointed at another previous hash', { ...middle, prevHash: Buffer.alloc(32, 7) }],
     ['given another MAC', { ...middle, mac: Buffer.alloc(32, 7) }],
     ['given a MAC of the wrong length', { ...middle, mac: middle.mac.subarray(0, 31) }],
     ['given a key version the app does not hold', { ...middle, macKeyVersion: 9 }],

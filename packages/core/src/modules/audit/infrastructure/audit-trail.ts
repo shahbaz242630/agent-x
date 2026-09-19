@@ -15,17 +15,28 @@
 // An event whose details carry a state seal is a signed-state event (ADR-012
 // §2, @agentx/platform/audit-chain/signed-state): the latest one for an object
 // is what the object's authority fields must equal. It is found by the object
-// in the log itself, never from a pointer the row keeps, and its seal is
-// checked on its own before it is believed.
+// in the log itself, never from a pointer the row keeps. It is believed only
+// with every later event about the object, read in the same statement as the
+// chain's head: each must be sealed, and none past the head. So an edit to any
+// of them (the newest signed one stripped of its seal, say) shows at once,
+// not only at the next chain check.
+//
+// What this read can't see: a later event about the object deleted, which the
+// chain's check and anchor find; and the table's owner rewriting its row
+// security so that this query alone skips an event, which leaves the chain
+// check blind too. Only a check of the live schema (planned, A3e) and the
+// owner-login alert cover that.
 import {
   type AnchorPoint,
   appendEvent,
   type Chain,
+  type ChainHead,
   type ChainReader,
   type ChainReport,
   type ChainWriter,
   entryIsSealed,
   headFields,
+  headIsSealed,
   sealedFields,
   type StateSeal,
   stateSealIn,
@@ -63,21 +74,24 @@ export interface RecordedAuditEvent {
 /**
  * An object's latest signed state, as the log holds it:
  * - `none`: no event about the object carries a state seal
- * - `signed`: the latest one, whole: its seal, the version it made, where it is
- * - `broken`: the latest one can't be believed: its row can't be read, its own
- *   hash or MAC fails, or the seal in its details is malformed. Someone past
- *   the app changed or forged it.
+ * - `signed`: the latest one, whole: its seal, the version it made, its ID and place
+ * - `broken`: it can't be believed: it or a later event about the object can't
+ *   be read, fails its own hash or MAC, or lies past the chain's head; the
+ *   head itself fails its MAC; or the seal in its details is malformed.
+ *   Someone past the app changed or forged it. `seq` is where, when it could
+ *   be read.
  */
 export type LatestSignedState =
   | { readonly kind: 'none' }
   | {
       readonly kind: 'signed';
+      readonly id: string;
       readonly seq: bigint;
       readonly recordedAt: Date;
       readonly version: number;
       readonly seal: StateSeal;
     }
-  | { readonly kind: 'broken'; readonly seq: bigint };
+  | { readonly kind: 'broken'; readonly seq?: bigint };
 
 export interface AuditTrail {
   /**
@@ -99,11 +113,10 @@ export interface AuditTrail {
   verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
   /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
-   * the newest whose details carry a state seal, checked on its own. It says
-   * nothing of the events around it: a newer signed event deleted, or edited
-   * so it no longer reads as one, leaves an older one latest here, and only
-   * the chain's check and its anchor show that. Only in withTenant's
-   * transaction for that organisation, like `verify`.
+   * the newest whose details carry a state seal, with every later event about
+   * it sealed and none past the head (see the file's comment for what it
+   * can't see). Only in withTenant's transaction for that organisation, like
+   * `verify`.
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
 }
@@ -121,6 +134,17 @@ const isText = (value: unknown): value is string => typeof value === 'string';
  * key can only appear as a key, since quotes inside a value are escaped.
  */
 const HAS_STATE_SEAL = '"stateFingerprint":';
+
+/** The head read alongside the events, if it is whole: readable and sealed. */
+function headIsWhole(keys: KeyProvider, chain: Chain, row: Readonly<Record<string, unknown>>): ChainHead | undefined {
+  const head = headFields({
+    seq: row.head_seq,
+    hash: row.head_hash,
+    mac: row.head_mac,
+    mac_key_version: row.head_mac_key_version,
+  });
+  return head !== undefined && headIsSealed(keys, chain, head) ? head : undefined;
+}
 
 /** The details' JSON text as an object, or nothing if it isn't one. */
 function detailsObject(text: unknown): Readonly<Record<string, unknown>> | undefined {
@@ -290,37 +314,58 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       if (problems.length > 0) throw new AuditEventRefused(problems);
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const row = await tx
-        .selectFrom('audit.events')
-        .selectAll()
-        .select(sql<boolean>`recorded_at = pg_catalog.date_trunc('milliseconds', recorded_at)`.as('whole_ms'))
-        .where('org_id', '=', chain.orgId)
-        .where('subject_type', '=', subject.type)
-        .where('subject_id', '=', subject.id)
-        .where(sql<boolean>`pg_catalog.strpos(details, ${HAS_STATE_SEAL}) > 0`)
-        .orderBy('seq', 'desc')
-        .limit(1)
-        .executeTakeFirst();
-      if (row === undefined) return { kind: 'none' };
+      const id = subject.id.toLowerCase();
+      // One statement, so the head and the events come from the same moment.
+      const { rows } = await sql<Record<string, unknown>>`
+        select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
+               h.mac_key_version as head_mac_key_version,
+               e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+        from (values (1)) as one (x)
+        left join audit.heads h on h.org_id = ${chain.orgId}
+        left join audit.events e on e.org_id = ${chain.orgId} and e.subject_type = ${subject.type}
+          and e.subject_id = ${id}
+          and e.seq >= (
+            select pg_catalog.max(s.seq) from audit.events s
+            where s.org_id = ${chain.orgId} and s.subject_type = ${subject.type} and s.subject_id = ${id}
+              and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
+          )
+        order by e.seq
+      `.execute(tx);
+      const [first] = rows;
+      const events = rows.filter((row) => row.seq !== null);
+      const [newestSigned] = events;
+      if (first === undefined || newestSigned === undefined) return { kind: 'none' };
 
-      const sealed = sealedFields(row);
-      const content = contentOf(row);
-      const details = detailsObject(row.details);
+      const head = first.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+      const read = events.map((row) => ({ row, sealed: sealedFields(row), content: contentOf(row) }));
+      const bad = read.find(
+        ({ sealed, content }) =>
+          sealed === undefined ||
+          content === undefined ||
+          head === undefined ||
+          sealed.seq > head.seq ||
+          !entryIsSealed(keys, chain, { ...sealed, content }),
+      );
+      const details = detailsObject(newestSigned.details);
       const seal = details === undefined ? undefined : stateSealIn(details);
+      const signed = read[0]?.sealed;
+      const version = newestSigned.subject_version;
       if (
-        sealed === undefined ||
-        content === undefined ||
+        bad !== undefined ||
+        signed === undefined ||
+        typeof version !== 'number' ||
         seal === undefined ||
-        seal === 'malformed' ||
-        !entryIsSealed(keys, chain, { ...sealed, content })
+        seal === 'malformed'
       ) {
-        return { kind: 'broken', seq: typeof row.seq === 'bigint' ? row.seq : 0n };
+        const seq = (bad ?? read[0])?.row.seq;
+        return typeof seq === 'bigint' ? { kind: 'broken', seq } : { kind: 'broken' };
       }
       return Object.freeze({
         kind: 'signed',
-        seq: sealed.seq,
-        recordedAt: sealed.recordedAt,
-        version: row.subject_version,
+        id: signed.id,
+        seq: signed.seq,
+        recordedAt: signed.recordedAt,
+        version,
         seal,
       });
     },

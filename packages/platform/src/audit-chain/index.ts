@@ -11,6 +11,7 @@ export {
   ChainSealError,
   entryIsSealed,
   GENESIS_HASH,
+  headIsSealed,
   linkHash,
   type StoredEntry,
 } from './chain.ts';

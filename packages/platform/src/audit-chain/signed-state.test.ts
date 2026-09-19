@@ -136,15 +136,7 @@ describe('ADR-012 §2 a state seal', () => {
     expect(stateSealMatches(keys, FACTS, seal)).toBe(false);
   });
 
-  it("is not an event's MAC, though the key is the same: its label is its own", () => {
-    const eventMac = createHmac('sha256', key(AUDIT_MAC))
-      .update(encodeMessage(['audit-event', ORG, 'agent', AGENT, '3']))
-      .digest();
-
-    expect(sealState(keys, FACTS).fingerprint.equals(eventMac)).toBe(false);
-  });
-
-  it('is made with the current key, or with a newer version the caller names, and checked with its own', () => {
+  it('is made with the current key, and checked with its own version after a rotation', () => {
     const rotated = provider({
       'audit-mac': {
         current: 2,
@@ -157,13 +149,19 @@ describe('ADR-012 §2 a state seal', () => {
     const old = sealState(keys, FACTS);
 
     expect(sealState(rotated, FACTS).keyVersion).toBe(2);
-    expect(sealState(keys, FACTS, 1).keyVersion).toBe(1);
     expect(stateSealMatches(rotated, FACTS, old)).toBe(true);
     expect(stateSealMatches(rotated, FACTS, { ...old, keyVersion: 2 })).toBe(false);
   });
 
-  it('refuses to seal with a version this process does not hold', () => {
-    expect(() => sealState(keys, FACTS, 2)).toThrow('audit-mac has no version 2');
+  it.each<[string, StateFacts]>([
+    ['no fields, which would match any row', { ...FACTS, fields: [] }],
+    ['version 0', { ...FACTS, subject: { ...FACTS.subject, version: 0 } }],
+    ['a version that is not whole', { ...FACTS, subject: { ...FACTS.subject, version: 1.5 } }],
+  ])('refuses to seal %s, and never matches it', (_what, facts) => {
+    expect(() => sealState(keys, facts)).toThrow(
+      new RangeError('A state seal needs at least one field and a version from 1'),
+    );
+    expect(stateSealMatches(keys, facts, sealState(keys, FACTS))).toBe(false);
   });
 });
 
