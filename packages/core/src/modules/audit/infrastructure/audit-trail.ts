@@ -30,10 +30,10 @@
 // owner-login alert cover that.
 //
 // Events about an authority object are its state changes, few in its life;
-// activity goes against other subjects (A3b-2's rule). So the read is capped:
-// past that many later events it throws rather than slow every decision, and
-// rather than report the object broken, which would raise an alarm over
-// nothing but volume.
+// activity goes against other subjects (the rule in signed-states.ts). So the
+// read is capped: past that many later events it throws rather than slow
+// every decision, and rather than report the object broken, which would raise
+// an alarm over nothing but volume.
 import {
   type AnchorPoint,
   appendEvent,
@@ -83,7 +83,7 @@ export interface RecordedAuditEvent {
  * An object's latest signed state, as the log holds it:
  * - `none`: no event about the object carries a state seal. For an object
  *   that exists, that is tampering too (its only seal stripped), never "not
- *   signed yet": A3b-2's verifiedState must deny it and raise the alarm
+ *   signed yet": verifiedState (signed-states.ts) denies it and raises the alarm
  * - `signed`: the latest one, whole: its seal, the version it made, its ID and place
  * - `broken`: it can't be believed: it or a later event about the object can't
  *   be read, fails its own hash or MAC, or lies past the chain's head; the
