@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -205,7 +205,10 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
   });
 
   it('applies the repository’s own migrations', async () => {
-    expect(await run(REPO_MIGRATIONS)).toEqual(['0001_baseline.sql']);
+    const files = (await readdir(REPO_MIGRATIONS)).filter((name) => name.endsWith('.sql')).sort();
+
+    expect(files[0]).toBe('0001_baseline.sql');
+    expect(await run(REPO_MIGRATIONS)).toEqual(files);
     expect(await run(REPO_MIGRATIONS)).toEqual([]);
   });
 });
