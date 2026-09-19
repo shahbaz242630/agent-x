@@ -15,3 +15,12 @@ export {
   setUpServer,
 } from './server-setup.ts';
 export { assertTenant, TenantContextError, withTenant } from './tenant.ts';
+export {
+  createStatusChanger,
+  type StatusChange,
+  StatusChangeFailed,
+  type StatusChanger,
+  type StatusKey,
+  type StatusRules,
+  type StatusTable,
+} from './status.ts';
