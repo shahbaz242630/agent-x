@@ -8,6 +8,7 @@
 // rights drop that key and add a second head, the chain counts as having no
 // readable head: recording is refused and the check fails.
 import {
+  type AnchorPoint,
   appendEvent,
   type Chain,
   type ChainReader,
@@ -51,8 +52,8 @@ export interface PlatformChain {
    * gave up on the container; this way the start is refused, and says so.
    */
   recordAlone(db: Kysely<PlatformControlsTables>, event: PlatformEvent): Promise<RecordedPlatformEvent>;
-  /** Checks the platform chain up to its head (SEC-EVD-02). Reads only. */
-  verify(tx: PlatformTransaction): Promise<ChainReport>;
+  /** Checks the platform chain up to its head (SEC-EVD-02), and that it still holds its last anchor if given one (SEC-DB-11). Reads only. */
+  verify(tx: PlatformTransaction, anchor?: AnchorPoint): Promise<ChainReport>;
 }
 
 const CHAIN: Chain = { kind: 'platform' };
@@ -207,8 +208,8 @@ export function createPlatformChain({
         });
     },
 
-    verify(tx: PlatformTransaction): Promise<ChainReport> {
-      return verifyChain(keys, CHAIN, readerFor(tx));
+    verify(tx: PlatformTransaction, anchor?: AnchorPoint): Promise<ChainReport> {
+      return verifyChain(keys, CHAIN, readerFor(tx), anchor);
     },
   });
 }

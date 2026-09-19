@@ -162,6 +162,18 @@ const SETTINGS = {
     }),
     default: '24',
   },
+  // ADR-012 §2: how often the app checks each audit chain against its last
+  // anchor and anchors it again. A rollback made between two checks isn't
+  // seen, so the window is kept short.
+  AGENTX_AUDIT_ANCHOR_SECONDS: {
+    schema: wholeNumber({
+      min: 60,
+      max: 3600,
+      unit: 'seconds',
+      minimumReason: 'more often only repeats the whole check of every chain',
+    }),
+    default: '300',
+  },
   // The app's keys (ADR-011 §2): one file per key version, mounted by the
   // platform, and each key's current version where it isn't 1.
   AGENTX_KEYS_DIR: { schema: mountedFolder },
@@ -227,6 +239,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
+      'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_KEYS_DIR',
       'AGENTX_KEYS_CURRENT',
       ...LOCATION,

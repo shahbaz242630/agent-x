@@ -659,7 +659,7 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     expect(await problemOf(org)).toEqual({ reason: 'head', seq: 0n });
   });
 
-  it('the tail deleted and the head wound back to its earlier sealed value: the chain alone looks whole (the anchor check, A2c, catches this)', async () => {
+  it('SEC-DB-11 the tail deleted and the head wound back to its earlier sealed value: the chain alone looks whole, its anchor does not', async () => {
     const other = newOrg();
     await record(other, event(1), event(2));
     const [earlier] = await attacker.query(
@@ -668,6 +668,9 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     );
     if (earlier === undefined) throw new Error('The chain has no head');
     await record(org, event(5), event(6));
+    // The anchor check saw the chain at 6 and anchored it there.
+    const anchored = await verify(org);
+    if (!anchored.ok) throw new Error('The chain should have checked out before the tampering');
     await tamper('delete from audit.events where org_id = $1 and seq > 4');
     await attacker.query(
       'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
@@ -675,6 +678,19 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     );
 
     expect(await verify(org)).toMatchObject({ ok: true, seq: 4n });
+    const anchor = { seq: anchored.seq, hash: anchored.hash };
+    expect(await withTenant(app, org, (tx) => trail.verify(tx, org, anchor))).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 6n },
+    });
+
+    // The app then records on the wound-back head, as it would, and the chain grows whole again, but not the one anchored.
+    await record(org, event(7), event(8), event(9));
+    expect(await verify(org)).toMatchObject({ ok: true, seq: 7n });
+    expect(await withTenant(app, org, (tx) => trail.verify(tx, org, anchor))).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 6n },
+    });
   });
 });
 

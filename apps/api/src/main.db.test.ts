@@ -212,6 +212,17 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     }
   });
 
+  it('anchors the platform chain once it listens, where the start it recorded is the head (ADR-012 §2)', async () => {
+    await database.as('admin').query('truncate platform_controls.audit_events, platform_controls.audit_head');
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'audit.anchored')).toEqual(
+        expect.objectContaining({ level: 'info', chain: 'platform', seq: '1' }),
+      );
+    });
+    await stop(run);
+  });
+
   it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
     // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
     await stop(await start(envFor('app')));

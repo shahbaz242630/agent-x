@@ -331,6 +331,27 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
     }
   });
 
+  it('SEC-DB-11 the whole chain wound back, then grown again: whole and sealed, but not what was anchored', async () => {
+    const [earlier] = await attacker.query('select seq, hash, mac, mac_key_version from platform_controls.audit_head');
+    if (earlier === undefined) throw new Error('The chain has no head');
+    await record(started(4));
+    const anchored = await verify();
+    if (!anchored.ok) throw new Error('The chain should have checked out before the tampering');
+    const anchor = { seq: anchored.seq, hash: anchored.hash };
+    await tamper('delete from platform_controls.audit_events where seq = 4');
+    await attacker.query(
+      'update platform_controls.audit_head set seq = $1, hash = $2, mac = $3, mac_key_version = $4',
+      [earlier.seq, earlier.hash, earlier.mac, earlier.mac_key_version],
+    );
+    const against = () => app.transaction().execute((tx) => chain.verify(tx, anchor));
+
+    expect(await verify()).toMatchObject({ ok: true, seq: 3n });
+    expect(await against()).toEqual({ ok: false, problem: { reason: 'anchor', seq: 4n } });
+    await record(started(5), started(6));
+    expect(await verify()).toMatchObject({ ok: true, seq: 5n });
+    expect(await against()).toEqual({ ok: false, problem: { reason: 'anchor', seq: 4n } });
+  });
+
   it('the head deleted: the events are left headless, and nothing more is recorded on them', async () => {
     await tamper('delete from platform_controls.audit_head');
 

@@ -74,7 +74,8 @@ export class ChainSealError extends Error {
   }
 }
 
-function chainName(chain: Chain): string {
+/** The chain's name in every hash, MAC and signature: `platform`, or `organisation:` and its ID. */
+export function chainName(chain: Chain): string {
   return chain.kind === 'platform' ? 'platform' : `organisation:${chain.orgId}`;
 }
 
@@ -175,8 +176,16 @@ export function sealNext(
  *   older key version than an event before it
  * - `unreadable`: the stored event can't be read as an event at all
  * - `head`: the head's MAC is wrong, it isn't at the last event, or the store holds events it doesn't count
+ * - `anchor`: the chain no longer holds what was last anchored: the head is behind the anchor, or the
+ *   anchored event isn't the one anchored (a chain wound back, or grown again on a wound-back head)
  */
-export type ChainProblemReason = 'gap' | 'link' | 'hash' | 'mac' | 'unreadable' | 'head';
+export type ChainProblemReason = 'gap' | 'link' | 'hash' | 'mac' | 'unreadable' | 'head' | 'anchor';
+
+/** A place in a chain the app has seen and signed (ADR-012 §2): the chain must still hold it. */
+export interface AnchorPoint {
+  readonly seq: bigint;
+  readonly hash: Buffer;
+}
 
 export interface ChainProblem {
   readonly reason: ChainProblemReason;
@@ -201,6 +210,8 @@ export type ChainReport =
 export interface ChainState {
   readonly head: ChainHead;
   readonly stored: bigint;
+  /** The last anchor, if the chain has one: the chain must still hold it (ADR-012 §2). */
+  readonly anchor?: AnchorPoint | undefined;
 }
 
 /**
@@ -218,7 +229,11 @@ export interface ChainVerifier {
   finish(): ChainReport;
 }
 
-export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, stored }: ChainState): ChainVerifier {
+export function createChainVerifier(
+  keys: KeyProvider,
+  chain: Chain,
+  { head, stored, anchor }: ChainState,
+): ChainVerifier {
   let seq = 0n;
   let hash: Buffer = GENESIS_HASH;
   let keyVersion = 0;
@@ -235,6 +250,8 @@ export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, sto
     if (entry.macKeyVersion < keyVersion || !macMatches(keys, entry.macKeyVersion, message, entry.mac)) {
       return { reason: 'mac', seq: expected };
     }
+    // Sealed and in place, but not the event anchored there: this is a chain grown again on a wound-back head.
+    if (anchor?.seq === entry.seq && !anchor.hash.equals(entry.hash)) return { reason: 'anchor', seq: expected };
     return undefined;
   };
 
@@ -259,6 +276,10 @@ export function createChainVerifier(keys: KeyProvider, chain: Chain, { head, sto
       // the store holds nothing else.
       if (problem === undefined && (stored !== head.seq || !hash.equals(head.hash))) {
         problem = { reason: 'head', seq: head.seq };
+      }
+      // A whole chain can be wound back to an earlier head it once had: only the anchor, held apart, shows it.
+      if (problem === undefined && anchor !== undefined && head.seq < anchor.seq) {
+        problem = { reason: 'anchor', seq: anchor.seq };
       }
       return problem === undefined ? { ok: true, seq, hash } : { ok: false, problem };
     },

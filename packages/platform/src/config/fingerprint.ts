@@ -85,6 +85,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     },
     outbound: { allowedOrigins: config.outbound.allowedOrigins },
     payees: { coolingOffHours: config.payees.coolingOffHours },
+    audit: { anchorSeconds: config.audit.anchorSeconds },
     keys: { directory: config.keys.directory, current: config.keys.current },
   };
 }

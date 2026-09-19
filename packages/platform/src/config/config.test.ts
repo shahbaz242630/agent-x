@@ -61,6 +61,7 @@ describe('config: a correct config loads', () => {
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
       payees: { coolingOffHours: 24 },
+      audit: { anchorSeconds: 300 },
       keys: { directory: KEYS_DIR, current: {} },
     });
   });
@@ -83,6 +84,7 @@ describe('config: a correct config loads', () => {
       AGENTX_OUTBOUND_ALLOWED_ORIGINS:
         'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
+      AGENTX_AUDIT_ANCHOR_SECONDS: '600',
       AGENTX_DB_HOST: '10.0.0.5',
       AGENTX_DB_PORT: '6432',
       AGENTX_DB_NAME: 'agentx_uae',
@@ -115,6 +117,7 @@ describe('config: a correct config loads', () => {
       },
       outbound: { allowedOrigins: ['https://api.partner.example:8443', 'https://telemetry.example'] },
       payees: { coolingOffHours: 48 },
+      audit: { anchorSeconds: 600 },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
     });
     // In the keys' own order, whatever order they were set in, so the fingerprint doesn't depend on it.
@@ -174,6 +177,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     'AGENTX_RATE_LIMIT_PER_MINUTE',
     'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
     'AGENTX_PAYEE_COOLING_OFF_HOURS',
+    'AGENTX_AUDIT_ANCHOR_SECONDS',
     'AGENTX_KEYS_DIR',
     'AGENTX_KEYS_CURRENT',
     'AGENTX_DB_HOST',
@@ -247,6 +251,27 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     it('refuses one key given two current versions', () => {
       expect(problemsWith({ ...MINIMAL, AGENTX_KEYS_CURRENT: 'audit-mac:2,request-hash:2,audit-mac:3' })).toEqual([
         'AGENTX_KEYS_CURRENT: names a key more than once: give each key one current version',
+      ]);
+    });
+  });
+
+  describe('the audit anchor check, every 1 to 60 minutes (ADR-012 §2)', () => {
+    it.each([
+      ['60', 60],
+      ['3600', 3600],
+    ])('accepts %s seconds', (seconds, expected) => {
+      expect(loadConfig({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: seconds }).audit.anchorSeconds).toBe(expected);
+    });
+
+    it('refuses more often than once a minute', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '59' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at least 60 seconds (more often only repeats the whole check of every chain)',
+      ]);
+    });
+
+    it('refuses less often than once an hour, which would leave a rollback unseen for longer', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_AUDIT_ANCHOR_SECONDS: '3601' })).toEqual([
+        'AGENTX_AUDIT_ANCHOR_SECONDS: must be at most 3600 seconds',
       ]);
     });
   });

@@ -377,3 +377,58 @@ describe('SEC-EVD-02 the chain check', () => {
     return events.map((event, at) => (at === index ? { ...event, ...change } : event));
   }
 });
+
+describe('SEC-DB-11 the chain against its last anchor (ADR-012 §2)', () => {
+  const keys = provider();
+  const { events, head } = sealedChain(keys, 4);
+  const anchorAt = (seq: number) => ({ seq: BigInt(seq), hash: nth(events, seq - 1).hash });
+  const against = (chainHead: ChainHead, stored: readonly StoredEntry[], anchor: { seq: bigint; hash: Buffer }) => {
+    const verifier = createChainVerifier(keys, CHAIN, { head: chainHead, stored: BigInt(stored.length), anchor });
+    for (const event of stored) verifier.check(event);
+    return verifier.finish();
+  };
+
+  it('passes a chain that still holds its anchor, at its head or grown past it', () => {
+    expect(against(head, events, anchorAt(4))).toEqual({ ok: true, seq: 4n, hash: head.hash });
+    expect(against(head, events, anchorAt(2))).toEqual({ ok: true, seq: 4n, hash: head.hash });
+  });
+
+  it('finds a chain wound back to an earlier sealed head, its tail deleted: the chain alone looks whole', () => {
+    const earlier = sealedChain(keys, 2);
+
+    expect(verify(keys, earlier.head, events.slice(0, 2))).toMatchObject({ ok: true });
+    expect(against(earlier.head, events.slice(0, 2), anchorAt(4))).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 4n },
+    });
+  });
+
+  it('finds a chain grown again on a wound-back head: sealed and whole, but not the event anchored', () => {
+    // Wound back to event 2, and then the app went on recording, as it would on a head that checks out.
+    const earlier = sealedChain(keys, 2);
+    const regrown = [...events.slice(0, 2)];
+    let regrownHead = earlier.head;
+    for (const seq of [3n, 4n, 5n]) {
+      const next = entry(seq, ['action', `regrown.${seq.toString()}`]);
+      const sealed = sealNext(keys, CHAIN, regrownHead, next);
+      regrown.push({ ...next, ...sealed.link });
+      regrownHead = sealed.head;
+    }
+
+    expect(verify(keys, regrownHead, regrown)).toMatchObject({ ok: true, seq: 5n });
+    expect(against(regrownHead, regrown, anchorAt(3))).toEqual({ ok: false, problem: { reason: 'anchor', seq: 3n } });
+  });
+
+  it('reports the first problem it meets, even when the head is also behind the anchor', () => {
+    const earlier = sealedChain(keys, 2);
+
+    expect(against(earlier.head, events.slice(1, 2), anchorAt(4))).toEqual({
+      ok: false,
+      problem: { reason: 'gap', seq: 1n },
+    });
+  });
+
+  it('passes an empty chain anchored when it was empty', () => {
+    expect(against(genesisHead(keys, CHAIN), [], { seq: 0n, hash: GENESIS_HASH })).toMatchObject({ ok: true, seq: 0n });
+  });
+});

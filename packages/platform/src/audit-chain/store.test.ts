@@ -221,6 +221,31 @@ describe('checking a chain', () => {
     expect(await verifyChain(keys, CHAIN, new MemoryChain())).toEqual({ ok: true, seq: 0n, hash: GENESIS_HASH });
   });
 
+  it('reports a chain emptied after it was anchored, where the chain alone would look new', async () => {
+    const anchored = { seq: 3n, hash: Buffer.alloc(32, 3) };
+
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), anchored)).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 3n },
+    });
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), { seq: 0n, hash: GENESIS_HASH })).toMatchObject({
+      ok: true,
+      seq: 0n,
+    });
+  });
+
+  it('checks the chain against its anchor as it reads it', async () => {
+    const memory = await chainOf(3);
+    const at2 = memory.rows[1];
+    if (at2 === undefined) throw new Error('The chain is shorter than the test expects');
+
+    expect(await verifyChain(keys, CHAIN, memory, { seq: 2n, hash: at2.hash })).toMatchObject({ ok: true, seq: 3n });
+    expect(await verifyChain(keys, CHAIN, memory, { seq: 2n, hash: Buffer.alloc(32, 7) })).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 2n },
+    });
+  });
+
   it('reports events left with no head, and a head that cannot be read, at 0', async () => {
     const headless = await chainOf(2);
     headless.head = 'none';

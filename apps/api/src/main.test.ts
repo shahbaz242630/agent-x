@@ -90,6 +90,26 @@ vi.mock('./start-record.ts', () => ({
   },
 }));
 
+/** A stand-in for the anchor check, proven in anchor-check.test.ts: these tests see only when it starts and stops. */
+const anchorChecks = vi.hoisted(() => ({ intervals: [] as number[], chains: [] as unknown[] }));
+
+vi.mock('./anchor-check.ts', () => ({
+  createAnchorCheck: (options: { chains: readonly { chain: unknown }[] }) => {
+    anchorChecks.chains.push(...options.chains.map((one) => one.chain));
+    return { run: () => Promise.resolve() };
+  },
+  scheduleAnchorCheck: (_check: unknown, intervalMs: number) => {
+    fake.steps.push('anchor check started');
+    anchorChecks.intervals.push(intervalMs);
+    return {
+      stop: () => {
+        fake.steps.push('anchor check stopped');
+        return Promise.resolve();
+      },
+    };
+  },
+}));
+
 /** Plain words standing in for a secret put in the wrong setting, so secret scanners ignore it. */
 const MISPLACED = 'value that must never be printed';
 /** Plain words standing in for the database login. */
@@ -143,6 +163,8 @@ beforeEach(() => {
   fake.destroy = closePool;
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
+  anchorChecks.intervals.length = 0;
+  anchorChecks.chains.length = 0;
 });
 
 afterEach(async () => {
@@ -273,11 +295,19 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
   it('checks the role, logs that the database is ready, records the start, and only then listens', async () => {
     const { events, capture } = await start();
-    expect(fake.steps).toEqual(['role checked', 'start recorded']);
+    expect(fake.steps).toEqual(['role checked', 'start recorded', 'anchor check started']);
     expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
     );
+  });
+
+  it('starts the anchor check of the platform chain once it listens, at the configured interval (ADR-012 §2)', async () => {
+    await start();
+    await start({ ...ENV, AGENTX_AUDIT_ANCHOR_SECONDS: '600' });
+
+    expect(anchorChecks.chains).toEqual([{ kind: 'platform' }, { kind: 'platform' }]);
+    expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
   });
 
   it("SEC-OPS-05 writes the fingerprint's hash and the release to the platform chain, and logs its place", async () => {
@@ -434,7 +464,13 @@ describe('the API stops cleanly on a signal', () => {
         expect.objectContaining({ event: 'api.stopping', signal }),
       );
       expect(server?.server.listening).toBe(false);
-      expect(fake.steps).toEqual(['role checked', 'start recorded', 'pool closed']);
+      expect(fake.steps).toEqual([
+        'role checked',
+        'start recorded',
+        'anchor check started',
+        'anchor check stopped',
+        'pool closed',
+      ]);
     },
   );
 
@@ -453,7 +489,15 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps).toEqual(['role checked', 'start recorded', 'http closing', 'http closed', 'pool closed']);
+    expect(fake.steps).toEqual([
+      'role checked',
+      'start recorded',
+      'anchor check started',
+      'http closing',
+      'http closed',
+      'anchor check stopped',
+      'pool closed',
+    ]);
   });
 
   it.each([
