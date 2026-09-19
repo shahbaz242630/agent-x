@@ -90,10 +90,19 @@ function actorProblems(actor: AuditActor): string[] {
     : [actor.type === 'system' ? 'actor.id must be a process name' : `actor.id must be the ${actor.type}'s UUID`];
 }
 
-function subjectProblems(subject: AuditSubject): string[] {
+/** The object an event is about, without the version: what an object's events are found by. */
+export type AuditSubjectKey = Pick<AuditSubject, 'type' | 'id'>;
+
+/** Problems with an object's type and ID, as every event and every search by object needs them. */
+export function subjectKeyProblems({ type, id }: AuditSubjectKey): string[] {
   const problems: string[] = [];
-  if (!SUBJECT_TYPE.test(subject.type)) problems.push('subject.type must be lower-case words joined by _');
-  if (!UUID.test(subject.id)) problems.push('subject.id must be a UUID');
+  if (!SUBJECT_TYPE.test(type)) problems.push('subject.type must be lower-case words joined by _');
+  if (!UUID.test(id)) problems.push('subject.id must be a UUID');
+  return problems;
+}
+
+function subjectProblems(subject: AuditSubject): string[] {
+  const problems = subjectKeyProblems(subject);
   if (!Number.isSafeInteger(subject.version) || subject.version < 1 || subject.version > MAX_VERSION) {
     problems.push(`subject.version must be a whole number from 1 to ${MAX_VERSION}`);
   }

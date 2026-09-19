@@ -138,6 +138,23 @@ export function headIsSealed(keys: KeyProvider, chain: Chain, head: ChainHead): 
   return macMatches(keys, head.macKeyVersion, headMacMessage(chain, head.seq, head.hash), head.mac);
 }
 
+/** Whether the event's MAC is right for its place, ID and hash, under its key version. */
+function eventMacMatches(keys: KeyProvider, chain: Chain, entry: StoredEntry): boolean {
+  return macMatches(keys, entry.macKeyVersion, eventMacMessage(chain, entry.seq, entry.id, entry.hash), entry.mac);
+}
+
+/**
+ * Whether one stored event is sealed: its content hashes to its hash, from the
+ * previous hash it names, and its MAC is right. It says nothing about the
+ * events around it (a gap, a fork, a key version gone down), which only a
+ * check of the whole chain finds; it is for reading one event on its own, such
+ * as an object's latest signed state (ADR-012 §2), where a forged or edited
+ * event must not be believed.
+ */
+export function entryIsSealed(keys: KeyProvider, chain: Chain, entry: StoredEntry): boolean {
+  return linkHash(chain, entry.prevHash, entry).equals(entry.hash) && eventMacMatches(keys, chain, entry);
+}
+
 /**
  * Seals the event that follows `head`: its link and MAC, and the chain's new
  * head, with the head's key version where it is newer than the current one.
@@ -246,10 +263,8 @@ export function createChainVerifier(
     if (entry.seq !== expected) return { reason: 'gap', seq: expected };
     if (!entry.prevHash.equals(hash)) return { reason: 'link', seq: expected };
     if (!linkHash(chain, entry.prevHash, entry).equals(entry.hash)) return { reason: 'hash', seq: expected };
-    const message = eventMacMessage(chain, entry.seq, entry.id, entry.hash);
-    if (entry.macKeyVersion < keyVersion || !macMatches(keys, entry.macKeyVersion, message, entry.mac)) {
+    if (entry.macKeyVersion < keyVersion || !eventMacMatches(keys, chain, entry))
       return { reason: 'mac', seq: expected };
-    }
     // Sealed and in place, but not the event anchored there: this is a chain grown again on a wound-back head.
     if (anchor?.seq === entry.seq && !anchor.hash.equals(entry.hash)) return { reason: 'anchor', seq: expected };
     return undefined;

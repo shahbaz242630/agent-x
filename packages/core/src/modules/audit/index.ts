@@ -9,11 +9,14 @@ export {
   type AuditEvent,
   AuditEventRefused,
   type AuditSubject,
+  type AuditSubjectKey,
 } from './domain/event.ts';
 export {
   type AuditTrail,
   type AuditTransaction,
   createAuditTrail,
+  type LatestSignedState,
   type RecordedAuditEvent,
+  TooManyEventsAboutObject,
 } from './infrastructure/audit-trail.ts';
 export type { AuditTables } from './infrastructure/tables.ts';

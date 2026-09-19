@@ -17,6 +17,7 @@ import {
   type ChainHead,
   ChainSealError,
   createChainVerifier,
+  entryIsSealed,
   GENESIS_HASH,
   genesisHead,
   headIsSealed,
@@ -195,6 +196,41 @@ describe('the head check', () => {
   it("refuses another chain's head", () => {
     expect(headIsSealed(keys, { kind: 'organisation', orgId: OTHER_ORG }, head)).toBe(false);
     expect(headIsSealed(keys, { kind: 'platform' }, head)).toBe(false);
+  });
+});
+
+describe('one event checked on its own (entryIsSealed)', () => {
+  const keys = provider();
+  const { events } = sealedChain(keys, 3);
+  const middle = nth(events, 1);
+
+  it('accepts a sealed event, wherever it is in its chain', () => {
+    expect(events.every((event) => entryIsSealed(keys, CHAIN, event))).toBe(true);
+  });
+
+  it.each([
+    ['its content edited', { ...middle, content: ['action', 'step.9'] as const }],
+    ['its time edited', { ...middle, recordedAt: new Date(RECORDED_AT.getTime() + 1) }],
+    ['its ID edited', { ...middle, id: nth(events, 0).id }],
+    ['moved to another place', { ...middle, seq: 7n }],
+    ['pointed at another previous hash', { ...middle, prevHash: Buffer.alloc(32, 7) }],
+    ['given another MAC', { ...middle, mac: Buffer.alloc(32, 7) }],
+    ['given a MAC of the wrong length', { ...middle, mac: middle.mac.subarray(0, 31) }],
+    ['given a key version the app does not hold', { ...middle, macKeyVersion: 9 }],
+  ])('refuses an event %s', (_change, changed) => {
+    expect(entryIsSealed(keys, CHAIN, changed)).toBe(false);
+  });
+
+  it('refuses an event whose hash was recomputed over new content by someone without the key (FX-TAMPER)', () => {
+    const content = ['action', 'step.forged'] as const;
+    const forged = { ...middle, content, hash: linkHash(CHAIN, middle.prevHash, { ...middle, content }) };
+
+    expect(entryIsSealed(keys, CHAIN, forged)).toBe(false);
+  });
+
+  it("refuses another chain's event, MAC and all", () => {
+    expect(entryIsSealed(keys, { kind: 'organisation', orgId: OTHER_ORG }, middle)).toBe(false);
+    expect(entryIsSealed(keys, { kind: 'platform' }, middle)).toBe(false);
   });
 });
 
