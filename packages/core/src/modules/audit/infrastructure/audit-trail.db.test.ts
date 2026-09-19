@@ -26,7 +26,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
-import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
+import { type AuditTrail, createAuditTrail, TooManyEventsAboutObject } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -837,6 +837,14 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
     expect(await latest(other)).toMatchObject({ kind: 'signed', version: 9 });
   });
 
+  it('reads at most 1,000 events about the object in one go: past that it throws, and never calls the object broken', async () => {
+    await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 999 }, () => unsigned(1)));
+    expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 1n });
+
+    await record(org, unsigned(1));
+    await expect(latest(org)).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+  });
+
   it('finds an object by its ID in any case', async () => {
     await record(org, signed(org, 1, 'ACTIVE'));
 
@@ -900,7 +908,7 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       expect(await latest(org)).toEqual({ kind: 'broken', seq: 2n });
     });
 
-    it('a sealed signed event past the head, as a leaked old key would let someone add: the head wound back under it', async () => {
+    it('a sealed signed event past the head: the head wound back under it', async () => {
       const [saved] = await attacker.query<{ seq: bigint; hash: Buffer; mac: Buffer }>(
         'select seq, hash, mac from audit.heads where org_id = $1',
         [org],

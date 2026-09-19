@@ -21,11 +21,19 @@
 // of them (the newest signed one stripped of its seal, say) shows at once,
 // not only at the next chain check.
 //
-// What this read can't see: a later event about the object deleted, which the
-// chain's check and anchor find; and the table's owner rewriting its row
+// What this read can't see: a later event about the object deleted, or moved
+// to another object or organisation, which the chain's check and anchor find;
+// an event sealed with a key the app still holds, though rotated out, which
+// only the chain's check refuses; and the table's owner rewriting its row
 // security so that this query alone skips an event, which leaves the chain
 // check blind too. Only a check of the live schema (planned, A3e) and the
 // owner-login alert cover that.
+//
+// Events about an authority object are its state changes, few in its life;
+// activity goes against other subjects (A3b-2's rule). So the read is capped:
+// past that many later events it throws rather than slow every decision, and
+// rather than report the object broken, which would raise an alarm over
+// nothing but volume.
 import {
   type AnchorPoint,
   appendEvent,
@@ -73,7 +81,9 @@ export interface RecordedAuditEvent {
 
 /**
  * An object's latest signed state, as the log holds it:
- * - `none`: no event about the object carries a state seal
+ * - `none`: no event about the object carries a state seal. For an object
+ *   that exists, that is tampering too (its only seal stripped), never "not
+ *   signed yet": A3b-2's verifiedState must deny it and raise the alarm
  * - `signed`: the latest one, whole: its seal, the version it made, its ID and place
  * - `broken`: it can't be believed: it or a later event about the object can't
  *   be read, fails its own hash or MAC, or lies past the chain's head; the
@@ -92,6 +102,23 @@ export type LatestSignedState =
       readonly seal: StateSeal;
     }
   | { readonly kind: 'broken'; readonly seq?: bigint };
+
+/** The most events about an object, its newest signed one first, that one read takes. */
+const LATER_EVENTS_READ = 1000;
+
+/**
+ * Thrown by latestSignedState for an object with more than
+ * LATER_EVENTS_READ events since its newest signed one: activity recorded
+ * against the object itself, which belongs against another subject.
+ */
+export class TooManyEventsAboutObject extends Error {
+  constructor() {
+    super(
+      `More than ${LATER_EVENTS_READ.toString()} events about the object since its newest signed state; activity belongs against another subject`,
+    );
+    this.name = 'TooManyEventsAboutObject';
+  }
+}
 
 export interface AuditTrail {
   /**
@@ -319,7 +346,9 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       const { rows } = await sql<Record<string, unknown>>`
         select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
                h.mac_key_version as head_mac_key_version,
-               e.*, e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+               e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
+               e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
+               e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
         from (values (1)) as one (x)
         left join audit.heads h on h.org_id = ${chain.orgId}
         left join audit.events e on e.org_id = ${chain.orgId} and e.subject_type = ${subject.type}
@@ -330,7 +359,9 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
               and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
           )
         order by e.seq
+        limit ${LATER_EVENTS_READ + 1}
       `.execute(tx);
+      if (rows.length > LATER_EVENTS_READ) throw new TooManyEventsAboutObject();
       const [first] = rows;
       const events = rows.filter((row) => row.seq !== null);
       const [newestSigned] = events;

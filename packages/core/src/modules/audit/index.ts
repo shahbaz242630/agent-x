@@ -17,5 +17,6 @@ export {
   createAuditTrail,
   type LatestSignedState,
   type RecordedAuditEvent,
+  TooManyEventsAboutObject,
 } from './infrastructure/audit-trail.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
