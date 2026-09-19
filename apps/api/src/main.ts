@@ -92,8 +92,7 @@ function onStopSignals(
       // Requests are still answered while the server stops (return503OnClosing is
       // off), so the pool closes only once the last of them, and the anchor
       // check, have finished with it.
-      await server.close();
-      await anchorCheck.stop();
+      await Promise.all([server.close(), anchorCheck.stop()]);
       await database.destroy();
       logger.info('api.stopped');
       logger.flush();
@@ -223,12 +222,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       chains: [
         {
           chain: { kind: 'platform' },
-          verify: (anchor) => database.transaction().execute((tx) => platform.verify(tx, anchor)),
+          verify: (anchor) => platform.verifyAlone(database, anchor),
         },
       ],
       keys,
       clock: systemClock,
       logger,
+      // Three missed checks in a row are the alarm, not just a warning.
+      staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
     }),
     config.audit.anchorSeconds * 1000,
   );

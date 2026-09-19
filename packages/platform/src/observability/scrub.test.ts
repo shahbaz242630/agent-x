@@ -222,6 +222,29 @@ describe('scrub: ordinary log text is left alone', () => {
   ])('%s', (_what, text) => {
     expect(scrub(text)).toBe(text);
   });
+
+  // Each of these would, inside other text, look like a phone number or an Emirates ID in part.
+  const PHONE_LIKE = `0012345678${'ab'.repeat(27)}`;
+  const EMIRATES_ID_LIKE = `ab784198712345671${'c'.repeat(47)}`;
+
+  it.each([
+    ['a hash', PHONE_LIKE],
+    ['another hash', EMIRATES_ID_LIKE],
+    ['a config hash', `sha256:${PHONE_LIKE}`],
+  ])('%s, whole, even where part of it looks like a personal detail', (_what, hash) => {
+    expect(hash).toMatch(/^(?:sha256:)?[0-9a-f]{64}$/);
+    expect(scrub(hash)).toBe(hash);
+  });
+
+  it.each([
+    ['after other text', `head ${PHONE_LIKE}`],
+    ['before other text', `${PHONE_LIKE} seen`],
+    ['cut short', PHONE_LIKE.slice(0, 63)],
+    ['in capitals', PHONE_LIKE.toUpperCase()],
+    ['with another prefix', `sha1:${EMIRATES_ID_LIKE}`],
+  ])('but cleans the same text %s, as usual', (_what, text) => {
+    expect(scrub(text)).not.toBe(text);
+  });
 });
 
 describe('scrub: check-digit helpers', () => {

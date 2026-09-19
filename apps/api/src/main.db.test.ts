@@ -206,7 +206,10 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     );
     try {
       const chain = createPlatformChain({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
-      expect(await reader.transaction().execute((tx) => chain.verify(tx))).toMatchObject({ ok: true, seq: 2n });
+      expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({
+        ok: true,
+        seq: 2n,
+      });
     } finally {
       await reader.destroy();
     }

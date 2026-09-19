@@ -164,7 +164,7 @@ export async function verifyChain(
   keys: KeyProvider,
   chain: Chain,
   reader: ChainReader,
-  anchor?: AnchorPoint,
+  anchor: AnchorPoint | undefined,
 ): Promise<ChainReport> {
   const { head, stored } = await reader.state();
   if (head === 'none') {

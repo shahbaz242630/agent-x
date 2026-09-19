@@ -77,7 +77,7 @@ const record = (orgId: string, ...events: AuditEvent[]) =>
   });
 
 const verify = (orgId: string, using: AuditTrail = trail): Promise<ChainReport> =>
-  withTenant(app, orgId, (tx) => using.verify(tx, orgId));
+  withTenant(app, orgId, (tx) => using.verify(tx, orgId, undefined));
 
 const problemOf = async (orgId: string): Promise<unknown> => {
   const report = await verify(orgId);
@@ -231,7 +231,7 @@ describe('recording audit events (ADR-011 §3)', () => {
       await expect(trail.record(tx, 'org-1', event(1))).rejects.toThrow(
         new AuditEventRefused(['the organisation ID must be a UUID']),
       );
-      await expect(trail.verify(tx, 'org-1')).rejects.toThrow(TenantContextError);
+      await expect(trail.verify(tx, 'org-1', undefined)).rejects.toThrow(TenantContextError);
     });
   });
 });
@@ -251,7 +251,7 @@ describe('the tenant walls (SEC-TEN-01 on the audit tables)', () => {
     await record(org, event(1));
     const other = newOrg();
 
-    await expect(withTenant(app, other, (tx) => trail.verify(tx, org))).rejects.toThrow(TenantContextError);
+    await expect(withTenant(app, other, (tx) => trail.verify(tx, org, undefined))).rejects.toThrow(TenantContextError);
   });
 
   it("refuses to record into another organisation's chain", async () => {
@@ -716,7 +716,10 @@ describe('checking a chain while events are added', () => {
       },
     });
 
-    expect(await withTenant(racing, org, (tx) => trail.verify(tx, org))).toMatchObject({ ok: true, seq: 4n });
+    expect(await withTenant(racing, org, (tx) => trail.verify(tx, org, undefined))).toMatchObject({
+      ok: true,
+      seq: 4n,
+    });
     expect(added).toBe(true);
     expect(await verify(org)).toMatchObject({ ok: true, seq: 5n });
   });

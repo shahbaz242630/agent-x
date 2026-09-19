@@ -150,6 +150,15 @@ const IPV6_CANDIDATE =
 /** Four numbers joined by dots, not part of a longer dotted number; kept only if some part is over 255. */
 const IPV4_CANDIDATE = /(?<!\d|\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\d|\.\d)/g;
 
+/**
+ * A SHA-256 hash on its own, as the app logs one (a chain's head, the config
+ * fingerprint's hash). Random hex can by chance look like a phone number or an
+ * Emirates ID in part, and a hash changed in a log is no longer evidence. Only
+ * a whole value is let through: a hash inside other text, which could be a
+ * token in a query, is cleaned as usual.
+ */
+const WHOLE_HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
+
 function trailingPunctuation(text: string): number {
   let length = 0;
   while (length < text.length && TRAILING_PUNCTUATION.has(text.charAt(text.length - 1 - length))) length += 1;
@@ -257,6 +266,7 @@ function cleanIpv4(candidate: string): string {
 
 /** Returns the text with every secret, personal detail and payment detail replaced by a label. */
 export function scrub(text: string): string {
+  if (WHOLE_HASH.test(text)) return text;
   return (
     text
       // URLs first: their credentials and whole query go, before anything else changes their text.

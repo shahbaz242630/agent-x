@@ -90,12 +90,21 @@ vi.mock('./start-record.ts', () => ({
   },
 }));
 
-/** A stand-in for the anchor check, proven in anchor-check.test.ts: these tests see only when it starts and stops. */
-const anchorChecks = vi.hoisted(() => ({ intervals: [] as number[], chains: [] as unknown[] }));
+/**
+ * A stand-in for the anchor check, proven in anchor-check.test.ts: these tests
+ * see only how it is set up, and when it starts and stops. Stopping takes a
+ * moment, as it does when a run is in flight.
+ */
+const anchorChecks = vi.hoisted(() => ({
+  intervals: [] as number[],
+  staleAfter: [] as number[],
+  chains: [] as unknown[],
+}));
 
 vi.mock('./anchor-check.ts', () => ({
-  createAnchorCheck: (options: { chains: readonly { chain: unknown }[] }) => {
+  createAnchorCheck: (options: { chains: readonly { chain: unknown }[]; staleAfterMs: number }) => {
     anchorChecks.chains.push(...options.chains.map((one) => one.chain));
+    anchorChecks.staleAfter.push(options.staleAfterMs);
     return { run: () => Promise.resolve() };
   },
   scheduleAnchorCheck: (_check: unknown, intervalMs: number) => {
@@ -103,8 +112,13 @@ vi.mock('./anchor-check.ts', () => ({
     anchorChecks.intervals.push(intervalMs);
     return {
       stop: () => {
-        fake.steps.push('anchor check stopped');
-        return Promise.resolve();
+        fake.steps.push('anchor check stopping');
+        return new Promise<void>((resolve) => {
+          setTimeout(() => {
+            fake.steps.push('anchor check stopped');
+            resolve();
+          }, 20);
+        });
       },
     };
   },
@@ -164,6 +178,7 @@ beforeEach(() => {
   startRecord.written.length = 0;
   startRecord.result = () => Promise.resolve(7n);
   anchorChecks.intervals.length = 0;
+  anchorChecks.staleAfter.length = 0;
   anchorChecks.chains.length = 0;
 });
 
@@ -308,6 +323,8 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
     expect(anchorChecks.chains).toEqual([{ kind: 'platform' }, { kind: 'platform' }]);
     expect(anchorChecks.intervals).toEqual([300_000, 600_000]);
+    // Three intervals without a completed check are the alarm.
+    expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
   });
 
   it("SEC-OPS-05 writes the fingerprint's hash and the release to the platform chain, and logs its place", async () => {
@@ -468,13 +485,14 @@ describe('the API stops cleanly on a signal', () => {
         'role checked',
         'start recorded',
         'anchor check started',
+        'anchor check stopping',
         'anchor check stopped',
         'pool closed',
       ]);
     },
   );
 
-  it('closes the pool only after HTTP has stopped, so requests in flight still have it', async () => {
+  it('stops HTTP and the anchor check together, and closes the pool only after both, so work in flight still has it', async () => {
     const { host, server } = await start();
     if (server === undefined) throw new Error('the server should have started');
     const close = server.close.bind(server);
@@ -489,15 +507,15 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps).toEqual([
+    expect(fake.steps.slice(0, 5)).toEqual([
       'role checked',
       'start recorded',
       'anchor check started',
       'http closing',
-      'http closed',
-      'anchor check stopped',
-      'pool closed',
+      'anchor check stopping',
     ]);
+    expect(fake.steps.slice(5, 7)).toEqual(expect.arrayContaining(['http closed', 'anchor check stopped']));
+    expect(fake.steps.slice(7)).toEqual(['pool closed']);
   });
 
   it.each([
