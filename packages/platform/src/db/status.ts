@@ -12,22 +12,32 @@
 // refuses any move the machine doesn't list, whoever writes it.
 //
 // The row is locked before it is read, so no other transaction can change it
-// between the decision and the update. An update that then changes nothing
-// means something past the app is at work on the row (a trigger, say), so it
-// is an error, not a race to retry. While the lock holds, the update's
-// `status = from` can't miss; it is kept (ADR-007's compare-and-set) so that a
-// change which ever lost its lock would fail loudly rather than overwrite.
+// between the decision and the update. An update that then leaves the row in
+// any status but the one decided (it changed nothing, or a trigger rewrote
+// it) means something past the app is at work on the row, so it is an error,
+// not a race to retry. While the lock holds, the update's `status = from`
+// can't miss; it is kept (ADR-007's compare-and-set) so that a change which
+// ever lost its lock would fail loudly rather than overwrite.
+//
+// The guard and this step stop a status moving; they don't stop a row being
+// deleted or given another ID and then born again in the first status. So the
+// app role has no DELETE on a status table and no UPDATE of its org_id or id
+// (A3c checks both in CI), and the guard refuses a changed id besides.
 import { sql, type Transaction } from 'kysely';
 
 import type { Logger } from '../observability/index.ts';
+import { assertTenant } from './tenant.ts';
 
 /** What a status change needs of a state machine: the shared-kernel's defineStateMachine gives one. */
 export interface StatusRules<State extends string, Event extends string> {
   readonly name: string;
-  transition(
+  // A function property, not a method, so its event type is checked strictly:
+  // a machine with other events doesn't fit, and a misspelt event fails the
+  // type check rather than the change.
+  readonly transition: (
     from: string,
     event: Event,
-  ):
+  ) =>
     | { readonly ok: true; readonly from: State; readonly to: State }
     | { readonly ok: false; readonly problem: 'not_allowed'; readonly from: State }
     | { readonly ok: false; readonly problem: 'unknown_state' };
@@ -56,11 +66,13 @@ export type StatusChange<State extends string> =
   | { readonly outcome: 'missing' };
 
 /**
- * The change couldn't be made, and nothing was changed:
+ * The change couldn't be made as decided:
  * - `bad_key`: the organisation or row ID isn't a UUID
  * - `unreadable`: the stored status isn't one of the machine's, or more than
  *   one row has the key; either means someone past the app changed the table
- * - `not_applied`: the locked row's update changed nothing (see above)
+ * - `not_applied`: the locked row's update didn't leave it in the status
+ *   decided (see above)
+ * The caller's transaction must roll back: throwing out of withTenant does.
  */
 export class StatusChangeFailed extends Error {
   readonly reason: 'bad_key' | 'unreadable' | 'not_applied';
@@ -75,15 +87,16 @@ export class StatusChangeFailed extends Error {
 export interface StatusChanger {
   /**
    * Makes `event`'s move on the row, in the caller's transaction, which must
-   * be withTenant's for the row's organisation: in any other, row security
-   * hides the row and the answer is `missing`. The row's lock is held to the
-   * end of the transaction.
+   * be withTenant's for the row's organisation. Any other throws
+   * TenantContextError: row security would hide the row there, and `missing`
+   * would hide the mistake. The row's lock is held to the end of the
+   * transaction.
    */
   change<Schema, State extends string, Event extends string>(
     tx: Transaction<Schema>,
     table: StatusTable<State, Event>,
     key: StatusKey,
-    event: Event,
+    event: NoInfer<Event>,
   ): Promise<StatusChange<State>>;
 }
 
@@ -95,18 +108,23 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 const TABLE = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
 
+/**
+ * Build it from the request's or job's logger, a child carrying its
+ * correlation ID (Rule Book §8); each change adds the organisation.
+ */
 export function createStatusChanger({ logger }: { readonly logger: Logger }): StatusChanger {
   return Object.freeze({
     async change<Schema, State extends string, Event extends string>(
       tx: Transaction<Schema>,
       { table, rules }: StatusTable<State, Event>,
       { orgId, id }: StatusKey,
-      event: Event,
+      event: NoInfer<Event>,
     ): Promise<StatusChange<State>> {
       if (!TABLE.test(table)) throw new RangeError('A status table is named schema.table, in lower-case words');
       if (!UUID.test(orgId) || !UUID.test(id)) {
         throw new StatusChangeFailed('bad_key', 'A status change needs the organisation and row IDs as UUIDs');
       }
+      await assertTenant(tx, orgId);
       const log = logger.child({ orgId });
       const facts = { machine: rules.name, statusEvent: event, objectId: id };
 
@@ -135,13 +153,18 @@ export function createStatusChanger({ logger }: { readonly logger: Logger }): St
       const { from, to } = decided;
       // The alias keeps the text after the table name from starting with SET,
       // which the lint rule against session-wide settings would take for one.
-      const updated = await sql`
+      const updated = await sql<{ status: unknown }>`
         update ${sql.table(table)} as target set status = ${to}
         where org_id = ${orgId} and id = ${id} and status = ${from}
+        returning status
       `.execute(tx);
-      if (updated.numAffectedRows !== 1n) {
+      const [written] = updated.rows;
+      if (written?.status !== to) {
         log.error('status.change_not_applied', { ...facts, from, to });
-        throw new StatusChangeFailed('not_applied', `The locked ${rules.name} row's status update changed nothing`);
+        throw new StatusChangeFailed(
+          'not_applied',
+          `The locked ${rules.name} row's status update didn't leave it in the status decided`,
+        );
       }
       log.info('status.changed', { ...facts, from, to });
       return { outcome: 'changed', from, to };

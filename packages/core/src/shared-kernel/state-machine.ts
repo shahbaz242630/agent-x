@@ -48,15 +48,18 @@ export interface StateMachine<State extends string, Event extends string> {
   readonly initial: State;
   /** Every move some event allows, once each. */
   readonly moves: readonly Move<State>[];
-  isState(value: string): value is State;
+  // Written as function properties, not methods: TypeScript checks a
+  // method's parameters loosely, which would let a machine pass where a wider
+  // event type is expected, and a misspelt event through to run time.
+  readonly isState: (value: string) => value is State;
   /** True for a status no event leaves, such as `REVOKED`. */
-  isFinal(state: State): boolean;
+  readonly isFinal: (state: State) => boolean;
   /**
    * The move `event` makes from `from`, or why it can't. `from` is any text,
    * since it is usually read back from the database. An event the machine
    * doesn't define is a mistake in the calling code, so it throws.
    */
-  transition(from: string, event: Event): Transition<State>;
+  readonly transition: (from: string, event: Event) => Transition<State>;
 }
 
 /** The definition breaks the rules below; `problems` names each mistake. */
@@ -70,15 +73,23 @@ export class StateMachineInvalid extends Error {
   }
 }
 
-const NAME = /^[a-z][a-z_]{0,62}$/;
-const STATE = /^[A-Z][A-Z_]{0,62}$/;
+/** Lower-case words joined by single `_`s. */
+const NAME = /^[a-z]+(?:_[a-z]+)*$/;
+/** Words in capitals joined by single `_`s. */
+const STATE = /^[A-Z]+(?:_[A-Z]+)*$/;
+/** Postgres's longest name, so a status or name fits wherever it is stored. */
+const LONGEST = 63;
+
+const written = (pattern: RegExp, value: string): boolean => pattern.test(value) && value.length <= LONGEST;
 
 function duplicates(values: readonly string[]): string[] {
   return [...new Set(values.filter((value, index) => values.indexOf(value) !== index))];
 }
 
 function stateProblems(states: readonly string[], initial: string): string[] {
-  const problems = states.filter((state) => !STATE.test(state)).map((state) => `state ${state} must be in capitals`);
+  const problems = states
+    .filter((state) => !written(STATE, state))
+    .map((state) => `state ${state} must be words in capitals joined by _`);
   problems.push(...duplicates(states).map((state) => `state ${state} is listed twice`));
   if (!states.includes(initial)) problems.push(`the first state ${initial} is not one of the states`);
   return problems;
@@ -86,7 +97,7 @@ function stateProblems(states: readonly string[], initial: string): string[] {
 
 function eventProblems(event: string, rule: EventRule<string>, states: readonly string[]): string[] {
   const problems: string[] = [];
-  if (!NAME.test(event)) problems.push(`event ${event} must be lower-case words joined by _`);
+  if (!written(NAME, event)) problems.push(`event ${event} must be lower-case words joined by _`);
   if (rule.from.length === 0) problems.push(`event ${event} happens in no state`);
   problems.push(...duplicates(rule.from).map((state) => `event ${event} lists ${state} twice`));
   for (const state of [...rule.from, rule.to].filter((one) => !states.includes(one))) {
@@ -133,7 +144,7 @@ function snapshotOf<State extends string, Event extends string>(
 
 function definitionProblems({ name, states, initial, events }: Snapshot<string>): string[] {
   const problems: string[] = [];
-  if (!NAME.test(name)) problems.push('the name must be lower-case words joined by _');
+  if (!written(NAME, name)) problems.push('the name must be lower-case words joined by _');
   problems.push(...stateProblems(states, initial));
   if (events.length === 0) problems.push('there are no events');
   problems.push(...events.flatMap(([event, rule]) => eventProblems(event, rule, states)));

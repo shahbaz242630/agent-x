@@ -282,14 +282,14 @@ describe('a machine written wrong is refused when it is defined', () => {
     expect(problemsOf(agent)).toEqual([]);
   });
 
-  it.each(['Agent', 'agent-key', 'agent key', '', '_agent', `a${'b'.repeat(63)}`])(
+  it.each(['Agent', 'agent-key', 'agent key', '', '_agent', 'agent_', 'agent__key', 'agent2', `a${'b'.repeat(63)}`])(
     'a name written wrong: %j',
     (name) => {
       expect(problemsOf({ ...agent, name })).toEqual(['the name must be lower-case words joined by _']);
     },
   );
 
-  it.each(['agent_key', `a${'b'.repeat(62)}`])('passes a name written right: %j', (name) => {
+  it.each(['agent_key', 'spend_request_line', `a${'b'.repeat(62)}`])('passes a name written right: %j', (name) => {
     expect(problemsOf({ ...agent, name })).toEqual([]);
   });
 
@@ -300,18 +300,21 @@ describe('a machine written wrong is refused when it is defined', () => {
         states: ['ACTIVE', 'SUSPENDED', 'Revoked'],
         events: { ...agent.events, revoke: { from: ['ACTIVE'], to: 'Revoked' } },
       }),
-    ).toEqual(['state Revoked must be in capitals']);
+    ).toEqual(['state Revoked must be words in capitals joined by _']);
   });
 
-  it.each(['PENDING-ACCEPTANCE', '_ACTIVE', 'ACTIVE2', `A${'B'.repeat(63)}`])('a status written wrong: %j', (state) => {
-    expect(
-      problemsOf({
-        ...agent,
-        states: [...agent.states, state],
-        events: { ...agent.events, odd: { from: ['ACTIVE'], to: state } },
-      }),
-    ).toEqual([`state ${state} must be in capitals`]);
-  });
+  it.each(['PENDING-ACCEPTANCE', '_ACTIVE', 'ACTIVE_', 'PENDING__ACCEPTANCE', 'ACTIVE2', `A${'B'.repeat(63)}`])(
+    'a status written wrong: %j',
+    (state) => {
+      expect(
+        problemsOf({
+          ...agent,
+          states: [...agent.states, state],
+          events: { ...agent.events, odd: { from: ['ACTIVE'], to: state } },
+        }),
+      ).toEqual([`state ${state} must be words in capitals joined by _`]);
+    },
+  );
 
   it('a status listed twice', () => {
     expect(problemsOf({ ...agent, states: [...agent.states, 'SUSPENDED'] })).toEqual([
@@ -327,10 +330,22 @@ describe('a machine written wrong is refused when it is defined', () => {
     expect(problemsOf({ ...agent, states: ['ACTIVE'], events: {} })).toEqual(['there are no events']);
   });
 
-  it('an event name written wrong', () => {
+  it.each(['Kill-switch', 'kill_', 'kill__switch', 'kill2'])('an event name written wrong: %j', (event) => {
     expect(
-      problemsOf({ ...agent, events: { ...agent.events, 'Kill-switch': { from: ['ACTIVE'], to: 'SUSPENDED' } } }),
-    ).toEqual(['event Kill-switch must be lower-case words joined by _']);
+      problemsOf({ ...agent, events: { ...agent.events, [event]: { from: ['ACTIVE'], to: 'SUSPENDED' } } }),
+    ).toEqual([`event ${event} must be lower-case words joined by _`]);
+  });
+
+  it('passes a status written right at the longest a name may be', () => {
+    const longest = `A${'B'.repeat(62)}`;
+
+    expect(
+      problemsOf({
+        ...agent,
+        states: [...agent.states, longest],
+        events: { ...agent.events, odd: { from: ['ACTIVE'], to: longest } },
+      }),
+    ).toEqual([]);
   });
 
   it('an event that happens in no state', () => {
@@ -402,7 +417,7 @@ describe('a machine written wrong is refused when it is defined', () => {
       }),
     ).toEqual([
       'the name must be lower-case words joined by _',
-      'state lost must be in capitals',
+      'state lost must be words in capitals joined by _',
       'state ACTIVE is listed twice',
       'the first state NEW is not one of the states',
       'event Go must be lower-case words joined by _',

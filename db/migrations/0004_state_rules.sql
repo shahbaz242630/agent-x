@@ -2,11 +2,22 @@
 -- machine's rules. Every table with a status runs this trigger function before
 -- each row it inserts or updates, with its machine's rules as the trigger's
 -- arguments: first the status a new row starts in, then each allowed move
--- written FROM>TO. A new row in any other status, or a status changed along a
--- move not listed, is refused, whatever code or statement tried it.
+-- written FROM>TO. A new row in any other status, a status changed along a
+-- move not listed, or a row given another org_id or id, is refused, whatever
+-- code or statement tried it.
 --
 --   CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON agents.agents
 --     FOR EACH ROW EXECUTE FUNCTION state_rules.guard_status('ACTIVE', 'ACTIVE>SUSPENDED', ...);
+--
+-- What each status table must also have, since the guard can't see it (A3c
+-- checks these in CI):
+-- - `org_id`, `id` and `status` columns, and a key on (org_id, id);
+-- - no DELETE for the app role: a row deleted and inserted again would be
+--   born in the first status, which the guard allows;
+-- - no partitions: moving a row to another partition inserts it there;
+-- - no other BEFORE ROW trigger named after `status_guard`: Postgres runs them
+--   in name order, so one running later could change the status after the
+--   check.
 --
 -- The app decides every move with the same machine (the shared-kernel's
 -- defineStateMachine) and changes a status only through createStatusChanger,
@@ -39,13 +50,19 @@ BEGIN
       RAISE EXCEPTION 'a new row in %.% must start as %', TG_TABLE_SCHEMA, TG_TABLE_NAME, TG_ARGV[0]
         USING ERRCODE = 'check_violation', CONSTRAINT = 'status_guard';
     END IF;
-  ELSIF NEW.status IS DISTINCT FROM OLD.status THEN
-    -- The first argument is a status, never a move, so it can't match one.
-    IF (OLD.status || '>' || NEW.status = ANY (TG_ARGV)) IS NOT TRUE THEN
-      RAISE EXCEPTION 'the status of a row in %.% can''t move from % to %',
-        TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.status, NEW.status
-        USING ERRCODE = 'check_violation', CONSTRAINT = 'status_guard';
-    END IF;
+    RETURN NEW;
+  END IF;
+  -- A row keeps its key: given another, it could leave its history behind.
+  IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id THEN
+    RAISE EXCEPTION 'a row in %.% keeps its org_id and id', TG_TABLE_SCHEMA, TG_TABLE_NAME
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'status_guard';
+  END IF;
+  -- The first argument is a status, never a move, so it can't match one.
+  IF NEW.status IS DISTINCT FROM OLD.status
+     AND (OLD.status || '>' || NEW.status = ANY (TG_ARGV)) IS NOT TRUE THEN
+    RAISE EXCEPTION 'the status of a row in %.% can''t move from % to %',
+      TG_TABLE_SCHEMA, TG_TABLE_NAME, OLD.status, NEW.status
+      USING ERRCODE = 'check_violation', CONSTRAINT = 'status_guard';
   END IF;
   RETURN NEW;
 END;

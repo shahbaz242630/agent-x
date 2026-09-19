@@ -19,7 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import { createStatusChanger, StatusChangeFailed, type StatusRules, type StatusTable } from './status.ts';
-import { withTenant } from './tenant.ts';
+import { TenantContextError, withTenant } from './tenant.ts';
 
 type State = 'ACTIVE' | 'SUSPENDED' | 'REVOKED';
 type Event = 'suspend' | 'reactivate' | 'revoke';
@@ -59,8 +59,10 @@ const FIXTURE = [
   'alter table probe.parts enable row level security',
   'alter table probe.parts force row level security',
   `create policy tenant_isolation on probe.parts ${TENANT_POLICY}`,
+  // As a status table's rights must be (0004's header): no DELETE, and no UPDATE of org_id or id.
   'grant usage on schema probe to agentx_app',
-  'grant select, insert, update on probe.things, probe.parts to agentx_app',
+  'grant select, insert on probe.things, probe.parts to agentx_app',
+  'grant update (status, label) on probe.things to agentx_app',
 ];
 
 interface ProbeTables {
@@ -174,15 +176,23 @@ describe('ADR-007 §1.2 a status change', () => {
     expect(linesNamed('status.row_missing')).toEqual([expect.objectContaining({ level: 'info', objectId: id })]);
   });
 
-  it("can't reach another organisation's row, by its key or from its transaction (SEC-TEN-01)", async () => {
+  it("can't reach another organisation's row by its ID (SEC-TEN-01)", async () => {
     const theirs = await thingIn('ACTIVE', OTHER_ORG);
 
     expect(await change(theirs, 'suspend')).toEqual({ outcome: 'missing' });
-    const fromTheirTransaction = await withTenant(app, OTHER_ORG, (tx) =>
-      changer().change(tx, THINGS, { orgId: ORG, id: theirs }, 'suspend'),
-    );
-    expect(fromTheirTransaction).toEqual({ outcome: 'missing' });
     expect(await statusOf(theirs, OTHER_ORG)).toBe('ACTIVE');
+  });
+
+  it("refuses to run in another organisation's transaction, where the row would look missing", async () => {
+    const ours = await thingIn('ACTIVE');
+
+    await expect(
+      withTenant(app, OTHER_ORG, (tx) => changer().change(tx, THINGS, { orgId: ORG, id: ours }, 'suspend')),
+    ).rejects.toBeInstanceOf(TenantContextError);
+    await expect(
+      app.transaction().execute((tx) => changer().change(tx, THINGS, { orgId: ORG, id: ours }, 'suspend')),
+    ).rejects.toBeInstanceOf(TenantContextError);
+    expect(await statusOf(ours)).toBe('ACTIVE');
   });
 
   it('changes only the status', async () => {
@@ -399,14 +409,40 @@ describe('the status guard (db/migrations/0004): the database refuses what the m
     expect(await statusOf(id)).toBe('SUSPENDED');
   });
 
-  it('runs for the app, which holds no right on the function or its schema, and it cannot switch the guard off', async () => {
+  it('runs for the app, which holds no right on the function or its schema', async () => {
     const rights = await admin.query<{ execute: boolean; usage: boolean }>(
       "select pg_catalog.has_function_privilege('agentx_app', 'state_rules.guard_status()', 'EXECUTE') as execute, pg_catalog.has_schema_privilege('agentx_app', 'state_rules', 'USAGE') as usage",
     );
     expect(rights).toEqual([{ execute: false, usage: false }]);
+  });
+
+  it.each([
+    ['switching triggers off for its session', sql`set local session_replication_role = replica`],
+    ['disabling the guard', sql`alter table probe.things disable trigger status_guard`],
+    ['dropping the guard', sql`drop trigger status_guard on probe.things`],
+  ])("can't be switched off by the app: %s", async (_how, statement) => {
+    await expect(withTenant(app, ORG, (tx) => statement.execute(tx))).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it.each([
+    ['id', 'update probe.things set id = $3 where org_id = $1 and id = $2'],
+    ['organisation', 'update probe.things set org_id = $3 where org_id = $1 and id = $2'],
+  ])('refuses a row given another %s, even by the server admin, past row security', async (_which, statement) => {
+    const id = await thingIn('REVOKED');
+    const rekey = (): Promise<unknown> =>
+      // eslint-disable-next-line agentx/no-string-built-sql -- The statement is one of the fixed texts above.
+      admin.query(statement, [ORG, id, newId()]);
+
+    await expect(rekey()).rejects.toMatchObject({
+      ...guardRefusal,
+      message: 'a row in probe.things keeps its org_id and id',
+    });
     await expect(
-      withTenant(app, ORG, (tx) => sql`set local session_replication_role = replica`.execute(tx)),
+      withTenant(app, ORG, (tx) =>
+        sql`update probe.things set id = ${newId()} where org_id = ${ORG} and id = ${id}`.execute(tx),
+      ),
     ).rejects.toMatchObject({ code: '42501' });
+    expect(await statusOf(id)).toBe('REVOKED');
   });
 
   it("runs with its own search_path, pg_catalog, and with its caller's rights", async () => {
@@ -509,23 +545,29 @@ describe('FX-TAMPER a table changed past the app is refused, not trusted', () =>
     }
   });
 
-  it('a trigger planted to swallow the update: the locked row changes nothing, which is an error', async () => {
+  // Postgres runs a table's BEFORE ROW triggers in name order: `aaa_` before the guard, `zzz_` after it.
+  it.each([
+    ['swallows the update', 'aaa_planted', 'return null;'],
+    ['keeps the old status, before the guard looks', 'aaa_planted', 'new.status := old.status; return new;'],
+    ['writes another status, after the guard has looked', 'zzz_planted', "new.status := 'SUSPENDED'; return new;"],
+  ])('a trigger planted that %s: the row is not left as decided, which is an error', async (_what, name, body) => {
     const id = await thingIn('ACTIVE');
+    // eslint-disable-next-line agentx/no-string-built-sql -- Fixed fixture text from the cases above.
+    await admin.query(`create function probe.planted() returns trigger language plpgsql as $$ begin ${body} end $$`);
+    // eslint-disable-next-line agentx/no-string-built-sql -- As above.
     await admin.query(
-      'create function probe.swallow() returns trigger language plpgsql as $$ begin return null; end $$',
-    );
-    await admin.query(
-      'create trigger swallow before update on probe.things for each row execute function probe.swallow()',
+      `create trigger ${name} before update on probe.things for each row execute function probe.planted()`,
     );
     try {
-      await expect(change(id, 'suspend')).rejects.toMatchObject({ name: 'StatusChangeFailed', reason: 'not_applied' });
+      await expect(change(id, 'revoke')).rejects.toMatchObject({ name: 'StatusChangeFailed', reason: 'not_applied' });
       expect(await statusOf(id)).toBe('ACTIVE');
       expect(linesNamed('status.change_not_applied')).toEqual([
-        expect.objectContaining({ level: 'error', from: 'ACTIVE', to: 'SUSPENDED' }),
+        expect.objectContaining({ level: 'error', from: 'ACTIVE', to: 'REVOKED' }),
       ]);
     } finally {
-      await admin.query('drop trigger swallow on probe.things');
-      await admin.query('drop function probe.swallow()');
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await admin.query(`drop trigger ${name} on probe.things`);
+      await admin.query('drop function probe.planted()');
     }
   });
 });
