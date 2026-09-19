@@ -14,6 +14,17 @@ export {
   type SetupLogins,
   setUpServer,
 } from './server-setup.ts';
+export {
+  advanceSignedRow,
+  pointSignedRow,
+  readSignedRow,
+  type RowLock,
+  type SignedField,
+  type SignedFieldType,
+  type SignedRow,
+  type SignedRowKey,
+  type SignedStateTable,
+} from './signed-rows.ts';
 export { assertTenant, TenantContextError, withTenant } from './tenant.ts';
 export {
   createStatusChanger,
