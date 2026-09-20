@@ -7,8 +7,21 @@ import { defineConfig, globalIgnores } from 'eslint/config';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
+import { AUTHORITY_TABLES } from './tooling/authority-tables.ts';
+import authorityTablesThroughSignedState from './tooling/eslint-rules/authority-tables-through-signed-state.js';
 import noStringBuiltSql from './tooling/eslint-rules/no-string-built-sql.js';
+import signedStateStepsInAuditModule from './tooling/eslint-rules/signed-state-steps-in-audit-module.js';
 import tenantSettingOnlyInWithTenant from './tooling/eslint-rules/tenant-setting-only-in-with-tenant.js';
+
+/**
+ * A3c, ADR-012 §2: the authority tables, from the same registry the CI schema
+ * checks read (tooling/authority-tables.ts), so the two can never drift. Node
+ * strips the types as it loads it, which is why a plain JS config can import a
+ * TypeScript file. Empty until slice B1 brings the first authority table; the
+ * rule is proven on a registry of its own meanwhile
+ * (tooling/gate-proofs/lint-authority-registry.test.ts).
+ */
+const authorityTables = AUTHORITY_TABLES.map(({ table, subject }) => ({ table, subject }));
 
 /** SEC-WEB-03: nothing may write raw HTML into the page. */
 const rawHtmlInjection = [
@@ -268,14 +281,18 @@ export default defineConfig([
     plugins: {
       agentx: {
         rules: {
+          'authority-tables-through-signed-state': authorityTablesThroughSignedState,
           'no-string-built-sql': noStringBuiltSql,
+          'signed-state-steps-in-audit-module': signedStateStepsInAuditModule,
           'tenant-setting-only-in-with-tenant': tenantSettingOnlyInWithTenant,
         },
       },
     },
     rules: {
       'no-console': 'error',
+      'agentx/authority-tables-through-signed-state': ['error', { tables: authorityTables }],
       'agentx/no-string-built-sql': 'error',
+      'agentx/signed-state-steps-in-audit-module': 'error',
       'agentx/tenant-setting-only-in-with-tenant': 'error',
       'no-restricted-syntax': ['error', ...productSyntax],
       'no-restricted-properties': [
@@ -294,6 +311,31 @@ export default defineConfig([
   {
     files: ['packages/platform/src/db/tenant.ts', '**/*.test.{ts,tsx}', 'packages/testing/**/*.{ts,tsx}'],
     rules: { 'agentx/tenant-setting-only-in-with-tenant': 'off' },
+  },
+
+  // ADR-012 §2, A3c: the signed-row steps are written in @agentx/platform/db
+  // and used by the audit module's signed states, which sign every change they
+  // make. **These four entries are the whole set of places allowed to hold
+  // them**: another one is a change to the wall itself, not a convenience, and
+  // each of the two that ship has a gate proof (lint-authority.test.ts). Tests
+  // and the harness may call them to prove what they do; neither ships.
+  {
+    files: [
+      'packages/platform/src/db/**/*.{ts,tsx}',
+      'packages/core/src/modules/audit/**/*.{ts,tsx}',
+      '**/*.test.{ts,tsx}',
+      'packages/testing/**/*.{ts,tsx}',
+    ],
+    rules: { 'agentx/signed-state-steps-in-audit-module': 'off' },
+  },
+
+  // An authority table's own name and subject type are written where the table
+  // is declared, which the rule sees for itself. Tests and the harness build
+  // tables of their own with names of their own (the A3c fixtures), so the
+  // rule would read their fixtures as product code.
+  {
+    files: ['**/*.test.{ts,tsx}', 'packages/testing/**/*.{ts,tsx}'],
+    rules: { 'agentx/authority-tables-through-signed-state': 'off' },
   },
 
   // The config module is the one place that reads the environment. Flat config

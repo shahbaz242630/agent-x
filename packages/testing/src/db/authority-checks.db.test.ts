@@ -172,6 +172,19 @@ describe(`A3c what passes (Postgres ${server.version})`, () => {
     );
   });
 
+  it('passes a trigger that fires after the row, or once per statement, however it is named', async () => {
+    // Neither can rewrite the row the guard has just passed: one runs after
+    // the write, the other has no row at all. Both are named after
+    // status_guard on purpose.
+    const statements = [
+      ...SOUND,
+      TRIGGER_FUNCTION,
+      'create trigger zz_after_row after insert or update on t.agents for each row execute function t.rewrite()',
+      'create trigger zz_per_statement before insert or update on t.agents for each statement execute function t.rewrite()',
+    ];
+    expect(await problemsAfter(statements)).toEqual([]);
+  });
+
   it('passes another BEFORE ROW trigger that only fires on DELETE, which has no new row', async () => {
     const statements = [
       ...SOUND,
@@ -304,6 +317,20 @@ describe('A3c the registry itself', () => {
     const unknown: AuthorityMachine = { ...MACHINE, moves: [{ from: 'ACTIVE', to: 'LAPSED' }] };
     expect(await listProblems([{ ...AGENTS, status: unknown }])).toEqual([
       "t.agents: the agent machine allows ACTIVE>LAPSED, which names a state it doesn't have",
+    ]);
+  });
+
+  it('fails a state named in several places once, not once per place', async () => {
+    // `new` is the first status, one of the states and one end of a move: the
+    // spelling is one problem, not three.
+    const everywhere: AuthorityMachine = {
+      name: 'agent',
+      states: ['new', 'ACTIVE'],
+      initial: 'new',
+      moves: [{ from: 'new', to: 'ACTIVE' }],
+    };
+    expect(await listProblems([{ ...AGENTS, status: everywhere }])).toEqual([
+      "t.agents: the agent machine's state new must be words in capitals joined by _",
     ]);
   });
 
