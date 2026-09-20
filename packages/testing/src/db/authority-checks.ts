@@ -101,7 +101,7 @@ const KEY = ['org_id', 'id'] as const;
  * version past what the app can hold. A declared `integer` field is freer
  * (COLUMN_TYPES), because there the reader only reads the value as text.
  */
-const INTEGER = 23;
+const INTEGER = '23';
 const GUARD = 'status_guard';
 const GUARD_FUNCTION = 'state_rules.guard_status';
 /** The table a trigger is on, as Postgres prints it in the trigger's definition. */
@@ -115,11 +115,11 @@ const ON_TABLE = / ON .+? FOR EACH ROW /;
  * would, since it carries the modifier a column was declared with
  * (`timestamptz(3)` reads the same as `timestamptz`).
  */
-const COLUMN_TYPES: Readonly<Record<AuthorityFieldType, readonly number[]>> = {
-  text: [25],
-  uuid: [2950],
-  integer: [21, 23, 20],
-  timestamptz: [1184],
+const COLUMN_TYPES: Readonly<Record<AuthorityFieldType, readonly string[]>> = {
+  text: ['25'],
+  uuid: ['2950'],
+  integer: ['21', '23', '20'],
+  timestamptz: ['1184'],
 };
 
 /** The names of those types, for the message that refuses a column. */
@@ -132,18 +132,24 @@ const TYPE_NAMES: Readonly<Record<AuthorityFieldType, string>> = {
 
 /**
  * What the app role may hold on an authority table, and nothing else: it adds
- * rows and reads them, and changes the sealed fields column by column
- * (checked below). A right that isn't listed is refused whatever it is, so a
- * privilege we haven't thought about, or one a later Postgres adds, can't
- * slip in: TRIGGER alone would let the app write a trigger of its own that
- * fires after the status guard has passed a row.
+ * rows and reads them, and changes the sealed fields column by column (checked
+ * below). A right that isn't listed is refused whatever it is, so a privilege
+ * we haven't thought about, or one a later Postgres adds, can't slip in. The
+ * ones we have thought about say why the list is this short:
+ * - DELETE or TRUNCATE would take a row's authority out of reach of the log
+ *   that signed it (ADR-012 §2);
+ * - TRIGGER would let the app write a trigger of its own that fires after the
+ *   status guard has passed a row;
+ * - REFERENCES would let it point a key of its own at these rows.
+ * Nothing may be given to PUBLIC, which would hand the same right to every
+ * role on the server, the backup role included (ADR-005 §3).
  */
 const APP_MAY = ['SELECT', 'INSERT'];
 
 const RELATION = `
   select pg_catalog.concat_ws('.', n.nspname, c.relname) as name, c.relkind::text as kind,
          c.relrowsecurity as rls, c.relforcerowsecurity as forced,
-         c.relhassubclass as has_children,
+         exists (select 1 from pg_catalog.pg_inherits h where h.inhparent = c.oid) as has_children,
          exists (select 1 from pg_catalog.pg_inherits h where h.inhrelid = c.oid) as inherits,
          c.oid::pg_catalog.regclass::text as printed
   from pg_catalog.pg_class c
@@ -157,12 +163,18 @@ const RELATION = `
  * Every column of those tables: the type name, whether it is NOT NULL (a
  * Postgres 18 constraint that is NOT VALID marks the column while old rows may
  * still be null, so it doesn't count) and its default.
+ *
+ * **The NOT NULL expression is also in schema-checks.ts's COLUMNS query**; it
+ * is the one piece of catalogue reading the two checkers still hold twice (the
+ * connection and the query step are shared, in catalogue.ts). A Postgres
+ * version that changes how an unvalidated NOT NULL is recorded has to be
+ * followed in both.
  */
 const COLUMNS = `
   select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, a.attname::text as column,
-         a.atttypid::pg_catalog.int4 as type_oid,
+         a.atttypid::pg_catalog.text as type_oid,
          pg_catalog.format_type(a.atttypid, a.atttypmod) as type,
-         a.attgenerated <> '' as generated,
+         a.attgenerated <> '' or a.attidentity <> '' as given_by_the_database,
          a.attnotnull and not exists (
            select 1 from pg_catalog.pg_constraint k
            where k.conrelid = a.attrelid and k.contype = 'n' and not k.convalidated and k.conkey = array[a.attnum]
@@ -310,12 +322,17 @@ interface Relation {
 interface Column {
   table: string;
   column: string;
-  /** The built-in type's fixed ID, which is what the reader matches on. */
-  type_oid: number;
+  /**
+   * The built-in type's fixed ID, which is what the reader matches on, as
+   * text: an oid is an unsigned 32-bit number, and narrowing one to Postgres's
+   * signed integer would raise or come back negative on a database whose oid
+   * counter has passed 2^31.
+   */
+  type_oid: string;
   /** The same type as this server prints it, for the messages. */
   type: string;
-  /** True when the database computes the value, so no writer can set it. */
-  generated: boolean;
+  /** True when the database gives the value itself (a generated or identity column), so no writer can set it. */
+  given_by_the_database: boolean;
   not_null: boolean;
   default_expression: string | null;
 }
@@ -349,6 +366,9 @@ interface Trigger {
   /** Fires on INSERT or UPDATE: a DELETE-only trigger can't rewrite a row being written. */
   on_write: boolean;
 }
+
+/** The trigger fires on writes here: on origin (the usual) or always, never disabled or replica-only. */
+const fires = (trigger: Trigger): boolean => trigger.enabled === 'O' || trigger.enabled === 'A';
 
 interface Check {
   table: string;
@@ -384,6 +404,8 @@ export async function authorityProblems(database: TestDatabase, tables: readonly
   // A registry that names a table twice, or a machine written wrong, would
   // make the facts below ambiguous, so nothing is read until it is sound.
   if (listed.length > 0) return listed;
+  // No authority table yet (main, until slice B1): nothing to read.
+  if (tables.length === 0) return [];
   const client = await openCatalogue(database);
   try {
     const facts = await readFacts(client, tables, database.server.roles.app.user);
@@ -419,10 +441,23 @@ async function readReferences(client: pg.Client, tables: readonly AuthorityTable
   );
   const references = new Map<string, Reference>();
   if (withStatus.length === 0) return references;
+  // Two tables may be ruled by the same machine, and two machines may share a
+  // name while differing: the reference objects are built once per machine
+  // that is genuinely different (its states, first status and moves), and kept
+  // against every table they belong to.
+  const built = new Map<string, Reference>();
+  const shapeOf = (machine: AuthorityMachine): string =>
+    JSON.stringify([machine.states, machine.initial, machine.moves.map((move) => [move.from, move.to])]);
   await client.query('begin');
   try {
     let index = 0;
     for (const [name, machine] of withStatus) {
+      const shape = shapeOf(machine);
+      const already = built.get(shape);
+      if (already !== undefined) {
+        references.set(name, already);
+        continue;
+      }
       const reference = `authority_reference_${index++}`;
       const guardArguments = [machine.initial, ...machine.moves.map((move) => `${move.from}>${move.to}`)];
       const [statements] = await rows<{
@@ -449,10 +484,12 @@ async function readReferences(client: pg.Client, tables: readonly AuthorityTable
       if (!ON_TABLE.test(printed.guard_definition)) {
         throw new Error(`The reference guard for ${name} was printed as ${printed.guard_definition}`);
       }
-      references.set(name, {
+      const reading: Reference = {
         checkDefinition: printed.check_definition,
         guardDefinition: printed.guard_definition,
-      });
+      };
+      built.set(shape, reading);
+      references.set(name, reading);
     }
     return references;
   } finally {
@@ -569,7 +606,7 @@ function tableProblems(table: AuthorityTable, facts: Facts): string[] {
       table,
       facts.grants.filter((grant) => grant.table === name),
     ).map(at),
-    ...statusProblems(table, columns, facts, relation.printed).map(at),
+    ...statusProblems(table, columns, facts, relation).map(at),
   ];
 }
 
@@ -594,9 +631,11 @@ function relationProblems(relation: Relation): string[] {
       'is partitioned; a row moved between partitions is deleted and inserted, which would start it again at the first status and leave its signed state behind',
     );
   } else if (relation.kind !== 'r') {
+    // RELATION asks for these kinds only, and the two above are handled, so
+    // the lookup always finds one; the bare kind is a belt, not a case.
     problems.push(`is ${OTHER_KINDS[relation.kind] ?? relation.kind}, not a table, so nothing here holds`);
   }
-  if (relation.has_children) {
+  if (relation.has_children && relation.kind !== 'p') {
     problems.push(
       "has table inheritance children; a child gets this table's columns and checks but not its triggers or row security, and its rows answer a read of this table (ADR-005 §2, ADR-012 §2)",
     );
@@ -646,11 +685,15 @@ function columnProblems(table: AuthorityTable, columns: readonly Column[]): stri
       );
     }
   }
-  // record writes every one of these itself, and a value the database computes
-  // can't be written at all: the seal would fail on the first change.
-  for (const written of [...table.fields.map((field) => field.column), VERSION, POINTER]) {
-    if (of(written)?.generated === true) {
-      problems.push(`${written} is a generated column, so nothing can write it and no change could be sealed`);
+  // The app writes every one of these itself: the key when it creates the row,
+  // and the fields and the signed-state columns on every change. A column the
+  // database gives itself (generated, or an identity column) can't be written
+  // at all, so the row could never be created or sealed.
+  for (const written of [...KEY, ...table.fields.map((field) => field.column), VERSION, POINTER]) {
+    if (of(written)?.given_by_the_database === true) {
+      problems.push(
+        `${written} is a column the database gives itself (generated or an identity column), so nothing can write it and no row could be created or sealed`,
+      );
     }
   }
   const hasStatus = columns.some((column) => column.column === STATUS);
@@ -713,22 +756,28 @@ function keyProblems(keys: readonly Key[]): string[] {
 function grantProblems(table: AuthorityTable, grants: readonly AppGrant[]): string[] {
   const mayUpdate = new Set<string>([...table.fields.map((field) => field.column), VERSION, POINTER]);
   return grants.flatMap((grant) => {
-    const who = grant.to_public ? 'PUBLIC' : 'the app role';
     const on = grant.column === '' ? '' : ` on ${grant.column}`;
+    // PUBLIC first: a right given to PUBLIC is every role's, the backup role's
+    // included, so even the two the app may hold are refused there.
+    if (grant.to_public) {
+      return [
+        `PUBLIC has ${grant.privilege}${on}; an authority table grants nothing to PUBLIC, which is every role on the server (ADR-005 §3)`,
+      ];
+    }
     if (APP_MAY.includes(grant.privilege)) return [];
     if (grant.privilege !== 'UPDATE') {
       return [
-        `${who} has ${grant.privilege}${on}, which is not one of the rights the app has on an authority table (${APP_MAY.join(', ')} and UPDATE of the sealed columns): a deleted or emptied row takes its authority out of reach of the log that signed it, and a trigger of the app's own could rewrite a row the guard has just passed`,
+        `the app role has ${grant.privilege}${on}, which is not one of the rights the app has on an authority table (${APP_MAY.join(', ')}, and UPDATE of the sealed columns)`,
       ];
     }
     if (grant.column === '') {
       return [
-        `${who} has UPDATE on the whole table, which covers ${KEY.join(' and ')}; grant UPDATE column by column (${[...mayUpdate].join(', ')})`,
+        `the app role has UPDATE on the whole table, which covers ${KEY.join(' and ')}; grant UPDATE column by column (${[...mayUpdate].join(', ')})`,
       ];
     }
     return mayUpdate.has(grant.column)
       ? []
-      : [`${who} has UPDATE on ${grant.column}, which is not an authority field or a signed-state column`];
+      : [`the app role has UPDATE on ${grant.column}, which is not an authority field or a signed-state column`];
   });
 }
 
@@ -737,7 +786,7 @@ function grantProblems(table: AuthorityTable, grants: readonly AppGrant[]): stri
  * machine's states, the guard carries exactly its first status and its moves,
  * and no other trigger can rewrite the status after the guard has passed it.
  */
-function statusProblems(table: AuthorityTable, columns: readonly Column[], facts: Facts, printed: string): string[] {
+function statusProblems(table: AuthorityTable, columns: readonly Column[], facts: Facts, relation: Relation): string[] {
   const machine = table.status;
   const triggers = facts.triggers.filter((trigger) => trigger.table === table.table);
   if (machine === undefined) {
@@ -754,7 +803,7 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
   if (reference === undefined) throw new Error(`No reference objects were read for ${table.table}`);
   const checks = facts.checks.filter((check) => check.table === table.table);
   problems.push(...statusCheckProblems(machine, checks, reference));
-  problems.push(...guardProblems(printed, machine, triggers, reference));
+  problems.push(...guardProblems(relation.printed, machine, triggers, reference));
   return problems;
 }
 
@@ -803,23 +852,18 @@ function guardProblems(
     if (guard.definition !== wanted) {
       problems.push(`the ${GUARD} trigger is ${guard.definition}, not the ${machine.name} machine's rules: ${wanted}`);
     }
-    if (guard.enabled !== 'O' && guard.enabled !== 'A') {
+    if (!fires(guard)) {
       problems.push(
         `the ${GUARD} trigger doesn't fire on writes here (tgenabled ${guard.enabled}); it must be enabled`,
       );
     }
   }
-  // Only a trigger that fires before a row is written, and that fires at all,
-  // could rewrite what the guard has just passed: a DELETE-only trigger has no
-  // new row, and a disabled or replica-only one never runs here.
-  const competing = triggers.filter(
-    (one) =>
-      one.before &&
-      one.for_each_row &&
-      one.on_write &&
-      (one.enabled === 'O' || one.enabled === 'A') &&
-      one.name !== GUARD,
-  );
+  // A trigger that fires before a row is written could rewrite what the guard
+  // has just passed. A DELETE-only trigger couldn't: it has no new row. One
+  // that is switched off still counts, since switching it back on is a single
+  // statement that changes no definition and adds nothing for a reviewer to
+  // notice.
+  const competing = triggers.filter((one) => one.before && one.for_each_row && one.on_write && one.name !== GUARD);
   for (const trigger of competing) {
     if (!LOWER_WORDS.test(trigger.name)) {
       problems.push(

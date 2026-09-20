@@ -102,7 +102,11 @@ let built: TestDatabase[] = [];
 afterEach(async () => {
   const open = built;
   built = [];
-  for (const database of open) await database.drop();
+  // Every one is dropped even if one of them fails (a DROP DATABASE that loses
+  // a race with a connection), and the failures are reported together.
+  const dropped = await Promise.allSettled(open.map((database) => database.drop()));
+  const failed = dropped.flatMap((result) => (result.status === 'rejected' ? [String(result.reason)] : []));
+  if (failed.length > 0) throw new Error(`A fixture database was not dropped: ${failed.join('; ')}`);
 });
 
 /** A fresh copy of the migrated database with the fixture applied, one statement at a time. */
@@ -168,20 +172,13 @@ describe(`A3c what passes (Postgres ${server.version})`, () => {
     );
   });
 
-  it('passes another BEFORE ROW trigger that only fires on DELETE, or that is switched off', async () => {
-    const onDelete = [
+  it('passes another BEFORE ROW trigger that only fires on DELETE, which has no new row', async () => {
+    const statements = [
       ...SOUND,
       TRIGGER_FUNCTION,
       'create trigger zz_on_delete before delete on t.agents for each row execute function t.rewrite()',
     ];
-    const switchedOff = [
-      ...SOUND,
-      TRIGGER_FUNCTION,
-      'create trigger zz_switched_off before insert or update on t.agents for each row execute function t.rewrite()',
-      'alter table t.agents disable trigger zz_switched_off',
-    ];
-    expect(await problemsAfter(onDelete)).toEqual([]);
-    expect(await problemsAfter(switchedOff)).toEqual([]);
+    expect(await problemsAfter(statements)).toEqual([]);
   });
 
   it('passes two tables whose machines share a name, each against its own states', async () => {
@@ -230,17 +227,22 @@ describe('A3c the registry itself', () => {
   // These rules are judged before the database is read at all
   // (authorityProblems returns the registry's problems without connecting), so
   // one copy of the migrated database serves the whole block.
-  let shared: TestDatabase;
+  let shared: TestDatabase | undefined;
 
   beforeAll(async () => {
     shared = await createTestDatabase(server, { schema: 'migrated' });
   });
 
   afterAll(async () => {
-    await shared.drop();
+    // Guarded, so a database that was never made doesn't hide why with a
+    // TypeError of its own.
+    if (shared !== undefined) await shared.drop();
   });
 
-  const listProblems = (tables: readonly AuthorityTable[]): Promise<string[]> => authorityProblems(shared, tables);
+  const listProblems = (tables: readonly AuthorityTable[]): Promise<string[]> => {
+    if (shared === undefined) throw new Error('The shared fixture database was not made');
+    return authorityProblems(shared, tables);
+  };
 
   it('fails a table not named schema.table in lower-case words', async () => {
     expect(await listProblems([{ ...AGENTS, table: 'T.Agents' }])).toEqual([
@@ -341,12 +343,18 @@ describe('A3c each rule fails on a broken fixture', () => {
            state_version integer not null default 1, state_event_id uuid,
            primary key (org_id, id), constraint status_is_a_state ${MACHINE_STATES})
          partition by list (org_id)`,
+        "create table t.agents_one partition of t.agents for values in ('00000000-0000-0000-0000-000000000000')",
         ...walls('t.agents'),
         guard('t.agents'),
+        'grant select, insert on t.agents to agentx_app',
+        'grant update (status, expires_at, state_version, state_event_id) on t.agents to agentx_app',
       ];
-      expect(await problemsAfter(statements)).toContain(
+      // Exactly one problem: a partition is not an inheritance child for these
+      // purposes (its row triggers are cloned from the parent and the parent's
+      // row security reaches its rows), so that rule must stay quiet here.
+      expect(await problemsAfter(statements)).toEqual([
         't.agents: is partitioned; a row moved between partitions is deleted and inserted, which would start it again at the first status and leave its signed state behind',
-      );
+      ]);
     });
 
     it('fails a view in place of a table', async () => {
@@ -360,6 +368,13 @@ describe('A3c each rule fails on a broken fixture', () => {
       expect(await problemsAfter(statements, [PASSES])).toContain(
         't.passes: is a view, not a table, so nothing here holds',
       );
+    });
+
+    it('passes a table whose inheritance child has been dropped', async () => {
+      // pg_class.relhassubclass stays true once a table has ever had a child,
+      // and no statement clears it, so the rule reads pg_inherits instead.
+      const statements = [...SOUND, 'create table t.agents_old () inherits (t.agents)', 'drop table t.agents_old'];
+      expect(await problemsAfter(statements)).toEqual([]);
     });
 
     it('fails a table with inheritance children, and one that inherits', async () => {
@@ -482,7 +497,30 @@ describe('A3c each rule fails on a broken fixture', () => {
       ];
       const labelled: AuthorityTable = { ...AGENTS, fields: [...AGENTS.fields, { column: 'label', type: 'text' }] };
       expect(await problemsAfter(statements, [labelled])).toEqual([
-        't.agents: label is a generated column, so nothing can write it and no change could be sealed',
+        't.agents: label is a column the database gives itself (generated or an identity column), so nothing can write it and no row could be created or sealed',
+      ]);
+    });
+
+    it('fails a key column the database gives itself, which no INSERT of ours can name', async () => {
+      const statements = [
+        'create schema t',
+        `create table t.passes (
+           org_id uuid not null,
+           id uuid generated always as ('00000000-0000-0000-0000-000000000001'::uuid) stored,
+           expires_at timestamptz, state_version integer not null default 1, state_event_id uuid)`,
+        ...walls('t.passes'),
+        'create unique index passes_by_id on t.passes (org_id, id)',
+      ];
+      expect(await problemsAfter(statements, [PASSES])).toContain(
+        't.passes: id is a column the database gives itself (generated or an identity column), so nothing can write it and no row could be created or sealed',
+      );
+    });
+
+    it('fails an identity column, which no INSERT or UPDATE of ours can name either', async () => {
+      const statements = [...SOUND, 'alter table t.agents add column uses integer generated always as identity'];
+      const counted: AuthorityTable = { ...AGENTS, fields: [...AGENTS.fields, { column: 'uses', type: 'integer' }] };
+      expect(await problemsAfter(statements, [counted])).toEqual([
+        't.agents: uses is a column the database gives itself (generated or an identity column), so nothing can write it and no row could be created or sealed',
       ]);
     });
 
@@ -563,7 +601,7 @@ describe('A3c each rule fails on a broken fixture', () => {
   describe('what the app role may do', () => {
     it('fails an app role that may delete or empty the table', async () => {
       const refused = (right: string): string =>
-        `t.agents: the app role has ${right}, which is not one of the rights the app has on an authority table (SELECT, INSERT and UPDATE of the sealed columns): a deleted or emptied row takes its authority out of reach of the log that signed it, and a trigger of the app's own could rewrite a row the guard has just passed`;
+        `t.agents: the app role has ${right}, which is not one of the rights the app has on an authority table (SELECT, INSERT, and UPDATE of the sealed columns)`;
       expect(await problemsAfter([...SOUND, 'grant delete on t.agents to agentx_app'])).toEqual([refused('DELETE')]);
       expect(await problemsAfter([...SOUND, 'grant truncate on t.agents to agentx_app'])).toEqual([
         refused('TRUNCATE'),
@@ -574,8 +612,9 @@ describe('A3c each rule fails on a broken fixture', () => {
       // TRIGGER alone would let the app create the very trigger the guard
       // check exists to forbid: one that fires after status_guard has passed a
       // row. The app's rights are an allow-list for that reason.
-      const [only] = await problemsAfter([...SOUND, 'grant trigger on t.agents to agentx_app']);
-      expect(only).toContain('t.agents: the app role has TRIGGER, which is not one of the rights the app has');
+      expect(await problemsAfter([...SOUND, 'grant trigger on t.agents to agentx_app'])).toEqual([
+        't.agents: the app role has TRIGGER, which is not one of the rights the app has on an authority table (SELECT, INSERT, and UPDATE of the sealed columns)',
+      ]);
     });
 
     it("fails an UPDATE on the whole table, which covers the row's identity", async () => {
@@ -590,9 +629,13 @@ describe('A3c each rule fails on a broken fixture', () => {
       ]);
     });
 
-    it('fails a right given to PUBLIC, which the app role holds too', async () => {
-      const [only] = await problemsAfter([...SOUND, 'grant delete on t.agents to public']);
-      expect(only).toContain('t.agents: PUBLIC has DELETE, which is not one of the rights the app has');
+    it('fails any right given to PUBLIC, even one the app role may hold', async () => {
+      const given = (right: string): string =>
+        `t.agents: PUBLIC has ${right}; an authority table grants nothing to PUBLIC, which is every role on the server (ADR-005 §3)`;
+      expect(await problemsAfter([...SOUND, 'grant delete on t.agents to public'])).toEqual([given('DELETE')]);
+      // SELECT is one of the two the app may hold, and still not PUBLIC's: the
+      // backup role may only read what ADR-005 §3 lets it.
+      expect(await problemsAfter([...SOUND, 'grant select on t.agents to public'])).toEqual([given('SELECT')]);
     });
   });
 
@@ -653,6 +696,20 @@ describe('A3c each rule fails on a broken fixture', () => {
     it('fails a guard that does not fire on writes here', async () => {
       expect(await problemsAfter([...SOUND, 'alter table t.agents disable trigger status_guard'])).toEqual([
         "t.agents: the status_guard trigger doesn't fire on writes here (tgenabled D); it must be enabled",
+      ]);
+    });
+
+    it('fails a competing BEFORE ROW trigger even when it is switched off', async () => {
+      // Switching it back on is one statement that changes no definition and
+      // adds nothing for a reviewer to notice.
+      const statements = [
+        ...SOUND,
+        TRIGGER_FUNCTION,
+        'create trigger zz_switched_off before insert or update on t.agents for each row execute function t.rewrite()',
+        'alter table t.agents disable trigger zz_switched_off',
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        't.agents: the BEFORE ROW trigger zz_switched_off sorts after status_guard, so Postgres fires it last and it could rewrite a status the guard has passed',
       ]);
     });
 

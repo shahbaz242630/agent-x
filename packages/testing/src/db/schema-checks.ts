@@ -105,6 +105,11 @@ const RELATIONS = `
  * Columns, and whether each is uuid and NOT NULL. Postgres 18 can add a NOT
  * NULL constraint NOT VALID, which marks the column NOT NULL while old rows
  * may still be null, so an unvalidated one doesn't count.
+ *
+ * **The NOT NULL expression is also in authority-checks.ts's COLUMNS query**:
+ * the one piece of catalogue reading the two checkers hold twice. A Postgres
+ * version that changes how an unvalidated NOT NULL is recorded has to be
+ * followed in both.
  */
 const COLUMNS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
