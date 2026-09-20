@@ -12,10 +12,10 @@
     "./outbound": "./src/outbound/index.ts"
   },
   "dependencies": {
-    "kysely": "0.29.5",
+    "kysely": "0.29.6",
     "pg": "8.23.0",
     "pino": "10.3.1",
-    "zod": "4.6.2"
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@agentx/testing": "workspace:*",
