@@ -18,8 +18,8 @@ import tenantSettingOnlyInWithTenant from './tooling/eslint-rules/tenant-setting
  * checks read (tooling/authority-tables.ts), so the two can never drift. Node
  * strips the types as it loads it, which is why a plain JS config can import a
  * TypeScript file. Empty until slice B1 brings the first authority table; the
- * rule is proven on its own options meanwhile
- * (tooling/eslint-rules/authority-tables-through-signed-state.test.ts).
+ * rule is proven on a registry of its own meanwhile
+ * (tooling/gate-proofs/lint-authority-registry.test.ts).
  */
 const authorityTables = AUTHORITY_TABLES.map(({ table, subject }) => ({ table, subject }));
 

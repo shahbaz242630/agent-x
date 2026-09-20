@@ -29,37 +29,62 @@ export const TESTING = 'packages/testing/src/gate-proof';
 export const AUDIT = 'packages/core/src/modules/audit/gate-proof';
 
 /**
+ * A module's table description, for the A3c-2 proofs. The type is imported
+ * from the platform, as product code imports it: the rule counts a declaration
+ * only when the type came from there, so a local type alias of the same name
+ * can't exempt a file.
+ */
+export const describes = (table: string, subject: string): string =>
+  `import type { SignedStateTable } from '@agentx/platform/db';
+
+export const TABLE: SignedStateTable = {
+  table: '${table}',
+  subject: '${subject}',
+  fields: [{ column: 'status', type: 'text' }],
+};
+`;
+
+/**
  * Lints every snippet with the real eslint.config.js and checks each verdict.
- * `rules` adds to the real configuration rather than replacing it: a rule
- * whose behaviour depends on its options (A3c's authority tables, whose
- * registry is empty until slice B1) can be given a registry of its own here
- * while everything else about the configuration stays real.
+ *
+ * `override` gives one rule other options, for a rule whose behaviour depends
+ * on them (A3c's authority tables, whose registry is empty until slice B1).
+ * **It carries its own `files`, and must:** a rule written into a block that
+ * matches everything applies everywhere, which would switch the rule back on
+ * for the very paths the real configuration turns it off for, and a proof of
+ * an exemption would then pass while proving nothing. Name the folders the
+ * option cases sit in, and every other path is judged by the real
+ * configuration alone.
  */
 export function proveLintRules(
   rejected: readonly LintCase[],
   allowed: readonly LintCase[],
-  rules: Linter.RulesRecord = {},
+  override?: { readonly files: readonly string[]; readonly rules: Linter.RulesRecord },
 ): void {
   const eslint = new ESLint({
     // The snippets are not on disk, so the TypeScript project service opens them
     // in a default project built from the root tsconfig.json.
-    overrideConfig: {
-      files: ['**/*.{ts,tsx}'],
-      languageOptions: {
-        parserOptions: {
-          projectService: {
-            allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING, AUDIT].flatMap((folder) => [
-              `${folder}/*.ts`,
-              `${folder}/*.tsx`,
-            ]),
-            defaultProject: 'tsconfig.json',
-            // The limit guards editor performance; here every snippet uses the default project.
-            maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 100,
+    overrideConfig: [
+      {
+        files: ['**/*.{ts,tsx}'],
+        languageOptions: {
+          parserOptions: {
+            projectService: {
+              allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING, AUDIT].flatMap(
+                (folder) => [`${folder}/*.ts`, `${folder}/*.tsx`],
+              ),
+              defaultProject: 'tsconfig.json',
+              // The limit guards editor performance; here every snippet uses the default project.
+              maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 100,
+            },
           },
         },
       },
-      rules,
-    },
+      // Last, so the options win for these folders and nowhere else.
+      ...(override === undefined
+        ? []
+        : [{ files: override.files.map((folder) => `${folder}/*.{ts,tsx}`), rules: override.rules }]),
+    ],
   });
 
   const results = new Map<string, Linter.LintMessage[]>();
