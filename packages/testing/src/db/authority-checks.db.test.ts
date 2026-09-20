@@ -216,6 +216,25 @@ describe('A3c the registry itself', () => {
       "t.agents: the agent machine allows ACTIVE>LAPSED, which names a state it doesn't have",
     ]);
   });
+
+  it('fails a state not written in capitals, which defineStateMachine would never give', async () => {
+    // A state no move names, so this pins the way it is written and nothing else.
+    const lowered: AuthorityMachine = { ...MACHINE, states: [...MACHINE.states, 'lapsed'] };
+    expect(await listProblems([{ ...AGENTS, status: lowered }])).toEqual([
+      "t.agents: the agent machine's state lapsed must be words in capitals joined by _",
+    ]);
+  });
+
+  it('fails a status field declared as anything but text', async () => {
+    const asUuid: AuthorityTable = {
+      ...AGENTS,
+      fields: [
+        { column: 'status', type: 'uuid' },
+        { column: 'expires_at', type: 'timestamptz' },
+      ],
+    };
+    expect(await listProblems([asUuid])).toEqual(['t.agents: the status field is read as uuid; a status is text']);
+  });
 });
 
 describe('A3c each rule fails on a broken fixture', () => {
@@ -367,6 +386,17 @@ describe('A3c each rule fails on a broken fixture', () => {
         `t.agents: the unique key ${key} covers ${columns}; moving the pointer would then be a key update, which the row's FOR NO KEY UPDATE lock can't hold (ADR-006 §6)`;
       expect(await problemsAfter(pointer)).toEqual([covers('agents_by_event', 'state_event_id')]);
       expect(await problemsAfter(version)).toEqual([covers('agents_by_version', 'state_version')]);
+    });
+
+    it('fails an exclusion constraint over a signed-state column, and says which kind of key it is', async () => {
+      const statements = [
+        ...SOUND,
+        'create extension if not exists btree_gist',
+        'alter table t.agents add constraint agents_one_event exclude using gist (state_event_id with =)',
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        "t.agents: the exclusion constraint agents_one_event covers state_event_id; moving the pointer would then be a key update, which the row's FOR NO KEY UPDATE lock can't hold (ADR-006 §6)",
+      ]);
     });
 
     it('fails a key built on expressions, which this check cannot read', async () => {
