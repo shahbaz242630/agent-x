@@ -10,7 +10,7 @@
 // its own change with its own proofs, not a passenger on A3c-2.
 
 /** Stands for a value spliced into a string, so no two pieces read as one word. */
-export const VALUE = '\u0000';
+const VALUE = '\u0000';
 
 /** The text of a literal or a template with no values in it, or null for anything else. */
 export function textOf(node) {
