@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@agentx/platform": "workspace:*",
-    "kysely": "0.29.5",
+    "kysely": "0.29.6",
     "uuid": "14.0.2"
   },
   "devDependencies": {

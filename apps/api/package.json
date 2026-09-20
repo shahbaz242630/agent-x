@@ -6,10 +6,10 @@
   "dependencies": {
     "@agentx/core": "workspace:*",
     "@agentx/platform": "workspace:*",
-    "@fastify/proxy-addr": "5.1.0",
+    "@fastify/proxy-addr": "5.1.1",
     "@fastify/rate-limit": "11.2.0",
-    "fastify": "5.12.4",
-    "zod": "4.6.2"
+    "fastify": "5.12.5",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@agentx/testing": "workspace:*"
