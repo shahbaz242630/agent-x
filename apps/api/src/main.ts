@@ -255,7 +255,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const anchorCheck = scheduleAnchorCheck(
     {
       async run(signal?: AbortSignal): Promise<void> {
-        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger });
+        // Within its own deadline and ending at once when the API stops, so a
+        // database that accepts a read and never answers cannot hold the
+        // schedule open and silence every later check.
+        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal });
         if (signal?.aborted === true) return;
         await anchors.run(signal);
       },

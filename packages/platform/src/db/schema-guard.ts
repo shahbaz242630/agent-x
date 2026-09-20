@@ -46,6 +46,35 @@ const STATUS_GUARD = 'status_guard';
 const STATUS_GUARD_FUNCTION = 'state_rules.guard_status';
 
 /**
+ * When the status guard must fire: BEFORE INSERT OR UPDATE, FOR EACH ROW.
+ * Postgres's `tgtype` bits are ROW 1, BEFORE 2, INSERT 4, DELETE 8, UPDATE 16,
+ * so 1 + 2 + 4 + 16 = 23.
+ *
+ * **The name and the function are not enough.** The owner can drop the guard
+ * and put back one called `status_guard`, calling the same `guard_status`, but
+ * BEFORE INSERT only — and every *move* between statuses then goes unchecked,
+ * along with the key columns the guard holds still. Found by the A3e-1b review.
+ */
+const STATUS_GUARD_TYPE = 23;
+
+/** What 0004 pins on the guard function, so no name inside it resolves anywhere else. */
+const PINNED_FUNCTION_CONFIG = 'search_path=pg_catalog';
+
+/**
+ * The SHA-256 of `state_rules.guard_status`'s body, as 0004_state_rules.sql
+ * wrote it. The owner can CREATE OR REPLACE the function without touching a
+ * single table, and nothing else here would see it; comparing the hash covers
+ * the whole body without this file carrying a copy. schema-guard.db.test.ts
+ * proves this is the body on a freshly migrated database, so a change to 0004
+ * fails there rather than on staging.
+ */
+const STATUS_GUARD_BODY = '52692e2d94ac490ceb626cc10024e4bb75fff4484ebd80fdf518cd34405cf246';
+
+/** The arguments it must carry: the first status, then one FROM>TO for each move the machine allows. */
+const STATUS_GUARD_ARGUMENTS =
+  /^CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON \S+ FOR EACH ROW EXECUTE FUNCTION state_rules\.guard_status\('[^']+'(?:, '[^']+>[^']+')*\)$/;
+
+/**
  * The rights the app role may hold on a table in an append-only schema, and on
  * one of the listed exceptions. Decoded privilege by privilege rather than
  * compared as a printed access list: Postgres 18 prints a MAINTAIN privilege
@@ -68,6 +97,13 @@ const TABLE_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFER
 
 /** The first version that knows MAINTAIN (17.0), as `server_version_num` counts. */
 const MAINTAIN_FROM = 170_000;
+
+/**
+ * The privileges Postgres lets you grant on single columns. A column grant is
+ * invisible to has_table_privilege — GRANT UPDATE (details) ON audit.events
+ * leaves the table-level answer false — so these are asked a second way.
+ */
+const COLUMN_RIGHTS = new Set(['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']);
 
 /**
  * The server's version number, read as text and turned into a number here
@@ -99,6 +135,8 @@ export type SchemaProblem = string;
 
 interface RelationRow {
   readonly name: string;
+  /** Unquoted, straight from the catalogue: re-parsing it out of `name` would break on a name needing quotes. */
+  readonly schema: string;
   readonly kind: string;
   readonly rls: boolean;
   readonly forced: boolean;
@@ -127,6 +165,18 @@ interface TriggerRow {
   readonly name: string;
   readonly function: string;
   readonly enabled: string;
+  /** Postgres's bitmask of when the trigger fires. */
+  readonly type: number;
+  /** The whole CREATE TRIGGER, which carries the arguments the guard is given. */
+  readonly definition: string;
+}
+
+interface FunctionRow {
+  readonly name: string;
+  readonly definer: boolean;
+  readonly owner: string;
+  readonly config: string | null;
+  readonly body: string;
 }
 
 interface RuleRow {
@@ -195,12 +245,20 @@ const QUALIFIED = sql`pg_catalog.format('%I.%I', n.nspname, c.relname)`;
 async function relations<Schema>(db: Kysely<Schema>): Promise<RelationRow[]> {
   const { rows } = await sql<RelationRow>`
     select ${QUALIFIED} as name,
+           n.nspname as schema,
            c.relkind as kind,
            c.relrowsecurity as rls,
            c.relforcerowsecurity as forced,
            pg_catalog.pg_get_userbyid(c.relowner) as owner,
            c.relkind = 'p' as partitioned,
-           (c.relhassubclass or exists (select 1 from pg_catalog.pg_inherits i where i.inhrelid = c.oid)) as inherits
+           -- relhassubclass is true if the table has, or once had, a child and
+           -- never clears: the same stickiness this file avoids for
+           -- relhasrules. Left in, a table that once had a partition attached
+           -- and detached would refuse every start for ever, with nothing the
+           -- app could do about it. pg_inherits is the accurate question.
+           exists (
+             select 1 from pg_catalog.pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid
+           ) as inherits
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     where ${OURS} and ${ROW_KINDS}
@@ -247,7 +305,9 @@ async function triggers<Schema>(db: Kysely<Schema>): Promise<TriggerRow[]> {
     select ${QUALIFIED} as table,
            t.tgname as name,
            pg_catalog.format('%I.%I', fn.nspname, f.proname) as function,
-           t.tgenabled as enabled
+           t.tgenabled as enabled,
+           t.tgtype as type,
+           pg_catalog.pg_get_triggerdef(t.oid) as definition
     from pg_catalog.pg_trigger t
     join pg_catalog.pg_class c on c.oid = t.tgrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -281,6 +341,34 @@ async function rules<Schema>(db: Kysely<Schema>): Promise<RuleRow[]> {
   return [...rows];
 }
 
+/**
+ * Every function in our schemas, and what would let one act for someone else.
+ *
+ * Today that is 0004's status guard alone. The owner can rewrite any of them
+ * with CREATE OR REPLACE, or mark one SECURITY DEFINER so it runs with the
+ * owner's rights rather than the caller's, or unpin its search_path so a name
+ * inside it resolves somewhere else — none of which touches a table, and none
+ * of which the rest of this file would see. CI-06 forbids SECURITY DEFINER at
+ * migration time; this is the same rule on the running database.
+ *
+ * The body is compared by its hash, so the whole of it is covered without this
+ * file carrying a copy of it.
+ */
+async function functions<Schema>(db: Kysely<Schema>): Promise<FunctionRow[]> {
+  const { rows } = await sql<FunctionRow>`
+    select pg_catalog.format('%I.%I', n.nspname, p.proname) as name,
+           p.prosecdef as definer,
+           pg_catalog.pg_get_userbyid(p.proowner) as owner,
+           pg_catalog.array_to_string(p.proconfig, ',') as config,
+           pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc, 'UTF8')), 'hex') as body
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where ${OURS}
+    order by 1
+  `.execute(db);
+  return [...rows];
+}
+
 /** Every index on our tables, and what would stop it holding a tenant wall up. */
 async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
   const { rows } = await sql<IndexRow>`
@@ -289,9 +377,13 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
            i.indisunique as is_unique,
            i.indisvalid as is_valid,
            i.indpred is not null as partial,
+           -- Key columns only: indkey also holds an INCLUDE payload, and a
+           -- payload column separates nothing. A unique index on (id) that
+           -- merely INCLUDEs org_id still makes id unique across every
+           -- organisation. pg_get_indexdef answers per key column, 1-based.
            exists (
-             select 1 from pg_catalog.pg_attribute a
-             where a.attrelid = c.oid and a.attnum = any(i.indkey) and a.attname = 'org_id'
+             select 1 from pg_catalog.generate_series(1, i.indnkeyatts) as k(n)
+             where pg_catalog.pg_get_indexdef(i.indexrelid, k.n, true) = 'org_id'
            ) as covers_org
     from pg_catalog.pg_index i
     join pg_catalog.pg_class c on c.oid = i.indrelid
@@ -310,6 +402,12 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * what the app can do, not how it came to be able to. The role and the list of
  * privileges are bound values, never written into the text.
  *
+ * **A column grant is a second question.** `GRANT UPDATE (details) ON
+ * audit.events TO agentx_app` leaves the table-level answer false while the app
+ * can still rewrite that column, so the privileges Postgres allows per column
+ * are asked again through has_any_column_privilege and the two are unioned.
+ * Found by the A3e-1b review.
+ *
  * The two `::text` here are the only ones left in this file, and they are not
  * casts in the sense that matters: they give a type to a bound parameter that
  * arrives untyped, which is an input coercion and never looks in `pg_cast`.
@@ -319,6 +417,7 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  */
 async function grants<Schema>(db: Kysely<Schema>, appRole: string): Promise<GrantRow[]> {
   const known = await rightsThisServerKnows(db);
+  const columnWise = known.filter((right) => COLUMN_RIGHTS.has(right));
   const { rows } = await sql<GrantRow>`
     select ${QUALIFIED} as table, r.privilege
     from pg_catalog.pg_class c
@@ -326,6 +425,13 @@ async function grants<Schema>(db: Kysely<Schema>, appRole: string): Promise<Gran
     cross join (select pg_catalog.unnest(${sql.val(known)}::text[]) as privilege) r
     where ${OURS} and ${ROW_KINDS}
       and pg_catalog.has_table_privilege(${appRole}::text, c.oid, r.privilege)
+    union
+    select ${QUALIFIED} as table, r.privilege
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    cross join (select pg_catalog.unnest(${sql.val(columnWise)}::text[]) as privilege) r
+    where ${OURS} and ${ROW_KINDS}
+      and pg_catalog.has_any_column_privilege(${appRole}::text, c.oid, r.privilege)
     order by 1, 2
   `.execute(db);
   return [...rows];
@@ -347,6 +453,15 @@ async function publicGrants<Schema>(db: Kysely<Schema>): Promise<PublicGrantRow[
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     cross join pg_catalog.aclexplode(c.relacl) as acl
+    where ${OURS} and ${ROW_KINDS} and acl.grantee = 0
+    union
+    -- Column grants live on the column, not the table, so relacl alone would
+    -- miss GRANT SELECT (details) ON audit.events TO PUBLIC entirely.
+    select ${QUALIFIED} as table, acl.privilege_type as privilege
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    join pg_catalog.pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+    cross join pg_catalog.aclexplode(a.attacl) as acl
     where ${OURS} and ${ROW_KINDS} and acl.grantee = 0
     order by 1, 2
   `.execute(db);
@@ -431,6 +546,7 @@ export async function liveSchemaProblems<Schema>(
     allSchemas,
     allPolicies,
     allTriggers,
+    allFunctions,
     allRules,
     allIndexes,
     allGrants,
@@ -443,6 +559,7 @@ export async function liveSchemaProblems<Schema>(
     schemas(db),
     policies(db),
     triggers(db),
+    functions(db),
     rules(db),
     indexes(db),
     grants(db, appRole),
@@ -521,6 +638,19 @@ export async function liveSchemaProblems<Schema>(
   );
   if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
 
+  // Functions: the status guard is the only one our schemas hold, and it must
+  // still be the function 0004 wrote, running with its caller's rights and
+  // looking names up where 0004 pinned them.
+  for (const fn of allFunctions) {
+    if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
+    if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
+    if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
+    if (fn.name === STATUS_GUARD_FUNCTION && fn.body !== STATUS_GUARD_BODY) {
+      problems.push(`${fn.name} is not the function the migration wrote`);
+    }
+    if (fn.name !== STATUS_GUARD_FUNCTION) problems.push(`${fn.name} is a function our schemas should not hold`);
+  }
+
   // A rewrite rule can turn any statement into a different one, silently.
   for (const rule of allRules) {
     problems.push(`${rule.table} carries the rewrite rule ${quoted(rule.name)}`);
@@ -536,6 +666,14 @@ export async function liveSchemaProblems<Schema>(
       problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
       continue;
     }
+    // A guard that fires on fewer events than 0004 installs leaves the moves it
+    // no longer sees unchecked, while still passing on its name.
+    if (trigger.type !== STATUS_GUARD_TYPE) problems.push(`${trigger.table}'s ${STATUS_GUARD} fires at other times`);
+    else if (!STATUS_GUARD_ARGUMENTS.test(trigger.definition)) {
+      problems.push(`${trigger.table}'s ${STATUS_GUARD} is given other arguments`);
+    }
+    // Postgres keeps a switched-off trigger's row and stops running it, which
+    // is tampering that leaves no trace in the table itself.
     if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
   }
 
@@ -561,9 +699,12 @@ export async function liveSchemaProblems<Schema>(
     held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
   for (const relation of allRelations) {
-    const schema = relation.name.split('.', 1)[0] ?? '';
     const allowed = new Set<string>(
-      appendOnly.has(schema) ? (exceptions.has(relation.name) ? EXCEPTION_RIGHTS : APPEND_ONLY_RIGHTS) : TABLE_RIGHTS,
+      appendOnly.has(relation.schema)
+        ? exceptions.has(relation.name)
+          ? EXCEPTION_RIGHTS
+          : APPEND_ONLY_RIGHTS
+        : TABLE_RIGHTS,
     );
     for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);

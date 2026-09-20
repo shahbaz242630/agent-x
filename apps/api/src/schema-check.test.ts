@@ -97,6 +97,42 @@ describe('on a scheduled run', () => {
   });
 });
 
+describe('the deadline', () => {
+  it('ends a read that never answers, rather than leaving the run pending for ever', async () => {
+    // Without this, a database that accepts the read and stalls would hold the
+    // scheduled run open: the schedule would never re-arm, the chain checks
+    // after it would never run, and no alarm would ever be raised. Found by
+    // the A3e-1b review.
+    guard.result = (): Promise<string[]> => new Promise(() => undefined);
+    const log = logger();
+    await expect(checkSchemaOnSchedule({ ...options(log), deadlineMs: 20 })).resolves.toBeUndefined();
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines()[0]).toMatchObject({ check: 'schema', reason: 'unreadable' });
+  });
+
+  it('refuses the start when the read does not finish in time', async () => {
+    guard.result = (): Promise<string[]> => new Promise(() => undefined);
+    const log = logger();
+    expect(await schemaSoundAtStart({ ...options(log), deadlineMs: 20 })).toBe(false);
+  });
+
+  it('ends at once when the API is stopping, without waiting for the deadline', async () => {
+    guard.result = (): Promise<string[]> => new Promise(() => undefined);
+    const log = logger();
+    const stopping = new AbortController();
+    stopping.abort();
+    const started = Date.now();
+    await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000, signal: stopping.signal });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('lets a read that answers in time through untouched', async () => {
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000 });
+    expect(log.capture.lines()).toEqual([]);
+  });
+});
+
 describe('the owner role it compares against', () => {
   it('is the one db/bootstrap/roles.sql creates', () => {
     // Proven against the SQL itself in tooling/checks/database-roles.test.ts.

@@ -31,6 +31,50 @@ export interface SchemaCheckOptions<Schema = unknown> {
   /** The role the app connects as, from its own settings, so its real rights are the ones checked. */
   readonly appRole: string;
   readonly logger: Logger;
+  /**
+   * How long the whole read may take. Postgres's own limits can be got round by
+   * someone who owns the database, and a connection can accept a query and
+   * never answer, so the app keeps its own — as the anchor check does.
+   */
+  readonly deadlineMs?: number | undefined;
+  /** Ends the check at once when the API is stopping. */
+  readonly signal?: AbortSignal | undefined;
+}
+
+/**
+ * The default deadline. These are a dozen reads of system catalogues; a server
+ * that cannot answer them in this long is not one we can vouch for.
+ */
+const SCHEMA_CHECK_DEADLINE_MS = 10_000;
+
+/**
+ * The work, or a rejection once the deadline passes or the run is stopped,
+ * whichever comes first.
+ *
+ * A signal that has **already** aborted is checked before anything is waited
+ * on: `addEventListener('abort', …)` never fires on one that aborted earlier,
+ * so a stop that arrived first would otherwise be missed and the check would
+ * sit out its whole deadline while the API was trying to shut down.
+ */
+async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: AbortSignal | undefined): Promise<T> {
+  if (signal?.aborted === true) throw new Error('the schema check was stopped');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stop: (() => void) | undefined;
+  const cut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`the schema check did not finish within ${String(deadlineMs)} ms`));
+    }, deadlineMs);
+    stop = () => {
+      reject(new Error('the schema check was stopped'));
+    };
+    signal?.addEventListener('abort', stop, { once: true });
+  });
+  try {
+    return await Promise.race([work, cut]);
+  } finally {
+    clearTimeout(timer);
+    if (stop !== undefined) signal?.removeEventListener('abort', stop);
+  }
 }
 
 /** What the check found: the problems, or the reason it couldn't run. */
@@ -40,13 +84,29 @@ type SchemaCheckOutcome =
   | { readonly kind: 'unreadable'; readonly error: unknown };
 
 /**
- * Reads the live catalogue once. It never throws: a database that refuses the
- * read is an outcome of its own, because losing the right to read the catalogue
- * is itself a change worth knowing about.
+ * Reads the live catalogue once, within its deadline. It never throws: a
+ * database that refuses the read, or will not answer it, is an outcome of its
+ * own — losing the right to read the catalogue, or the ability to, is itself a
+ * change worth knowing about.
+ *
+ * **The deadline is the point, not a nicety.** Without it, a database that
+ * accepts a connection and never answers would leave the scheduled run pending
+ * for ever: the schedule would never re-arm, the chain checks after it would
+ * never run, and no alarm would ever be raised — the very way of stopping the
+ * check that anchor-check.ts's own deadline exists to defeat. Found by the
+ * A3e-1b review.
  */
-async function checkSchema<Schema>({ database, appRole }: SchemaCheckOptions<Schema>): Promise<SchemaCheckOutcome> {
+async function checkSchema<Schema>({
+  database,
+  appRole,
+  deadlineMs = SCHEMA_CHECK_DEADLINE_MS,
+  signal,
+}: SchemaCheckOptions<Schema>): Promise<SchemaCheckOutcome> {
   try {
-    const problems = await liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE });
+    const reading = Promise.resolve().then(() => liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE }));
+    // Handled here too, so a read that finishes after its deadline never goes unhandled.
+    void reading.catch(() => undefined);
+    const problems = await withinDeadline(reading, deadlineMs, signal);
     return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
   } catch (error) {
     return { kind: 'unreadable', error };
