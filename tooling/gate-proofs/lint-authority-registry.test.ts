@@ -33,7 +33,6 @@ const REJECTED: LintCase[] = [
     code: query("export const rows = db.selectFrom('agents.agents');\n"),
     rule: RULE,
     says: 'agents.agents is an authority table, and this is a query on it',
-    withOptions: true,
   },
   {
     name: "the same query written with Kysely's alias form",
@@ -41,7 +40,50 @@ const REJECTED: LintCase[] = [
     code: query("export const rows = db.selectFrom('agents.agents as a');\n"),
     rule: RULE,
     says: 'agents.agents is an authority table',
-    withOptions: true,
+  },
+  {
+    name: 'a query whose table is written as a constant',
+    filePath: `${CORE}/as-const-query.ts`,
+    code: query("export const rows = db.selectFrom('agents.agents' as const);\n"),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "a query given a list of tables, Kysely's array form",
+    filePath: `${CORE}/array-query.ts`,
+    code:
+      'declare const db: { selectFrom: (tables: readonly string[]) => unknown };\n\n' +
+      "export const rows = db.selectFrom(['agents.agents as a', 'audit.events']);\n",
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'a lateral join, a shape nobody listed by hand',
+    filePath: `${CORE}/lateral-join.ts`,
+    code:
+      'declare const db: { innerJoinLateral: (table: string, left: string, right: string) => unknown };\n\n' +
+      "export const rows = db.innerJoinLateral('agents.agents', 'a', 'b');\n",
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'a schema change on an authority table',
+    filePath: `${CORE}/schema-change.ts`,
+    code:
+      'declare const schema: { dropTable: (table: string) => unknown };\n\n' +
+      "export const gone = schema.dropTable('agents.agents');\n",
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'SQL text held in a constant and sent later',
+    filePath: `${CORE}/const-sql.ts`,
+    code:
+      'declare const db: { executeSql: (text: string) => unknown };\n\n' +
+      "const SQL = 'select status from agents.agents where id = 1';\n\n" +
+      'export const rows = db.executeSql(SQL);\n',
+    rule: RULE,
+    says: 'agents.agents is an authority table',
   },
   {
     name: 'a join on an authority table',
@@ -51,7 +93,6 @@ const REJECTED: LintCase[] = [
       "export const rows = db.innerJoin('orgs.organisations', 'a.org_id', 'o.id');\n",
     rule: RULE,
     says: 'orgs.organisations is an authority table',
-    withOptions: true,
   },
   {
     name: 'the name built with a plus inside a query',
@@ -59,7 +100,6 @@ const REJECTED: LintCase[] = [
     code: query("export const rows = db.selectFrom('agents.' + 'agents');\n"),
     rule: RULE,
     says: 'agents.agents is an authority table',
-    withOptions: true,
   },
   {
     name: 'the name in SQL text on the sql tag',
@@ -69,7 +109,6 @@ const REJECTED: LintCase[] = [
       'export const rows = sql`select status from agents.agents where id = 1`;\n',
     rule: RULE,
     says: 'agents.agents is an authority table',
-    withOptions: true,
   },
   {
     name: 'a file that declares a table, querying it anyway',
@@ -77,7 +116,6 @@ const REJECTED: LintCase[] = [
     code: `${describes('agents.agents', 'agent')}\n${query("export const rows = db.selectFrom('agents.agents');\n")}`,
     rule: RULE,
     says: 'agents.agents is an authority table',
-    withOptions: true,
   },
   {
     name: 'a query nested inside the description itself',
@@ -90,7 +128,6 @@ const REJECTED: LintCase[] = [
       "  rows: db.selectFrom('agents.agents'),\n};\n",
     rule: RULE,
     says: 'agents.agents is an authority table',
-    withOptions: true,
   },
   {
     name: "an event of its own against an authority object's subject",
@@ -98,7 +135,6 @@ const REJECTED: LintCase[] = [
     code: "export const event = { actor: { type: 'user', id: '1' }, subject: { type: 'agent', id: '2' }, action: 'x' };\n",
     rule: RULE,
     says: "is an authority table's subject type",
-    withOptions: true,
   },
   {
     name: 'the same subject type written as a constant',
@@ -106,7 +142,6 @@ const REJECTED: LintCase[] = [
     code: "export const event = { subject: { type: 'agent' as const, id: '2' }, action: 'x' };\n",
     rule: RULE,
     says: "is an authority table's subject type",
-    withOptions: true,
   },
   {
     name: 'a table declared off the registry',
@@ -114,7 +149,6 @@ const REJECTED: LintCase[] = [
     code: describes(MADE_UP, 'made_up'),
     rule: RULE,
     says: 'is not on the registry',
-    withOptions: true,
   },
   {
     name: 'the same, wrapped in as const satisfies',
@@ -124,7 +158,6 @@ const REJECTED: LintCase[] = [
       `export const TABLE = { table: '${MADE_UP}', subject: 'made_up', fields: [] } as const satisfies SignedStateTable;\n`,
     rule: RULE,
     says: 'is not on the registry',
-    withOptions: true,
   },
   {
     name: 'the same, in a readonly array of descriptions',
@@ -134,7 +167,6 @@ const REJECTED: LintCase[] = [
       `export const TABLES: readonly SignedStateTable[] = [{ table: '${MADE_UP}', subject: 'made_up', fields: [] }];\n`,
     rule: RULE,
     says: 'is not on the registry',
-    withOptions: true,
   },
   {
     name: 'the same, with the type named through a namespace',
@@ -144,7 +176,6 @@ const REJECTED: LintCase[] = [
       `export const TABLE: platform.SignedStateTable = { table: '${MADE_UP}', subject: 'made_up', fields: [] };\n`,
     rule: RULE,
     says: 'is not on the registry',
-    withOptions: true,
   },
   {
     name: 'the same, given back by a function',
@@ -154,7 +185,55 @@ const REJECTED: LintCase[] = [
       `export const describe = (): SignedStateTable => ({ table: '${MADE_UP}', subject: 'made_up', fields: [] });\n`,
     rule: RULE,
     says: 'is not on the registry',
-    withOptions: true,
+  },
+  {
+    name: 'a description typed as the table or nothing',
+    filePath: `${CORE}/off-the-registry-union.ts`,
+    code:
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+      `export const TABLE: SignedStateTable | undefined = { table: '${MADE_UP}', subject: 'made_up', fields: [] };\n`,
+    rule: RULE,
+    says: 'is not on the registry',
+  },
+  {
+    name: 'a description declared off the registry with an angle-bracket assertion',
+    filePath: `${CORE}/asserted-table.ts`,
+    code:
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+      `export const TABLE = <SignedStateTable>{ table: '${MADE_UP}', subject: 'made_up', fields: [] };\n`,
+    rule: RULE,
+    says: 'is not on the registry',
+  },
+  {
+    name: 'a description declared off the registry as a class property',
+    filePath: `${CORE}/class-table.ts`,
+    code:
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+      'export class Module {\n' +
+      `  static readonly TABLE: SignedStateTable = { table: '${MADE_UP}', subject: 'made_up', fields: [] };\n` +
+      '}\n',
+    rule: RULE,
+    says: 'is not on the registry',
+  },
+  {
+    name: 'a description annotated and satisfied at once, reported once',
+    filePath: `${CORE}/twice-typed.ts`,
+    code:
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+      `export const TABLE: SignedStateTable = { table: '${MADE_UP}', subject: 'made_up', fields: [] } satisfies SignedStateTable;\n`,
+    rule: RULE,
+    says: 'is not on the registry',
+    once: true,
+  },
+  {
+    name: 'a description whose subject is named through a constant',
+    filePath: `${CORE}/subject-through-a-constant.ts`,
+    code:
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+      "const RECORDED = 'agent';\n" +
+      "export const TABLE: SignedStateTable = { table: 'agents.agents', subject: RECORDED, fields: [] };\n",
+    rule: RULE,
+    says: "write this table's name here as a string",
   },
   {
     name: 'a description whose table is named through a constant',
@@ -165,7 +244,6 @@ const REJECTED: LintCase[] = [
       'export const TABLE: SignedStateTable = { table: NAME, subject: '.concat("'made_up', fields: [] };\n"),
     rule: RULE,
     says: "write this table's name here as a string",
-    withOptions: true,
   },
   {
     name: 'a description that records its rows as something the registry does not say',
@@ -173,18 +251,6 @@ const REJECTED: LintCase[] = [
     code: describes('agents.agents', 'agent_row'),
     rule: RULE,
     says: 'this table records its rows as agent_row, but the registry',
-    withOptions: true,
-  },
-  {
-    name: 'a description read through a local type of the same name',
-    filePath: `${CORE}/local-type.ts`,
-    code:
-      'type SignedStateTable = { readonly table: string; readonly subject: string };\n\n' +
-      `export const TABLE: SignedStateTable = { table: '${MADE_UP}', subject: 'made_up' };\n` +
-      query("export const rows = db.selectFrom('agents.agents');\n"),
-    rule: RULE,
-    says: 'agents.agents is an authority table',
-    withOptions: true,
   },
 ];
 
@@ -194,7 +260,6 @@ const ALLOWED: LintCase[] = [
     filePath: `${CORE}/declares-its-own.ts`,
     code: describes('agents.agents', 'agent'),
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'the same description written with satisfies, and its import below it',
@@ -207,7 +272,6 @@ const ALLOWED: LintCase[] = [
       '} satisfies SignedStateTable;\n\n' +
       "import type { SignedStateTable } from '@agentx/platform/db';\n",
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'a description as an intersection with its status table',
@@ -218,7 +282,6 @@ const ALLOWED: LintCase[] = [
       'export const TABLE: SignedStateTable & StatusTable = {\n' +
       "  table: 'agents.agents',\n  subject: 'agent',\n  fields: [],\n  rules: { name: 'agent' },\n};\n",
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'a Kysely schema interface, which keys its tables by name',
@@ -229,7 +292,6 @@ const ALLOWED: LintCase[] = [
       "  'orgs.organisations': { org_id: string; status: string };\n" +
       '}\n',
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'a table name in a type and in a message someone will read',
@@ -239,7 +301,6 @@ const ALLOWED: LintCase[] = [
       'declare const log: (line: string) => void;\n\n' +
       "export const complain = (): void => {\n  log('could not read agents.agents');\n};\n",
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'a subject type as a union member, an actor and a switch case',
@@ -254,7 +315,6 @@ const ALLOWED: LintCase[] = [
       '  }\n' +
       '};\n',
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'a longer name that merely starts with an authority table’s',
@@ -263,20 +323,31 @@ const ALLOWED: LintCase[] = [
       "export const archive = db.selectFrom('agents.agents_old');\nexport const other = db.selectFrom('my_agents.agents');\n",
     ),
     rule: RULE,
-    withOptions: true,
+  },
+  {
+    name: 'a local type of the same name, which declares nothing',
+    // Nothing else in the snippet: if a local type counted as a declaration
+    // the table would be judged against the registry and reported, so silence
+    // here is the proof.
+    filePath: `${CORE}/local-type.ts`,
+    code:
+      'type SignedStateTable = { readonly table: string; readonly subject: string };\n\n' +
+      `export const TABLE: SignedStateTable = { table: '${MADE_UP}', subject: 'made_up' };\n`,
+    rule: RULE,
   },
   {
     name: 'a query on a table of no authority',
     filePath: `${CORE}/other-names.ts`,
     code: query("export const rows = db.selectFrom('audit.events');\n"),
     rule: RULE,
-    withOptions: true,
   },
   {
     name: 'the test harness, which the real configuration exempts',
-    // No options here: this case is judged by the real configuration, which is
-    // what makes it a proof of the exemption rather than of the override.
+    // Judged by the real configuration alone. With the real registry empty the
+    // rule would say nothing here anyway, so the case is thin until slice B1
+    // fills it -- kept because that is the moment it starts to mean something.
     filePath: `${TESTING}/harness-fixture.ts`,
+    realConfig: true,
     code: query("export const rows = db.selectFrom('agents.agents');\n"),
     rule: RULE,
   },

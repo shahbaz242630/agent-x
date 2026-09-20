@@ -91,6 +91,7 @@ const REJECTED: LintCase[] = [
     code: "export { readSignedRow } from '@agentx/platform/db';\n",
     rule: STEPS_RULE,
     says: 'readSignedRow',
+    once: true,
   },
   {
     name: 'a signed-row step passed on under another name',
@@ -138,9 +139,12 @@ const ALLOWED: LintCase[] = [
   {
     name: "the platform's own database module, where the steps are written",
     filePath: `${PLATFORM_DB}/writes-the-steps.ts`,
+    // Something the rule bites on elsewhere: a plain declaration would pass
+    // with the rule fully switched on, and prove nothing about the exemption.
     code: [
-      'export const writeSignedRow = (row: string): string => row;',
-      'export const readSignedRow = (row: string): string => row;',
+      'declare const inner: { writeSignedRow: (row: string) => string };',
+      '',
+      'export const writeSignedRow = (row: string): string => inner.writeSignedRow(row);',
       '',
     ].join('\n'),
     rule: STEPS_RULE,

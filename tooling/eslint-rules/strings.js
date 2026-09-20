@@ -13,23 +13,70 @@
 const VALUE = '\u0000';
 
 /**
+ * A TypeScript wrapper around a value: `as`, `satisfies`, `!`, an explicit
+ * type argument list, or an angle-bracket assertion. One list, read by both
+ * directions below, so a rule can't know about a wrapper going down and not
+ * coming back up.
+ */
+const isWrapper = (node) =>
+  node !== undefined &&
+  node !== null &&
+  (node.type === 'TSAsExpression' ||
+    node.type === 'TSSatisfiesExpression' ||
+    node.type === 'TSNonNullExpression' ||
+    node.type === 'TSInstantiationExpression' ||
+    node.type === 'TSTypeAssertion');
+
+/**
  * A value with its TypeScript wrappers taken off, so `'agent' as const` and
  * `('x' satisfies string)` read as the string they are. A rule that stopped at
  * the wrapper would miss the spelling a strict codebase actually uses.
  */
 export function withoutWrappers(node) {
   let current = node;
-  while (
-    current !== undefined &&
-    current !== null &&
-    (current.type === 'TSAsExpression' ||
-      current.type === 'TSSatisfiesExpression' ||
-      current.type === 'TSNonNullExpression' ||
-      current.type === 'TSInstantiationExpression')
-  ) {
-    current = current.expression;
-  }
+  while (isWrapper(current)) current = current.expression;
   return current;
+}
+
+/**
+ * The node this one sits inside once its wrappers are climbed: the other way
+ * round, for a rule asking what a string is being *used as*.
+ */
+export function outermost(node) {
+  let current = node;
+  while (isWrapper(current.parent) && current.parent.expression === current) current = current.parent;
+  return current;
+}
+
+/** True for Kysely's `sql` tag, written `sql` or `something.sql`. */
+export function isSqlTag(tag) {
+  if (tag === undefined || tag === null) return false;
+  if (tag.type === 'Identifier') return tag.name === 'sql';
+  return tag.type === 'MemberExpression' && !tag.computed && tag.property.type === 'Identifier'
+    ? tag.property.name === 'sql'
+    : false;
+}
+
+/**
+ * The fixed text a `const` holds, for a name written once and used in a query
+ * later (`const SQL = '…'; db.executeSql(SQL)`). One level, and only for a
+ * plain single-definition `const`: more than that is a value, not a name
+ * anyone can read off the page. no-string-built-sql.js resolves a const the
+ * same way for the same reason.
+ */
+export function constText(context, identifier) {
+  let scope = context.sourceCode.getScope(identifier);
+  while (scope) {
+    const variable = scope.set.get(identifier.name);
+    if (variable) {
+      const [definition] = variable.defs;
+      const declaration = definition?.parent;
+      const isConst = definition?.type === 'Variable' && declaration?.kind === 'const' && variable.defs.length === 1;
+      return isConst && definition.node.id.type === 'Identifier' ? definition.node.init : null;
+    }
+    scope = scope.upper;
+  }
+  return null;
 }
 
 /** The text of a literal or a template with no values in it, or null for anything else. */
@@ -81,7 +128,3 @@ export function joinedText(node) {
   }
   return VALUE;
 }
-
-/** True for a `+` chain, whose text is judged once, from the top of the chain. */
-export const isConcatenation = (node) =>
-  node !== undefined && node !== null && node.type === 'BinaryExpression' && node.operator === '+';

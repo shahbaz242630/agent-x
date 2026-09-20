@@ -54,16 +54,39 @@
 // mistake, at the moment it is written. It is not the wall. The wall is the
 // signed state itself -- a field changed by anything but `record` fails
 // `verifiedState` and raises the SEV-1 integrity alarm -- and the CI checks on
-// the table. A name assembled at run time is a name no syntax can show, and
-// this rule will not see it. That is why the row, not the code, is what the
-// system actually trusts.
-import { carries, isConcatenation, joinedText, textOf, withoutWrappers } from './strings.js';
+// the table. The row, not the code, is what the system actually trusts.
+//
+// **Where its reach ends** (four review rounds found each of these, and this
+// is the line we stopped at, on purpose):
+// - a query sink nobody listed: the list above is names, and a helper of our
+//   own that takes a table name is not on it;
+// - a name assembled beyond one `const` or one `+` chain: read from config,
+//   built in a loop, or passed in as an argument;
+// - a table reached through a variable holding the module's description, since
+//   the description is what the signed-state calls take anyway;
+// - anything in a file the rule doesn't run on (the exemptions in
+//   eslint.config.js, which are a short and reviewed list).
+// Each of those still meets the signed state: the row's fields must equal its
+// latest signed event, and a change made any other way is denied and raises
+// the alarm. That is the order of the defences, and it is deliberate -- a
+// lint rule that chased every spelling would still not be a wall, and would
+// cost a false failure on the day someone needed to ship.
+import { carries, constText, isSqlTag, joinedText, outermost, textOf, withoutWrappers } from './strings.js';
 
 /** The type a module's table description is declared as, and where it must come from. */
 const DECLARED_AS = 'SignedStateTable';
 const DECLARED_IN = '@agentx/platform/db';
 
-/** Kysely's ways of naming a table, and the ways SQL text is sent. */
+/**
+ * Kysely's ways of naming a table, and the ways SQL text is sent. Any method
+ * whose name ends in `Join` counts as well, so a join shape Kysely adds (the
+ * lateral ones, an apply) is caught without anyone having to remember it.
+ *
+ * **This list is where the rule's reach ends, and it is a list.** A sink
+ * nobody wrote down here -- a wrapper of our own, a helper that takes a table
+ * name -- reaches a row unreported. That is the guard rail's limit, written
+ * out rather than implied.
+ */
 const QUERY_METHODS = new Set([
   'selectFrom',
   'insertInto',
@@ -71,20 +94,28 @@ const QUERY_METHODS = new Set([
   'deleteFrom',
   'replaceInto',
   'mergeInto',
-  'innerJoin',
-  'leftJoin',
-  'rightJoin',
-  'fullJoin',
-  'crossJoin',
   'using',
   'with',
   'withRecursive',
   'table',
+  'createTable',
+  'alterTable',
+  'dropTable',
+  'createIndex',
+  'dropIndex',
   'query',
   'raw',
   'executeSql',
   'unsafe',
 ]);
+
+/**
+ * A name that carries `Join`, or ends in `Apply`, counts too: that is every
+ * join shape Kysely has (`innerJoin`, `innerJoinLateral`, `crossApply`) and
+ * every one it adds. Case matters, so an array's `join` is not a query.
+ */
+const isQueryMethod = (name) =>
+  name !== null && (QUERY_METHODS.has(name) || name.includes('Join') || /Apply$/.test(name));
 
 /** An event's subject: the property whose object's own `type` names the object recorded. */
 const SUBJECT = 'subject';
@@ -99,42 +130,6 @@ function calledName(node) {
     return callee.property.name;
   }
   return null;
-}
-
-/** True when this string is a table given to a query, or sits in SQL text on its way to one. */
-function inAQuery(node) {
-  const parent = node.parent;
-  if (parent === undefined || parent === null) return false;
-  if (parent.type === 'CallExpression' && parent.arguments.includes(node)) {
-    const name = calledName(parent);
-    return name !== null && QUERY_METHODS.has(name);
-  }
-  // The `sql` tag, written `sql` or `something.sql`. The template itself is
-  // the node here, so the tag is its own parent.
-  if (node.type === 'TemplateLiteral' && parent.type === 'TaggedTemplateExpression') {
-    const { tag } = parent;
-    if (tag.type === 'Identifier') return tag.name === 'sql';
-    return tag.type === 'MemberExpression' && !tag.computed && tag.property.type === 'Identifier'
-      ? tag.property.name === 'sql'
-      : false;
-  }
-  return false;
-}
-
-/** The node this one sits inside once its TypeScript wrappers are climbed (`'agent' as const`). */
-function outermost(node) {
-  let current = node;
-  while (
-    current.parent !== undefined &&
-    current.parent !== null &&
-    (current.parent.type === 'TSAsExpression' ||
-      current.parent.type === 'TSSatisfiesExpression' ||
-      current.parent.type === 'TSNonNullExpression') &&
-    current.parent.expression === current
-  ) {
-    current = current.parent;
-  }
-  return current;
 }
 
 /** The property this node is the value of, by name, or null. */
@@ -224,6 +219,15 @@ export default {
     const namespaces = new Set();
     /** Declarations found while reading, judged at the end: an import may be written below what it types. */
     const declarations = [];
+    /** The functions being walked, so a `return` knows whose it is. */
+    const functions = [];
+    /**
+     * Almost no file in the repository names the declaration type, and one
+     * that doesn't can hold no description: the collecting is skipped there.
+     * The query and subject checks still run everywhere, which is the point of
+     * them.
+     */
+    const mayDeclare = context.sourceCode.getText().includes(DECLARED_AS);
 
     /** True if the type node mentions the declaration type, through any wrapper a declaration may use. */
     const mentions = (node) => {
@@ -239,9 +243,12 @@ export default {
         case 'TSTupleType': {
           return node.elementTypes.some((one) => mentions(one));
         }
-        // An intersection still says "this is one"; a union says "it may not be",
-        // which is too weak to hang a declaration on.
-        case 'TSIntersectionType': {
+        // Either way round: an intersection says "this is one and more", a
+        // union "this or something else". Both are a description the registry
+        // must know about, and a union is the cheapest thing to hide behind
+        // (`SignedStateTable | undefined`) if it isn't read.
+        case 'TSIntersectionType':
+        case 'TSUnionType': {
           return node.types.some((one) => mentions(one));
         }
         case 'TSTypeReference': {
@@ -261,17 +268,37 @@ export default {
       }
     };
 
-    const note = (node) => {
-      if (isConcatenation(node.parent)) return; // judged once, from the top of the chain
-      if (isConcatenation(node) && node.operator !== '+') return;
-      if (inAQuery(node)) {
-        const text = joinedText(node);
+    /**
+     * What a query was given, as text: the argument itself, the strings in an
+     * array of tables, or the text a `const` holds. Wrappers are climbed on
+     * the way, so `'agents.agents' as const` reads as the name it is.
+     */
+    const textsGivenTo = (argument) => {
+      const value = withoutWrappers(argument);
+      if (value === undefined || value === null) return [];
+      if (value.type === 'ArrayExpression') {
+        return value.elements.flatMap((element) => (element === null ? [] : textsGivenTo(element)));
+      }
+      if (value.type === 'Identifier') {
+        const held = constText(context, value);
+        return held === null ? [] : [[argument, joinedText(held)]];
+      }
+      return [[argument, joinedText(value)]];
+    };
+
+    /** A query on an authority table, wherever the name came from. */
+    const judgeQuery = (node, argument) => {
+      for (const [where, text] of textsGivenTo(argument)) {
         const named = names.find((name) => carries(text, name));
         if (named !== undefined) {
-          context.report({ node, messageId: 'table', data: { name: named } });
+          context.report({ node: where, messageId: 'table', data: { name: named } });
           return;
         }
       }
+    };
+
+    /** An event's own subject type, which only record may write. */
+    const judgeSubject = (node) => {
       const whole = textOf(node);
       if (whole !== null && subjects.has(whole) && namesASubjectType(node)) {
         context.report({ node, messageId: 'subject', data: { name: whole } });
@@ -292,6 +319,10 @@ export default {
         return;
       }
       const recorded = subject === undefined ? null : textOf(subject);
+      if (subject !== undefined && recorded === null) {
+        context.report({ node: subject, messageId: 'unwritten' });
+        return;
+      }
       const wanted = subjectOf.get(name);
       if (recorded !== null && recorded !== wanted) {
         context.report({
@@ -303,7 +334,7 @@ export default {
     };
 
     const declares = (type, value) => {
-      if (type === undefined || type === null || value === undefined || value === null) return;
+      if (!mayDeclare || type === undefined || type === null || value === undefined || value === null) return;
       declarations.push([type, value]);
     };
 
@@ -333,26 +364,42 @@ export default {
       TSTypeAssertion(node) {
         declares(node.typeAnnotation, node.expression);
       },
-      // A description a function gives back, whose type is the function's.
+      // A description a function gives back, whose type is the function's. The
+      // stack is what a `return` inside it reads, rather than walking every
+      // ancestor of every return in the repository.
       'ArrowFunctionExpression, FunctionDeclaration, FunctionExpression'(node) {
+        functions.push(node);
         if (node.returnType === undefined || node.returnType === null) return;
         if (node.body.type !== 'BlockStatement') declares(node.returnType, node.body);
       },
+      'ArrowFunctionExpression, FunctionDeclaration, FunctionExpression:exit'() {
+        functions.pop();
+      },
       ReturnStatement(node) {
         if (node.argument === null || node.argument === undefined) return;
-        const holder = context.sourceCode
-          .getAncestors(node)
-          .reverse()
-          .find((one) => ['ArrowFunctionExpression', 'FunctionDeclaration', 'FunctionExpression'].includes(one.type));
+        const holder = functions.at(-1);
         if (holder !== undefined) declares(holder.returnType, node.argument);
       },
-      Literal: note,
-      TemplateLiteral: note,
-      BinaryExpression: note,
+      CallExpression(node) {
+        if (!isQueryMethod(calledName(node))) return;
+        for (const argument of node.arguments) judgeQuery(node, argument);
+      },
+      TaggedTemplateExpression(node) {
+        if (!isSqlTag(node.tag)) return;
+        judgeQuery(node, node.quasi);
+      },
+      Literal: judgeSubject,
       'Program:exit'() {
+        // A description with both an annotation and a `satisfies` is found
+        // twice; it is one description, and one report.
+        const judged = new Set();
         for (const [type, value] of declarations) {
           if (!mentions(type)) continue;
-          for (const object of objectsIn(value)) judge(object);
+          for (const object of objectsIn(value)) {
+            if (judged.has(object)) continue;
+            judged.add(object);
+            judge(object);
+          }
         }
       },
     };

@@ -16,11 +16,15 @@ export interface LintCase {
   /** Text the message must contain, to tell apart checks that share a rule. */
   says?: string;
   /**
-   * True for a snippet that needs the options `proveLintRules` was given: they
-   * reach this file and no other, so a case meant to be judged by the real
-   * configuration (an exemption, say) can't be given them by accident.
+   * True for a snippet that must be judged by the real configuration alone,
+   * with none of the options `proveLintRules` was given: an exemption case,
+   * whose whole point is what the real configuration does. Everything else
+   * gets the options, so a forgotten flag makes a case fail loudly rather than
+   * pass while proving nothing.
    */
-  withOptions?: boolean;
+  realConfig?: boolean;
+  /** True when the rule must report exactly once, for a shape that could report twice. */
+  once?: boolean;
 }
 
 /** Folders the snippets pretend to sit in. None exists on disk. */
@@ -57,12 +61,12 @@ export const TABLE: SignedStateTable = {
  *
  * `options` gives one rule other options, for a rule whose behaviour depends
  * on them (A3c's authority tables, whose registry is empty until slice B1).
- * They reach **only the snippets that ask for them** (`withOptions` on the
- * case), because a rule written into a block that matches everything applies
- * everywhere: it would switch the rule back on for the very paths the real
- * configuration turns it off for, and a proof of an exemption would then pass
- * while proving nothing. The folders are taken from those cases, so no caller
- * can get that wrong.
+ * They reach every snippet **but the ones marked `realConfig`**, because a
+ * rule written into a block that matches everything applies everywhere: it
+ * would switch the rule back on for the very paths the real configuration
+ * turns it off for, and a proof of an exemption would then pass while proving
+ * nothing. Marking the exemption cases, rather than the option cases, is what
+ * makes a forgotten mark fail loudly.
  */
 export function proveLintRules(
   rejected: readonly LintCase[],
@@ -70,7 +74,7 @@ export function proveLintRules(
   options: Linter.RulesRecord = {},
 ): void {
   const withOptions = [...rejected, ...allowed]
-    .filter((testCase) => testCase.withOptions === true)
+    .filter((testCase) => testCase.realConfig !== true)
     .map((testCase) => testCase.filePath);
   const eslint = new ESLint({
     // The snippets are not on disk, so the TypeScript project service opens them
@@ -114,6 +118,9 @@ export function proveLintRules(
     }
   });
 
+  /** Every message this rule gave the snippet. */
+  const reported = (testCase: LintCase): Linter.LintMessage[] =>
+    (results.get(testCase.name) ?? []).filter((message) => message.ruleId === testCase.rule);
   const reports = (testCase: LintCase): boolean =>
     (results.get(testCase.name) ?? []).some(
       (message) =>
@@ -132,6 +139,7 @@ export function proveLintRules(
     it.each(rejected.map((testCase) => [testCase.name, testCase] as const))('%s', (_name, testCase) => {
       expect(fatal(testCase)).toEqual([]);
       expect(reports(testCase)).toBe(true);
+      if (testCase.once === true) expect(reported(testCase)).toHaveLength(1);
     });
   });
 
