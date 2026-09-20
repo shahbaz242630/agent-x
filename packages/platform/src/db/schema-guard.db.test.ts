@@ -353,6 +353,37 @@ it('sees a unique key made partial, which enforces nothing outside its condition
   }
 });
 
+it('sees the status guard given arguments that are not a machine', async () => {
+  // Fires at the right times, calls the right function, but its moves are not
+  // moves. Whether they are the *right* moves for that table's machine is
+  // A3c-1's question, which has the machine to compare them with; this is only
+  // that they still look like a guard's at all.
+  await owner.query(
+    `create trigger status_guard before insert or update on audit.events for each row
+     execute function state_rules.guard_status('new', 'not-a-move')`,
+  );
+  try {
+    expect(await problems()).toContain("audit.events's status_guard is given other arguments");
+  } finally {
+    await owner.query('drop trigger status_guard on audit.events');
+  }
+});
+
+it('accepts the status guard as 0004 installs it, so the rule is not simply always true', async () => {
+  await owner.query(
+    `create trigger status_guard before insert or update on audit.events for each row
+     execute function state_rules.guard_status('new', 'new>done', 'done>archived')`,
+  );
+  try {
+    const found = await problems();
+    expect(found).not.toContain("audit.events's status_guard is given other arguments");
+    expect(found).not.toContain("audit.events's status_guard fires at other times");
+    expect(found).not.toContain('audit.events carries the trigger "status_guard"');
+  } finally {
+    await owner.query('drop trigger status_guard on audit.events');
+  }
+});
+
 it('sees the status guard switched off, which Postgres keeps but stops running', async () => {
   // 0004's guard is the one trigger the schema is allowed. Postgres keeps a
   // disabled trigger's row, so a check that only looked for its name would

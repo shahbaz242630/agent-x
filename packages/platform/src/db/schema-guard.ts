@@ -70,9 +70,38 @@ const PINNED_FUNCTION_CONFIG = 'search_path=pg_catalog';
  */
 const STATUS_GUARD_BODY = '52692e2d94ac490ceb626cc10024e4bb75fff4484ebd80fdf518cd34405cf246';
 
-/** The arguments it must carry: the first status, then one FROM>TO for each move the machine allows. */
-const STATUS_GUARD_ARGUMENTS =
-  /^CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON \S+ FOR EACH ROW EXECUTE FUNCTION state_rules\.guard_status\('[^']+'(?:, '[^']+>[^']+')*\)$/;
+/**
+ * Whether the status guard's arguments are the shape 0004 gives it: the status
+ * a row is born in, then one FROM>TO for each move the machine allows.
+ *
+ * **Read by hand rather than by regular expression.** The first draft matched
+ * the printed definition with a pattern whose nested quantifiers could
+ * backtrack exponentially, and the text comes from the database — the one thing
+ * an attacker here owns. A regular expression runs to completion on the event
+ * loop, so a trigger defined to be pathological would have hung the whole
+ * process, not merely the check, and the deadline could never fire because
+ * nothing else would run. Found by CodeQL on the A3e-1b branch.
+ *
+ * Whether the arguments are the right ones *for that table's machine* is
+ * A3c-1's question, which has the machine to compare them with; this is only
+ * that they still look like a guard's.
+ */
+function guardArgumentsWellFormed(definition: string): boolean {
+  const call = `${STATUS_GUARD_FUNCTION}(`;
+  const open = definition.lastIndexOf(call);
+  if (open === -1 || !definition.endsWith(')')) return false;
+  const inside = definition.slice(open + call.length, -1);
+  const parts = inside.split(', ');
+  return parts.every((part, index) => {
+    if (part.length < 3 || !part.startsWith("'") || !part.endsWith("'")) return false;
+    const value = part.slice(1, -1);
+    if (value === '' || value.includes("'")) return false;
+    // The first is the first status; every later one is a move, FROM>TO.
+    if (index === 0) return !value.includes('>');
+    const move = value.split('>');
+    return move.length === 2 && move[0] !== '' && move[1] !== '';
+  });
+}
 
 /**
  * The rights the app role may hold on a table in an append-only schema, and on
@@ -669,7 +698,7 @@ export async function liveSchemaProblems<Schema>(
     // A guard that fires on fewer events than 0004 installs leaves the moves it
     // no longer sees unchecked, while still passing on its name.
     if (trigger.type !== STATUS_GUARD_TYPE) problems.push(`${trigger.table}'s ${STATUS_GUARD} fires at other times`);
-    else if (!STATUS_GUARD_ARGUMENTS.test(trigger.definition)) {
+    else if (!guardArgumentsWellFormed(trigger.definition)) {
       problems.push(`${trigger.table}'s ${STATUS_GUARD} is given other arguments`);
     }
     // Postgres keeps a switched-off trigger's row and stops running it, which
