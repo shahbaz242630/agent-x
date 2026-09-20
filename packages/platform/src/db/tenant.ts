@@ -93,35 +93,74 @@ export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: strin
   }
 }
 
-/** The tenant the connection carries: its `app.org_id` setting, or '' for none. */
-async function tenantOn(client: pg.ClientBase): Promise<string> {
-  const { rows } = await client.query<{ org_id: string | null }>(
-    "select pg_catalog.current_setting('app.org_id', true) as org_id",
-  );
-  return rows[0]?.org_id ?? '';
+/**
+ * What a connection must carry before any work runs on it: no tenant, and the
+ * `search_path` the startup packet pinned. Both come back from one statement,
+ * so checking the second costs no extra round trip on a pooled connection.
+ */
+interface ConnectionState {
+  /** Its `app.org_id` setting, or '' for none. */
+  readonly tenant: string;
+  /** Its `search_path`, which PINNED_SEARCH_PATH sets to pg_catalog alone. */
+  readonly searchPath: string;
+}
+
+/** Both settings in one statement, so the search_path costs no extra round trip. */
+const CONNECTION_STATE =
+  "select pg_catalog.current_setting('app.org_id', true) as org_id, pg_catalog.current_setting('search_path', true) as search_path";
+
+async function stateOf(client: pg.ClientBase): Promise<ConnectionState> {
+  const { rows } = await client.query<{ org_id: string | null; search_path: string | null }>(CONNECTION_STATE);
+  return { tenant: rows[0]?.org_id ?? '', searchPath: rows[0]?.search_path ?? '' };
+}
+
+/** What PINNED_SEARCH_PATH leaves on a connection, as Postgres reports it back. */
+const PINNED = 'pg_catalog';
+
+/**
+ * The reason a connection can't be used, or undefined when it is sound.
+ *
+ * A connection must start with no tenant. One could arrive with a tenant
+ * already set, by PGOPTIONS in the environment or by ALTER ROLE or ALTER
+ * DATABASE … SET, which points at tampering or a bad setting.
+ *
+ * Its search_path must be the pinned one (A3e). The startup packet's setting
+ * beats a setting on the database or the role, so this holds unless the pin
+ * was dropped from poolConfig or something in the session changed it — and
+ * with any other schema in front of pg_catalog, a planted function or operator
+ * could stand in for one of Postgres's own, which is how canonical text (and
+ * so a state seal) could be made to read alike for two different values.
+ */
+function unusable({ tenant, searchPath }: ConnectionState): string | undefined {
+  if (tenant !== '') {
+    return 'it already carries an organisation (from PGOPTIONS, or ALTER ROLE or ALTER DATABASE ... SET)';
+  }
+  if (searchPath !== PINNED) {
+    // The path itself is not echoed: it names schemas, and the line is enough to find it.
+    return `its search_path is not the pinned ${PINNED}`;
+  }
+  return undefined;
 }
 
 /**
- * A new connection must start with no tenant. One could arrive with a tenant
- * already set, by PGOPTIONS in the environment or by ALTER ROLE or ALTER
- * DATABASE … SET, which points at tampering or a bad setting. The pool runs
+ * A new connection must be sound before anything runs on it. The pool runs
  * this on each new connection and closes the connection if it throws.
  */
 export async function refuseTenantPreset(client: pg.ClientBase): Promise<void> {
-  if ((await tenantOn(client)) !== '') {
-    throw new TenantContextError(
-      'a new database connection already carries an organisation (from PGOPTIONS, or ALTER ROLE or ALTER DATABASE ... SET), so it is closed unused',
-    );
+  const problem = unusable(await stateOf(client));
+  if (problem !== undefined) {
+    throw new TenantContextError(`a new database connection is refused: ${problem}, so it is closed unused`);
   }
 }
 
 /**
- * Wraps the pool so that every connection taken from it carries no tenant. A
- * connection that still does was given a session-wide tenant by an earlier
- * caller, which is a bug or an attack: it is closed (so any other session
- * settings go with it), the event is logged, and another connection is taken.
- * New connections are checked on opening, so after at most `attempts` tries
- * one is clean, or the pool is failing and the error says so.
+ * Wraps the pool so that every connection taken from it carries no tenant and
+ * still has the pinned search_path. A connection that carries either fault was
+ * given a session-wide setting by an earlier caller, which is a bug or an
+ * attack: it is closed (so any other session settings go with it), the event
+ * is logged, and another connection is taken. New connections are checked on
+ * opening, so after at most `attempts` tries one is sound, or the pool is
+ * failing and the error says so.
  */
 export function tenantCheckedPool(pool: pg.Pool, logger: Logger, attempts: number): PostgresPool {
   return {
@@ -130,18 +169,18 @@ export function tenantCheckedPool(pool: pg.Pool, logger: Logger, attempts: numbe
     connect: async () => {
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         const client = await pool.connect();
-        let tenant: string;
+        let problem: string | undefined;
         try {
-          tenant = await tenantOn(client);
+          problem = unusable(await stateOf(client));
         } catch (error) {
           client.release(error instanceof Error ? error : true);
           throw error;
         }
-        if (tenant === '') return client;
+        if (problem === undefined) return client;
         client.release(true);
-        logger.error('db.tenant.leftover_discarded', { attempt });
+        logger.error('db.tenant.leftover_discarded', { attempt, problem });
       }
-      throw new TenantContextError(`no connection without a leftover tenant after ${String(attempts)} tries`);
+      throw new TenantContextError(`no sound connection after ${String(attempts)} tries`);
     },
   };
 }

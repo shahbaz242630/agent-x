@@ -38,7 +38,7 @@ import path from 'node:path';
 import pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
-import { type DatabaseConnectionOptions, poolConfig } from './database.ts';
+import { type DatabaseConnectionOptions, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
 import { scramVerifier } from './scram.ts';
 import { splitStatements } from './sql-statements.ts';
 
@@ -293,14 +293,14 @@ export function publicSchemaProblems(database: string, facts: PublicSchemaFacts)
 type Client = pg.Client;
 
 /**
- * Every connection the job opens looks up names in pg_catalog only, so no
- * function or operator the migration role (or anyone who can create objects
- * in a database) planted can stand in for Postgres's own and run with the
- * admin's rights (security review, S13; schema-checks.ts pins it the same way).
+ * The settings of every connection the job opens: the admin's, named in
+ * Postgres's views, and pinned to pg_catalog by poolConfig — so no function or
+ * operator the migration role (or anyone who can create objects in a database)
+ * planted can stand in for Postgres's own and run with the admin's rights
+ * (security review, S13; schema-checks.ts pins it the same way). The pin is
+ * named here as well, so a change to poolConfig that dropped it fails this
+ * job's own test rather than only the app's.
  */
-const PINNED_SEARCH_PATH = '-c search_path=pg_catalog';
-
-/** The settings of every connection the job opens: the admin's, named in Postgres's views, pinned to pg_catalog. */
 export function adminClientConfig(options: DatabaseConnectionOptions): pg.ClientConfig {
   return { ...poolConfig({ ...options, applicationName: 'agentx-db-setup' }), options: PINNED_SEARCH_PATH };
 }

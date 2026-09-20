@@ -5,11 +5,24 @@ import { describe, expect, it } from 'vitest';
 import { createLogger } from '../observability/index.ts';
 import { TenantContextError, tenantCheckedPool } from './tenant.ts';
 
-/** A stand-in connection that reports `tenant` and records how it was released. */
-function connection(tenant: string | null | Error): { client: pg.PoolClient; released: unknown[] } {
+/** What a sound connection reports: the pin poolConfig puts in the startup packet. */
+const PINNED = 'pg_catalog';
+
+/**
+ * A stand-in connection that reports `tenant` and `searchPath` and records how
+ * it was released. The search path defaults to the pinned one, so each test
+ * names only the fault it is about.
+ */
+function connection(
+  tenant: string | null | Error,
+  searchPath: string | null = PINNED,
+): { client: pg.PoolClient; released: unknown[] } {
   const released: unknown[] = [];
   const client = {
-    query: () => (tenant instanceof Error ? Promise.reject(tenant) : Promise.resolve({ rows: [{ org_id: tenant }] })),
+    query: () =>
+      tenant instanceof Error
+        ? Promise.reject(tenant)
+        : Promise.resolve({ rows: [{ org_id: tenant, search_path: searchPath }] }),
     release: (how?: unknown) => {
       released.push(how);
     },
@@ -77,10 +90,43 @@ describe('SEC-TEN-06 tenantCheckedPool', () => {
     const log = logger();
     const pool = tenantCheckedPool(poolOf(...tries.map((each) => each.client)).pool, log.logger, 2);
 
-    await expect(pool.connect()).rejects.toThrow(
-      new TenantContextError('no connection without a leftover tenant after 2 tries'),
-    );
+    await expect(pool.connect()).rejects.toThrow(new TenantContextError('no sound connection after 2 tries'));
     expect(tries.map((each) => each.released)).toEqual([[true], [true], []]);
+  });
+
+  it.each([
+    ['a schema in front of pg_catalog', 'audit, pg_catalog'],
+    ['a schema after it', 'pg_catalog, audit'],
+    ['the default path', '"$user", public'],
+    ['nothing at all', ''],
+    ['no setting', null],
+    ['the same schemas written differently', 'pg_catalog '],
+  ])('closes a connection whose search_path is %s, and hands out the next', async (_case, path) => {
+    const poisoned = connection(null, path);
+    const clean = connection(null);
+    const log = logger();
+    const pool = tenantCheckedPool(poolOf(poisoned.client, clean.client).pool, log.logger, 3);
+
+    expect(await pool.connect()).toBe(clean.client);
+    expect(poisoned.released).toEqual([true]);
+    expect(log.capture.lines()).toMatchObject([
+      {
+        level: 'error',
+        event: 'db.tenant.leftover_discarded',
+        attempt: 1,
+        problem: expect.stringContaining('search_path') as unknown,
+      },
+    ]);
+  });
+
+  it('never echoes the schemas a poisoned search_path names', async () => {
+    const poisoned = connection(null, 'planted_schema, pg_catalog');
+    const clean = connection(null);
+    const log = logger();
+    const pool = tenantCheckedPool(poolOf(poisoned.client, clean.client).pool, log.logger, 3);
+
+    await pool.connect();
+    expect(log.capture.text).not.toContain('planted_schema');
   });
 
   it('closes a connection whose check fails, and passes the error on', async () => {
