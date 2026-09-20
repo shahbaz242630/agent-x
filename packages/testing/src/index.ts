@@ -1,4 +1,12 @@
 export { FixedClock } from './clock.ts';
+export {
+  type AuthorityField,
+  type AuthorityFieldType,
+  type AuthorityMachine,
+  type AuthorityMove,
+  authorityProblems,
+  type AuthorityTable,
+} from './db/authority-checks.ts';
 export { waitUntilBlocked, waitUntilQueued } from './db/lock-wait.ts';
 export { type SchemaPolicy, schemaProblems } from './db/schema-checks.ts';
 export { createTenantProbe } from './db/tenant-probe.ts';
