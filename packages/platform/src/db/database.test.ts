@@ -2,6 +2,7 @@ import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 
 import { type DatabaseConnectionOptions, DatabaseOptionsError, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { refuseTenantPreset } from './tenant.ts';
 
 const OPTIONS: DatabaseConnectionOptions = {
@@ -52,12 +53,28 @@ describe('poolConfig', () => {
     expect(poolConfig(OPTIONS).onConnect).toBe(refuseTenantPreset);
   });
 
-  it('A3e: pins every connection to pg_catalog, whatever the options ask for', () => {
+  it('A3e: pins every connection, whatever the options ask for', () => {
     expect(poolConfig(OPTIONS).options).toBe(PINNED_SEARCH_PATH);
-    expect(PINNED_SEARCH_PATH).toBe('-c search_path=pg_catalog');
+    expect(PINNED_SEARCH_PATH).toBe('-c search_path=pg_catalog,pg_temp');
     // The pin travels in the startup packet, which beats a search_path set on
     // the database or the role, and replaces PGOPTIONS rather than adding to it.
     expect(poolConfig({ ...OPTIONS, applicationName: 'agentx-worker' }).options).toBe(PINNED_SEARCH_PATH);
+  });
+
+  it('A3e: the option the pool sets and the value the connection check expects cannot drift apart', () => {
+    // They are derived from one literal. Were they two hand-kept copies,
+    // strengthening one and forgetting the other would make every connection
+    // fail its check and refuse every query, with no unit test to show it.
+    expect(PINNED_SEARCH_PATH).toBe(`-c search_path=${PINNED_SEARCH_PATH_VALUE}`);
+    expect(poolConfig(OPTIONS).options).toBe(`-c search_path=${PINNED_SEARCH_PATH_VALUE}`);
+  });
+
+  it('A3e: names pg_temp, and last, so a temporary object cannot shadow a type name', () => {
+    // Left out, Postgres searches the session's temporary schema for relation
+    // and type names *before* pg_catalog; named last, it is searched after.
+    const schemas = PINNED_SEARCH_PATH_VALUE.split(',');
+    expect(schemas[0]).toBe('pg_catalog');
+    expect(schemas.at(-1)).toBe('pg_temp');
   });
 
   it('ADR-006: reads bigint columns as BigInt, and leaves other types alone', () => {

@@ -6,6 +6,7 @@ import { Kysely, PostgresDialect } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import type { Logger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH } from './search-path.ts';
 import { refuseTenantPreset, tenantCheckedPool } from './tenant.ts';
 
 export interface DatabaseConnectionOptions {
@@ -45,16 +46,16 @@ function typeParsers(): pg.TypeOverrides {
 }
 
 /**
- * Every name our SQL leaves unqualified is looked up in pg_catalog alone, so
- * nothing planted in another schema can stand in for one of Postgres's own
+ * Every name our SQL leaves unqualified is looked up in Postgres's own catalogue
+ * first, so nothing planted in another schema can stand in for one of its own
  * (the CVE-2018-1058 pattern). The setup job and the schema checks have always
  * pinned their connections this way; the app's pool is pinned for a second
  * reason (A3e).
  *
  * The database's owner is no superuser and can't set `search_path` on the app's
  * role, but it can on the database it owns, and a connection takes that up. On
- * a real server (S32) `ALTER DATABASE ... SET search_path = audit, pg_catalog`
- * with a planted `audit.length(text)` made the app read `length('abc')` as 999
+ * a real server (S32) `ALTER DATABASE ... SET search_path = planted, pg_catalog`
+ * with a planted `planted.length(text)` made the app read `length('abc')` as 999
  * rather than 3 — and canonical text made of such reads is what a state seal is
  * built from, so a tampered value could be made to seal alike. The startup
  * packet's own setting beats a setting on the database or the role, so pinning
@@ -62,9 +63,10 @@ function typeParsers(): pg.TypeOverrides {
  * the setting as well, since it is a sign someone tried).
  *
  * It also settles PGOPTIONS: pg would otherwise pass the environment's, and
- * this replaces it.
+ * this replaces it. What the path itself is, and why `pg_temp` is named last,
+ * is in search-path.ts.
  */
-export const PINNED_SEARCH_PATH = '-c search_path=pg_catalog';
+export { PINNED_SEARCH_PATH } from './search-path.ts';
 
 function tlsSetting(tls: string): PoolConfig['ssl'] {
   // Set to true explicitly, so NODE_TLS_REJECT_UNAUTHORIZED=0 can't turn the check off (SEC-PTR-07).

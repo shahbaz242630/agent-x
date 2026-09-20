@@ -21,6 +21,7 @@ import { type Kysely, type PostgresPool, sql, type Transaction } from 'kysely';
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 
 /** A UUID in its canonical form, which is how every organisation ID is written (ADR-007). */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -101,7 +102,7 @@ export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: strin
 interface ConnectionState {
   /** Its `app.org_id` setting, or '' for none. */
   readonly tenant: string;
-  /** Its `search_path`, which PINNED_SEARCH_PATH sets to pg_catalog alone. */
+  /** Its `search_path`, which the startup packet pins to PINNED_SEARCH_PATH_VALUE. */
   readonly searchPath: string;
 }
 
@@ -114,9 +115,6 @@ async function stateOf(client: pg.ClientBase): Promise<ConnectionState> {
   return { tenant: rows[0]?.org_id ?? '', searchPath: rows[0]?.search_path ?? '' };
 }
 
-/** What PINNED_SEARCH_PATH leaves on a connection, as Postgres reports it back. */
-const PINNED = 'pg_catalog';
-
 /**
  * The reason a connection can't be used, or undefined when it is sound.
  *
@@ -124,20 +122,24 @@ const PINNED = 'pg_catalog';
  * already set, by PGOPTIONS in the environment or by ALTER ROLE or ALTER
  * DATABASE … SET, which points at tampering or a bad setting.
  *
- * Its search_path must be the pinned one (A3e). The startup packet's setting
- * beats a setting on the database or the role, so this holds unless the pin
- * was dropped from poolConfig or something in the session changed it — and
+ * Its search_path must be the pinned one, exactly (A3e). The startup packet's
+ * setting beats a setting on the database or the role, so this holds unless the
+ * pin was dropped from poolConfig or something in the session changed it — and
  * with any other schema in front of pg_catalog, a planted function or operator
  * could stand in for one of Postgres's own, which is how canonical text (and
  * so a state seal) could be made to read alike for two different values.
+ *
+ * Compared whole rather than by parts: a path that merely *contains* pg_catalog
+ * would pass while another schema sat in front of it, and `pg_temp` must keep
+ * its place at the end (search-path.ts says why).
  */
 function unusable({ tenant, searchPath }: ConnectionState): string | undefined {
   if (tenant !== '') {
     return 'it already carries an organisation (from PGOPTIONS, or ALTER ROLE or ALTER DATABASE ... SET)';
   }
-  if (searchPath !== PINNED) {
+  if (searchPath !== PINNED_SEARCH_PATH_VALUE) {
     // The path itself is not echoed: it names schemas, and the line is enough to find it.
-    return `its search_path is not the pinned ${PINNED}`;
+    return `its search_path is not the pinned ${PINNED_SEARCH_PATH_VALUE}`;
   }
   return undefined;
 }

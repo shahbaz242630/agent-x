@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { TenantContextError, tenantCheckedPool } from './tenant.ts';
 
 const server = inject('postgres');
@@ -44,15 +45,21 @@ function testLogger(): { capture: LogCapture; logger: ReturnType<typeof createLo
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  const admin = database.as('admin');
-  // The trap, exactly as the database's owner could lay it: a schema the app
-  // may use, a stand-in for a built-in, and the database told to look there
-  // first. The database is named through format(%I) inside the server, so the
-  // statement this file holds is fixed text (SEC-TEN-07).
-  await admin.query('create schema planted');
-  await admin.query('grant usage on schema planted to agentx_app');
-  await admin.query("create function planted.length(text) returns integer language sql immutable as 'select 999'");
-  await admin.query(
+  // Laid by the **owner**, not the admin: agentx_owner is the role the threat is
+  // about, and it is no superuser. Everything below is something it may really
+  // do — it owns the database and may create a schema in it, and may set the
+  // database's own search_path. The database is named through format(%I) inside
+  // the server, so the statement this file holds is fixed text (SEC-TEN-07).
+  const owner = database.as('owner');
+  await owner.query('create schema planted');
+  await owner.query('grant usage on schema planted to agentx_app');
+  await owner.query("create function planted.length(text) returns integer language sql immutable as 'select 999'");
+  // 0001_baseline.sql revokes EXECUTE on the owner's new functions from PUBLIC,
+  // so the owner must grant it for the trap to spring at all. That revoke is a
+  // barrier of its own; the grant here is what an attacker would add, so the
+  // test proves the pin rather than resting on the revoke.
+  await owner.query('grant execute on function planted.length(text) to agentx_app');
+  await owner.query(
     "do $$ begin execute pg_catalog.format('alter database %I set search_path = planted, pg_catalog', pg_catalog.current_database()); end $$",
   );
 
@@ -85,7 +92,18 @@ describe('A3e: a planted search_path on the database', () => {
     expect(answer.rows[0]?.answer).toBe(3);
 
     const path = await sql<{ path: string }>`select pg_catalog.current_setting('search_path') as path`.execute(app);
-    expect(path.rows[0]?.path).toBe('pg_catalog');
+    // Read back from the server, so the value the check compares against is the
+    // value Postgres really reports for the option we send — not our idea of it.
+    expect(path.rows[0]?.path).toBe(PINNED_SEARCH_PATH_VALUE);
+  });
+
+  it('leaves the app unable to make a temporary object anyway, the first of the two barriers', async () => {
+    // pg_temp is named last so a temporary type cannot shadow a type name. The
+    // app role also has no TEMPORARY right, so it could not create one; this
+    // records that both hold, rather than resting on either alone.
+    await expect(sql`create temporary table shadow (id int)`.execute(app)).rejects.toThrow(
+      /permission denied|no schema has been selected/i,
+    );
   });
 
   it('leaves a schema-qualified read working, which is how every one of ours is written', async () => {
@@ -95,6 +113,23 @@ describe('A3e: a planted search_path on the database', () => {
       select count(*)::text as events from audit.events
     `.execute(app);
     expect(rows[0]?.events).toBe('0');
+  });
+
+  it('needs the owner to grant EXECUTE as well, which 0001_baseline.sql revokes by default', async () => {
+    // The second barrier, found by the A3e-1a review: the baseline takes EXECUTE
+    // on the owner's new functions away from PUBLIC, so a planted stand-in is
+    // not callable by the app until the owner grants it. Proven by taking the
+    // grant away again and watching the unpinned connection fail.
+    const owner = database.as('owner');
+    await owner.query('revoke execute on function planted.length(text) from agentx_app');
+    const unpinned = new pg.Client({ ...database.connection('app'), ssl: false });
+    await unpinned.connect();
+    try {
+      await expect(unpinned.query("select length('abc') as answer")).rejects.toThrow(/permission denied for function/i);
+    } finally {
+      await unpinned.end();
+      await owner.query('grant execute on function planted.length(text) to agentx_app');
+    }
   });
 
   it('is pinned for the migration role too, so a migration cannot be poisoned either', async () => {

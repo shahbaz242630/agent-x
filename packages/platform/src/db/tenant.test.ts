@@ -3,10 +3,11 @@ import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { TenantContextError, tenantCheckedPool } from './tenant.ts';
 
 /** What a sound connection reports: the pin poolConfig puts in the startup packet. */
-const PINNED = 'pg_catalog';
+const PINNED = PINNED_SEARCH_PATH_VALUE;
 
 /**
  * A stand-in connection that reports `tenant` and `searchPath` and records how
@@ -95,12 +96,14 @@ describe('SEC-TEN-06 tenantCheckedPool', () => {
   });
 
   it.each([
-    ['a schema in front of pg_catalog', 'audit, pg_catalog'],
-    ['a schema after it', 'pg_catalog, audit'],
+    ['a schema in front of pg_catalog', 'audit,pg_catalog,pg_temp'],
+    ['a schema after it', 'pg_catalog,pg_temp,audit'],
+    ['pg_temp moved in front, where it shadows type names', 'pg_temp,pg_catalog'],
+    ['pg_temp dropped, which puts it in front again', 'pg_catalog'],
     ['the default path', '"$user", public'],
     ['nothing at all', ''],
     ['no setting', null],
-    ['the same schemas written differently', 'pg_catalog '],
+    ['the same schemas written differently', 'pg_catalog, pg_temp'],
   ])('closes a connection whose search_path is %s, and hands out the next', async (_case, path) => {
     const poisoned = connection(null, path);
     const clean = connection(null);

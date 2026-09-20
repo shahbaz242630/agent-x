@@ -8,6 +8,7 @@ import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { applyMigration, MigrationFailed, MigrationNotAtomic, MigrationRefused, runMigrations } from './migrate.ts';
 import { TenantContextError } from './tenant.ts';
 
@@ -164,7 +165,7 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
     // table in the wrong schema.
     await write(
       '0002_second.sql',
-      "do $$ begin if pg_catalog.current_setting('search_path') <> 'pg_catalog'" +
+      `do $$ begin if pg_catalog.current_setting('search_path') <> '${PINNED_SEARCH_PATH_VALUE}'` +
         " then raise exception 'the search_path of the file before leaked'; end if; end $$;\n" +
         'create table demo.two (id int);\n',
     );
