@@ -2,10 +2,10 @@
 // on a broken fixture, and the shape ADR-012 §2 and ADR-007 §1 ask for passes.
 // Each fixture gets its own copy of the migrated database, so the real status
 // guard (db/migrations/0004) and the real app role are the ones under test.
-import { afterEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type AuthorityMachine, type AuthorityTable, authorityProblems } from './authority-checks.ts';
-import { createTestDatabase, type TestDatabase } from './test-database.ts';
+import { createTestDatabase, type TestDatabase, type TestRole } from './test-database.ts';
 
 const server = inject('postgres');
 
@@ -93,31 +93,34 @@ const WITHOUT_STATUS: string[] = [
   'grant update (expires_at, state_version, state_event_id) on t.passes to agentx_app',
 ];
 
-let database: TestDatabase | undefined;
+/** A fixture statement: run as the migration role, or as the role named first. */
+type Statement = string | readonly [TestRole, string];
+
+/** Every database a test built, so each one is dropped even when a test builds several. */
+let built: TestDatabase[] = [];
 
 afterEach(async () => {
-  const current = database;
-  database = undefined;
-  if (current !== undefined) await current.drop();
+  const open = built;
+  built = [];
+  for (const database of open) await database.drop();
 });
 
 /** A fresh copy of the migrated database with the fixture applied, one statement at a time. */
-async function fixture(statements: readonly string[]): Promise<TestDatabase> {
-  database = await createTestDatabase(server, { schema: 'migrated' });
+async function fixture(statements: readonly Statement[]): Promise<TestDatabase> {
+  const database = await createTestDatabase(server, { schema: 'migrated' });
+  built.push(database);
   for (const statement of statements) {
+    const [role, text] = typeof statement === 'string' ? (['owner', statement] as const) : statement;
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text in this file.
-    await database.as('owner').query(statement);
+    await database.as(role).query(text);
   }
   return database;
 }
 
 const problemsAfter = async (
-  statements: readonly string[],
+  statements: readonly Statement[],
   tables: readonly AuthorityTable[] = [AGENTS],
 ): Promise<string[]> => authorityProblems(await fixture(statements), tables);
-
-/** The registry's own rules are judged before the database is read, so these fixtures need no table. */
-const listProblems = (tables: readonly AuthorityTable[]): Promise<string[]> => problemsAfter([], tables);
 
 describe(`A3c what passes (Postgres ${server.version})`, () => {
   it('passes an empty registry on the migrated schema, which has no authority table yet', async () => {
@@ -143,6 +146,76 @@ describe(`A3c what passes (Postgres ${server.version})`, () => {
     expect(await problemsAfter(statements)).toEqual([]);
   });
 
+  it('passes a table whose name Postgres quotes, guard and all', async () => {
+    // `user` is a reserved word, so every catalogue name for it is printed
+    // quoted; the registry writes it plainly and the two must still meet.
+    const statements = [
+      'create schema t',
+      `create table t."user" (
+         org_id uuid not null, id uuid not null, status text not null, expires_at timestamptz,
+         state_version integer not null default 1, state_event_id uuid,
+         primary key (org_id, id), constraint status_is_a_state ${MACHINE_STATES})`,
+      ...walls('t."user"'),
+      guard('t."user"'),
+    ];
+    const users: AuthorityTable = { ...AGENTS, table: 't.user', subject: 'user' };
+    expect(await problemsAfter(statements, [users])).toEqual([]);
+  });
+
+  it('passes a time field declared with a precision, which the reader reads the same way', async () => {
+    expect(await problemsAfter([...SOUND, 'alter table t.agents alter column expires_at type timestamptz(3)'])).toEqual(
+      [],
+    );
+  });
+
+  it('passes another BEFORE ROW trigger that only fires on DELETE, or that is switched off', async () => {
+    const onDelete = [
+      ...SOUND,
+      TRIGGER_FUNCTION,
+      'create trigger zz_on_delete before delete on t.agents for each row execute function t.rewrite()',
+    ];
+    const switchedOff = [
+      ...SOUND,
+      TRIGGER_FUNCTION,
+      'create trigger zz_switched_off before insert or update on t.agents for each row execute function t.rewrite()',
+      'alter table t.agents disable trigger zz_switched_off',
+    ];
+    expect(await problemsAfter(onDelete)).toEqual([]);
+    expect(await problemsAfter(switchedOff)).toEqual([]);
+  });
+
+  it('passes two tables whose machines share a name, each against its own states', async () => {
+    // The reference objects are kept by table, so t.passes is never judged by
+    // t.agents' rules (or the other way round) just because both machines are
+    // called `agent`.
+    const shorter: AuthorityMachine = {
+      name: 'agent',
+      states: ['ACTIVE', 'REVOKED'],
+      initial: 'ACTIVE',
+      moves: [{ from: 'ACTIVE', to: 'REVOKED' }],
+    };
+    const statements = [
+      ...SOUND,
+      `create table t.passes (
+         org_id uuid not null, id uuid not null, status text not null, expires_at timestamptz,
+         state_version integer not null default 1, state_event_id uuid,
+         primary key (org_id, id),
+         constraint status_is_a_state check (status in ('ACTIVE', 'REVOKED')))`,
+      ...walls('t.passes'),
+      guard('t.passes', "'ACTIVE', 'ACTIVE>REVOKED'"),
+    ];
+    const passes: AuthorityTable = {
+      table: 't.passes',
+      subject: 'pass',
+      fields: [
+        { column: 'status', type: 'text' },
+        { column: 'expires_at', type: 'timestamptz' },
+      ],
+      status: shorter,
+    };
+    expect(await problemsAfter(statements, [AGENTS, passes])).toEqual([]);
+  });
+
   it('passes a guard that is always enabled, and a key that leaves the signed-state columns alone', async () => {
     const statements = [
       ...SOUND,
@@ -154,6 +227,21 @@ describe(`A3c what passes (Postgres ${server.version})`, () => {
 });
 
 describe('A3c the registry itself', () => {
+  // These rules are judged before the database is read at all
+  // (authorityProblems returns the registry's problems without connecting), so
+  // one copy of the migrated database serves the whole block.
+  let shared: TestDatabase;
+
+  beforeAll(async () => {
+    shared = await createTestDatabase(server, { schema: 'migrated' });
+  });
+
+  afterAll(async () => {
+    await shared.drop();
+  });
+
+  const listProblems = (tables: readonly AuthorityTable[]): Promise<string[]> => authorityProblems(shared, tables);
+
   it('fails a table not named schema.table in lower-case words', async () => {
     expect(await listProblems([{ ...AGENTS, table: 'T.Agents' }])).toEqual([
       'T.Agents: an authority table is named schema.table, in lower-case words',
@@ -274,6 +362,26 @@ describe('A3c each rule fails on a broken fixture', () => {
       );
     });
 
+    it('fails a table with inheritance children, and one that inherits', async () => {
+      // A child gets the parent's columns and checks but not its triggers or
+      // its row security, and its rows answer a read of the parent.
+      const parent = [...SOUND, 'create table t.agents_old () inherits (t.agents)'];
+      expect(await problemsAfter(parent)).toContain(
+        "t.agents: has table inheritance children; a child gets this table's columns and checks but not its triggers or row security, and its rows answer a read of this table (ADR-005 §2, ADR-012 §2)",
+      );
+      const child = [
+        'create schema t',
+        `create table t.rows (org_id uuid not null, id uuid not null, expires_at timestamptz,
+           state_version integer not null default 1, state_event_id uuid)`,
+        ...walls('t.rows'),
+        'create table t.passes (primary key (org_id, id)) inherits (t.rows)',
+        ...walls('t.passes'),
+      ];
+      expect(await problemsAfter(child, [PASSES])).toContain(
+        't.passes: inherits from another table, so a read of that table answers with these rows, which its own walls never judged',
+      );
+    });
+
     it('fails a table whose row-level security is off, or enabled but not forced', async () => {
       expect(await problemsAfter([...SOUND, 'alter table t.agents disable row level security'])).toEqual([
         't.agents: row-level security is off (ADR-005 §2)',
@@ -362,7 +470,19 @@ describe('A3c each rule fails on a broken fixture', () => {
         "t.agents: the authority field expires_at is timestamp with time zone, which is not read as text (text): another type's text could read the same for another value",
       ]);
       expect(await problemsAfter(SOUND, [asNumber])).toEqual([
-        "t.agents: the authority field expires_at is timestamp with time zone, which is not read as integer (smallint, integer, bigint): another type's text could read the same for another value",
+        "t.agents: the authority field expires_at is timestamp with time zone, which is not read as integer (smallint, integer or bigint): another type's text could read the same for another value",
+      ]);
+    });
+
+    it('fails a column the database computes, which no change could write', async () => {
+      const statements = [
+        ...SOUND,
+        "alter table t.agents add column label text generated always as (status || '-x') stored",
+        'grant update (label) on t.agents to agentx_app',
+      ];
+      const labelled: AuthorityTable = { ...AGENTS, fields: [...AGENTS.fields, { column: 'label', type: 'text' }] };
+      expect(await problemsAfter(statements, [labelled])).toEqual([
+        't.agents: label is a generated column, so nothing can write it and no change could be sealed',
       ]);
     });
 
@@ -406,6 +526,18 @@ describe('A3c each rule fails on a broken fixture', () => {
       ]);
     });
 
+    it('fails a key that is in the catalogue but enforces nothing', async () => {
+      // What a failed CREATE UNIQUE INDEX CONCURRENTLY leaves behind: the row
+      // is there, and two rows could still share the key.
+      const statements: Statement[] = [
+        ...SOUND,
+        ['admin', "update pg_catalog.pg_index set indisvalid = false where indexrelid = 't.agents_pkey'::regclass"],
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        't.agents: has no unique key on (org_id, id); without one, two rows could share a key and every read of the row would be unreadable',
+      ]);
+    });
+
     it('fails a table with no key on the row, and one whose only key is partial', async () => {
       const statements = [
         'create schema t',
@@ -430,12 +562,20 @@ describe('A3c each rule fails on a broken fixture', () => {
 
   describe('what the app role may do', () => {
     it('fails an app role that may delete or empty the table', async () => {
-      const deleted =
-        't.agents: the app role has DELETE; a row deleted or emptied takes its authority out of reach of the log that signed it (ADR-012 §2)';
-      expect(await problemsAfter([...SOUND, 'grant delete on t.agents to agentx_app'])).toEqual([deleted]);
+      const refused = (right: string): string =>
+        `t.agents: the app role has ${right}, which is not one of the rights the app has on an authority table (SELECT, INSERT and UPDATE of the sealed columns): a deleted or emptied row takes its authority out of reach of the log that signed it, and a trigger of the app's own could rewrite a row the guard has just passed`;
+      expect(await problemsAfter([...SOUND, 'grant delete on t.agents to agentx_app'])).toEqual([refused('DELETE')]);
       expect(await problemsAfter([...SOUND, 'grant truncate on t.agents to agentx_app'])).toEqual([
-        deleted.replace('DELETE', 'TRUNCATE'),
+        refused('TRUNCATE'),
       ]);
+    });
+
+    it('fails an app role that may write triggers of its own on the table', async () => {
+      // TRIGGER alone would let the app create the very trigger the guard
+      // check exists to forbid: one that fires after status_guard has passed a
+      // row. The app's rights are an allow-list for that reason.
+      const [only] = await problemsAfter([...SOUND, 'grant trigger on t.agents to agentx_app']);
+      expect(only).toContain('t.agents: the app role has TRIGGER, which is not one of the rights the app has');
     });
 
     it("fails an UPDATE on the whole table, which covers the row's identity", async () => {
@@ -451,9 +591,8 @@ describe('A3c each rule fails on a broken fixture', () => {
     });
 
     it('fails a right given to PUBLIC, which the app role holds too', async () => {
-      expect(await problemsAfter([...SOUND, 'grant delete on t.agents to public'])).toEqual([
-        't.agents: PUBLIC has DELETE; a row deleted or emptied takes its authority out of reach of the log that signed it (ADR-012 §2)',
-      ]);
+      const [only] = await problemsAfter([...SOUND, 'grant delete on t.agents to public']);
+      expect(only).toContain('t.agents: PUBLIC has DELETE, which is not one of the rights the app has');
     });
   });
 
@@ -473,8 +612,7 @@ describe('A3c each rule fails on a broken fixture', () => {
         'alter table t.agents drop constraint status_is_a_state',
         "alter table t.agents add constraint status_is_a_state check (status in ('REVOKED', 'SUSPENDED', 'ACTIVE'))",
       ];
-      const wanted =
-        "not the agent machine's states in its own order: CHECK (status IN ('ACTIVE', 'SUSPENDED', 'REVOKED'))";
+      const wanted = "not the agent machine's states in its own order: CHECK ((status = ANY (ARRAY[";
       const [otherStates] = await problemsAfter(others);
       expect(otherStates).toContain('t.agents: the check constraint status_is_a_state is CHECK');
       expect(otherStates).toContain(wanted);
@@ -485,10 +623,14 @@ describe('A3c each rule fails on a broken fixture', () => {
     it('fails a table with no check over its status, or with two', async () => {
       const none = [...SOUND, 'alter table t.agents drop constraint status_is_a_state'];
       const two = [...SOUND, 'alter table t.agents add constraint status_is_short check (length(status) < 20)'];
-      const wanted =
-        "it has exactly one, listing the machine's states: CHECK (status IN ('ACTIVE', 'SUSPENDED', 'REVOKED'))";
-      expect(await problemsAfter(none)).toEqual([`t.agents: has 0 check constraints over status; ${wanted}`]);
-      expect(await problemsAfter(two)).toEqual([`t.agents: has 2 check constraints over status; ${wanted}`]);
+      // The message quotes the reference constraint as this server prints it,
+      // so the test pins the half that can't change with a Postgres version.
+      const wanted = "it has exactly one, listing the agent machine's states: CHECK ((status = ANY (ARRAY[";
+      const [missing] = await problemsAfter(none);
+      const [twice] = await problemsAfter(two);
+      expect(missing).toContain(`t.agents: has 0 check constraints over status; ${wanted}`);
+      expect(missing).toContain("'ACTIVE'");
+      expect(twice).toContain(`t.agents: has 2 check constraints over status; ${wanted}`);
     });
 
     it('fails a missing guard, and one that carries other rules than the machine', async () => {

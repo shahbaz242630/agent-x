@@ -35,8 +35,9 @@
 // slightly differently from one version to the next. Names are sorted byte
 // by byte (Postgres's name type sorts that way), so every server lists the
 // problems in the same order, whatever its locale.
-import pg from 'pg';
+import type pg from 'pg';
 
+import { catalogueRows as rows, openCatalogue } from './catalogue.ts';
 import type { TestDatabase } from './test-database.ts';
 
 /** A table with no org_id and no row-level security, allowed by name (ADR-005 §6). */
@@ -371,22 +372,17 @@ interface RoleNames {
  */
 export async function schemaProblems(database: TestDatabase, policy: SchemaPolicy): Promise<string[]> {
   const roles: RoleNames = { app: database.server.roles.app.user, backup: database.server.roles.backup.user };
-  // With only pg_catalog on the search path, every name from our schemas is
-  // printed with its schema, public included. (A look-alike function in a
-  // policy prints with its schema either way: Postgres searches pg_catalog
-  // first, so only its own current_setting prints without one.)
-  const client = new pg.Client({ ...database.connection('owner'), ssl: false, options: '-c search_path=pg_catalog' });
-  await client.connect();
+  // The catalogue connection: the migration role, pg_catalog alone on the
+  // search path, so every name from our schemas is printed with its schema,
+  // public included. (A look-alike function in a policy prints with its schema
+  // either way: Postgres searches pg_catalog first, so only its own
+  // current_setting prints without one.)
+  const client = await openCatalogue(database);
   try {
     return checkFacts(await readFacts(client), policy, roles);
   } finally {
     await client.end();
   }
-}
-
-async function rows<Row extends object>(client: pg.Client, text: string, values: readonly unknown[]): Promise<Row[]> {
-  // eslint-disable-next-line agentx/no-string-built-sql -- Passes on the fixed query texts above; the rule checks each where it is written.
-  return (await client.query<Row>(text, [...values])).rows;
 }
 
 async function referenceExpression(client: pg.Client): Promise<string> {

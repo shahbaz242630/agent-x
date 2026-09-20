@@ -31,8 +31,9 @@
 // the real table means no rule here depends on how a Postgres version words a
 // constraint or a trigger, only on the two agreeing (the same way CI-06
 // compares the tenant policy with a reference policy).
-import pg from 'pg';
+import type pg from 'pg';
 
+import { catalogueRows as rows, openCatalogue } from './catalogue.ts';
 import type { TestDatabase } from './test-database.ts';
 
 /** The type an authority field is read as: @agentx/platform/db's SignedFieldType. */
@@ -93,35 +94,61 @@ const VERSION = 'state_version';
 const POINTER = 'state_event_id';
 /** The columns that name the row, which nothing may change: the guard refuses them too (0004). */
 const KEY = ['org_id', 'id'] as const;
+/**
+ * Postgres's `integer`, which `state_version` must be exactly: the app counts
+ * versions up to 2,147,483,647 (signed-rows.ts's MAX_VERSION), so a smallint
+ * would overflow in the database long before that, and a bigint would let a
+ * version past what the app can hold. A declared `integer` field is freer
+ * (COLUMN_TYPES), because there the reader only reads the value as text.
+ */
+const INTEGER = 23;
 const GUARD = 'status_guard';
 const GUARD_FUNCTION = 'state_rules.guard_status';
 /** The table a trigger is on, as Postgres prints it in the trigger's definition. */
 const ON_TABLE = / ON .+? FOR EACH ROW /;
 
 /**
- * The column types each declared type may have, by the name this server prints
- * for them. It mirrors COLUMN_TYPES in @agentx/platform/db's signed-rows.ts,
- * which reads the same types by their fixed IDs; the two are a pair, and
- * either one alone failing is loud (a type this list allows and the reader
- * doesn't makes every read of the row `unreadable`, and the other way round
- * fails this check).
+ * The column types each declared type may have, by the built-in types' fixed
+ * IDs (pg_type's oid), which no name on the search path can stand in for.
+ * These are the very numbers @agentx/platform/db's signed-rows.ts reads the
+ * row with, so the check and the reader can't disagree; a printed type name
+ * would, since it carries the modifier a column was declared with
+ * (`timestamptz(3)` reads the same as `timestamptz`).
  */
-const COLUMN_TYPES: Readonly<Record<AuthorityFieldType, readonly string[]>> = {
-  text: ['text'],
-  uuid: ['uuid'],
-  integer: ['smallint', 'integer', 'bigint'],
-  timestamptz: ['timestamp with time zone'],
+const COLUMN_TYPES: Readonly<Record<AuthorityFieldType, readonly number[]>> = {
+  text: [25],
+  uuid: [2950],
+  integer: [21, 23, 20],
+  timestamptz: [1184],
 };
 
-/** What the app role may never hold on an authority table, whatever else it has. */
-const APP_MAY_NOT = ['DELETE', 'TRUNCATE'];
+/** The names of those types, for the message that refuses a column. */
+const TYPE_NAMES: Readonly<Record<AuthorityFieldType, string>> = {
+  text: 'text',
+  uuid: 'uuid',
+  integer: 'smallint, integer or bigint',
+  timestamptz: 'timestamp with time zone',
+};
+
+/**
+ * What the app role may hold on an authority table, and nothing else: it adds
+ * rows and reads them, and changes the sealed fields column by column
+ * (checked below). A right that isn't listed is refused whatever it is, so a
+ * privilege we haven't thought about, or one a later Postgres adds, can't
+ * slip in: TRIGGER alone would let the app write a trigger of its own that
+ * fires after the status guard has passed a row.
+ */
+const APP_MAY = ['SELECT', 'INSERT'];
 
 const RELATION = `
-  select pg_catalog.format('%I.%I', n.nspname, c.relname) as name, c.relkind::text as kind,
-         c.relrowsecurity as rls, c.relforcerowsecurity as forced
+  select pg_catalog.concat_ws('.', n.nspname, c.relname) as name, c.relkind::text as kind,
+         c.relrowsecurity as rls, c.relforcerowsecurity as forced,
+         c.relhassubclass as has_children,
+         exists (select 1 from pg_catalog.pg_inherits h where h.inhrelid = c.oid) as inherits,
+         c.oid::pg_catalog.regclass::text as printed
   from pg_catalog.pg_class c
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-  where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[])
+  where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[])
     and c.relkind in ('r', 'p', 'v', 'm', 'f')
   order by n.nspname, c.relname
 `;
@@ -132,8 +159,10 @@ const RELATION = `
  * still be null, so it doesn't count) and its default.
  */
 const COLUMNS = `
-  select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
+  select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, a.attname::text as column,
+         a.atttypid::pg_catalog.int4 as type_oid,
          pg_catalog.format_type(a.atttypid, a.atttypmod) as type,
+         a.attgenerated <> '' as generated,
          a.attnotnull and not exists (
            select 1 from pg_catalog.pg_constraint k
            where k.conrelid = a.attrelid and k.contype = 'n' and not k.convalidated and k.conkey = array[a.attnum]
@@ -143,7 +172,7 @@ const COLUMNS = `
   join pg_catalog.pg_class c on c.oid = a.attrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
   left join pg_catalog.pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-  where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[])
+  where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[])
     and a.attnum > 0 and not a.attisdropped
   order by n.nspname, c.relname, a.attnum
 `;
@@ -155,9 +184,9 @@ const COLUMNS = `
  * whether it has a condition is read too.
  */
 const KEYS = `
-  select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, ic.relname::text as key,
+  select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, ic.relname::text as key,
          i.indisexclusion as exclusion, i.indexprs is not null as expressions,
-         i.indpred is not null as partial,
+         i.indpred is not null as partial, i.indisvalid and i.indisready as enforced,
          (select pg_catalog.array_agg(a.attname::text order by k.position)
             from pg_catalog.unnest(i.indkey::pg_catalog.int2[]) with ordinality as k(attnum, position)
             join pg_catalog.pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
@@ -166,7 +195,7 @@ const KEYS = `
   join pg_catalog.pg_class c on c.oid = i.indrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
   join pg_catalog.pg_class ic on ic.oid = i.indexrelid
-  where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[])
+  where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[])
     and (i.indisunique or i.indisexclusion)
   order by n.nspname, c.relname, ic.relname
 `;
@@ -180,16 +209,16 @@ const KEYS = `
 const APP_GRANTS = `
   select g.table, g.column, g.to_public, g.privilege
   from (
-    select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, '' as column,
+    select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, '' as column,
            acl.grantee = 0 as to_public,
            case when acl.grantee = 0 then null else pg_catalog.pg_get_userbyid(acl.grantee)::text end as grantee,
            acl.privilege_type as privilege
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(c.relacl) acl
-    where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[])
+    where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[])
     union all
-    select pg_catalog.format('%I.%I', n.nspname, c.relname), a.attname::text,
+    select pg_catalog.concat_ws('.', n.nspname, c.relname), a.attname::text,
            acl.grantee = 0,
            case when acl.grantee = 0 then null else pg_catalog.pg_get_userbyid(acl.grantee)::text end,
            acl.privilege_type
@@ -197,7 +226,7 @@ const APP_GRANTS = `
     join pg_catalog.pg_class c on c.oid = a.attrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(a.attacl) acl
-    where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[])
+    where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[])
       and a.attnum > 0 and not a.attisdropped
   ) g
   where g.to_public or g.grantee = $2
@@ -211,19 +240,20 @@ const APP_GRANTS = `
  * ROW. Postgres's own foreign-key and constraint triggers are left out.
  */
 const TRIGGERS = `
-  select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, t.tgname::text as name,
+  select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, t.tgname::text as name,
          pg_catalog.pg_get_triggerdef(t.oid) as definition, t.tgenabled::text as enabled,
-         (t.tgtype & 1) <> 0 as for_each_row, (t.tgtype & 2) <> 0 as before
+         (t.tgtype & 1) <> 0 as for_each_row, (t.tgtype & 2) <> 0 as before,
+         (t.tgtype & 4) <> 0 or (t.tgtype & 16) <> 0 as on_write
   from pg_catalog.pg_trigger t
   join pg_catalog.pg_class c on c.oid = t.tgrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-  where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[]) and not t.tgisinternal
+  where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[]) and not t.tgisinternal
   order by n.nspname, c.relname, t.tgname collate "C"
 `;
 
 /** The check constraints on those tables, and whether each covers the status column. */
 const CHECKS = `
-  select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, con.conname::text as name,
+  select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, con.conname::text as name,
          pg_catalog.pg_get_constraintdef(con.oid) as definition,
          exists (
            select 1 from pg_catalog.unnest(con.conkey) as k(attnum)
@@ -233,7 +263,7 @@ const CHECKS = `
   from pg_catalog.pg_constraint con
   join pg_catalog.pg_class c on c.oid = con.conrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-  where pg_catalog.format('%I.%I', n.nspname, c.relname) = any($1::pg_catalog.text[]) and con.contype = 'c'
+  where pg_catalog.concat_ws('.', n.nspname, c.relname) = any($1::pg_catalog.text[]) and con.contype = 'c'
   order by n.nspname, c.relname, con.conname collate "C"
 `;
 
@@ -271,12 +301,21 @@ interface Relation {
   kind: string;
   rls: boolean;
   forced: boolean;
+  has_children: boolean;
+  inherits: boolean;
+  /** The name this server prints for the table, which its triggers' definitions carry. */
+  printed: string;
 }
 
 interface Column {
   table: string;
   column: string;
+  /** The built-in type's fixed ID, which is what the reader matches on. */
+  type_oid: number;
+  /** The same type as this server prints it, for the messages. */
   type: string;
+  /** True when the database computes the value, so no writer can set it. */
+  generated: boolean;
   not_null: boolean;
   default_expression: string | null;
 }
@@ -287,6 +326,8 @@ interface Key {
   exclusion: boolean;
   expressions: boolean;
   partial: boolean;
+  /** Valid and maintained: an index left behind by a failed CREATE INDEX CONCURRENTLY enforces nothing. */
+  enforced: boolean;
   columns: string[] | null;
 }
 
@@ -305,6 +346,8 @@ interface Trigger {
   enabled: string;
   for_each_row: boolean;
   before: boolean;
+  /** Fires on INSERT or UPDATE: a DELETE-only trigger can't rewrite a row being written. */
+  on_write: boolean;
 }
 
 interface Check {
@@ -327,7 +370,7 @@ interface Facts {
   grants: AppGrant[];
   triggers: Trigger[];
   checks: Check[];
-  /** By machine name: the machines are named once each (checked before they are built). */
+  /** By table: each status table's own reference objects, built from its own machine. */
   references: Map<string, Reference>;
 }
 
@@ -341,22 +384,13 @@ export async function authorityProblems(database: TestDatabase, tables: readonly
   // A registry that names a table twice, or a machine written wrong, would
   // make the facts below ambiguous, so nothing is read until it is sound.
   if (listed.length > 0) return listed;
-  // Only pg_catalog on the search path, as CI-06 does: every name from our
-  // schemas is then printed with its schema, and no planted function can stand
-  // in for one of Postgres's own.
-  const client = new pg.Client({ ...database.connection('owner'), ssl: false, options: '-c search_path=pg_catalog' });
-  await client.connect();
+  const client = await openCatalogue(database);
   try {
     const facts = await readFacts(client, tables, database.server.roles.app.user);
     return tables.flatMap((table) => tableProblems(table, facts));
   } finally {
     await client.end();
   }
-}
-
-async function rows<Row extends object>(client: pg.Client, text: string, values: readonly unknown[]): Promise<Row[]> {
-  // eslint-disable-next-line agentx/no-string-built-sql -- Passes on the fixed query texts above; the rule checks each where it is written.
-  return (await client.query<Row>(text, [...values])).rows;
 }
 
 async function readFacts(client: pg.Client, tables: readonly AuthorityTable[], appRole: string): Promise<Facts> {
@@ -373,20 +407,22 @@ async function readFacts(client: pg.Client, tables: readonly AuthorityTable[], a
 }
 
 /**
- * The reference check constraint and guard for each machine, built and printed
- * inside a transaction that is rolled back. Each machine gets a temporary
- * table of its own, so its guard can carry the trigger's real name.
+ * The reference check constraint and guard for each table that has a status,
+ * built and printed inside a transaction that is rolled back. They are kept
+ * by table, not by machine: two tables may be ruled by machines of the same
+ * name, and each must be judged against its own states and moves. Each gets a
+ * temporary table of its own, so its guard can carry the trigger's real name.
  */
 async function readReferences(client: pg.Client, tables: readonly AuthorityTable[]): Promise<Map<string, Reference>> {
-  const machines = new Map(
-    tables.flatMap((table) => (table.status === undefined ? [] : [[table.status.name, table.status] as const])),
+  const withStatus = tables.flatMap((table) =>
+    table.status === undefined ? [] : [[table.table, table.status] as const],
   );
   const references = new Map<string, Reference>();
-  if (machines.size === 0) return references;
+  if (withStatus.length === 0) return references;
   await client.query('begin');
   try {
     let index = 0;
-    for (const [name, machine] of machines) {
+    for (const [name, machine] of withStatus) {
       const reference = `authority_reference_${index++}`;
       const guardArguments = [machine.initial, ...machine.moves.map((move) => `${move.from}>${move.to}`)];
       const [statements] = await rows<{
@@ -403,7 +439,7 @@ async function readReferences(client: pg.Client, tables: readonly AuthorityTable
         check_definition: string | null;
         guard_definition: string | null;
       }>(client, REFERENCE_DEFINITIONS, [reference, GUARD]);
-      const missing = `The reference objects for the ${name} machine were not created`;
+      const missing = `The reference objects for ${name} were not created`;
       if (printed === undefined) throw new Error(missing);
       if (printed.check_definition === null || printed.guard_definition === null) throw new Error(missing);
       // The table a trigger is on is printed inside its definition, and a
@@ -411,7 +447,7 @@ async function readReferences(client: pg.Client, tables: readonly AuthorityTable
       // real table's name is put in its place rather than swapped for a name
       // read another way.
       if (!ON_TABLE.test(printed.guard_definition)) {
-        throw new Error(`The reference guard for the ${name} machine was printed as ${printed.guard_definition}`);
+        throw new Error(`The reference guard for ${name} was printed as ${printed.guard_definition}`);
       }
       references.set(name, {
         checkDefinition: printed.check_definition,
@@ -501,8 +537,9 @@ function machineListProblems(table: AuthorityTable): string[] {
   }
   if (!LOWER_WORDS.test(machine.name)) at(`the machine name ${machine.name} must be lower-case words joined by _`);
   if (machine.states.length === 0) at(`the ${machine.name} machine has no states`);
-  for (const state of [machine.initial, ...machine.states, ...machine.moves.flatMap((move) => [move.from, move.to])]) {
-    if (!STATE.test(state)) at(`the ${machine.name} machine's state ${state} must be words in capitals joined by _`);
+  const named = new Set([machine.initial, ...machine.states, ...machine.moves.flatMap((move) => [move.from, move.to])]);
+  for (const state of [...named].filter((state) => !STATE.test(state))) {
+    at(`the ${machine.name} machine's state ${state} must be words in capitals joined by _`);
   }
   if (!machine.states.includes(machine.initial)) {
     at(`the ${machine.name} machine starts in ${machine.initial}, which is not one of its states`);
@@ -532,19 +569,24 @@ function tableProblems(table: AuthorityTable, facts: Facts): string[] {
       table,
       facts.grants.filter((grant) => grant.table === name),
     ).map(at),
-    ...statusProblems(table, columns, facts).map(at),
+    ...statusProblems(table, columns, facts, relation.printed).map(at),
   ];
 }
 
 /** What a relation that isn't a plain table is, for the message that refuses it. */
 const OTHER_KINDS: Readonly<Record<string, string>> = {
-  p: 'partitioned',
   v: 'a view',
   m: 'a materialized view',
   f: 'a foreign table',
 };
 
-/** A plain table, with the tenant walls forced on it (ADR-005 §2). */
+/**
+ * A plain table of its own, with the tenant walls forced on it (ADR-005 §2).
+ * Neither partitions nor inheritance: a child table gets the parent's columns
+ * and check constraints but not its triggers or its row-level security, and
+ * its rows answer a read of the parent, so authority rows could be written
+ * there with no guard, no tenant policy and no signed state at all.
+ */
 function relationProblems(relation: Relation): string[] {
   const problems: string[] = [];
   if (relation.kind === 'p') {
@@ -553,6 +595,16 @@ function relationProblems(relation: Relation): string[] {
     );
   } else if (relation.kind !== 'r') {
     problems.push(`is ${OTHER_KINDS[relation.kind] ?? relation.kind}, not a table, so nothing here holds`);
+  }
+  if (relation.has_children) {
+    problems.push(
+      "has table inheritance children; a child gets this table's columns and checks but not its triggers or row security, and its rows answer a read of this table (ADR-005 §2, ADR-012 §2)",
+    );
+  }
+  if (relation.inherits) {
+    problems.push(
+      'inherits from another table, so a read of that table answers with these rows, which its own walls never judged',
+    );
   }
   if (!relation.rls) problems.push('row-level security is off (ADR-005 §2)');
   else if (!relation.forced) {
@@ -569,42 +621,50 @@ function columnProblems(table: AuthorityTable, columns: readonly Column[]): stri
     const found = of(column);
     if (found === undefined)
       problems.push(`has no ${column} column; an authority row is named by its organisation and its own ID`);
-    else if (found.type !== 'uuid' || !found.not_null) problems.push(`${column} must be uuid NOT NULL`);
+    else if (!isType(found, 'uuid') || !found.not_null) problems.push(`${column} must be uuid NOT NULL`);
   }
   const version = of(VERSION);
   if (version === undefined)
     problems.push(`has no ${VERSION} column, which holds the version its latest signed event made`);
-  else if (version.type !== 'integer' || !version.not_null || version.default_expression !== '1') {
+  else if (version.type_oid !== INTEGER || !version.not_null || version.default_expression !== '1') {
     problems.push(
       `${VERSION} must be integer NOT NULL DEFAULT 1, not ${version.type}${version.not_null ? '' : ' NULL'} DEFAULT ${version.default_expression ?? 'nothing'}`,
     );
   }
   const pointer = of(POINTER);
   if (pointer === undefined) problems.push(`has no ${POINTER} column, which points at that event`);
-  else if (pointer.type !== 'uuid') problems.push(`${POINTER} must be uuid, not ${pointer.type}`);
+  else if (!isType(pointer, 'uuid')) problems.push(`${POINTER} must be uuid, not ${pointer.type}`);
   else if (pointer.not_null) {
     problems.push(`${POINTER} must take a null: a row is written before the event it will point at is recorded`);
   }
   for (const field of table.fields) {
     const found = of(field.column);
-    const allowed = COLUMN_TYPES[field.type];
     if (found === undefined) problems.push(`has no ${field.column} column, which it declares as an authority field`);
-    else if (!allowed.includes(found.type)) {
+    else if (!isType(found, field.type)) {
       problems.push(
-        `the authority field ${field.column} is ${found.type}, which is not read as ${field.type} (${allowed.join(', ')}): another type's text could read the same for another value`,
+        `the authority field ${field.column} is ${found.type}, which is not read as ${field.type} (${TYPE_NAMES[field.type]}): another type's text could read the same for another value`,
       );
     }
   }
-  const undeclared =
-    columns.find((column) => column.column === STATUS) !== undefined &&
-    !table.fields.some((field) => field.column === STATUS);
-  return undeclared
-    ? [
-        ...problems,
-        `has a ${STATUS} column that it doesn't seal; a status that no signed event covers could be flipped unseen (ADR-012 §2)`,
-      ]
-    : problems;
+  // record writes every one of these itself, and a value the database computes
+  // can't be written at all: the seal would fail on the first change.
+  for (const written of [...table.fields.map((field) => field.column), VERSION, POINTER]) {
+    if (of(written)?.generated === true) {
+      problems.push(`${written} is a generated column, so nothing can write it and no change could be sealed`);
+    }
+  }
+  const hasStatus = columns.some((column) => column.column === STATUS);
+  if (hasStatus && !table.fields.some((field) => field.column === STATUS)) {
+    problems.push(
+      `has a ${STATUS} column that it doesn't seal; a status that no signed event covers could be flipped unseen (ADR-012 §2)`,
+    );
+  }
+  return problems;
 }
+
+/** The column's type is one the reader reads a field of that declared type with. */
+const isType = (column: Column, declared: AuthorityFieldType): boolean =>
+  COLUMN_TYPES[declared].includes(column.type_oid);
 
 /**
  * One plain key on the row's identity, and no key over the signed-state
@@ -629,21 +689,18 @@ function keyProblems(keys: readonly Key[]): string[] {
       );
     }
   }
-  const identity = keys.some(
-    (key) =>
-      !key.exclusion &&
-      !key.partial &&
-      !key.expressions &&
-      key.columns !== null &&
-      key.columns.length === KEY.length &&
-      KEY.every((column) => key.columns?.includes(column)),
-  );
-  return identity
-    ? problems
-    : [
-        ...problems,
-        `has no unique key on (${KEY.join(', ')}); without one, two rows could share a key and every read of the row would be unreadable`,
-      ];
+  const identity = keys.some(({ exclusion, partial, expressions, enforced, columns }) => {
+    // An index a failed CREATE INDEX CONCURRENTLY left behind is in the
+    // catalogue but enforces nothing, so it is no key at all.
+    if (exclusion || partial || expressions || !enforced || columns === null) return false;
+    return columns.length === KEY.length && KEY.every((column) => columns.includes(column));
+  });
+  if (!identity) {
+    problems.push(
+      `has no unique key on (${KEY.join(', ')}); without one, two rows could share a key and every read of the row would be unreadable`,
+    );
+  }
+  return problems;
 }
 
 /**
@@ -657,12 +714,13 @@ function grantProblems(table: AuthorityTable, grants: readonly AppGrant[]): stri
   const mayUpdate = new Set<string>([...table.fields.map((field) => field.column), VERSION, POINTER]);
   return grants.flatMap((grant) => {
     const who = grant.to_public ? 'PUBLIC' : 'the app role';
-    if (APP_MAY_NOT.includes(grant.privilege)) {
+    const on = grant.column === '' ? '' : ` on ${grant.column}`;
+    if (APP_MAY.includes(grant.privilege)) return [];
+    if (grant.privilege !== 'UPDATE') {
       return [
-        `${who} has ${grant.privilege}${grant.column === '' ? '' : ` on ${grant.column}`}; a row deleted or emptied takes its authority out of reach of the log that signed it (ADR-012 §2)`,
+        `${who} has ${grant.privilege}${on}, which is not one of the rights the app has on an authority table (${APP_MAY.join(', ')} and UPDATE of the sealed columns): a deleted or emptied row takes its authority out of reach of the log that signed it, and a trigger of the app's own could rewrite a row the guard has just passed`,
       ];
     }
-    if (grant.privilege !== 'UPDATE') return [];
     if (grant.column === '') {
       return [
         `${who} has UPDATE on the whole table, which covers ${KEY.join(' and ')}; grant UPDATE column by column (${[...mayUpdate].join(', ')})`,
@@ -679,7 +737,7 @@ function grantProblems(table: AuthorityTable, grants: readonly AppGrant[]): stri
  * machine's states, the guard carries exactly its first status and its moves,
  * and no other trigger can rewrite the status after the guard has passed it.
  */
-function statusProblems(table: AuthorityTable, columns: readonly Column[], facts: Facts): string[] {
+function statusProblems(table: AuthorityTable, columns: readonly Column[], facts: Facts, printed: string): string[] {
   const machine = table.status;
   const triggers = facts.triggers.filter((trigger) => trigger.table === table.table);
   if (machine === undefined) {
@@ -690,13 +748,13 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
   const problems: string[] = [];
   const status = columns.find((column) => column.column === STATUS);
   if (status === undefined) problems.push(`has no ${STATUS} column, which the ${machine.name} machine rules`);
-  else if (status.type !== 'text' || !status.not_null)
+  else if (!isType(status, 'text') || !status.not_null)
     problems.push(`${STATUS} must be text NOT NULL, not ${status.type}${status.not_null ? '' : ' NULL'}`);
-  const reference = facts.references.get(machine.name);
-  if (reference === undefined) throw new Error(`No reference objects were read for the ${machine.name} machine`);
+  const reference = facts.references.get(table.table);
+  if (reference === undefined) throw new Error(`No reference objects were read for ${table.table}`);
   const checks = facts.checks.filter((check) => check.table === table.table);
   problems.push(...statusCheckProblems(machine, checks, reference));
-  problems.push(...guardProblems(table.table, machine, triggers, reference));
+  problems.push(...guardProblems(printed, machine, triggers, reference));
   return problems;
 }
 
@@ -704,13 +762,17 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
 function statusCheckProblems(machine: AuthorityMachine, checks: readonly Check[], reference: Reference): string[] {
   const onStatus = checks.filter((check) => check.on_status);
   const [only, ...others] = onStatus;
-  const wanted = `CHECK (status IN (${machine.states.map((state) => `'${state}'`).join(', ')}))`;
+  // The reference constraint, as this server prints it: the same shape the
+  // real one is printed in, so the two halves of the message can be read
+  // against each other. Written `CHECK (status IN (…))`, in the machine's own
+  // order, it prints like this.
+  const wanted = reference.checkDefinition;
   if (only === undefined || others.length > 0) {
     return [
-      `has ${onStatus.length} check constraints over ${STATUS}; it has exactly one, listing the machine's states: ${wanted}`,
+      `has ${onStatus.length} check constraints over ${STATUS}; it has exactly one, listing the ${machine.name} machine's states: ${wanted}`,
     ];
   }
-  return only.definition === reference.checkDefinition
+  return only.definition === wanted
     ? []
     : [
         `the check constraint ${only.name} is ${only.definition}, not the ${machine.name} machine's states in its own order: ${wanted}`,
@@ -726,13 +788,15 @@ function statusCheckProblems(machine: AuthorityMachine, checks: readonly Check[]
  * is sealed (record, A3b-2).
  */
 function guardProblems(
-  table: string,
+  printed: string,
   machine: AuthorityMachine,
   triggers: readonly Trigger[],
   reference: Reference,
 ): string[] {
   const problems: string[] = [];
-  const wanted = reference.guardDefinition.replace(ON_TABLE, () => ` ON ${table} FOR EACH ROW `);
+  // The name this server printed for the table itself, so a name it quotes
+  // (a reserved word such as `user`) reads the same on both sides.
+  const wanted = reference.guardDefinition.replace(ON_TABLE, () => ` ON ${printed} FOR EACH ROW `);
   const guard = triggers.find((trigger) => trigger.name === GUARD);
   if (guard === undefined) problems.push(`has no ${GUARD} trigger (db/migrations/0004): ${wanted}`);
   else {
@@ -745,7 +809,18 @@ function guardProblems(
       );
     }
   }
-  for (const trigger of triggers.filter((one) => one.before && one.for_each_row && one.name !== GUARD)) {
+  // Only a trigger that fires before a row is written, and that fires at all,
+  // could rewrite what the guard has just passed: a DELETE-only trigger has no
+  // new row, and a disabled or replica-only one never runs here.
+  const competing = triggers.filter(
+    (one) =>
+      one.before &&
+      one.for_each_row &&
+      one.on_write &&
+      (one.enabled === 'O' || one.enabled === 'A') &&
+      one.name !== GUARD,
+  );
+  for (const trigger of competing) {
     if (!LOWER_WORDS.test(trigger.name)) {
       problems.push(
         `the BEFORE ROW trigger ${trigger.name} isn't named in lower-case words, so which of it and ${GUARD} Postgres fires last can't be read off its name`,
