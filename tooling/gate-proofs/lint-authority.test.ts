@@ -9,7 +9,7 @@
 // is empty until slice B1, so what it does with a registry is proven in
 // lint-authority-registry.test.ts. Its one rule that bites on an empty
 // registry — a table that declares itself and isn't on it — is proven here.
-import { API, AUDIT, CORE, describes, type LintCase, PLATFORM, proveLintRules } from './lint-harness.ts';
+import { API, AUDIT, CORE, describes, type LintCase, PLATFORM, PLATFORM_DB, proveLintRules } from './lint-harness.ts';
 
 const STEPS_RULE = 'agentx/signed-state-steps-in-audit-module';
 const TABLES_RULE = 'agentx/authority-tables-through-signed-state';
@@ -39,6 +39,42 @@ const REJECTED: LintCase[] = [
       "export const write = (row: string): void => {\n  db['writeSignedRow'](row);\n};\n",
     rule: STEPS_RULE,
     says: 'writeSignedRow',
+  },
+  {
+    name: 'a signed-row step imported under the string spelling of its name',
+    filePath: `${CORE}/string-named-import.ts`,
+    code: ["import { 'readSignedRow' as read } from '@agentx/platform/db';", '', 'export const step = read;', ''].join(
+      '\n',
+    ),
+    rule: STEPS_RULE,
+    says: 'readSignedRow',
+  },
+  {
+    name: 'a signed-row step reached by a name in backticks',
+    filePath: `${API}/backtick-step.ts`,
+    code: [
+      "declare const db: Record<'writeSignedRow', (row: string) => void>;",
+      '',
+      'export const write = (row: string): void => {',
+      '  db[`writeSignedRow`](row);',
+      '};',
+      '',
+    ].join('\n'),
+    rule: STEPS_RULE,
+    says: 'writeSignedRow',
+  },
+  {
+    name: 'a signed-row step taken out by a computed destructuring key',
+    filePath: `${CORE}/computed-destructured-step.ts`,
+    code: [
+      'declare const db: { readSignedRow: (row: string) => string };',
+      '',
+      "const { ['readSignedRow']: read } = db;",
+      'export const step = read;',
+      '',
+    ].join('\n'),
+    rule: STEPS_RULE,
+    says: 'readSignedRow',
   },
   {
     name: 'a signed-row step taken out of a namespace by destructuring',
@@ -97,6 +133,16 @@ const ALLOWED: LintCase[] = [
     code:
       "import { pointSignedRow, readSignedRow, writeSignedRow } from '@agentx/platform/db';\n\n" +
       'export const steps = { readSignedRow, writeSignedRow, pointSignedRow };\n',
+    rule: STEPS_RULE,
+  },
+  {
+    name: "the platform's own database module, where the steps are written",
+    filePath: `${PLATFORM_DB}/writes-the-steps.ts`,
+    code: [
+      'export const writeSignedRow = (row: string): string => row;',
+      'export const readSignedRow = (row: string): string => row;',
+      '',
+    ].join('\n'),
     rule: STEPS_RULE,
   },
   {

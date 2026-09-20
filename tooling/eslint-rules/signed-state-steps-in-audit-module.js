@@ -17,13 +17,20 @@
 // written (@agentx/platform/db) and where they are used (the audit module's
 // infrastructure) the rule is turned off in eslint.config.js, which is also
 // the list of the places allowed to hold them.
+import { textOf } from './strings.js';
+
 const STEPS = new Set(['readSignedRow', 'writeSignedRow', 'pointSignedRow', 'createStatusChanger']);
 
 /** The module the steps come from: re-exporting it whole would pass them on wholesale. */
 const PLATFORM_DB = '@agentx/platform/db';
 
-/** The string a literal says, for a step reached as `db['writeSignedRow']`. */
-const textOf = (node) => (node.type === 'Literal' && typeof node.value === 'string' ? node.value : null);
+/**
+ * The name a node says: an identifier, or a string wherever a name may be
+ * written as one (a computed key, and the module export names ES2022 allows in
+ * an import or an export).
+ */
+const named = (node) =>
+  node === undefined || node === null ? null : node.type === 'Identifier' ? node.name : textOf(node);
 
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
@@ -39,17 +46,19 @@ export default {
   },
   create(context) {
     const check = (node, name) => {
-      if (STEPS.has(name)) context.report({ node, messageId: 'step', data: { name } });
+      if (name !== null && STEPS.has(name)) context.report({ node, messageId: 'step', data: { name } });
     };
     return {
-      // import { writeSignedRow } from '@agentx/platform/db'
+      // import { writeSignedRow } from '@agentx/platform/db', and the string
+      // spelling of the same thing: import { 'writeSignedRow' as write } …
       ImportSpecifier(node) {
-        if (node.imported.type === 'Identifier') check(node, node.imported.name);
+        check(node, named(node.imported));
       },
-      // export { writeSignedRow } / export { mine as writeSignedRow }
+      // export { writeSignedRow } / export { mine as writeSignedRow }, either
+      // side of the rename and either spelling. Reported once.
       ExportSpecifier(node) {
-        if (node.local.type === 'Identifier') check(node, node.local.name);
-        if (node.exported.type === 'Identifier') check(node, node.exported.name);
+        const both = [named(node.local), named(node.exported)].find((name) => name !== null && STEPS.has(name));
+        if (both !== undefined) check(node, both);
       },
       // export * from '@agentx/platform/db', which passes all four on at once
       ExportAllDeclaration(node) {
@@ -57,23 +66,15 @@ export default {
           context.report({ node, messageId: 'wholesale', data: { module: PLATFORM_DB } });
         }
       },
-      // db.writeSignedRow(...) and db['writeSignedRow'](...), after import * as db
+      // db.writeSignedRow(...), db['writeSignedRow'](...) and the same in
+      // backticks, after import * as db
       MemberExpression(node) {
-        if (node.computed) {
-          const named = textOf(node.property);
-          if (named !== null) check(node, named);
-          return;
-        }
-        if (node.property.type === 'Identifier') check(node, node.property.name);
+        check(node, named(node.property));
       },
-      // const { writeSignedRow } = db
+      // const { writeSignedRow } = db, and const { ['writeSignedRow']: write } = db
       Property(node) {
-        if (node.parent.type !== 'ObjectPattern' || node.computed) return;
-        if (node.key.type === 'Identifier') check(node, node.key.name);
-        else {
-          const named = textOf(node.key);
-          if (named !== null) check(node, named);
-        }
+        if (node.parent.type !== 'ObjectPattern') return;
+        check(node, named(node.key));
       },
     };
   },

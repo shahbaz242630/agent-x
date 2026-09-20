@@ -12,14 +12,54 @@
 /** Stands for a value spliced into a string, so no two pieces read as one word. */
 const VALUE = '\u0000';
 
+/**
+ * A value with its TypeScript wrappers taken off, so `'agent' as const` and
+ * `('x' satisfies string)` read as the string they are. A rule that stopped at
+ * the wrapper would miss the spelling a strict codebase actually uses.
+ */
+export function withoutWrappers(node) {
+  let current = node;
+  while (
+    current !== undefined &&
+    current !== null &&
+    (current.type === 'TSAsExpression' ||
+      current.type === 'TSSatisfiesExpression' ||
+      current.type === 'TSNonNullExpression' ||
+      current.type === 'TSInstantiationExpression')
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
 /** The text of a literal or a template with no values in it, or null for anything else. */
 export function textOf(node) {
-  if (node === undefined || node === null) return null;
-  if (node.type === 'Literal') return typeof node.value === 'string' ? node.value : null;
-  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
-    return node.quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw).join('');
+  const value = withoutWrappers(node);
+  if (value === undefined || value === null) return null;
+  if (value.type === 'Literal') return typeof value.value === 'string' ? value.value : null;
+  if (value.type === 'TemplateLiteral' && value.expressions.length === 0) {
+    return value.quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw).join('');
   }
   return null;
+}
+
+/**
+ * A character a name is made of. A name is looked for with one of these on
+ * neither side, so `'agents.agents as a'` carries `agents.agents` while
+ * `'agents.agents_old'` and `'my_agents.agents'` are other names.
+ */
+const NAME_CHARACTER = /[A-Za-z0-9_.]/;
+
+/** True when `text` carries `name` as a name of its own, not as part of a longer one. */
+export function carries(text, name) {
+  let at = text.indexOf(name);
+  while (at !== -1) {
+    const before = at === 0 ? '' : text[at - 1];
+    const after = text[at + name.length] ?? '';
+    if (!NAME_CHARACTER.test(before) && !NAME_CHARACTER.test(after)) return true;
+    at = text.indexOf(name, at + 1);
+  }
+  return false;
 }
 
 /**
@@ -29,14 +69,15 @@ export function textOf(node) {
  * reads as `agents.` then a marker, and can't be mistaken for the whole name.
  */
 export function joinedText(node) {
-  if (node === undefined || node === null) return VALUE;
-  if (node.type === 'Literal') return typeof node.value === 'string' ? node.value : VALUE;
-  if (node.type === 'TemplateLiteral') {
-    const pieces = node.quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw);
+  const value = withoutWrappers(node);
+  if (value === undefined || value === null) return VALUE;
+  if (value.type === 'Literal') return typeof value.value === 'string' ? value.value : VALUE;
+  if (value.type === 'TemplateLiteral') {
+    const pieces = value.quasis.map((quasi) => quasi.value.cooked ?? quasi.value.raw);
     return pieces.join(VALUE);
   }
-  if (node.type === 'BinaryExpression' && node.operator === '+') {
-    return joinedText(node.left) + joinedText(node.right);
+  if (value.type === 'BinaryExpression' && value.operator === '+') {
+    return joinedText(value.left) + joinedText(value.right);
   }
   return VALUE;
 }

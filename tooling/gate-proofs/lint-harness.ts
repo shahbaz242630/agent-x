@@ -15,6 +15,12 @@ export interface LintCase {
   rule: string | null;
   /** Text the message must contain, to tell apart checks that share a rule. */
   says?: string;
+  /**
+   * True for a snippet that needs the options `proveLintRules` was given: they
+   * reach this file and no other, so a case meant to be judged by the real
+   * configuration (an exemption, say) can't be given them by accident.
+   */
+  withOptions?: boolean;
 }
 
 /** Folders the snippets pretend to sit in. None exists on disk. */
@@ -27,6 +33,8 @@ export const CONSOLE = 'apps/console/src/gate-proof';
 export const TESTING = 'packages/testing/src/gate-proof';
 /** Inside the audit module, the one product module allowed to hold the signed-row steps (A3c). */
 export const AUDIT = 'packages/core/src/modules/audit/gate-proof';
+/** Inside the platform's database module, where the signed-row steps are written (A3c). */
+export const PLATFORM_DB = 'packages/platform/src/db/gate-proof';
 
 /**
  * A module's table description, for the A3c-2 proofs. The type is imported
@@ -47,20 +55,23 @@ export const TABLE: SignedStateTable = {
 /**
  * Lints every snippet with the real eslint.config.js and checks each verdict.
  *
- * `override` gives one rule other options, for a rule whose behaviour depends
+ * `options` gives one rule other options, for a rule whose behaviour depends
  * on them (A3c's authority tables, whose registry is empty until slice B1).
- * **It carries its own `files`, and must:** a rule written into a block that
- * matches everything applies everywhere, which would switch the rule back on
- * for the very paths the real configuration turns it off for, and a proof of
- * an exemption would then pass while proving nothing. Name the folders the
- * option cases sit in, and every other path is judged by the real
- * configuration alone.
+ * They reach **only the snippets that ask for them** (`withOptions` on the
+ * case), because a rule written into a block that matches everything applies
+ * everywhere: it would switch the rule back on for the very paths the real
+ * configuration turns it off for, and a proof of an exemption would then pass
+ * while proving nothing. The folders are taken from those cases, so no caller
+ * can get that wrong.
  */
 export function proveLintRules(
   rejected: readonly LintCase[],
   allowed: readonly LintCase[],
-  override?: { readonly files: readonly string[]; readonly rules: Linter.RulesRecord },
+  options: Linter.RulesRecord = {},
 ): void {
+  const withOptions = [...rejected, ...allowed]
+    .filter((testCase) => testCase.withOptions === true)
+    .map((testCase) => testCase.filePath);
   const eslint = new ESLint({
     // The snippets are not on disk, so the TypeScript project service opens them
     // in a default project built from the root tsconfig.json.
@@ -70,9 +81,17 @@ export function proveLintRules(
         languageOptions: {
           parserOptions: {
             projectService: {
-              allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING, AUDIT].flatMap(
-                (folder) => [`${folder}/*.ts`, `${folder}/*.tsx`],
-              ),
+              allowDefaultProject: [
+                CORE,
+                PLATFORM,
+                CONFIG,
+                OUTBOUND,
+                API,
+                CONSOLE,
+                TESTING,
+                AUDIT,
+                PLATFORM_DB,
+              ].flatMap((folder) => [`${folder}/*.ts`, `${folder}/*.tsx`]),
               defaultProject: 'tsconfig.json',
               // The limit guards editor performance; here every snippet uses the default project.
               maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 100,
@@ -80,10 +99,9 @@ export function proveLintRules(
           },
         },
       },
-      // Last, so the options win for these folders and nowhere else.
-      ...(override === undefined
-        ? []
-        : [{ files: override.files.map((folder) => `${folder}/*.{ts,tsx}`), rules: override.rules }]),
+      // Last, so the options win for the snippets that asked for them and
+      // nowhere else.
+      ...(withOptions.length === 0 ? [] : [{ files: withOptions, rules: options }]),
     ],
   });
 

@@ -315,9 +315,10 @@ export default defineConfig([
 
   // ADR-012 §2, A3c: the signed-row steps are written in @agentx/platform/db
   // and used by the audit module's signed states, which sign every change they
-  // make. **This list is the whole set of places allowed to hold them**: a
-  // fourth entry here is a change to the wall itself, not a convenience.
-  // Tests and the harness may call them to prove what they do; neither ships.
+  // make. **These four entries are the whole set of places allowed to hold
+  // them**: another one is a change to the wall itself, not a convenience, and
+  // each of the two that ship has a gate proof (lint-authority.test.ts). Tests
+  // and the harness may call them to prove what they do; neither ships.
   {
     files: [
       'packages/platform/src/db/**/*.{ts,tsx}',
