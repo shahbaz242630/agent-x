@@ -1,51 +1,19 @@
+import { SCHEMA_POLICY as PRODUCT_POLICY } from '../packages/platform/src/db/schema-policy.ts';
 import type { SchemaPolicy } from '../packages/testing/src/index.ts';
 
 /**
- * CI-06's decisions about our schema (ADR-005 §6, §8, §9), checked on every
- * run against db/migrations (tooling/checks/database-schema.db.test.ts).
+ * CI-06's decisions about our schema (ADR-005 §6, §8, §9), checked on every run
+ * against db/migrations (tooling/checks/database-schema.db.test.ts).
  *
- * Every table not listed under `globalTables` is a tenant table and must carry
- * the tenant walls. A table is listed only with a reason and its exact
- * columns, so a new global table, or a new column on one, is always a reviewed
- * change to this file (SEC-TEN-08). An entry for a table that no longer exists
- * fails the check, so the list can't go stale; the same holds for the
- * append-only exceptions.
+ * **The decisions themselves live in the product**, in
+ * `@agentx/platform/db`'s schema-policy.ts, because the live schema guard
+ * (A3e-1b) checks the running database against the same list as the app role,
+ * and a second copy here would be free to drift from it — the mistake A3c-2
+ * set out to make impossible. This file only hands it to the CI checks.
+ *
+ * The annotation is the proof that the two shapes still fit: @agentx/testing
+ * declares its own `SchemaPolicy` because it must not depend on
+ * @agentx/platform (that way round is the workspace cycle removed in S28), so
+ * this assignment is where a change to either shape is caught, at compile time.
  */
-export const SCHEMA_POLICY: SchemaPolicy = {
-  globalTables: {
-    'migrations.applied': {
-      reason:
-        'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
-      columns: ['name', 'checksum', 'applied_at'],
-    },
-    'platform_controls.audit_events': {
-      reason:
-        "The platform's own audit chain (ADR-011 §3, ADR-014 §8): events of no organisation, such as each start's config hash (SEC-OPS-05). Append-only for the app",
-      columns: [
-        'seq',
-        'id',
-        'recorded_at',
-        'actor_type',
-        'actor_id',
-        'action',
-        'details',
-        'prev_hash',
-        'hash',
-        'mac',
-        'mac_key_version',
-      ],
-    },
-    'platform_controls.audit_head': {
-      reason: "The platform audit chain's one head row, which the app locks and moves on with every event",
-      columns: ['only_row', 'seq', 'hash', 'mac', 'mac_key_version'],
-    },
-  },
-  // The audit trails' schemas (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
-  appendOnlySchemas: ['audit', 'platform_controls'],
-  appendOnlyExceptions: {
-    'audit.heads':
-      "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
-    'platform_controls.audit_head':
-      "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
-  },
-};
+export const SCHEMA_POLICY: SchemaPolicy = PRODUCT_POLICY;

@@ -1,0 +1,82 @@
+// What our schema is allowed to look like (ADR-005 §6, §8, §9): which tables
+// may stand outside the tenant walls, and what the app role may do in the
+// audit trails' schemas.
+//
+// **It lives in the product, not in tooling, because two readers need it and
+// they must never hold different lists** (the A3c-2 lesson):
+//
+// - CI-06 checks a freshly migrated database against it on every run
+//   (tooling/checks/database-schema.db.test.ts, through @agentx/testing's
+//   schemaProblems), as the migration role, on Postgres 16 and 18;
+// - the live schema guard checks the **running** database against it, as the
+//   app role, at start-up and on every anchor check (A3e-1b). The database is
+//   what an owner-level attacker controls, so the expectation has to travel in
+//   the image CI signs and the deploy verifies — never in the database itself.
+//
+// A table is listed under `globalTables` only with a reason and its exact
+// columns, so a new global table, or a new column on one, is always a reviewed
+// change to this file (SEC-TEN-08). An entry for a table that no longer exists
+// fails CI-06, so the list can't go stale; the same holds for the append-only
+// exceptions.
+
+/** A table with no org_id and no row-level security, allowed by name (ADR-005 §6). */
+interface GlobalTable {
+  /** Why it can't be a tenant table. */
+  readonly reason: string;
+  /** Every column it has, exactly: a new column is a reviewed entry (SEC-TEN-08). */
+  readonly columns: readonly string[];
+}
+
+export interface SchemaPolicy {
+  /**
+   * The global tables, by schema-qualified name as Postgres quotes it
+   * (`schema.table`). Every other table is a tenant table.
+   */
+  readonly globalTables: Readonly<Record<string, GlobalTable>>;
+  /** Schemas whose tables the app role may only add to and read, such as the audit trail (SEC-EVD-01). */
+  readonly appendOnlySchemas: readonly string[];
+  /**
+   * Tables in those schemas that the app may also change, by name, each with
+   * its reason: a row the app locks and moves on, such as a chain head.
+   */
+  readonly appendOnlyExceptions: Readonly<Record<string, string>>;
+}
+
+export const SCHEMA_POLICY: SchemaPolicy = {
+  globalTables: {
+    'migrations.applied': {
+      reason:
+        'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
+      columns: ['name', 'checksum', 'applied_at'],
+    },
+    'platform_controls.audit_events': {
+      reason:
+        "The platform's own audit chain (ADR-011 §3, ADR-014 §8): events of no organisation, such as each start's config hash (SEC-OPS-05). Append-only for the app",
+      columns: [
+        'seq',
+        'id',
+        'recorded_at',
+        'actor_type',
+        'actor_id',
+        'action',
+        'details',
+        'prev_hash',
+        'hash',
+        'mac',
+        'mac_key_version',
+      ],
+    },
+    'platform_controls.audit_head': {
+      reason: "The platform audit chain's one head row, which the app locks and moves on with every event",
+      columns: ['only_row', 'seq', 'hash', 'mac', 'mac_key_version'],
+    },
+  },
+  // The audit trails' schemas (ADR-004 §4): the app role may only add audit rows and read them (ADR-005 §9).
+  appendOnlySchemas: ['audit', 'platform_controls'],
+  appendOnlyExceptions: {
+    'audit.heads':
+      "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
+    'platform_controls.audit_head':
+      "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
+  },
+};

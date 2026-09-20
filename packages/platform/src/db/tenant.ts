@@ -26,6 +26,20 @@ import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 /** A UUID in its canonical form, which is how every organisation ID is written (ADR-007). */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The tenant policy's expression as `pg_get_expr` prints it back, which the
+ * live schema guard (A3e-1b) compares every tenant table's policy with.
+ *
+ * It lives here because this is the one product file allowed to name the
+ * setting (lint), and the policy is the other half of what withTenant sets:
+ * the two have to say the same thing or the walls don't hold. How Postgres
+ * prints it can differ between major versions, so schema-guard.db.test.ts
+ * proves this is what the server really says on each version we support — a
+ * future major that words it differently fails there, never silently.
+ */
+export const TENANT_POLICY_EXPRESSION =
+  "(org_id = (NULLIF(current_setting('app.org_id'::text, true), ''::text))::uuid)";
+
 export class TenantContextError extends Error {
   constructor(problem: string) {
     super(`Tenant context refused: ${problem}`);
