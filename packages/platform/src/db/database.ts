@@ -6,6 +6,7 @@ import { Kysely, PostgresDialect } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import type { Logger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH } from './search-path.ts';
 import { refuseTenantPreset, tenantCheckedPool } from './tenant.ts';
 
 export interface DatabaseConnectionOptions {
@@ -44,6 +45,29 @@ function typeParsers(): pg.TypeOverrides {
   return types;
 }
 
+/**
+ * Every name our SQL leaves unqualified is looked up in Postgres's own catalogue
+ * first, so nothing planted in another schema can stand in for one of its own
+ * (the CVE-2018-1058 pattern). The setup job and the schema checks have always
+ * pinned their connections this way; the app's pool is pinned for a second
+ * reason (A3e).
+ *
+ * The database's owner is no superuser and can't set `search_path` on the app's
+ * role, but it can on the database it owns, and a connection takes that up. On
+ * a real server (S32) `ALTER DATABASE ... SET search_path = planted, pg_catalog`
+ * with a planted `planted.length(text)` made the app read `length('abc')` as 999
+ * rather than 3 — and canonical text made of such reads is what a state seal is
+ * built from, so a tampered value could be made to seal alike. The startup
+ * packet's own setting beats a setting on the database or the role, so pinning
+ * it here stops that rather than merely reporting it (A3e's live check reports
+ * the setting as well, since it is a sign someone tried).
+ *
+ * It also settles PGOPTIONS: pg would otherwise pass the environment's, and
+ * this replaces it. What the path itself is, and why `pg_temp` is named last,
+ * is in search-path.ts.
+ */
+export { PINNED_SEARCH_PATH } from './search-path.ts';
+
 function tlsSetting(tls: string): PoolConfig['ssl'] {
   // Set to true explicitly, so NODE_TLS_REJECT_UNAUTHORIZED=0 can't turn the check off (SEC-PTR-07).
   if (tls === 'verify-full') return { rejectUnauthorized: true };
@@ -54,9 +78,10 @@ function tlsSetting(tls: string): PoolConfig['ssl'] {
 /**
  * pg's settings for these options. pg fills a missing or empty host, port,
  * database, user, password or application name from the PG* environment
- * variables, so each is given and must not be empty. PGOPTIONS can still add
- * session settings; a tenant set that way is refused on connection, and the
- * start-up config check will refuse PG* variables (piece E).
+ * variables, so each is given and must not be empty. `options` is given too,
+ * which replaces PGOPTIONS rather than adding to it (PINNED_SEARCH_PATH); a
+ * tenant set on the database or the role is still refused on connection, and
+ * the start-up config check will refuse PG* variables (piece E).
  */
 export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { readonly max: number } {
   for (const name of ['host', 'database', 'user', 'password', 'applicationName'] as const) {
@@ -77,6 +102,7 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { r
     password: options.password,
     ssl: tlsSetting(options.tls),
     max,
+    options: PINNED_SEARCH_PATH,
     application_name: options.applicationName ?? 'agentx',
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,

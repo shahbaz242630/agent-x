@@ -1,7 +1,8 @@
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 
-import { type DatabaseConnectionOptions, DatabaseOptionsError, poolConfig } from './database.ts';
+import { type DatabaseConnectionOptions, DatabaseOptionsError, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { refuseTenantPreset } from './tenant.ts';
 
 const OPTIONS: DatabaseConnectionOptions = {
@@ -50,6 +51,23 @@ describe('poolConfig', () => {
 
   it('SEC-TEN-06: checks every new connection for a preset tenant', () => {
     expect(poolConfig(OPTIONS).onConnect).toBe(refuseTenantPreset);
+  });
+
+  it('A3e: pins every connection, whatever the options ask for', () => {
+    expect(poolConfig(OPTIONS).options).toBe(PINNED_SEARCH_PATH);
+    expect(PINNED_SEARCH_PATH).toBe('-c search_path=pg_catalog,pg_temp');
+    // The pin travels in the startup packet, which beats a search_path set on
+    // the database or the role, and replaces PGOPTIONS rather than adding to it.
+    expect(poolConfig({ ...OPTIONS, applicationName: 'agentx-worker' }).options).toBe(PINNED_SEARCH_PATH);
+  });
+
+  it('A3e: sends the very value the connection check expects, so the two cannot drift apart', () => {
+    // PINNED_SEARCH_PATH_VALUE is what tenant.ts compares a live connection
+    // against. Were the option built from a second hand-kept literal,
+    // strengthening one and forgetting the other would make every connection
+    // fail its check and refuse every query, with no unit test to show it.
+    // The path itself is checked in tooling/checks/search-path-pin.test.ts.
+    expect(poolConfig(OPTIONS).options).toBe(`-c search_path=${PINNED_SEARCH_PATH_VALUE}`);
   });
 
   it('ADR-006: reads bigint columns as BigInt, and leaves other types alone', () => {

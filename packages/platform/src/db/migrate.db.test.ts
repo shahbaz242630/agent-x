@@ -8,6 +8,7 @@ import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
+import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { applyMigration, MigrationFailed, MigrationNotAtomic, MigrationRefused, runMigrations } from './migrate.ts';
 import { TenantContextError } from './tenant.ts';
 
@@ -158,7 +159,16 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
 
   it('resets the session after each file, so a SET in one file cannot change the next', async () => {
     await write('0001_first.sql', 'create schema demo;\nset search_path = demo;\ncreate table one (id int);\n');
-    await write('0002_second.sql', 'create table two (id int);\n');
+    // The second file checks the path itself before creating anything: the
+    // reset puts back what the startup packet pinned (PINNED_SEARCH_PATH), so
+    // a leak from the first file shows as the raised error rather than as a
+    // table in the wrong schema.
+    await write(
+      '0002_second.sql',
+      `do $$ begin if pg_catalog.current_setting('search_path') <> '${PINNED_SEARCH_PATH_VALUE}'` +
+        " then raise exception 'the search_path of the file before leaked'; end if; end $$;\n" +
+        'create table demo.two (id int);\n',
+    );
     await run();
     const rows = await database
       .as('owner')
@@ -167,8 +177,15 @@ describe(`runMigrations (Postgres ${server.version})`, () => {
       );
     expect(rows).toEqual([
       { schema: 'demo', name: 'one' },
-      { schema: 'public', name: 'two' },
+      { schema: 'demo', name: 'two' },
     ]);
+  });
+
+  it('pins the search_path inside a migration, so an unqualified object is refused rather than landing in public', async () => {
+    await write('0001_first.sql', 'create table stray (id int);\n');
+    await expect(run()).rejects.toThrow(MigrationFailed);
+    expect(await tables()).toEqual([]);
+    expect(await ledger()).toEqual([]);
   });
 
   it('lets only one run work at a time, so two deploys at once apply each file once', async () => {

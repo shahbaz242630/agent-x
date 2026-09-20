@@ -293,16 +293,20 @@ export function publicSchemaProblems(database: string, facts: PublicSchemaFacts)
 type Client = pg.Client;
 
 /**
- * Every connection the job opens looks up names in pg_catalog only, so no
- * function or operator the migration role (or anyone who can create objects
- * in a database) planted can stand in for Postgres's own and run with the
- * admin's rights (security review, S13; schema-checks.ts pins it the same way).
+ * The settings of every connection the job opens: the admin's, named in
+ * Postgres's views, and pinned by poolConfig — so no function or operator the
+ * migration role (or anyone who can create objects in a database) planted can
+ * stand in for Postgres's own and run with the admin's rights (security
+ * review, S13). The schema checks pin the same path on their own connections
+ * (CATALOGUE_OPTIONS in @agentx/testing), and the two are compared in
+ * tooling/checks/search-path-pin.test.ts.
+ *
+ * The pin comes from poolConfig alone and is not set again here: this job's own
+ * test asserts the pinned value, so removing it from poolConfig fails that test
+ * as well as the app's, which an override after the spread would have hidden.
  */
-const PINNED_SEARCH_PATH = '-c search_path=pg_catalog';
-
-/** The settings of every connection the job opens: the admin's, named in Postgres's views, pinned to pg_catalog. */
 export function adminClientConfig(options: DatabaseConnectionOptions): pg.ClientConfig {
-  return { ...poolConfig({ ...options, applicationName: 'agentx-db-setup' }), options: PINNED_SEARCH_PATH };
+  return poolConfig({ ...options, applicationName: 'agentx-db-setup' });
 }
 
 async function connect(options: DatabaseConnectionOptions, logger: Logger): Promise<Client> {

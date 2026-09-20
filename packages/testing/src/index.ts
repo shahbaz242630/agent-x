@@ -7,6 +7,7 @@ export {
   authorityProblems,
   type AuthorityTable,
 } from './db/authority-checks.ts';
+export { CATALOGUE_OPTIONS } from './db/catalogue.ts';
 export { waitUntilBlocked, waitUntilQueued } from './db/lock-wait.ts';
 export { type SchemaPolicy, schemaProblems } from './db/schema-checks.ts';
 export { createTenantProbe } from './db/tenant-probe.ts';

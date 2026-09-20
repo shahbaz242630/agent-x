@@ -16,9 +16,19 @@ import pg from 'pg';
 
 import type { TestDatabase } from './test-database.ts';
 
-/** A connection as the migration role, with pg_catalog alone on the search path. Close it with `end()`. */
+/**
+ * The search path every connection here pins, which is the one the product pins
+ * (PINNED_SEARCH_PATH in @agentx/platform/db). It is written out rather than
+ * imported because @agentx/testing must not depend on @agentx/platform, which
+ * depends on this package for its own tests — the workspace cycle removed in
+ * S28. tooling/checks/search-path-pin.test.ts compares the two, so a change to
+ * one that is not made here fails there rather than drifting quietly.
+ */
+export const CATALOGUE_OPTIONS = '-c search_path=pg_catalog,pg_temp';
+
+/** A connection as the migration role, with Postgres's own catalogue first on the search path. Close it with `end()`. */
 export async function openCatalogue(database: TestDatabase): Promise<pg.Client> {
-  const client = new pg.Client({ ...database.connection('owner'), ssl: false, options: '-c search_path=pg_catalog' });
+  const client = new pg.Client({ ...database.connection('owner'), ssl: false, options: CATALOGUE_OPTIONS });
   await client.connect();
   return client;
 }

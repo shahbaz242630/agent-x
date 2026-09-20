@@ -22,6 +22,7 @@ import {
   ServerSetupRefused,
   setUpServer,
 } from './server-setup.ts';
+import { PINNED_SEARCH_PATH } from './search-path.ts';
 
 const BOOTSTRAP = fileURLToPath(new URL('../../../../db/bootstrap', import.meta.url));
 
@@ -104,8 +105,10 @@ describe('adminClientConfig', () => {
       password: 'x',
       tls: 'verify-full',
     });
+    // The pin comes from poolConfig, with nothing set again here, so dropping it
+    // there fails this test as well as the app's (the A3e-1a review).
     expect(config).toMatchObject({
-      options: '-c search_path=pg_catalog',
+      options: PINNED_SEARCH_PATH,
       application_name: 'agentx-db-setup',
       ssl: { rejectUnauthorized: true },
     });
