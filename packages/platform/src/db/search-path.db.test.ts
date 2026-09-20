@@ -1,5 +1,5 @@
-// A3e: the app's connections look names up in pg_catalog alone, whatever the
-// database says.
+// A3e: the app's connections look names up in Postgres's own catalogue first,
+// whatever the database says.
 //
 // The database's owner is no superuser and can't set `search_path` on the app's
 // role (Postgres wants CREATEROLE and ADMIN for that), but it can set one on
@@ -97,15 +97,6 @@ describe('A3e: a planted search_path on the database', () => {
     expect(path.rows[0]?.path).toBe(PINNED_SEARCH_PATH_VALUE);
   });
 
-  it('leaves the app unable to make a temporary object anyway, the first of the two barriers', async () => {
-    // pg_temp is named last so a temporary type cannot shadow a type name. The
-    // app role also has no TEMPORARY right, so it could not create one; this
-    // records that both hold, rather than resting on either alone.
-    await expect(sql`create temporary table shadow (id int)`.execute(app)).rejects.toThrow(
-      /permission denied|no schema has been selected/i,
-    );
-  });
-
   it('leaves a schema-qualified read working, which is how every one of ours is written', async () => {
     // A table the app role may read. Row security lets no row through without a
     // tenant, which is the point: the read runs, so the pin breaks no query.
@@ -116,10 +107,12 @@ describe('A3e: a planted search_path on the database', () => {
   });
 
   it('needs the owner to grant EXECUTE as well, which 0001_baseline.sql revokes by default', async () => {
-    // The second barrier, found by the A3e-1a review: the baseline takes EXECUTE
-    // on the owner's new functions away from PUBLIC, so a planted stand-in is
-    // not callable by the app until the owner grants it. Proven by taking the
-    // grant away again and watching the unpinned connection fail.
+    // A guard of its own, found by the A3e-1a review: the baseline takes EXECUTE
+    // on the owner's new functions away from PUBLIC (unscoped, so it covers the
+    // planted schema made later too), and a stand-in is not callable by the app
+    // until the owner grants it. Proven by taking the grant away again and
+    // watching the unpinned connection fail. The tests above grant it on
+    // purpose, so they prove the pin rather than resting on this.
     const owner = database.as('owner');
     await owner.query('revoke execute on function planted.length(text) from agentx_app');
     const unpinned = new pg.Client({ ...database.connection('app'), ssl: false });

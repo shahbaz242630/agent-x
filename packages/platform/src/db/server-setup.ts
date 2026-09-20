@@ -297,7 +297,9 @@ type Client = pg.Client;
  * Postgres's views, and pinned by poolConfig — so no function or operator the
  * migration role (or anyone who can create objects in a database) planted can
  * stand in for Postgres's own and run with the admin's rights (security
- * review, S13; schema-checks.ts pins it the same way).
+ * review, S13). The schema checks pin the same path on their own connections
+ * (CATALOGUE_OPTIONS in @agentx/testing), and the two are compared in
+ * tooling/checks/search-path-pin.test.ts.
  *
  * The pin comes from poolConfig alone and is not set again here: this job's own
  * test asserts the pinned value, so removing it from poolConfig fails that test

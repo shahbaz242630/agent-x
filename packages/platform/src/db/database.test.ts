@@ -61,20 +61,13 @@ describe('poolConfig', () => {
     expect(poolConfig({ ...OPTIONS, applicationName: 'agentx-worker' }).options).toBe(PINNED_SEARCH_PATH);
   });
 
-  it('A3e: the option the pool sets and the value the connection check expects cannot drift apart', () => {
-    // They are derived from one literal. Were they two hand-kept copies,
+  it('A3e: sends the very value the connection check expects, so the two cannot drift apart', () => {
+    // PINNED_SEARCH_PATH_VALUE is what tenant.ts compares a live connection
+    // against. Were the option built from a second hand-kept literal,
     // strengthening one and forgetting the other would make every connection
     // fail its check and refuse every query, with no unit test to show it.
-    expect(PINNED_SEARCH_PATH).toBe(`-c search_path=${PINNED_SEARCH_PATH_VALUE}`);
+    // The path itself is checked in tooling/checks/search-path-pin.test.ts.
     expect(poolConfig(OPTIONS).options).toBe(`-c search_path=${PINNED_SEARCH_PATH_VALUE}`);
-  });
-
-  it('A3e: names pg_temp, and last, so a temporary object cannot shadow a type name', () => {
-    // Left out, Postgres searches the session's temporary schema for relation
-    // and type names *before* pg_catalog; named last, it is searched after.
-    const schemas = PINNED_SEARCH_PATH_VALUE.split(',');
-    expect(schemas[0]).toBe('pg_catalog');
-    expect(schemas.at(-1)).toBe('pg_temp');
   });
 
   it('ADR-006: reads bigint columns as BigInt, and leaves other types alone', () => {
