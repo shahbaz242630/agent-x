@@ -30,6 +30,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { buildServer } from './server.ts';
+import { checkSchemaOnSchedule, schemaSoundAtStart } from './schema-check.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
@@ -190,6 +191,16 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     return undefined;
   }
 
+  // Before anything is written: a database whose walls have been rewritten
+  // must not be served from, and the platform chain's own tables are among
+  // what is checked (A3e-1b).
+  if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) {
+    await database.destroy();
+    logger.flush();
+    host.exitCode = 1;
+    return undefined;
+  }
+
   let recorded: bigint;
   try {
     recorded = await recordStart(database, keys, uuidV7Ids, {
@@ -224,21 +235,31 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   }
   logger.info('api.listening', { ports: server.addresses().map((address) => address.port) });
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
+  const anchors = createAnchorCheck({
+    chains: [
+      {
+        chain: { kind: 'platform' },
+        verify: (anchor) => platform.verifyAlone(database, anchor),
+      },
+    ],
+    keys,
+    clock: systemClock,
+    logger,
+    // Three missed checks in a row are the alarm, not just a warning.
+    staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
+    deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+  });
+  // The schema is checked on the same schedule as the chains, so there is one
+  // timer and one pace. It runs first: a chain read through rewritten walls is
+  // worth less than knowing the walls were rewritten.
   const anchorCheck = scheduleAnchorCheck(
-    createAnchorCheck({
-      chains: [
-        {
-          chain: { kind: 'platform' },
-          verify: (anchor) => platform.verifyAlone(database, anchor),
-        },
-      ],
-      keys,
-      clock: systemClock,
-      logger,
-      // Three missed checks in a row are the alarm, not just a warning.
-      staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-    }),
+    {
+      async run(signal?: AbortSignal): Promise<void> {
+        await checkSchemaOnSchedule({ database, appRole: config.db.user, logger });
+        if (signal?.aborted === true) return;
+        await anchors.run(signal);
+      },
+    },
     config.audit.anchorSeconds * 1000,
   );
   onStopSignals(host, server, anchorCheck, database, logger);

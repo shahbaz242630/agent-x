@@ -74,6 +74,28 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 });
 
 /**
+ * A stand-in for the live schema guard, proven against a real database in
+ * schema-guard.db.test.ts and schema-check.test.ts. These tests see only that
+ * it runs, where in the order it runs, and what a refusal does.
+ */
+const schemaCheck = vi.hoisted(() => ({
+  sound: (): Promise<boolean> => Promise.resolve(true),
+  scheduledRuns: 0,
+}));
+
+vi.mock('./schema-check.ts', () => ({
+  OWNER_ROLE: 'agentx_owner',
+  schemaSoundAtStart: () => {
+    fake.steps.push('schema checked');
+    return schemaCheck.sound();
+  },
+  checkSchemaOnSchedule: () => {
+    schemaCheck.scheduledRuns += 1;
+    return Promise.resolve();
+  },
+}));
+
+/**
  * A stand-in for the platform chain: start-record.ts is proven against a real
  * database in main.db.test.ts. `result` is what the write gives back.
  */
@@ -101,6 +123,10 @@ const anchorChecks = vi.hoisted(() => ({
   deadlines: [] as number[],
   chains: [] as unknown[],
   verifies: [] as ((anchor: unknown) => Promise<unknown>)[],
+  /** What main.ts handed to the schedule, so a test can run one tick of it. */
+  scheduled: [] as { run(signal?: AbortSignal): Promise<void> }[],
+  /** Runs of the anchor check itself, to prove the schema check does not replace it. */
+  runs: 0,
 }));
 
 vi.mock('./anchor-check.ts', () => ({
@@ -113,9 +139,16 @@ vi.mock('./anchor-check.ts', () => ({
     anchorChecks.verifies.push(...options.chains.map((one) => one.verify));
     anchorChecks.staleAfter.push(options.staleAfterMs);
     anchorChecks.deadlines.push(options.deadlineMs);
-    return { run: () => Promise.resolve() };
+    return {
+      run: () => {
+        anchorChecks.runs += 1;
+        fake.steps.push('chains checked');
+        return Promise.resolve();
+      },
+    };
   },
-  scheduleAnchorCheck: (_check: unknown, intervalMs: number) => {
+  scheduleAnchorCheck: (check: { run(signal?: AbortSignal): Promise<void> }, intervalMs: number) => {
+    anchorChecks.scheduled.push(check);
     fake.steps.push('anchor check started');
     anchorChecks.intervals.push(intervalMs);
     return {
@@ -198,6 +231,10 @@ const servers: FastifyInstance[] = [];
 beforeEach(() => {
   fake.created.length = 0;
   fake.steps.length = 0;
+  schemaCheck.sound = (): Promise<boolean> => Promise.resolve(true);
+  schemaCheck.scheduledRuns = 0;
+  anchorChecks.scheduled.length = 0;
+  anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
   startRecord.written.length = 0;
@@ -338,7 +375,9 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 
   it('checks the role, logs that the database is ready, records the start, and only then listens', async () => {
     const { events, capture } = await start();
-    expect(fake.steps).toEqual(['role checked', 'start recorded', 'anchor check started']);
+    // The schema is checked before anything is written: the platform chain's
+    // own tables are among what the check covers (A3e-1b).
+    expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded', 'anchor check started']);
     expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
@@ -387,6 +426,53 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       expect.objectContaining({ level: 'error', event: 'audit.integrity_failed', chain: 'platform', check: 'start' }),
       expect.objectContaining({ level: 'error', event: 'api.start_not_recorded' }),
     ]);
+  });
+
+  it('A3e-1b: refuses to start when the live schema has drifted, before anything is written', async () => {
+    // A database whose walls have been rewritten must not be served from, the
+    // same way a broken platform chain refuses a start. The refusal comes
+    // before the start is recorded, so nothing is written through walls that
+    // are no longer the ones the migrations built.
+    schemaCheck.sound = (): Promise<boolean> => Promise.resolve(false);
+    const serversBefore = built.length;
+    const { host, server } = await start();
+
+    expect(server).toBeUndefined();
+    expect(host.exitCode).toBe(1);
+    expect(fake.steps).toEqual(['role checked', 'schema checked', 'pool closed']);
+    expect(fake.steps).not.toContain('start recorded');
+    expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
+    expect(built.length).toBe(serversBefore);
+  });
+
+  it('A3e-1b: checks the live schema on every scheduled run, before the chains, and keeps both', async () => {
+    // One timer and one pace for both checks. The schema goes first: a chain
+    // read through rewritten walls is worth less than knowing they were
+    // rewritten. Drift while running raises the alarm but must not stop the
+    // process — a restart would empty the in-memory anchor store, which is
+    // what someone tampering would want.
+    const { server } = await start();
+    expect(server).toBeDefined();
+    const scheduled = anchorChecks.scheduled.at(-1);
+    expect(scheduled).toBeDefined();
+
+    fake.steps.length = 0;
+    await scheduled?.run();
+    expect(schemaCheck.scheduledRuns).toBe(1);
+    expect(anchorChecks.runs).toBe(1);
+    expect(fake.steps).toEqual(['chains checked']);
+  });
+
+  it('A3e-1b: a stopped run does not go on to the chains', async () => {
+    const { server } = await start();
+    expect(server).toBeDefined();
+    const scheduled = anchorChecks.scheduled.at(-1);
+
+    const stopping = new AbortController();
+    stopping.abort();
+    await scheduled?.run(stopping.signal);
+    expect(schemaCheck.scheduledRuns).toBe(1);
+    expect(anchorChecks.runs).toBe(0);
   });
 
   it('refuses to start when the start cannot be recorded, closes the pool, and builds nothing', async () => {
@@ -522,6 +608,7 @@ describe('the API stops cleanly on a signal', () => {
       expect(server?.server.listening).toBe(false);
       expect(fake.steps).toEqual([
         'role checked',
+        'schema checked',
         'start recorded',
         'anchor check started',
         'anchor check stopping',
@@ -546,15 +633,16 @@ describe('the API stops cleanly on a signal', () => {
     await vi.waitFor(() => {
       expect(host.exits).toEqual([0]);
     });
-    expect(fake.steps.slice(0, 5)).toEqual([
+    expect(fake.steps.slice(0, 6)).toEqual([
       'role checked',
+      'schema checked',
       'start recorded',
       'anchor check started',
       'http closing',
       'anchor check stopping',
     ]);
-    expect(fake.steps.slice(5, 7)).toEqual(expect.arrayContaining(['http closed', 'anchor check stopped']));
-    expect(fake.steps.slice(7)).toEqual(['pool closed']);
+    expect(fake.steps.slice(6, 8)).toEqual(expect.arrayContaining(['http closed', 'anchor check stopped']));
+    expect(fake.steps.slice(8)).toEqual(['pool closed']);
   });
 
   it.each([

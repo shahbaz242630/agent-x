@@ -41,6 +41,10 @@ import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
 /** The name every tenant table's one policy has (ADR-005 §2). */
 const TENANT_POLICY = 'tenant_isolation';
 
+/** The one trigger our schema is allowed, and the function it must call (0004_state_rules.sql, ADR-007 §1.1). */
+const STATUS_GUARD = 'status_guard';
+const STATUS_GUARD_FUNCTION = 'state_rules.guard_status';
+
 /**
  * The rights the app role may hold on a table in an append-only schema, and on
  * one of the listed exceptions. Decoded privilege by privilege rather than
@@ -51,8 +55,32 @@ const TENANT_POLICY = 'tenant_isolation';
 const APPEND_ONLY_RIGHTS = ['SELECT', 'INSERT'] as const;
 const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 
-/** Every privilege Postgres can grant on a table, so a new one shows up as unexpected rather than being missed. */
+/**
+ * Every privilege Postgres can grant on a table, so a new one shows up as
+ * unexpected rather than being missed.
+ *
+ * **MAINTAIN arrived in Postgres 17.** Asking `has_table_privilege` about it on
+ * 16 is not a false answer but an error — "unrecognized privilege type" — which
+ * would take the whole check down on the older version we support. So the list
+ * is trimmed to what the server in front of us knows.
+ */
 const TABLE_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'] as const;
+
+/** The first version that knows MAINTAIN (17.0), as `server_version_num` counts. */
+const MAINTAIN_FROM = 170_000;
+
+/**
+ * The server's version number, read as text and turned into a number here
+ * rather than cast in SQL: a cast to integer is one more thing a planted cast
+ * could answer for (see PresentRow).
+ */
+async function rightsThisServerKnows<Schema>(db: Kysely<Schema>): Promise<string[]> {
+  const { rows } = await sql<{ version: string }>`
+    select pg_catalog.current_setting('server_version_num') as version
+  `.execute(db);
+  const version = Number(rows[0]?.version ?? '0');
+  return version >= MAINTAIN_FROM ? [...TABLE_RIGHTS] : TABLE_RIGHTS.filter((right) => right !== 'MAINTAIN');
+}
 
 export interface SchemaGuardOptions {
   /** The role the app connects as; its rights are the ones checked. */
@@ -74,7 +102,6 @@ interface RelationRow {
   readonly kind: string;
   readonly rls: boolean;
   readonly forced: boolean;
-  readonly has_rules: boolean;
   readonly owner: string;
   readonly partitioned: boolean;
   readonly inherits: boolean;
@@ -86,17 +113,43 @@ interface PolicyRow {
   readonly command: string;
   readonly expression: string | null;
   readonly check_expression: string | null;
-  readonly roles: string | null;
+  /**
+   * Whether the policy applies to every role. A policy written with no TO
+   * clause holds the single OID 0, which is PUBLIC; naming roles instead would
+   * leave every role not named with no policy at all, and forced row security
+   * would then let them see everything.
+   */
+  readonly everyone: boolean;
 }
 
 interface TriggerRow {
   readonly table: string;
   readonly name: string;
+  readonly function: string;
+  readonly enabled: string;
+}
+
+interface RuleRow {
+  readonly table: string;
+  readonly name: string;
+}
+
+interface IndexRow {
+  readonly table: string;
+  readonly name: string;
+  readonly is_unique: boolean;
+  readonly is_valid: boolean;
+  readonly partial: boolean;
+  readonly covers_org: boolean;
 }
 
 interface GrantRow {
   readonly table: string;
-  readonly grantee: string;
+  readonly privilege: string;
+}
+
+interface PublicGrantRow {
+  readonly table: string;
   readonly privilege: string;
 }
 
@@ -105,8 +158,18 @@ interface ColumnRow {
   readonly column: string;
 }
 
-interface CountRow {
-  readonly count: string;
+/**
+ * A yes-or-no answered in SQL. The count is compared to zero on the server and
+ * comes back as a boolean, so nothing here goes through a cast to text.
+ *
+ * **That matters more than it looks.** The first draft of this file asked for
+ * `count(*)::text`, and the database test that plants `CREATE CAST (bigint AS
+ * text)` made that read return the planted function's answer instead of the
+ * number — so the check for planted casts was itself blinded by a planted cast,
+ * and reported nothing. Found by that test, S32.
+ */
+interface PresentRow {
+  readonly present: boolean;
 }
 
 interface SchemaRow {
@@ -129,13 +192,12 @@ const ROW_KINDS = sql`c.relkind in ('r', 'p', 'v', 'm', 'f')`;
 const QUALIFIED = sql`pg_catalog.format('%I.%I', n.nspname, c.relname)`;
 
 /** Every relation in our schemas, with what would make it something other than a plain owned table. */
-async function relations(db: Kysely<unknown>): Promise<RelationRow[]> {
+async function relations<Schema>(db: Kysely<Schema>): Promise<RelationRow[]> {
   const { rows } = await sql<RelationRow>`
     select ${QUALIFIED} as name,
-           c.relkind::text as kind,
+           c.relkind as kind,
            c.relrowsecurity as rls,
            c.relforcerowsecurity as forced,
-           c.relhasrules as has_rules,
            pg_catalog.pg_get_userbyid(c.relowner) as owner,
            c.relkind = 'p' as partitioned,
            (c.relhassubclass or exists (select 1 from pg_catalog.pg_inherits i where i.inhrelid = c.oid)) as inherits
@@ -147,9 +209,9 @@ async function relations(db: Kysely<unknown>): Promise<RelationRow[]> {
   return [...rows];
 }
 
-async function schemas(db: Kysely<unknown>): Promise<SchemaRow[]> {
+async function schemas<Schema>(db: Kysely<Schema>): Promise<SchemaRow[]> {
   const { rows } = await sql<SchemaRow>`
-    select n.nspname::text as name, pg_catalog.pg_get_userbyid(n.nspowner) as owner
+    select n.nspname as name, pg_catalog.pg_get_userbyid(n.nspowner) as owner
     from pg_catalog.pg_namespace n
     where ${OURS}
     order by 1
@@ -157,15 +219,14 @@ async function schemas(db: Kysely<unknown>): Promise<SchemaRow[]> {
   return [...rows];
 }
 
-async function policies(db: Kysely<unknown>): Promise<PolicyRow[]> {
+async function policies<Schema>(db: Kysely<Schema>): Promise<PolicyRow[]> {
   const { rows } = await sql<PolicyRow>`
     select ${QUALIFIED} as table,
-           p.polname::text as name,
-           p.polcmd::text as command,
+           p.polname as name,
+           p.polcmd as command,
            pg_catalog.pg_get_expr(p.polqual, p.polrelid) as expression,
            pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) as check_expression,
-           (select pg_catalog.string_agg(pg_catalog.pg_get_userbyid(r), ',' order by r)
-            from pg_catalog.unnest(p.polroles) as r) as roles
+           p.polroles = '{0}'::pg_catalog.oid[] as everyone
     from pg_catalog.pg_policy p
     join pg_catalog.pg_class c on c.oid = p.polrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -175,14 +236,68 @@ async function policies(db: Kysely<unknown>): Promise<PolicyRow[]> {
   return [...rows];
 }
 
-/** Triggers someone wrote, not the ones Postgres makes for a foreign key. */
-async function triggers(db: Kysely<unknown>): Promise<TriggerRow[]> {
+/**
+ * Triggers someone wrote, not the ones Postgres makes for a foreign key, with
+ * the function each one calls. The function matters as much as the name: a
+ * planted trigger called `status_guard` that ran something else would otherwise
+ * pass by its name alone.
+ */
+async function triggers<Schema>(db: Kysely<Schema>): Promise<TriggerRow[]> {
   const { rows } = await sql<TriggerRow>`
-    select ${QUALIFIED} as table, t.tgname::text as name
+    select ${QUALIFIED} as table,
+           t.tgname as name,
+           pg_catalog.format('%I.%I', fn.nspname, f.proname) as function,
+           t.tgenabled as enabled
     from pg_catalog.pg_trigger t
     join pg_catalog.pg_class c on c.oid = t.tgrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    join pg_catalog.pg_proc f on f.oid = t.tgfoid
+    join pg_catalog.pg_namespace fn on fn.oid = f.pronamespace
     where ${OURS} and not t.tgisinternal
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
+/**
+ * Rewrite rules on our tables, read from pg_rewrite rather than from
+ * `pg_class.relhasrules`: that flag is a hint Postgres sets when a rule is made
+ * and **does not clear when the rule is dropped**, so it reports a rule that is
+ * no longer there (the same trap `relhassubclass` set for the A3c-1 review).
+ *
+ * `_RETURN` is left out: it is the rule that *is* a view, and every view on the
+ * server has one. A view standing where a table should be is already caught by
+ * the relation kind, and with a clearer problem than "carries a rule".
+ */
+async function rules<Schema>(db: Kysely<Schema>): Promise<RuleRow[]> {
+  const { rows } = await sql<RuleRow>`
+    select ${QUALIFIED} as table, r.rulename as name
+    from pg_catalog.pg_rewrite r
+    join pg_catalog.pg_class c on c.oid = r.ev_class
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and r.rulename <> '_RETURN'
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
+/** Every index on our tables, and what would stop it holding a tenant wall up. */
+async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
+  const { rows } = await sql<IndexRow>`
+    select ${QUALIFIED} as table,
+           ic.relname as name,
+           i.indisunique as is_unique,
+           i.indisvalid as is_valid,
+           i.indpred is not null as partial,
+           exists (
+             select 1 from pg_catalog.pg_attribute a
+             where a.attrelid = c.oid and a.attnum = any(i.indkey) and a.attname = 'org_id'
+           ) as covers_org
+    from pg_catalog.pg_index i
+    join pg_catalog.pg_class c on c.oid = i.indrelid
+    join pg_catalog.pg_class ic on ic.oid = i.indexrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS}
     order by 1, 2
   `.execute(db);
   return [...rows];
@@ -194,24 +309,53 @@ async function triggers(db: Kysely<unknown>): Promise<TriggerRow[]> {
  * PUBLIC, or a role it is a member of), which is what matters: the question is
  * what the app can do, not how it came to be able to. The role and the list of
  * privileges are bound values, never written into the text.
+ *
+ * The two `::text` here are the only ones left in this file, and they are not
+ * casts in the sense that matters: they give a type to a bound parameter that
+ * arrives untyped, which is an input coercion and never looks in `pg_cast`.
+ * Every read of a catalogue column goes uncast, because a planted cast would
+ * otherwise be able to change what this file sees — as one did in the first
+ * draft (see PresentRow).
  */
-async function grants(db: Kysely<unknown>, appRole: string): Promise<GrantRow[]> {
+async function grants<Schema>(db: Kysely<Schema>, appRole: string): Promise<GrantRow[]> {
+  const known = await rightsThisServerKnows(db);
   const { rows } = await sql<GrantRow>`
-    select ${QUALIFIED} as table, g.grantee, r.privilege
+    select ${QUALIFIED} as table, r.privilege
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
-    cross join (select pg_catalog.unnest(array[${appRole}::text, 'public'::text]) as grantee) g
-    cross join (select pg_catalog.unnest(${sql.val([...TABLE_RIGHTS])}::text[]) as privilege) r
+    cross join (select pg_catalog.unnest(${sql.val(known)}::text[]) as privilege) r
     where ${OURS} and ${ROW_KINDS}
-      and pg_catalog.has_table_privilege(g.grantee, c.oid, r.privilege)
-    order by 1, 2, 3
+      and pg_catalog.has_table_privilege(${appRole}::text, c.oid, r.privilege)
+    order by 1, 2
   `.execute(db);
   return [...rows];
 }
 
-async function columns(db: Kysely<unknown>): Promise<ColumnRow[]> {
+/**
+ * Rights held by PUBLIC, which is every role there is or will be.
+ *
+ * This cannot go through `has_table_privilege`: PUBLIC is not a role, and
+ * Postgres refuses the name. It is read from the access list instead, where
+ * PUBLIC is the grantee with OID 0. The app-role check above would not stand in
+ * for this one either — a right PUBLIC holds that the app is *allowed* to hold
+ * would pass there while every other role on the server quietly held it too.
+ * The A3c-1 review found exactly that hole in its first draft.
+ */
+async function publicGrants<Schema>(db: Kysely<Schema>): Promise<PublicGrantRow[]> {
+  const { rows } = await sql<PublicGrantRow>`
+    select ${QUALIFIED} as table, acl.privilege_type as privilege
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    cross join pg_catalog.aclexplode(c.relacl) as acl
+    where ${OURS} and ${ROW_KINDS} and acl.grantee = 0
+    order by 1, 2
+  `.execute(db);
+  return [...rows];
+}
+
+async function columns<Schema>(db: Kysely<Schema>): Promise<ColumnRow[]> {
   const { rows } = await sql<ColumnRow>`
-    select ${QUALIFIED} as table, a.attname::text as column
+    select ${QUALIFIED} as table, a.attname as column
     from pg_catalog.pg_attribute a
     join pg_catalog.pg_class c on c.oid = a.attrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -230,38 +374,46 @@ async function columns(db: Kysely<unknown>): Promise<ColumnRow[]> {
  * watches a tier above the database owner. Everything Postgres ships has an
  * OID below FirstNormalObjectId; anything at or above it was made later.
  */
-async function plantedCasts(db: Kysely<unknown>): Promise<number> {
-  const { rows } = await sql<CountRow>`
-    select pg_catalog.count(*)::text as count from pg_catalog.pg_cast where oid >= 16384
+async function plantedCasts<Schema>(db: Kysely<Schema>): Promise<boolean> {
+  const { rows } = await sql<PresentRow>`
+    select pg_catalog.count(*) > 0 as present from pg_catalog.pg_cast where oid >= 16384
   `.execute(db);
-  return Number(rows[0]?.count ?? '0');
+  return rows[0]?.present === true;
 }
 
 /**
- * Settings pinned to our database or to any role. A `search_path` set this way
- * is the trap A3e-1a pins against; the pin means one can no longer take effect,
- * but its presence is still a sign someone tried, and another setting could
- * change how a statement behaves.
+ * Settings that would reach a session of ours: one pinned to this database
+ * (whatever role it names), or one pinned cluster-wide to a role we connect as.
+ *
+ * `pg_db_role_setting` is a **shared** catalogue — it covers the whole server,
+ * not this database — so the scope has to be exact. A setting on our role *in
+ * another database* reaches nothing of ours and is deliberately not flagged;
+ * an early draft matched any role setting anywhere and reported another test's
+ * database as drift in ours.
+ *
+ * A `search_path` set this way is the trap A3e-1a pins against, so one can no
+ * longer take effect; its presence is still a sign someone tried, and another
+ * setting (a statement timeout, an isolation level) could change how a
+ * statement behaves.
  */
-async function roleSettings(db: Kysely<unknown>): Promise<number> {
-  const { rows } = await sql<CountRow>`
-    select pg_catalog.count(*)::text as count
+async function roleSettings<Schema>(db: Kysely<Schema>, roles: readonly string[]): Promise<boolean> {
+  const { rows } = await sql<PresentRow>`
+    select pg_catalog.count(*) > 0 as present
     from pg_catalog.pg_db_role_setting s
     where s.setdatabase = (
             select d.oid from pg_catalog.pg_database d where d.datname = pg_catalog.current_database()
           )
-       or s.setrole <> 0
+       or (
+            s.setdatabase = 0
+            and s.setrole in (
+              select r.oid from pg_catalog.pg_roles r where r.rolname = any(${sql.val([...roles])}::text[])
+            )
+          )
   `.execute(db);
-  return Number(rows[0]?.count ?? '0');
+  return rows[0]?.present === true;
 }
 
 const quoted = (name: string): string => `"${name}"`;
-
-/** `schema.table` as Postgres's format('%I.%I') writes it, so a name needing quotes matches. */
-function policyName(name: string): string {
-  const [schema = '', table = ''] = name.split('.', 2);
-  return `${schema}.${table}`;
-}
 
 /**
  * Everything about the live database that differs from what the migrations
@@ -269,30 +421,50 @@ function policyName(name: string): string {
  * database that refuses the read throws, and the caller treats that as a failed
  * check in its own right.
  */
-export async function liveSchemaProblems(
-  db: Kysely<unknown>,
+export async function liveSchemaProblems<Schema>(
+  db: Kysely<Schema>,
   { appRole, ownerRole, policy = SCHEMA_POLICY }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const problems: SchemaProblem[] = [];
-  const [allRelations, allSchemas, allPolicies, allTriggers, allGrants, allColumns, casts, settings] =
-    await Promise.all([
-      relations(db),
-      schemas(db),
-      policies(db),
-      triggers(db),
-      grants(db, appRole),
-      columns(db),
-      plantedCasts(db),
-      roleSettings(db),
-    ]);
+  const [
+    allRelations,
+    allSchemas,
+    allPolicies,
+    allTriggers,
+    allRules,
+    allIndexes,
+    allGrants,
+    forPublic,
+    allColumns,
+    casts,
+    settings,
+  ] = await Promise.all([
+    relations(db),
+    schemas(db),
+    policies(db),
+    triggers(db),
+    rules(db),
+    indexes(db),
+    grants(db, appRole),
+    publicGrants(db),
+    columns(db),
+    plantedCasts(db),
+    roleSettings(db, [appRole, ownerRole]),
+  ]);
 
+  // `public` is Postgres's own schema, not one our migrations make: since
+  // version 15 it belongs to the built-in `pg_database_owner`, which *is* the
+  // database's owner by definition. 0001_baseline.sql takes every right on it
+  // away from PUBLIC and no module uses it, and the pinned search_path means
+  // nothing unqualified reaches it either way.
+  const OWNS = new Set([ownerRole, 'pg_database_owner']);
   for (const schema of allSchemas) {
-    if (schema.owner !== ownerRole) problems.push(`schema ${quoted(schema.name)} is owned by another role`);
+    if (!OWNS.has(schema.owner)) problems.push(`schema ${quoted(schema.name)} is owned by another role`);
   }
 
-  const globalTables = new Set(Object.keys(policy.globalTables).map(policyName));
+  const globalTables = new Set(Object.keys(policy.globalTables));
   const appendOnly = new Set(policy.appendOnlySchemas);
-  const exceptions = new Set(Object.keys(policy.appendOnlyExceptions).map(policyName));
+  const exceptions = new Set(Object.keys(policy.appendOnlyExceptions));
 
   for (const relation of allRelations) {
     const name = relation.name;
@@ -302,8 +474,6 @@ export async function liveSchemaProblems(
     if (relation.partitioned) problems.push(`${name} is partitioned`);
     if (relation.inherits) problems.push(`${name} is in an inheritance tree`);
     if (relation.owner !== ownerRole) problems.push(`${name} is owned by another role`);
-    // A rewrite rule can turn any statement into a different one, silently.
-    if (relation.has_rules) problems.push(`${name} carries a rewrite rule`);
 
     if (!globalTables.has(name)) {
       if (!relation.rls) problems.push(`${name} does not have row-level security enabled`);
@@ -335,7 +505,7 @@ export async function liveSchemaProblems(
     if (one.name !== TENANT_POLICY) problems.push(`${relation.name}'s policy is not ${TENANT_POLICY}`);
     // '*' is ALL: one policy covering select, insert, update and delete alike.
     if (one.command !== '*') problems.push(`${relation.name}'s policy no longer covers every command`);
-    if (one.roles !== null) problems.push(`${relation.name}'s policy is limited to named roles`);
+    if (!one.everyone) problems.push(`${relation.name}'s policy is limited to named roles`);
     if (one.expression !== TENANT_POLICY_EXPRESSION) problems.push(`${relation.name}'s policy reads differently`);
     if (one.check_expression !== null && one.check_expression !== TENANT_POLICY_EXPRESSION) {
       problems.push(`${relation.name}'s policy writes differently`);
@@ -351,36 +521,65 @@ export async function liveSchemaProblems(
   );
   if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
 
+  // A rewrite rule can turn any statement into a different one, silently.
+  for (const rule of allRules) {
+    problems.push(`${rule.table} carries the rewrite rule ${quoted(rule.name)}`);
+  }
+
+  // The only trigger our schema has is the status guard 0004 installs, and it
+  // must still be the guard: a planted trigger given that name would otherwise
+  // pass on its name alone. A switched-off guard is drift too — Postgres keeps
+  // the row and stops running it, which is tampering that leaves no trace in
+  // the table.
   for (const trigger of allTriggers) {
-    problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
+    if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
+      problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
+      continue;
+    }
+    if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
+  }
+
+  // Indexes. A plain index missing is a matter of speed, so it is not checked
+  // here; a **unique** one is a wall. An invalid one enforces nothing while
+  // still being listed, a partial one enforces nothing outside its condition,
+  // and a unique key that leaves org_id out would make two organisations
+  // collide (SEC-TEN-05, which CI-06 checks at migration time — this is the
+  // same rule on the running database).
+  for (const index of allIndexes) {
+    if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
+    if (!index.is_unique) continue;
+    if (index.partial) problems.push(`${index.table}'s unique index ${quoted(index.name)} is partial`);
+    if (!globalTables.has(index.table) && !index.covers_org) {
+      problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
+    }
   }
 
   // Rights: an allow-list, so a privilege nobody thought about is a problem
   // rather than an omission.
   const held = new Map<string, Set<string>>();
   for (const grant of allGrants) {
-    const key = `${grant.grantee}\u0000${grant.table}`;
-    held.set(key, (held.get(key) ?? new Set()).add(grant.privilege));
+    held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
   for (const relation of allRelations) {
     const schema = relation.name.split('.', 1)[0] ?? '';
     const allowed = new Set<string>(
       appendOnly.has(schema) ? (exceptions.has(relation.name) ? EXCEPTION_RIGHTS : APPEND_ONLY_RIGHTS) : TABLE_RIGHTS,
     );
-    for (const right of held.get(`${appRole}\u0000${relation.name}`) ?? []) {
+    for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
     }
-    if ((held.get(`public\u0000${relation.name}`) ?? new Set()).size > 0) {
-      problems.push(`PUBLIC has rights on ${relation.name}`);
-    }
+  }
+  // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
+  // role holds reaches the app as well, and reaches every role made later.
+  for (const grant of forPublic) {
+    problems.push(`PUBLIC may ${grant.privilege} on ${grant.table}`);
   }
 
   // Global tables are listed with their exact columns, so a new one is a
   // reviewed change rather than something that appears.
   const columnsOf = new Map<string, string[]>();
   for (const column of allColumns) columnsOf.set(column.table, [...(columnsOf.get(column.table) ?? []), column.column]);
-  for (const [listed, entry] of Object.entries(policy.globalTables)) {
-    const name = policyName(listed);
+  for (const [name, entry] of Object.entries(policy.globalTables)) {
     const live = columnsOf.get(name);
     if (live === undefined) continue;
     if (live.join(',') !== [...entry.columns].join(',')) problems.push(`${name} no longer has exactly its columns`);
@@ -390,8 +589,8 @@ export async function liveSchemaProblems(
     if (!(columnsOf.get(relation.name) ?? []).includes('org_id')) problems.push(`${relation.name} has no org_id`);
   }
 
-  if (casts > 0) problems.push('the database carries a cast Postgres did not ship');
-  if (settings > 0) problems.push('a setting is pinned to this database or to a role');
+  if (casts) problems.push('the database carries a cast Postgres did not ship');
+  if (settings) problems.push('a setting is pinned to this database or to a role');
 
   return problems.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }

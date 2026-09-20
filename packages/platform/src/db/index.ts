@@ -7,6 +7,8 @@ export {
   runMigrations,
 } from './migrate.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
+export { liveSchemaProblems, type SchemaGuardOptions, type SchemaProblem } from './schema-guard.ts';
+export { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
 export {
   type ServerSetupOptions,
   type ServerSetupOutcome,

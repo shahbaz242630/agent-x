@@ -1,0 +1,105 @@
+// What the live schema check logs, and what it decides. The rules themselves
+// are proven against a real database in schema-guard.db.test.ts; these are
+// about the two answers the API needs — may it start, and what does it say.
+import { LogCapture } from '@agentx/testing';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { createLogger } from '@agentx/platform/observability';
+
+const guard = vi.hoisted(() => ({
+  result: (): Promise<string[]> => Promise.resolve([]),
+}));
+
+vi.mock('@agentx/platform/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/db')>();
+  return { ...actual, liveSchemaProblems: () => guard.result() };
+});
+
+const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
+
+function logger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
+  const capture = new LogCapture();
+  return {
+    capture,
+    logger: createLogger({
+      service: 'test',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: capture,
+    }),
+  };
+}
+
+const options = (log: ReturnType<typeof logger>) => ({
+  database: {} as never,
+  appRole: 'agentx_app',
+  logger: log.logger,
+});
+
+beforeEach(() => {
+  guard.result = (): Promise<string[]> => Promise.resolve([]);
+});
+
+describe('at start-up', () => {
+  it('lets the API go on when the live schema matches, and says so', async () => {
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log))).toBe(true);
+    expect(log.capture.lines()).toMatchObject([{ level: 'info', event: 'db.schema_checked', problems: 0 }]);
+  });
+
+  it('refuses the start on drift, and raises the integrity alarm the SEV-1 rule already watches', async () => {
+    guard.result = (): Promise<string[]> => Promise.resolve(['audit.events carries a rewrite rule']);
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log))).toBe(false);
+    expect(log.capture.lines()).toMatchObject([
+      {
+        level: 'error',
+        event: 'audit.integrity_failed',
+        check: 'schema',
+        when: 'start',
+        problems: ['audit.events carries a rewrite rule'],
+      },
+    ]);
+  });
+
+  it('refuses the start when the catalogue cannot be read at all', async () => {
+    // Losing the right to read the catalogue is itself a change worth knowing
+    // about, so it is the alarm rather than a warning.
+    guard.result = (): Promise<string[]> => Promise.reject(new Error('permission denied for table pg_class'));
+    const log = logger();
+    expect(await schemaSoundAtStart(options(log))).toBe(false);
+    const events = log.capture.lines().map((line) => line.event);
+    expect(events).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines()[0]).toMatchObject({ check: 'schema', reason: 'unreadable' });
+  });
+});
+
+describe('on a scheduled run', () => {
+  it('says nothing when the live schema matches, so a quiet run stays quiet', async () => {
+    const log = logger();
+    await checkSchemaOnSchedule(options(log));
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('raises the alarm on drift and returns, leaving the API serving', async () => {
+    guard.result = (): Promise<string[]> => Promise.resolve(['PUBLIC may SELECT on audit.events']);
+    const log = logger();
+    await expect(checkSchemaOnSchedule(options(log))).resolves.toBeUndefined();
+    expect(log.capture.lines()).toMatchObject([
+      { level: 'error', event: 'audit.integrity_failed', check: 'schema', when: 'running' },
+    ]);
+  });
+
+  it('never throws, whatever the database does, so the schedule cannot be stopped by one bad run', async () => {
+    guard.result = (): Promise<string[]> => Promise.reject(new Error('connection reset'));
+    const log = logger();
+    await expect(checkSchemaOnSchedule(options(log))).resolves.toBeUndefined();
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+  });
+});
+
+describe('the owner role it compares against', () => {
+  it('is the one db/bootstrap/roles.sql creates', () => {
+    // Proven against the SQL itself in tooling/checks/database-roles.test.ts.
+    expect(OWNER_ROLE).toBe('agentx_owner');
+  });
+});
