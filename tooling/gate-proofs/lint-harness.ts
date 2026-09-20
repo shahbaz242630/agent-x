@@ -25,8 +25,21 @@ export const OUTBOUND = 'packages/platform/src/outbound/gate-proof';
 export const API = 'apps/api/src/gate-proof';
 export const CONSOLE = 'apps/console/src/gate-proof';
 export const TESTING = 'packages/testing/src/gate-proof';
+/** Inside the audit module, the one product module allowed to hold the signed-row steps (A3c). */
+export const AUDIT = 'packages/core/src/modules/audit/gate-proof';
 
-export function proveLintRules(rejected: readonly LintCase[], allowed: readonly LintCase[]): void {
+/**
+ * Lints every snippet with the real eslint.config.js and checks each verdict.
+ * `rules` adds to the real configuration rather than replacing it: a rule
+ * whose behaviour depends on its options (A3c's authority tables, whose
+ * registry is empty until slice B1) can be given a registry of its own here
+ * while everything else about the configuration stays real.
+ */
+export function proveLintRules(
+  rejected: readonly LintCase[],
+  allowed: readonly LintCase[],
+  rules: Linter.RulesRecord = {},
+): void {
   const eslint = new ESLint({
     // The snippets are not on disk, so the TypeScript project service opens them
     // in a default project built from the root tsconfig.json.
@@ -35,7 +48,7 @@ export function proveLintRules(rejected: readonly LintCase[], allowed: readonly 
       languageOptions: {
         parserOptions: {
           projectService: {
-            allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING].flatMap((folder) => [
+            allowDefaultProject: [CORE, PLATFORM, CONFIG, OUTBOUND, API, CONSOLE, TESTING, AUDIT].flatMap((folder) => [
               `${folder}/*.ts`,
               `${folder}/*.tsx`,
             ]),
@@ -45,6 +58,7 @@ export function proveLintRules(rejected: readonly LintCase[], allowed: readonly 
           },
         },
       },
+      rules,
     },
   });
 
