@@ -317,6 +317,21 @@ const ALLOWED: LintCase[] = [
     rule: RULE,
   },
   {
+    name: 'a value standing between two pieces that would otherwise read as the name',
+    // The pieces are joined with a marker, so `agents.` and `agents` either
+    // side of a value are two names, not one. Joined bare they would read as
+    // the table and this snippet would be refused.
+    filePath: `${CORE}/value-between-pieces.ts`,
+    code: [
+      'declare const db: { executeSql: (text: string) => unknown };',
+      'declare const other: string;',
+      '',
+      'export const rows = db.executeSql(`select from agents.${other}agents`);',
+      '',
+    ].join('\n'),
+    rule: RULE,
+  },
+  {
     name: 'a longer name that merely starts with an authority table’s',
     filePath: `${CORE}/longer-name.ts`,
     code: query(

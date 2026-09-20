@@ -110,12 +110,16 @@ const QUERY_METHODS = new Set([
 ]);
 
 /**
- * A name that carries `Join`, or ends in `Apply`, counts too: that is every
- * join shape Kysely has (`innerJoin`, `innerJoinLateral`, `crossApply`) and
- * every one it adds. Case matters, so an array's `join` is not a query.
+ * A name that carries `Join` counts too: that is every join shape Kysely has
+ * on Postgres (`innerJoin`, `innerJoinLateral`, `crossJoinLateral`) and every
+ * one it adds. Case matters, so an array's `join` is not a query.
+ *
+ * Kysely's `crossApply` and `outerApply` are not here: APPLY is SQL Server's,
+ * Postgres has LATERAL instead (ADR-001 pins Postgres), so a branch for them
+ * is a branch no test of ours could ever reach. The mutation pass found it
+ * that way.
  */
-const isQueryMethod = (name) =>
-  name !== null && (QUERY_METHODS.has(name) || name.includes('Join') || /Apply$/.test(name));
+const isQueryMethod = (name) => name !== null && (QUERY_METHODS.has(name) || name.includes('Join'));
 
 /** An event's subject: the property whose object's own `type` names the object recorded. */
 const SUBJECT = 'subject';
