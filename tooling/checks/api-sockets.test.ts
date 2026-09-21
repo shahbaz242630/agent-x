@@ -5,6 +5,7 @@
 import net from 'node:net';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { buildServer } from '../../apps/api/src/server.ts';
 import { createLogger } from '../../packages/platform/src/observability/index.ts';
@@ -13,8 +14,15 @@ import { SequentialIds } from '../../packages/testing/src/ids.ts';
 
 const CRLF = String.fromCharCode(13, 10);
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
-/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
-const OPEN = { config: { access: ['public'] } } as const;
+/**
+ * Test routes are open to anyone, read at most 1 KiB and answer `{ ok: true }`
+ * (or a string, sent as it is): none of that is what these tests are about.
+ */
+const OPEN = {
+  config: { access: ['public'] },
+  bodyLimit: 1024,
+  schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
+} as const;
 
 type Server = Awaited<ReturnType<typeof buildServer>>;
 const servers: Server[] = [];
@@ -44,9 +52,10 @@ async function listening() {
     await new Promise<void>((resolve) => (release = resolve));
     return { done: true };
   };
-  app.get('/test/slow', OPEN, slow);
+  const slowly = { ...OPEN, schema: { response: { 200: z.object({ done: z.literal(true) }) } } };
+  app.get('/test/slow', slowly, slow);
   // A write whose body is read in full before the handler waits: the case Node doesn't call aborted.
-  app.post('/test/slow', OPEN, slow);
+  app.post('/test/slow', slowly, slow);
   app.get('/test/fail', OPEN, () => {
     throw new Error('failed on our side');
   });
@@ -66,7 +75,7 @@ async function listening() {
     guarded.push('route');
     return 'guarded';
   };
-  app.get('/test/guarded', { config: { access: ['admin'] }, onSend: holdBack }, reach);
+  app.get('/test/guarded', { ...OPEN, config: { access: ['admin'] }, onSend: holdBack }, reach);
   app.post('/test/guarded', { ...OPEN, onSend: holdBack }, reach);
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });

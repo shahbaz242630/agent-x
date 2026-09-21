@@ -15,7 +15,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 
 import { registerAccess } from './access.ts';
 import { answerClientError } from './client-errors.ts';
-import { registerContract } from './contract.ts';
+import { BODY_LIMIT_BYTES, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
@@ -31,9 +31,6 @@ export interface ServerOptions {
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
 }
-
-/** The largest request body read. No route takes a body yet; each later route sets its own, below this. */
-const BODY_LIMIT_BYTES = 64 * 1024;
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -94,6 +91,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     genReqId: (request) => correlationIdFrom(request.headers[CORRELATION_HEADER], ids),
     // So `request.ip` is the client's too, for the security events Phase 1 records.
     trustProxy: trust,
+    // The most any body may be; every route that takes one sets its own, at most this (contract.ts).
     bodyLimit: BODY_LIMIT_BYTES,
     requestTimeout: REQUEST_TIMEOUT_MS,
     // Requests arriving while the server stops are answered as usual, with our

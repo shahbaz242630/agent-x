@@ -2,6 +2,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, FastifySchema, RouteShorthandOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { accessProblems, type Principal } from './access.ts';
 import { ContractBroken } from './contract.ts';
@@ -32,9 +33,14 @@ async function server() {
   return app;
 }
 
-/** A route's options with a given access, typed loosely so a test can hand over a wrong one. */
+/**
+ * A route's options with a given access, typed loosely so a test can hand over
+ * a wrong one. Its body limit and answer aren't what these tests are about.
+ */
 const withAccess = (access: unknown): RouteShorthandOptions => ({
   config: { access } as NonNullable<RouteShorthandOptions['config']>,
+  bodyLimit: 1024,
+  schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
 });
 
 describe('BR-04 every route names who may call it', () => {

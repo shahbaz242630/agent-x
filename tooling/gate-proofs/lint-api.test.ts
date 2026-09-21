@@ -12,6 +12,10 @@ const SETTERS = [
   'setValidatorCompiler',
   'setSerializerCompiler',
   'setReplySerializer',
+  'serializer',
+  'addContentTypeParser',
+  'removeContentTypeParser',
+  'removeAllContentTypeParsers',
 ] as const;
 
 /** A plugin that calls one setter, typed just enough to compile on its own. */

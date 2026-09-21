@@ -239,6 +239,12 @@ const apiSetters = [
   'setValidatorCompiler',
   'setSerializerCompiler',
   'setReplySerializer',
+  // A reply's own serializer writes an answer whole, past its route's schema.
+  'serializer',
+  // A body parser of its own may read past a route's bodyLimit (a stream-style parser does).
+  'addContentTypeParser',
+  'removeContentTypeParser',
+  'removeAllContentTypeParsers',
 ].map((property) => ({ property, message: apiContractOnly }));
 
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */

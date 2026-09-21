@@ -1,10 +1,11 @@
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { FastifyInstance, FastifyReply, FastifySchema, RouteShorthandOptions } from 'fastify';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { API_SCHEMAS } from './api-schemas.ts';
 import { ContractBroken, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
 import { REQUEST_FAILED } from './request-log.ts';
@@ -15,8 +16,15 @@ const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const PLANTED = 'planted value that must not appear';
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const ITEM_ID = '0190f4c2-1e5b-7c3d-8a9b-0c1d2e3f4a5b';
-/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
-const OPEN = { config: { access: ['public'] } } as const;
+/**
+ * Test routes are open to anyone, read at most 1 KiB and answer `{ ok: true }`
+ * (or a string, sent as it is): none of that is what these tests are about.
+ */
+const OPEN = {
+  config: { access: ['public'] },
+  bodyLimit: 1024,
+  schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
+} as const;
 
 const servers: FastifyInstance[] = [];
 
@@ -101,7 +109,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     ["tagged with the document's hidden tag", { tags: ['X-HIDDEN'] }],
   ])('refuses to start with a route %s, naming it and its HEAD', async (_how, schema) => {
     const { app } = await server();
-    app.get('/test/debug', { schema, ...OPEN }, () => 'ok');
+    app.get('/test/debug', { ...OPEN, schema: { ...OPEN.schema, ...schema } }, () => 'ok');
     const ready = app.ready();
     await expect(ready).rejects.toThrow(ContractBroken);
     await expect(ready).rejects.toMatchObject({
@@ -199,11 +207,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     expect(() => app.post('/test/route', options, () => 'ok')).toThrow(`POST /test/route: ${problem}`);
   });
 
-  it('takes an answer declared for each content type in zod, and documents it with its description', async () => {
+  it('documents a success answer with the description its schema was registered with', async () => {
     const { app } = await server();
-    const item = z.object({ id: z.uuid() });
-    const response = { 200: { description: 'The item.', content: { 'application/json': { schema: item } } } };
-    app.get('/test/item', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID, note: PLANTED }));
+    const item = z.object({ id: z.uuid() }).register(API_SCHEMAS, { description: 'The item.' });
+    app.get('/test/item', { ...OPEN, schema: { response: { 200: item } } }, () => ({ id: ITEM_ID, note: PLANTED }));
     await app.ready();
     expect(documentOf(app).paths['/test/item']?.get?.responses['200']).toMatchObject({ description: 'The item.' });
     expect((await app.inject('/test/item')).json()).toEqual({ id: ITEM_ID });
@@ -216,7 +223,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       content: { 'application/json': { schema: ERROR_BODY } },
     };
     const response = { 200: z.object({ id: z.uuid() }), 409: conflict, 422: ERROR_BODY };
-    app.post('/test/claim', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID }));
+    app.post('/test/claim', { ...OPEN, schema: { response } }, () => ({ id: ITEM_ID }));
     await app.ready();
     expect(documentOf(app).paths['/test/claim']?.post?.responses['409']).toMatchObject({
       description: 'Another request holds the key.',
@@ -263,8 +270,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it('refuses to start with a schema the document could only show as "anything"', async () => {
     const { app } = await server();
-    const response = { 200: z.object({ at: z.date() }) };
-    app.get('/test/when', { schema: { response }, ...OPEN }, () => ({ at: new Date() }));
+    const schema = { ...OPEN.schema, body: z.object({ at: z.date() }) };
+    app.post('/test/when', { ...OPEN, schema }, () => 'ok');
     await expect(app.ready()).rejects.toThrow(/Date cannot be represented in JSON Schema/);
   });
 
@@ -352,8 +359,8 @@ describe('SEC-DATA-04 every error answer is written as it is, never through a ro
     ) => {
       done(null, { ...(payload as object), note: PLANTED });
     };
-    app.post('/test/item', { schema, preSerialization, ...OPEN }, () => ({ quantity: 1 }));
-    app.get('/test/item', { schema: { response: schema.response }, preSerialization, ...OPEN }, () => {
+    app.post('/test/item', { ...OPEN, schema, preSerialization }, () => ({ quantity: 1 }));
+    app.get('/test/item', { ...OPEN, schema: { response: schema.response }, preSerialization }, () => {
       throw new Error('failed on our side');
     });
     await app.ready();
@@ -361,6 +368,439 @@ describe('SEC-DATA-04 every error answer is written as it is, never through a ro
     expect(response.statusCode).toBe(status);
     expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
     expect(response.json()).toEqual(errorBody(code, 'not-a-uuid'));
+  });
+});
+
+describe('SEC-WEB-06 each route declares what it answers, and the most it reads', () => {
+  it.each<[string, RouteShorthandOptions, string]>([
+    [
+      'no answer for success',
+      { ...OPEN, schema: { response: { 404: ERROR_BODY } } },
+      'it declares no answer for success',
+    ],
+    [
+      'a success answer that is a string',
+      { ...OPEN, schema: { response: { 200: z.string() } } },
+      'its 200 answer is not an object with named fields',
+    ],
+    [
+      'a success answer that is a list',
+      { ...OPEN, schema: { response: { 200: z.array(z.object({ id: z.uuid() })) } } },
+      'its 200 answer is not an object with named fields',
+    ],
+    [
+      'a success answer that could be anything',
+      { ...OPEN, schema: { response: { 201: z.unknown() } } },
+      'its 201 answer is not an object with named fields',
+    ],
+    [
+      'a body but no limit of its own for it',
+      { config: OPEN.config, schema: OPEN.schema },
+      'it takes a body but sets no limit of its own for it',
+    ],
+    [
+      "a body limit over the server's own",
+      { ...OPEN, bodyLimit: 64 * 1024 + 1 },
+      'it takes a body but sets no limit of its own for it',
+    ],
+    [
+      'a body limit of its own in its document',
+      { ...OPEN, schema: { ...OPEN.schema, 'x-body-limit': 10 } as FastifySchema },
+      'the body limit its document shows is not its own (x-body-limit)',
+    ],
+  ])('refuses a write with %s as it is added', async (_what, options, problem) => {
+    const { app } = await server();
+    expect(() => app.post('/test/route', options, () => 'ok')).toThrow(`POST /test/route: ${problem}`);
+  });
+
+  it.each([0, 1.5])(
+    'refuses to start when a later hook sets a body limit of %s, which Fastify checks only as a route is added',
+    async (limit) => {
+      const { app } = await server();
+      await app.register(
+        (child, _options, done) => {
+          child.addHook('onRoute', (route) => {
+            route.bodyLimit = limit;
+          });
+          child.post('/item', OPEN, () => 'ok');
+          done();
+        },
+        { prefix: '/test/plugin' },
+      );
+      await expect(app.ready()).rejects.toThrow('POST /test/plugin/item: it takes a body but sets no limit of its own');
+    },
+  );
+
+  it('asks a body limit of a delete, and of a route that reads and writes at one address', async () => {
+    const { app } = await server();
+    const noLimit = { config: OPEN.config, schema: OPEN.schema };
+    expect(() => app.delete('/test/one', noLimit, () => 'ok')).toThrow('DELETE /test/one: it takes a body');
+    const both = { method: ['GET', 'POST'] as const, url: '/test/two', ...noLimit, handler: () => 'ok' };
+    expect(() => app.route({ ...both, method: [...both.method] })).toThrow('GET,POST /test/two: it takes a body');
+  });
+
+  it('takes a route whose only success answer is a redirect', async () => {
+    const { app } = await server();
+    app.get('/test/moved', { config: OPEN.config, schema: { response: { 302: z.object({}) } } }, (_request, reply) =>
+      reply.code(302).header('location', '/health').send({}),
+    );
+    await app.ready();
+    expect((await app.inject('/test/moved')).statusCode).toBe(302);
+  });
+
+  it('takes a read with no body limit, a range of success answers, and a body limit of the most allowed', async () => {
+    const { app } = await server();
+    const read = { config: OPEN.config, schema: { response: { '2xx': z.object({ ok: z.literal(true) }) } } };
+    app.get('/test/read', read, () => ({ ok: true }));
+    const create = { ...OPEN, bodyLimit: 64 * 1024, schema: { response: { 201: z.object({ id: z.uuid() }) } } };
+    app.post('/test/create', create, (_request, reply) => reply.code(201).send({ id: ITEM_ID }));
+    await app.ready();
+    const paths = app.swagger().paths as Record<string, Record<string, Record<string, unknown>>>;
+    expect(paths['/test/create']?.post?.['x-body-limit']).toBe(64 * 1024);
+    expect(paths['/test/read']?.get).not.toHaveProperty('x-body-limit');
+  });
+
+  it("refuses a body over the route's own limit, though under the server's", async () => {
+    const { app } = await server();
+    app.post('/test/small', { ...OPEN, bodyLimit: 16 }, () => ({ ok: true }));
+    await app.ready();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test/small',
+      headers: { origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
+      payload: JSON.stringify({ note: 'longer than sixteen bytes' }),
+    });
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual(errorBody('PAYLOAD_TOO_LARGE', FIRST_ID));
+  });
+
+  // The serializer runs zod, so the zod schema is what is checked: the document can show a part
+  // tighter than zod sends it, as each of the last five here would be.
+  it.each<[string, z.ZodType, string]>([
+    ['open to fields it does not name', z.looseObject({ id: z.uuid() }), "answer (open to fields it doesn't name)"],
+    ['a field that could be anything', z.object({ id: z.uuid(), extra: z.unknown() }), 'answer.extra (unknown)'],
+    ['a field of any kind', z.object({ id: z.uuid(), extra: z.any() }), 'answer.extra (any)'],
+    ['a list of anything, deeper down', z.object({ items: z.array(z.unknown()) }), 'answer.items[] (unknown)'],
+    [
+      'a nested object open to more fields',
+      z.object({ owner: z.object({ id: z.uuid() }).catchall(z.string()) }),
+      "answer.owner (open to fields it doesn't name)",
+    ],
+    ['a tuple whose rest could be anything', z.object({ row: z.tuple([z.string()], z.unknown()) }), 'answer.row[rest]'],
+    [
+      'a map keyed by any text',
+      z.object({ byName: z.record(z.string(), z.string()) }),
+      'answer.byName (a map whose keys',
+    ],
+    ['a date', z.object({ at: z.date() }), 'answer.at (date)'],
+    ['a default', z.object({ note: z.string().default('x') }), 'answer.note (default)'],
+    [
+      'a union with a member that could be anything, which the document leaves out',
+      z.object({ extra: z.union([z.unknown(), z.object({ id: z.uuid() })]) }),
+      'answer.extra (unknown)',
+    ],
+    ['a codec, whose sent side the document never shows', z.object({ flag: z.stringbool() }), 'answer.flag (pipe)'],
+    ['a transform', z.object({ name: z.string().transform((name) => name) }), 'answer.name (pipe)'],
+    [
+      'an intersection with a map, which the document shows closed',
+      z.object({ row: z.object({ id: z.uuid() }).and(z.record(z.string(), z.string())) }),
+      'answer.row (intersection)',
+    ],
+    [
+      'a lazy part that turns out open',
+      z.object({ later: z.lazy(() => z.looseObject({ id: z.uuid() })) }),
+      "answer.later (open to fields it doesn't name)",
+    ],
+    [
+      'a loose map, which the document shows as a map of described values',
+      z.object({ tags: z.looseRecord(z.enum(['a']), z.string()) }),
+      'answer.tags (a map whose keys',
+    ],
+  ])('refuses a success answer %s, as it is added', async (_what, answer, where) => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { 200: answer } } };
+    expect(() => app.get('/test/loose', options, () => ({ id: ITEM_ID }))).toThrow(
+      `GET /test/loose: its 200 answer lets through what it doesn't name: ${where}`,
+    );
+  });
+
+  it('sends an answer under a range written in capitals, which Fastify reads as the range', async () => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { '2XX': z.object({ id: z.uuid() }) } } };
+    app.get('/test/capital', options, (_request, reply) => reply.code(201).send({ id: ITEM_ID, secret: PLANTED }));
+    await app.ready();
+    const answer = await app.inject('/test/capital');
+    expect(answer.statusCode).toBe(201);
+    expect(answer.json()).toEqual({ id: ITEM_ID });
+  });
+
+  it('asks no body limit of a TRACE route, whose requests Fastify reads no body for', async () => {
+    const { app } = await server();
+    app.route({ method: 'TRACE', url: '/test/trace', config: OPEN.config, schema: OPEN.schema, handler: () => 'ok' });
+    await app.ready();
+    expect(operations(app)).toContain('TRACE /test/trace');
+  });
+
+  it('refuses a loose answer under a range written in capitals, which Fastify reads as the range', async () => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { '2XX': z.looseObject({ id: z.uuid() }) } } };
+    expect(() => app.get('/test/loose', options, () => ({ id: ITEM_ID }))).toThrow(
+      "GET /test/loose: its 2XX answer lets through what it doesn't name",
+    );
+  });
+
+  it('refuses a success answer declared per content type, since Fastify would miss another type', async () => {
+    const { app } = await server();
+    const item = z.object({ id: z.uuid() });
+    const options = { ...OPEN, schema: { response: { 200: { content: { 'application/json': { schema: item } } } } } };
+    expect(() => app.get('/test/item', options, () => 'ok')).toThrow(
+      'GET /test/item: its 200 answer is not an object with named fields, declared as its schema itself',
+    );
+  });
+
+  it('refuses an error status whose content names no type', async () => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { ...OPEN.schema.response, 409: { content: {} } } } };
+    expect(() => app.get('/test/item', options, () => 'ok')).toThrow(
+      'GET /test/item: its 409 response names no content type',
+    );
+  });
+
+  it('takes answers that name all they carry at every depth: lists, tuples, fixed-key maps, optional, nullable, read-only, lazy and union parts', async () => {
+    const { app } = await server();
+    const node: z.ZodType<{ name: string; children: unknown[] }> = z.object({
+      name: z.string(),
+      children: z.lazy(() => z.array(node)),
+    });
+    const answer = z.object({
+      items: z.array(z.object({ id: z.uuid() })),
+      counts: z.record(z.enum(['open', 'paid']), z.int()),
+      only: z.record(z.literal('total'), z.int()),
+      owner: z.object({ name: z.string() }).nullable(),
+      nickname: z.string().optional(),
+      pair: z.tuple([z.string(), z.int()]),
+      fixed: z.readonly(z.object({ code: z.literal('A') })),
+      kind: z.discriminatedUnion('type', [z.object({ type: z.literal('a') }), z.object({ type: z.literal('b') })]),
+      tree: node,
+      ref: z.templateLiteral(['agent-', z.int()]),
+      state: z.enum(['on', 'off']),
+      ready: z.boolean(),
+      strictly: z.strictObject({ id: z.uuid() }),
+    });
+    app.get('/test/tight', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
+      items: [],
+      counts: { open: 1, paid: 2 },
+      only: { total: 3 },
+      owner: null,
+      pair: ['a', 1],
+      fixed: { code: 'A' },
+      kind: { type: 'a' },
+      tree: { name: 'root', children: [] },
+      ref: 'agent-1',
+      state: 'on',
+      ready: true,
+      strictly: { id: ITEM_ID },
+    }));
+    await app.ready();
+    expect((await app.inject('/test/tight')).statusCode).toBe(200);
+  });
+});
+
+describe('SEC-WEB-06 an object answer goes out only through the schema declared for its status', () => {
+  it.each([
+    ['a status it declares no answer for', { 201: z.object({ id: z.uuid() }) }, (reply: FastifyReply) => reply],
+    [
+      'a status the range of its answer does not cover',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => reply.code(203),
+    ],
+    [
+      'a JSON-like content type Fastify still serializes, but not as the JSON declared',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => reply.type('application/problem+json'),
+    ],
+    [
+      'an error status in a content type the error answers are not declared for',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => {
+        reply.statusCode = 409;
+        return reply.type('application/problem+json');
+      },
+    ],
+  ])('answers an object sent with %s as a failure on our side, showing none of it', async (_what, response, set) => {
+    const { app, capture } = await server();
+    app.get('/test/row', { ...OPEN, schema: { response } }, (_request, reply) =>
+      set(reply).send({ id: ITEM_ID, secret: PLANTED }),
+    );
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(capture.lines().filter((line) => line.event === REQUEST_FAILED)).toEqual([
+      expect.objectContaining({ err: expect.objectContaining({ type: 'AnswerUndeclared' }) as unknown }),
+    ]);
+    expect(findLeaks(capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("sends an object under a range it declares, and an error body under the contract's own ranges", async () => {
+    const { app } = await server();
+    app.post(
+      '/test/claim',
+      { ...OPEN, schema: { response: { '2xx': z.object({ id: z.uuid() }) } } },
+      (_request, reply) => reply.code(201).send({ id: ITEM_ID, secret: PLANTED }),
+    );
+    const conflict = { ...OPEN, schema: { response: { ...OPEN.schema.response, 409: ERROR_BODY } } };
+    app.get('/test/conflict', conflict, (_request, reply) => reply.code(409).send(errorBody('ORG_FROZEN', FIRST_ID)));
+    await app.ready();
+    const claim = await app.inject({ method: 'POST', url: '/test/claim', headers: { origin: PUBLIC_ORIGIN } });
+    expect(claim.statusCode).toBe(201);
+    expect(claim.json()).toEqual({ id: ITEM_ID });
+    expect((await app.inject('/test/conflict')).statusCode).toBe(409);
+  });
+});
+
+describe("SEC-WEB-06 a route's own answers above 500 are held to the same rules", () => {
+  it.each<[string, Record<number, z.ZodType>, string]>([
+    ['a 503 open to fields it does not name', { 503: z.looseObject({ id: z.uuid() }) }, 'its 503 answer lets through'],
+    ['a 503 that could be anything', { 503: z.unknown() }, 'its 503 answer is not an object with named fields'],
+    ['a 501 map keyed by any text', { 501: z.record(z.string(), z.string()) }, 'its 501 answer is not an object'],
+  ])('refuses %s, as it is added', async (_what, extra, problem) => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { ...OPEN.schema.response, ...extra } } };
+    expect(() => app.get('/test/route', options, () => 'ok')).toThrow(`GET /test/route: ${problem}`);
+  });
+
+  it('refuses to start when a later hook adds an open answer of its own to a route', async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          const responses = route.schema?.response as Record<string, unknown>;
+          responses['503'] = z.looseObject({});
+        });
+        child.get('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await expect(app.ready()).rejects.toThrow(
+      "GET /test/plugin/item: its 503 answer lets through what it doesn't name",
+    );
+  });
+});
+
+describe("SEC-WEB-06 the contract's check of an answer runs after every other hook that could change it", () => {
+  it("answers as a failure an object whose status the route's own hook changed before it was written", async () => {
+    const { app, capture } = await server();
+    const preSerialization = (
+      _request: unknown,
+      reply: FastifyReply,
+      payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) => {
+      reply.code(201);
+      done(null, payload);
+    };
+    app.get('/test/row', { ...OPEN, preSerialization }, () => ({ ok: true, secret: PLANTED }));
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("answers as a failure an object whose status a plugin's own hook changed before it was written", async () => {
+    const { app, capture } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('preSerialization', (_request, reply, payload, next) => {
+          void reply.code(201);
+          next(null, payload);
+        });
+        child.get('/row', OPEN, () => ({ ok: true, secret: PLANTED }));
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await app.ready();
+    const answer = await app.inject('/test/plugin/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('answers as a failure an object sent on the not-found path, which is no route', async () => {
+    const { app, capture } = await server();
+    app.addHook('onRequest', (request, reply, done) => {
+      if (request.url === '/test/unknown') {
+        void reply.send({ ok: true, secret: PLANTED });
+        return;
+      }
+      done();
+    });
+    await app.ready();
+    const answer = await app.inject('/test/unknown');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("refuses to start when a later hook puts a preSerialization hook after the contract's", async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          route.preSerialization = [...(route.preSerialization as unknown[]), () => undefined] as never;
+        });
+        child.get('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await expect(app.ready()).rejects.toThrow(
+      "GET /test/plugin/item: a preSerialization hook runs after the contract's check of its answers",
+    );
+  });
+
+  it("answers as a failure an object a serializer of the reply's own would write whole", async () => {
+    const { app, capture } = await server();
+    app.get('/test/row', OPEN, (_request, reply) =>
+      // eslint-disable-next-line no-restricted-properties -- proves the check catches what lint bans
+      reply.serializer((payload) => JSON.stringify(payload)).send({ ok: true, secret: PLANTED }),
+    );
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('walks the inner schema zod caches for a lazy part, calling its getter once, as zod does', async () => {
+    const { app } = await server();
+    const getter = vi.fn(() => z.object({ id: z.uuid() }));
+    const answer = z.object({ inner: z.lazy(getter) });
+    app.get('/test/lazy', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
+      inner: { id: ITEM_ID, secret: PLANTED },
+    }));
+    await app.ready();
+    expect((await app.inject('/test/lazy')).json()).toEqual({ inner: { id: ITEM_ID } });
+    expect(getter).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SEC-WEB-06 what the contract wrote into a route must still be there once every plugin has had its say', () => {
+  it('refuses to start when a later hook rebuilds a route schema, dropping its access, limit and error answers', async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          route.schema = { response: { 200: z.object({ ok: z.literal(true) }) } };
+        });
+        child.post('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    const ready = app.ready();
+    await expect(ready).rejects.toThrow("POST /test/plugin/item: its error answers are not the contract's");
+    await expect(ready).rejects.toThrow('POST /test/plugin/item: the body limit its document shows is not its own');
+    await expect(ready).rejects.toThrow('POST /test/plugin/item: the access its document shows is not its own');
   });
 });
 
@@ -455,13 +895,13 @@ describe('every route checks and answers through its own zod schemas', () => {
     app.post(
       '/test/items/:id',
       {
+        ...OPEN,
         schema: {
           params: z.object({ id: z.uuid() }),
           querystring: z.object({ mode: z.enum(['quick', 'full']).optional() }),
           body: z.strictObject({ quantity: z.int().positive() }),
           response: { 200: z.object({ id: z.uuid(), quantity: z.int() }) },
         },
-        ...OPEN,
       },
       (request) => {
         reached.push(request.body);
@@ -470,7 +910,7 @@ describe('every route checks and answers through its own zod schemas', () => {
         return { id: ITEM_ID, quantity, note: PLANTED };
       },
     );
-    app.get('/test/broken', { schema: { response: { 200: z.object({ quantity: z.int() }) } }, ...OPEN }, () => ({
+    app.get('/test/broken', { ...OPEN, schema: { response: { 200: z.object({ quantity: z.int() }) } } }, () => ({
       quantity: PLANTED,
     }));
     await app.ready();

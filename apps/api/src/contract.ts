@@ -9,6 +9,11 @@
 //   (errors.ts), which the document names once, with every reason code.
 // - Each route names who may call it (access.ts), which the document shows as
 //   x-access on each of its operations.
+// - Each route declares its answers for success, as zod objects that name all
+//   they carry, at every depth, and each route that takes a body sets its own
+//   limit for it, which the document shows as x-body-limit.
+// - An object answer goes out only through the schema its route declares for
+//   its status, as JSON; one without is a failure on our side, never sent.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -17,7 +22,7 @@
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
-import type { FastifyInstance, FastifySchema, RouteOptions } from 'fastify';
+import type { FastifyInstance, FastifySchema, preSerializationHookHandler, RouteOptions } from 'fastify';
 import {
   createJsonSchemaTransform,
   createJsonSchemaTransformObject,
@@ -37,6 +42,15 @@ const COMPONENT_PREFIX = '#/components/schemas/';
 
 /** Where each operation shows who may call it; the swagger plugin copies `x-` keys of a route's schema into it. */
 const ACCESS_KEY = 'x-access';
+
+/** Where each operation that takes a body shows the most it reads. */
+const BODY_LIMIT_KEY = 'x-body-limit';
+
+/** The most any request body may be: the server's own limit, and the most a route may set for itself. */
+export const BODY_LIMIT_BYTES = 64 * 1024;
+
+/** Methods whose requests Fastify reads no body for. */
+const BODILESS_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'TRACE']);
 
 /**
  * A schema the document can't describe (a Date, the output of a transform)
@@ -69,6 +83,9 @@ const isErrorRange = (status: string): boolean => /^[45]xx$/i.test(status) || st
  */
 const isErrorPathStatus = (status: string): boolean => /^(?:4[0-9][0-9]|500)$/.test(status);
 
+/** A success answer's status, or range of statuses: anything below 400. */
+const isSuccessStatus = (status: string): boolean => /^[1-3](?:[0-9][0-9]|xx)$/i.test(status);
+
 /**
  * Route options that would check input, or write answers or errors, other
  * than through the contract. A plugin's own compilers are checked too.
@@ -77,6 +94,99 @@ const BYPASSES = ['attachValidation', 'validatorCompiler', 'serializerCompiler',
 
 /** A route as its onRoute hook sees it. */
 type AddedRoute = RouteOptions & { readonly routePath: string; readonly prefix: string };
+
+/** Answer parts that carry a value of their own and nothing beyond it. */
+const NAMED_LEAVES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'boolean',
+  'null',
+  'literal',
+  'enum',
+  'template_literal',
+]);
+
+/**
+ * Where an answer's zod schema lets through what it doesn't name, each as a
+ * path into it. The schema is walked, not the document: the serializer runs
+ * zod, and the document can show a part tighter than zod sends it (a union's
+ * "anything" member left out, a codec's other side, an intersection's map).
+ * Only these pass: objects closed to fields they don't name, lists, tuples,
+ * unions, optional, nullable or read-only parts, lazy parts, maps whose keys
+ * are a fixed list, and the named leaves.
+ */
+function unnamedParts(schema: z.core.$ZodType, at: string, seen: Set<z.core.$ZodType>): string[] {
+  if (seen.has(schema)) return [];
+  seen.add(schema);
+  const walk = (child: z.core.$ZodType, where: string): string[] => unnamedParts(child, where, seen);
+  if (schema instanceof z.ZodObject) {
+    const { catchall } = schema._zod.def;
+    const open =
+      catchall === undefined || catchall instanceof z.ZodNever ? [] : [`${at} (open to fields it doesn't name)`];
+    const shape: Readonly<Record<string, z.core.$ZodType>> = schema._zod.def.shape;
+    return [...open, ...Object.entries(shape).flatMap(([name, field]) => walk(field, `${at}.${name}`))];
+  }
+  if (schema instanceof z.ZodArray) return walk(schema.element, `${at}[]`);
+  if (schema instanceof z.ZodTuple) {
+    const { items, rest } = schema._zod.def;
+    return [
+      ...items.flatMap((item, index) => walk(item, `${at}[${String(index)}]`)),
+      ...(rest === null ? [] : walk(rest, `${at}[rest]`)),
+    ];
+  }
+  if (schema instanceof z.ZodUnion) return schema.options.flatMap((option) => walk(option, at));
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodReadonly) {
+    return walk(schema._zod.def.innerType, at);
+  }
+  // The inner schema zod caches and parses with, not a fresh call of its getter, which could differ.
+  if (schema instanceof z.ZodLazy) return walk(schema._zod.innerType, at);
+  if (schema instanceof z.ZodRecord) {
+    const { keyType, valueType } = schema._zod.def;
+    const loose = 'mode' in schema._zod.def && schema._zod.def.mode === 'loose';
+    const fixedKeys = (keyType instanceof z.ZodEnum || keyType instanceof z.ZodLiteral) && !loose;
+    return [...(fixedKeys ? [] : [`${at} (a map whose keys aren't a fixed list)`]), ...walk(valueType, `${at}.*`)];
+  }
+  return NAMED_LEAVES.has(schema._zod.def.type) ? [] : [`${at} (${schema._zod.def.type})`];
+}
+
+/**
+ * An object answer with no schema for its status, or not sent as JSON: Fastify
+ * would write it whole, or a serializer of the reply's own would, so it is a
+ * failure on our side instead.
+ */
+class AnswerUndeclared extends Error {
+  constructor(route: string, status: number) {
+    super(`${route} answered ${String(status)} with an object it declares no schema for, or not as JSON`);
+    this.name = 'AnswerUndeclared';
+  }
+}
+
+const keysOf = (value: unknown): string[] => (typeof value === 'object' && value !== null ? Object.keys(value) : []);
+
+/**
+ * An object answer goes out only through the schema its route declares for its
+ * status (as Fastify looks it up: the status, then its range), as JSON. The
+ * contract adds it as each route's last preSerialization hook, so no hook after
+ * it can change the status or the type. Fastify sets the JSON type before these
+ * hooks run, so an answer without it has a serializer of the reply's own.
+ * Error answers are text already; objects Fastify sends as bytes or a stream
+ * never reach it.
+ */
+const answerGuard: preSerializationHookHandler = (request, reply, payload, done) => {
+  const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
+  const status = String(reply.statusCode);
+  const type = reply.getHeader('content-type');
+  const json = typeof type === 'string' && /^application\/json\s*(?:;|$)/i.test(type);
+  if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
+    done(null, payload);
+    return;
+  }
+  done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
+};
+
+/** A route's own hooks of one kind, as a list. */
+const hooksOf = <T>(hooks: T | readonly T[] | undefined): readonly T[] =>
+  hooks === undefined ? [] : Array.isArray(hooks) ? hooks : [hooks as T];
 
 /** The API's routes and its OpenAPI document differ, or a route can't be documented. */
 export class ContractBroken extends Error {
@@ -91,6 +201,11 @@ export class ContractBroken extends Error {
 
 const methodsOf = (route: RouteOptions): readonly string[] =>
   typeof route.method === 'string' ? [route.method] : route.method;
+
+const takesBody = (route: RouteOptions): boolean => methodsOf(route).some((method) => !BODILESS_METHODS.has(method));
+
+const isBodyLimit = (limit: unknown): boolean =>
+  typeof limit === 'number' && Number.isInteger(limit) && limit >= 1 && limit <= BODY_LIMIT_BYTES;
 
 /** A route's responses by status, or none. */
 function responsesOf(route: RouteOptions): object {
@@ -111,10 +226,16 @@ function responseSchemas(response: unknown): unknown[] {
   return [response];
 }
 
-/** Why the document couldn't describe a route truthfully, if it couldn't. */
-function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
+/**
+ * Why the document couldn't describe a route truthfully, if it couldn't. Once
+ * `written`, what the contract wrote into its schema must still be there: a
+ * later hook that rebuilt the schema would drop it from the document.
+ */
+function routeProblems(route: AddedRoute, instance: FastifyInstance, written: boolean): string[] {
   const problems: string[] = [];
   const schema = route.schema ?? {};
+  const keys = new Map<string, unknown>(Object.entries(schema));
+  const declared = new Map<string, unknown>(Object.entries(responsesOf(route)));
   for (const part of ['body', 'querystring', 'params', 'headers'] as const) {
     if (schema[part] !== undefined && !(schema[part] instanceof z.ZodType)) {
       problems.push(`its ${part} schema is not a zod schema`);
@@ -126,16 +247,48 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
       if (!OUR_ERROR_RESPONSES.has(response)) {
         problems.push(`it sets its own ${status} response, but every error has the one error body`);
       }
+    } else if (schemas.length === 0) {
+      problems.push(`its ${status} response names no content type`);
     } else if (!schemas.every((entry) => entry instanceof z.ZodType)) {
       problems.push(`its ${status} response schema is not a zod schema`);
     } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
   }
+  if (written && ![...OUR_ERROR_RESPONSES].every((ours) => [...declared.values()].includes(ours))) {
+    problems.push("its error answers are not the contract's");
+  }
+  if (written && hooksOf(route.preSerialization).at(-1) !== answerGuard) {
+    problems.push("a preSerialization hook runs after the contract's check of its answers");
+  }
+  // Allowlisted answers: every answer a route declares, but the one error body, names all it
+  // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
+  const answers = [...declared].filter(([status]) => !isErrorRange(status) && !isErrorPathStatus(status));
+  if (!answers.some(([status]) => isSuccessStatus(status))) {
+    problems.push('it declares no answer for success (a response below 400)');
+  }
+  for (const [status, response] of answers) {
+    if (!(response instanceof z.ZodObject)) {
+      problems.push(`its ${status} answer is not an object with named fields, declared as its schema itself`);
+      continue;
+    }
+    const unnamed = unnamedParts(response, 'answer', new Set());
+    if (unnamed.length > 0)
+      problems.push(`its ${status} answer lets through what it doesn't name: ${unnamed.join(', ')}`);
+  }
+  if (takesBody(route) && !isBodyLimit(route.bodyLimit)) {
+    problems.push(`it takes a body but sets no limit of its own for it (bodyLimit, 1 to ${BODY_LIMIT_BYTES} bytes)`);
+  }
+  if (
+    (written || keys.has(BODY_LIMIT_KEY)) &&
+    keys.get(BODY_LIMIT_KEY) !== (takesBody(route) ? route.bodyLimit : undefined)
+  ) {
+    problems.push('the body limit its document shows is not its own (x-body-limit)');
+  }
   problems.push(...accessProblems(route.config?.access, route.url));
   // The document shows the access the contract wrote from the route's own; a route
   // can't write another, and a later hook that swapped the route's own would part the two.
-  if (ACCESS_KEY in schema && schema[ACCESS_KEY] !== route.config?.access) {
+  if ((written || keys.has(ACCESS_KEY)) && keys.get(ACCESS_KEY) !== route.config?.access) {
     problems.push('the access its document shows is not its own (x-access)');
   }
   // A route of its own transform could show the document another schema than the one it runs.
@@ -235,20 +388,27 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
 
   const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
   app.addHook('onRoute', function (route) {
-    const problems = routeProblems(route, this);
+    const problems = routeProblems(route, this, false);
     if (problems.length > 0) throw new ContractBroken(problems);
     // A frozen copy, which the document and the access hook share: neither a change
     // to the document nor to a list the route was given can change who may call it.
     const access = Object.freeze([...(route.config?.access ?? [])]);
     route.config = { ...route.config, access };
-    const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> = {
-      ...route.schema,
-      [ACCESS_KEY]: access,
-      response: { ...responsesOf(route), ...ERROR_RESPONSES },
-    };
+    const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> & Partial<Record<typeof BODY_LIMIT_KEY, number>> =
+      {
+        ...route.schema,
+        [ACCESS_KEY]: access,
+        ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
+        response: { ...responsesOf(route), ...ERROR_RESPONSES },
+      };
     route.schema = schema;
+    route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
     added.push({ route, instance: this });
   });
+
+  // And at the root too, for the not-found path, which is no route: no onRoute
+  // hook adds the check there, and it declares no answer, so it refuses any object.
+  app.addHook('preSerialization', answerGuard);
 
   const transformObject = createJsonSchemaTransformObject({
     schemaRegistry: API_SCHEMAS,
@@ -275,7 +435,7 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
       methodsOf(route).map((method) => `${method} ${formatParamUrl(route.url)}`),
     );
     const problems = [
-      ...added.flatMap(({ route, instance }) => routeProblems(route, instance)),
+      ...added.flatMap(({ route, instance }) => routeProblems(route, instance, true)),
       ...routeTableProblems(served, app.swagger()),
     ];
     done(problems.length > 0 ? new ContractBroken(problems) : undefined);

@@ -3,6 +3,7 @@ import { createLogger, type Logger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SENSITIVE_SAMPLES as SAMPLES, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { CORRELATION_HEADER } from './correlation.ts';
 import { errorBody } from './errors.ts';
@@ -18,8 +19,15 @@ const PLANTED = 'planted value that must not appear';
 /** The first IDs SequentialIds hands out, for requests that bring no usable correlation ID. */
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const SECOND_ID = '00000000-0000-7000-8000-000000000002';
-/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
-const OPEN = { config: { access: ['public'] } } as const;
+/**
+ * Test routes are open to anyone, read at most 1 KiB and answer `{ ok: true }`
+ * (or a string, sent as it is): none of that is what these tests are about.
+ */
+const OPEN = {
+  config: { access: ['public'] },
+  bodyLimit: 1024,
+  schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
+} as const;
 
 const HTTP: Config['http'] = {
   host: '127.0.0.1',
@@ -62,11 +70,11 @@ async function setup(options: SetupOptions = {}) {
     healthChecks: options.healthChecks ?? [],
   });
   const reached: string[] = [];
-  app.post('/test/write', OPEN, async (_request, reply) => {
+  app.post('/test/write', OPEN, () => {
     reached.push('write');
-    return reply.code(204).send();
+    return { ok: true };
   });
-  app.post('/test/body', OPEN, (request) => {
+  app.post('/test/body', { ...OPEN, schema: { response: { 200: z.object({ received: z.string() }) } } }, (request) => {
     reached.push('body');
     return { received: typeof request.body };
   });
@@ -79,8 +87,14 @@ async function setup(options: SetupOptions = {}) {
     void reply.send('second');
   });
   // A route with its own, lower limit, as Phase 1's per-agent limits will have.
-  app.get('/test/limited', { config: { ...OPEN.config, rateLimit: { max: 2, timeWindow: 60_000 } } }, () => 'ok');
-  app.get('/test/ip', OPEN, (request) => ({ ip: request.ip }));
+  app.get(
+    '/test/limited',
+    { ...OPEN, config: { ...OPEN.config, rateLimit: { max: 2, timeWindow: 60_000 } } },
+    () => 'ok',
+  );
+  app.get('/test/ip', { ...OPEN, schema: { response: { 200: z.object({ ip: z.string() }) } } }, (request) => ({
+    ip: request.ip,
+  }));
   // A route that puts caller input in a header, which Node refuses when it holds a control character.
   app.get('/test/header', OPEN, (request, reply) => {
     void reply.header('x-note', (request.query as { note?: string }).note);
@@ -177,7 +191,7 @@ describe('SEC-WEB-01 a request that can change something must come from our own 
   it('accepts a write from our own origin', async () => {
     const { app, reached } = await setup();
     const response = await app.inject({ method: 'POST', url: '/test/write', headers: { origin: PUBLIC_ORIGIN } });
-    expect(response.statusCode).toBe(204);
+    expect(response.statusCode).toBe(200);
     expect(reached).toEqual(['write']);
   });
 
