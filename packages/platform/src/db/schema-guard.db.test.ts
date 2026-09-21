@@ -600,6 +600,16 @@ describe('an authority table the product lists (A3f-2)', () => {
     expect(await listed()).toEqual([]);
   });
 
+  it('finds a listed table named with a reserved word, by the plain name its module and CI use', async () => {
+    // Postgres quotes `user` when it prints the name; the module writes probe.user, as A3c-1 reads it.
+    await owner.query('alter table probe.agents rename to "user"');
+    const USERS = { ...AGENTS, table: 'probe.user' };
+
+    expect(await listed([USERS])).toEqual([]);
+    await owner.query('grant delete on probe."user" to agentx_app');
+    expect(await listed([USERS])).toEqual(['agentx_app may DELETE on probe."user"']);
+  });
+
   it('holds only a listed table to it: the same DELETE on a table not listed is a tenant table’s right', async () => {
     await owner.query('grant delete on probe.agents to agentx_app');
 
