@@ -266,7 +266,10 @@ const answerLeaves: onSendHookHandler = (request, reply, payload, done) => {
  * a not-found handler's own hooks after every root hook, as it does a route's
  * (four-oh-four.js takes every lifecycle hook, though its types list only two).
  */
-export const NOT_FOUND_CHECKS: object = { preSerialization: [answerGuard], onSend: [answerLeaves] };
+export const NOT_FOUND_CHECKS: object = Object.freeze({
+  preSerialization: Object.freeze([answerGuard]),
+  onSend: Object.freeze([answerLeaves]),
+});
 
 /**
  * Only the contract puts a hook between an answer being written and it
@@ -291,7 +294,8 @@ function guardWhatLeaves(app: FastifyInstance): void {
     return Reflect.apply(addHook, this, args);
   };
   const guardedSetNotFoundHandler = function (this: FastifyInstance, ...args: unknown[]): unknown {
-    if (args[0] !== NOT_FOUND_CHECKS) {
+    // Without a handler of its own, Fastify would answer with its own.
+    if (args[0] !== NOT_FOUND_CHECKS || typeof args[1] !== 'function') {
       throw new ContractBroken(["a not-found handler must carry the contract's checks (NOT_FOUND_CHECKS)"]);
     }
     return Reflect.apply(setNotFoundHandler, this, args);

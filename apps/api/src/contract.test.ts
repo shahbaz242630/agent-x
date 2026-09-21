@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
-import { ContractBroken, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
+import { ContractBroken, NOT_FOUND_CHECKS, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
 import { REQUEST_FAILED } from './request-log.ts';
 import { buildServer } from './server.ts';
@@ -872,6 +872,20 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     const plugin = async (child: FastifyInstance): Promise<void> => {
       // eslint-disable-next-line no-restricted-properties -- proves the server refuses what lint bans
       child.setNotFoundHandler((_request, reply) => reply.send({ leak: PLANTED }));
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow("a not-found handler must carry the contract's checks");
+  });
+
+  it('holds the not-found checks fixed, and a handler that carries them to a handler of its own', async () => {
+    expect(Object.isFrozen(NOT_FOUND_CHECKS)).toBe(true);
+    expect(Object.values(NOT_FOUND_CHECKS).every((hooks) => Object.isFrozen(hooks))).toBe(true);
+    const { app } = await server();
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-properties -- proves the server refuses what lint bans
+      const setNotFound = child.setNotFoundHandler.bind(child) as unknown as (opts: object) => void;
+      setNotFound(NOT_FOUND_CHECKS);
     };
     void app.register(plugin, { prefix: '/test/plugin' });
     await expect(app.ready()).rejects.toThrow("a not-found handler must carry the contract's checks");
