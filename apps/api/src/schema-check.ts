@@ -15,6 +15,7 @@
 // the SEV-1 alert rule A2c-2 installed already matches, so this needs no new
 // alert. The problems name rules and objects, never a value read from the
 // database, so the alarm can't carry tampered text into the log.
+import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -77,11 +78,18 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
   }
 }
 
-/** What the check found: the problems, or the reason it couldn't run. */
+/**
+ * What the check found: the problems, the reason it couldn't run, or that the
+ * API stopped it. A stop is ours, never the database's doing, so it is no sign
+ * of anything: raising the integrity alarm for it would page someone on a
+ * routine shutdown (found by A3f-2's tests; the anchor check already tells the
+ * two apart).
+ */
 type SchemaCheckOutcome =
   | { readonly kind: 'clean' }
   | { readonly kind: 'drift'; readonly problems: readonly SchemaProblem[] }
-  | { readonly kind: 'unreadable'; readonly error: unknown };
+  | { readonly kind: 'unreadable'; readonly error: unknown }
+  | { readonly kind: 'stopped' };
 
 /**
  * Reads the live catalogue once, within its deadline. It never throws: a
@@ -103,12 +111,18 @@ async function checkSchema<Schema>({
   signal,
 }: SchemaCheckOptions<Schema>): Promise<SchemaCheckOutcome> {
   try {
-    const reading = Promise.resolve().then(() => liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE }));
+    // The authority tables are the product's own list, the one CI checks the migrations against (A3f-2).
+    const reading = Promise.resolve().then(() =>
+      liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE, authorityTables: AUTHORITY_TABLES }),
+    );
     // Handled here too, so a read that finishes after its deadline never goes unhandled.
     void reading.catch(() => undefined);
     const problems = await withinDeadline(reading, deadlineMs, signal);
     return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
   } catch (error) {
+    // Once the API is stopping, whatever cut the read short (the stop itself,
+    // or its pool closing under it) is the stop.
+    if (signal?.aborted === true) return { kind: 'stopped' };
     return { kind: 'unreadable', error };
   }
 }
@@ -123,6 +137,8 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
     options.logger.info('db.schema_checked', { problems: 0 });
     return true;
   }
+  // Stopped while starting: the API isn't going on either way, and a stop is no alarm.
+  if (outcome.kind === 'stopped') return false;
   if (outcome.kind === 'drift') {
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', problems: outcome.problems });
   } else {
@@ -139,7 +155,7 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
  */
 export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<Schema>): Promise<void> {
   const outcome = await checkSchema(options);
-  if (outcome.kind === 'clean') return;
+  if (outcome.kind === 'clean' || outcome.kind === 'stopped') return;
   if (outcome.kind === 'drift') {
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'running', problems: outcome.problems });
     return;

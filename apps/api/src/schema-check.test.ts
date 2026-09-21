@@ -124,6 +124,36 @@ describe('the deadline', () => {
     const started = Date.now();
     await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000, signal: stopping.signal });
     expect(Date.now() - started).toBeLessThan(5_000);
+    // The stop is the API's own doing, so it raises no alarm: a routine shutdown must not page anyone.
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('raises no alarm when the stop comes during a read, whatever the read then does', async () => {
+    const stopping = new AbortController();
+    // As the pool closes under a stopping API: the read fails once the stop has begun.
+    guard.result = (): Promise<string[]> => {
+      stopping.abort();
+      return Promise.reject(new Error('Connection terminated'));
+    };
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('declines a start that is stopped mid-check, with no alarm', async () => {
+    guard.result = (): Promise<string[]> => new Promise(() => undefined);
+    const log = logger();
+    const stopping = new AbortController();
+    stopping.abort();
+    expect(await schemaSoundAtStart({ ...options(log), signal: stopping.signal })).toBe(false);
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('still raises the alarm for a read that fails with no stop', async () => {
+    guard.result = (): Promise<string[]> => Promise.reject(new Error('permission denied for table pg_class'));
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: new AbortController().signal });
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
   });
 
   it('lets a read that answers in time through untouched', async () => {
