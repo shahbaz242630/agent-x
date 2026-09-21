@@ -114,6 +114,16 @@ const APPEND_ONLY_RIGHTS = ['SELECT', 'INSERT'] as const;
 const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 
 /**
+ * The rights the app role may hold on any other table: reading and writing
+ * rows, each through the table's policies. Never TRUNCATE, which empties a
+ * table past row security, every organisation's rows at once; nor TRIGGER,
+ * REFERENCES or MAINTAIN, which would let it plant a trigger, point a key at
+ * the rows, or lock and reindex them (A3f-1; CI-06 holds the migrations to the
+ * same list).
+ */
+const TENANT_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
+
+/**
  * Every privilege Postgres can grant on a table, so a new one shows up as
  * unexpected rather than being missed.
  *
@@ -733,7 +743,7 @@ export async function liveSchemaProblems<Schema>(
         ? exceptions.has(relation.name)
           ? EXCEPTION_RIGHTS
           : APPEND_ONLY_RIGHTS
-        : TABLE_RIGHTS,
+        : TENANT_RIGHTS,
     );
     for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);

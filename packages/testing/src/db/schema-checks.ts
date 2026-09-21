@@ -21,7 +21,8 @@
 // connect, none but the backup role has BYPASSRLS, and none is a member of a
 // role or has members. The backup role only reads. The app role only adds to
 // and reads the tables of append-only schemas, apart from listed exceptions
-// (SEC-EVD-01).
+// (SEC-EVD-01), and on any other table holds nothing but SELECT, INSERT,
+// UPDATE and DELETE.
 //
 // Not read: types (every table's row type is usable by PUBLIC by default, and
 // using a type reaches no row); languages (PUBLIC may write plpgsql and SQL,
@@ -436,6 +437,17 @@ const BACKUP_MAY: Readonly<Record<Exclude<Grant['kind'], 'default'>, readonly st
 /** What the app role may hold on an append-only table or its columns (ADR-005 §9). */
 const APPEND_ONLY_APP_MAY = ['INSERT', 'SELECT'];
 
+/**
+ * What the app role may hold on any other table or its columns: reading and
+ * writing rows, each through the table's policies. The rest are refused
+ * whatever the table (A3f-1): TRUNCATE empties a table past row security, every
+ * organisation's rows at once; TRIGGER lets the app plant a trigger of its
+ * own; REFERENCES lets it point a key of its own at the rows; MAINTAIN
+ * (Postgres 17 on) lets it lock, vacuum or reindex them. A privilege a later
+ * Postgres adds is refused too, until it is listed here.
+ */
+const APP_MAY = ['DELETE', 'INSERT', 'SELECT', 'UPDATE'];
+
 const LEAKS = "so it could reveal another organisation's rows (SEC-TEN-05)";
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -616,6 +628,12 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
   if (appendOnly && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)`,
+    ];
+  }
+  const onRows = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
+  if (onRows && grant.grantee === roles.app && !APP_MAY.includes(grant.privilege)) {
+    return [
+      `${grant.object}: ${roles.app} has ${grant.privilege}; on a table it may only SELECT, INSERT, UPDATE and DELETE (ADR-005)`,
     ];
   }
   return [];

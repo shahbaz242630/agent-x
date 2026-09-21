@@ -780,6 +780,26 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ]);
     });
 
+    it('fails TRUNCATE, TRIGGER, REFERENCES or MAINTAIN for the app role on any other table or its columns (A3f-1)', async () => {
+      // MAINTAIN is a right only from Postgres 17.
+      const maintain = major >= 17;
+      const statements = [
+        ...TENANT_TABLE,
+        'grant usage on schema t to agentx_app',
+        'grant select, insert, update, delete, truncate, trigger, references on t.items to agentx_app',
+        'grant references (label) on t.items to agentx_app',
+        ...(maintain ? ['grant maintain on t.items to agentx_app'] : []),
+      ];
+      const rows = 'on a table it may only SELECT, INSERT, UPDATE and DELETE (ADR-005)';
+      expect(await problemsAfter(statements)).toEqual([
+        `column t.items.label: agentx_app has REFERENCES; ${rows}`,
+        ...(maintain ? [`table t.items: agentx_app has MAINTAIN; ${rows}`] : []),
+        `table t.items: agentx_app has REFERENCES; ${rows}`,
+        `table t.items: agentx_app has TRIGGER; ${rows}`,
+        `table t.items: agentx_app has TRUNCATE; ${rows}`,
+      ]);
+    });
+
     it('fails an exception with no reason, for a missing table, or outside an append-only schema', async () => {
       const policy = {
         ...POLICY,
