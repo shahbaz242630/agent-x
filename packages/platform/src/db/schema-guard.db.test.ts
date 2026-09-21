@@ -13,7 +13,7 @@
 // make every later case pass for the wrong reason.
 import { readFileSync } from 'node:fs';
 
-import { createTestDatabase, type TestDatabase, type TestSession } from '@agentx/testing';
+import { createTenantProbe, createTestDatabase, type TestDatabase, type TestSession } from '@agentx/testing';
 import type { Kysely } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -185,6 +185,35 @@ describe('what the database owner can really do', () => {
       expect(await problems()).toContain('agentx_app may UPDATE on audit.events');
     } finally {
       await owner.query('revoke update on audit.events from agentx_app');
+    }
+  });
+
+  it('sees the app role given more than reading and writing rows on a tenant table (A3f-1)', async () => {
+    // A tenant table outside the audit schemas, where the app may SELECT,
+    // INSERT, UPDATE and DELETE and nothing else; MAINTAIN exists from 17.
+    const maintain = Number(server.version.split('.')[0]) >= 17;
+    try {
+      // Inside the try, so a probe half built is still dropped, and can't fail every later case instead.
+      await createTenantProbe(database);
+      expect(await problems()).toEqual([]);
+      await owner.query('grant truncate, trigger, references on probe.items to agentx_app');
+      if (maintain) await owner.query('grant maintain on probe.items to agentx_app');
+      expect((await problems()).sort()).toEqual(
+        [
+          'agentx_app may TRUNCATE on probe.items',
+          'agentx_app may TRIGGER on probe.items',
+          'agentx_app may REFERENCES on probe.items',
+          ...(maintain ? ['agentx_app may MAINTAIN on probe.items'] : []),
+        ].sort(),
+      );
+      await owner.query('revoke truncate, trigger, references on probe.items from agentx_app');
+      if (maintain) await owner.query('revoke maintain on probe.items from agentx_app');
+      expect(await problems()).toEqual([]);
+      // A column grant alone is seen too, though the table-level answer doesn't show it.
+      await owner.query('grant references (label) on probe.items to agentx_app');
+      expect(await problems()).toEqual(['agentx_app may REFERENCES on probe.items']);
+    } finally {
+      await owner.query('drop schema if exists probe cascade');
     }
   });
 

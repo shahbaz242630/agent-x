@@ -114,8 +114,19 @@ const APPEND_ONLY_RIGHTS = ['SELECT', 'INSERT'] as const;
 const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 
 /**
- * Every privilege Postgres can grant on a table, so a new one shows up as
- * unexpected rather than being missed.
+ * The rights the app role may hold on any other table, tenant or global:
+ * reading and writing rows, through the table's policies where it has them.
+ * Never TRUNCATE, which empties a table past row security, every
+ * organisation's rows at once; nor TRIGGER, REFERENCES or MAINTAIN, which would
+ * let it plant a trigger, point a key at the rows, or lock and reindex them
+ * (A3f-1; CI-06 holds the migrations to the same list).
+ */
+const APP_ROW_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
+
+/**
+ * Every privilege Postgres can grant on a table: the ones the app role is
+ * asked about. A privilege a later Postgres adds isn't asked about until it is
+ * listed here; CI-06 refuses it in the migrations meanwhile, whatever it is.
  *
  * **MAINTAIN arrived in Postgres 17.** Asking `has_table_privilege` about it on
  * 16 is not a false answer but an error — "unrecognized privilege type" — which
@@ -733,7 +744,7 @@ export async function liveSchemaProblems<Schema>(
         ? exceptions.has(relation.name)
           ? EXCEPTION_RIGHTS
           : APPEND_ONLY_RIGHTS
-        : TABLE_RIGHTS,
+        : APP_ROW_RIGHTS,
     );
     for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
