@@ -1,11 +1,12 @@
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, FastifySchema, RouteShorthandOptions } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifySchema, RouteShorthandOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { ContractBroken, looseAnswers, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
+import { API_SCHEMAS } from './api-schemas.ts';
+import { ContractBroken, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
 import { REQUEST_FAILED } from './request-log.ts';
 import { buildServer } from './server.ts';
@@ -206,11 +207,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     expect(() => app.post('/test/route', options, () => 'ok')).toThrow(`POST /test/route: ${problem}`);
   });
 
-  it('takes an answer declared for each content type in zod, and documents it with its description', async () => {
+  it('documents a success answer with the description its schema was registered with', async () => {
     const { app } = await server();
-    const item = z.object({ id: z.uuid() });
-    const response = { 200: { description: 'The item.', content: { 'application/json': { schema: item } } } };
-    app.get('/test/item', { ...OPEN, schema: { response } }, () => ({ id: ITEM_ID, note: PLANTED }));
+    const item = z.object({ id: z.uuid() }).register(API_SCHEMAS, { description: 'The item.' });
+    app.get('/test/item', { ...OPEN, schema: { response: { 200: item } } }, () => ({ id: ITEM_ID, note: PLANTED }));
     await app.ready();
     expect(documentOf(app).paths['/test/item']?.get?.responses['200']).toMatchObject({ description: 'The item.' });
     expect((await app.inject('/test/item')).json()).toEqual({ id: ITEM_ID });
@@ -270,8 +270,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it('refuses to start with a schema the document could only show as "anything"', async () => {
     const { app } = await server();
-    const response = { 200: z.object({ at: z.date() }) };
-    app.get('/test/when', { ...OPEN, schema: { response } }, () => ({ at: new Date() }));
+    const schema = { ...OPEN.schema, body: z.object({ at: z.date() }) };
+    app.post('/test/when', { ...OPEN, schema }, () => 'ok');
     await expect(app.ready()).rejects.toThrow(/Date cannot be represented in JSON Schema/);
   });
 
@@ -453,7 +453,7 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     const read = { config: OPEN.config, schema: { response: { '2xx': z.object({ ok: z.literal(true) }) } } };
     app.get('/test/read', read, () => ({ ok: true }));
     const create = { ...OPEN, bodyLimit: 64 * 1024, schema: { response: { 201: z.object({ id: z.uuid() }) } } };
-    app.post('/test/create', create, () => ({ id: ITEM_ID }));
+    app.post('/test/create', create, (_request, reply) => reply.code(201).send({ id: ITEM_ID }));
     await app.ready();
     const paths = app.swagger().paths as Record<string, Record<string, Record<string, unknown>>>;
     expect(paths['/test/create']?.post?.['x-body-limit']).toBe(64 * 1024);
@@ -474,91 +474,184 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     expect(response.json()).toEqual(errorBody('PAYLOAD_TOO_LARGE', FIRST_ID));
   });
 
+  // The serializer runs zod, so the zod schema is what is checked: the document can show a part
+  // tighter than zod sends it, as each of the last five here would be.
   it.each<[string, z.ZodType, string]>([
-    ['open to fields it does not name', z.looseObject({ id: z.uuid() }), 'answer.additionalProperties'],
-    ['a field that could be anything', z.object({ id: z.uuid(), extra: z.unknown() }), 'answer.properties.extra'],
-    ['a list of anything, deeper down', z.object({ items: z.array(z.unknown()) }), 'answer.properties.items.items'],
+    ['open to fields it does not name', z.looseObject({ id: z.uuid() }), "answer (open to fields it doesn't name)"],
+    ['a field that could be anything', z.object({ id: z.uuid(), extra: z.unknown() }), 'answer.extra (unknown)'],
+    ['a field of any kind', z.object({ id: z.uuid(), extra: z.any() }), 'answer.extra (any)'],
+    ['a list of anything, deeper down', z.object({ items: z.array(z.unknown()) }), 'answer.items[] (unknown)'],
     [
       'a nested object open to more fields',
       z.object({ owner: z.object({ id: z.uuid() }).catchall(z.string()) }),
-      'answer.properties.owner.additionalProperties',
+      "answer.owner (open to fields it doesn't name)",
     ],
-  ])('refuses to start with a success answer %s', async (_what, answer, where) => {
+    ['a tuple whose rest could be anything', z.object({ row: z.tuple([z.string()], z.unknown()) }), 'answer.row[rest]'],
+    [
+      'a map keyed by any text',
+      z.object({ byName: z.record(z.string(), z.string()) }),
+      'answer.byName (a map whose keys',
+    ],
+    ['a date', z.object({ at: z.date() }), 'answer.at (date)'],
+    ['a default', z.object({ note: z.string().default('x') }), 'answer.note (default)'],
+    [
+      'a union with a member that could be anything, which the document leaves out',
+      z.object({ extra: z.union([z.unknown(), z.object({ id: z.uuid() })]) }),
+      'answer.extra (unknown)',
+    ],
+    ['a codec, whose sent side the document never shows', z.object({ flag: z.stringbool() }), 'answer.flag (pipe)'],
+    ['a transform', z.object({ name: z.string().transform((name) => name) }), 'answer.name (pipe)'],
+    [
+      'an intersection with a map, which the document shows closed',
+      z.object({ row: z.object({ id: z.uuid() }).and(z.record(z.string(), z.string())) }),
+      'answer.row (intersection)',
+    ],
+    [
+      'a loose map, which the document shows as a map of described values',
+      z.object({ tags: z.looseRecord(z.enum(['a']), z.string()) }),
+      'answer.tags (a map whose keys',
+    ],
+  ])('refuses a success answer %s, as it is added', async (_what, answer, where) => {
     const { app } = await server();
-    app.get('/test/loose', { ...OPEN, schema: { response: { 200: answer } } }, () => ({ id: ITEM_ID }));
-    await expect(app.ready()).rejects.toThrow(
-      `GET /test/loose: its 200 answer lets through what it doesn't name (${where})`,
+    const options = { ...OPEN, schema: { response: { 200: answer } } };
+    expect(() => app.get('/test/loose', options, () => ({ id: ITEM_ID }))).toThrow(
+      `GET /test/loose: its 200 answer lets through what it doesn't name: ${where}`,
     );
   });
 
-  it('takes answers that name every field at every depth: lists, maps of named values, nullable parts, pairs', async () => {
+  it('refuses a loose answer under a range written in capitals, which Fastify reads as the range', async () => {
     const { app } = await server();
+    const options = { ...OPEN, schema: { response: { '2XX': z.looseObject({ id: z.uuid() }) } } };
+    expect(() => app.get('/test/loose', options, () => ({ id: ITEM_ID }))).toThrow(
+      "GET /test/loose: its 2XX answer lets through what it doesn't name",
+    );
+  });
+
+  it('refuses a success answer declared per content type, since Fastify would miss another type', async () => {
+    const { app } = await server();
+    const item = z.object({ id: z.uuid() });
+    const options = { ...OPEN, schema: { response: { 200: { content: { 'application/json': { schema: item } } } } } };
+    expect(() => app.get('/test/item', options, () => 'ok')).toThrow(
+      'GET /test/item: its 200 answer is not an object with named fields, declared as its schema itself',
+    );
+  });
+
+  it('refuses an error status whose content names no type', async () => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { ...OPEN.schema.response, 409: { content: {} } } } };
+    expect(() => app.get('/test/item', options, () => 'ok')).toThrow(
+      'GET /test/item: its 409 response names no content type',
+    );
+  });
+
+  it('takes answers that name all they carry at every depth: lists, tuples, fixed-key maps, optional, nullable, read-only, lazy and union parts', async () => {
+    const { app } = await server();
+    const node: z.ZodType<{ name: string; children: unknown[] }> = z.object({
+      name: z.string(),
+      children: z.lazy(() => z.array(node)),
+    });
     const answer = z.object({
       items: z.array(z.object({ id: z.uuid() })),
-      counts: z.record(z.string(), z.int()),
+      counts: z.record(z.enum(['open', 'paid']), z.int()),
       owner: z.object({ name: z.string() }).nullable(),
+      nickname: z.string().optional(),
       pair: z.tuple([z.string(), z.int()]),
+      fixed: z.readonly(z.object({ code: z.literal('A') })),
+      kind: z.discriminatedUnion('type', [z.object({ type: z.literal('a') }), z.object({ type: z.literal('b') })]),
+      tree: node,
+      ref: z.templateLiteral(['agent-', z.int()]),
+      state: z.enum(['on', 'off']),
+      ready: z.boolean(),
+      strictly: z.strictObject({ id: z.uuid() }),
     });
     app.get('/test/tight', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
       items: [],
-      counts: {},
+      counts: { open: 1, paid: 2 },
       owner: null,
       pair: ['a', 1],
+      fixed: { code: 'A' },
+      kind: { type: 'a' },
+      tree: { name: 'root', children: [] },
+      ref: 'agent-1',
+      state: 'on',
+      ready: true,
+      strictly: { id: ITEM_ID },
     }));
     await app.ready();
     expect((await app.inject('/test/tight')).statusCode).toBe(200);
   });
 });
 
-describe('the check for answers that let through what they do not name', () => {
-  const answering = (schema: unknown, components: Record<string, unknown> = {}) => ({
-    paths: { '/a': { get: { responses: { 200: { content: { 'application/json': { schema } } } } } } },
-    components: { schemas: components },
-  });
-  const strict = { type: 'object', properties: { id: { type: 'string' } }, additionalProperties: false };
-
-  it('follows a named schema, once, even one that refers to itself', () => {
-    const tree = {
-      type: 'object',
-      properties: { child: { $ref: '#/components/schemas/Tree' } },
-      additionalProperties: false,
-    };
-    expect(looseAnswers(answering({ $ref: '#/components/schemas/Tree' }, { Tree: tree }))).toEqual([]);
-    expect(looseAnswers(answering({ $ref: '#/components/schemas/Open' }, { Open: {} }))).toEqual([
-      "GET /a: its 200 answer lets through what it doesn't name (#/components/schemas/Open)",
+describe('SEC-WEB-06 an object answer goes out only through the schema declared for its status', () => {
+  it.each([
+    ['a status it declares no answer for', { 201: z.object({ id: z.uuid() }) }, (reply: FastifyReply) => reply],
+    [
+      'a status the range of its answer does not cover',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => reply.code(203),
+    ],
+    [
+      'a JSON-like content type Fastify still serializes, but not as the JSON declared',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => reply.type('application/problem+json'),
+    ],
+    [
+      'an error status in a content type the error answers are not declared for',
+      { 200: z.object({ id: z.uuid() }) },
+      (reply: FastifyReply) => {
+        reply.statusCode = 409;
+        return reply.type('application/problem+json');
+      },
+    ],
+  ])('answers an object sent with %s as a failure on our side, showing none of it', async (_what, response, set) => {
+    const { app, capture } = await server();
+    app.get('/test/row', { ...OPEN, schema: { response } }, (_request, reply) =>
+      set(reply).send({ id: ITEM_ID, secret: PLANTED }),
+    );
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(capture.lines().filter((line) => line.event === REQUEST_FAILED)).toEqual([
+      expect.objectContaining({ err: expect.objectContaining({ type: 'AnswerUndeclared' }) as unknown }),
     ]);
+    expect(findLeaks(capture.text, [PLANTED])).toEqual([]);
   });
 
-  it('counts a reference it cannot follow, and a map with no values described, as open', () => {
-    expect(looseAnswers(answering({ $ref: 'https://example.com/schemas/Thing' }))).toHaveLength(1);
-    // As long as the prefix it should have, and ending in the name of a tight schema it isn't.
-    expect(looseAnswers(answering({ $ref: '#/components/headers/Named' }, { Named: strict }))).toHaveLength(1);
-    expect(looseAnswers(answering({ type: 'object' }))).toEqual([
-      "GET /a: its 200 answer lets through what it doesn't name (answer.additionalProperties)",
-    ]);
+  it("sends an object under a range it declares, and an error body under the contract's own ranges", async () => {
+    const { app } = await server();
+    app.post(
+      '/test/claim',
+      { ...OPEN, schema: { response: { '2xx': z.object({ id: z.uuid() }) } } },
+      (_request, reply) => reply.code(201).send({ id: ITEM_ID, secret: PLANTED }),
+    );
+    const conflict = { ...OPEN, schema: { response: { ...OPEN.schema.response, 409: ERROR_BODY } } };
+    app.get('/test/conflict', conflict, (_request, reply) => reply.code(409).send(errorBody('ORG_FROZEN', FIRST_ID)));
+    await app.ready();
+    const claim = await app.inject({ method: 'POST', url: '/test/claim', headers: { origin: PUBLIC_ORIGIN } });
+    expect(claim.statusCode).toBe(201);
+    expect(claim.json()).toEqual({ id: ITEM_ID });
+    expect((await app.inject('/test/conflict')).statusCode).toBe(409);
   });
+});
 
-  it('looks inside every alternative and every position of a pair, but not past items: false', () => {
-    const alternatives = { anyOf: [strict, { oneOf: [strict, { allOf: [strict, {}] }] }] };
-    expect(looseAnswers(answering(alternatives))).toEqual([
-      "GET /a: its 200 answer lets through what it doesn't name (answer.anyOf[1].oneOf[1].allOf[1])",
-    ]);
-    expect(looseAnswers(answering({ type: 'array', prefixItems: [strict, {}], items: false }))).toHaveLength(1);
-    expect(looseAnswers(answering({ type: 'array', prefixItems: [strict], items: false }))).toEqual([]);
-  });
-
-  it('reads only success answers that have content, in documents of the expected shape', () => {
-    const errorsOnly = {
-      paths: { '/a': { get: { responses: { 400: { content: { 'application/json': { schema: {} } } } } } } },
-    };
-    expect(looseAnswers(errorsOnly)).toEqual([]);
-    expect(looseAnswers({ paths: { '/a': { get: { responses: { 204: { description: 'Done' } } } } } })).toEqual([]);
-    expect(looseAnswers({ paths: { '/a': 'not an item' } })).toEqual([]);
-    expect(looseAnswers({ paths: { '/a': { get: { responses: 'none' } } } })).toEqual([]);
-    expect(
-      looseAnswers({ paths: { '/a': { get: { responses: { 200: { content: { 'application/json': 'x' } } } } } } }),
-    ).toHaveLength(1);
-    expect(looseAnswers('not a document')).toEqual([]);
+describe('SEC-WEB-06 what the contract wrote into a route must still be there once every plugin has had its say', () => {
+  it('refuses to start when a later hook rebuilds a route schema, dropping its access, limit and error answers', async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          route.schema = { response: { 200: z.object({ ok: z.literal(true) }) } };
+        });
+        child.post('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    const ready = app.ready();
+    await expect(ready).rejects.toThrow("POST /test/plugin/item: its error answers are not the contract's");
+    await expect(ready).rejects.toThrow('POST /test/plugin/item: the body limit its document shows is not its own');
+    await expect(ready).rejects.toThrow('POST /test/plugin/item: the access its document shows is not its own');
   });
 });
 

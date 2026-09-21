@@ -239,6 +239,10 @@ const apiSetters = [
   'setValidatorCompiler',
   'setSerializerCompiler',
   'setReplySerializer',
+  // A body parser of its own may read past a route's bodyLimit (a stream-style parser does).
+  'addContentTypeParser',
+  'removeContentTypeParser',
+  'removeAllContentTypeParsers',
 ].map((property) => ({ property, message: apiContractOnly }));
 
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */

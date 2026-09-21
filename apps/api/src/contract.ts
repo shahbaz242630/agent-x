@@ -9,9 +9,11 @@
 //   (errors.ts), which the document names once, with every reason code.
 // - Each route names who may call it (access.ts), which the document shows as
 //   x-access on each of its operations.
-// - Each route declares its answers for success, as objects that name every
-//   field they carry, at every depth, and each route that takes a body sets its
-//   own limit for it, which the document shows as x-body-limit.
+// - Each route declares its answers for success, as zod objects that name all
+//   they carry, at every depth, and each route that takes a body sets its own
+//   limit for it, which the document shows as x-body-limit.
+// - An object answer goes out only through the schema its route declares for
+//   its status, as JSON; one without is a failure on our side, never sent.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -48,7 +50,7 @@ const BODY_LIMIT_KEY = 'x-body-limit';
 export const BODY_LIMIT_BYTES = 64 * 1024;
 
 /** Methods whose requests Fastify reads no body for. */
-const BODILESS_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
+const BODILESS_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'TRACE']);
 
 /**
  * A schema the document can't describe (a Date, the output of a transform)
@@ -93,6 +95,72 @@ const BYPASSES = ['attachValidation', 'validatorCompiler', 'serializerCompiler',
 /** A route as its onRoute hook sees it. */
 type AddedRoute = RouteOptions & { readonly routePath: string; readonly prefix: string };
 
+/** Answer parts that carry a value of their own and nothing beyond it. */
+const NAMED_LEAVES: ReadonlySet<string> = new Set([
+  'string',
+  'number',
+  'boolean',
+  'null',
+  'literal',
+  'enum',
+  'template_literal',
+]);
+
+/**
+ * Where an answer's zod schema lets through what it doesn't name, each as a
+ * path into it. The schema is walked, not the document: the serializer runs
+ * zod, and the document can show a part tighter than zod sends it (a union's
+ * "anything" member left out, a codec's other side, an intersection's map).
+ * Only these pass: objects closed to fields they don't name, lists, tuples,
+ * unions, optional, nullable or read-only parts, lazy parts, maps whose keys
+ * are a fixed list, and the named leaves.
+ */
+function unnamedParts(schema: unknown, at: string, seen: Set<unknown>): string[] {
+  if (!(schema instanceof z.ZodType)) return [`${at} (not a zod schema)`];
+  if (seen.has(schema)) return [];
+  seen.add(schema);
+  const walk = (child: unknown, where: string): string[] => unnamedParts(child, where, seen);
+  if (schema instanceof z.ZodObject) {
+    const { catchall } = schema._zod.def;
+    const open =
+      catchall === undefined || catchall instanceof z.ZodNever ? [] : [`${at} (open to fields it doesn't name)`];
+    return [...open, ...Object.entries(schema.shape).flatMap(([name, field]) => walk(field, `${at}.${name}`))];
+  }
+  if (schema instanceof z.ZodArray) return walk(schema.element, `${at}[]`);
+  if (schema instanceof z.ZodTuple) {
+    const { items, rest } = schema._zod.def;
+    return [
+      ...items.flatMap((item, index) => walk(item, `${at}[${String(index)}]`)),
+      ...(rest === null ? [] : walk(rest, `${at}[rest]`)),
+    ];
+  }
+  if (schema instanceof z.ZodUnion) return schema.options.flatMap((option: unknown) => walk(option, at));
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodReadonly) {
+    return walk(schema._zod.def.innerType, at);
+  }
+  if (schema instanceof z.ZodLazy) return walk(schema._zod.def.getter(), at);
+  if (schema instanceof z.ZodRecord) {
+    const { keyType, valueType } = schema._zod.def;
+    const loose = 'mode' in schema._zod.def && schema._zod.def.mode === 'loose';
+    const fixedKeys = (keyType instanceof z.ZodEnum || keyType instanceof z.ZodLiteral) && !loose;
+    return [...(fixedKeys ? [] : [`${at} (a map whose keys aren't a fixed list)`]), ...walk(valueType, `${at}.*`)];
+  }
+  return NAMED_LEAVES.has(schema._zod.def.type) ? [] : [`${at} (${schema._zod.def.type})`];
+}
+
+/**
+ * An object answer with no schema for its status, or not sent as JSON: Fastify
+ * would write it whole, so it is a failure on our side instead.
+ */
+class AnswerUndeclared extends Error {
+  constructor(route: string, status: number) {
+    super(`${route} answered ${String(status)} with an object it declares no schema for, or not as JSON`);
+    this.name = 'AnswerUndeclared';
+  }
+}
+
+const keysOf = (value: unknown): string[] => (typeof value === 'object' && value !== null ? Object.keys(value) : []);
+
 /** The API's routes and its OpenAPI document differ, or a route can't be documented. */
 export class ContractBroken extends Error {
   readonly problems: readonly string[];
@@ -131,10 +199,16 @@ function responseSchemas(response: unknown): unknown[] {
   return [response];
 }
 
-/** Why the document couldn't describe a route truthfully, if it couldn't. */
-function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
+/**
+ * Why the document couldn't describe a route truthfully, if it couldn't. Once
+ * `written`, what the contract wrote into its schema must still be there: a
+ * later hook that rebuilt the schema would drop it from the document.
+ */
+function routeProblems(route: AddedRoute, instance: FastifyInstance, written: boolean): string[] {
   const problems: string[] = [];
   const schema = route.schema ?? {};
+  const keys = new Map<string, unknown>(Object.entries(schema));
+  const declared = new Map<string, unknown>(Object.entries(responsesOf(route)));
   for (const part of ['body', 'querystring', 'params', 'headers'] as const) {
     if (schema[part] !== undefined && !(schema[part] instanceof z.ZodType)) {
       problems.push(`its ${part} schema is not a zod schema`);
@@ -146,30 +220,42 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
       if (!OUR_ERROR_RESPONSES.has(response)) {
         problems.push(`it sets its own ${status} response, but every error has the one error body`);
       }
+    } else if (schemas.length === 0) {
+      problems.push(`its ${status} response names no content type`);
     } else if (!schemas.every((entry) => entry instanceof z.ZodType)) {
       problems.push(`its ${status} response schema is not a zod schema`);
     } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
   }
-  // Allowlisted answers: a success answer names its fields, so nothing it doesn't name leaves.
-  const successes = Object.entries(responsesOf(route)).filter(([status]) => isSuccessStatus(status));
+  if (written && ![...OUR_ERROR_RESPONSES].every((ours) => [...declared.values()].includes(ours))) {
+    problems.push("its error answers are not the contract's");
+  }
+  // Allowlisted answers: a success answer names all it carries, so nothing it doesn't name leaves.
+  const successes = [...declared].filter(([status]) => isSuccessStatus(status));
   if (successes.length === 0) problems.push('it declares no answer for success (a response below 400)');
   for (const [status, response] of successes) {
-    if (!responseSchemas(response).every((entry) => entry instanceof z.ZodObject)) {
-      problems.push(`its ${status} answer is not an object with named fields`);
+    if (!(response instanceof z.ZodObject)) {
+      problems.push(`its ${status} answer is not an object with named fields, declared as its schema itself`);
+      continue;
     }
+    const unnamed = unnamedParts(response, 'answer', new Set());
+    if (unnamed.length > 0)
+      problems.push(`its ${status} answer lets through what it doesn't name: ${unnamed.join(', ')}`);
   }
   if (takesBody(route) && !isBodyLimit(route.bodyLimit)) {
     problems.push(`it takes a body but sets no limit of its own for it (bodyLimit, 1 to ${BODY_LIMIT_BYTES} bytes)`);
   }
-  if (BODY_LIMIT_KEY in schema && schema[BODY_LIMIT_KEY] !== (takesBody(route) ? route.bodyLimit : undefined)) {
+  if (
+    (written || keys.has(BODY_LIMIT_KEY)) &&
+    keys.get(BODY_LIMIT_KEY) !== (takesBody(route) ? route.bodyLimit : undefined)
+  ) {
     problems.push('the body limit its document shows is not its own (x-body-limit)');
   }
   problems.push(...accessProblems(route.config?.access, route.url));
   // The document shows the access the contract wrote from the route's own; a route
   // can't write another, and a later hook that swapped the route's own would part the two.
-  if (ACCESS_KEY in schema && schema[ACCESS_KEY] !== route.config?.access) {
+  if ((written || keys.has(ACCESS_KEY)) && keys.get(ACCESS_KEY) !== route.config?.access) {
     problems.push('the access its document shows is not its own (x-access)');
   }
   // A route of its own transform could show the document another schema than the one it runs.
@@ -217,95 +303,6 @@ export function routeTableProblems(
     ...documented.filter((route) => !onServer.has(route)).map((route) => `${route} is documented but not served`),
     ...[...twins].map((route) => `${route} is served by more than one route`),
   ];
-}
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-/** The keywords by which a JSON Schema says anything about a value: one with none of them takes anything. */
-const CONSTRAINING = [
-  'type',
-  'const',
-  'enum',
-  '$ref',
-  'anyOf',
-  'oneOf',
-  'allOf',
-  'not',
-  'properties',
-  'items',
-  'prefixItems',
-  'additionalProperties',
-];
-
-/**
- * Where a schema lets through what it doesn't describe, each as a path into
- * it: a value that could be anything, or an object with fields beyond those it
- * names. A map (no named fields, every value of one schema) names its values,
- * so it passes when they do.
- */
-function looseParts(
-  schema: unknown,
-  at: string,
-  components: Readonly<Record<string, unknown>>,
-  seen: Set<string>,
-): string[] {
-  if (!isRecord(schema) || !CONSTRAINING.some((key) => key in schema)) return [at];
-  const walk = (child: unknown, where: string): string[] => looseParts(child, where, components, seen);
-  if (typeof schema.$ref === 'string') {
-    if (!schema.$ref.startsWith(COMPONENT_PREFIX)) return [at];
-    const name = schema.$ref.slice(COMPONENT_PREFIX.length);
-    if (seen.has(name)) return [];
-    seen.add(name);
-    return walk(components[name], schema.$ref);
-  }
-  const parts: string[] = [];
-  if (isRecord(schema.properties)) {
-    if (schema.additionalProperties !== false) parts.push(`${at}.additionalProperties`);
-    for (const [name, property] of Object.entries(schema.properties)) {
-      parts.push(...walk(property, `${at}.properties.${name}`));
-    }
-  } else if (schema.type === 'object' || 'additionalProperties' in schema) {
-    parts.push(...walk(schema.additionalProperties, `${at}.additionalProperties`));
-  }
-  if ('items' in schema && schema.items !== false) parts.push(...walk(schema.items, `${at}.items`));
-  for (const key of ['prefixItems', 'anyOf', 'oneOf', 'allOf']) {
-    const list = schema[key];
-    if (Array.isArray(list))
-      list.forEach((entry, index) => parts.push(...walk(entry, `${at}.${key}[${String(index)}]`)));
-  }
-  return parts;
-}
-
-/**
- * Every success answer in the document that lets through what it doesn't
- * name, at any depth: a field that could be anything, or an object open to
- * fields it doesn't list. A route's own check sees only the top of its answer.
- */
-export function looseAnswers(document: unknown): string[] {
-  if (!isRecord(document) || !isRecord(document.paths)) return [];
-  const components =
-    isRecord(document.components) && isRecord(document.components.schemas) ? document.components.schemas : {};
-  const problems: string[] = [];
-  for (const [path, item] of Object.entries(document.paths)) {
-    for (const method of OPENAPI_METHODS) {
-      const operation = isRecord(item) ? item[method] : undefined;
-      const responses = isRecord(operation) ? operation.responses : undefined;
-      for (const [status, response] of Object.entries(isRecord(responses) ? responses : {})) {
-        const content = isRecord(response) ? response.content : undefined;
-        if (!isSuccessStatus(status) || !isRecord(content)) continue;
-        for (const media of Object.values(content)) {
-          const loose = looseParts(isRecord(media) ? media.schema : undefined, 'answer', components, new Set());
-          if (loose.length > 0) {
-            problems.push(
-              `${method.toUpperCase()} ${path}: its ${status} answer lets through what it doesn't name (${loose.join(', ')})`,
-            );
-          }
-        }
-      }
-    }
-  }
-  return problems;
 }
 
 interface WithSchemas {
@@ -358,7 +355,7 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
 
   const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
   app.addHook('onRoute', function (route) {
-    const problems = routeProblems(route, this);
+    const problems = routeProblems(route, this, false);
     if (problems.length > 0) throw new ContractBroken(problems);
     // A frozen copy, which the document and the access hook share: neither a change
     // to the document nor to a list the route was given can change who may call it.
@@ -373,6 +370,21 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
       };
     route.schema = schema;
     added.push({ route, instance: this });
+  });
+
+  // An object answer goes out only through the schema its route declares for its
+  // status (as Fastify looks it up: the status, then its range), as JSON: with
+  // neither, Fastify would write it whole. Error answers are text already.
+  app.addHook('preSerialization', (request, reply, payload, done) => {
+    const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
+    const status = String(reply.statusCode);
+    const type = reply.getHeader('content-type');
+    const json = type === undefined || /^application\/json\s*(?:;|$)/i.test(String(type));
+    if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
+      done(null, payload);
+      return;
+    }
+    done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
   });
 
   const transformObject = createJsonSchemaTransformObject({
@@ -399,11 +411,9 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     const served = added.flatMap(({ route }) =>
       methodsOf(route).map((method) => `${method} ${formatParamUrl(route.url)}`),
     );
-    const document = app.swagger();
     const problems = [
-      ...added.flatMap(({ route, instance }) => routeProblems(route, instance)),
-      ...routeTableProblems(served, document),
-      ...looseAnswers(document),
+      ...added.flatMap(({ route, instance }) => routeProblems(route, instance, true)),
+      ...routeTableProblems(served, app.swagger()),
     ];
     done(problems.length > 0 ? new ContractBroken(problems) : undefined);
   });
