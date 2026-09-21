@@ -241,6 +241,8 @@ const apiSetters = [
   'setReplySerializer',
   // A reply's own serializer writes an answer whole, past its route's schema.
   'serializer',
+  // A hijacked reply is written by hand, past every hook.
+  'hijack',
   // A body parser of its own may read past a route's bodyLimit (a stream-style parser does).
   'addContentTypeParser',
   'removeContentTypeParser',
@@ -256,6 +258,19 @@ const apiSendHooks = [
   {
     selector: "CallExpression[callee.property.name='addHook'][arguments.0.value='onSend']",
     message: 'SEC-WEB-06: an onSend hook could rewrite an answer after it was written; only contract.ts adds one.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='addHook'][arguments.0.type!='Literal']",
+    message: 'SEC-WEB-06: name the hook with a plain string, so lint can see which it is.',
+  },
+  {
+    selector: "CallExpression[callee.computed=true][callee.property.value='addHook']",
+    message: 'SEC-WEB-06: call addHook by name, so lint can see which hook it adds.',
+  },
+  // Writes that skip Fastify, and so the contract's check of what leaves.
+  {
+    selector: "MemberExpression[object.name='reply'][property.name='raw']",
+    message: 'SEC-WEB-06: writing to the raw response skips the check of what leaves; answer with reply.send.',
   },
 ];
 

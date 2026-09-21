@@ -55,11 +55,9 @@ export function sendErrorBody(
   code: ReasonCode,
   correlationId: string,
 ): FastifyReply {
-  markWritten(reply);
-  return reply
-    .code(status)
-    .type(JSON_TYPE)
-    .send(JSON.stringify(errorBody(code, correlationId)));
+  const text = JSON.stringify(errorBody(code, correlationId));
+  markWritten(reply, text);
+  return reply.code(status).type(JSON_TYPE).send(text);
 }
 
 /** Refusals the framework, Node or the rate limit raise, by HTTP status. */

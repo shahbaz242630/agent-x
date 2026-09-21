@@ -824,13 +824,63 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
   });
 
-  it('lets an empty answer go, which carries nothing', async () => {
+  it.each<[string, (reply: FastifyReply) => FastifyReply]>([
+    ['with no body', (reply) => reply.send()],
+    ['as empty text', (reply) => reply.send('')],
+  ])('lets an answer go empty, %s, at a status its route declares', async (_what, send) => {
     const { app } = await server();
-    app.get('/test/empty', OPEN, (_request, reply) => reply.send());
+    app.get('/test/empty', OPEN, (_request, reply) => send(reply));
     await app.ready();
     const answer = await app.inject('/test/empty');
     expect(answer.statusCode).toBe(200);
     expect(answer.body).toBe('');
+  });
+
+  it('answers as a failure an empty answer at a status its route does not declare', async () => {
+    const { app } = await server();
+    app.get('/test/teapot', OPEN, (_request, reply) => {
+      reply.statusCode = 418;
+      return reply.send();
+    });
+    await app.ready();
+    const answer = await app.inject('/test/teapot');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+  });
+
+  it('answers as a failure a written answer a server hook rewrote before it left', async () => {
+    const { app, capture } = await server();
+    // eslint-disable-next-line no-restricted-syntax -- stands in for a plugin's own hook, to prove the check catches it
+    app.addHook('onSend', (request, _reply, payload, done) => {
+      done(null, request.url === '/test/row' ? `{"ok":true,"secret":"${PLANTED}"}` : payload);
+    });
+    app.get('/test/row', OPEN, () => ({ ok: true }));
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("answers as a failure an object a serializer of the reply's own writes, though it says JSON", async () => {
+    const { app, capture } = await server();
+    app.get('/test/row', OPEN, (_request, reply) => {
+      void reply.type('application/json');
+      // eslint-disable-next-line no-restricted-properties -- proves the check catches what lint bans
+      return reply.serializer((payload) => JSON.stringify(payload)).send({ ok: true, secret: PLANTED });
+    });
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('closes a stream it refuses, so the stream holds nothing open', async () => {
+    const { app } = await server();
+    const stream = Readable.from(['row']);
+    app.get('/test/stream', OPEN, (_request, reply) => reply.send(stream));
+    await app.ready();
+    expect((await app.inject('/test/stream')).statusCode).toBe(500);
+    expect(stream.destroyed).toBe(true);
   });
 
   it('lets the HEAD of a GET go, which Fastify empties after it is written', async () => {
@@ -855,6 +905,46 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     const answer = await app.inject('/test/unknown');
     expect(answer.statusCode).toBe(500);
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("refuses Fastify's own name for its HEAD hook on a route that isn't HEAD alone", async () => {
+    const { app } = await server();
+    function headRouteOnSendHandler(
+      _request: unknown,
+      _reply: unknown,
+      payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) {
+      done(null, payload);
+    }
+    const route = { url: '/test/both', ...OPEN, onSend: headRouteOnSendHandler, handler: () => ({ ok: true }) };
+    expect(() => app.route({ ...route, method: ['GET', 'HEAD'] })).toThrow(
+      'GET,HEAD /test/both: it rewrites its answers after they are written (onSend)',
+    );
+    expect(() =>
+      app.route({ ...route, method: 'HEAD', onSend: [headRouteOnSendHandler, headRouteOnSendHandler] }),
+    ).toThrow('HEAD /test/both: it rewrites its answers after they are written (onSend)');
+  });
+
+  it("answers as a failure a HEAD route's own hook that borrows Fastify's name to rewrite its answer", async () => {
+    const { app } = await server();
+    function headRouteOnSendHandler(
+      _request: unknown,
+      _reply: unknown,
+      _payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) {
+      done(null, `row ${PLANTED}`);
+    }
+    app.route({
+      method: 'HEAD',
+      url: '/test/head',
+      ...OPEN,
+      onSend: headRouteOnSendHandler,
+      handler: () => ({ ok: true }),
+    });
+    await app.ready();
+    expect((await app.inject({ method: 'HEAD', url: '/test/head' })).statusCode).toBe(500);
   });
 
   it('refuses a route with an onSend hook of its own, which could rewrite an answer after it was written', async () => {

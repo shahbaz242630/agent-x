@@ -13,6 +13,7 @@ const SETTERS = [
   'setSerializerCompiler',
   'setReplySerializer',
   'serializer',
+  'hijack',
   'addContentTypeParser',
   'removeContentTypeParser',
   'removeAllContentTypeParsers',
@@ -59,6 +60,24 @@ const REJECTED: LintCase[] = [
     code: "export function plugin(app: { addHook(name: string, hook: () => void): void }): void {\n  app.addHook('onSend', () => undefined);\n}\n",
     rule: 'no-restricted-syntax',
     says: 'onSend',
+  },
+  ...[
+    ['an onSend hook named in a template literal', 'app.addHook(`onSend`, () => undefined);'],
+    ['a hook named through a variable', "const name = 'onSend';\n  app.addHook(name, () => undefined);"],
+    ['addHook called by a computed name', "app['addHook']('onSend', () => undefined);"],
+  ].map(([what, call]) => ({
+    name: `${String(what)} in an API module`,
+    filePath: `${API}/hook-${String(what).replace(/\W/g, '')}.ts`,
+    code: `export function plugin(app: { addHook(name: string, hook: () => void): void }): void {\n  ${String(call)}\n}\n`,
+    rule: 'no-restricted-syntax',
+    says: 'SEC-WEB-06',
+  })),
+  {
+    name: 'a write to the raw response in an API module',
+    filePath: `${API}/raw.ts`,
+    code: "export function answer(reply: { raw: { end(text: string): void } }): void {\n  reply.raw.end('text');\n}\n",
+    rule: 'no-restricted-syntax',
+    says: 'raw response',
   },
   {
     name: "raw HTML in the API, whose block repeats the product's syntax list",

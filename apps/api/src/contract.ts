@@ -14,9 +14,10 @@
 //   limit for it, which the document shows as x-body-limit.
 // - An object answer goes out only through the schema its route declares for
 //   its status, as JSON; one without is a failure on our side, never sent.
-// - An answer leaves only as the contract wrote it (written-answers.ts): a
-//   string, bytes or a stream a route sent itself is a failure on our side,
-//   and no route may rewrite its answers after they are written (onSend).
+// - An answer leaves only as the contract wrote it, byte for byte
+//   (written-answers.ts): a string, bytes or a stream a route sent itself, or
+//   anything a hook put in its place, is a failure on our side; an empty
+//   answer leaves only at a status its route declares.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -27,6 +28,7 @@
 import swagger, { formatParamUrl } from '@fastify/swagger';
 import type {
   FastifyInstance,
+  FastifyRequest,
   FastifySchema,
   onSendHookHandler,
   preSerializationHookHandler,
@@ -43,7 +45,7 @@ import { z } from 'zod';
 import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
-import { isWritten, markWritten } from './written-answers.ts';
+import { aboutToWrite, hasWritten, isWritten, recordingWrites } from './written-answers.ts';
 
 /** The methods an OpenAPI path can hold. A route served with any other can't be documented. */
 const OPENAPI_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
@@ -174,6 +176,24 @@ class AnswerUndeclared extends Error {
 const keysOf = (value: unknown): string[] => (typeof value === 'object' && value !== null ? Object.keys(value) : []);
 
 /**
+ * Whether the request's route declares an answer for the status, as Fastify
+ * looks it up: the status, then its range. `own` counts only the route's own
+ * answers, not the error body it answers every 4xx and 5xx with.
+ */
+function isDeclared(request: FastifyRequest, statusCode: number, own = false): boolean {
+  const declared = new Set(
+    keysOf(request.routeOptions.schema?.response)
+      .filter((key) => !own || (!isErrorRange(key) && !isErrorPathStatus(key)))
+      .map((key) => key.toLowerCase()),
+  );
+  const status = String(statusCode);
+  return declared.has(status) || declared.has(`${status.charAt(0)}xx`);
+}
+
+/** The zod serializer, recording what it writes for the reply it writes it for (written-answers.ts). */
+const recordingSerializerCompiler: typeof serializerCompiler = (route) => recordingWrites(serializerCompiler(route));
+
+/**
  * An object answer goes out only through the schema its route declares for its
  * status (as Fastify looks it up: the status, then its range), as JSON. The
  * contract adds it as each route's last preSerialization hook, so no hook after
@@ -183,12 +203,10 @@ const keysOf = (value: unknown): string[] => (typeof value === 'object' && value
  * never reach it.
  */
 const answerGuard: preSerializationHookHandler = (request, reply, payload, done) => {
-  const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
-  const status = String(reply.statusCode);
   const type = reply.getHeader('content-type');
   const json = typeof type === 'string' && /^application\/json\s*(?:;|$)/i.test(type);
-  if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
-    markWritten(reply);
+  if (json && isDeclared(request, reply.statusCode)) {
+    aboutToWrite(reply);
     done(null, payload);
     return;
   }
@@ -203,18 +221,35 @@ class AnswerUnwritten extends Error {
   }
 }
 
+/** Closes a stream a refused answer would have sent, so it holds nothing open (a file, say). */
+function closeRefused(payload: unknown): void {
+  if (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'destroy' in payload &&
+    typeof payload.destroy === 'function'
+  ) {
+    (payload.destroy as () => void).call(payload);
+  }
+}
+
 /**
- * An answer leaves only as the contract wrote it (written-answers.ts), or
- * empty. The contract adds it as each route's last onSend hook, after Fastify's
- * own that empties a HEAD answer, and at the root for the not-found path. A
- * route may add no onSend hook of its own: one that rewrote an answer after it
- * was written would send what no schema declares.
+ * An answer leaves only as the contract wrote it, byte for byte
+ * (written-answers.ts), or empty at a status its route declares. The contract
+ * adds it as each route's last onSend hook, after Fastify's own that empties a
+ * HEAD answer, and at the root for the not-found path; it compares the payload
+ * as it now stands, so whatever an earlier hook put in its place is refused.
  */
 const answerLeaves: onSendHookHandler = (request, reply, payload, done) => {
-  if (isWritten(reply) || payload === undefined || payload === null || payload === '') {
+  // Empty, an answer carries nothing: at a status its route declares an answer of its own for (a
+  // redirect, say), or once the contract wrote it and Fastify's own HEAD hook emptied it. Not at a
+  // 4xx or 5xx, which the document says carries the error body.
+  const empty = payload === undefined || payload === null || payload === '';
+  if (isWritten(reply, payload) || (empty && (hasWritten(reply) || isDeclared(request, reply.statusCode, true)))) {
     done(null, payload);
     return;
   }
+  closeRefused(payload);
   done(new AnswerUnwritten(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
 };
 
@@ -303,7 +338,9 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
     problems.push("an onSend hook runs after the contract's check of what leaves");
   }
   const ownSendHooks = written ? sendHooks.slice(0, -1) : sendHooks;
-  if (!ownSendHooks.every((hook) => methodsOf(route).includes('HEAD') && isHeadEmptier(hook))) {
+  // A route of HEAD alone may have Fastify's own; any other rewrite is refused as the answer leaves anyway.
+  const headsOnly = route.method === 'HEAD' && ownSendHooks.length === 1;
+  if (!ownSendHooks.every((hook) => headsOnly && isHeadEmptier(hook))) {
     problems.push('it rewrites its answers after they are written (onSend)');
   }
   // Allowlisted answers: every answer a route declares, but the one error body, names all it
@@ -345,7 +382,7 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
       problems.push(`it sets ${option}, so it would check or answer other than through its schemas`);
     }
   }
-  if (instance.validatorCompiler !== validatorCompiler || instance.serializerCompiler !== serializerCompiler) {
+  if (instance.validatorCompiler !== validatorCompiler || instance.serializerCompiler !== recordingSerializerCompiler) {
     problems.push('its plugin checks or writes through compilers other than zod');
   }
   // A twin of a documented route, served only for some hosts or versions, would never show.
@@ -429,7 +466,7 @@ export function withoutUnusedSchemas<D extends WithSchemas>(
  */
 export async function registerContract(app: FastifyInstance): Promise<void> {
   app.setValidatorCompiler(validatorCompiler);
-  app.setSerializerCompiler(serializerCompiler);
+  app.setSerializerCompiler(recordingSerializerCompiler);
 
   const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
   app.addHook('onRoute', function (route) {
