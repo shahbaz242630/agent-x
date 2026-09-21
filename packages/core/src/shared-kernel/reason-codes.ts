@@ -32,6 +32,8 @@ export const REASON_CODES = {
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
+  UNAUTHENTICATED:
+    'This address answers only a signed-in person or an agent with its key, and the request came from neither, so it is refused.',
   UNSUPPORTED_MEDIA_TYPE: "The request body's content type isn't accepted at this address, so it is refused.",
 } as const satisfies Readonly<Record<string, string>>;
 

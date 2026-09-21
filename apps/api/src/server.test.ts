@@ -18,6 +18,8 @@ const PLANTED = 'planted value that must not appear';
 /** The first IDs SequentialIds hands out, for requests that bring no usable correlation ID. */
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const SECOND_ID = '00000000-0000-7000-8000-000000000002';
+/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
+const OPEN = { config: { access: ['public'] } } as const;
 
 const HTTP: Config['http'] = {
   host: '127.0.0.1',
@@ -60,27 +62,27 @@ async function setup(options: SetupOptions = {}) {
     healthChecks: options.healthChecks ?? [],
   });
   const reached: string[] = [];
-  app.post('/test/write', async (_request, reply) => {
+  app.post('/test/write', OPEN, async (_request, reply) => {
     reached.push('write');
     return reply.code(204).send();
   });
-  app.post('/test/body', (request) => {
+  app.post('/test/body', OPEN, (request) => {
     reached.push('body');
     return { received: typeof request.body };
   });
-  app.get('/test/fail', () => {
+  app.get('/test/fail', OPEN, () => {
     throw new Error(`database said: password rejected for ${SAMPLES.email}`);
   });
   // A route bug a later route could have: it replies twice.
-  app.get('/test/items/:ref', (_request, reply) => {
+  app.get('/test/items/:ref', OPEN, (_request, reply) => {
     void reply.send('first');
     void reply.send('second');
   });
   // A route with its own, lower limit, as Phase 1's per-agent limits will have.
-  app.get('/test/limited', { config: { rateLimit: { max: 2, timeWindow: 60_000 } } }, () => 'ok');
-  app.get('/test/ip', (request) => ({ ip: request.ip }));
+  app.get('/test/limited', { config: { ...OPEN.config, rateLimit: { max: 2, timeWindow: 60_000 } } }, () => 'ok');
+  app.get('/test/ip', OPEN, (request) => ({ ip: request.ip }));
   // A route that puts caller input in a header, which Node refuses when it holds a control character.
-  app.get('/test/header', (request, reply) => {
+  app.get('/test/header', OPEN, (request, reply) => {
     void reply.header('x-note', (request.query as { note?: string }).note);
     return 'ok';
   });

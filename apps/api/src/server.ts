@@ -3,6 +3,7 @@
 // 1. gets its correlation ID (from the caller if it's a UUID) and the security headers
 // 2. is counted against its client address's rate limit (ADR-011 §4)
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
+// 4. is refused if its route doesn't name its caller (access.ts, BR-04)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
@@ -12,6 +13,7 @@ import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
+import { registerAccess } from './access.ts';
 import { answerClientError } from './client-errors.ts';
 import { registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
@@ -127,12 +129,17 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   // Every request is counted, 404s and refusals included, before anything else can refuse it.
   app.addHook('onRequest', countRequest);
-  app.addHook('onRequest', async (request, reply) => {
+  // done() only for a request let through, as in access.ts: a refusal the client
+  // hangs up on must not go on to the route.
+  app.addHook('onRequest', (request, reply, done) => {
     if (isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)) {
-      return sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
+      void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
+      return;
     }
-    return undefined;
+    done();
   });
+
+  registerAccess(app);
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler((request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

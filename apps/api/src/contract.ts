@@ -7,6 +7,8 @@
 //   names; a string or a Buffer is sent as it is.
 // - Each route answers a refusal or a failure with the one error body
 //   (errors.ts), which the document names once, with every reason code.
+// - Each route names who may call it (access.ts), which the document shows as
+//   x-access on each of its operations.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -15,7 +17,7 @@
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
-import type { FastifyInstance, RouteOptions } from 'fastify';
+import type { FastifyInstance, FastifySchema, RouteOptions } from 'fastify';
 import {
   createJsonSchemaTransform,
   createJsonSchemaTransformObject,
@@ -24,6 +26,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
 
@@ -31,6 +34,9 @@ import { ERROR_BODY } from './errors.ts';
 const OPENAPI_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
 
 const COMPONENT_PREFIX = '#/components/schemas/';
+
+/** Where each operation shows who may call it; the swagger plugin copies `x-` keys of a route's schema into it. */
+const ACCESS_KEY = 'x-access';
 
 /**
  * A schema the document can't describe (a Date, the output of a transform)
@@ -125,6 +131,12 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
     } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
+  }
+  problems.push(...accessProblems(route.config?.access, route.url));
+  // The document shows the access the contract wrote from the route's own; a route
+  // can't write another, and a later hook that swapped the route's own would part the two.
+  if (ACCESS_KEY in schema && schema[ACCESS_KEY] !== route.config?.access) {
+    problems.push('the access its document shows is not its own (x-access)');
   }
   // A route of its own transform could show the document another schema than the one it runs.
   if (route.config !== undefined && 'swaggerTransform' in route.config) {
@@ -225,7 +237,16 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
   app.addHook('onRoute', function (route) {
     const problems = routeProblems(route, this);
     if (problems.length > 0) throw new ContractBroken(problems);
-    route.schema = { ...route.schema, response: { ...responsesOf(route), ...ERROR_RESPONSES } };
+    // A frozen copy, which the document and the access hook share: neither a change
+    // to the document nor to a list the route was given can change who may call it.
+    const access = Object.freeze([...(route.config?.access ?? [])]);
+    route.config = { ...route.config, access };
+    const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> = {
+      ...route.schema,
+      [ACCESS_KEY]: access,
+      response: { ...responsesOf(route), ...ERROR_RESPONSES },
+    };
+    route.schema = schema;
     added.push({ route, instance: this });
   });
 

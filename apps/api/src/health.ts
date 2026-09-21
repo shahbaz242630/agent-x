@@ -54,7 +54,8 @@ async function allPass(checks: readonly HealthCheck[], log: Logger): Promise<boo
 
 export function registerHealth(app: FastifyInstance, checks: readonly HealthCheck[], logger: Logger): void {
   const schema = { summary: 'Whether the API is up', response: HEALTH_RESPONSES };
-  app.withTypeProvider<ZodTypeProvider>().get(HEALTH_PATH, { schema }, async (request, reply) => {
+  const config = { access: ['public'] } as const;
+  app.withTypeProvider<ZodTypeProvider>().get(HEALTH_PATH, { schema, config }, async (request, reply) => {
     const ok = await allPass(checks, logger.child({ correlationId: request.id }));
     return ok ? reply.code(200).send({ status: 'ok' }) : reply.code(503).send({ status: 'unavailable' });
   });
