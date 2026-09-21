@@ -12,7 +12,7 @@
 // or the chain's anchor. Two cases get past the row check alone, and are here
 // to prove what does catch them: an event hidden from the signed-state read by
 // a policy (the guard), and the chain wound back to an earlier sealed head
-// (the anchor). The last two are what the owner is refused outright.
+// (the anchor). The final describe block is what the owner is refused outright.
 import {
   createTestDatabase,
   LogCapture,
@@ -496,10 +496,18 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
 
 describe('FX-TAMPER as the owner: what it is refused, which needs the server admin', () => {
   it.each([
-    ['a cast between built-in types', 'create cast (bigint as text) without function'],
-    ['a setting pinned to the app role', 'alter role agentx_app set search_path = probe, pg_catalog'],
-  ])('%s', async (_, statement) => {
+    ['a cast between built-in types', 'create cast (bigint as text) without function', /must be owner of type/],
+    [
+      // Scoped to this test's own database, so a refusal that ever stopped
+      // holding couldn't leave the setting on the shared test server.
+      'a setting pinned to the app role',
+      "do $$ begin execute pg_catalog.format('alter role agentx_app in database %I set search_path = probe, pg_catalog', pg_catalog.current_database()); end $$",
+      /permission denied to alter role/,
+    ],
+  ])('%s', async (_, statement, refusal) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
-    await expect(owner.query(statement)).rejects.toMatchObject({ code: '42501' });
+    const refused = owner.query(statement);
+    await expect(refused).rejects.toMatchObject({ code: '42501' });
+    await expect(refused).rejects.toThrow(refusal);
   });
 });

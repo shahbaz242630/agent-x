@@ -66,8 +66,10 @@ export interface OwnerTamper {
   /**
    * Runs `work` with the events hidden by a policy of the owner's, then drops
    * the policy. Hidden from every query, or with `fromQueriesContaining`, only
-   * from queries whose text contains that word: one read made blind while
-   * every other read, the chain's check among them, still sees them.
+   * from queries whose text contains that text anywhere (a plain substring):
+   * one read made blind while every other read, the chain's check among them,
+   * still sees them. Pick text only the target query holds; a common one
+   * (`seq`, `org_id`) would blind the chain's check too.
    */
   withEventsHidden<T>(
     eventIds: readonly string[],
