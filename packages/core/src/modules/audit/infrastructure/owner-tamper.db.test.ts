@@ -10,8 +10,9 @@
 // and raises `audit.integrity_failed`, check `state`), the live schema guard
 // (A3e-1b: the same alarm, check `schema`, at start and on every anchor run),
 // or the chain's anchor. Two cases get past the row check alone, and are here
-// to prove what does catch them: events hidden by a policy (the guard), and
-// the chain wound back to an earlier sealed head (the anchor).
+// to prove what does catch them: an event hidden from the signed-state read by
+// a policy (the guard), and the chain wound back to an earlier sealed head
+// (the anchor). The last two are what the owner is refused outright.
 import {
   createTestDatabase,
   LogCapture,
@@ -29,6 +30,7 @@ import {
 } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
+import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -285,19 +287,28 @@ describe(`FX-TAMPER as the owner: an authority row changed past the app is denie
 });
 
 describe('FX-TAMPER as the owner: what gets past the row check alone, and what catches it', () => {
-  it('the newest event hidden by a policy of the owner’s and the row rolled back: the schema guard names the policy', async () => {
+  it('the newest event hidden from the signed-state read alone and the row rolled back: only the schema guard tells', async () => {
     const id = await newAgent();
     const saved = await owner.saveRow(id);
     await changeStatus(id, 'revoke');
     const [, revoked] = await eventIdsAbout(id);
     if (revoked === undefined) throw new Error('The test expected the revoke event');
 
-    await owner.withEventsHidden([revoked], async () => {
-      await owner.withoutStatusGuard(() => owner.restoreRow(saved));
-      // Read through the owner's policy, the older state is the latest: the row check alone can't tell.
-      expect(await check(id)).toMatchObject({ outcome: 'verified', version: 1 });
-      expect(await guard()).toContain('audit.events does not have exactly one row-security policy');
-    });
+    // The policy hides the revoke only from a query whose text names strpos:
+    // latestSignedState's search for the seal, and no read the chain's check makes.
+    const hidden = { fromQueriesContaining: 'strpos' };
+    await owner.withEventsHidden(
+      [revoked],
+      async () => {
+        await owner.withoutStatusGuard(() => owner.restoreRow(saved));
+        // Read through the owner's policy, the older state is the latest, and the chain still checks out whole.
+        expect(await check(id)).toMatchObject({ outcome: 'verified', version: 1 });
+        expect(await verifyChain()).toMatchObject({ ok: true, seq: 2n });
+        expect(alarms()).toEqual([]);
+        expect(await guard()).toContain('audit.events does not have exactly one row-security policy');
+      },
+      hidden,
+    );
 
     // The policy gone, the revoke is the latest again and the row no longer points at it.
     await deniedWith(id, 'pointer');
@@ -355,16 +366,39 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     });
   });
 
-  it('a planted rule doing nothing instead of an update: no change goes through, and the guard names it', async () => {
+  it('a planted trigger raising the role as a row is inserted: the signed state holds what the app declared, and the guard names it', async () => {
+    await owner.query(
+      "create function probe.raise() returns trigger language plpgsql set search_path = pg_catalog as $$ begin new.role := 'admin'; return new; end $$",
+    );
+    await owner.query('create trigger raise before insert on probe.agents for each row execute function probe.raise()');
+    try {
+      expect(await guard()).toContain('probe.agents carries the trigger "raise"');
+      const id = await newAgent('reader');
+      // record writes every declared field after the insert, which the insert trigger doesn't see.
+      expect(await check(id)).toMatchObject({
+        outcome: 'verified',
+        fields: new Map(Object.entries({ status: 'ACTIVE', role: 'reader' })),
+      });
+    } finally {
+      await owner.query('drop trigger raise on probe.agents');
+      await owner.query('drop function probe.raise()');
+    }
+    expect(alarms()).toEqual([]);
+  });
+
+  it('a planted rule doing nothing instead of an update: no change goes through, and only the guard raises the alarm', async () => {
     const id = await newAgent();
     await owner.query('create rule stay as on update to probe.agents do instead nothing');
     try {
       expect(await guard()).toContain('probe.agents carries the rewrite rule "stay"');
-      // Postgres refuses the status update's RETURNING under a DO INSTEAD NOTHING rule, so the change stops there.
+      // Postgres refuses the status update's RETURNING under a DO INSTEAD NOTHING rule, so the change stops there,
+      // as a database error rather than a tampering sign: the guard's next run (at start, or with the anchor check)
+      // is what raises the alarm.
       await expect(changeStatus(id, 'suspend')).rejects.toThrow('cannot perform UPDATE RETURNING');
     } finally {
       await owner.query('drop rule stay on probe.agents');
     }
+    expect(alarms()).toEqual([]);
     expect(await check(id)).toMatchObject({ outcome: 'verified', version: 1 });
     expect(await owner.query('select id from audit.events where org_id = $1', [org])).toHaveLength(1);
   });
@@ -414,10 +448,11 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     expect(alarms()).toEqual([]);
   });
 
-  // The live guard allows DELETE on a tenant table, and doesn't yet know which
-  // tables hold authority: that comes with the first entry in
-  // tooling/authority-tables.ts (B1). Until then, it is the row check that
-  // catches a row the app role was given the right to delete.
+  // The live guard allows the app role every table right on a tenant table
+  // outside the audit schemas (DELETE, TRUNCATE, TRIGGER, UPDATE of any
+  // column), and doesn't yet know which tables hold authority: that comes with
+  // the first entry in tooling/authority-tables.ts (B1). Until then, it is the
+  // row check that catches a row the app role was given the right to delete.
   it('the app role given DELETE, and a row deleted with it: the row check denies it', async () => {
     const id = await newAgent();
     await owner.query('grant delete on probe.agents to agentx_app');
@@ -431,11 +466,8 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     }
   });
 
-  it('a search_path pinned to the database over a planted function: new connections ignore it, and the guard names it', async () => {
+  it('a search_path pinned to the database: new connections keep the pinned one, and the guard names it', async () => {
     const id = await newAgent();
-    await owner.query(
-      'create function probe.strpos(text, text) returns integer language sql set search_path = pg_catalog as $$ select 0 $$',
-    );
     await owner.query(
       "do $$ begin execute pg_catalog.format('alter database %I set search_path = probe, pg_catalog', pg_catalog.current_database()); end $$",
     );
@@ -445,12 +477,10 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
       loggerFor(new LogCapture()),
     );
     try {
-      expect(await guard()).toEqual(
-        expect.arrayContaining([
-          'a setting is pinned to this database or to a role',
-          'probe.strpos is a function our schemas should not hold',
-        ]),
-      );
+      expect(await guard()).toContain('a setting is pinned to this database or to a role');
+      const path = await sql<{ path: string }>`select pg_catalog.current_setting('search_path') as path`.execute(fresh);
+      // A3e-1a's PINNED_SEARCH_PATH_VALUE, set in every connection's startup packet.
+      expect(path.rows[0]?.path).toBe('pg_catalog,pg_temp');
       expect(
         await withTenant(fresh, org, (tx) => states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share')),
       ).toMatchObject({ outcome: 'verified', version: 1 });
@@ -459,8 +489,17 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
       await owner.query(
         "do $$ begin execute pg_catalog.format('alter database %I reset search_path', pg_catalog.current_database()); end $$",
       );
-      await owner.query('drop function probe.strpos(text, text)');
     }
     expect(alarms()).toEqual([]);
+  });
+});
+
+describe('FX-TAMPER as the owner: what it is refused, which needs the server admin', () => {
+  it.each([
+    ['a cast between built-in types', 'create cast (bigint as text) without function'],
+    ['a setting pinned to the app role', 'alter role agentx_app set search_path = probe, pg_catalog'],
+  ])('%s', async (_, statement) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await expect(owner.query(statement)).rejects.toMatchObject({ code: '42501' });
   });
 });

@@ -39,7 +39,8 @@ async function addEvent(org: string, seq: number, subjectId: string, details: st
 }
 
 const statusOf = async (id: string) =>
-  (await admin.query<{ status: string }>('select status from probe.things where id = $1', [id]))[0]?.status;
+  (await admin.query<{ status: string }>('select status from probe.things where org_id = $1 and id = $2', [ORG, id]))[0]
+    ?.status;
 
 const guardEnabled = async () =>
   (
@@ -206,11 +207,30 @@ describe(`tamperAsOwner, FX-TAMPER's owner (Postgres ${server.version})`, () => 
     expect(await seen()).toBe(2);
   });
 
+  it('hides events only from queries whose text contains the word, when asked to', async () => {
+    await addEvent(ORG, 1, ROW, '{}');
+    await addEvent(ORG, 2, ROW, '{}');
+    const [first] = await admin.query<{ id: string }>('select id from audit.events where seq = 1');
+    if (first === undefined) throw new Error('The test expected an event');
+
+    await owner.withEventsHidden(
+      [first.id],
+      async () => {
+        expect(await owner.query('select seq from audit.events /* marked */')).toEqual([{ seq: '2' }]);
+        expect(await owner.query('select seq from audit.events order by seq')).toEqual([{ seq: '1' }, { seq: '2' }]);
+      },
+      { fromQueriesContaining: 'marked' },
+    );
+  });
+
   it.each([
-    ['no events', []],
-    ['an ID that is not a UUID', ["x') or (true"]],
-  ])('refuses to hide %s', async (_, ids) => {
-    await expect(owner.withEventsHidden(ids, () => Promise.resolve())).rejects.toBeInstanceOf(RangeError);
+    ['no events', [], undefined],
+    ['an ID that is not a UUID', ["x') or (true"], undefined],
+    ['from queries naming a word that is not letters', [ROW], "x') or (true"],
+  ])('refuses to hide %s', async (_, ids, word) => {
+    await expect(
+      owner.withEventsHidden(ids, () => Promise.resolve(), word === undefined ? {} : { fromQueriesContaining: word }),
+    ).rejects.toBeInstanceOf(RangeError);
   });
 
   it.each([
