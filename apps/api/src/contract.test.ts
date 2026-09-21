@@ -15,6 +15,8 @@ const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const PLANTED = 'planted value that must not appear';
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const ITEM_ID = '0190f4c2-1e5b-7c3d-8a9b-0c1d2e3f4a5b';
+/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
+const OPEN = { config: { access: ['public'] } } as const;
 
 const servers: FastifyInstance[] = [];
 
@@ -73,11 +75,11 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it("documents every route the server serves, and the HEAD Fastify adds to each GET, whatever the route's shape", async () => {
     const { app } = await server();
-    app.get('/test/items/:ref', () => 'ok');
-    app.route({ method: ['POST', 'PUT'], url: '/test/both', handler: () => 'ok' });
+    app.get('/test/items/:ref', OPEN, () => 'ok');
+    app.route({ method: ['POST', 'PUT'], url: '/test/both', ...OPEN, handler: () => 'ok' });
     await app.register(
       (child, _options, done) => {
-        child.delete('/things/:id', () => 'ok');
+        child.delete('/things/:id', OPEN, () => 'ok');
         done();
       },
       { prefix: '/test/nested' },
@@ -99,7 +101,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     ["tagged with the document's hidden tag", { tags: ['X-HIDDEN'] }],
   ])('refuses to start with a route %s, naming it and its HEAD', async (_how, schema) => {
     const { app } = await server();
-    app.get('/test/debug', { schema }, () => 'ok');
+    app.get('/test/debug', { schema, ...OPEN }, () => 'ok');
     const ready = app.ready();
     await expect(ready).rejects.toThrow(ContractBroken);
     await expect(ready).rejects.toMatchObject({
@@ -109,7 +111,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it("documents a route under the provider's own skip list rather than leaving it out", async () => {
     const { app } = await server();
-    app.get('/documentation/json', () => 'ok');
+    app.get('/documentation/json', OPEN, () => 'ok');
     await app.ready();
     expect(operations(app)).toContain('GET /documentation/json');
   });
@@ -201,7 +203,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     const { app } = await server();
     const item = z.object({ id: z.uuid() });
     const response = { 200: { description: 'The item.', content: { 'application/json': { schema: item } } } };
-    app.get('/test/item', { schema: { response } }, () => ({ id: ITEM_ID, note: PLANTED }));
+    app.get('/test/item', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID, note: PLANTED }));
     await app.ready();
     expect(documentOf(app).paths['/test/item']?.get?.responses['200']).toMatchObject({ description: 'The item.' });
     expect((await app.inject('/test/item')).json()).toEqual({ id: ITEM_ID });
@@ -214,7 +216,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       content: { 'application/json': { schema: ERROR_BODY } },
     };
     const response = { 200: z.object({ id: z.uuid() }), 409: conflict, 422: ERROR_BODY };
-    app.post('/test/claim', { schema: { response } }, () => ({ id: ITEM_ID }));
+    app.post('/test/claim', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID }));
     await app.ready();
     expect(documentOf(app).paths['/test/claim']?.post?.responses['409']).toMatchObject({
       description: 'Another request holds the key.',
@@ -223,8 +225,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it('refuses to start with a twin of a route, served by a stricter address pattern', async () => {
     const { app } = await server();
-    app.get('/test/a/:id', () => 'ok');
-    app.get('/test/a/:id(^[0-9]+$)', () => 'twin');
+    app.get('/test/a/:id', OPEN, () => 'ok');
+    app.get('/test/a/:id(^[0-9]+$)', OPEN, () => 'twin');
     await expect(app.ready()).rejects.toMatchObject({
       problems: [
         'GET /test/a/{id} is served by more than one route',
@@ -239,7 +241,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     // Fastify altogether, and the API's crash handler stops it instead.
     // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin is what this case is about
     const plugin = async (child: FastifyInstance): Promise<void> => {
-      child.get('/', () => 'ok');
+      child.get('/', OPEN, () => 'ok');
     };
     void app.register(plugin, { prefix: '/test/p' });
     await expect(app.ready()).rejects.toThrow("GET /test/p: it sits at its prefix's root");
@@ -249,7 +251,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     const { app } = await server();
     await app.register(
       (child, _options, done) => {
-        child.get('/', { prefixTrailingSlash: 'no-slash' }, () => 'ok');
+        child.get('/', { prefixTrailingSlash: 'no-slash', ...OPEN }, () => 'ok');
         done();
       },
       { prefix: '/test/p' },
@@ -261,7 +263,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
   it('refuses to start with a schema the document could only show as "anything"', async () => {
     const { app } = await server();
-    app.get('/test/when', { schema: { response: { 200: z.object({ at: z.date() }) } } }, () => ({ at: new Date() }));
+    const response = { 200: z.object({ at: z.date() }) };
+    app.get('/test/when', { schema: { response }, ...OPEN }, () => ({ at: new Date() }));
     await expect(app.ready()).rejects.toThrow(/Date cannot be represented in JSON Schema/);
   });
 
@@ -283,7 +286,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
 
 describe('SEC-WEB-06 every route is checked again once every plugin has had its say', () => {
   const item = (child: FastifyInstance): void => {
-    child.get('/item', () => 'ok');
+    child.get('/item', OPEN, () => 'ok');
   };
 
   it.each<[string, (child: FastifyInstance) => void, string]>([
@@ -349,8 +352,8 @@ describe('SEC-DATA-04 every error answer is written as it is, never through a ro
     ) => {
       done(null, { ...(payload as object), note: PLANTED });
     };
-    app.post('/test/item', { schema, preSerialization }, () => ({ quantity: 1 }));
-    app.get('/test/item', { schema: { response: schema.response }, preSerialization }, () => {
+    app.post('/test/item', { schema, preSerialization, ...OPEN }, () => ({ quantity: 1 }));
+    app.get('/test/item', { schema: { response: schema.response }, preSerialization, ...OPEN }, () => {
       throw new Error('failed on our side');
     });
     await app.ready();
@@ -413,7 +416,7 @@ describe('the document names only the schemas it uses', () => {
 describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and every reason code', () => {
   it('gives every operation a 4XX and a 5XX answer in the one error body', async () => {
     const { app } = await server();
-    app.post('/test/write', () => 'ok');
+    app.post('/test/write', OPEN, () => 'ok');
     await app.ready();
     const document = documentOf(app);
     const answers = Object.values(document.paths).flatMap((item) =>
@@ -458,6 +461,7 @@ describe('every route checks and answers through its own zod schemas', () => {
           body: z.strictObject({ quantity: z.int().positive() }),
           response: { 200: z.object({ id: z.uuid(), quantity: z.int() }) },
         },
+        ...OPEN,
       },
       (request) => {
         reached.push(request.body);
@@ -466,7 +470,7 @@ describe('every route checks and answers through its own zod schemas', () => {
         return { id: ITEM_ID, quantity, note: PLANTED };
       },
     );
-    app.get('/test/broken', { schema: { response: { 200: z.object({ quantity: z.int() }) } } }, () => ({
+    app.get('/test/broken', { schema: { response: { 200: z.object({ quantity: z.int() }) } }, ...OPEN }, () => ({
       quantity: PLANTED,
     }));
     await app.ready();

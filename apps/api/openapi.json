@@ -76,6 +76,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "UNAUTHENTICATED",
+                    "description": "This address answers only a signed-in person or an agent with its key, and the request came from neither, so it is refused."
+                  },
+                  {
+                    "type": "string",
                     "const": "UNSUPPORTED_MEDIA_TYPE",
                     "description": "The request body's content type isn't accepted at this address, so it is refused."
                   }
@@ -110,6 +115,9 @@
     "/health": {
       "get": {
         "summary": "Whether the API is up",
+        "x-access": [
+          "public"
+        ],
         "responses": {
           "200": {
             "description": "Every check passed.",
@@ -181,6 +189,9 @@
       },
       "head": {
         "summary": "Whether the API is up",
+        "x-access": [
+          "public"
+        ],
         "responses": {
           "200": {
             "description": "Every check passed.",

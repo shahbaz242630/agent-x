@@ -13,6 +13,8 @@ import { SequentialIds } from '../../packages/testing/src/ids.ts';
 
 const CRLF = String.fromCharCode(13, 10);
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
+/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
+const OPEN = { config: { access: ['public'] } } as const;
 
 type Server = Awaited<ReturnType<typeof buildServer>>;
 const servers: Server[] = [];
@@ -42,10 +44,10 @@ async function listening() {
     await new Promise<void>((resolve) => (release = resolve));
     return { done: true };
   };
-  app.get('/test/slow', slow);
+  app.get('/test/slow', OPEN, slow);
   // A write whose body is read in full before the handler waits: the case Node doesn't call aborted.
-  app.post('/test/slow', slow);
-  app.get('/test/fail', () => {
+  app.post('/test/slow', OPEN, slow);
+  app.get('/test/fail', OPEN, () => {
     throw new Error('failed on our side');
   });
   servers.push(app);
