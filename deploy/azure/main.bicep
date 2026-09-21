@@ -104,6 +104,7 @@ var ids = {
   appsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'apps')
   databaseSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'database')
   databaseZone: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/privateDnsZones', names.databaseZone)
+  appsEnvironment: resourceId(subscription().subscriptionId, group.name, 'Microsoft.App/managedEnvironments', names.appsEnvironment)
 }
 
 module monitoring 'modules/monitoring.bicep' = {
@@ -162,8 +163,9 @@ module database 'modules/postgres.bicep' = {
     privateDnsZoneId: ids.databaseZone
     workspaceId: ids.workspace
     actionGroupId: ids.actionGroup
-    // The apps deployment creates the job under this name; the owner-login alert pairs its starts with the owner's logins.
+    // The apps deployment creates the job under this name, in this environment; the owner-login alert pairs its starts with the owner's logins.
     migrateJobName: jobName(environment, 'migrate')
+    appsEnvironmentId: ids.appsEnvironment
   }
   // The delegated subnet, the zone linked to the network, the workspace and the action group must exist first.
   dependsOn: [

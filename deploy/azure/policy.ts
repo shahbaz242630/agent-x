@@ -124,17 +124,18 @@ const OWNER_ROLE = 'agentx_owner';
 
 /**
  * The owner-login alert's query (ADR-012 §2, Phase 1 A3e-2) for the migration
- * job's name, written again here so that changing it takes both: each owner
- * login paired with the nearest start of that job, and counted unless the
- * start is within two minutes and no other login is paired with it; judged
- * only between 20 and 50 minutes old, since Azure's lines for the job reach
- * the workspace minutes after Postgres's. postgres.bicep says why each number.
+ * job and the environment it runs in, written again here so that changing it
+ * takes both: each owner login paired with the nearest start of that job, and
+ * counted unless the start is within two minutes and nothing else is paired
+ * with it; a start with no login counted too; each judged only between 20 and
+ * 50 minutes old, since Azure's lines for the job reach the workspace minutes
+ * after Postgres's. postgres.bicep says why each number.
  */
-const ownerLoginQuery = (migrateJob: string): string =>
+const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   [
     'let near = 2m;',
     'let starts = ContainerAppSystemLogs',
-    `    | where JobName == "${migrateJob}" and Reason == "ContainerStarted"`,
+    `    | where _ResourceId =~ "${environmentId}" and JobName == "${migrateJob}" and Reason == "ContainerStarted"`,
     '    | project Start = TimeGenerated, Run = ReplicaName;',
     'let logins = PGSQLServerLogs',
     `    | where Message matches regex @"${LOG_LINE_START}connection authorized: user=${OWNER_ROLE} "`,
@@ -147,17 +148,23 @@ const ownerLoginQuery = (migrateJob: string): string =>
     'let claims = paired',
     '    | where Gap <= near',
     '    | summarize Claims = count() by Run;',
-    'paired',
-    '| where Login between (ago(50m) .. ago(20m))',
-    '| join kind=leftouter claims on Run',
-    '| where Gap > near or Claims > 1',
-    '| summarize Logins = count()',
+    'let strays = paired',
+    '    | where Login between (ago(50m) .. ago(20m))',
+    '    | join kind=leftouter claims on Run',
+    '    | where Gap > near or Claims > 1',
+    '    | project Run;',
+    'let unclaimed = starts',
+    '    | where Start between (ago(50m) .. ago(20m))',
+    '    | join kind=leftanti claims on Run',
+    '    | project Run;',
+    'union strays, unclaimed',
+    '| summarize Unpaired = count()',
   ].join('\n');
 
 /**
  * When the owner-login alert runs, and the hour each run reads: its band is 30
- * minutes, so two runs 15 minutes apart judge every login, and the hour holds
- * the band's oldest login and the start two minutes before it.
+ * minutes, so two runs 15 minutes apart judge every login and start, and the
+ * hour holds the band's oldest one and whatever two minutes before it.
  */
 const OWNER_LOGIN_RUNS = { every: 'PT15M', reads: 'PT1H' } as const;
 
@@ -1287,17 +1294,23 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const groups = list(at(alert.properties, 'actions', 'actionGroups'));
+    // One condition: `allOf` fires only when every condition holds, so a
+    // second one that never does would keep the alert from ever firing while
+    // the first still passed each rule that reads it. And a SEV-1 alert is
+    // never muted, which would silence every notification after the first.
     if (
       at(alert.properties, 'enabled') !== true ||
+      criteria.length !== 1 ||
       groups.length === 0 ||
       !groups.every((group) => deliversAlerts(snapshot, group)) ||
-      (severity === 1 && at(alert.properties, 'autoMitigate') !== false)
+      (severity === 1 &&
+        (at(alert.properties, 'autoMitigate') !== false || at(alert.properties, 'muteActionsDuration') !== undefined))
     ) {
       add({
         rule: 'alert-delivery',
         resource: alert.name,
         message:
-          "must be enabled and reach this deployment's action groups, each switched on with someone to tell; a SEV-1 alert is stateless, so it notifies every time",
+          "must be enabled, hold one condition and reach this deployment's action groups, each switched on with someone to tell; a SEV-1 alert is stateless and never muted, so it notifies every time",
       });
     }
   }
@@ -1530,16 +1543,19 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
  * An enabled, stateless SEV-1 alert on the workspace fires when the owner role
  * logs in other than as the migration job starting (ADR-012 §2, Phase 1
  * A3e-2): that role can rewrite the walls the app's checks stand on. Its query
- * names this deployment's own migration job, and it runs and reads exactly as
- * its band needs (OWNER_LOGIN_RUNS).
+ * names this deployment's own migration job and the environment it runs in,
+ * and it runs and reads exactly as its band needs (OWNER_LOGIN_RUNS).
  */
 const ownerLoginAlert: Check = (snapshot, _expected, add) => {
   const workspaces = workspaceIds(snapshot);
   const [migrate, ...others] = ofType(snapshot, TYPES.job).filter((job) => jobWorkloadOf(job.name) === 'migrate');
+  const [environment, ...otherEnvironments] = ofType(snapshot, TYPES.environment);
   for (const server of ofType(snapshot, TYPES.server)) {
     const alerted =
       migrate !== undefined &&
       others.length === 0 &&
+      environment !== undefined &&
+      otherEnvironments.length === 0 &&
       ofType(snapshot, TYPES.alert).some(
         (alert) =>
           at(alert.properties, 'enabled') === true &&
@@ -1550,7 +1566,7 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
           list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
           list(at(alert.properties, 'criteria', 'allOf')).some(
             (criterion) =>
-              at(criterion, 'query') === ownerLoginQuery(migrate.name) &&
+              at(criterion, 'query') === ownerLoginQuery(migrate.name, environment.id) &&
               at(criterion, 'operator') === 'GreaterThan' &&
               at(criterion, 'threshold') === 0 &&
               watchesEveryWindow(alert, criterion),
@@ -1560,7 +1576,7 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
       add({
         rule: 'owner-login-alert',
         resource: server.name,
-        message: `needs an enabled, stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting (ADR-012 §2)`,
+        message: `needs an enabled, stateless SEV-1 alert on this deployment's workspace, every 15 minutes over the hour before, that fires on the first window when ${OWNER_ROLE} logs in other than as this deployment's migration job starting in its environment, or that job starts with no login (ADR-012 §2)`,
       });
     }
   }

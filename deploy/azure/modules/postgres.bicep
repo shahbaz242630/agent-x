@@ -26,6 +26,8 @@ param workspaceId string
 param actionGroupId string
 @description('The migration job, the one thing that logs in as the owner role (apps.bicep).')
 param migrateJobName string
+@description('The Container Apps environment that job runs in, whose platform lines record its starts.')
+param appsEnvironmentId string
 
 // Fixed: Azure never lets a server's admin login change, and the alert below matches it by name.
 var adminLogin = 'agentx_admin'
@@ -181,24 +183,28 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // SEV-1 alert. The migration job is the one thing that logs in as it, with one
 // connection as it starts: each of its first 19 runs on staging logged in
 // within half a second of Azure's `ContainerStarted` line for the run (S33).
-// So each owner login is paired with the nearest start of that job, and it is
-// a deploy's only when that start is within two minutes and no other login is
-// paired with it. The alert counts the rest: a login with no start near it,
-// and two logins paired with one start (someone logging in beside a release).
+// So each owner login is paired with the nearest start of that job, in this
+// environment, and the two are a deploy only when the start is within two
+// minutes and nothing else is paired with it. The alert counts the rest: a
+// login with no start near it, two logins paired with one start (someone
+// logging in beside a release), and a start with no login (a run that died
+// before it connected, or login lines the pattern no longer matches, which
+// would otherwise quieten both login alerts at once).
 //
 // Azure's lines for the job reach the workspace 6 to 9 minutes after the
-// Postgres ones (S33), so a login is judged only once it is 20 minutes old,
-// over a band of 30 minutes that two runs 15 minutes apart both see: a login
-// outside a deploy notifies twice, the first time within about 35 minutes. Each
-// run reads the hour before it (overrideQueryTimeRange), so the start a judged
-// login is paired with is always in view. Whatever breaks the pairing (the job
-// renamed, Azure rewording its line, the migration opening a second connection)
-// makes every release fire it: loud, never silent.
+// Postgres ones (S33), so logins and starts are judged only once 20 minutes
+// old, over a band of 30 minutes that two runs 15 minutes apart both see:
+// anything unpaired notifies twice, the first time within about 35 minutes.
+// Each run reads the hour before it (overrideQueryTimeRange), so whatever a
+// judged login or start is paired with is always in view. Whatever breaks the
+// pairing on either side (the job renamed, Azure rewording a line, the
+// migration opening a second connection) fires it on every release. A query
+// that stops running at all is another matter (Carry-Forward.md).
 var ownerLoginQuery = join(
   [
     'let near = 2m;'
     'let starts = ContainerAppSystemLogs'
-    '    | where JobName == "${migrateJobName}" and Reason == "ContainerStarted"'
+    '    | where _ResourceId =~ "${appsEnvironmentId}" and JobName == "${migrateJobName}" and Reason == "ContainerStarted"'
     '    | project Start = TimeGenerated, Run = ReplicaName;'
     'let logins = PGSQLServerLogs'
     '    | where Message matches regex @"${loginLineStart}connection authorized: user=${ownerRole} "'
@@ -211,11 +217,17 @@ var ownerLoginQuery = join(
     'let claims = paired'
     '    | where Gap <= near'
     '    | summarize Claims = count() by Run;'
-    'paired'
-    '| where Login between (ago(50m) .. ago(20m))'
-    '| join kind=leftouter claims on Run'
-    '| where Gap > near or Claims > 1'
-    '| summarize Logins = count()'
+    'let strays = paired'
+    '    | where Login between (ago(50m) .. ago(20m))'
+    '    | join kind=leftouter claims on Run'
+    '    | where Gap > near or Claims > 1'
+    '    | project Run;'
+    'let unclaimed = starts'
+    '    | where Start between (ago(50m) .. ago(20m))'
+    '    | join kind=leftanti claims on Run'
+    '    | project Run;'
+    'union strays, unclaimed'
+    '| summarize Unpaired = count()'
   ],
   '\n'
 )
@@ -227,7 +239,7 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Database: login by the owner role outside a deploy'
-    description: 'SEV-1. The owner role logged in to Postgres other than as the migration job starting, so someone else holds its login and could rewrite the tables\' walls (ADR-012 §2). Runbook: Incident-Response-Playbook.md section I.'
+    description: 'SEV-1. The owner role logged in to Postgres other than as the migration job starting, so someone else may hold its login and could rewrite the tables\' walls; or a start of that job had no login beside it (ADR-012 §2). Runbook: Incident-Response-Playbook.md section I.'
     severity: 1
     enabled: true
     scopes: [workspaceId]
@@ -241,7 +253,7 @@ resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
         {
           query: ownerLoginQuery
           timeAggregation: 'Total'
-          metricMeasureColumn: 'Logins'
+          metricMeasureColumn: 'Unpaired'
           operator: 'GreaterThan'
           threshold: 0
           failingPeriods: {

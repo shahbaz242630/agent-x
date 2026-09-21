@@ -526,10 +526,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra({ ...structuredClone(workspace), id: `${String(workspace?.id)}-second` }))).toContain(
       'required',
     );
-    // Without the environment there is nowhere of ours for the jobs to run, and
-    // the doors and their certificates belong to no environment of ours.
+    // Without the environment there is nowhere of ours for the jobs to run, no
+    // platform lines for the owner-login alert to pair with, and the doors and
+    // their certificates belong to no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
+      'owner-login-alert',
       'jobs',
       'apps',
       'public-doors',
@@ -750,16 +752,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
     };
     expect(brokenRules(without(OWNER_ALERT))).toEqual(['owner-login-alert']);
     for (const change of [
-      // Another role's logins, or another job's starts, or another deployment's.
+      // Another role's logins, or another job's starts, or another deployment's, or any environment's.
       edited('user=agentx_owner ', 'user=agentx_app '),
       edited('user=agentx_owner ', 'user=agentx_owner'),
       edited('"job-agentx-stg-migrate"', '"job-agentx-stg-db-setup"'),
       edited('"job-agentx-stg-migrate"', '"job-agentx-prd-migrate"'),
       edited('Reason == "ContainerStarted"', 'Reason == "Completed"'),
-      // A looser pairing: a wider "near", or a second login beside one start let through.
+      edited(
+        /_ResourceId =~ "[^"]+"/,
+        '_ResourceId =~ "/subscriptions/x/resourceGroups/y/providers/Microsoft.App/managedEnvironments/z"',
+      ),
+      edited(/_ResourceId =~ "[^"]+" and /, ''),
+      // A looser pairing: a wider "near", a second login beside one start let
+      // through, or a start with no login (which is also how login lines the
+      // pattern stopped matching would show) let through.
       edited('let near = 2m;', 'let near = 15m;'),
       edited('| where Gap > near or Claims > 1', '| where Gap > near'),
       edited('join kind=leftouter claims', 'join kind=inner claims'),
+      edited('union strays, unclaimed', 'union strays'),
+      edited('join kind=leftanti claims', 'join kind=leftsemi claims'),
       // A band judged too soon (before Azure's lines for the job arrive), or one a run can miss.
       edited('ago(20m)', 'ago(5m)'),
       edited('ago(50m)', 'ago(30m)'),
@@ -797,6 +808,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
     twice.id = String(twice.id).replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/rg-other/');
     expect(twice.id).not.toBe(staging.predictedResources.find(JOB('migrate'))?.id);
     expect(brokenRules(withExtra(twice))).toContain('owner-login-alert');
+    // The same for the environment whose platform lines it reads.
+    const second = structuredClone(staging.predictedResources.find(ENVIRONMENT)) as unknown as Mutable;
+    second.id = String(second.id).replace(/cae-agentx-staging$/, 'cae-agentx-other');
+    second.name = 'cae-agentx-other';
+    expect(brokenRules(withExtra(second))).toContain('owner-login-alert');
   });
 
   it('SEC-DB-04 the owner-login alert matches the lines Postgres 18 on Azure writes for the owner, and no others (S33)', () => {
@@ -1008,10 +1024,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
     // The playbook's sections run from A to I.
     const inSection = (section: string) => (alert: Mutable) => {
-      properties(alert).description = String(properties(alert).description).replace(
-        /section [A-I]\.$/,
-        `section ${section}.`,
-      );
+      const before = String(properties(alert).description);
+      properties(alert).description = before.replace(/section [A-H]\.$/, `section ${section}.`);
+      expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('I')))).toEqual([]);
     expect(brokenRules(changed(CAP_ALERT, inSection('J')))).toEqual(['alert-runbook']);
@@ -1045,6 +1060,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['alert-delivery']);
+    // A SEV-1 alert muted after it fires tells nobody of the next window; a
+    // SEV-2 one may be.
+    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT]) {
+      expect(brokenRules(changed(sev1, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([
+        'alert-delivery',
+      ]);
+    }
+    expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([]);
+    // A second condition that never holds keeps the whole alert from firing.
+    for (const alert of [LOGIN_ALERT, OWNER_ALERT, CAP_ALERT]) {
+      expect(
+        brokenRules(
+          changed(alert, (entry) => {
+            const conditions = at(entry, 'properties', 'criteria', 'allOf') as Mutable[];
+            conditions.push({ ...structuredClone(first(conditions)), threshold: 1_000_000 });
+          }),
+        ),
+      ).toContain('alert-delivery');
+    }
   });
 
   it("resource-logs: a vault or server whose logs stay out of this deployment's workspace", () => {
