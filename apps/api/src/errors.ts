@@ -3,17 +3,35 @@
 // error message, stack or framework code, and no echo of the request. An
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
-import { REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import { z } from 'zod';
 
-/** The body of every error response. */
-export interface ErrorBody {
-  readonly error: {
-    readonly code: ReasonCode;
-    /** The code's public description (ADR-011 §8). */
-    readonly message: string;
-    readonly correlationId: string;
-  };
-}
+import { API_SCHEMAS } from './api-schemas.ts';
+
+/** Each registered code as a value of its own, with its public description, so OpenAPI documents every one (ADR-011 §8). */
+const REASON_CODE = z.union(
+  Object.keys(REASON_CODES)
+    .filter(isReasonCode)
+    .map((code) => z.literal(code).register(API_SCHEMAS, { description: REASON_CODES[code] })),
+);
+
+/** The body of every error response, named `Error` in the OpenAPI document. */
+export const ERROR_BODY = z
+  .object({
+    error: z.object({
+      code: REASON_CODE,
+      /** The code's public description. */
+      message: z.string(),
+      correlationId: z.uuid(),
+    }),
+  })
+  .register(API_SCHEMAS, {
+    id: 'Error',
+    description:
+      "Every refusal and failure has this body: a reason code, the code's public description, and the request's correlation ID. Nothing else.",
+  });
+
+export type ErrorBody = z.output<typeof ERROR_BODY>;
 
 export function errorBody(code: ReasonCode, correlationId: string): ErrorBody {
   return { error: { code, message: REASON_CODES[code], correlationId } };

@@ -4,13 +4,16 @@
 // 2. is counted against its client address's rate limit (ADR-011 §4)
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
-// and each request is logged by its route pattern only (ADR-011 §7).
+// and each request is logged by its route pattern only (ADR-011 §7). Every route
+// is checked, answered and documented through its zod schemas, and the API
+// serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
 import { answerClientError } from './client-errors.ts';
+import { registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { errorBody, responseFor } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
@@ -103,6 +106,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     },
   });
 
+  // First, so no route escapes it.
+  await registerContract(app);
   await registerRateLimit(app, config.http.rateLimitPerMinute, trust);
 
   app.addHook('onRequest', async (request, reply) => {
