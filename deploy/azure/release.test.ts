@@ -598,6 +598,9 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
     // apps's stamp is what staging runs: no record stands in for it.
     const runApps = 'deploy.ts apps reads it, so run it by hand, its what-if read';
     expect(decided(['deploy/azure/apps.bicep'], every)).toEqual(red('deploy/azure/apps.bicep', runApps));
+    // Not even a record for apps itself, which recordsIn never reads but a caller could hand in.
+    const forApps = new Map<string, string>([...every, ['apps', NEW]]) as unknown as Records;
+    expect(decided(['deploy/azure/apps.bicep'], forApps)).toEqual(red('deploy/azure/apps.bicep', runApps));
     expect(decided(['deploy/azure/names.bicep'], every)).toEqual(red('deploy/azure/names.bicep', runApps));
     expect(decided(['deploy/azure/hand-deployed.json'], every)).toEqual(
       red('deploy/azure/hand-deployed.json', HAND_DEPLOYED[0]?.why ?? ''),
