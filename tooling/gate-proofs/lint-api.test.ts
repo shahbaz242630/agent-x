@@ -26,13 +26,15 @@ const REJECTED: LintCase[] = [
     rule: 'no-restricted-properties',
     says: 'SEC-WEB-06',
   })),
-  {
-    name: 'setNotFoundHandler in an API test',
-    filePath: `${API}/not-found.test.ts`,
+  // Beside the two files that may, so an exemption wider than those two fails here.
+  ...['apps/api/src/health.ts', 'apps/api/src/server.test.ts', 'apps/api/src/contract.test.ts'].map((filePath) => ({
+    name: `setNotFoundHandler in ${filePath}`,
+    filePath,
     code: calls('setNotFoundHandler'),
     rule: 'no-restricted-properties',
     says: 'SEC-WEB-06',
-  },
+    realConfig: true,
+  })),
   {
     name: "Math.random in the API, whose block repeats the product's list",
     filePath: `${API}/random.ts`,

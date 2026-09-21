@@ -2,8 +2,9 @@
 // document, generated from each route's own zod schemas, and the API serves
 // nothing the document doesn't hold.
 // - Each route checks its input through its zod schemas: input outside them
-//   is refused as BAD_REQUEST before the route runs. An answer with a schema
-//   for its status is written through it, cut down to the fields it names.
+//   is refused as BAD_REQUEST before the route runs. An object answer with a
+//   schema for its status is written through it, cut down to the fields it
+//   names; a string or a Buffer is sent as it is.
 // - Each route answers a refusal or a failure with the one error body
 //   (errors.ts), which the document names once, with every reason code.
 // - A route the document couldn't describe truthfully is refused as it is
@@ -138,10 +139,11 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
     problems.push('its plugin checks or writes through compilers other than zod');
   }
   // A twin of a documented route, served only for some hosts or versions, would never show.
-  if (route.constraints !== undefined && Object.keys(route.constraints).length > 0) {
+  if (route.constraints !== undefined) {
     problems.push("it is served only for some hosts or versions (constraints), which the document can't show");
   }
   // Fastify serves such a route at both /prefix and /prefix/, and tells the hooks of the first alone.
+  // A route at '' is served once, but its hooks can't tell it from one at '/', so it must say so too.
   if (route.prefix !== '' && route.routePath === '' && (route.prefixTrailingSlash ?? 'both') === 'both') {
     problems.push("it sits at its prefix's root: set prefixTrailingSlash to 'no-slash' or 'slash'");
   }

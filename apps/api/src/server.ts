@@ -15,7 +15,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 import { answerClientError } from './client-errors.ts';
 import { registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
-import { errorBody, responseFor, writeErrorBody } from './errors.ts';
+import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isForeignWrite } from './origin-check.ts';
@@ -63,7 +63,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     for (const name of Object.keys(reply.getHeaders())) {
       if (!ERROR_HEADERS.has(name)) reply.removeHeader(name);
     }
-    void reply.code(status).serializer(writeErrorBody).send(errorBody(code, request.id));
+    void sendErrorBody(reply, status, code, request.id);
     // After sending, so a failure to log can't stop the plain answer going out.
     if (status === 500) logger.child({ correlationId: request.id }).error(REQUEST_FAILED, { err: error });
     return reply;
@@ -129,13 +129,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.addHook('onRequest', countRequest);
   app.addHook('onRequest', async (request, reply) => {
     if (isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)) {
-      return reply.code(403).serializer(writeErrorBody).send(errorBody('ORIGIN_REFUSED', request.id));
+      return sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
     }
     return undefined;
   });
 
   app.setErrorHandler(sendError);
-  app.setNotFoundHandler((request, reply) => reply.code(404).send(errorBody('NOT_FOUND', request.id)));
+  app.setNotFoundHandler((request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
 
   registerHealth(app, options.healthChecks, logger);
   return app;

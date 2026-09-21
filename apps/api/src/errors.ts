@@ -4,6 +4,7 @@
 // unexpected error is logged with its detail instead. Addresses that don't
 // exist, and features that are off, get the same plain 404.
 import { isReasonCode, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
+import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
@@ -37,13 +38,26 @@ export function errorBody(code: ReasonCode, correlationId: string): ErrorBody {
   return { error: { code, message: REASON_CODES[code], correlationId } };
 }
 
+/** The content type of an error answer, as Fastify writes it for JSON. */
+export const JSON_TYPE = 'application/json; charset=utf-8';
+
 /**
- * Writes an error body as it is. Every error answer is sent through this, so a
- * route's own schema for the same status can neither reshape the body nor fail
- * to write it, which would send Fastify's own fallback body instead.
+ * Sends an error answer, its body already written out. Fastify sends a string
+ * as it is, so neither a route's schema nor a preSerialization hook can reshape
+ * the body, or fail to write it and send Fastify's own fallback body instead.
+ * Every error answer from a route, a hook or the not-found handler goes out
+ * this way; bytes Node's parser refuses are answered in client-errors.ts.
  */
-export function writeErrorBody(body: ErrorBody): string {
-  return JSON.stringify(body);
+export function sendErrorBody(
+  reply: FastifyReply,
+  status: number,
+  code: ReasonCode,
+  correlationId: string,
+): FastifyReply {
+  return reply
+    .code(status)
+    .type(JSON_TYPE)
+    .send(JSON.stringify(errorBody(code, correlationId)));
 }
 
 /** Refusals the framework, Node or the rate limit raise, by HTTP status. */

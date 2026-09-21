@@ -152,6 +152,23 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       },
       'its 409 answer is not the one error body',
     ],
+    [
+      'the one error body for one content type of an error status, but not for another',
+      {
+        schema: {
+          response: {
+            409: {
+              content: {
+                'application/json': { schema: ERROR_BODY },
+                'application/problem+json': { schema: z.object({ detail: z.string() }) },
+              },
+            },
+          },
+        },
+      },
+      'its 409 answer is not the one error body',
+    ],
+    ['empty constraints, which say nothing but hide nothing either', { constraints: {} }, 'it is served only for some'],
     ['validation errors handed to it rather than refused', { attachValidation: true }, 'it sets attachValidation'],
     ['a validator of its own', { validatorCompiler: () => () => true }, 'it sets validatorCompiler'],
     [
@@ -311,24 +328,35 @@ describe('SEC-WEB-06 every route is checked again once every plugin has had its 
   });
 });
 
-describe('SEC-DATA-04 every error answer is written as it is, never through a route schema', () => {
+describe('SEC-DATA-04 every error answer is written as it is, never through a route schema or hook', () => {
   // A correlation ID the error body's schema would refuse, so an answer written through it would fail.
   const odd: IdGenerator = { next: () => 'not-a-uuid' };
 
   it.each([
-    ['a refused body', 'POST', { origin: PUBLIC_ORIGIN }, { quantity: 'many' }, 400, 'BAD_REQUEST'],
-    ['a refused origin', 'POST', {}, { quantity: 1 }, 403, 'ORIGIN_REFUSED'],
-    ['a failure on our side', 'GET', {}, undefined, 500, 'INTERNAL_ERROR'],
-  ] as const)('answers %s', async (_what, method, headers, payload, status, code) => {
+    ['a refused body', 'POST', '/test/item', { origin: PUBLIC_ORIGIN }, { quantity: 'many' }, 400, 'BAD_REQUEST'],
+    ['a refused origin', 'POST', '/test/item', {}, { quantity: 1 }, 403, 'ORIGIN_REFUSED'],
+    ['a failure on our side', 'GET', '/test/item', {}, undefined, 500, 'INTERNAL_ERROR'],
+    ['an unknown address', 'GET', '/test/nothing', {}, undefined, 404, 'NOT_FOUND'],
+  ] as const)('answers %s', async (_what, method, url, headers, payload, status, code) => {
     const { app } = await server(odd);
     const schema = { body: z.object({ quantity: z.int() }), response: { 200: z.object({ quantity: z.int() }) } };
-    app.post('/test/item', { schema }, () => ({ quantity: 1 }));
-    app.get('/test/item', { schema: { response: schema.response } }, () => {
+    // A hook that would add to any object answer: an error answer is already a string, so it never runs.
+    const preSerialization = (
+      _request: unknown,
+      _reply: unknown,
+      payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) => {
+      done(null, { ...(payload as object), note: PLANTED });
+    };
+    app.post('/test/item', { schema, preSerialization }, () => ({ quantity: 1 }));
+    app.get('/test/item', { schema: { response: schema.response }, preSerialization }, () => {
       throw new Error('failed on our side');
     });
     await app.ready();
-    const response = await app.inject({ method, url: '/test/item', headers, ...(payload && { payload }) });
+    const response = await app.inject({ method, url, headers, ...(payload && { payload }) });
     expect(response.statusCode).toBe(status);
+    expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
     expect(response.json()).toEqual(errorBody(code, 'not-a-uuid'));
   });
 });
