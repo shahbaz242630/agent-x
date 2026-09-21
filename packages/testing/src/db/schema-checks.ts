@@ -630,6 +630,8 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
   }
   // A sequence in an append-only schema is fine: drawing a number changes no row.
   const inAppendOnly = grant.relation !== '' && policy.appendOnlySchemas.includes(grant.schema);
+  // Only inside an append-only schema, as the live guard reads it; an exception
+  // listed anywhere else already fails the list's own check (appendOnlyListProblems).
   const exception = inAppendOnly && Object.hasOwn(policy.appendOnlyExceptions, grant.relation);
   if (inAppendOnly && !exception && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
     return [

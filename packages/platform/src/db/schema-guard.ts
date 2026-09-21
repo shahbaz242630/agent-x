@@ -115,11 +115,11 @@ const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 
 /**
  * The rights the app role may hold on any other table, tenant or global:
- * reading and writing rows, each through the table's policies. Never TRUNCATE, which empties a
- * table past row security, every organisation's rows at once; nor TRIGGER,
- * REFERENCES or MAINTAIN, which would let it plant a trigger, point a key at
- * the rows, or lock and reindex them (A3f-1; CI-06 holds the migrations to the
- * same list).
+ * reading and writing rows, through the table's policies where it has them.
+ * Never TRUNCATE, which empties a table past row security, every
+ * organisation's rows at once; nor TRIGGER, REFERENCES or MAINTAIN, which would
+ * let it plant a trigger, point a key at the rows, or lock and reindex them
+ * (A3f-1; CI-06 holds the migrations to the same list).
  */
 const APP_ROW_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
 
