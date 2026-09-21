@@ -22,7 +22,7 @@
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
-import type { FastifyInstance, FastifySchema, RouteOptions } from 'fastify';
+import type { FastifyInstance, FastifySchema, preSerializationHookHandler, RouteOptions } from 'fastify';
 import {
   createJsonSchemaTransform,
   createJsonSchemaTransformObject,
@@ -138,7 +138,8 @@ function unnamedParts(schema: z.core.$ZodType, at: string, seen: Set<z.core.$Zod
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodReadonly) {
     return walk(schema._zod.def.innerType, at);
   }
-  if (schema instanceof z.ZodLazy) return walk(schema._zod.def.getter(), at);
+  // The inner schema zod caches and parses with, not a fresh call of its getter, which could differ.
+  if (schema instanceof z.ZodLazy) return walk(schema._zod.innerType, at);
   if (schema instanceof z.ZodRecord) {
     const { keyType, valueType } = schema._zod.def;
     const loose = 'mode' in schema._zod.def && schema._zod.def.mode === 'loose';
@@ -150,7 +151,8 @@ function unnamedParts(schema: z.core.$ZodType, at: string, seen: Set<z.core.$Zod
 
 /**
  * An object answer with no schema for its status, or not sent as JSON: Fastify
- * would write it whole, so it is a failure on our side instead.
+ * would write it whole, or a serializer of the reply's own would, so it is a
+ * failure on our side instead.
  */
 class AnswerUndeclared extends Error {
   constructor(route: string, status: number) {
@@ -160,6 +162,31 @@ class AnswerUndeclared extends Error {
 }
 
 const keysOf = (value: unknown): string[] => (typeof value === 'object' && value !== null ? Object.keys(value) : []);
+
+/**
+ * An object answer goes out only through the schema its route declares for its
+ * status (as Fastify looks it up: the status, then its range), as JSON. The
+ * contract adds it as each route's last preSerialization hook, so no hook after
+ * it can change the status or the type. Fastify sets the JSON type before these
+ * hooks run, so an answer without it has a serializer of the reply's own.
+ * Error answers are text already; objects Fastify sends as bytes or a stream
+ * never reach it.
+ */
+const answerGuard: preSerializationHookHandler = (request, reply, payload, done) => {
+  const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
+  const status = String(reply.statusCode);
+  const type = reply.getHeader('content-type');
+  const json = typeof type === 'string' && /^application\/json\s*(?:;|$)/i.test(type);
+  if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
+    done(null, payload);
+    return;
+  }
+  done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
+};
+
+/** A route's own hooks of one kind, as a list. */
+const hooksOf = <T>(hooks: T | readonly T[] | undefined): readonly T[] =>
+  hooks === undefined ? [] : Array.isArray(hooks) ? hooks : [hooks as T];
 
 /** The API's routes and its OpenAPI document differ, or a route can't be documented. */
 export class ContractBroken extends Error {
@@ -231,10 +258,16 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (written && ![...OUR_ERROR_RESPONSES].every((ours) => [...declared.values()].includes(ours))) {
     problems.push("its error answers are not the contract's");
   }
-  // Allowlisted answers: a success answer names all it carries, so nothing it doesn't name leaves.
-  const successes = [...declared].filter(([status]) => isSuccessStatus(status));
-  if (successes.length === 0) problems.push('it declares no answer for success (a response below 400)');
-  for (const [status, response] of successes) {
+  if (written && hooksOf(route.preSerialization).at(-1) !== answerGuard) {
+    problems.push("a preSerialization hook runs after the contract's check of its answers");
+  }
+  // Allowlisted answers: every answer a route declares, but the one error body, names all it
+  // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
+  const answers = [...declared].filter(([status]) => !isErrorRange(status) && !isErrorPathStatus(status));
+  if (!answers.some(([status]) => isSuccessStatus(status))) {
+    problems.push('it declares no answer for success (a response below 400)');
+  }
+  for (const [status, response] of answers) {
     if (!(response instanceof z.ZodObject)) {
       problems.push(`its ${status} answer is not an object with named fields, declared as its schema itself`);
       continue;
@@ -369,22 +402,8 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
       };
     route.schema = schema;
+    route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
     added.push({ route, instance: this });
-  });
-
-  // An object answer goes out only through the schema its route declares for its
-  // status (as Fastify looks it up: the status, then its range), as JSON: with
-  // neither, Fastify would write it whole. Error answers are text already.
-  app.addHook('preSerialization', (request, reply, payload, done) => {
-    const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
-    const status = String(reply.statusCode);
-    const type = reply.getHeader('content-type');
-    const json = type === undefined || /^application\/json\s*(?:;|$)/i.test(String(type));
-    if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
-      done(null, payload);
-      return;
-    }
-    done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
   });
 
   const transformObject = createJsonSchemaTransformObject({

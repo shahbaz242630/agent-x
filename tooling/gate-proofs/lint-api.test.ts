@@ -12,6 +12,7 @@ const SETTERS = [
   'setValidatorCompiler',
   'setSerializerCompiler',
   'setReplySerializer',
+  'serializer',
   'addContentTypeParser',
   'removeContentTypeParser',
   'removeAllContentTypeParsers',

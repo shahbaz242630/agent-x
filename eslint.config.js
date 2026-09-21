@@ -239,6 +239,8 @@ const apiSetters = [
   'setValidatorCompiler',
   'setSerializerCompiler',
   'setReplySerializer',
+  // A reply's own serializer writes an answer whole, past its route's schema.
+  'serializer',
   // A body parser of its own may read past a route's bodyLimit (a stream-style parser does).
   'addContentTypeParser',
   'removeContentTypeParser',

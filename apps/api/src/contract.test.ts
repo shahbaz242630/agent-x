@@ -2,7 +2,7 @@ import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/share
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, FastifyReply, FastifySchema, RouteShorthandOptions } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
@@ -656,6 +656,97 @@ describe('SEC-WEB-06 an object answer goes out only through the schema declared 
     expect(claim.statusCode).toBe(201);
     expect(claim.json()).toEqual({ id: ITEM_ID });
     expect((await app.inject('/test/conflict')).statusCode).toBe(409);
+  });
+});
+
+describe("SEC-WEB-06 a route's own answers above 500 are held to the same rules", () => {
+  it.each<[string, Record<number, z.ZodType>, string]>([
+    ['a 503 open to fields it does not name', { 503: z.looseObject({ id: z.uuid() }) }, 'its 503 answer lets through'],
+    ['a 503 that could be anything', { 503: z.unknown() }, 'its 503 answer is not an object with named fields'],
+    ['a 501 map keyed by any text', { 501: z.record(z.string(), z.string()) }, 'its 501 answer is not an object'],
+  ])('refuses %s, as it is added', async (_what, extra, problem) => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { ...OPEN.schema.response, ...extra } } };
+    expect(() => app.get('/test/route', options, () => 'ok')).toThrow(`GET /test/route: ${problem}`);
+  });
+
+  it('refuses to start when a later hook adds an open answer of its own to a route', async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          const responses = route.schema?.response as Record<string, unknown>;
+          responses['503'] = z.looseObject({});
+        });
+        child.get('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await expect(app.ready()).rejects.toThrow(
+      "GET /test/plugin/item: its 503 answer lets through what it doesn't name",
+    );
+  });
+});
+
+describe("SEC-WEB-06 the contract's check of an answer runs after every other hook that could change it", () => {
+  it("answers as a failure an object whose status the route's own hook changed before it was written", async () => {
+    const { app, capture } = await server();
+    const preSerialization = (
+      _request: unknown,
+      reply: FastifyReply,
+      payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) => {
+      reply.code(201);
+      done(null, payload);
+    };
+    app.get('/test/row', { ...OPEN, preSerialization }, () => ({ ok: true, secret: PLANTED }));
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("refuses to start when a later hook puts a preSerialization hook after the contract's", async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          route.preSerialization = [...(route.preSerialization as unknown[]), () => undefined] as never;
+        });
+        child.get('/item', OPEN, () => 'ok');
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await expect(app.ready()).rejects.toThrow(
+      "GET /test/plugin/item: a preSerialization hook runs after the contract's check of its answers",
+    );
+  });
+
+  it("answers as a failure an object a serializer of the reply's own would write whole", async () => {
+    const { app, capture } = await server();
+    app.get('/test/row', OPEN, (_request, reply) =>
+      // eslint-disable-next-line no-restricted-properties -- proves the check catches what lint bans
+      reply.serializer((payload) => JSON.stringify(payload)).send({ ok: true, secret: PLANTED }),
+    );
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('walks the inner schema zod caches for a lazy part, calling its getter once, as zod does', async () => {
+    const { app } = await server();
+    const getter = vi.fn(() => z.object({ id: z.uuid() }));
+    const answer = z.object({ inner: z.lazy(getter) });
+    app.get('/test/lazy', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
+      inner: { id: ITEM_ID, secret: PLANTED },
+    }));
+    await app.ready();
+    expect((await app.inject('/test/lazy')).json()).toEqual({ inner: { id: ITEM_ID } });
+    expect(getter).toHaveBeenCalledTimes(1);
   });
 });
 
