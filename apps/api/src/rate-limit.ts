@@ -61,6 +61,7 @@ export async function registerRateLimit(app: FastifyInstance, perMinute: number,
     global: false,
     max: perMinute,
     timeWindow: WINDOW_MS,
+    // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to
     keyGenerator: (request) => clientKey(proxyAddr(request.raw, trust)),
   });
 }

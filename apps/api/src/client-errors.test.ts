@@ -22,7 +22,7 @@ function fakeSocket(state: { writable?: boolean; destroyed?: boolean } = {}) {
       destroyed.push(error);
     },
   };
-  return { socket: socket as unknown as Socket, written, destroyed };
+  return { connection: socket as unknown as Socket, written, destroyed };
 }
 
 function setup() {
@@ -64,7 +64,7 @@ describe("SEC-WEB-02, SEC-DATA-04 a request Node can't parse gets the same plain
     'answers %s with the headers, a correlation ID and its reason code',
     (_what, code, statusLine, reason) => {
       const { logger, ids } = setup();
-      const { socket, written, destroyed } = fakeSocket();
+      const { connection: socket, written, destroyed } = fakeSocket();
       const error = parserError(code);
       answerClientError(error, socket, logger, ids);
       expect(written).toHaveLength(1);
@@ -87,7 +87,7 @@ describe("SEC-WEB-02, SEC-DATA-04 a request Node can't parse gets the same plain
     const error = Object.assign(parserError('HPE_INVALID_METHOD'), {
       rawPacket: Buffer.from('POST /v1/x?token=plantedvalue HTTP/1.1'),
     });
-    answerClientError(error, fakeSocket().socket, logger, ids);
+    answerClientError(error, fakeSocket().connection, logger, ids);
     expect(lines()).toEqual([
       expect.objectContaining({
         level: 'info',
@@ -102,7 +102,7 @@ describe("SEC-WEB-02, SEC-DATA-04 a request Node can't parse gets the same plain
 
   it('writes nothing to a socket that no longer takes writes, and still closes and logs it', () => {
     const { logger, ids, lines } = setup();
-    const { socket, written, destroyed } = fakeSocket({ writable: false });
+    const { connection: socket, written, destroyed } = fakeSocket({ writable: false });
     answerClientError(parserError('HPE_INVALID_METHOD'), socket, logger, ids);
     expect(written).toEqual([]);
     expect(destroyed).toHaveLength(1);
@@ -114,7 +114,7 @@ describe("SEC-WEB-02, SEC-DATA-04 a request Node can't parse gets the same plain
     ['a socket already closed', parserError('HPE_INVALID_METHOD'), { destroyed: true }],
   ])('leaves %s alone: there is no one to answer', (_what, error, state) => {
     const { logger, ids, lines } = setup();
-    const { socket, written, destroyed } = fakeSocket(state);
+    const { connection: socket, written, destroyed } = fakeSocket(state);
     answerClientError(error, socket, logger, ids);
     expect([written, destroyed, lines()]).toEqual([[], [], []]);
   });

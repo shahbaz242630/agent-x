@@ -8,6 +8,7 @@ import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
+import { markWritten } from './written-answers.ts';
 
 /** Each registered code as a value of its own, with its public description, so OpenAPI documents every one (ADR-011 §8). */
 const REASON_CODE = z.union(
@@ -54,10 +55,9 @@ export function sendErrorBody(
   code: ReasonCode,
   correlationId: string,
 ): FastifyReply {
-  return reply
-    .code(status)
-    .type(JSON_TYPE)
-    .send(JSON.stringify(errorBody(code, correlationId)));
+  const text = JSON.stringify(errorBody(code, correlationId));
+  markWritten(reply, text);
+  return reply.code(status).type(JSON_TYPE).send(text);
 }
 
 /** Refusals the framework, Node or the rate limit raise, by HTTP status. */

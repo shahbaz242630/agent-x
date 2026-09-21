@@ -14,6 +14,10 @@
 //   limit for it, which the document shows as x-body-limit.
 // - An object answer goes out only through the schema its route declares for
 //   its status, as JSON; one without is a failure on our side, never sent.
+// - An answer leaves only as the contract wrote it, byte for byte
+//   (written-answers.ts): a string, bytes or a stream a route sent itself, or
+//   anything a hook put in its place, is a failure on our side; an empty
+//   answer leaves only at a status its route declares.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -22,7 +26,14 @@
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
-import type { FastifyInstance, FastifySchema, preSerializationHookHandler, RouteOptions } from 'fastify';
+import type {
+  FastifyInstance,
+  FastifyRequest,
+  FastifySchema,
+  onSendHookHandler,
+  preSerializationHookHandler,
+  RouteOptions,
+} from 'fastify';
 import {
   createJsonSchemaTransform,
   createJsonSchemaTransformObject,
@@ -34,6 +45,7 @@ import { z } from 'zod';
 import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
+import { aboutToWrite, recordingWrites, writtenText } from './written-answers.ts';
 
 /** The methods an OpenAPI path can hold. A route served with any other can't be documented. */
 const OPENAPI_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
@@ -164,6 +176,24 @@ class AnswerUndeclared extends Error {
 const keysOf = (value: unknown): string[] => (typeof value === 'object' && value !== null ? Object.keys(value) : []);
 
 /**
+ * Whether the request's route declares an answer for the status, as Fastify
+ * looks it up: the status, then its range. `own` counts only the route's own
+ * answers, not the error body it answers every 4xx and 5xx with.
+ */
+function isDeclared(request: FastifyRequest, statusCode: number, own = false): boolean {
+  const declared = new Set(
+    keysOf(request.routeOptions.schema?.response)
+      .filter((key) => !own || (!isErrorRange(key) && !isErrorPathStatus(key)))
+      .map((key) => key.toLowerCase()),
+  );
+  const status = String(statusCode);
+  return declared.has(status) || declared.has(`${status.charAt(0)}xx`);
+}
+
+/** The zod serializer, recording what it writes for the reply it writes it for (written-answers.ts). */
+const recordingSerializerCompiler: typeof serializerCompiler = (route) => recordingWrites(serializerCompiler(route));
+
+/**
  * An object answer goes out only through the schema its route declares for its
  * status (as Fastify looks it up: the status, then its range), as JSON. The
  * contract adds it as each route's last preSerialization hook, so no hook after
@@ -173,16 +203,109 @@ const keysOf = (value: unknown): string[] => (typeof value === 'object' && value
  * never reach it.
  */
 const answerGuard: preSerializationHookHandler = (request, reply, payload, done) => {
-  const declared = new Set(keysOf(request.routeOptions.schema?.response).map((key) => key.toLowerCase()));
-  const status = String(reply.statusCode);
   const type = reply.getHeader('content-type');
   const json = typeof type === 'string' && /^application\/json\s*(?:;|$)/i.test(type);
-  if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
+  if (json && isDeclared(request, reply.statusCode)) {
+    aboutToWrite(reply, payload);
     done(null, payload);
     return;
   }
   done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
 };
+
+/** An answer the contract didn't write: a string, bytes or a stream a route sent itself. */
+class AnswerUnwritten extends Error {
+  constructor(route: string, status: number) {
+    super(`${route} answered ${String(status)} with a body the contract didn't write`);
+    this.name = 'AnswerUnwritten';
+  }
+}
+
+/** Closes a stream a refused answer would have sent, so it holds nothing open (a file, say). */
+function closeRefused(payload: unknown): void {
+  if (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'destroy' in payload &&
+    typeof payload.destroy === 'function'
+  ) {
+    (payload.destroy as () => void).call(payload);
+  }
+}
+
+/**
+ * An answer leaves only as the contract wrote it, byte for byte
+ * (written-answers.ts), or empty at a status its route declares. The contract
+ * adds it as each route's last onSend hook, after Fastify's own that empties a
+ * HEAD answer, and at the root for the not-found path; it compares the payload
+ * as it now stands, so whatever an earlier hook put in its place is refused.
+ */
+const answerLeaves: onSendHookHandler = (request, reply, payload, done) => {
+  const recorded = writtenText(reply);
+  // Empty, an answer carries nothing: at a status its route declares an answer of its own for (a
+  // redirect, say), or once the contract wrote it and Fastify's own HEAD hook emptied it. Not at a
+  // 4xx or 5xx, which the document says carries the error body.
+  const empty = payload === undefined || payload === null || payload === '';
+  const exact = recorded !== undefined && payload === recorded;
+  if (exact || (empty && (recorded !== undefined || isDeclared(request, reply.statusCode, true)))) {
+    done(null, payload);
+    return;
+  }
+  closeRefused(payload);
+  // A refusal or failure a hook rewrote goes out as the contract wrote it: refusing it
+  // again would leave Fastify's own last answer, which shows the error's message.
+  if (recorded !== undefined && reply.statusCode >= 400) {
+    done(null, recorded);
+    return;
+  }
+  done(new AnswerUnwritten(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
+};
+
+/**
+ * The contract's checks for the not-found path, which is no route: Fastify runs
+ * a not-found handler's own hooks after every root hook, as it does a route's
+ * (four-oh-four.js takes every lifecycle hook, though its types list only two).
+ */
+export const NOT_FOUND_CHECKS: object = Object.freeze({
+  preSerialization: Object.freeze([answerGuard]),
+  onSend: Object.freeze([answerLeaves]),
+});
+
+/**
+ * Only the contract puts a hook between an answer being written and it
+ * leaving. An onSend hook on the server or a plugin could rewrite an answer
+ * after the check, or throw and leave Fastify's own last answer, which shows
+ * the error's message; a not-found handler without the contract's checks would
+ * answer unchecked. Refused as they are added, from here on, by every plugin
+ * (each inherits the server's methods), third-party ones included.
+ */
+function guardWhatLeaves(app: FastifyInstance): void {
+  // Kept to call on whichever instance calls the guard, with that instance as this.
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- applied with the calling instance below
+  const addHook = app.addHook;
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- applied with the calling instance below
+  const setNotFoundHandler = app.setNotFoundHandler;
+  const guardedAddHook = function (this: FastifyInstance, ...args: unknown[]): unknown {
+    if (args[0] === 'onSend') {
+      throw new ContractBroken([
+        "an onSend hook on the server or a plugin could rewrite an answer after the contract's check",
+      ]);
+    }
+    return Reflect.apply(addHook, this, args);
+  };
+  const guardedSetNotFoundHandler = function (this: FastifyInstance, ...args: unknown[]): unknown {
+    // Without a handler of its own, Fastify would answer with its own.
+    if (args[0] !== NOT_FOUND_CHECKS || typeof args[1] !== 'function') {
+      throw new ContractBroken(["a not-found handler must carry the contract's checks (NOT_FOUND_CHECKS)"]);
+    }
+    return Reflect.apply(setNotFoundHandler, this, args);
+  };
+  app.addHook = guardedAddHook as unknown as FastifyInstance['addHook'];
+  app.setNotFoundHandler = guardedSetNotFoundHandler as unknown as FastifyInstance['setNotFoundHandler'];
+}
+
+/** Fastify's own onSend hook on a HEAD route, which empties the answer. */
+const isHeadEmptier = (hook: unknown): boolean => typeof hook === 'function' && hook.name === 'headRouteOnSendHandler';
 
 /** A route's own hooks of one kind, as a list. */
 const hooksOf = <T>(hooks: T | readonly T[] | undefined): readonly T[] =>
@@ -261,6 +384,16 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (written && hooksOf(route.preSerialization).at(-1) !== answerGuard) {
     problems.push("a preSerialization hook runs after the contract's check of its answers");
   }
+  const sendHooks = hooksOf(route.onSend);
+  if (written && sendHooks.at(-1) !== answerLeaves) {
+    problems.push("an onSend hook runs after the contract's check of what leaves");
+  }
+  const ownSendHooks = written ? sendHooks.slice(0, -1) : sendHooks;
+  // A route of HEAD alone may have Fastify's own; any other rewrite is refused as the answer leaves anyway.
+  const headsOnly = route.method === 'HEAD' && ownSendHooks.length === 1;
+  if (!ownSendHooks.every((hook) => headsOnly && isHeadEmptier(hook))) {
+    problems.push('it rewrites its answers after they are written (onSend)');
+  }
   // Allowlisted answers: every answer a route declares, but the one error body, names all it
   // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
   const answers = [...declared].filter(([status]) => !isErrorRange(status) && !isErrorPathStatus(status));
@@ -300,7 +433,7 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
       problems.push(`it sets ${option}, so it would check or answer other than through its schemas`);
     }
   }
-  if (instance.validatorCompiler !== validatorCompiler || instance.serializerCompiler !== serializerCompiler) {
+  if (instance.validatorCompiler !== validatorCompiler || instance.serializerCompiler !== recordingSerializerCompiler) {
     problems.push('its plugin checks or writes through compilers other than zod');
   }
   // A twin of a documented route, served only for some hosts or versions, would never show.
@@ -384,7 +517,8 @@ export function withoutUnusedSchemas<D extends WithSchemas>(
  */
 export async function registerContract(app: FastifyInstance): Promise<void> {
   app.setValidatorCompiler(validatorCompiler);
-  app.setSerializerCompiler(serializerCompiler);
+  app.setSerializerCompiler(recordingSerializerCompiler);
+  guardWhatLeaves(app);
 
   const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
   app.addHook('onRoute', function (route) {
@@ -403,12 +537,9 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
       };
     route.schema = schema;
     route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
+    route.onSend = [...hooksOf(route.onSend), answerLeaves];
     added.push({ route, instance: this });
   });
-
-  // And at the root too, for the not-found path, which is no route: no onRoute
-  // hook adds the check there, and it declares no answer, so it refuses any object.
-  app.addHook('preSerialization', answerGuard);
 
   const transformObject = createJsonSchemaTransformObject({
     schemaRegistry: API_SCHEMAS,

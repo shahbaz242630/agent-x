@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
@@ -6,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
-import { ContractBroken, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
+import { ContractBroken, NOT_FOUND_CHECKS, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
 import { REQUEST_FAILED } from './request-log.ts';
 import { buildServer } from './server.ts';
@@ -801,6 +803,210 @@ describe('SEC-WEB-06 what the contract wrote into a route must still be there on
     await expect(ready).rejects.toThrow("POST /test/plugin/item: its error answers are not the contract's");
     await expect(ready).rejects.toThrow('POST /test/plugin/item: the body limit its document shows is not its own');
     await expect(ready).rejects.toThrow('POST /test/plugin/item: the access its document shows is not its own');
+  });
+});
+
+describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
+  it.each<[string, () => unknown]>([
+    ['a string', () => `row ${PLANTED}`],
+    ['bytes', () => Buffer.from(`row ${PLANTED}`)],
+    ['a stream', () => Readable.from([`row ${PLANTED}`])],
+  ])('answers %s a route sent itself as a failure on our side, showing none of it', async (_what, body) => {
+    const { app, capture } = await server();
+    app.get('/test/raw', OPEN, (_request, reply) => reply.send(body()));
+    await app.ready();
+    const answer = await app.inject('/test/raw');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(capture.lines().filter((line) => line.event === REQUEST_FAILED)).toEqual([
+      expect.objectContaining({ err: expect.objectContaining({ type: 'AnswerUnwritten' }) as unknown }),
+    ]);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it.each<[string, (reply: FastifyReply) => FastifyReply]>([
+    ['with no body', (reply) => reply.send()],
+    ['as empty text', (reply) => reply.send('')],
+  ])('lets an answer go empty, %s, at a status its route declares', async (_what, send) => {
+    const { app } = await server();
+    app.get('/test/empty', OPEN, (_request, reply) => send(reply));
+    await app.ready();
+    const answer = await app.inject('/test/empty');
+    expect(answer.statusCode).toBe(200);
+    expect(answer.body).toBe('');
+  });
+
+  it('answers as a failure an empty answer at a status its route does not declare', async () => {
+    const { app } = await server();
+    app.get('/test/teapot', OPEN, (_request, reply) => {
+      reply.statusCode = 418;
+      return reply.send();
+    });
+    await app.ready();
+    const answer = await app.inject('/test/teapot');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+  });
+
+  it('refuses an onSend hook on the server or a plugin, which could rewrite an answer after the check', async () => {
+    const { app } = await server();
+    const hook = (_request: unknown, _reply: unknown, payload: unknown, done: (e: null, p: unknown) => void) => {
+      done(null, payload);
+    };
+    // eslint-disable-next-line no-restricted-syntax -- proves the server refuses what lint bans
+    expect(() => app.addHook('onSend', hook)).toThrow(
+      'an onSend hook on the server or a plugin could rewrite an answer',
+    );
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-syntax -- proves the server refuses what lint bans
+      child.addHook('onSend', hook);
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow('an onSend hook on the server or a plugin could rewrite an answer');
+  });
+
+  it("refuses a plugin's own not-found handler without the contract's checks", async () => {
+    const { app } = await server();
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-properties -- proves the server refuses what lint bans
+      child.setNotFoundHandler((_request, reply) => reply.send({ leak: PLANTED }));
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow("a not-found handler must carry the contract's checks");
+  });
+
+  it('holds the not-found checks fixed, and a handler that carries them to a handler of its own', async () => {
+    expect(Object.isFrozen(NOT_FOUND_CHECKS)).toBe(true);
+    expect(Object.values(NOT_FOUND_CHECKS).every((hooks) => Object.isFrozen(hooks))).toBe(true);
+    const { app } = await server();
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-properties -- proves the server refuses what lint bans
+      const setNotFound = child.setNotFoundHandler.bind(child) as unknown as (opts: object) => void;
+      setNotFound(NOT_FOUND_CHECKS);
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow("a not-found handler must carry the contract's checks");
+  });
+
+  it("answers as a failure an object a serializer of the reply's own writes, though it says JSON", async () => {
+    const { app, capture } = await server();
+    app.get('/test/row', OPEN, (_request, reply) => {
+      void reply.type('application/json');
+      // eslint-disable-next-line no-restricted-properties -- proves the check catches what lint bans
+      return reply.serializer((payload) => JSON.stringify(payload)).send({ ok: true, secret: PLANTED });
+    });
+    await app.ready();
+    const answer = await app.inject('/test/row');
+    expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('closes a stream it refuses, so the stream holds nothing open', async () => {
+    const { app } = await server();
+    const stream = Readable.from(['row']);
+    app.get('/test/stream', OPEN, (_request, reply) => reply.send(stream));
+    await app.ready();
+    expect((await app.inject('/test/stream')).statusCode).toBe(500);
+    expect(stream.destroyed).toBe(true);
+  });
+
+  it('lets the HEAD of a GET go, which Fastify empties after it is written', async () => {
+    const { app } = await server();
+    app.get('/test/row', OPEN, () => ({ ok: true }));
+    await app.ready();
+    const answer = await app.inject({ method: 'HEAD', url: '/test/row' });
+    expect(answer.statusCode).toBe(200);
+    expect(answer.body).toBe('');
+  });
+
+  it('answers as a failure a string sent on the not-found path, which is no route', async () => {
+    const { app, capture } = await server();
+    app.addHook('onRequest', (request, reply, done) => {
+      if (request.url === '/test/unknown') {
+        void reply.send(`row ${PLANTED}`);
+        return;
+      }
+      done();
+    });
+    await app.ready();
+    const answer = await app.inject('/test/unknown');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it("refuses Fastify's own name for its HEAD hook on a route that isn't HEAD alone", async () => {
+    const { app } = await server();
+    function headRouteOnSendHandler(
+      _request: unknown,
+      _reply: unknown,
+      payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) {
+      done(null, payload);
+    }
+    const route = { url: '/test/both', ...OPEN, onSend: headRouteOnSendHandler, handler: () => ({ ok: true }) };
+    expect(() => app.route({ ...route, method: ['GET', 'HEAD'] })).toThrow(
+      'GET,HEAD /test/both: it rewrites its answers after they are written (onSend)',
+    );
+    expect(() =>
+      app.route({ ...route, method: 'HEAD', onSend: [headRouteOnSendHandler, headRouteOnSendHandler] }),
+    ).toThrow('HEAD /test/both: it rewrites its answers after they are written (onSend)');
+  });
+
+  it("answers as a failure a HEAD route's own hook that borrows Fastify's name to rewrite its answer", async () => {
+    const { app } = await server();
+    function headRouteOnSendHandler(
+      _request: unknown,
+      _reply: unknown,
+      _payload: unknown,
+      done: (e: null, p: unknown) => void,
+    ) {
+      done(null, `row ${PLANTED}`);
+    }
+    app.route({
+      method: 'HEAD',
+      url: '/test/head',
+      ...OPEN,
+      onSend: headRouteOnSendHandler,
+      handler: () => ({ ok: true }),
+    });
+    await app.ready();
+    expect((await app.inject({ method: 'HEAD', url: '/test/head' })).statusCode).toBe(500);
+  });
+
+  it('refuses a route with an onSend hook of its own, which could rewrite an answer after it was written', async () => {
+    const { app } = await server();
+    const onSend = (_request: unknown, _reply: unknown, payload: unknown, done: (e: null, p: unknown) => void) => {
+      done(null, payload);
+    };
+    expect(() => app.get('/test/route', { ...OPEN, onSend }, () => ({ ok: true }))).toThrow(
+      'GET /test/route: it rewrites its answers after they are written (onSend)',
+    );
+  });
+
+  it("refuses to start when a later hook puts an onSend hook after the contract's", async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('onRoute', (route) => {
+          route.onSend = [...(route.onSend as unknown[]), () => undefined] as never;
+        });
+        child.get('/item', OPEN, () => ({ ok: true }));
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    const ready = app.ready();
+    await expect(ready).rejects.toThrow(
+      "GET /test/plugin/item: an onSend hook runs after the contract's check of what leaves",
+    );
+    await expect(ready).rejects.toThrow(
+      'GET /test/plugin/item: it rewrites its answers after they are written (onSend)',
+    );
   });
 });
 

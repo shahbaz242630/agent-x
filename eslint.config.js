@@ -241,11 +241,44 @@ const apiSetters = [
   'setReplySerializer',
   // A reply's own serializer writes an answer whole, past its route's schema.
   'serializer',
+  // A hijacked reply, or the raw response, is written by hand, past every hook.
+  'hijack',
+  'raw',
+  'socket',
+  // A serializer called by hand writes text the contract never checked.
+  'serialize',
+  'serializeInput',
+  'compileSerializationSchema',
+  'getSerializationFunction',
   // A body parser of its own may read past a route's bodyLimit (a stream-style parser does).
   'addContentTypeParser',
   'removeContentTypeParser',
   'removeAllContentTypeParsers',
 ].map((property) => ({ property, message: apiContractOnly }));
+
+/**
+ * SEC-WEB-06: an onSend hook runs after an answer is written, and could send
+ * what no schema declares in its place. The contract refuses one on a route;
+ * this refuses one on a plugin, which its check at start can't see.
+ */
+const apiSendHooks = [
+  {
+    selector: "CallExpression[callee.property.name='addHook'][arguments.0.value='onSend']",
+    message: 'SEC-WEB-06: an onSend hook could rewrite an answer after it was written; only contract.ts adds one.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='addHook'][arguments.0.type!='Literal']",
+    message: 'SEC-WEB-06: name the hook with a plain string, so lint can see which it is.',
+  },
+  {
+    selector: "CallExpression[callee.computed=true][callee.property.value='addHook']",
+    message: 'SEC-WEB-06: call addHook by name, so lint can see which hook it adds.',
+  },
+  {
+    selector: "MemberExpression[object.property.name='addHook'][property.name=/^(?:call|apply|bind)$/]",
+    message: 'SEC-WEB-06: call addHook itself, so lint can see which hook it adds.',
+  },
+];
 
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
 const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
@@ -333,6 +366,7 @@ export default defineConfig([
     ignores: ['apps/api/src/server.ts', 'apps/api/src/contract.ts'],
     rules: {
       'no-restricted-properties': ['error', ...productProperties, ...apiSetters],
+      'no-restricted-syntax': ['error', ...productSyntax, ...apiSendHooks],
     },
   },
 

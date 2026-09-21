@@ -83,22 +83,20 @@ async function setup(options: SetupOptions = {}) {
   });
   // A route bug a later route could have: it replies twice.
   app.get('/test/items/:ref', OPEN, (_request, reply) => {
-    void reply.send('first');
-    void reply.send('second');
+    void reply.send({ ok: true });
+    void reply.send({ ok: true });
   });
   // A route with its own, lower limit, as Phase 1's per-agent limits will have.
-  app.get(
-    '/test/limited',
-    { ...OPEN, config: { ...OPEN.config, rateLimit: { max: 2, timeWindow: 60_000 } } },
-    () => 'ok',
-  );
+  app.get('/test/limited', { ...OPEN, config: { ...OPEN.config, rateLimit: { max: 2, timeWindow: 60_000 } } }, () => ({
+    ok: true,
+  }));
   app.get('/test/ip', { ...OPEN, schema: { response: { 200: z.object({ ip: z.string() }) } } }, (request) => ({
     ip: request.ip,
   }));
   // A route that puts caller input in a header, which Node refuses when it holds a control character.
   app.get('/test/header', OPEN, (request, reply) => {
     void reply.header('x-note', (request.query as { note?: string }).note);
-    return 'ok';
+    return { ok: true };
   });
   servers.push(app);
   await app.ready();
