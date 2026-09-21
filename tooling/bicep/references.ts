@@ -39,7 +39,7 @@ export interface Server {
   on(event: 'error', listener: (error: Error) => void): unknown;
   /** Once it has exited and its output has all been read. */
   on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
-  kill(): unknown;
+  kill(signal: NodeJS.Signals): unknown;
 }
 
 /** The pinned Bicep, checked against its pin, listening on stdin and stdout. */
@@ -94,7 +94,9 @@ export async function fileReferences(
       settled = true;
       clearTimeout(timer);
       server.stdin.end();
-      server.kill();
+      // Killed outright: it holds nothing to save, and one that ignored a
+      // polite stop would hold CI's release open until the job's own limit.
+      server.kill('SIGKILL');
       if (error === undefined) resolve(new Map(paramsFiles.map((file) => [file, found.get(file) ?? []])));
       else reject(error);
     };

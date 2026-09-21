@@ -45,7 +45,7 @@ class Stub extends EventEmitter implements Server {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly questions: Question[] = [];
-  killed = false;
+  killed: NodeJS.Signals | undefined;
 
   constructor(answer?: (questions: readonly Question[], stub: Stub) => void) {
     super();
@@ -55,12 +55,12 @@ class Stub extends EventEmitter implements Server {
     });
   }
 
-  send(text: string): void {
+  send(text: string | Buffer): void {
     this.stdout.write(text);
   }
 
-  kill(): boolean {
-    this.killed = true;
+  kill(signal: NodeJS.Signals): boolean {
+    this.killed = signal;
     return true;
   }
 }
@@ -100,8 +100,8 @@ describe('asking Bicep which files a deployment reads', () => {
         ['b.bicepparam', ['b.bicepparam', 'names.bicep']],
       ]),
     );
-    // Stopped once every answer is in.
-    expect(stub.killed).toBe(true);
+    // Stopped outright once every answer is in.
+    expect(stub.killed).toBe('SIGKILL');
     expect(stub.stdin.writableEnded).toBe(true);
   });
 
@@ -110,17 +110,17 @@ describe('asking Bicep which files a deployment reads', () => {
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { filePaths: ['x.bicep'] } });
       const text = [
         framed({ jsonrpc: '2.0', method: 'window/logMessage', params: { message: 'hello' } }),
-        framed({ jsonrpc: '2.0', id: 2, result: { filePaths: ['y.bicep'] } }),
+        framed({ jsonrpc: '2.0', id: 2, result: { filePaths: ['Défaut/y.bicep'] } }),
         `content-length:${String(Buffer.byteLength(body))}\r\nContent-Type: application/json\r\n\r\n${body}`,
       ].join('');
       expect(questions).toHaveLength(2);
-      // One character at a time: a header, or a body, split between two reads.
-      for (const character of text) stub.send(character);
+      // One byte at a time: a header, a body, or a character of two bytes split between two reads.
+      for (const byte of Buffer.from(text, 'utf8')) stub.send(Buffer.from([byte]));
     });
     expect(answers).toEqual(
       new Map([
         ['a.bicepparam', ['x.bicep']],
-        ['b.bicepparam', ['y.bicep']],
+        ['b.bicepparam', ['Défaut/y.bicep']],
       ]),
     );
   });
@@ -149,7 +149,7 @@ describe('asking Bicep which files a deployment reads', () => {
     for (const [reply, message] of cases) {
       const { error, stub } = await asked(['a.bicepparam'], listing(reply));
       expect(error).toBe(message);
-      expect(stub.killed).toBe(true);
+      expect(stub.killed).toBe('SIGKILL');
     }
   });
 
@@ -199,7 +199,7 @@ describe('asking Bicep which files a deployment reads', () => {
     for (const [text, message] of cases) {
       const { error, stub } = await asked(['a.bicepparam'], sending(text));
       expect(error).toBe(message);
-      expect(stub.killed).toBe(true);
+      expect(stub.killed).toBe('SIGKILL');
     }
   });
 
@@ -241,7 +241,7 @@ describe('asking Bicep which files a deployment reads', () => {
       50,
     );
     expect(error).toBe("Bicep didn't answer within 0.05 s");
-    expect(stub.killed).toBe(true);
+    expect(stub.killed).toBe('SIGKILL');
   });
 
   // A deadline left running would hold CI's release open for its minute.

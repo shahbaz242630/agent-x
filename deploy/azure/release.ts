@@ -133,9 +133,8 @@ export function readersFrom(answers: ReadonlyMap<string, readonly string[]>): Re
   return readers;
 }
 
-/** Names in a list, as a sentence says them. */
-const listed = (names: readonly string[]): string =>
-  names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${String(names.at(-1))}`;
+/** Two or more names, as a sentence says them. */
+const listed = (names: readonly string[]): string => `${names.slice(0, -1).join(', ')} and ${String(names.at(-1))}`;
 
 /**
  * What to run for a file the named hand deploys read: each of them, and then
