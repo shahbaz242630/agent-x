@@ -135,7 +135,7 @@ const ownerLoginQuery = (migrateJob: string, environmentId: string): string =>
   [
     'let near = 2m;',
     'let starts = ContainerAppSystemLogs',
-    `    | where _ResourceId =~ "${environmentId}" and JobName == "${migrateJob}" and Reason == "ContainerStarted"`,
+    `    | where _ResourceId =~ "${environmentId}" and JobName == "${migrateJob}" and Reason == "ContainerStarted" and isnotempty(ReplicaName)`,
     '    | project Start = TimeGenerated, Run = ReplicaName;',
     'let logins = PGSQLServerLogs',
     `    | where Message matches regex @"${LOG_LINE_START}connection authorized: user=${OWNER_ROLE} "`,

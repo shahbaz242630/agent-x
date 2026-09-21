@@ -191,20 +191,21 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // before it connected, or login lines the pattern no longer matches, which
 // would otherwise quieten both login alerts at once).
 //
-// Azure's lines for the job reach the workspace 6 to 9 minutes after the
-// Postgres ones (S33), so logins and starts are judged only once 20 minutes
-// old, over a band of 30 minutes that two runs 15 minutes apart both see:
-// anything unpaired notifies twice, the first time within about 35 minutes.
-// Each run reads the hour before it (overrideQueryTimeRange), so whatever a
-// judged login or start is paired with is always in view. Whatever breaks the
-// pairing on either side (the job renamed, Azure rewording a line, the
-// migration opening a second connection) fires it on every release. A query
-// that stops running at all is another matter (Carry-Forward.md).
+// Azure's lines for the job reach the workspace up to 9 minutes after they
+// happen, Postgres's within 4 (S33), so logins and starts are judged only once
+// 20 minutes old, over a band of 30 minutes that two runs 15 minutes apart
+// both see: anything unpaired notifies twice, the first time within about 35
+// minutes. Each run reads the hour before it (overrideQueryTimeRange), so
+// whatever a judged login or start is paired with is always in view. Whatever
+// breaks the pairing on either side (the job renamed, Azure rewording a line
+// or leaving out the run's name, the migration opening a second connection)
+// fires it on every release. A query that stops running at all is another
+// matter (Carry-Forward.md).
 var ownerLoginQuery = join(
   [
     'let near = 2m;'
     'let starts = ContainerAppSystemLogs'
-    '    | where _ResourceId =~ "${appsEnvironmentId}" and JobName == "${migrateJobName}" and Reason == "ContainerStarted"'
+    '    | where _ResourceId =~ "${appsEnvironmentId}" and JobName == "${migrateJobName}" and Reason == "ContainerStarted" and isnotempty(ReplicaName)'
     '    | project Start = TimeGenerated, Run = ReplicaName;'
     'let logins = PGSQLServerLogs'
     '    | where Message matches regex @"${loginLineStart}connection authorized: user=${ownerRole} "'

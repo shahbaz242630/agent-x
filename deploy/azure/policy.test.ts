@@ -1077,7 +1077,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
             conditions.push({ ...structuredClone(first(conditions)), threshold: 1_000_000 });
           }),
         ),
-      ).toContain('alert-delivery');
+      ).toEqual(['alert-delivery']);
     }
   });
 
