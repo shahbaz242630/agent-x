@@ -3,22 +3,27 @@
 // or a stand-in staging that changes as a release writes to it, and the history
 // is a line of made-up commits (git.test.ts reads a real one).
 import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import type { Az, AzResult } from './deploy.ts';
+import { fileReferences } from '../../tooling/bicep/references.ts';
+import { type Az, type AzResult, type Deployment, DEPLOYMENTS } from './deploy.ts';
 import type { History } from './git.ts';
 import { JOBS_API } from './jobs.ts';
 import {
   changes,
   check,
   decide,
+  type Folder,
   HAND_DEPLOYED,
   handDeployedList,
   main,
   ORDER,
+  PARAMS_PATHS,
   parseArguments,
+  readersFrom,
   release,
   released,
   type ReleaseSteps,
@@ -30,7 +35,7 @@ import {
   WORKLOADS,
   workloadUrl,
 } from './release.ts';
-import { environmentSnapshot, inCopy } from './snapshot.ts';
+import { environmentSnapshot, inCopy, paramsFiles } from './snapshot.ts';
 
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000b';
 const REPOSITORY = 'ghcr.io/shahbaz242630/agent-x';
@@ -298,6 +303,43 @@ function history(line: readonly string[], changed: Readonly<Record<string, reado
   };
 }
 
+/** The repository, whose files Bicep names by their full paths. */
+const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const full = (file: string): string => path.join(ROOT, file);
+
+/**
+ * What Bicep might say each deployment reads, in its shape (full paths, the
+ * parameters file among them), made up: the real lists are tested below.
+ */
+const SAID: ReadonlyMap<string, readonly string[]> = new Map(
+  [...PARAMS_PATHS].map(([deployment, params]) => {
+    const own: Readonly<Record<Deployment, readonly string[]>> = {
+      foundation: ['main.bicep', 'modules/postgres.bicep', 'shared.json'],
+      secrets: ['secrets.bicep', 'shared.json'],
+      apps: ['apps.bicep'],
+      certificates: ['certificates.bicep'],
+    };
+    return [params, [params, ...[...own[deployment], 'names.bicep'].map((file) => full(`deploy/azure/${file}`))]];
+  }),
+);
+
+/** This folder as a check finds it: at a commit, clean or not, with Bicep's answer or failure; each question kept. */
+function folderAt(
+  head: string,
+  answer: ReadonlyMap<string, readonly string[]> | Error = SAID,
+  clean = true,
+): { folder: Folder; asked: string[][] } {
+  const asked: string[][] = [];
+  const folder: Folder = {
+    checkout: () => ({ head, clean }),
+    references: (files) => {
+      asked.push([...files]);
+      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+    },
+  };
+  return { folder, asked };
+}
+
 const both = (api: Running, migrate: Running): ReadonlyMap<Workload, Running> =>
   new Map([
     ['migrate', migrate],
@@ -400,6 +442,109 @@ describe('deciding a release', () => {
       reasons: [`deploy/azure/apps.bicep changed since ${older}: ${HAND_DEPLOYED[0]?.why ?? ''}`],
     });
   });
+
+  it('names the hand deploys that read a changed file once Bicep has said, and the reason for any none reads', () => {
+    const readers = readersFrom(SAID);
+    const reasons = (file: string): unknown =>
+      decide(
+        both(running('api'), running('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, NEW], { [OLD]: ['README.md', file] }),
+        readers,
+      );
+    const red = (file: string, reason: string): void => {
+      expect(reasons(file)).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${reason}`] });
+    };
+    const foundation = 'deploy.ts foundation reads it, so run it by hand, its what-if read, then apps';
+    red('deploy/azure/modules/postgres.bicep', foundation);
+    // Where a Windows checkout puts it all the same.
+    red('Deploy/Azure/Modules/Postgres.bicep', foundation);
+    // apps is what a release reads, so nothing follows it.
+    red('deploy/azure/apps.bicep', 'deploy.ts apps reads it, so run it by hand, its what-if read');
+    red(
+      'deploy/azure/shared.json',
+      'deploy.ts foundation and secrets read it, so run each by hand in that order, each what-if read, then apps',
+    );
+    red(
+      'deploy/azure/names.bicep',
+      'deploy.ts foundation, secrets, apps and certificates read it, so run each by hand in that order, each what-if read',
+    );
+    // Read by no deployment: the gate's own list, and the set-up job's files.
+    red('deploy/azure/hand-deployed.json', HAND_DEPLOYED[0]?.why ?? '');
+    red('db/bootstrap/roles.sql', HAND_DEPLOYED[1]?.why ?? '');
+    // Whether it is red never rests on what Bicep said: a file no area holds stays out of it.
+    const ts = readersFrom(new Map([...SAID].map(([params, read]) => [params, [...read, full('deploy/azure/x.ts')]])));
+    expect(
+      decide(
+        both(running('api'), running('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([OLD, NEW], { [OLD]: ['deploy/azure/x.ts'] }),
+        ts,
+      ).kind,
+    ).toBe('release');
+  });
+});
+
+describe('which hand deploys read each file', () => {
+  it("is read from Bicep's answers by each file's path in the repository, in lower case, in DEPLOYMENTS order", () => {
+    const readers = readersFrom(SAID);
+    expect(readers.get('deploy/azure/names.bicep')).toEqual(['foundation', 'secrets', 'apps', 'certificates']);
+    expect(readers.get('deploy/azure/modules/postgres.bicep')).toEqual(['foundation']);
+    expect(readers.get('deploy/azure/staging.apps.bicepparam')).toEqual(['apps']);
+    // A file said twice is one reader, and a path in the repository in another case is the same file.
+    const upper = (file: string): string => path.join(ROOT, path.relative(ROOT, file).toUpperCase());
+    const twice = new Map([...SAID].map(([params, read]) => [params, [...read, ...read, ...read.map(upper)]]));
+    expect(readersFrom(twice)).toEqual(readers);
+  });
+
+  it("refuses answers missing a deployment's, or naming a file outside the repository", () => {
+    const without = new Map(SAID);
+    without.delete(PARAMS_PATHS.get('secrets') ?? '');
+    expect(() => readersFrom(without)).toThrow('Bicep said nothing of what secrets reads');
+    // On Windows, a file on another drive has no path relative to the repository at all.
+    const otherDrive = process.platform === 'win32' ? 'Z:\\elsewhere.bicep' : '/elsewhere.bicep';
+    for (const outside of [path.join(ROOT, '..', 'elsewhere.bicep'), path.dirname(path.resolve(ROOT)), otherDrive]) {
+      const answers = new Map([...SAID].map(([params, read]) => [params, [...read, outside]]));
+      expect(() => readersFrom(answers)).toThrow(
+        `Bicep says a deployment reads ${outside}, which isn't in the repository`,
+      );
+    }
+    const root = new Map([...SAID].map(([params, read]) => [params, [...read, path.resolve(ROOT)]]));
+    expect(() => readersFrom(root)).toThrow("which isn't in the repository");
+  });
+
+  it('asks about every parameters file here, each named once', () => {
+    expect(Object.values(DEPLOYMENTS).sort()).toEqual(paramsFiles());
+    expect([...PARAMS_PATHS.values()]).toEqual(Object.values(DEPLOYMENTS).map((file) => full(`deploy/azure/${file}`)));
+  });
+
+  it('is what the pinned Bicep says of our deployments: the foundation alone reads the infrastructure', async () => {
+    const readers = readersFrom(await fileReferences([...PARAMS_PATHS.values()]));
+    const all = ['foundation', 'secrets', 'apps', 'certificates'];
+    expect(Object.fromEntries(readers)).toEqual({
+      'deploy/azure/app-keys.json': all,
+      'deploy/azure/apps.bicep': ['apps'],
+      'deploy/azure/bicepconfig.json': all,
+      'deploy/azure/certificates.bicep': ['certificates'],
+      'deploy/azure/github-ranges.json': ['foundation'],
+      'deploy/azure/main.bicep': ['foundation'],
+      'deploy/azure/modules/environment.bicep': ['foundation'],
+      'deploy/azure/modules/keyvault.bicep': ['foundation'],
+      'deploy/azure/modules/monitoring.bicep': ['foundation'],
+      'deploy/azure/modules/network.bicep': ['foundation'],
+      'deploy/azure/modules/postgres.bicep': ['foundation'],
+      'deploy/azure/modules/release.bicep': ['foundation'],
+      'deploy/azure/modules/secret-access.bicep': ['secrets'],
+      'deploy/azure/names.bicep': all,
+      'deploy/azure/secrets.bicep': ['secrets'],
+      'deploy/azure/staging.apps.bicepparam': ['apps'],
+      'deploy/azure/staging.bicepparam': ['foundation'],
+      'deploy/azure/staging.certificates.bicepparam': ['certificates'],
+      'deploy/azure/staging.secrets.bicepparam': ['secrets'],
+    });
+  }, 60_000);
 });
 
 /** A stand-in CLI: the account and the two workloads, recording each call. */
@@ -432,17 +577,18 @@ const staging = (release: string, image = OLD_IMAGE): Readonly<Record<Workload, 
 });
 
 /** A check of NEW against staging, with what it said and did. */
-function checked(
+async function checked(
   containers: Readonly<Record<Workload, unknown>>,
   line: History,
   account?: unknown,
-): { status: number | undefined; said: string[]; calls: string[][]; error: unknown } {
+  folder: Folder = folderAt(NEW).folder,
+): Promise<{ status: number | undefined; said: string[]; calls: string[][]; error: unknown }> {
   const said: string[] = [];
   const calls: string[][] = [];
   try {
-    const status = check(
+    const status = await check(
       { command: 'check', commit: NEW, digest: digest('2') },
-      { az: fakeAz(containers, calls, account), history: line, say: (said_) => said.push(said_) },
+      { az: fakeAz(containers, calls, account), history: line, folder, say: (said_) => said.push(said_) },
     );
     return { status, said, calls, error: undefined };
   } catch (error) {
@@ -451,9 +597,17 @@ function checked(
 }
 
 describe('check', () => {
-  it('reads the two from Resource Manager, and says what a release would change in each, changing nothing', () => {
-    const { status, said, calls } = checked(staging(OLD), history([OLD, NEW], { [OLD]: ['apps/api/src/main.ts'] }));
+  it('reads the two from Resource Manager, and says what a release would change in each, changing nothing', async () => {
+    const { folder, asked } = folderAt(NEW);
+    const { status, said, calls } = await checked(
+      staging(OLD),
+      history([OLD, NEW], { [OLD]: ['apps/api/src/main.ts'] }),
+      undefined,
+      folder,
+    );
     expect(status).toBe(0);
+    // Bicep is asked only once a release is red.
+    expect(asked).toEqual([]);
     expect(said).toEqual([
       'Signed in to the subscription "Azure subscription 1".',
       `migrate runs ${OLD} (${OLD_IMAGE}).`,
@@ -477,34 +631,79 @@ describe('check', () => {
     ]);
   });
 
-  it('says so when a release has nothing to do, or staging is already past the commit', () => {
-    const current = checked(staging(NEW, NEW_IMAGE), history([NEW]));
+  it('says so when a release has nothing to do, or staging is already past the commit', async () => {
+    const current = await checked(staging(NEW, NEW_IMAGE), history([NEW]));
     expect(current.status).toBe(0);
     expect(current.said.at(-1)).toBe(`Both already run ${NEW}: a release has nothing to do.`);
-    const past = checked(staging(LATER), history([NEW, LATER]));
+    const past = await checked(staging(LATER), history([NEW, LATER]));
     expect(past.status).toBe(0);
     expect(past.said.at(-1)).toBe(
       `Staging already runs a later commit than ${NEW}: a release of it has nothing to do.`,
     );
   });
 
-  it('ends with failure when it needs a hand deploy, giving each reason', () => {
-    const { status, said } = checked(staging(OLD), history([OLD, NEW], { [OLD]: ['db/bootstrap/roles.sql'] }));
+  it('ends with failure when it needs a hand deploy, giving each reason and the deploys that read each file', async () => {
+    const { folder, asked } = folderAt(NEW);
+    const { status, said } = await checked(
+      staging(OLD),
+      history([OLD, NEW], { [OLD]: ['db/bootstrap/roles.sql', 'deploy/azure/modules/postgres.bicep'] }),
+      undefined,
+      folder,
+    );
     expect(status).toBe(1);
-    expect(said.slice(-2)).toEqual([
+    expect(said.slice(-3)).toEqual([
       `A release of ${NEW} stops here, red: this needs a hand deploy.`,
       `  db/bootstrap/roles.sql changed since ${OLD}: ${HAND_DEPLOYED[1]?.why ?? ''}`,
+      `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deploy.ts foundation reads it, so run it by hand, its what-if read, then apps`,
     ]);
+    // Bicep was asked once, about every deployment.
+    expect(asked).toEqual([[...PARAMS_PATHS.values()]]);
   });
 
-  it('never prints the subscription or the host the settings name, whatever it ends with', () => {
-    const outcomes = [
+  it("leaves the deploys unsaid, still red with each reason, when this folder isn't the commit or Bicep can't say", async () => {
+    const changed = history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] });
+    const reason = `  deploy/azure/modules/postgres.bicep changed since ${OLD}: ${HAND_DEPLOYED[0]?.why ?? ''}`;
+    const broken: Folder = {
+      checkout: () => {
+        throw new Error("git couldn't say which commit this folder is at:\nfatal: not a git repository");
+      },
+      references: () => Promise.reject(new Error('never asked')),
+    };
+    const cases: [Folder, string][] = [
+      [folderAt(OLD).folder, `this folder is at ${OLD}, not ${NEW}`],
+      [folderAt(NEW, SAID, false).folder, `this folder is at ${NEW} with changes, not ${NEW}`],
+      [folderAt(NEW, new Error("Bicep didn't answer within 60 s")).folder, "Bicep didn't answer within 60 s"],
+      [folderAt(NEW, new Map()).folder, 'Bicep said nothing of what foundation reads'],
+      [broken, "git couldn't say which commit this folder is at:\nfatal: not a git repository"],
+    ];
+    for (const [folder, why] of cases) {
+      const { status, said } = await checked(staging(OLD), changed, undefined, folder);
+      expect(status).toBe(1);
+      expect(said.slice(-3)).toEqual([
+        `Which hand deploy reads each file goes unsaid: ${why}.`,
+        `A release of ${NEW} stops here, red: this needs a hand deploy.`,
+        reason,
+      ]);
+    }
+    // Bicep isn't asked about a folder that isn't a clean checkout of the commit.
+    for (const [head, clean] of [
+      [OLD, true],
+      [NEW, false],
+    ] as const) {
+      const { folder, asked } = folderAt(head, SAID, clean);
+      await checked(staging(OLD), changed, undefined, folder);
+      expect(asked).toEqual([]);
+    }
+  });
+
+  it('never prints the subscription or the host the settings name, whatever it ends with', async () => {
+    const outcomes = await Promise.all([
       checked(staging(OLD), history([OLD, NEW])),
       checked(staging(NEW, NEW_IMAGE), history([NEW])),
       checked(staging(LATER), history([NEW, LATER])),
       checked(staging(OLD), history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] })),
       checked({ ...staging(OLD), api: [azureContainer('api', { probes: [] })] }, history([OLD, NEW])),
-    ];
+    ]);
     for (const { said, error } of outcomes) {
       const printed = [...said, error instanceof Error ? error.message : ''].join('\n');
       expect(printed).not.toContain(SUBSCRIPTION);
@@ -512,7 +711,7 @@ describe('check', () => {
     }
   });
 
-  it('refuses an account that names no subscription, reading nothing more', () => {
+  it('refuses an account that names no subscription, reading nothing more', async () => {
     // No ID, one that isn't a subscription's, none at all, or a sign-in to a tenant alone (its "ID" the tenant's).
     const tenant = '00000000-0000-0000-0000-00000000000d';
     for (const account of [
@@ -521,7 +720,7 @@ describe('check', () => {
       null,
       { name: 'x', id: tenant, tenantId: tenant },
     ]) {
-      const { error, calls } = checked(staging(OLD), history([OLD, NEW]), account);
+      const { error, calls } = await checked(staging(OLD), history([OLD, NEW]), account);
       expect(error).toMatchObject({ message: "The Azure CLI named no subscription it's signed in to." });
       expect(calls).toHaveLength(1);
     }
@@ -866,6 +1065,7 @@ class Staging {
     return {
       az: this.az(),
       history: line,
+      folder: folderAt(NEW).folder,
       say: (text) => said.push(text),
       said,
       now: () => new Date(this.clock),
@@ -964,7 +1164,7 @@ describe('release', () => {
       [
         history([OLD, NEW], { [OLD]: ['deploy/azure/apps.bicep'] }),
         1,
-        `  deploy/azure/apps.bicep changed since ${OLD}: ${HAND_DEPLOYED[0]?.why ?? ''}`,
+        `  deploy/azure/apps.bicep changed since ${OLD}: deploy.ts apps reads it, so run it by hand, its what-if read`,
       ],
       [history([NEW, OLD]), 0, `Staging already runs a later commit than ${NEW}: a release of it has nothing to do.`],
     ];

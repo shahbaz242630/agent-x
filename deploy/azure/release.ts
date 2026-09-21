@@ -22,7 +22,9 @@
 //   commit. `apps` stamps one, and deploy.ts sends it only from a clean
 //   checkout of that very commit, so the stamp says what Azure was built from.
 //   The other hand deploys stamp nothing, so a red says what to run, and the
-//   person runs all of it
+//   person runs all of it: for a file a deployment reads, which hand deploys
+//   read it, as the pinned Bicep says of a clean checkout of the commit (T1a).
+//   Only what a red says rests on Bicep's answer, never whether it is red
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
@@ -37,11 +39,13 @@
 //   wait has an end; a stop after the first write says what it left. The API
 //   is updated only after a run of this release's image has succeeded
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { fileReferences } from '../../tooling/bicep/references.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
-import { ARM, type Az, realAz, realImages, RESOURCE_GROUP } from './deploy.ts';
-import { type History, realHistory } from './git.ts';
+import { ARM, type Az, type Deployment, DEPLOYMENTS, realAz, realImages, RESOURCE_GROUP } from './deploy.ts';
+import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { ENDED, isRunOf, JOBS_API, POLL_MS, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
@@ -89,6 +93,61 @@ const handDeployed = (file: string): HandDeployed | undefined =>
     ({ prefix, except }) =>
       file.toLowerCase().startsWith(prefix.toLowerCase()) && (except === undefined || !file.endsWith(except)),
   );
+
+/** The repository, whose paths git gives relative to it. */
+const REPOSITORY = path.resolve(import.meta.dirname, '../..');
+
+/**
+ * The hand deploys that read each file, by its path in the repository in lower
+ * case (a Windows checkout's case may differ from git's), in DEPLOYMENTS order.
+ */
+export type Readers = ReadonlyMap<string, readonly Deployment[]>;
+
+/** Each deployment's parameters file, by its full path: what Bicep is asked about. */
+export const PARAMS_PATHS: ReadonlyMap<Deployment, string> = new Map(
+  (Object.entries(DEPLOYMENTS) as [Deployment, string][]).map(([deployment, file]) => [
+    deployment,
+    path.join(import.meta.dirname, file),
+  ]),
+);
+
+/** A full path as git names it in the repository, or an error when it is outside. */
+function inRepository(file: string): string {
+  const relative = path.relative(REPOSITORY, file);
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Bicep says a deployment reads ${file}, which isn't in the repository`);
+  }
+  return relative.split(path.sep).join('/');
+}
+
+/** Readers from what Bicep says each parameters file's deployment reads, or an error when an answer is missing. */
+export function readersFrom(answers: ReadonlyMap<string, readonly string[]>): Readers {
+  const readers = new Map<string, Deployment[]>();
+  for (const [deployment, params] of PARAMS_PATHS) {
+    const read = answers.get(params);
+    if (read === undefined) throw new Error(`Bicep said nothing of what ${deployment} reads`);
+    for (const file of new Set(read.map((each) => inRepository(each).toLowerCase()))) {
+      readers.set(file, [...(readers.get(file) ?? []), deployment]);
+    }
+  }
+  return readers;
+}
+
+/** Names in a list, as a sentence says them. */
+const listed = (names: readonly string[]): string =>
+  names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${String(names.at(-1))}`;
+
+/**
+ * What to run for a file the named hand deploys read: each of them, and then
+ * apps, whose stamp is what a release reads (apps last when it reads it too).
+ */
+function toRun(readers: readonly Deployment[]): string {
+  const then = readers.includes('apps') ? '' : ', then apps';
+  if (readers.length === 1) {
+    return `deploy.ts ${String(readers[0])} reads it, so run it by hand, its what-if read${then}`;
+  }
+  return `deploy.ts ${listed(readers)} read it, so run each by hand in that order, each what-if read${then}`;
+}
 
 /** The two things a release changes, as Azure names them and the one container each runs (apps.bicep). */
 export const WORKLOADS = {
@@ -276,13 +335,15 @@ export type Decision =
  * when both already run it, or both run a later commit that has it (a release
  * run again after a newer one); a hand deploy when what either runs isn't in
  * the commit's history, or anything a person deploys changed since; otherwise
- * the update for each.
+ * the update for each. Given the readers, a changed file that a deployment
+ * reads names the hand deploys to run.
  */
 export function decide(
   running: ReadonlyMap<Workload, Running>,
   commit: string,
   image: string,
   history: History,
+  readers?: Readers,
 ): Decision {
   const all = ORDER.map((workload) => {
     const found = running.get(workload);
@@ -301,7 +362,9 @@ export function decide(
     }
     for (const file of history.changedFiles(release, commit)) {
       const area = handDeployed(file);
-      if (area !== undefined) reasons.add(`${file} changed since ${release}: ${area.why}`);
+      if (area === undefined) continue;
+      const deployments = readers?.get(file.toLowerCase());
+      reasons.add(`${file} changed since ${release}: ${deployments === undefined ? area.why : toRun(deployments)}`);
     }
   }
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
@@ -398,9 +461,18 @@ export function changes(before: Container, after: Container): string[] {
   return said;
 }
 
+/** What a check reads from this folder: the commit it is at, and what Bicep says each deployment reads. */
+export interface Folder {
+  readonly checkout: () => Checkout;
+  readonly references: (paramsFiles: readonly string[]) => Promise<ReadonlyMap<string, readonly string[]>>;
+}
+
+const realFolder = (): Folder => ({ checkout: () => realCheckout(), references: (files) => fileReferences(files) });
+
 export interface CheckSteps {
   readonly az: Az;
   readonly history: History;
+  readonly folder: Folder;
   readonly say: (line: string) => void;
 }
 
@@ -413,13 +485,42 @@ interface Plan {
   readonly decision: Decision;
 }
 
-function plan(request: Request, steps: CheckSteps): Plan {
+/**
+ * Which hand deploys read each file, as Bicep says of this folder, which must
+ * be a clean checkout of the commit; or nothing, with why said, when that
+ * can't be known. It is asked only once a release is red, and only what the
+ * red says rests on it.
+ */
+async function readersAt(commit: string, steps: CheckSteps): Promise<Readers | undefined> {
+  const unsaid = (why: string): void => {
+    steps.say(`Which hand deploy reads each file goes unsaid: ${why}.`);
+  };
+  try {
+    const here = steps.folder.checkout();
+    if (here.head !== commit || !here.clean) {
+      unsaid(`this folder is at ${here.head}${here.clean ? '' : ' with changes'}, not ${commit}`);
+      return undefined;
+    }
+    return readersFrom(await steps.folder.references([...PARAMS_PATHS.values()]));
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    unsaid(error.message);
+    return undefined;
+  }
+}
+
+async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   const subscription = signedIn(steps.az, steps.say);
   const image = `${IMAGE_REPOSITORY}@${request.digest}`;
   const reads = new Map(ORDER.map((workload) => [workload, readWorkload(steps.az, subscription, workload)] as const));
   const running = new Map([...reads].map(([workload, read]) => [workload, read.running] as const));
   for (const [workload, found] of running) steps.say(`${workload} runs ${found.release} (${found.image}).`);
-  return { subscription, image, reads, running, decision: decide(running, request.commit, image, steps.history) };
+  const first = decide(running, request.commit, image, steps.history);
+  const decision =
+    first.kind === 'by-hand'
+      ? decide(running, request.commit, image, steps.history, await readersAt(request.commit, steps))
+      : first;
+  return { subscription, image, reads, running, decision };
 }
 
 /**
@@ -444,8 +545,8 @@ function settled(decision: Decision, commit: string, say: (line: string) => void
 }
 
 /** `check`: what a release would do, said; 0 when it could go ahead (or has nothing to do), 1 when it needs a hand deploy. */
-export function check(request: Request, steps: CheckSteps): number {
-  const { running, decision } = plan(request, steps);
+export async function check(request: Request, steps: CheckSteps): Promise<number> {
+  const { running, decision } = await plan(request, steps);
   const stop = settled(decision, request.commit, steps.say);
   if (stop !== undefined || decision.kind !== 'release') return stop ?? 1;
   steps.say(`A release of ${request.commit} would update, in order:`);
@@ -856,7 +957,7 @@ export async function release(request: Request, steps: ReleaseSteps): Promise<nu
     steps.say(`The image was refused (${outcome.reason}), so nothing was read or changed:\n${outcome.detail}`);
     return 1;
   }
-  const { subscription, reads, decision } = plan(request, steps);
+  const { subscription, reads, decision } = await plan(request, steps);
   const job = reads.get('migrate');
   const api = reads.get('api');
   if (job === undefined || api === undefined) throw new Error('The release lost track of a workload.');
@@ -944,6 +1045,7 @@ export async function main(
   az: () => Az = realAz,
   history: () => History = realHistory,
   extras: () => Extras = realExtras,
+  folder: () => Folder = realFolder,
 ): Promise<number> {
   let request: Request;
   try {
@@ -954,8 +1056,10 @@ export async function main(
     return 2;
   }
   try {
-    const steps = { az: az(), history: history(), say };
-    return request.command === 'check' ? check(request, steps) : await release(request, { ...steps, ...extras() });
+    const steps = { az: az(), history: history(), folder: folder(), say };
+    return request.command === 'check'
+      ? await check(request, steps)
+      : await release(request, { ...steps, ...extras() });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     say(error.message);
