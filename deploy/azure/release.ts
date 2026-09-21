@@ -21,10 +21,15 @@
 //   stays red, however many merges follow, until a hand deploy stamps a later
 //   commit. `apps` stamps one, and deploy.ts sends it only from a clean
 //   checkout of that very commit, so the stamp says what Azure was built from.
-//   The other hand deploys stamp nothing, so a red says what to run, and the
-//   person runs all of it: for a file a deployment reads, which hand deploys
-//   read it, as the pinned Bicep says of a clean checkout of the commit (T1a).
-//   Only what a red says rests on Bicep's answer, never whether it is red
+//   The other hand deploys stamp nothing on the workloads; foundation, secrets
+//   and certificates each record the commit they sent in a tag on the
+//   migration job (T1b, deploy.ts). A red says what to run: for a file a
+//   deployment reads, which hand deploys read it, as the pinned Bicep says of
+//   a clean checkout of the commit (T1a). A file that only recorded deploys
+//   read, each recorded at a commit in this one's history with the file as it
+//   is now, needs no hand deploy. Bicep is asked only once a release would be
+//   red without it, and any doubt (Bicep unable to say, a record that isn't a
+//   commit, or isn't in the history) leaves it red
 // - an update carries the whole containers array, since Azure's PATCH replaces
 //   an array whole, and nothing else: no environment and no identity, which
 //   would ask for the linked actions CI's role doesn't hold (release.bicep).
@@ -44,7 +49,18 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
 import { IMAGE_REPOSITORY, type Outcome } from '../image/verify.ts';
-import { ARM, type Az, type Deployment, DEPLOYMENTS, realAz, realImages, RESOURCE_GROUP } from './deploy.ts';
+import {
+  ARM,
+  type Az,
+  type Deployment,
+  DEPLOYMENTS,
+  realAz,
+  realImages,
+  RECORDED,
+  type Recorded,
+  recordTag,
+  RESOURCE_GROUP,
+} from './deploy.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
 import { ENDED, isRunOf, JOBS_API, POLL_MS, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
@@ -137,15 +153,31 @@ export function readersFrom(answers: ReadonlyMap<string, readonly string[]>): Re
 const listed = (names: readonly string[]): string => `${names.slice(0, -1).join(', ')} and ${String(names.at(-1))}`;
 
 /**
- * What to run for a file the named hand deploys read: each of them, and then
- * apps, whose stamp is what a release reads (apps last when it reads it too).
+ * What to run for a file the named hand deploys read and haven't recorded:
+ * each of them, and then this release again, which each one's record lets
+ * through; apps moves what staging runs itself, so nothing follows it.
  */
 function toRun(readers: readonly Deployment[]): string {
-  const then = readers.includes('apps') ? '' : ', then apps';
+  const then = readers.includes('apps') ? '' : ', then run this release again';
   if (readers.length === 1) {
     return `deploy.ts ${String(readers[0])} reads it, so run it by hand, its what-if read${then}`;
   }
   return `deploy.ts ${listed(readers)} read it, so run each by hand in that order, each what-if read${then}`;
+}
+
+/** The commit each recorded hand deploy last sent, as the migration job's tags hold them (T1b). */
+export type Records = ReadonlyMap<Recorded, string>;
+
+/** The records a workload's tags hold; a record that isn't a commit counts for nothing, and is said. */
+export function recordsIn(tags: Readonly<Record<string, unknown>>, say: (line: string) => void): Records {
+  const records = new Map<Recorded, string>();
+  for (const deployment of RECORDED) {
+    const value = tags[recordTag(deployment)];
+    if (value === undefined) continue;
+    if (typeof value === 'string' && COMMIT.test(value)) records.set(deployment, value);
+    else say(`The migration job's ${recordTag(deployment)} isn't a commit, so it counts for nothing.`);
+  }
+  return records;
 }
 
 /** The two things a release changes, as Azure names them and the one container each runs (apps.bicep). */
@@ -327,7 +359,12 @@ export type Decision =
   | { readonly kind: 'current' }
   | { readonly kind: 'past' }
   | { readonly kind: 'by-hand'; readonly reasons: readonly string[] }
-  | { readonly kind: 'release'; readonly updates: ReadonlyMap<Workload, Container> };
+  | {
+      readonly kind: 'release';
+      readonly updates: ReadonlyMap<Workload, Container>;
+      /** Each changed file a person deploys that the records show deployed, and by which. */
+      readonly deployed: readonly string[];
+    };
 
 /**
  * What a release of `commit` would do, given what each workload runs: nothing
@@ -335,7 +372,9 @@ export type Decision =
  * run again after a newer one); a hand deploy when what either runs isn't in
  * the commit's history, or anything a person deploys changed since; otherwise
  * the update for each. Given the readers, a changed file that a deployment
- * reads names the hand deploys to run.
+ * reads names the hand deploys to run, and one that only recorded deploys
+ * read, each recorded at a commit in this one's history with the file
+ * unchanged since, needs none.
  */
 export function decide(
   running: ReadonlyMap<Workload, Running>,
@@ -343,6 +382,7 @@ export function decide(
   image: string,
   history: History,
   readers?: Readers,
+  records: Records = new Map(),
 ): Decision {
   const all = ORDER.map((workload) => {
     const found = running.get(workload);
@@ -353,7 +393,22 @@ export function decide(
   if (all.every(([, found]) => found.release !== commit && history.isAncestor(commit, found.release))) {
     return { kind: 'past' };
   }
+  // The files changed from each record's commit to this one, in lower case, read once each.
+  const since = new Map<string, ReadonlySet<string>>();
+  /** The commit a deploy's record says it sent this file as it is now, if one does. */
+  const recordFor = (deployment: Deployment, file: string): string | undefined => {
+    if (deployment === 'apps') return undefined;
+    const sent = records.get(deployment);
+    if (sent === undefined || !history.isAncestor(sent, commit)) return undefined;
+    let changed = since.get(sent);
+    if (changed === undefined) {
+      changed = new Set(history.changedFiles(sent, commit).map((each) => each.toLowerCase()));
+      since.set(sent, changed);
+    }
+    return changed.has(file.toLowerCase()) ? undefined : sent;
+  };
   const reasons = new Set<string>();
+  const deployed = new Set<string>();
   for (const release of new Set(all.map(([, found]) => found.release))) {
     if (!history.isAncestor(release, commit)) {
       reasons.add(`staging runs ${release}, which isn't in ${commit}'s history`);
@@ -363,13 +418,24 @@ export function decide(
       const area = handDeployed(file);
       if (area === undefined) continue;
       const deployments = readers?.get(file.toLowerCase());
-      reasons.add(`${file} changed since ${release}: ${deployments === undefined ? area.why : toRun(deployments)}`);
+      if (deployments === undefined) {
+        reasons.add(`${file} changed since ${release}: ${area.why}`);
+        continue;
+      }
+      const unrecorded = deployments.filter((deployment) => recordFor(deployment, file) === undefined);
+      if (unrecorded.length > 0) {
+        reasons.add(`${file} changed since ${release}: ${toRun(unrecorded)}`);
+        continue;
+      }
+      const sent = deployments.map((deployment) => `${deployment} from ${String(recordFor(deployment, file))}`);
+      deployed.add(`${file} changed since ${release}: deployed by hand, ${sent.join(', ')}`);
     }
   }
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
   return {
     kind: 'release',
     updates: new Map(all.map(([workload, found]) => [workload, released(found, image, commit)])),
+    deployed: [...deployed],
   };
 }
 
@@ -430,13 +496,16 @@ function signedIn(az: Az, say: (line: string) => void): string {
 /** A workload as Azure has it: its properties, and what it runs. */
 interface Read {
   readonly properties: Readonly<Record<string, unknown>>;
+  /** Its tags: the migration job's hold the hand deploys' records (T1b). */
+  readonly tags: Readonly<Record<string, unknown>>;
   readonly running: Running;
 }
 
 /** A workload, read from Azure. */
 function readWorkload(az: Az, subscription: string, workload: Workload): Read {
-  const properties = record(get(az, workloadUrl(subscription, workload), workload).properties);
-  return { properties, running: runningIn(workload, record(properties.template).containers) };
+  const found = get(az, workloadUrl(subscription, workload), workload);
+  const properties = record(found.properties);
+  return { properties, tags: record(found.tags), running: runningIn(workload, record(properties.template).containers) };
 }
 
 /** The build a container names in AGENTX_RELEASE, or nothing. */
@@ -515,11 +584,23 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   const running = new Map([...reads].map(([workload, read]) => [workload, read.running] as const));
   for (const [workload, found] of running) steps.say(`${workload} runs ${found.release} (${found.image}).`);
   const first = decide(running, request.commit, image, steps.history);
-  const decision =
-    first.kind === 'by-hand'
-      ? decide(running, request.commit, image, steps.history, await readersAt(request.commit, steps))
-      : first;
+  if (first.kind !== 'by-hand') return { subscription, image, reads, running, decision: first };
+  const readers = await readersAt(request.commit, steps);
+  const records = recordsIn(reads.get('migrate')?.tags ?? {}, steps.say);
+  steps.say(
+    records.size === 0
+      ? 'The migration job holds no hand deploy records.'
+      : `The migration job records: ${[...records].map(([deployment, sent]) => `${deployment} sent ${sent}`).join('; ')}.`,
+  );
+  const decision = decide(running, request.commit, image, steps.history, readers, records);
   return { subscription, image, reads, running, decision };
+}
+
+/** What the records show deployed by hand, said before a release goes ahead. */
+function sayDeployed(decision: Decision, say: (line: string) => void): void {
+  if (decision.kind !== 'release' || decision.deployed.length === 0) return;
+  say('Deployed by hand already, as the migration job records:');
+  for (const line of decision.deployed) say(`  ${line}`);
 }
 
 /**
@@ -548,6 +629,7 @@ export async function check(request: Request, steps: CheckSteps): Promise<number
   const { running, decision } = await plan(request, steps);
   const stop = settled(decision, request.commit, steps.say);
   if (stop !== undefined || decision.kind !== 'release') return stop ?? 1;
+  sayDeployed(decision, steps.say);
   steps.say(`A release of ${request.commit} would update, in order:`);
   for (const [workload, after] of decision.updates) {
     const before = running.get(workload)?.container;
@@ -963,6 +1045,7 @@ export async function release(request: Request, steps: ReleaseSteps): Promise<nu
   if (decision.kind === 'current') return alreadyServed(steps, subscription, api, image, commit);
   const stop = settled(decision, commit, steps.say);
   if (stop !== undefined || decision.kind !== 'release') return stop ?? 1;
+  sayDeployed(decision, steps.say);
   const migrateAfter = decision.updates.get('migrate');
   const apiAfter = decision.updates.get('api');
   if (migrateAfter === undefined || apiAfter === undefined) throw new Error('The release lost track of a workload.');
