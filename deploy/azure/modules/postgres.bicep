@@ -8,7 +8,8 @@
 // - password logins only, from the secret store (ADR-002, ADR-010: portable);
 //   no Microsoft Entra logins
 // - the server admin is break-glass (ADR-002): never the app, never routine
-//   work. A login by it or by the backup role raises an alert (ADR-012 §2)
+//   work. A login by it or by the backup role raises an alert (ADR-012 §2),
+//   and so does one by the owner role anywhere but the migration job
 // - TLS 1.3 at least, on every connection
 
 param location string
@@ -23,9 +24,14 @@ param subnetId string
 param privateDnsZoneId string
 param workspaceId string
 param actionGroupId string
+@description('The migration job, the one thing that logs in as the owner role (apps.bicep).')
+param migrateJobName string
 
 // Fixed: Azure never lets a server's admin login change, and the alert below matches it by name.
 var adminLogin = 'agentx_admin'
+
+// Owns the app's tables and runs the migrations (db/bootstrap/roles.sql).
+var ownerRole = 'agentx_owner'
 
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: name
@@ -122,11 +128,14 @@ resource serverLogs 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' =
   }
 }
 
+// How a login's line starts, up to the message, as log_line_prefix above
+// writes it: `2026-09-16 19:02:12 UTC-6aaae7b4.1dc3-LOG:  `. Both login alerts
+// match from here: anchored at "connection authorized" alone, the pattern
+// matched none of the set-up job's real logins (the first real run, S19).
+var loginLineStart = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  '
+
 // ADR-012 §2: a login by the server admin or the backup role raises an alert.
-// The set-up job's own login (G2) is one of them, and expected. The pattern
-// matches the whole start of the line, prefix included: anchored at
-// "connection authorized" alone, it matched none of the set-up job's real
-// logins (the first real run, S19).
+// The set-up job's own login (G2) is one of them, and expected.
 resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: 'alert-${name}-privileged-login'
   location: location
@@ -145,7 +154,7 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'PGSQLServerLogs | where Message matches regex @"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC-[0-9a-f]+[.][0-9a-f]+-LOG:  connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
+          query: 'PGSQLServerLogs | where Message matches regex @"${loginLineStart}connection authorized: user=(${adminLogin}|agentx_backup) " | summarize Logins = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Logins'
           operator: 'GreaterThan'
@@ -159,6 +168,90 @@ resource privilegedLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
     // Stateless: every 15 minutes with such a login notifies again. A stateful
     // alert stays fired and says nothing about a second login while it lasts.
+    autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [serverLogs]
+}
+
+// ADR-012 §2, Phase 1 A3e-2: the owner role can rewrite the walls the app's
+// checks stand on (the S32 probe), so a login by it outside a deploy raises a
+// SEV-1 alert. The migration job is the one thing that logs in as it, with one
+// connection as it starts: each of its first 19 runs on staging logged in
+// within half a second of Azure's `ContainerStarted` line for the run (S33).
+// So each owner login is paired with the nearest start of that job, and it is
+// a deploy's only when that start is within two minutes and no other login is
+// paired with it. The alert counts the rest: a login with no start near it,
+// and two logins paired with one start (someone logging in beside a release).
+//
+// Azure's lines for the job reach the workspace 6 to 9 minutes after the
+// Postgres ones (S33), so a login is judged only once it is 20 minutes old,
+// over a band of 30 minutes that two runs 15 minutes apart both see: a login
+// outside a deploy notifies twice, the first time within about 35 minutes. Each
+// run reads the hour before it (overrideQueryTimeRange), so the start a judged
+// login is paired with is always in view. Whatever breaks the pairing (the job
+// renamed, Azure rewording its line, the migration opening a second connection)
+// makes every release fire it: loud, never silent.
+var ownerLoginQuery = join(
+  [
+    'let near = 2m;'
+    'let starts = ContainerAppSystemLogs'
+    '    | where JobName == "${migrateJobName}" and Reason == "ContainerStarted"'
+    '    | project Start = TimeGenerated, Run = ReplicaName;'
+    'let logins = PGSQLServerLogs'
+    '    | where Message matches regex @"${loginLineStart}connection authorized: user=${ownerRole} "'
+    '    | project Login = TimeGenerated, Message;'
+    'let paired = logins'
+    '    | extend Key = 1'
+    '    | join kind=leftouter (starts | extend Key = 1) on Key'
+    '    | extend Gap = coalesce(abs(Login - Start), 1d)'
+    '    | summarize arg_min(Gap, Run) by Login, Message;'
+    'let claims = paired'
+    '    | where Gap <= near'
+    '    | summarize Claims = count() by Run;'
+    'paired'
+    '| where Login between (ago(50m) .. ago(20m))'
+    '| join kind=leftouter claims on Run'
+    '| where Gap > near or Claims > 1'
+    '| summarize Logins = count()'
+  ],
+  '\n'
+)
+
+resource ownerLogin 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: 'alert-${name}-owner-login'
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Database: login by the owner role outside a deploy'
+    description: 'SEV-1. The owner role logged in to Postgres other than as the migration job starting, so someone else holds its login and could rewrite the tables\' walls (ADR-012 §2). Runbook: Incident-Response-Playbook.md section I.'
+    severity: 1
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    overrideQueryTimeRange: 'PT1H'
+    // Both tables appear with their first log lines, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: ownerLoginQuery
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Logins'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    // Stateless, like the alert above.
     autoMitigate: false
     actions: {
       actionGroups: [actionGroupId]

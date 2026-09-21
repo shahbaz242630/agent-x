@@ -156,6 +156,9 @@ export interface MigrationOptions {
 /** Applies every migration not yet applied, in order, and returns their names. */
 export async function runMigrations(options: MigrationOptions): Promise<string[]> {
   const files = await loadMigrations(options.directory);
+  // One connection for the whole run, opened as it starts: on Azure the
+  // owner-login alert (postgres.bicep) takes any second login beside a start
+  // of the migration job for someone else's.
   const client = new pg.Client(poolConfig(options.connection));
   // A lost connection is also reported as an event; with no listener, Node
   // would crash the process instead of letting the failing query report it.
