@@ -10,7 +10,7 @@ import type { EventName, Logger } from '@agentx/platform/observability';
 import type { Socket } from 'node:net';
 
 import { CORRELATION_HEADER } from './correlation.ts';
-import { errorBody, responseForStatus } from './errors.ts';
+import { errorBody, JSON_TYPE, responseForStatus } from './errors.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 
 export const CLIENT_ERROR: EventName = 'http.client_error';
@@ -39,7 +39,7 @@ export function answerClientError(
   const headers = {
     ...SECURITY_HEADERS,
     [CORRELATION_HEADER]: correlationId,
-    'content-type': 'application/json; charset=utf-8',
+    'content-type': JSON_TYPE,
     'content-length': String(Buffer.byteLength(body)),
     connection: 'close',
   };

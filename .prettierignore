@@ -6,3 +6,5 @@ Documents/
 .claude/
 # Deliberately broken files that the gate proofs check are rejected.
 tooling/gate-proofs/fixtures/
+# Written from the routes by apps/api/src/contract.test.ts, never by hand.
+apps/api/openapi.json

@@ -6,6 +6,10 @@
 // added with the worker (Phase 4).
 import type { EventName, Logger } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
+import type { ZodTypeProvider } from 'fastify-type-provider-zod';
+import { z } from 'zod';
+
+import { API_SCHEMAS } from './api-schemas.ts';
 
 const HEALTH_PATH = '/health';
 export const CHECK_FAILED: EventName = 'health.check_failed';
@@ -17,9 +21,12 @@ export interface HealthCheck {
   readonly check: () => Promise<boolean>;
 }
 
-interface HealthBody {
-  readonly status: 'ok' | 'unavailable';
-}
+const HEALTH_RESPONSES = {
+  200: z.object({ status: z.literal('ok') }).register(API_SCHEMAS, { description: 'Every check passed.' }),
+  503: z
+    .object({ status: z.literal('unavailable') })
+    .register(API_SCHEMAS, { description: 'A check failed. The log says which; this answer never does.' }),
+};
 
 interface Outcome {
   readonly name: string;
@@ -46,9 +53,9 @@ async function allPass(checks: readonly HealthCheck[], log: Logger): Promise<boo
 }
 
 export function registerHealth(app: FastifyInstance, checks: readonly HealthCheck[], logger: Logger): void {
-  app.get(HEALTH_PATH, async (request, reply) => {
+  const schema = { summary: 'Whether the API is up', response: HEALTH_RESPONSES };
+  app.withTypeProvider<ZodTypeProvider>().get(HEALTH_PATH, { schema }, async (request, reply) => {
     const ok = await allPass(checks, logger.child({ correlationId: request.id }));
-    const body: HealthBody = { status: ok ? 'ok' : 'unavailable' };
-    return reply.code(ok ? 200 : 503).send(body);
+    return ok ? reply.code(200).send({ status: 'ok' }) : reply.code(503).send({ status: 'unavailable' });
   });
 }

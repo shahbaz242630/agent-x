@@ -1,0 +1,255 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent X API",
+    "version": "1"
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "AGGREGATE_THRESHOLD",
+                    "description": "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it."
+                  },
+                  {
+                    "type": "string",
+                    "const": "BAD_REQUEST",
+                    "description": "The request is malformed, so it can't be read."
+                  },
+                  {
+                    "type": "string",
+                    "const": "DUPLICATE_ORDER_REFERENCE",
+                    "description": "An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused."
+                  },
+                  {
+                    "type": "string",
+                    "const": "HEADERS_TOO_LARGE",
+                    "description": "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause."
+                  },
+                  {
+                    "type": "string",
+                    "const": "INTERNAL_ERROR",
+                    "description": "Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support."
+                  },
+                  {
+                    "type": "string",
+                    "const": "NOT_FOUND",
+                    "description": "There is nothing at this address, or the feature is not available."
+                  },
+                  {
+                    "type": "string",
+                    "const": "ORG_FROZEN",
+                    "description": "The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted."
+                  },
+                  {
+                    "type": "string",
+                    "const": "ORIGIN_REFUSED",
+                    "description": "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PAYLOAD_TOO_LARGE",
+                    "description": "The request body is larger than this address accepts, so it is refused."
+                  },
+                  {
+                    "type": "string",
+                    "const": "RATE_LIMITED",
+                    "description": "Too many requests came from this client address in the last minute. Wait the number of seconds in the Retry-After header, then try again."
+                  },
+                  {
+                    "type": "string",
+                    "const": "REQUEST_TIMEOUT",
+                    "description": "The request took too long to arrive, so it is refused. Send it again."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_CHANGED",
+                    "description": "The supplier's payment details changed after the request was decided, so it is refused before hand-off."
+                  },
+                  {
+                    "type": "string",
+                    "const": "UNSUPPORTED_MEDIA_TYPE",
+                    "description": "The request body's content type isn't accepted at this address, so it is refused."
+                  }
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "correlationId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "correlationId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
+        "description": "Every refusal and failure has this body: a reason code, the code's public description, and the request's correlation ID. Nothing else."
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Whether the API is up",
+        "responses": {
+          "200": {
+            "description": "Every check passed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Every check passed."
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A check failed. The log says which; this answer never does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false,
+                  "description": "A check failed. The log says which; this answer never does."
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "summary": "Whether the API is up",
+        "responses": {
+          "200": {
+            "description": "Every check passed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Every check passed."
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A check failed. The log says which; this answer never does.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false,
+                  "description": "A check failed. The log says which; this answer never does."
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
