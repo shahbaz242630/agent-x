@@ -191,9 +191,10 @@ describe('what the database owner can really do', () => {
   it('sees the app role given more than reading and writing rows on a tenant table (A3f-1)', async () => {
     // A tenant table outside the audit schemas, where the app may SELECT,
     // INSERT, UPDATE and DELETE and nothing else; MAINTAIN exists from 17.
-    await createTenantProbe(database);
     const maintain = Number(server.version.split('.')[0]) >= 17;
     try {
+      // Inside the try, so a probe half built is still dropped, and can't fail every later case instead.
+      await createTenantProbe(database);
       expect(await problems()).toEqual([]);
       await owner.query('grant truncate, trigger, references on probe.items to agentx_app');
       if (maintain) await owner.query('grant maintain on probe.items to agentx_app');
@@ -212,7 +213,7 @@ describe('what the database owner can really do', () => {
       await owner.query('grant references (label) on probe.items to agentx_app');
       expect(await problems()).toEqual(['agentx_app may REFERENCES on probe.items']);
     } finally {
-      await owner.query('drop schema probe cascade');
+      await owner.query('drop schema if exists probe cascade');
     }
   });
 

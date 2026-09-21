@@ -20,9 +20,10 @@
 // schemas, on the database, or in default privileges. Of the roles that may
 // connect, none but the backup role has BYPASSRLS, and none is a member of a
 // role or has members. The backup role only reads. The app role only adds to
-// and reads the tables of append-only schemas, apart from listed exceptions
-// (SEC-EVD-01), and on any other table holds nothing but SELECT, INSERT,
-// UPDATE and DELETE.
+// and reads the tables of append-only schemas, and may also update, never
+// delete, their listed exceptions (SEC-EVD-01); on any other table it holds
+// nothing but SELECT, INSERT, UPDATE and DELETE. The live schema guard holds
+// the running database to the same lists.
 //
 // Not read: types (every table's row type is usable by PUBLIC by default, and
 // using a type reaches no row); languages (PUBLIC may write plpgsql and SQL,
@@ -438,6 +439,13 @@ const BACKUP_MAY: Readonly<Record<Exclude<Grant['kind'], 'default'>, readonly st
 const APPEND_ONLY_APP_MAY = ['INSERT', 'SELECT'];
 
 /**
+ * What it may hold on one of that list's exceptions, such as a chain head: it
+ * moves the row on, and never deletes it, or it could start its chain again
+ * (SEC-EVD-01). The live schema guard's EXCEPTION_RIGHTS, the same list.
+ */
+const EXCEPTION_APP_MAY = ['INSERT', 'SELECT', 'UPDATE'];
+
+/**
  * What the app role may hold on any other table or its columns: reading and
  * writing rows, each through the table's policies. The rest are refused
  * whatever the table (A3f-1): TRUNCATE empties a table past row security, every
@@ -621,19 +629,22 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     return [`${grant.object}: ${roles.backup} has ${grant.privilege}; it may only read (ADR-005 §3)`];
   }
   // A sequence in an append-only schema is fine: drawing a number changes no row.
-  const appendOnly =
-    grant.relation !== '' &&
-    policy.appendOnlySchemas.includes(grant.schema) &&
-    !Object.hasOwn(policy.appendOnlyExceptions, grant.relation);
-  if (appendOnly && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
+  const inAppendOnly = grant.relation !== '' && policy.appendOnlySchemas.includes(grant.schema);
+  const exception = inAppendOnly && Object.hasOwn(policy.appendOnlyExceptions, grant.relation);
+  if (inAppendOnly && !exception && grant.grantee === roles.app && !APPEND_ONLY_APP_MAY.includes(grant.privilege)) {
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only table; it may only INSERT and SELECT (SEC-EVD-01)`,
+    ];
+  }
+  if (exception && grant.grantee === roles.app && !EXCEPTION_APP_MAY.includes(grant.privilege)) {
+    return [
+      `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only exception; it may only INSERT, SELECT and UPDATE (SEC-EVD-01)`,
     ];
   }
   const onRows = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
   if (onRows && grant.grantee === roles.app && !APP_MAY.includes(grant.privilege)) {
     return [
-      `${grant.object}: ${roles.app} has ${grant.privilege}; on a table it may only SELECT, INSERT, UPDATE and DELETE (ADR-005)`,
+      `${grant.object}: ${roles.app} has ${grant.privilege}; on a table it may only SELECT, INSERT, UPDATE and DELETE (ADR-005 §3)`,
     ];
   }
   return [];
