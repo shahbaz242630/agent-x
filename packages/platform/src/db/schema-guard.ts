@@ -194,6 +194,11 @@ export type SchemaProblem = string;
 
 interface RelationRow {
   readonly name: string;
+  /**
+   * `schema.table` unquoted, as a module names its table and as A3c-1 reads
+   * it: `name` quotes a part that needs it (a reserved word such as `user`).
+   */
+  readonly plain: string;
   /** Unquoted, straight from the catalogue: re-parsing it out of `name` would break on a name needing quotes. */
   readonly schema: string;
   readonly kind: string;
@@ -306,6 +311,7 @@ const QUALIFIED = sql`pg_catalog.format('%I.%I', n.nspname, c.relname)`;
 async function relations<Schema>(db: Kysely<Schema>): Promise<RelationRow[]> {
   const { rows } = await sql<RelationRow>`
     select ${QUALIFIED} as name,
+           pg_catalog.concat_ws('.', n.nspname, c.relname) as plain,
            n.nspname as schema,
            c.relkind as kind,
            c.relrowsecurity as rls,
@@ -470,9 +476,10 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * Found by the A3e-1b review.
  *
  * The `::text` here, and on the bound values in updatableColumns and
- * roleSettings, are the only ones left in this file, and they are not casts in
- * the sense that matters: they give a type to a bound parameter that arrives
- * untyped, which is an input coercion and never looks in `pg_cast`.
+ * roleSettings, and the `'{0}'::pg_catalog.oid[]` in policies, are the only
+ * ones left in this file, and they are not casts in the sense that matters:
+ * they give a type to a bound parameter or a literal that arrives untyped,
+ * which is an input coercion and never looks in `pg_cast`.
  * Every read of a catalogue column goes uncast, because a planted cast would
  * otherwise be able to change what this file sees — as one did in the first
  * draft (see PresentRow).
@@ -781,7 +788,15 @@ export async function liveSchemaProblems<Schema>(
   for (const grant of allGrants) {
     held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
-  const authority = new Map(authorityTables.map((table) => [table.table, table]));
+  // Each listed table by the name the rest of this check uses, matched on its
+  // plain name, as the module wrote it and as CI's A3c-1 check matches it.
+  const byPlainName = new Map(allRelations.map((relation) => [relation.plain, relation.name]));
+  const authority = new Map<string, SignedStateTable>();
+  for (const table of authorityTables) {
+    const name = byPlainName.get(table.table);
+    if (name === undefined) problems.push(`${table.table} is listed as an authority table but is not there`);
+    else authority.set(name, table);
+  }
   for (const relation of allRelations) {
     // Held to their own list, below.
     if (authority.has(relation.name)) continue;
@@ -801,10 +816,6 @@ export async function liveSchemaProblems<Schema>(
   const writableIn = new Map<string, string[]>();
   for (const { table, column } of writable) writableIn.set(table, [...(writableIn.get(table) ?? []), column]);
   for (const [name, table] of authority) {
-    if (!known.has(name)) {
-      problems.push(`${name} is listed as an authority table but is not there`);
-      continue;
-    }
     const grantsOn = allGrants.filter((grant) => grant.table === name);
     const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
     for (const right of onTable) {

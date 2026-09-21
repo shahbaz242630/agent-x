@@ -128,16 +128,32 @@ describe('the deadline', () => {
     expect(log.capture.lines()).toEqual([]);
   });
 
-  it('raises no alarm when the stop comes during a read, whatever the read then does', async () => {
+  it('raises no alarm when the stop comes during a read', async () => {
     const stopping = new AbortController();
-    // As the pool closes under a stopping API: the read fails once the stop has begun.
     guard.result = (): Promise<string[]> => {
       stopping.abort();
-      return Promise.reject(new Error('Connection terminated'));
+      return new Promise(() => undefined);
     };
     const log = logger();
     await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
     expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('still raises the alarm for a read that failed on its own, though the stop came just after', async () => {
+    const stopping = new AbortController();
+    // The read fails, and the stop lands in the same moment, before the check
+    // has handled the failure: the failure, not the stop, is what it met.
+    guard.result = (): Promise<string[]> =>
+      ({
+        then: (_resolve: unknown, reject: (error: Error) => void) => {
+          reject(new Error('permission denied for table pg_class'));
+          stopping.abort();
+        },
+      }) as unknown as Promise<string[]>;
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
+    expect(stopping.signal.aborted).toBe(true);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
   });
 
   it('declines a start that is stopped mid-check, with no alarm', async () => {

@@ -48,9 +48,17 @@ export interface SchemaCheckOptions<Schema = unknown> {
  */
 const SCHEMA_CHECK_DEADLINE_MS = 10_000;
 
+/** The check ended because the API is stopping: the API's own doing, never the database's. */
+class Stopped extends Error {
+  constructor() {
+    super('the schema check was stopped');
+    this.name = 'Stopped';
+  }
+}
+
 /**
- * The work, or a rejection once the deadline passes or the run is stopped,
- * whichever comes first.
+ * The work, or a rejection once the deadline passes or the run is stopped
+ * (Stopped), whichever comes first.
  *
  * A signal that has **already** aborted is checked before anything is waited
  * on: `addEventListener('abort', …)` never fires on one that aborted earlier,
@@ -58,7 +66,7 @@ const SCHEMA_CHECK_DEADLINE_MS = 10_000;
  * sit out its whole deadline while the API was trying to shut down.
  */
 async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: AbortSignal | undefined): Promise<T> {
-  if (signal?.aborted === true) throw new Error('the schema check was stopped');
+  if (signal?.aborted === true) throw new Stopped();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stop: (() => void) | undefined;
   const cut = new Promise<never>((_, reject) => {
@@ -66,7 +74,7 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
       reject(new Error(`the schema check did not finish within ${String(deadlineMs)} ms`));
     }, deadlineMs);
     stop = () => {
-      reject(new Error('the schema check was stopped'));
+      reject(new Stopped());
     };
     signal?.addEventListener('abort', stop, { once: true });
   });
@@ -120,16 +128,17 @@ async function checkSchema<Schema>({
     const problems = await withinDeadline(reading, deadlineMs, signal);
     return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
   } catch (error) {
-    // Once the API is stopping, whatever cut the read short (the stop itself,
-    // or its pool closing under it) is the stop.
-    if (signal?.aborted === true) return { kind: 'stopped' };
+    // Only the stop itself: a read that failed on its own is the alarm, even
+    // if the API began stopping just after (anchor-check.ts draws the same line).
+    if (error instanceof Stopped) return { kind: 'stopped' };
     return { kind: 'unreadable', error };
   }
 }
 
 /**
- * The check at start-up. Returns whether the API may go on; a refusal has
- * already been logged.
+ * The check at start-up. Returns whether the API may go on; a refusal for
+ * drift or an unreadable catalogue has already been logged, and one because
+ * the API was stopped needs no line.
  */
 export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Schema>): Promise<boolean> {
   const outcome = await checkSchema(options);

@@ -540,7 +540,7 @@ describe('an authority table the product lists (A3f-2)', () => {
   });
 
   afterEach(async () => {
-    await owner.query('drop schema probe cascade');
+    await owner.query('drop schema if exists probe cascade');
   });
 
   it('passes one built as its migration must build it', async () => {
@@ -579,11 +579,25 @@ describe('an authority table the product lists (A3f-2)', () => {
       'grant references (role) on probe.agents to agentx_app',
       ['agentx_app may REFERENCES on columns of probe.agents'],
     ],
+    [
+      'a table right it never needs, once: the same right on its columns is not named again',
+      'grant references on probe.agents to agentx_app',
+      ['agentx_app may REFERENCES on probe.agents'],
+    ],
   ])('names %s', async (_, grant, named) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
     await owner.query(grant);
 
     expect(await listed()).toEqual(named);
+  });
+
+  it('passes reading and adding granted column by column, as A3c-1 allows in CI', async () => {
+    await owner.query('revoke select, insert on probe.agents from agentx_app');
+    await owner.query(
+      'grant select (org_id, id, status, role), insert (org_id, id, status, role) on probe.agents to agentx_app',
+    );
+
+    expect(await listed()).toEqual([]);
   });
 
   it('holds only a listed table to it: the same DELETE on a table not listed is a tenant table’s right', async () => {
@@ -600,6 +614,18 @@ describe('an authority table the product lists (A3f-2)', () => {
 });
 
 describe('what only the server admin can do', () => {
+  // A role of this file's own to hand things to. The shared agentx_* roles
+  // belong to the whole test server, and other files check them while this one
+  // runs: main.db.test.ts refuses to start as a backup role that owns anything,
+  // and failed that way whenever it ran while audit.events was the backup's.
+  beforeAll(async () => {
+    await database.as('admin').query('create role schema_guard_fixture nologin');
+  });
+
+  afterAll(async () => {
+    await database.as('admin').query('drop role if exists schema_guard_fixture');
+  });
+
   it('sees a planted cast, which the database owner is refused', async () => {
     // agentx_owner cannot do this — Postgres answers "must be owner of type
     // bigint or type text" (proven S32) — so the admin stands in for the tier
@@ -625,7 +651,7 @@ describe('what only the server admin can do', () => {
     // so this is the admin's tier — but an owner that *was* made a member of
     // another role could, and the guard should not care how it happened.
     const admin = database.as('admin');
-    await admin.query('alter table audit.events owner to agentx_backup');
+    await admin.query('alter table audit.events owner to schema_guard_fixture');
     try {
       expect(await problems()).toContain('audit.events is owned by another role');
     } finally {
@@ -635,7 +661,7 @@ describe('what only the server admin can do', () => {
 
   it('sees a schema handed to another role', async () => {
     const admin = database.as('admin');
-    await admin.query('alter schema audit owner to agentx_backup');
+    await admin.query('alter schema audit owner to schema_guard_fixture');
     try {
       expect(await problems()).toContain('schema "audit" is owned by another role');
     } finally {
