@@ -1282,7 +1282,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-I]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-J]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {

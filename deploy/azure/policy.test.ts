@@ -1022,14 +1022,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to I.
+    // The playbook's sections run from A to J.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
-      properties(alert).description = before.replace(/section [A-H]\.$/, `section ${section}.`);
+      properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
-    expect(brokenRules(changed(CAP_ALERT, inSection('I')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('J')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('K')))).toEqual(['alert-runbook']);
+    // The log cap's own section (T1c): section D is about dependencies.
+    for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
+      const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
+      expect(description).toMatch(/ Runbook: Incident-Response-Playbook\.md section J\.$/);
+    }
   });
 
   it('alert-delivery: an alert switched off, sent nowhere, or to a group that is off or tells nobody', () => {

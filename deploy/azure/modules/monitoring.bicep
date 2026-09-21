@@ -82,7 +82,7 @@ resource quotaWarning 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Log quota: 80% of the daily cap'
-    description: 'SEV-2. The workspace took in more than 80% of its daily cap in the last 24 hours; at 100% it stops collecting until the next day. Runbook: Incident-Response-Playbook.md section D.'
+    description: 'SEV-2. The workspace took in more than 80% of its daily cap in the last 24 hours; at 100% it stops collecting until the next day. Runbook: Incident-Response-Playbook.md section J.'
     severity: 2
     enabled: true
     scopes: [workspace.id]
@@ -118,7 +118,7 @@ resource capReached 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Log quota: daily cap reached'
-    description: 'SEV-2. The workspace reached its daily cap and stopped collecting logs until its daily reset; monitoring is blind until then. Runbook: Incident-Response-Playbook.md section D.'
+    description: 'SEV-2. The workspace reached its daily cap and stopped collecting logs until its daily reset; monitoring is blind until then. Runbook: Incident-Response-Playbook.md section J.'
     severity: 2
     enabled: true
     scopes: [workspace.id]
