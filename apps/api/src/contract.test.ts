@@ -708,6 +708,40 @@ describe("SEC-WEB-06 the contract's check of an answer runs after every other ho
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
   });
 
+  it("answers as a failure an object whose status a plugin's own hook changed before it was written", async () => {
+    const { app, capture } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.addHook('preSerialization', (_request, reply, payload, next) => {
+          void reply.code(201);
+          next(null, payload);
+        });
+        child.get('/row', OPEN, () => ({ ok: true, secret: PLANTED }));
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await app.ready();
+    const answer = await app.inject('/test/plugin/row');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('answers as a failure an object sent on the not-found path, which is no route', async () => {
+    const { app, capture } = await server();
+    app.addHook('onRequest', (request, reply, done) => {
+      if (request.url === '/test/unknown') {
+        void reply.send({ ok: true, secret: PLANTED });
+        return;
+      }
+      done();
+    });
+    await app.ready();
+    const answer = await app.inject('/test/unknown');
+    expect(answer.statusCode).toBe(500);
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
   it("refuses to start when a later hook puts a preSerialization hook after the contract's", async () => {
     const { app } = await server();
     await app.register(

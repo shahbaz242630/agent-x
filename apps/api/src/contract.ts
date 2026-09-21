@@ -406,6 +406,10 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     added.push({ route, instance: this });
   });
 
+  // And at the root too, for the not-found path, which is no route: no onRoute
+  // hook adds the check there, and it declares no answer, so it refuses any object.
+  app.addHook('preSerialization', answerGuard);
+
   const transformObject = createJsonSchemaTransformObject({
     schemaRegistry: API_SCHEMAS,
     zodToJsonConfig: ZOD_TO_JSON,
