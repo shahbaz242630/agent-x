@@ -9,13 +9,14 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { fileReferences } from '../../tooling/bicep/references.ts';
-import { type Az, type AzResult, type Deployment, DEPLOYMENTS } from './deploy.ts';
+import { type Az, type AzResult, type Deployment, DEPLOYMENTS, RECORDED, RECORDS_JOB, recordTag } from './deploy.ts';
 import type { History } from './git.ts';
-import { JOBS_API } from './jobs.ts';
+import { jobName, JOBS_API } from './jobs.ts';
 import {
   changes,
   check,
   decide,
+  type Decision,
   type Folder,
   HAND_DEPLOYED,
   handDeployedList,
@@ -23,7 +24,10 @@ import {
   ORDER,
   PARAMS_PATHS,
   parseArguments,
+  type Readers,
   readersFrom,
+  type Records,
+  recordsIn,
   release,
   released,
   type ReleaseSteps,
@@ -456,7 +460,8 @@ describe('deciding a release', () => {
     const red = (file: string, reason: string): void => {
       expect(reasons(file)).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${reason}`] });
     };
-    const foundation = 'deploy.ts foundation reads it, so run it by hand, its what-if read, then apps';
+    const foundation =
+      'deploy.ts foundation reads it, so run it by hand, its what-if read, then run this release again';
     red('deploy/azure/modules/postgres.bicep', foundation);
     // Where a Windows checkout puts it all the same.
     red('Deploy/Azure/Modules/Postgres.bicep', foundation);
@@ -464,7 +469,7 @@ describe('deciding a release', () => {
     red('deploy/azure/apps.bicep', 'deploy.ts apps reads it, so run it by hand, its what-if read');
     red(
       'deploy/azure/shared.json',
-      'deploy.ts foundation and secrets read it, so run each by hand in that order, each what-if read, then apps',
+      'deploy.ts foundation and secrets read it, so run each by hand in that order, each what-if read, then run this release again',
     );
     red(
       'deploy/azure/names.bicep',
@@ -484,6 +489,162 @@ describe('deciding a release', () => {
         ts,
       ).kind,
     ).toBe('release');
+  });
+});
+
+describe('deciding a release on the hand deploys records (T1b)', () => {
+  const readers = readersFrom(SAID);
+  /** A commit between OLD and NEW. */
+  const MIDDLE = commit('d');
+  const postgres = 'deploy/azure/modules/postgres.bicep';
+  /** A release of NEW from OLD where the files changed, with the records, and what changed since each record. */
+  const decided = (
+    files: readonly string[],
+    records: Records,
+    since: Readonly<Record<string, readonly string[]>> = {},
+    // null: Bicep hasn't said (undefined would take the default).
+    known: Readers | null = readers,
+  ): Decision =>
+    decide(
+      both(running('api'), running('migrate')),
+      NEW,
+      NEW_IMAGE,
+      history([OLD, MIDDLE, NEW], { [OLD]: files, ...since }),
+      known ?? undefined,
+      records,
+    );
+  const red = (file: string, reason: string) => ({
+    kind: 'by-hand',
+    reasons: [`${file} changed since ${OLD}: ${reason}`],
+  });
+  const runFoundation =
+    'deploy.ts foundation reads it, so run it by hand, its what-if read, then run this release again';
+  const every: Records = new Map([
+    ['foundation', NEW],
+    ['secrets', NEW],
+    ['certificates', NEW],
+  ]);
+
+  it('takes a changed file only recorded deploys read as deployed once each record has it as it is now', () => {
+    expect(decided([postgres], new Map([['foundation', NEW]]))).toEqual({
+      kind: 'release',
+      updates: new Map([
+        ['migrate', released(running('migrate'), NEW_IMAGE, NEW)],
+        ['api', released(running('api'), NEW_IMAGE, NEW)],
+      ]),
+      deployed: [`${postgres} changed since ${OLD}: deployed by hand, foundation from ${NEW}`],
+    });
+    // Recorded earlier, with the file unchanged since.
+    expect(decided([postgres], new Map([['foundation', MIDDLE]]), { [MIDDLE]: ['apps/api/src/main.ts'] }).kind).toBe(
+      'release',
+    );
+    // Read by two, each recorded.
+    expect(
+      decided(
+        ['deploy/azure/shared.json'],
+        new Map([
+          ['foundation', NEW],
+          ['secrets', MIDDLE],
+        ]),
+        { [MIDDLE]: [] },
+      ),
+    ).toMatchObject({
+      kind: 'release',
+      deployed: [
+        `deploy/azure/shared.json changed since ${OLD}: deployed by hand, foundation from ${NEW}, secrets from ${MIDDLE}`,
+      ],
+    });
+  });
+
+  it('stays red, naming only the deploys whose record lacks the file, when any does', () => {
+    // Recorded before the file last changed, in either case.
+    expect(decided([postgres], new Map([['foundation', MIDDLE]]), { [MIDDLE]: [postgres] })).toEqual(
+      red(postgres, runFoundation),
+    );
+    expect(
+      decided([postgres], new Map([['foundation', MIDDLE]]), { [MIDDLE]: ['Deploy/Azure/Modules/Postgres.bicep'] }),
+    ).toEqual(red(postgres, runFoundation));
+    // Recorded at a commit this one doesn't have: a branch's, or a later one.
+    expect(decided([postgres], new Map([['foundation', commit('9')]]))).toEqual(red(postgres, runFoundation));
+    expect(decided([postgres], new Map([['foundation', LATER]]))).toEqual(red(postgres, runFoundation));
+    // Only another deploy recorded, or none.
+    expect(
+      decided(
+        [postgres],
+        new Map([
+          ['secrets', NEW],
+          ['certificates', NEW],
+        ]),
+      ),
+    ).toEqual(red(postgres, runFoundation));
+    expect(decided([postgres], new Map())).toEqual(red(postgres, runFoundation));
+    // Read by two, one recorded: the other named alone.
+    expect(decided(['deploy/azure/shared.json'], new Map([['foundation', NEW]]))).toEqual(
+      red(
+        'deploy/azure/shared.json',
+        'deploy.ts secrets reads it, so run it by hand, its what-if read, then run this release again',
+      ),
+    );
+    // One file covered and one not: red for the one not.
+    expect(decided([postgres, 'deploy/azure/secrets.bicep'], new Map([['foundation', NEW]]))).toEqual(
+      red(
+        'deploy/azure/secrets.bicep',
+        'deploy.ts secrets reads it, so run it by hand, its what-if read, then run this release again',
+      ),
+    );
+  });
+
+  it('never takes a record for apps, a file no deployment reads, or when Bicep has not said', () => {
+    // apps's stamp is what staging runs: no record stands in for it.
+    const runApps = 'deploy.ts apps reads it, so run it by hand, its what-if read';
+    expect(decided(['deploy/azure/apps.bicep'], every)).toEqual(red('deploy/azure/apps.bicep', runApps));
+    expect(decided(['deploy/azure/names.bicep'], every)).toEqual(red('deploy/azure/names.bicep', runApps));
+    expect(decided(['deploy/azure/hand-deployed.json'], every)).toEqual(
+      red('deploy/azure/hand-deployed.json', HAND_DEPLOYED[0]?.why ?? ''),
+    );
+    expect(decided(['db/bootstrap/roles.sql'], every)).toEqual(
+      red('db/bootstrap/roles.sql', HAND_DEPLOYED[1]?.why ?? ''),
+    );
+    expect(decided([postgres], every, {}, null)).toEqual(red(postgres, HAND_DEPLOYED[0]?.why ?? ''));
+  });
+});
+
+describe('the hand deploys records', () => {
+  it("are read from each recorded deploy's tag on the migration job, and nothing else", () => {
+    const said: string[] = [];
+    const tags = {
+      environment: 'staging',
+      'agentx-deployed-foundation': NEW,
+      'agentx-deployed-certificates': OLD,
+      'agentx-deployed-apps': NEW,
+      'Agentx-Deployed-Secrets': NEW,
+    };
+    expect(recordsIn(tags, (line) => said.push(line))).toEqual(
+      new Map([
+        ['foundation', NEW],
+        ['certificates', OLD],
+      ]),
+    );
+    expect(said).toEqual([]);
+  });
+
+  it("count a record that isn't a commit for nothing, saying so without its value", () => {
+    for (const value of ['main', NEW.toUpperCase(), NEW.slice(1), `${NEW} `, 1, null]) {
+      const said: string[] = [];
+      expect(recordsIn({ 'agentx-deployed-secrets': value }, (line) => said.push(line))).toEqual(new Map());
+      expect(said).toEqual(["The migration job's agentx-deployed-secrets isn't a commit, so it counts for nothing."]);
+    }
+  });
+
+  it('are held on the job CI releases, one tag for each deploy but apps', () => {
+    expect(RECORDS_JOB).toBe(jobName('migrate'));
+    expect(`jobs/${RECORDS_JOB}`).toBe(WORKLOADS.migrate.path);
+    expect(RECORDED.map(recordTag)).toEqual([
+      'agentx-deployed-foundation',
+      'agentx-deployed-secrets',
+      'agentx-deployed-certificates',
+    ]);
+    expect([...RECORDED, 'apps'].sort()).toEqual(Object.keys(DEPLOYMENTS).sort());
   });
 });
 
@@ -552,6 +713,7 @@ function fakeAz(
   containers: Readonly<Record<Workload, unknown>>,
   calls: string[][],
   account: unknown = { name: 'Azure subscription 1', id: SUBSCRIPTION },
+  jobTags: Readonly<Record<string, unknown>> = {},
 ): Az {
   const answer = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
   return {
@@ -563,7 +725,11 @@ function fakeAz(
       if (args[0] === 'account') return answer(account);
       const workload = ORDER.find((each) => args.includes(workloadUrl(SUBSCRIPTION, each)));
       if (args[0] === 'rest' && workload !== undefined) {
-        return answer({ id: 'x', properties: { template: { containers: containers[workload] } } });
+        return answer({
+          id: 'x',
+          ...(workload === 'migrate' ? { tags: jobTags } : {}),
+          properties: { template: { containers: containers[workload] } },
+        });
       }
       return { status: 1, stdout: '', stderr: `unexpected: az ${args.join(' ')}` };
     },
@@ -582,13 +748,14 @@ async function checked(
   line: History,
   account?: unknown,
   folder: Folder = folderAt(NEW).folder,
+  jobTags: Readonly<Record<string, unknown>> = {},
 ): Promise<{ status: number | undefined; said: string[]; calls: string[][]; error: unknown }> {
   const said: string[] = [];
   const calls: string[][] = [];
   try {
     const status = await check(
       { command: 'check', commit: NEW, digest: digest('2') },
-      { az: fakeAz(containers, calls, account), history: line, folder, say: (said_) => said.push(said_) },
+      { az: fakeAz(containers, calls, account, jobTags), history: line, folder, say: (said_) => said.push(said_) },
     );
     return { status, said, calls, error: undefined };
   } catch (error) {
@@ -654,13 +821,47 @@ describe('check', () => {
     expect(said.slice(-3)).toEqual([
       `A release of ${NEW} stops here, red: this needs a hand deploy.`,
       `  db/bootstrap/roles.sql changed since ${OLD}: ${HAND_DEPLOYED[1]?.why ?? ''}`,
-      `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deploy.ts foundation reads it, so run it by hand, its what-if read, then apps`,
+      `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deploy.ts foundation reads it, so run it by hand, its what-if read, then run this release again`,
     ]);
     // Bicep was asked once, about every deployment.
     expect(asked).toEqual([[...PARAMS_PATHS.values()]]);
   });
 
-  it("leaves the deploys unsaid, still red with each reason, when this folder isn't the commit or Bicep can't say", async () => {
+  it('goes ahead on a change only recorded deploys read, saying which records it rests on', async () => {
+    const { folder, asked } = folderAt(NEW);
+    const { status, said } = await checked(
+      staging(OLD),
+      history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] }),
+      undefined,
+      folder,
+      { 'agentx-deployed-foundation': NEW },
+    );
+    expect(status).toBe(0);
+    expect(said.slice(3)).toEqual([
+      `The migration job records: foundation sent ${NEW}.`,
+      'Deployed by hand already, as the migration job records:',
+      `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deployed by hand, foundation from ${NEW}`,
+      `A release of ${NEW} would update, in order:`,
+      `  migrate: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}, and nothing else`,
+      `  api: image ${OLD_IMAGE} → ${NEW_IMAGE}; AGENTX_RELEASE ${OLD} → ${NEW}, and nothing else`,
+    ]);
+    expect(asked).toHaveLength(1);
+  });
+
+  it("stays red on a record that isn't a commit, saying so", async () => {
+    const { status, said } = await checked(
+      staging(OLD),
+      history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] }),
+      undefined,
+      folderAt(NEW).folder,
+      { 'agentx-deployed-foundation': 'main' },
+    );
+    expect(status).toBe(1);
+    expect(said).toContain("The migration job's agentx-deployed-foundation isn't a commit, so it counts for nothing.");
+    expect(said).toContain('The migration job holds no hand deploy records.');
+  });
+
+  it("leaves the deploys unsaid, still red whatever the records, when this folder isn't the commit or Bicep can't say", async () => {
     const changed = history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] });
     const reason = `  deploy/azure/modules/postgres.bicep changed since ${OLD}: ${HAND_DEPLOYED[0]?.why ?? ''}`;
     const broken: Folder = {
@@ -676,11 +877,14 @@ describe('check', () => {
       [folderAt(NEW, new Map()).folder, 'Bicep said nothing of what foundation reads'],
       [broken, "git couldn't say which commit this folder is at:\nfatal: not a git repository"],
     ];
+    // A record that would cover the file, were it known that only foundation reads it.
+    const recorded = { 'agentx-deployed-foundation': NEW };
     for (const [folder, why] of cases) {
-      const { status, said } = await checked(staging(OLD), changed, undefined, folder);
+      const { status, said } = await checked(staging(OLD), changed, undefined, folder, recorded);
       expect(status).toBe(1);
-      expect(said.slice(-3)).toEqual([
+      expect(said.slice(-4)).toEqual([
         `Which hand deploy reads each file goes unsaid: ${why}.`,
+        `The migration job records: foundation sent ${NEW}.`,
         `A release of ${NEW} stops here, red: this needs a hand deploy.`,
         reason,
       ]);
@@ -778,6 +982,8 @@ class Staging {
     command: ['node'],
     limit: 900,
   };
+  /** The migration job's tags, which hold the hand deploys' records (T1b). */
+  jobTags: Readonly<Record<string, unknown>> = { environment: 'staging', product: 'agent-x' };
   app: Held & { suffix: unknown; env: readonly unknown[] } = {
     release: OLD,
     image: OLD_IMAGE,
@@ -879,6 +1085,7 @@ class Staging {
       env: workload === 'api' ? this.app.env : builtAt(held.release),
     });
     return {
+      ...(workload === 'migrate' ? { tags: this.jobTags } : {}),
       properties: {
         provisioningState: state,
         ...(workload === 'migrate'
@@ -1157,6 +1364,24 @@ describe('release', () => {
     expect(steps.said.at(-1)).toBe(
       'The image was refused (SIGNATURE_REFUSED), so nothing was read or changed:\nnot signed by CI on main',
     );
+  });
+
+  it('releases a change only recorded deploys read, saying so, with the writes an ordinary release makes', async () => {
+    const azure = new Staging();
+    azure.jobTags = { ...azure.jobTags, 'agentx-deployed-foundation': NEW };
+    const ended_ = await outcome(azure, history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] }));
+    expect(ended_.status).toBe(0);
+    expect(ended_.said).toContain(
+      `  deploy/azure/modules/postgres.bicep changed since ${OLD}: deployed by hand, foundation from ${NEW}`,
+    );
+    const plain = new Staging();
+    expect((await outcome(plain)).status).toBe(0);
+    expect(azure.writes).toEqual(plain.writes);
+    // Without the record, the same change stays red and writes nothing.
+    const unrecorded = new Staging();
+    const red = await outcome(unrecorded, history([OLD, NEW], { [OLD]: ['deploy/azure/modules/postgres.bicep'] }));
+    expect(red.status).toBe(1);
+    expect(unrecorded.writes).toEqual([]);
   });
 
   it('writes nothing when a person must deploy it, or staging is already past it', async () => {

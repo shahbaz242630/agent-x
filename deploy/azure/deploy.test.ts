@@ -488,7 +488,19 @@ interface AzAnswers {
   readonly apps?: readonly { readonly name: string; readonly fewest?: unknown }[];
   /** The environment's certificates after the deployment. */
   readonly certificates?: readonly unknown[];
+  /**
+   * How the migration job takes a record (T1b): kept (the default); no job yet
+   * (a first deploy); the write refused; or kept by the write but missing
+   * from the read back.
+   */
+  readonly record?: 'kept' | 'no job' | 'refused' | 'lost';
 }
+
+/** The migration job, which holds the records, as `az tag` names it. */
+const RECORDS_JOB_ID = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/jobs/job-agentx-stg-migrate`;
+
+/** The tag commands a recorded deploy runs, with the record it writes, by their first three words. */
+const RECORDING = ['tag update --resource-id', 'tag list --resource-id'] as const;
 
 const ENVIRONMENT_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/managedEnvironments/cae-agentx-staging`;
 /** A made-up address from the documentation range, and a made-up code of the shape Azure gives. */
@@ -551,6 +563,8 @@ const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPT
 class RecordingAz implements Az {
   readonly calls: Call[] = [];
   readonly options: AzAnswers;
+  /** The migration job's tags, as Azure holds them after each write. */
+  readonly tags: Record<string, string | undefined> = { environment: 'staging', product: 'agent-x' };
   #deployed = false;
   #readings = 0;
 
@@ -595,6 +609,24 @@ class RecordingAz implements Az {
         return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
       case 'containerapp job':
         return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
+      case 'tag update': {
+        const record = this.options.record ?? 'kept';
+        if (record === 'no job') {
+          return {
+            status: 3,
+            stdout: '',
+            stderr: `ERROR: (ResourceNotFound) The Resource 'Microsoft.App/jobs/job-agentx-stg-migrate' under resource group 'rg-agentx-staging' was not found.\nCode: ResourceNotFound\n`,
+          };
+        }
+        if (record === 'refused') {
+          return { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) The client may not write tags.\n' };
+        }
+        const [name, value] = (args[args.indexOf('--tags') + 1] ?? '').split('=');
+        if (record === 'kept' && name !== undefined) this.tags[name] = value;
+        return json({ properties: { tags: this.tags } });
+      }
+      case 'tag list':
+        return json({ properties: { tags: this.tags } });
       case 'rest --method': {
         const url = args[args.indexOf('--url') + 1] ?? '';
         if (url === `${ENVIRONMENT_URL}?api-version=2026-01-01`) {
@@ -685,8 +717,26 @@ describe('deploy foundation', () => {
       'bicep version',
       'deployment sub create',
       'deployment sub show',
+      ...RECORDING,
       'rest --method get',
     ]);
+    // The commit it sent, recorded on the migration job once Azure said it succeeded, and read back.
+    expect(done.az.calls.find((call) => call.args[1] === 'update')?.args).toEqual([
+      'tag',
+      'update',
+      '--resource-id',
+      RECORDS_JOB_ID,
+      '--operation',
+      'Merge',
+      '--tags',
+      `agentx-deployed-foundation=${COMMIT}`,
+      '--output',
+      'json',
+    ]);
+    expect(done.az.tags['agentx-deployed-foundation']).toBe(COMMIT);
+    expect(done.terminal.said).toContain(
+      `Recorded on job-agentx-stg-migrate: foundation sent ${COMMIT}. CI's release takes it for what foundation reads.`,
+    );
     const deployment = done.az.deployment;
     expect(deployment?.args).toEqual([
       'deployment',
@@ -922,7 +972,9 @@ describe('deploy secrets', () => {
       'deployment group show',
       // Fifteen secrets, three a page, and the empty page Azure ends with.
       ...Array<string>(6).fill('rest --method get'),
+      ...RECORDING,
     ]);
+    expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
     const deployment = done.az.deployment;
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
     expect(deployment?.args).toContain(RESOURCE_GROUP);
@@ -934,10 +986,11 @@ describe('deploy secrets', () => {
       for (const value of Object.values(values)) expect(call.args.join(' ')).not.toContain(value);
     }
     done.terminal.neverSaid(Object.values(values));
-    expect(done.terminal.said.slice(-16, -1)).toEqual([...everything].sort().map((name) => `  ${name}`));
-    expect(done.terminal.said.at(-1)).toBe(
+    expect(done.terminal.said.slice(-17, -2)).toEqual([...everything].sort().map((name) => `  ${name}`));
+    expect(done.terminal.said.slice(-2)).toEqual([
       "The app's 6 keys are there, and none that was there before was written again.",
-    );
+      `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
+    ]);
   });
 
   it('on a vault that already has secrets, --all goes on only when the operator types the words', async () => {
@@ -1021,9 +1074,10 @@ describe('deploy secrets', () => {
       .sort();
     expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
-    expect(done.terminal.said.at(-1)).toBe(
+    expect(done.terminal.said.at(-2)).toBe(
       "The app's 6 keys are there, and none that was there before was written again.",
     );
+    expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });
 
   it('ends red when a key the vault held was written again, naming it and never a value', async () => {
@@ -1367,6 +1421,97 @@ describe('dns', () => {
   });
 });
 
+describe('what a hand deploy records (T1b)', () => {
+  const admin = aPaste();
+  /** Each recorded deploy, with what its run is told; each succeeds by default. */
+  const deploys = (): readonly { deployment: string; argv: readonly string[]; told: Scenario }[] => [
+    {
+      deployment: 'foundation',
+      argv: ['foundation'],
+      told: { answers: ['y', 'ops@example.invalid'], hidden: [admin, admin] },
+    },
+    { deployment: 'secrets', argv: ['secrets', '--keys'], told: { answers: ['y'] } },
+    {
+      deployment: 'certificates',
+      argv: ['certificates'],
+      told: { answers: ['y', AUTH_HOST, APP_HOST], dns: readyDns() },
+    },
+  ];
+  const keys = [...Object.keys(VAULT_SECRETS), ...APP_KEYS];
+  /** Staging answering as the options say, with the vault's keys sound. */
+  const staging = (options: AzAnswers = {}): RecordingAz => new RecordingAz({ before: keys, after: keys, ...options });
+
+  it('refuses, before asking anything, to send from a folder with changes or none to read', async () => {
+    for (const { deployment, argv, told } of deploys()) {
+      const dirty = await run(argv, { ...told, checkout: { head: COMMIT, clean: false } });
+      expect(dirty.error).toMatchObject({
+        message: `This folder is at ${COMMIT} with changes not committed. ${deployment} records the commit it sends, and CI's release takes the record as what Azure was built from, so the Bicep sent must be a commit's with nothing changed (git switch main, then git pull). Nothing was deployed.`,
+      });
+      expect(dirty.az.calls).toEqual([]);
+      expect(dirty.terminal.questions).toEqual([]);
+      const unread = await run(argv, { ...told, checkout: null });
+      expect(unread.error).toMatchObject({ message: 'No way to read this folder was given.' });
+      expect(unread.az.calls).toEqual([]);
+    }
+  });
+
+  it('records the commit a clean folder is at, whatever commit that is, and nothing else', async () => {
+    const other = 'c'.repeat(40);
+    for (const { deployment, argv, told } of deploys()) {
+      const az = staging();
+      const done = await run(argv, { ...told, az, checkout: { head: other, clean: true } });
+      expect(done.status).toBe(0);
+      // Its own record, beside the job's own tags as they were.
+      expect(az.tags).toEqual({ environment: 'staging', product: 'agent-x', [`agentx-deployed-${deployment}`]: other });
+    }
+  });
+
+  it('records nothing when the deployment failed or was declined', async () => {
+    for (const options of [{ ended: 'Failed' }, { ended: 'Declined' }, { status: 1 }]) {
+      for (const { argv, told } of deploys()) {
+        const done = await run(argv, { ...told, az: staging(options) });
+        expect(done.status).toBe(1);
+        expect(done.az.sequence).not.toContain('tag update --resource-id');
+      }
+    }
+  });
+
+  it('records nothing, and ends as it would, before the first apps run makes the migration job', async () => {
+    for (const { argv, told } of deploys()) {
+      const done = await run(argv, { ...told, az: staging({ record: 'no job' }) });
+      expect(done.status).toBe(0);
+      expect(done.az.sequence).not.toContain('tag list --resource-id');
+      expect(done.terminal.said).toContain(
+        'No job-agentx-stg-migrate yet (apps creates it), so nothing was recorded: the first apps run stamps what staging runs.',
+      );
+    }
+  });
+
+  it('ends red, the deployment kept, when the record is refused or does not read back', async () => {
+    for (const { deployment, argv, told } of deploys()) {
+      const refused = await run(argv, { ...told, az: staging({ record: 'refused' }) });
+      expect(refused.status).toBe(1);
+      expect(refused.terminal.said).toContain(
+        `Deployed, but not recorded (az tag update --resource-id ${RECORDS_JOB_ID} --operation Merge --tags agentx-deployed-${deployment}=${COMMIT} failed:\nERROR: (AuthorizationFailed) The client may not write tags.): CI's release stays red on what ${deployment} reads until apps runs.`,
+      );
+      const lost = await run(argv, { ...told, az: staging({ record: 'lost' }) });
+      expect(lost.status).toBe(1);
+      expect(lost.terminal.said).toContain(
+        `Deployed, but not recorded (agentx-deployed-${deployment} reads back as nothing): CI's release stays red on what ${deployment} reads until apps runs.`,
+      );
+    }
+  });
+
+  it("records nothing for secrets whose keys aren't sound", async () => {
+    const missing = await run(['secrets', '--keys'], {
+      answers: ['y'],
+      az: new RecordingAz({ before: keys, after: keys.filter((name) => name !== 'key-audit-mac-v1') }),
+    });
+    expect(missing.status).toBe(1);
+    expect(missing.az.sequence).not.toContain('tag update --resource-id');
+  });
+});
+
 describe('deploy certificates', () => {
   const answers = ['y', AUTH_HOST, APP_HOST];
   const certificates = [
@@ -1390,7 +1535,9 @@ describe('deploy certificates', () => {
       'deployment group create',
       'deployment group show',
       'rest --method get',
+      ...RECORDING,
     ]);
+    expect(done.az.tags['agentx-deployed-certificates']).toBe(COMMIT);
     const deployment = done.az.deployment;
     expect(deployment?.args).toContain('staging.certificates.bicepparam');
     expect(deployment?.args).toContain('--confirm-with-what-if');
@@ -1399,10 +1546,11 @@ describe('deploy certificates', () => {
     );
     expect(deployment?.values).toEqual({ AGENTX_AZURE_AUTH_HOST: AUTH_HOST, AGENTX_AZURE_APP_HOST: APP_HOST });
     expect(done.checked).toEqual([deployment?.values]);
-    expect(done.terminal.said.slice(-4)).toEqual([
+    expect(done.terminal.said.slice(-5)).toEqual([
       'Deployed. The certificates, and how Azure left each:',
       `  mc-agentx-stg-app: ${APP_HOST}, Succeeded`,
       `  mc-agentx-stg-auth: ${AUTH_HOST}, Pending`,
+      `Recorded on job-agentx-stg-migrate: certificates sent ${COMMIT}. CI's release takes it for what certificates reads.`,
       'A door answers over https once its certificate has succeeded. Then run apps without --keep-running to stop the billing.',
     ]);
   });

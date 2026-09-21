@@ -32,6 +32,9 @@
 // the commit being deployed, named by its digest (ADR-002 Amendment E2), and
 // only from a clean checkout of that commit: the apps are stamped with it,
 // and CI's release job reads the stamp as what Azure was built from (G4-3).
+// foundation, secrets and certificates also run only from a clean checkout,
+// and once Azure says the deployment succeeded, each records the commit it
+// sent in a tag on the migration job, which the release reads too (T1b).
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { promises as systemDns } from 'node:dns';
@@ -78,6 +81,21 @@ export const DEPLOYMENTS = {
   certificates: `${ENVIRONMENT}.certificates.bicepparam`,
 } as const;
 export type Deployment = keyof typeof DEPLOYMENTS;
+
+/**
+ * The hand deploys that record the commit they sent (T1b), each in its own tag
+ * on the migration job, which CI's release reads already: the gate then takes
+ * a changed file only these read as deployed once each one's record has it
+ * (release.ts). apps needs none: its stamp is what the workloads run.
+ */
+export const RECORDED = ['foundation', 'secrets', 'certificates'] as const satisfies readonly Deployment[];
+export type Recorded = (typeof RECORDED)[number];
+
+/** The tag that holds a hand deploy's record. */
+export const recordTag = (deployment: Recorded): string => `agentx-deployed-${deployment}`;
+
+/** The job that holds the records (apps.bicep); a test holds it to the one CI releases. */
+export const RECORDS_JOB = 'job-agentx-stg-migrate';
 
 /** The Container Apps environment the foundation creates (names.bicep), which holds the doors; a test holds the two equal. */
 export const APPS_ENVIRONMENT = 'cae-agentx-staging';
@@ -705,7 +723,66 @@ function succeeded(steps: Steps, name: string, ended: Ended): boolean {
   return false;
 }
 
+/**
+ * The commit this folder is at, which a recorded deploy records: refused when
+ * anything in it differs from that commit, since the record says the commit's
+ * Bicep is what Azure was built from.
+ */
+function sentFrom(steps: Steps, deployment: Recorded): string {
+  if (steps.checkout === undefined) throw new Error('No way to read this folder was given.');
+  const here = steps.checkout();
+  if (!here.clean) {
+    throw new Error(
+      `This folder is at ${here.head} with changes not committed. ${deployment} records the commit it sends, and CI's release takes the record as what Azure was built from, so the Bicep sent must be a commit's with nothing changed (git switch main, then git pull). Nothing was deployed.`,
+    );
+  }
+  return here.head;
+}
+
+/**
+ * Records on the migration job that this deploy sent the commit, then reads
+ * the record back; true once it holds. Before the first apps run there is no
+ * job to hold it, and no release to accept it either, so nothing is recorded.
+ * A record that can't be written leaves CI's release red, as it was before T1b.
+ */
+function leaveRecord(steps: Steps, subscription: string, deployment: Recorded, commit: string): boolean {
+  const job = `/subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/jobs/${RECORDS_JOB}`;
+  const tag = recordTag(deployment);
+  const unrecorded = (why: string): false => {
+    steps.terminal.say(
+      `Deployed, but not recorded (${why}): CI's release stays red on what ${deployment} reads until apps runs.`,
+    );
+    return false;
+  };
+  try {
+    azJson(steps.az, ['tag', 'update', '--resource-id', job, '--operation', 'Merge', '--tags', `${tag}=${commit}`]);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    if (error.message.includes('(ResourceNotFound)')) {
+      steps.terminal.say(
+        `No ${RECORDS_JOB} yet (apps creates it), so nothing was recorded: the first apps run stamps what staging runs.`,
+      );
+      return true;
+    }
+    return unrecorded(error.message);
+  }
+  let held: unknown;
+  try {
+    const read = azJson(steps.az, ['tag', 'list', '--resource-id', job]) as { properties?: { tags?: unknown } } | null;
+    held = (read?.properties?.tags as Readonly<Record<string, unknown>> | null | undefined)?.[tag];
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    return unrecorded(error.message);
+  }
+  if (held !== commit) return unrecorded(`${tag} reads back as ${typeof held === 'string' ? held : 'nothing'}`);
+  steps.terminal.say(
+    `Recorded on ${RECORDS_JOB}: ${deployment} sent ${commit}. CI's release takes it for what ${deployment} reads.`,
+  );
+  return true;
+}
+
 async function deployFoundation(steps: Steps): Promise<number> {
+  const commit = sentFrom(steps, 'foundation');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   if (!steps.rangesCurrent()) {
@@ -747,7 +824,8 @@ async function deployFoundation(steps: Steps): Promise<number> {
   for (const [key, output] of Object.entries((ended.outputs ?? {}) as Record<string, { value?: unknown }>)) {
     steps.terminal.say(`  ${key}: ${text(output.value)}`);
   }
-  if (await alertsReachable(steps, subscription)) return 0;
+  const recorded = leaveRecord(steps, subscription, 'foundation', commit);
+  if (await alertsReachable(steps, subscription)) return recorded ? 0 : 1;
   steps.terminal.say(
     'The foundation is deployed, but no alert email can reach you yet. Once the address is confirmed, run node deploy/azure/deploy.ts alerts to check.',
   );
@@ -911,6 +989,7 @@ export function keyProblems(before: readonly Listed[], after: readonly Listed[])
 }
 
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
+  const commit = sentFrom(steps, 'secrets');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   const vaults = azJson(steps.az, [
@@ -983,10 +1062,12 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   steps.terminal.say(
     `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
   );
+  // Recorded only once the keys are sound: a release on a vault missing one would start an API that can't.
+  const recorded = leaveRecord(steps, subscription, 'secrets', commit);
   if (plan.kind === 'rotate' && [...plan.names].some((secret) => secret.startsWith('db-'))) {
     steps.terminal.say('A database login changed: start the set-up job now, so the server takes it.');
   }
-  return 0;
+  return recorded ? 0 : 1;
 }
 
 /** A host name the operator types, held to DNS's shape. */
@@ -1171,6 +1252,7 @@ function appsKeptAtZero(steps: Steps, subscription: string): string[] {
 
 async function deployCertificates(steps: Steps): Promise<number> {
   const dns = dnsOf(steps);
+  const commit = sentFrom(steps, 'certificates');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   const { authHost, appHost } = await askHosts(steps);
@@ -1231,10 +1313,11 @@ async function deployCertificates(steps: Steps): Promise<number> {
       `  ${text(certificate.name)}: ${text(certificate.properties?.subjectName)}, ${text(certificate.properties?.provisioningState)}`,
     );
   }
+  const recorded = leaveRecord(steps, subscription, 'certificates', commit);
   steps.terminal.say(
     'A door answers over https once its certificate has succeeded. Then run apps without --keep-running to stop the billing.',
   );
-  return 0;
+  return recorded ? 0 : 1;
 }
 
 async function deployApps(steps: Steps, commit: string | undefined, keepRunning: boolean): Promise<number> {
