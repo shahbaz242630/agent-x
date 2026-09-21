@@ -8,6 +8,7 @@ import type { FastifyReply } from 'fastify';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
+import { markWritten } from './written-answers.ts';
 
 /** Each registered code as a value of its own, with its public description, so OpenAPI documents every one (ADR-011 §8). */
 const REASON_CODE = z.union(
@@ -54,6 +55,7 @@ export function sendErrorBody(
   code: ReasonCode,
   correlationId: string,
 ): FastifyReply {
+  markWritten(reply);
   return reply
     .code(status)
     .type(JSON_TYPE)

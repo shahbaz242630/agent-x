@@ -247,6 +247,18 @@ const apiSetters = [
   'removeAllContentTypeParsers',
 ].map((property) => ({ property, message: apiContractOnly }));
 
+/**
+ * SEC-WEB-06: an onSend hook runs after an answer is written, and could send
+ * what no schema declares in its place. The contract refuses one on a route;
+ * this refuses one on a plugin, which its check at start can't see.
+ */
+const apiSendHooks = [
+  {
+    selector: "CallExpression[callee.property.name='addHook'][arguments.0.value='onSend']",
+    message: 'SEC-WEB-06: an onSend hook could rewrite an answer after it was written; only contract.ts adds one.',
+  },
+];
+
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
 const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
 
@@ -333,6 +345,7 @@ export default defineConfig([
     ignores: ['apps/api/src/server.ts', 'apps/api/src/contract.ts'],
     rules: {
       'no-restricted-properties': ['error', ...productProperties, ...apiSetters],
+      'no-restricted-syntax': ['error', ...productSyntax, ...apiSendHooks],
     },
   },
 

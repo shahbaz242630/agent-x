@@ -53,21 +53,41 @@ const REJECTED: LintCase[] = [
     rule: 'no-restricted-properties',
     says: 'loadConfig',
   },
+  {
+    name: 'an onSend hook on a plugin in an API module',
+    filePath: `${API}/on-send.ts`,
+    code: "export function plugin(app: { addHook(name: string, hook: () => void): void }): void {\n  app.addHook('onSend', () => undefined);\n}\n",
+    rule: 'no-restricted-syntax',
+    says: 'onSend',
+  },
+  {
+    name: "raw HTML in the API, whose block repeats the product's syntax list",
+    filePath: `${API}/html.ts`,
+    code: "export function show(element: { innerHTML: string }): void {\n  element.innerHTML = '<b>x</b>';\n}\n",
+    rule: 'no-restricted-syntax',
+    says: 'SEC-WEB-03',
+  },
 ];
 
-/** A plugin that calls every setter. */
+/** A plugin that calls every setter, and adds an onSend hook. */
 const callsAll = [
-  `export function plugin(app: Record<${SETTERS.map((setter) => `'${setter}'`).join(' | ')}, (handler: () => void) => void>): void {`,
+  `type Setters = Record<${SETTERS.map((setter) => `'${setter}'`).join(' | ')}, (handler: () => void) => void>;`,
+  'export function plugin(app: Setters & { addHook(name: string, hook: () => void): void }): void {',
   ...SETTERS.map((setter) => `  app.${setter}(() => undefined);`),
+  "  app.addHook('onSend', () => undefined);",
   '}',
   '',
 ].join('\n');
 
-const ALLOWED: LintCase[] = ['apps/api/src/server.ts', 'apps/api/src/contract.ts'].map((filePath) => ({
-  name: `every setter in ${filePath}`,
+// One file for each rule: both are exempt through the same entry of the same block.
+const ALLOWED: LintCase[] = [
+  { filePath: 'apps/api/src/server.ts', rule: 'no-restricted-properties' },
+  { filePath: 'apps/api/src/contract.ts', rule: 'no-restricted-syntax' },
+].map(({ filePath, rule }) => ({
+  name: `every setter and an onSend hook in ${filePath}`,
   filePath,
   code: callsAll,
-  rule: 'no-restricted-properties',
+  rule,
   realConfig: true,
 }));
 

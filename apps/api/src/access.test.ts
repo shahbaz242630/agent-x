@@ -153,7 +153,7 @@ describe('BR-04 a route answers only a caller it names, denying by default', () 
       reached.push('invite');
       return 'ok';
     });
-    app.get('/test/open', withAccess(['public']), () => 'open');
+    app.get('/test/open', withAccess(['public']), () => ({ ok: true }));
     await app.ready();
     return { app, reached };
   }
@@ -222,7 +222,7 @@ describe('BR-04 a route answers only a caller it names, denying by default', () 
 
   it('answers a public route, and the health check, to anyone', async () => {
     const { app } = await withRoutes();
-    expect((await app.inject('/test/open')).body).toBe('open');
+    expect((await app.inject('/test/open')).json()).toEqual({ ok: true });
     expect((await app.inject('/health')).json()).toEqual({ status: 'ok' });
   });
 

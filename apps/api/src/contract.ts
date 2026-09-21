@@ -14,6 +14,9 @@
 //   limit for it, which the document shows as x-body-limit.
 // - An object answer goes out only through the schema its route declares for
 //   its status, as JSON; one without is a failure on our side, never sent.
+// - An answer leaves only as the contract wrote it (written-answers.ts): a
+//   string, bytes or a stream a route sent itself is a failure on our side,
+//   and no route may rewrite its answers after they are written (onSend).
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -22,7 +25,13 @@
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
-import type { FastifyInstance, FastifySchema, preSerializationHookHandler, RouteOptions } from 'fastify';
+import type {
+  FastifyInstance,
+  FastifySchema,
+  onSendHookHandler,
+  preSerializationHookHandler,
+  RouteOptions,
+} from 'fastify';
 import {
   createJsonSchemaTransform,
   createJsonSchemaTransformObject,
@@ -34,6 +43,7 @@ import { z } from 'zod';
 import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
+import { isWritten, markWritten } from './written-answers.ts';
 
 /** The methods an OpenAPI path can hold. A route served with any other can't be documented. */
 const OPENAPI_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
@@ -178,11 +188,38 @@ const answerGuard: preSerializationHookHandler = (request, reply, payload, done)
   const type = reply.getHeader('content-type');
   const json = typeof type === 'string' && /^application\/json\s*(?:;|$)/i.test(type);
   if (json && (declared.has(status) || declared.has(`${status.charAt(0)}xx`))) {
+    markWritten(reply);
     done(null, payload);
     return;
   }
   done(new AnswerUndeclared(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
 };
+
+/** An answer the contract didn't write: a string, bytes or a stream a route sent itself. */
+class AnswerUnwritten extends Error {
+  constructor(route: string, status: number) {
+    super(`${route} answered ${String(status)} with a body the contract didn't write`);
+    this.name = 'AnswerUnwritten';
+  }
+}
+
+/**
+ * An answer leaves only as the contract wrote it (written-answers.ts), or
+ * empty. The contract adds it as each route's last onSend hook, after Fastify's
+ * own that empties a HEAD answer, and at the root for the not-found path. A
+ * route may add no onSend hook of its own: one that rewrote an answer after it
+ * was written would send what no schema declares.
+ */
+const answerLeaves: onSendHookHandler = (request, reply, payload, done) => {
+  if (isWritten(reply) || payload === undefined || payload === null || payload === '') {
+    done(null, payload);
+    return;
+  }
+  done(new AnswerUnwritten(`${request.method} ${request.routeOptions.url ?? request.url}`, reply.statusCode));
+};
+
+/** Fastify's own onSend hook on a HEAD route, which empties the answer. */
+const isHeadEmptier = (hook: unknown): boolean => typeof hook === 'function' && hook.name === 'headRouteOnSendHandler';
 
 /** A route's own hooks of one kind, as a list. */
 const hooksOf = <T>(hooks: T | readonly T[] | undefined): readonly T[] =>
@@ -260,6 +297,14 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   }
   if (written && hooksOf(route.preSerialization).at(-1) !== answerGuard) {
     problems.push("a preSerialization hook runs after the contract's check of its answers");
+  }
+  const sendHooks = hooksOf(route.onSend);
+  if (written && sendHooks.at(-1) !== answerLeaves) {
+    problems.push("an onSend hook runs after the contract's check of what leaves");
+  }
+  const ownSendHooks = written ? sendHooks.slice(0, -1) : sendHooks;
+  if (!ownSendHooks.every((hook) => methodsOf(route).includes('HEAD') && isHeadEmptier(hook))) {
+    problems.push('it rewrites its answers after they are written (onSend)');
   }
   // Allowlisted answers: every answer a route declares, but the one error body, names all it
   // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
@@ -403,12 +448,14 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
       };
     route.schema = schema;
     route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
+    route.onSend = [...hooksOf(route.onSend), answerLeaves];
     added.push({ route, instance: this });
   });
 
   // And at the root too, for the not-found path, which is no route: no onRoute
   // hook adds the check there, and it declares no answer, so it refuses any object.
   app.addHook('preSerialization', answerGuard);
+  app.addHook('onSend', answerLeaves);
 
   const transformObject = createJsonSchemaTransformObject({
     schemaRegistry: API_SCHEMAS,

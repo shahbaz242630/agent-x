@@ -62,21 +62,24 @@ async function listening() {
   // Two routes whose answers an async onSend hook holds back, as a compression or
   // signing hook would, so a refusal is still going out when the client hangs up:
   // one no one may call yet, and a public one a write from another origin reaches.
+  // No route may have an onSend hook of its own (contract.ts), so it sits on the
+  // server, for these two routes alone.
   const guarded: string[] = [];
   let sending = (): void => undefined;
   let send = (): void => undefined;
   const inSend = new Promise<void>((resolve) => (sending = resolve));
-  const holdBack = async (_request: unknown, _reply: unknown, payload: unknown): Promise<unknown> => {
+  app.addHook('onSend', async (request, _reply, payload) => {
+    if (request.url !== '/test/guarded') return payload;
     sending();
     await new Promise<void>((resolve) => (send = resolve));
     return payload;
-  };
-  const reach = (): string => {
+  });
+  const reach = () => {
     guarded.push('route');
-    return 'guarded';
+    return { ok: true };
   };
-  app.get('/test/guarded', { ...OPEN, config: { access: ['admin'] }, onSend: holdBack }, reach);
-  app.post('/test/guarded', { ...OPEN, onSend: holdBack }, reach);
+  app.get('/test/guarded', { ...OPEN, config: { access: ['admin'] } }, reach);
+  app.post('/test/guarded', OPEN, reach);
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = app.addresses()[0]?.port ?? 0;
