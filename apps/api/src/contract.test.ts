@@ -431,6 +431,23 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     },
   );
 
+  it('asks a body limit of a delete, and of a route that reads and writes at one address', async () => {
+    const { app } = await server();
+    const noLimit = { config: OPEN.config, schema: OPEN.schema };
+    expect(() => app.delete('/test/one', noLimit, () => 'ok')).toThrow('DELETE /test/one: it takes a body');
+    const both = { method: ['GET', 'POST'] as const, url: '/test/two', ...noLimit, handler: () => 'ok' };
+    expect(() => app.route({ ...both, method: [...both.method] })).toThrow('GET,POST /test/two: it takes a body');
+  });
+
+  it('takes a route whose only success answer is a redirect', async () => {
+    const { app } = await server();
+    app.get('/test/moved', { config: OPEN.config, schema: { response: { 302: z.object({}) } } }, (_request, reply) =>
+      reply.code(302).header('location', '/health').send({}),
+    );
+    await app.ready();
+    expect((await app.inject('/test/moved')).statusCode).toBe(302);
+  });
+
   it('takes a read with no body limit, a range of success answers, and a body limit of the most allowed', async () => {
     const { app } = await server();
     const read = { config: OPEN.config, schema: { response: { '2xx': z.object({ ok: z.literal(true) }) } } };
@@ -514,6 +531,8 @@ describe('the check for answers that let through what they do not name', () => {
 
   it('counts a reference it cannot follow, and a map with no values described, as open', () => {
     expect(looseAnswers(answering({ $ref: 'https://example.com/schemas/Thing' }))).toHaveLength(1);
+    // As long as the prefix it should have, and ending in the name of a tight schema it isn't.
+    expect(looseAnswers(answering({ $ref: '#/components/headers/Named' }, { Named: strict }))).toHaveLength(1);
     expect(looseAnswers(answering({ type: 'object' }))).toEqual([
       "GET /a: its 200 answer lets through what it doesn't name (answer.additionalProperties)",
     ]);
