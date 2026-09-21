@@ -237,9 +237,13 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
   app.addHook('onRoute', function (route) {
     const problems = routeProblems(route, this);
     if (problems.length > 0) throw new ContractBroken(problems);
+    // A frozen copy, which the document and the access hook share: neither a change
+    // to the document nor to a list the route was given can change who may call it.
+    const access = Object.freeze([...(route.config?.access ?? [])]);
+    route.config = { ...route.config, access };
     const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> = {
       ...route.schema,
-      [ACCESS_KEY]: route.config?.access,
+      [ACCESS_KEY]: access,
       response: { ...responsesOf(route), ...ERROR_RESPONSES },
     };
     route.schema = schema;

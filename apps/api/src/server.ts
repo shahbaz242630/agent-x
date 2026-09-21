@@ -129,11 +129,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   // Every request is counted, 404s and refusals included, before anything else can refuse it.
   app.addHook('onRequest', countRequest);
-  app.addHook('onRequest', async (request, reply) => {
+  // done() only for a request let through, as in access.ts: a refusal the client
+  // hangs up on must not go on to the route.
+  app.addHook('onRequest', (request, reply, done) => {
     if (isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)) {
-      return sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
+      void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
+      return;
     }
-    return undefined;
+    done();
   });
 
   registerAccess(app);

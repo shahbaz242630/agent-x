@@ -42,8 +42,7 @@ describe('BR-04 every route names who may call it', () => {
     ['one role', ['admin'], '/v1/members'],
     ['several roles and agents', ['admin', 'approver', 'developer', 'viewer', 'agent'], '/v1/spend-requests'],
     ['the public alone', ['public'], '/health'],
-    ['operators alone, outside the tenant addresses', ['operator'], '/operator/hand-off/pause'],
-    ['operators alone, at an address that only starts like a tenant one', ['operator'], '/v1x/pause'],
+    ['operators alone, under /operator/', ['operator'], '/operator/hand-off/pause'],
   ])('takes %s', (_what, access, url) => {
     expect(accessProblems(access, url)).toEqual([]);
   });
@@ -56,11 +55,26 @@ describe('BR-04 every route names who may call it', () => {
     ['a name in the wrong case', ['Admin'], '/v1/members', 'its access names someone unknown'],
     ['someone twice', ['admin', 'admin'], '/v1/members', 'its access names someone twice'],
     ['the public beside others', ['public', 'viewer'], '/v1/members', 'the public beside others'],
-    ['operators beside customers (SEC-OPS-01)', ['operator', 'admin'], '/admin/tools', 'operators beside customers'],
-    ['operators on a tenant address', ['operator'], '/v1/organization/unfreeze', 'operators on a tenant address'],
-    ['operators on the tenant root', ['operator'], '/v1', 'operators on a tenant address'],
+    ['operators beside customers (SEC-OPS-01)', ['operator', 'admin'], '/operator/tools', 'operators beside others'],
+    ['operators on a tenant address', ['operator'], '/v1/organization/unfreeze', 'operators outside /operator/'],
+    [
+      'operators behind a parameter, which would answer a tenant address too',
+      ['operator'],
+      '/:api/organization/unfreeze',
+      'operators outside /operator/',
+    ],
+    ['operators behind a wildcard', ['operator'], '/v1*', 'operators outside /operator/'],
+    ['operators at the prefix without its slash', ['operator'], '/operator', 'operators outside /operator/'],
+    ['customers under the operator prefix', ['admin'], '/operator/tools', 'which only operators may call'],
+    ['the public under the operator prefix', ['public'], '/operator/status', 'which only operators may call'],
   ])('refuses %s', (_what, access, url, problem) => {
     expect(accessProblems(access, url).join('; ')).toContain(problem);
+  });
+
+  it('refuses a list with a hole in it, which every() alone would skip', () => {
+    const sparse: unknown[] = [];
+    sparse[1] = 'admin';
+    expect(accessProblems(sparse, '/v1/members')).toEqual([expect.stringContaining('names someone unknown')]);
   });
 
   it('refuses, as it is added, a route that names no one', async () => {
@@ -94,6 +108,18 @@ describe('BR-04 every route names who may call it', () => {
       { prefix: '/test/plugin' },
     );
     await expect(app.ready()).rejects.toThrow('GET /test/plugin/item: the access its document shows is not its own');
+  });
+
+  it('holds a route to the list it was added with: changing that list, or the document, later changes nothing', async () => {
+    const app = await server();
+    const readers: Principal[] = ['admin'];
+    app.get('/test/report', withAccess(readers), () => 'report');
+    await app.ready();
+    readers.splice(0, 1, 'public');
+    const documented = app.swagger().paths?.['/test/report']?.get as Record<string, unknown> | undefined;
+    expect(Object.isFrozen(documented?.['x-access'])).toBe(true);
+    expect(documented?.['x-access']).toEqual(['admin']);
+    expect((await app.inject('/test/report')).statusCode).toBe(401);
   });
 
   it('shows who may call each operation in the document, the HEAD of a GET included', async () => {
@@ -154,6 +180,34 @@ describe('BR-04 a route answers only a caller it names, denying by default', () 
       headers: { origin: 'https://evil.example' },
     });
     expect(response.statusCode).toBe(403);
+  });
+
+  it('refuses a route in a prefixed plugin, before a hook of the route itself runs', async () => {
+    const app = await server();
+    const reached: string[] = [];
+    await app.register(
+      (child, _options, done) => {
+        child.get(
+          '/members',
+          {
+            ...withAccess(['admin']),
+            onRequest: (_request, _reply, next) => {
+              reached.push('route hook');
+              next();
+            },
+          },
+          () => {
+            reached.push('route');
+            return 'ok';
+          },
+        );
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await app.ready();
+    expect((await app.inject('/test/plugin/members')).statusCode).toBe(401);
+    expect(reached).toEqual([]);
   });
 
   it('answers a public route, and the health check, to anyone', async () => {

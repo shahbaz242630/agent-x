@@ -50,6 +50,24 @@ async function listening() {
   app.get('/test/fail', OPEN, () => {
     throw new Error('failed on our side');
   });
+  // Two routes whose answers an async onSend hook holds back, as a compression or
+  // signing hook would, so a refusal is still going out when the client hangs up:
+  // one no one may call yet, and a public one a write from another origin reaches.
+  const guarded: string[] = [];
+  let sending = (): void => undefined;
+  let send = (): void => undefined;
+  const inSend = new Promise<void>((resolve) => (sending = resolve));
+  const holdBack = async (_request: unknown, _reply: unknown, payload: unknown): Promise<unknown> => {
+    sending();
+    await new Promise<void>((resolve) => (send = resolve));
+    return payload;
+  };
+  const reach = (): string => {
+    guarded.push('route');
+    return 'guarded';
+  };
+  app.get('/test/guarded', { config: { access: ['admin'] }, onSend: holdBack }, reach);
+  app.post('/test/guarded', { ...OPEN, onSend: holdBack }, reach);
   servers.push(app);
   await app.listen({ host: '127.0.0.1', port: 0 });
   const port = app.addresses()[0]?.port ?? 0;
@@ -60,6 +78,11 @@ async function listening() {
     inHandler,
     release: () => {
       release();
+    },
+    guarded,
+    inSend,
+    send: () => {
+      send();
     },
   };
 }
@@ -145,6 +168,31 @@ describe("SEC-WEB-02, SEC-DATA-04 bytes Node's parser refuses get our plain answ
       expect(capture.lines().filter((line) => line.event === 'http.client_error')).toHaveLength(3);
     });
     expect(capture.lines().filter((line) => line.level === 'error')).toEqual([]);
+  });
+});
+
+describe('BR-04, SEC-WEB-01 a refused request never reaches its route', () => {
+  it.each([
+    ['a route that names no caller', request('GET /test/guarded HTTP/1.1', 'Host: x')],
+    [
+      'a write from another origin',
+      request('POST /test/guarded HTTP/1.1', 'Host: x', 'Origin: https://evil.example', 'Content-Length: 0'),
+    ],
+  ])('%s, even when the client hangs up while the refusal is still going out', async (_what, bytes) => {
+    const { port, capture, guarded, inSend, send } = await listening();
+    const connection = connect(port);
+    await connection.opened;
+    connection.socket.write(bytes);
+    await inSend;
+    connection.socket.destroy();
+    await connection.closed;
+    await vi.waitFor(() => {
+      expect(capture.lines().some((line) => line.event === 'http.request_aborted')).toBe(true);
+    });
+    send();
+    // A route let through by the hang-up would run straight after it; give it the chance.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(guarded).toEqual([]);
   });
 });
 
