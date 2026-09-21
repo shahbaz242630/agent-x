@@ -858,6 +858,7 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     await app.ready();
     const answer = await app.inject('/test/row');
     expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
   });
 
@@ -871,6 +872,20 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     await app.ready();
     const answer = await app.inject('/test/row');
     expect(answer.statusCode).toBe(500);
+    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  });
+
+  it('sends a not-found answer a server hook rewrote as the contract wrote it, which that path checks last', async () => {
+    const { app, capture } = await server();
+    // eslint-disable-next-line no-restricted-syntax -- stands in for a plugin's own hook, to prove the check catches it
+    app.addHook('onSend', (request, _reply, payload, done) => {
+      done(null, request.url === '/test/unknown' ? `{"leak":"${PLANTED}"}` : payload);
+    });
+    await app.ready();
+    const answer = await app.inject('/test/unknown');
+    expect(answer.statusCode).toBe(404);
+    expect(answer.json()).toEqual(errorBody('NOT_FOUND', FIRST_ID));
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
   });
 

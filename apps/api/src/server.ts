@@ -15,7 +15,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 
 import { registerAccess } from './access.ts';
 import { answerClientError } from './client-errors.ts';
-import { BODY_LIMIT_BYTES, registerContract } from './contract.ts';
+import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
@@ -140,7 +140,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerAccess(app);
 
   app.setErrorHandler(sendError);
-  app.setNotFoundHandler((request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
+  app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
 
   registerHealth(app, options.healthChecks, logger);
   return app;

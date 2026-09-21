@@ -14,6 +14,11 @@ const SETTERS = [
   'setReplySerializer',
   'serializer',
   'hijack',
+  'raw',
+  'serialize',
+  'serializeInput',
+  'compileSerializationSchema',
+  'getSerializationFunction',
   'addContentTypeParser',
   'removeContentTypeParser',
   'removeAllContentTypeParsers',
@@ -65,6 +70,7 @@ const REJECTED: LintCase[] = [
     ['an onSend hook named in a template literal', 'app.addHook(`onSend`, () => undefined);'],
     ['a hook named through a variable', "const name = 'onSend';\n  app.addHook(name, () => undefined);"],
     ['addHook called by a computed name', "app['addHook']('onSend', () => undefined);"],
+    ['addHook called through call', "app.addHook.call(app, 'onSend', () => undefined);"],
   ].map(([what, call]) => ({
     name: `${String(what)} in an API module`,
     filePath: `${API}/hook-${String(what).replace(/\W/g, '')}.ts`,
@@ -72,12 +78,32 @@ const REJECTED: LintCase[] = [
     rule: 'no-restricted-syntax',
     says: 'SEC-WEB-06',
   })),
+  ...[
+    [
+      'the raw response',
+      "export function answer(reply: { raw: { end(text: string): void } }): void {\n  reply.raw.end('text');\n}\n",
+    ],
+    [
+      'the raw response, taken apart',
+      "export function answer(reply: { raw: { end(text: string): void } }): void {\n  const { raw } = reply;\n  raw.end('text');\n}\n",
+    ],
+    [
+      'the raw response, by a computed name',
+      "export function answer(reply: { raw: { end(text: string): void } }): void {\n  reply['raw'].end('text');\n}\n",
+    ],
+  ].map(([what, code]) => ({
+    name: `a write to ${String(what)} in an API module`,
+    filePath: `${API}/raw-${String(what).replace(/\W/g, '')}.ts`,
+    code: String(code),
+    rule: 'no-restricted-properties',
+    says: 'SEC-WEB-06',
+  })),
   {
-    name: 'a write to the raw response in an API module',
-    filePath: `${API}/raw.ts`,
-    code: "export function answer(reply: { raw: { end(text: string): void } }): void {\n  reply.raw.end('text');\n}\n",
+    name: 'a write to the socket in an API module',
+    filePath: `${API}/socket.ts`,
+    code: "export function answer(request: { socket: { end(text: string): void } }): void {\n  request.socket.end('text');\n}\n",
     rule: 'no-restricted-syntax',
-    says: 'raw response',
+    says: 'socket',
   },
   {
     name: "raw HTML in the API, whose block repeats the product's syntax list",
