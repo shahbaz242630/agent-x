@@ -111,7 +111,7 @@ const COLUMN_TYPES: Readonly<Record<SignedFieldType, readonly number[]>> = {
   timestamptz: [1184],
 };
 /** The signed-state columns themselves: sealing the pointer would need the event's ID before the event exists. */
-const OWN_COLUMNS: ReadonlySet<string> = new Set(['state_version', 'state_event_id']);
+export const OWN_COLUMNS: ReadonlySet<string> = new Set(['state_version', 'state_event_id']);
 /** Postgres's integer, the state_version column's type. */
 const MAX_VERSION = 2_147_483_647;
 

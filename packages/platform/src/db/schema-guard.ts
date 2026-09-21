@@ -36,6 +36,7 @@
 import { type Kysely, sql } from 'kysely';
 
 import { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
+import { OWN_COLUMNS, type SignedStateTable } from './signed-rows.ts';
 import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
 
 /** The name every tenant table's one policy has (ADR-005 §2). */
@@ -124,6 +125,18 @@ const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 const APP_ROW_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
 
 /**
+ * The rights the app role may hold on an authority table as a whole (A3f-2):
+ * adding rows and reading them. It changes a row only column by column, and
+ * only the sealed fields and the two signed-state columns, which is all record
+ * writes; UPDATE of the whole table would cover the row's identity too. Never
+ * DELETE: a row gone takes its authority out of reach of the log that signed it
+ * (ADR-012 §2). A3c-1 holds the migrations to the same rule in CI.
+ */
+const AUTHORITY_RIGHTS = ['SELECT', 'INSERT'] as const;
+/** What the app may hold on an authority table's columns; UPDATE only on the ones it may change. */
+const AUTHORITY_COLUMN_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
+
+/**
  * Every privilege Postgres can grant on a table: the ones the app role is
  * asked about. A privilege a later Postgres adds isn't asked about until it is
  * listed here; CI-06 refuses it in the migrations meanwhile, whatever it is.
@@ -165,6 +178,12 @@ export interface SchemaGuardOptions {
   readonly ownerRole: string;
   /** The decisions to check against. Defaults to the product's own. */
   readonly policy?: SchemaPolicy;
+  /**
+   * The authority tables (ADR-012 §2), from the product's own list
+   * (@agentx/core/authority-tables), each held to its narrower rights. None
+   * by default.
+   */
+  readonly authorityTables?: readonly SignedStateTable[];
 }
 
 /**
@@ -236,6 +255,8 @@ interface IndexRow {
 interface GrantRow {
   readonly table: string;
   readonly privilege: string;
+  /** Held on the whole table, or on at least one of its columns. */
+  readonly level: 'table' | 'column';
 }
 
 interface PublicGrantRow {
@@ -448,9 +469,10 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * are asked again through has_any_column_privilege and the two are unioned.
  * Found by the A3e-1b review.
  *
- * The two `::text` here are the only ones left in this file, and they are not
- * casts in the sense that matters: they give a type to a bound parameter that
- * arrives untyped, which is an input coercion and never looks in `pg_cast`.
+ * The `::text` here, and on the bound values in updatableColumns and
+ * roleSettings, are the only ones left in this file, and they are not casts in
+ * the sense that matters: they give a type to a bound parameter that arrives
+ * untyped, which is an input coercion and never looks in `pg_cast`.
  * Every read of a catalogue column goes uncast, because a planted cast would
  * otherwise be able to change what this file sees — as one did in the first
  * draft (see PresentRow).
@@ -459,14 +481,14 @@ async function grants<Schema>(db: Kysely<Schema>, appRole: string): Promise<Gran
   const known = await rightsThisServerKnows(db);
   const columnWise = known.filter((right) => COLUMN_RIGHTS.has(right));
   const { rows } = await sql<GrantRow>`
-    select ${QUALIFIED} as table, r.privilege
+    select ${QUALIFIED} as table, r.privilege, 'table' as level
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     cross join (select pg_catalog.unnest(${sql.val(known)}::text[]) as privilege) r
     where ${OURS} and ${ROW_KINDS}
       and pg_catalog.has_table_privilege(${appRole}::text, c.oid, r.privilege)
     union
-    select ${QUALIFIED} as table, r.privilege
+    select ${QUALIFIED} as table, r.privilege, 'column' as level
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     cross join (select pg_catalog.unnest(${sql.val(columnWise)}::text[]) as privilege) r
@@ -515,6 +537,25 @@ async function columns<Schema>(db: Kysely<Schema>): Promise<ColumnRow[]> {
     join pg_catalog.pg_class c on c.oid = a.attrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
     where ${OURS} and ${ROW_KINDS} and a.attnum > 0 and not a.attisdropped
+    order by 1, a.attnum
+  `.execute(db);
+  return [...rows];
+}
+
+/**
+ * Every column the app role may UPDATE, through any route: a column grant, the
+ * whole table's, PUBLIC or a role it is a member of. has_any_column_privilege
+ * says only that some column is writable; an authority table needs to know
+ * which (A3f-2).
+ */
+async function updatableColumns<Schema>(db: Kysely<Schema>, appRole: string): Promise<ColumnRow[]> {
+  const { rows } = await sql<ColumnRow>`
+    select ${QUALIFIED} as table, a.attname as column
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+    where ${OURS} and ${ROW_KINDS} and a.attnum > 0 and not a.attisdropped
+      and pg_catalog.has_column_privilege(${appRole}::text, c.oid, a.attnum, 'UPDATE')
     order by 1, a.attnum
   `.execute(db);
   return [...rows];
@@ -578,7 +619,7 @@ const quoted = (name: string): string => `"${name}"`;
  */
 export async function liveSchemaProblems<Schema>(
   db: Kysely<Schema>,
-  { appRole, ownerRole, policy = SCHEMA_POLICY }: SchemaGuardOptions,
+  { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [] }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const problems: SchemaProblem[] = [];
   const [
@@ -592,6 +633,7 @@ export async function liveSchemaProblems<Schema>(
     allGrants,
     forPublic,
     allColumns,
+    writable,
     casts,
     settings,
   ] = await Promise.all([
@@ -605,6 +647,7 @@ export async function liveSchemaProblems<Schema>(
     grants(db, appRole),
     publicGrants(db),
     columns(db),
+    updatableColumns(db, appRole),
     plantedCasts(db),
     roleSettings(db, [appRole, ownerRole]),
   ]);
@@ -738,7 +781,10 @@ export async function liveSchemaProblems<Schema>(
   for (const grant of allGrants) {
     held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
+  const authority = new Map(authorityTables.map((table) => [table.table, table]));
   for (const relation of allRelations) {
+    // Held to their own list, below.
+    if (authority.has(relation.name)) continue;
     const allowed = new Set<string>(
       appendOnly.has(relation.schema)
         ? exceptions.has(relation.name)
@@ -748,6 +794,32 @@ export async function liveSchemaProblems<Schema>(
     );
     for (const right of held.get(relation.name) ?? []) {
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
+    }
+  }
+  // An authority table (A3f-2): rows added and read, and changed only in the
+  // columns record writes, each granted on its own.
+  const writableIn = new Map<string, string[]>();
+  for (const { table, column } of writable) writableIn.set(table, [...(writableIn.get(table) ?? []), column]);
+  for (const [name, table] of authority) {
+    if (!known.has(name)) {
+      problems.push(`${name} is listed as an authority table but is not there`);
+      continue;
+    }
+    const grantsOn = allGrants.filter((grant) => grant.table === name);
+    const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
+    for (const right of onTable) {
+      if (!(AUTHORITY_RIGHTS as readonly string[]).includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
+    }
+    for (const grant of grantsOn) {
+      // A right on the whole table shows on its columns too; it is named once, above.
+      if (grant.level !== 'column' || onTable.has(grant.privilege)) continue;
+      if (!(AUTHORITY_COLUMN_RIGHTS as readonly string[]).includes(grant.privilege)) {
+        problems.push(`${appRole} may ${grant.privilege} on columns of ${name}`);
+      }
+    }
+    const mayChange = new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]);
+    for (const column of writableIn.get(name) ?? []) {
+      if (!mayChange.has(column)) problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
     }
   }
   // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
