@@ -37,6 +37,15 @@ export function errorBody(code: ReasonCode, correlationId: string): ErrorBody {
   return { error: { code, message: REASON_CODES[code], correlationId } };
 }
 
+/**
+ * Writes an error body as it is. Every error answer is sent through this, so a
+ * route's own schema for the same status can neither reshape the body nor fail
+ * to write it, which would send Fastify's own fallback body instead.
+ */
+export function writeErrorBody(body: ErrorBody): string {
+  return JSON.stringify(body);
+}
+
 /** Refusals the framework, Node or the rate limit raise, by HTTP status. */
 const REFUSALS: Readonly<Partial<Record<number, ReasonCode>>> = {
   400: 'BAD_REQUEST',

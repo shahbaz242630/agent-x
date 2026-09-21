@@ -1,4 +1,4 @@
-import { isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
+import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 /** The real server, not yet ready, so a test can add routes of its own first. */
-async function server() {
+async function server(ids: IdGenerator = new SequentialIds()) {
   const capture = new LogCapture();
   const config = {
     http: { host: '127.0.0.1', port: 0, publicOrigin: PUBLIC_ORIGIN, trustedProxies: [], rateLimitPerMinute: 100 },
@@ -34,7 +34,7 @@ async function server() {
     config: { environment: 'test', release: 'r-1', ...config },
     destination: capture,
   });
-  const app = await buildServer({ config, logger, ids: new SequentialIds(), healthChecks: [] });
+  const app = await buildServer({ config, logger, ids, healthChecks: [] });
   servers.push(app);
   return { app, capture };
 }
@@ -129,9 +129,46 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'its 200 response',
     ],
     ['content that is not a list of types', { schema: { response: { 200: { content: 'text' } } } }, 'its 200 response'],
+    ['content that is empty', { schema: { response: { 200: { content: null } } } }, 'its 200 response'],
     ['its own 4xx error body', { schema: { response: { '4xx': ERROR_BODY } } }, 'it sets its own 4xx response'],
     ['its own 5XX error body', { schema: { response: { '5XX': ERROR_BODY } } }, 'it sets its own 5XX response'],
     ['its own default body', { schema: { response: { default: ERROR_BODY } } }, 'it sets its own default response'],
+    [
+      'its own shape for an error status',
+      { schema: { response: { 400: z.object({ detail: z.string() }) } } },
+      'its 400 answer is not the one error body',
+    ],
+    [
+      'its own shape for a failure',
+      { schema: { response: { 500: z.object({ detail: z.string() }) } } },
+      'its 500 answer is not the one error body',
+    ],
+    [
+      'its own shape for one content type of an error status',
+      {
+        schema: {
+          response: { 409: { content: { 'application/json': { schema: z.object({ detail: z.string() }) } } } },
+        },
+      },
+      'its 409 answer is not the one error body',
+    ],
+    ['validation errors handed to it rather than refused', { attachValidation: true }, 'it sets attachValidation'],
+    ['a validator of its own', { validatorCompiler: () => () => true }, 'it sets validatorCompiler'],
+    [
+      'a serializer of its own',
+      { serializerCompiler: () => (data) => JSON.stringify(data) },
+      'it sets serializerCompiler',
+    ],
+    [
+      'an error handler of its own',
+      {
+        errorHandler: (_error, _request, reply) => {
+          void reply.send('detail');
+        },
+      },
+      'it sets errorHandler',
+    ],
+    ['a twin served only for one host', { constraints: { host: 'debug.example' } }, 'it is served only for some hosts'],
     [
       'its own way of being documented',
       { config: { swaggerTransform: () => ({ schema: {}, url: '/elsewhere' }) } },
@@ -141,6 +178,68 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     const { app } = await server();
     expect(() => app.post('/test/route', options, () => 'ok')).toThrow(ContractBroken);
     expect(() => app.post('/test/route', options, () => 'ok')).toThrow(`POST /test/route: ${problem}`);
+  });
+
+  it('takes an answer declared for each content type in zod, and documents it with its description', async () => {
+    const { app } = await server();
+    const item = z.object({ id: z.uuid() });
+    const response = { 200: { description: 'The item.', content: { 'application/json': { schema: item } } } };
+    app.get('/test/item', { schema: { response } }, () => ({ id: ITEM_ID, note: PLANTED }));
+    await app.ready();
+    expect(documentOf(app).paths['/test/item']?.get?.responses['200']).toMatchObject({ description: 'The item.' });
+    expect((await app.inject('/test/item')).json()).toEqual({ id: ITEM_ID });
+  });
+
+  it('lets a route name an error status with the one error body, to say when it is sent', async () => {
+    const { app } = await server();
+    const conflict = {
+      description: 'Another request holds the key.',
+      content: { 'application/json': { schema: ERROR_BODY } },
+    };
+    const response = { 200: z.object({ id: z.uuid() }), 409: conflict, 422: ERROR_BODY };
+    app.post('/test/claim', { schema: { response } }, () => ({ id: ITEM_ID }));
+    await app.ready();
+    expect(documentOf(app).paths['/test/claim']?.post?.responses['409']).toMatchObject({
+      description: 'Another request holds the key.',
+    });
+  });
+
+  it('refuses to start with a twin of a route, served by a stricter address pattern', async () => {
+    const { app } = await server();
+    app.get('/test/a/:id', () => 'ok');
+    app.get('/test/a/:id(^[0-9]+$)', () => 'twin');
+    await expect(app.ready()).rejects.toMatchObject({
+      problems: [
+        'GET /test/a/{id} is served by more than one route',
+        'HEAD /test/a/{id} is served by more than one route',
+      ],
+    });
+  });
+
+  it("refuses a route at its prefix's root, which Fastify would also serve with a slash, unseen", async () => {
+    const { app } = await server();
+    // An async plugin: Fastify hands what it throws to ready(). A callback plugin's throw escapes
+    // Fastify altogether, and the API's crash handler stops it instead.
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin is what this case is about
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      child.get('/', () => 'ok');
+    };
+    void app.register(plugin, { prefix: '/test/p' });
+    await expect(app.ready()).rejects.toThrow("GET /test/p: it sits at its prefix's root");
+  });
+
+  it("serves and documents a route at its prefix's root in the one form it chose", async () => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        child.get('/', { prefixTrailingSlash: 'no-slash' }, () => 'ok');
+        done();
+      },
+      { prefix: '/test/p' },
+    );
+    await app.ready();
+    expect(operations(app)).toContain('GET /test/p');
+    expect((await app.inject('/test/p/')).statusCode).toBe(404);
   });
 
   it('refuses to start with a schema the document could only show as "anything"', async () => {
@@ -158,6 +257,79 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     expect(routeTableProblems(['GET /health', 'POST /gone'], document)).toEqual([]);
     expect(routeTableProblems([], { paths: { '/nothing': undefined } })).toEqual([]);
     expect(routeTableProblems(['GET /health'], {})).toEqual(['GET /health is served but not documented']);
+    expect(routeTableProblems(['GET /health', 'GET /health'], document)).toEqual([
+      'POST /gone is documented but not served',
+      'GET /health is served by more than one route',
+    ]);
+  });
+});
+
+describe('SEC-WEB-06 every route is checked again once every plugin has had its say', () => {
+  const item = (child: FastifyInstance): void => {
+    child.get('/item', () => 'ok');
+  };
+
+  it.each<[string, (child: FastifyInstance) => void, string]>([
+    [
+      'writes through a serializer of its own, set after its route was added',
+      (child) => {
+        item(child);
+        // eslint-disable-next-line no-restricted-properties -- proves the check at start catches what lint bans
+        child.setSerializerCompiler(() => (data) => JSON.stringify(data));
+      },
+      'its plugin checks or writes through compilers other than zod',
+    ],
+    [
+      'checks through a validator of its own, set after its route was added',
+      (child) => {
+        item(child);
+        // eslint-disable-next-line no-restricted-properties -- proves the check at start catches what lint bans
+        child.setValidatorCompiler(() => () => true);
+      },
+      'its plugin checks or writes through compilers other than zod',
+    ],
+    [
+      'changes its routes with an onRoute hook of its own, which runs after the contract check',
+      (child) => {
+        child.addHook('onRoute', (route) => {
+          route.attachValidation = true;
+        });
+        item(child);
+      },
+      'it sets attachValidation',
+    ],
+  ])('refuses to start with a plugin that %s', async (_what, plugin, problem) => {
+    const { app } = await server();
+    await app.register(
+      (child, _options, done) => {
+        plugin(child);
+        done();
+      },
+      { prefix: '/test/plugin' },
+    );
+    await expect(app.ready()).rejects.toThrow(`GET /test/plugin/item: ${problem}`);
+  });
+});
+
+describe('SEC-DATA-04 every error answer is written as it is, never through a route schema', () => {
+  // A correlation ID the error body's schema would refuse, so an answer written through it would fail.
+  const odd: IdGenerator = { next: () => 'not-a-uuid' };
+
+  it.each([
+    ['a refused body', 'POST', { origin: PUBLIC_ORIGIN }, { quantity: 'many' }, 400, 'BAD_REQUEST'],
+    ['a refused origin', 'POST', {}, { quantity: 1 }, 403, 'ORIGIN_REFUSED'],
+    ['a failure on our side', 'GET', {}, undefined, 500, 'INTERNAL_ERROR'],
+  ] as const)('answers %s', async (_what, method, headers, payload, status, code) => {
+    const { app } = await server(odd);
+    const schema = { body: z.object({ quantity: z.int() }), response: { 200: z.object({ quantity: z.int() }) } };
+    app.post('/test/item', { schema }, () => ({ quantity: 1 }));
+    app.get('/test/item', { schema: { response: schema.response } }, () => {
+      throw new Error('failed on our side');
+    });
+    await app.ready();
+    const response = await app.inject({ method, url: '/test/item', headers, ...(payload && { payload }) });
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toEqual(errorBody(code, 'not-a-uuid'));
   });
 });
 
@@ -187,6 +359,8 @@ describe('the document names only the schemas it uses', () => {
             properties: { $ref: { type: 'string' } },
             enum: ['#/components/schemas/Named'],
             other: { $ref: 'https://example.com/schemas/Named' },
+            // As long as the prefix it should have, so a check on length alone would take it.
+            header: { $ref: '#/components/headers/Named' },
           },
         },
       },
@@ -304,5 +478,6 @@ describe('every route checks and answers through its own zod schemas', () => {
     expect(capture.lines().filter((line) => line.event === REQUEST_FAILED)).toEqual([
       expect.objectContaining({ err: expect.objectContaining({ code: 'FST_ERR_RESPONSE_SERIALIZATION' }) as unknown }),
     ]);
+    expect(findLeaks(capture.text, [PLANTED])).toEqual([]);
   });
 });

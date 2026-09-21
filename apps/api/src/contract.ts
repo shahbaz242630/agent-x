@@ -1,14 +1,16 @@
 // SEC-WEB-06 (threat WEB-6, ADR-012 §10): the API's contract is its OpenAPI
 // document, generated from each route's own zod schemas, and the API serves
 // nothing the document doesn't hold.
-// - Each route checks and answers through its zod schemas: input outside them
-//   is refused as BAD_REQUEST, and an answer is cut down to the fields its
-//   schema names, so a field a route didn't declare never leaves.
+// - Each route checks its input through its zod schemas: input outside them
+//   is refused as BAD_REQUEST before the route runs. An answer with a schema
+//   for its status is written through it, cut down to the fields it names.
 // - Each route answers a refusal or a failure with the one error body
 //   (errors.ts), which the document names once, with every reason code.
-// - Once the server is ready, the routes it serves are compared with the
-//   document. A route missing from it, hidden or for any other reason, stops
-//   the API starting; so does a route the document can't describe.
+// - A route the document couldn't describe truthfully is refused as it is
+//   added, and every route is checked again once every plugin's hooks have
+//   run. Then the routes served are compared with the document: a route
+//   missing from it (hidden, or for any other reason), or served twice,
+//   stops the API starting.
 // The document is kept in the repository as apps/api/openapi.json, and
 // contract.test.ts fails when the two differ.
 import swagger, { formatParamUrl } from '@fastify/swagger';
@@ -47,8 +49,27 @@ const ERROR_RESPONSES = {
   },
 };
 
+/** Recognised by identity, so a route can't pass off error responses of its own as these. */
+const OUR_ERROR_RESPONSES: ReadonlySet<unknown> = new Set(Object.values(ERROR_RESPONSES));
+
 /** The response keys that would give a route an error body of its own. */
 const isErrorRange = (status: string): boolean => /^[45]xx$/i.test(status) || status === 'default';
+
+/**
+ * The statuses the error path answers with (errors.ts: every 4xx, and 500). A
+ * route may name one to say when it is sent, but only with the one error body:
+ * the error path never writes through a route's schemas.
+ */
+const isErrorPathStatus = (status: string): boolean => /^(?:4[0-9][0-9]|500)$/.test(status);
+
+/**
+ * Route options that would check input, or write answers or errors, other
+ * than through the contract. A plugin's own compilers are checked too.
+ */
+const BYPASSES = ['attachValidation', 'validatorCompiler', 'serializerCompiler', 'errorHandler'] as const;
+
+/** A route as its onRoute hook sees it. */
+type AddedRoute = RouteOptions & { readonly routePath: string; readonly prefix: string };
 
 /** The API's routes and its OpenAPI document differ, or a route can't be documented. */
 export class ContractBroken extends Error {
@@ -84,7 +105,7 @@ function responseSchemas(response: unknown): unknown[] {
 }
 
 /** Why the document couldn't describe a route truthfully, if it couldn't. */
-function routeProblems(route: RouteOptions): string[] {
+function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
   const problems: string[] = [];
   const schema = route.schema ?? {};
   for (const part of ['body', 'querystring', 'params', 'headers'] as const) {
@@ -93,20 +114,44 @@ function routeProblems(route: RouteOptions): string[] {
     }
   }
   for (const [status, response] of Object.entries(responsesOf(route))) {
+    const schemas = responseSchemas(response);
     if (isErrorRange(status)) {
-      problems.push(`it sets its own ${status} response, but every error has the one error body`);
-    } else if (!responseSchemas(response).every((entry) => entry instanceof z.ZodType)) {
+      if (!OUR_ERROR_RESPONSES.has(response)) {
+        problems.push(`it sets its own ${status} response, but every error has the one error body`);
+      }
+    } else if (!schemas.every((entry) => entry instanceof z.ZodType)) {
       problems.push(`its ${status} response schema is not a zod schema`);
+    } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
+      problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
   }
   // A route of its own transform could show the document another schema than the one it runs.
   if (route.config !== undefined && 'swaggerTransform' in route.config) {
     problems.push('it changes how the document shows it (swaggerTransform)');
   }
+  for (const option of BYPASSES) {
+    if (route[option] !== undefined && route[option] !== false) {
+      problems.push(`it sets ${option}, so it would check or answer other than through its schemas`);
+    }
+  }
+  if (instance.validatorCompiler !== validatorCompiler || instance.serializerCompiler !== serializerCompiler) {
+    problems.push('its plugin checks or writes through compilers other than zod');
+  }
+  // A twin of a documented route, served only for some hosts or versions, would never show.
+  if (route.constraints !== undefined && Object.keys(route.constraints).length > 0) {
+    problems.push("it is served only for some hosts or versions (constraints), which the document can't show");
+  }
+  // Fastify serves such a route at both /prefix and /prefix/, and tells the hooks of the first alone.
+  if (route.prefix !== '' && route.routePath === '' && (route.prefixTrailingSlash ?? 'both') === 'both') {
+    problems.push("it sits at its prefix's root: set prefixTrailingSlash to 'no-slash' or 'slash'");
+  }
   return problems.map((problem) => `${methodsOf(route).join(',')} ${route.url}: ${problem}`);
 }
 
-/** Routes served but not documented, and documented but not served, each as "METHOD /path". */
+/**
+ * Routes served but not documented, documented but not served, and served by
+ * more than one route (a twin the document shows as one), each as "METHOD /path".
+ */
 export function routeTableProblems(
   served: readonly string[],
   document: { readonly paths?: Readonly<Record<string, object | undefined>> | undefined },
@@ -118,9 +163,11 @@ export function routeTableProblems(
   );
   const inDocument = new Set(documented);
   const onServer = new Set(served);
+  const twins = new Set(served.filter((route, index) => served.indexOf(route) !== index));
   return [
     ...[...onServer].filter((route) => !inDocument.has(route)).map((route) => `${route} is served but not documented`),
     ...documented.filter((route) => !onServer.has(route)).map((route) => `${route} is documented but not served`),
+    ...[...twins].map((route) => `${route} is served by more than one route`),
   ];
 }
 
@@ -172,12 +219,12 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
-  const served: string[] = [];
-  app.addHook('onRoute', (route) => {
-    const problems = routeProblems(route);
+  const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
+  app.addHook('onRoute', function (route) {
+    const problems = routeProblems(route, this);
     if (problems.length > 0) throw new ContractBroken(problems);
     route.schema = { ...route.schema, response: { ...responsesOf(route), ...ERROR_RESPONSES } };
-    served.push(...methodsOf(route).map((method) => `${method} ${formatParamUrl(route.url)}`));
+    added.push({ route, instance: this });
   });
 
   const transformObject = createJsonSchemaTransformObject({
@@ -197,9 +244,17 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
   });
 
   // After the document's own ready hook, which collects what it needs first.
-  // Fastify takes anything thrown here, writing the document included, as the error.
+  // Every route again, as it now stands: a plugin's own onRoute hook runs after
+  // this one and could have changed it, or its plugin's compilers. Fastify
+  // takes anything thrown here, writing the document included, as the error.
   app.addHook('onReady', (done) => {
-    const problems = routeTableProblems(served, app.swagger());
+    const served = added.flatMap(({ route }) =>
+      methodsOf(route).map((method) => `${method} ${formatParamUrl(route.url)}`),
+    );
+    const problems = [
+      ...added.flatMap(({ route, instance }) => routeProblems(route, instance)),
+      ...routeTableProblems(served, app.swagger()),
+    ];
     done(problems.length > 0 ? new ContractBroken(problems) : undefined);
   });
 }

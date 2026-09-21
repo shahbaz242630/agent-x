@@ -221,6 +221,26 @@ const productImportBans = [
   ...['node:module', 'module'].map((name) => ({ name, importNames: ['createRequire'], message: namedLoadsOnly })),
 ];
 
+/** The property bans of all product code. Flat config replaces a rule's options per block, so blocks that add to it repeat these. */
+const productProperties = [mathRandom, { object: 'process', property: 'env', message: configOnly }, ...outputStreams];
+
+/**
+ * SEC-WEB-06, SEC-DATA-04: how the API checks input, writes answers and
+ * answers errors and unknown addresses is set once, in server.ts and
+ * contract.ts. Set anywhere else, a plugin could answer in a shape of its own
+ * or outside the zod schemas; and a not-found handler or a reply serializer
+ * isn't a route, so the contract's check at start can't see it.
+ */
+const apiContractOnly =
+  'SEC-WEB-06, SEC-DATA-04: set once, in apps/api/src/server.ts or contract.ts, so every route answers through the contract.';
+const apiSetters = [
+  'setErrorHandler',
+  'setNotFoundHandler',
+  'setValidatorCompiler',
+  'setSerializerCompiler',
+  'setReplySerializer',
+].map((property) => ({ property, message: apiContractOnly }));
+
 /** Node's network globals. XMLHttpRequest and EventSource aren't Node globals, so they aren't listed. */
 const networkGlobals = ['fetch', 'WebSocket'].map((name) => ({ name, message: outboundOnly }));
 
@@ -296,13 +316,17 @@ export default defineConfig([
       'agentx/signed-state-steps-in-audit-module': 'error',
       'agentx/tenant-setting-only-in-with-tenant': 'error',
       'no-restricted-syntax': ['error', ...productSyntax],
-      'no-restricted-properties': [
-        'error',
-        mathRandom,
-        { object: 'process', property: 'env', message: configOnly },
-        ...outputStreams,
-      ],
+      'no-restricted-properties': ['error', ...productProperties],
       'no-restricted-imports': ['error', { paths: productImportBans }],
+    },
+  },
+
+  // The API's contract: only its own two files set how every route checks, answers and fails.
+  {
+    files: ['apps/api/**/*.{ts,tsx}'],
+    ignores: ['apps/api/src/server.ts', 'apps/api/src/contract.ts'],
+    rules: {
+      'no-restricted-properties': ['error', ...productProperties, ...apiSetters],
     },
   },
 
