@@ -41,6 +41,7 @@ describe('BR-04 every route names who may call it', () => {
   it.each<[string, readonly Principal[], string]>([
     ['one role', ['admin'], '/v1/members'],
     ['several roles and agents', ['admin', 'approver', 'developer', 'viewer', 'agent'], '/v1/spend-requests'],
+    ['a parameter past the first segment', ['admin'], '/v1/members/:id'],
     ['the public alone', ['public'], '/health'],
     ['operators alone, under /operator/', ['operator'], '/operator/hand-off/pause'],
   ])('takes %s', (_what, access, url) => {
@@ -67,6 +68,9 @@ describe('BR-04 every route names who may call it', () => {
     ['operators at the prefix without its slash', ['operator'], '/operator', 'operators outside /operator/'],
     ['customers under the operator prefix', ['admin'], '/operator/tools', 'which only operators may call'],
     ['the public under the operator prefix', ['public'], '/operator/status', 'which only operators may call'],
+    ['the public on a root wildcard, which would answer operator addresses', ['public'], '/*', 'parameter or wildcard'],
+    ['customers behind a root parameter', ['admin'], '/:x/pause', 'parameter or wildcard'],
+    ['customers behind a root pattern', ['admin'], '/(^[0-9]+$)/pause', 'parameter or wildcard'],
   ])('refuses %s', (_what, access, url, problem) => {
     expect(accessProblems(access, url).join('; ')).toContain(problem);
   });

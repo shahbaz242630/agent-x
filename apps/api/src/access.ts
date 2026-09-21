@@ -58,6 +58,11 @@ export function accessProblems(access: unknown, url: string): string[] {
   if (operatorAddress && !names.includes('operator')) {
     problems.push(`it sits under ${OPERATOR_PREFIX}, which only operators may call`);
   }
+  // A first segment that is a parameter, a pattern or a wildcard would answer every
+  // address no other route takes, those under the operator prefix among them.
+  if (/^\/[:*(]/.test(url)) {
+    problems.push("its address starts with a parameter or wildcard, which would answer other routes' addresses");
+  }
   return problems;
 }
 
