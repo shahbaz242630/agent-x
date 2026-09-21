@@ -244,6 +244,7 @@ const apiSetters = [
   // A hijacked reply, or the raw response, is written by hand, past every hook.
   'hijack',
   'raw',
+  'socket',
   // A serializer called by hand writes text the contract never checked.
   'serialize',
   'serializeInput',
@@ -276,11 +277,6 @@ const apiSendHooks = [
   {
     selector: "MemberExpression[object.property.name='addHook'][property.name=/^(?:call|apply|bind)$/]",
     message: 'SEC-WEB-06: call addHook itself, so lint can see which hook it adds.',
-  },
-  // A write to the socket skips Fastify, and so the contract's check of what leaves.
-  {
-    selector: "MemberExpression[object.name=/^(?:request|reply)$/][property.name='socket']",
-    message: 'SEC-WEB-06: writing to the socket skips the check of what leaves; answer with reply.send.',
   },
 ];
 

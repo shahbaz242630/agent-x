@@ -848,18 +848,33 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
   });
 
-  it('answers as a failure a written answer a server hook rewrote before it left', async () => {
-    const { app, capture } = await server();
-    // eslint-disable-next-line no-restricted-syntax -- stands in for a plugin's own hook, to prove the check catches it
-    app.addHook('onSend', (request, _reply, payload, done) => {
-      done(null, request.url === '/test/row' ? `{"ok":true,"secret":"${PLANTED}"}` : payload);
-    });
-    app.get('/test/row', OPEN, () => ({ ok: true }));
-    await app.ready();
-    const answer = await app.inject('/test/row');
-    expect(answer.statusCode).toBe(500);
-    expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
-    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
+  it('refuses an onSend hook on the server or a plugin, which could rewrite an answer after the check', async () => {
+    const { app } = await server();
+    const hook = (_request: unknown, _reply: unknown, payload: unknown, done: (e: null, p: unknown) => void) => {
+      done(null, payload);
+    };
+    // eslint-disable-next-line no-restricted-syntax -- proves the server refuses what lint bans
+    expect(() => app.addHook('onSend', hook)).toThrow(
+      'an onSend hook on the server or a plugin could rewrite an answer',
+    );
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-syntax -- proves the server refuses what lint bans
+      child.addHook('onSend', hook);
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow('an onSend hook on the server or a plugin could rewrite an answer');
+  });
+
+  it("refuses a plugin's own not-found handler without the contract's checks", async () => {
+    const { app } = await server();
+    // eslint-disable-next-line @typescript-eslint/require-await -- an async plugin, so its throw fails ready()
+    const plugin = async (child: FastifyInstance): Promise<void> => {
+      // eslint-disable-next-line no-restricted-properties -- proves the server refuses what lint bans
+      child.setNotFoundHandler((_request, reply) => reply.send({ leak: PLANTED }));
+    };
+    void app.register(plugin, { prefix: '/test/plugin' });
+    await expect(app.ready()).rejects.toThrow("a not-found handler must carry the contract's checks");
   });
 
   it("answers as a failure an object a serializer of the reply's own writes, though it says JSON", async () => {
@@ -873,19 +888,6 @@ describe('SEC-WEB-06 an answer leaves only as the contract wrote it', () => {
     const answer = await app.inject('/test/row');
     expect(answer.statusCode).toBe(500);
     expect(answer.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
-    expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
-  });
-
-  it('sends a not-found answer a server hook rewrote as the contract wrote it, which that path checks last', async () => {
-    const { app, capture } = await server();
-    // eslint-disable-next-line no-restricted-syntax -- stands in for a plugin's own hook, to prove the check catches it
-    app.addHook('onSend', (request, _reply, payload, done) => {
-      done(null, request.url === '/test/unknown' ? `{"leak":"${PLANTED}"}` : payload);
-    });
-    await app.ready();
-    const answer = await app.inject('/test/unknown');
-    expect(answer.statusCode).toBe(404);
-    expect(answer.json()).toEqual(errorBody('NOT_FOUND', FIRST_ID));
     expect(findLeaks(answer.body + capture.text, [PLANTED])).toEqual([]);
   });
 
