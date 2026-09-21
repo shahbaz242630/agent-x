@@ -1,4 +1,5 @@
-// The authority-table registry (tooling/authority-tables.ts) holds each
+// The authority-table registry (the product's list, packages/core/src/authority-tables.ts,
+// which tooling/authority-tables.ts hands to CI's checks) holds each
 // module's own table description, not a copy of it, so the checks in CI are
 // made against the very facts the app runs on. That only holds if a module's
 // SignedStateTable and its state machine fit an AuthorityTable exactly, which
@@ -12,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { defineStateMachine } from '../../packages/core/src/shared-kernel/index.ts';
 import type { SignedStateTable } from '../../packages/platform/src/db/index.ts';
 import type { AuthorityMachine, AuthorityTable } from '../../packages/testing/src/index.ts';
+import type { AuthorityTableEntry } from '../../packages/core/src/authority-tables.ts';
 import { AUTHORITY_TABLES } from '../authority-tables.ts';
 
 const AGENT = defineStateMachine({
@@ -69,6 +71,15 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     const looseMachine: AuthorityMachine = { ...AGENT, moves: ['ACTIVE>REVOKED'] };
 
     expect([unknownType, noSubject, looseMachine]).toHaveLength(3);
+  });
+
+  it("fits the product's list the same way, with the machine as `rules`, as changeStatus takes it", () => {
+    const entry: AuthorityTableEntry = { ...AGENTS, rules: AGENT };
+    // @ts-expect-error -- The product's list names the machine `rules`, never `status`.
+    const misnamed: AuthorityTableEntry = { ...AGENTS, status: AGENT };
+
+    expect(entry.rules).toBe(AGENT);
+    expect(misnamed).toBeDefined();
   });
 
   it('is empty until the first module has an authority table (slice B1)', () => {

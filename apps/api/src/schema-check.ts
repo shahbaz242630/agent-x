@@ -15,6 +15,7 @@
 // the SEV-1 alert rule A2c-2 installed already matches, so this needs no new
 // alert. The problems name rules and objects, never a value read from the
 // database, so the alarm can't carry tampered text into the log.
+import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -47,9 +48,17 @@ export interface SchemaCheckOptions<Schema = unknown> {
  */
 const SCHEMA_CHECK_DEADLINE_MS = 10_000;
 
+/** The check ended because the API is stopping: the API's own doing, never the database's. */
+class Stopped extends Error {
+  constructor() {
+    super('the schema check was stopped');
+    this.name = 'Stopped';
+  }
+}
+
 /**
- * The work, or a rejection once the deadline passes or the run is stopped,
- * whichever comes first.
+ * The work, or a rejection once the deadline passes or the run is stopped
+ * (Stopped), whichever comes first.
  *
  * A signal that has **already** aborted is checked before anything is waited
  * on: `addEventListener('abort', …)` never fires on one that aborted earlier,
@@ -57,7 +66,7 @@ const SCHEMA_CHECK_DEADLINE_MS = 10_000;
  * sit out its whole deadline while the API was trying to shut down.
  */
 async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: AbortSignal | undefined): Promise<T> {
-  if (signal?.aborted === true) throw new Error('the schema check was stopped');
+  if (signal?.aborted === true) throw new Stopped();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stop: (() => void) | undefined;
   const cut = new Promise<never>((_, reject) => {
@@ -65,7 +74,7 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
       reject(new Error(`the schema check did not finish within ${String(deadlineMs)} ms`));
     }, deadlineMs);
     stop = () => {
-      reject(new Error('the schema check was stopped'));
+      reject(new Stopped());
     };
     signal?.addEventListener('abort', stop, { once: true });
   });
@@ -77,11 +86,18 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
   }
 }
 
-/** What the check found: the problems, or the reason it couldn't run. */
+/**
+ * What the check found: the problems, the reason it couldn't run, or that the
+ * API stopped it. A stop is ours, never the database's doing, so it is no sign
+ * of anything: raising the integrity alarm for it would page someone on a
+ * routine shutdown (found by A3f-2's tests; the anchor check already tells the
+ * two apart).
+ */
 type SchemaCheckOutcome =
   | { readonly kind: 'clean' }
   | { readonly kind: 'drift'; readonly problems: readonly SchemaProblem[] }
-  | { readonly kind: 'unreadable'; readonly error: unknown };
+  | { readonly kind: 'unreadable'; readonly error: unknown }
+  | { readonly kind: 'stopped' };
 
 /**
  * Reads the live catalogue once, within its deadline. It never throws: a
@@ -103,19 +119,26 @@ async function checkSchema<Schema>({
   signal,
 }: SchemaCheckOptions<Schema>): Promise<SchemaCheckOutcome> {
   try {
-    const reading = Promise.resolve().then(() => liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE }));
+    // The authority tables are the product's own list, the one CI checks the migrations against (A3f-2).
+    const reading = Promise.resolve().then(() =>
+      liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE, authorityTables: AUTHORITY_TABLES }),
+    );
     // Handled here too, so a read that finishes after its deadline never goes unhandled.
     void reading.catch(() => undefined);
     const problems = await withinDeadline(reading, deadlineMs, signal);
     return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
   } catch (error) {
+    // Only the stop itself: a read that failed on its own is the alarm, even
+    // if the API began stopping just after (anchor-check.ts draws the same line).
+    if (error instanceof Stopped) return { kind: 'stopped' };
     return { kind: 'unreadable', error };
   }
 }
 
 /**
- * The check at start-up. Returns whether the API may go on; a refusal has
- * already been logged.
+ * The check at start-up. Returns whether the API may go on; a refusal for
+ * drift or an unreadable catalogue has already been logged, and one because
+ * the API was stopped needs no line.
  */
 export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Schema>): Promise<boolean> {
   const outcome = await checkSchema(options);
@@ -123,6 +146,8 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
     options.logger.info('db.schema_checked', { problems: 0 });
     return true;
   }
+  // Stopped while starting: the API isn't going on either way, and a stop is no alarm.
+  if (outcome.kind === 'stopped') return false;
   if (outcome.kind === 'drift') {
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', problems: outcome.problems });
   } else {
@@ -139,7 +164,7 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
  */
 export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<Schema>): Promise<void> {
   const outcome = await checkSchema(options);
-  if (outcome.kind === 'clean') return;
+  if (outcome.kind === 'clean' || outcome.kind === 'stopped') return;
   if (outcome.kind === 'drift') {
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'running', problems: outcome.problems });
     return;

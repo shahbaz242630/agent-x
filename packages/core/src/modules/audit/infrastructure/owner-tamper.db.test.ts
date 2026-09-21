@@ -152,8 +152,11 @@ const changeStatus = (id: string, event: 'suspend' | 'reactivate' | 'revoke') =>
 const verifyChain = (anchor?: { seq: bigint; hash: Buffer }) =>
   withTenant(app, org, (tx) => trail.verify(tx, org, anchor));
 
-/** What the live schema guard reports, read as the app role on the app's pool. */
-const guard = (): Promise<string[]> => liveSchemaProblems(app, ROLES);
+/**
+ * What the live schema guard reports, read as the app role on the app's pool,
+ * with the stand-in listed as the product lists its authority tables.
+ */
+const guard = (): Promise<string[]> => liveSchemaProblems(app, { ...ROLES, authorityTables: [AGENTS] });
 
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
 
@@ -448,15 +451,13 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
     expect(alarms()).toEqual([]);
   });
 
-  // The live guard allows the app role every table right on a tenant table
-  // outside the audit schemas (DELETE, TRUNCATE, TRIGGER, UPDATE of any
-  // column), and doesn't yet know which tables hold authority: that comes with
-  // the first entry in tooling/authority-tables.ts (B1). Until then, it is the
-  // row check that catches a row the app role was given the right to delete.
-  it('the app role given DELETE, and a row deleted with it: the row check denies it', async () => {
+  // DELETE is a right on an ordinary tenant table; on a listed authority table
+  // the guard names it (A3f-2), and a row deleted with it is denied anyway.
+  it('the app role given DELETE, and a row deleted with it: the guard names the right, and the row check denies the row', async () => {
     const id = await newAgent();
     await owner.query('grant delete on probe.agents to agentx_app');
     try {
+      expect(await guard()).toEqual(['agentx_app may DELETE on probe.agents']);
       await withTenant(app, org, (tx) =>
         tx.deleteFrom('probe.agents').where('org_id', '=', org).where('id', '=', id).execute(),
       );

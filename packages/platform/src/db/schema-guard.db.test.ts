@@ -15,11 +15,12 @@ import { readFileSync } from 'node:fs';
 
 import { createTenantProbe, createTestDatabase, type TestDatabase, type TestSession } from '@agentx/testing';
 import type { Kysely } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import { liveSchemaProblems } from './schema-guard.ts';
+import type { SignedStateTable } from './signed-rows.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -508,7 +509,133 @@ it('sees a function added to one of our schemas', async () => {
   }
 });
 
+describe('an authority table the product lists (A3f-2)', () => {
+  /** A stand-in, described as a module describes one, and built as its migration must build it. */
+  const AGENTS = {
+    table: 'probe.agents',
+    subject: 'agent',
+    fields: [
+      { column: 'status', type: 'text' },
+      { column: 'role', type: 'text' },
+    ],
+  } as const satisfies SignedStateTable;
+  const TENANT_POLICY =
+    "using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid) with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)";
+
+  const listed = (tables: readonly SignedStateTable[] = [AGENTS]) =>
+    liveSchemaProblems(app, { ...ROLES, authorityTables: tables });
+
+  beforeEach(async () => {
+    await owner.query('create schema probe');
+    await owner.query(
+      'create table probe.agents (org_id uuid not null, id uuid not null, status text not null, role text not null, label text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))',
+    );
+    await owner.query('alter table probe.agents enable row level security');
+    await owner.query('alter table probe.agents force row level security');
+    // eslint-disable-next-line agentx/no-string-built-sql -- The policy is the fixed text above.
+    await owner.query(`create policy tenant_isolation on probe.agents ${TENANT_POLICY}`);
+    await owner.query('grant usage on schema probe to agentx_app');
+    await owner.query('grant select, insert on probe.agents to agentx_app');
+    await owner.query('grant update (status, role, state_version, state_event_id) on probe.agents to agentx_app');
+  });
+
+  afterEach(async () => {
+    await owner.query('drop schema if exists probe cascade');
+  });
+
+  it('passes one built as its migration must build it', async () => {
+    expect(await listed()).toEqual([]);
+  });
+
+  it.each([
+    [
+      'DELETE, which takes a row out of reach of its log',
+      'grant delete on probe.agents to agentx_app',
+      ['agentx_app may DELETE on probe.agents'],
+    ],
+    [
+      'UPDATE of the whole table, which covers its key',
+      'grant update on probe.agents to agentx_app',
+      // The guard lists its problems sorted.
+      [
+        'agentx_app may UPDATE on probe.agents',
+        'agentx_app may UPDATE probe.agents\'s column "id"',
+        'agentx_app may UPDATE probe.agents\'s column "label"',
+        'agentx_app may UPDATE probe.agents\'s column "org_id"',
+      ],
+    ],
+    [
+      'UPDATE of a column it never seals',
+      'grant update (label) on probe.agents to agentx_app',
+      ['agentx_app may UPDATE probe.agents\'s column "label"'],
+    ],
+    [
+      'UPDATE of its key',
+      'grant update (id) on probe.agents to agentx_app',
+      ['agentx_app may UPDATE probe.agents\'s column "id"'],
+    ],
+    [
+      'a column right it never needs',
+      'grant references (role) on probe.agents to agentx_app',
+      ['agentx_app may REFERENCES on columns of probe.agents'],
+    ],
+    [
+      'a table right it never needs, once: the same right on its columns is not named again',
+      'grant references on probe.agents to agentx_app',
+      ['agentx_app may REFERENCES on probe.agents'],
+    ],
+  ])('names %s', async (_, grant, named) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await owner.query(grant);
+
+    expect(await listed()).toEqual(named);
+  });
+
+  it('passes reading and adding granted column by column, as A3c-1 allows in CI', async () => {
+    await owner.query('revoke select, insert on probe.agents from agentx_app');
+    await owner.query(
+      'grant select (org_id, id, status, role), insert (org_id, id, status, role) on probe.agents to agentx_app',
+    );
+
+    expect(await listed()).toEqual([]);
+  });
+
+  it('finds a listed table named with a reserved word, by the plain name its module and CI use', async () => {
+    // Postgres quotes `user` when it prints the name; the module writes probe.user, as A3c-1 reads it.
+    await owner.query('alter table probe.agents rename to "user"');
+    const USERS = { ...AGENTS, table: 'probe.user' };
+
+    expect(await listed([USERS])).toEqual([]);
+    await owner.query('grant delete on probe."user" to agentx_app');
+    expect(await listed([USERS])).toEqual(['agentx_app may DELETE on probe."user"']);
+  });
+
+  it('holds only a listed table to it: the same DELETE on a table not listed is a tenant table’s right', async () => {
+    await owner.query('grant delete on probe.agents to agentx_app');
+
+    expect(await listed([])).toEqual([]);
+  });
+
+  it('names a listed table that is not there', async () => {
+    expect(await listed([AGENTS, { ...AGENTS, table: 'probe.gone' }])).toEqual([
+      'probe.gone is listed as an authority table but is not there',
+    ]);
+  });
+});
+
 describe('what only the server admin can do', () => {
+  // A role of this file's own to hand things to. The shared agentx_* roles
+  // belong to the whole test server, and other files check them while this one
+  // runs: main.db.test.ts refuses to start as a backup role that owns anything,
+  // and failed that way whenever it ran while audit.events was the backup's.
+  beforeAll(async () => {
+    await database.as('admin').query('create role schema_guard_fixture nologin');
+  });
+
+  afterAll(async () => {
+    await database.as('admin').query('drop role if exists schema_guard_fixture');
+  });
+
   it('sees a planted cast, which the database owner is refused', async () => {
     // agentx_owner cannot do this — Postgres answers "must be owner of type
     // bigint or type text" (proven S32) — so the admin stands in for the tier
@@ -534,7 +661,7 @@ describe('what only the server admin can do', () => {
     // so this is the admin's tier — but an owner that *was* made a member of
     // another role could, and the guard should not care how it happened.
     const admin = database.as('admin');
-    await admin.query('alter table audit.events owner to agentx_backup');
+    await admin.query('alter table audit.events owner to schema_guard_fixture');
     try {
       expect(await problems()).toContain('audit.events is owned by another role');
     } finally {
@@ -544,7 +671,7 @@ describe('what only the server admin can do', () => {
 
   it('sees a schema handed to another role', async () => {
     const admin = database.as('admin');
-    await admin.query('alter schema audit owner to agentx_backup');
+    await admin.query('alter schema audit owner to schema_guard_fixture');
     try {
       expect(await problems()).toContain('schema "audit" is owned by another role');
     } finally {

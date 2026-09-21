@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./authority-tables": "./src/authority-tables.ts",
     "./modules/audit": "./src/modules/audit/index.ts",
     "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"

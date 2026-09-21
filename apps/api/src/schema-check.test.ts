@@ -124,6 +124,52 @@ describe('the deadline', () => {
     const started = Date.now();
     await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000, signal: stopping.signal });
     expect(Date.now() - started).toBeLessThan(5_000);
+    // The stop is the API's own doing, so it raises no alarm: a routine shutdown must not page anyone.
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('raises no alarm when the stop comes during a read', async () => {
+    const stopping = new AbortController();
+    guard.result = (): Promise<string[]> => {
+      stopping.abort();
+      return new Promise(() => undefined);
+    };
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('still raises the alarm for a read that failed on its own, though the stop came just after', async () => {
+    const stopping = new AbortController();
+    // The read fails, and the stop lands in the same moment, before the check
+    // has handled the failure: the failure, not the stop, is what it met.
+    guard.result = (): Promise<string[]> =>
+      ({
+        then: (_resolve: unknown, reject: (error: Error) => void) => {
+          reject(new Error('permission denied for table pg_class'));
+          stopping.abort();
+        },
+      }) as unknown as Promise<string[]>;
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
+    expect(stopping.signal.aborted).toBe(true);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+  });
+
+  it('declines a start that is stopped mid-check, with no alarm', async () => {
+    guard.result = (): Promise<string[]> => new Promise(() => undefined);
+    const log = logger();
+    const stopping = new AbortController();
+    stopping.abort();
+    expect(await schemaSoundAtStart({ ...options(log), signal: stopping.signal })).toBe(false);
+    expect(log.capture.lines()).toEqual([]);
+  });
+
+  it('still raises the alarm for a read that fails with no stop', async () => {
+    guard.result = (): Promise<string[]> => Promise.reject(new Error('permission denied for table pg_class'));
+    const log = logger();
+    await checkSchemaOnSchedule({ ...options(log), signal: new AbortController().signal });
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
   });
 
   it('lets a read that answers in time through untouched', async () => {
