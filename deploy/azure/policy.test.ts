@@ -180,6 +180,7 @@ const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
 const LOGIN_ALERT = named(/-privileged-login$/);
+const OWNER_ALERT = named(/-owner-login$/);
 const CAP_ALERT = named(/-log-cap-reached$/);
 const QUOTA_ALERT = named(/-log-quota$/);
 const setting = (name: string) => (resource: PredictedResource) => resource.name.endsWith(`/${name}`);
@@ -382,6 +383,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(
         /^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-privileged-login$/,
       ),
+      expect.stringMatching(/^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-owner-login$/),
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
       ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'].map(
@@ -524,10 +526,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra({ ...structuredClone(workspace), id: `${String(workspace?.id)}-second` }))).toContain(
       'required',
     );
-    // Without the environment there is nowhere of ours for the jobs to run, and
-    // the doors and their certificates belong to no environment of ours.
+    // Without the environment there is nowhere of ours for the jobs to run, no
+    // platform lines for the owner-login alert to pair with, and the doors and
+    // their certificates belong to no environment of ours.
     expect(brokenRules(without((resource) => ENVIRONMENT(resource) || APP_LOGS(resource)))).toEqual([
       'required',
+      'owner-login-alert',
       'jobs',
       'apps',
       'public-doors',
@@ -739,6 +743,106 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
+  it("owner-login-alert: no alert on the owner's logins, or one that can't fire, misjudges a deploy, or fires too late or too quietly", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const edited = (from: string | RegExp, to: string) => (alert: Mutable) => {
+      const before = String(criterion(alert).query);
+      criterion(alert).query = before.replace(from, to);
+      expect(criterion(alert).query).not.toBe(before);
+    };
+    expect(brokenRules(without(OWNER_ALERT))).toEqual(['owner-login-alert']);
+    for (const change of [
+      // Another role's logins, or another job's starts, or another deployment's, or any environment's.
+      edited('user=agentx_owner ', 'user=agentx_app '),
+      edited('user=agentx_owner ', 'user=agentx_owner'),
+      edited('"job-agentx-stg-migrate"', '"job-agentx-stg-db-setup"'),
+      edited('"job-agentx-stg-migrate"', '"job-agentx-prd-migrate"'),
+      edited('Reason == "ContainerStarted"', 'Reason == "Completed"'),
+      edited(
+        /_ResourceId =~ "[^"]+"/,
+        '_ResourceId =~ "/subscriptions/x/resourceGroups/y/providers/Microsoft.App/managedEnvironments/z"',
+      ),
+      edited(/_ResourceId =~ "[^"]+" and /, ''),
+      // A looser pairing: a wider "near", a second login beside one start let
+      // through, or a start with no login (which is also how login lines the
+      // pattern stopped matching would show) let through.
+      edited('let near = 2m;', 'let near = 15m;'),
+      edited('| where Gap > near or Claims > 1', '| where Gap > near'),
+      edited('join kind=leftouter claims', 'join kind=inner claims'),
+      edited('union strays, unclaimed', 'union strays'),
+      edited('join kind=leftanti claims', 'join kind=leftsemi claims'),
+      // A band judged too soon (before Azure's lines for the job arrive), or one a run can miss.
+      edited('ago(20m)', 'ago(5m)'),
+      edited('ago(50m)', 'ago(30m)'),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      ...LATE_OR_BLIND,
+      // Reading less than the hour, or running less often than the band needs.
+      (alert: Mutable) => (properties(alert).overrideQueryTimeRange = 'PT30M'),
+      (alert: Mutable) => delete properties(alert).overrideQueryTimeRange,
+      (alert: Mutable) => {
+        properties(alert).evaluationFrequency = 'PT30M';
+        properties(alert).windowSize = 'PT30M';
+      },
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(OWNER_ALERT, change))).toEqual(['owner-login-alert']);
+    }
+    // Quieter than SEV-1, or stateful, or off: the general alert rules object too.
+    expect(brokenRules(changed(OWNER_ALERT, (alert) => (properties(alert).severity = 2)))).toEqual([
+      'alert-runbook',
+      'owner-login-alert',
+    ]);
+    expect(brokenRules(changed(OWNER_ALERT, (alert) => (properties(alert).autoMitigate = true)))).toEqual([
+      'alert-delivery',
+      'owner-login-alert',
+    ]);
+    expect(brokenRules(changed(OWNER_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'owner-login-alert',
+    ]);
+    // The job it pairs with must be this deployment's, and only one.
+    expect(brokenRules(without(JOB('migrate')))).toContain('owner-login-alert');
+    // A second job by the same name, in another resource group: which one's starts would count?
+    const twice = structuredClone(staging.predictedResources.find(JOB('migrate'))) as unknown as Mutable;
+    twice.id = String(twice.id).replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/rg-other/');
+    expect(twice.id).not.toBe(staging.predictedResources.find(JOB('migrate'))?.id);
+    expect(brokenRules(withExtra(twice))).toContain('owner-login-alert');
+    // The same for the environment whose platform lines it reads.
+    const second = structuredClone(staging.predictedResources.find(ENVIRONMENT)) as unknown as Mutable;
+    second.id = String(second.id).replace(/cae-agentx-staging$/, 'cae-agentx-other');
+    second.name = 'cae-agentx-other';
+    expect(brokenRules(withExtra(second))).toContain('owner-login-alert');
+  });
+
+  it('SEC-DB-04 the owner-login alert matches the lines Postgres 18 on Azure writes for the owner, and no others (S33)', () => {
+    const query = String(criterion(staging.predictedResources.find(OWNER_ALERT) as unknown as Mutable).query);
+    const source = /matches regex @"([^"]+)"/.exec(query)?.[1];
+    expect(source).toBeDefined();
+    // Kusto's regular expressions are RE2; this pattern uses nothing JavaScript reads differently.
+    const pattern = new RegExp(source ?? '(?!)');
+    // A line as the migration job's login wrote it on staging (20 Sep, S33), the session and role filled in here.
+    const line = (message: string, session = '6ab011c5.8f4ee') => `2026-09-20 17:03:01 UTC-${session}-LOG:  ${message}`;
+    const authorized = (role: string, database = 'agentx') =>
+      `connection authorized: user=${role} database=${database} application_name=agentx-migrate SSL enabled (protocol=TLSv1.3, cipher=TLS_AES_256_GCM_SHA384, bits=256)`;
+    expect(line(authorized('agentx_owner'))).toMatch(pattern);
+    // Whatever the session, the database or the name the client gives itself.
+    expect(line(authorized('agentx_owner', 'postgres'), '6ab01234.1')).toMatch(pattern);
+    expect(line(authorized('agentx_owner').replace('agentx-migrate', 'psql'))).toMatch(pattern);
+    for (const other of [
+      line(authorized('agentx_app')),
+      line(authorized('agentx_admin')),
+      line(authorized('agentx_backup')),
+      line(authorized('agentx_owner2')),
+      line('connection authenticated: identity="agentx_owner" method=md5 (/datadrive/pg/data/pg_hba.conf:29)'),
+      line('disconnection: session time: 0:00:00.077 user=agentx_owner database=agentx host=10.40.0.16 port=10007'),
+      line(`statement: SELECT '${authorized('agentx_owner')}'`),
+      authorized('agentx_owner'),
+    ]) {
+      expect(other).not.toMatch(pattern);
+    }
+  });
+
   it('database-tls: TLS not required, or older than 1.3', () => {
     expect(
       brokenRules(changed(setting('require_secure_transport'), (entry) => (inside(entry, 'properties').value = 'off'))),
@@ -918,17 +1022,14 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to H.
-    expect(
-      brokenRules(
-        changed(CAP_ALERT, (alert) => {
-          properties(alert).description = String(properties(alert).description).replace(
-            /section [A-H]\.$/,
-            'section I.',
-          );
-        }),
-      ),
-    ).toEqual(['alert-runbook']);
+    // The playbook's sections run from A to I.
+    const inSection = (section: string) => (alert: Mutable) => {
+      const before = String(properties(alert).description);
+      properties(alert).description = before.replace(/section [A-H]\.$/, `section ${section}.`);
+      expect(properties(alert).description).not.toBe(before);
+    };
+    expect(brokenRules(changed(CAP_ALERT, inSection('I')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('J')))).toEqual(['alert-runbook']);
   });
 
   it('alert-delivery: an alert switched off, sent nowhere, or to a group that is off or tells nobody', () => {
@@ -959,6 +1060,25 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['alert-delivery']);
+    // A SEV-1 alert muted after it fires tells nobody of the next window; a
+    // SEV-2 one may be.
+    for (const sev1 of [LOGIN_ALERT, OWNER_ALERT, INTEGRITY_ALERT]) {
+      expect(brokenRules(changed(sev1, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([
+        'alert-delivery',
+      ]);
+    }
+    expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).muteActionsDuration = 'PT1H')))).toEqual([]);
+    // A second condition that never holds keeps the whole alert from firing.
+    for (const alert of [LOGIN_ALERT, OWNER_ALERT, CAP_ALERT]) {
+      expect(
+        brokenRules(
+          changed(alert, (entry) => {
+            const conditions = at(entry, 'properties', 'criteria', 'allOf') as Mutable[];
+            conditions.push({ ...structuredClone(first(conditions)), threshold: 1_000_000 });
+          }),
+        ),
+      ).toEqual(['alert-delivery']);
+    }
   });
 
   it("resource-logs: a vault or server whose logs stay out of this deployment's workspace", () => {
@@ -1971,11 +2091,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual(['jobs']);
     // A job the deployment needs, left out. CI's role would then be given on
-    // a migration job this deployment doesn't make.
+    // a migration job this deployment doesn't make, and the owner-login alert
+    // would pair logins with its starts.
     for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
-        rules: workload === 'migrate' ? ['release-access', 'jobs'] : ['jobs'],
+        rules: workload === 'migrate' ? ['owner-login-alert', 'release-access', 'jobs'] : ['jobs'],
       });
     }
   });
