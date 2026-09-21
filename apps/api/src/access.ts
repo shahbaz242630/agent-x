@@ -13,7 +13,7 @@ import { sendErrorBody } from './errors.ts';
  * Who a route can name: an organisation's four roles, an AI agent by its key,
  * the platform's operators, or anyone (BRD §2).
  */
-export const PRINCIPALS = ['admin', 'approver', 'developer', 'viewer', 'agent', 'operator', 'public'] as const;
+const PRINCIPALS = ['admin', 'approver', 'developer', 'viewer', 'agent', 'operator', 'public'] as const;
 export type Principal = (typeof PRINCIPALS)[number];
 
 declare module 'fastify' {
