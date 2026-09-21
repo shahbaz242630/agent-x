@@ -1,11 +1,11 @@
 import { type IdGenerator, isReasonCode, REASON_CODES } from '@agentx/core/shared-kernel';
 import { createLogger } from '@agentx/platform/observability';
 import { findLeaks, LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
+import type { FastifyInstance, FastifySchema, RouteShorthandOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { ContractBroken, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
+import { ContractBroken, looseAnswers, routeTableProblems, withoutUnusedSchemas } from './contract.ts';
 import { ERROR_BODY, errorBody } from './errors.ts';
 import { REQUEST_FAILED } from './request-log.ts';
 import { buildServer } from './server.ts';
@@ -15,8 +15,15 @@ const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const PLANTED = 'planted value that must not appear';
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const ITEM_ID = '0190f4c2-1e5b-7c3d-8a9b-0c1d2e3f4a5b';
-/** Test routes are open to anyone: who may call a route isn't what these tests are about. */
-const OPEN = { config: { access: ['public'] } } as const;
+/**
+ * Test routes are open to anyone, read at most 1 KiB and answer `{ ok: true }`
+ * (or a string, sent as it is): none of that is what these tests are about.
+ */
+const OPEN = {
+  config: { access: ['public'] },
+  bodyLimit: 1024,
+  schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
+} as const;
 
 const servers: FastifyInstance[] = [];
 
@@ -101,7 +108,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     ["tagged with the document's hidden tag", { tags: ['X-HIDDEN'] }],
   ])('refuses to start with a route %s, naming it and its HEAD', async (_how, schema) => {
     const { app } = await server();
-    app.get('/test/debug', { schema, ...OPEN }, () => 'ok');
+    app.get('/test/debug', { ...OPEN, schema: { ...OPEN.schema, ...schema } }, () => 'ok');
     const ready = app.ready();
     await expect(ready).rejects.toThrow(ContractBroken);
     await expect(ready).rejects.toMatchObject({
@@ -203,7 +210,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
     const { app } = await server();
     const item = z.object({ id: z.uuid() });
     const response = { 200: { description: 'The item.', content: { 'application/json': { schema: item } } } };
-    app.get('/test/item', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID, note: PLANTED }));
+    app.get('/test/item', { ...OPEN, schema: { response } }, () => ({ id: ITEM_ID, note: PLANTED }));
     await app.ready();
     expect(documentOf(app).paths['/test/item']?.get?.responses['200']).toMatchObject({ description: 'The item.' });
     expect((await app.inject('/test/item')).json()).toEqual({ id: ITEM_ID });
@@ -216,7 +223,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       content: { 'application/json': { schema: ERROR_BODY } },
     };
     const response = { 200: z.object({ id: z.uuid() }), 409: conflict, 422: ERROR_BODY };
-    app.post('/test/claim', { schema: { response }, ...OPEN }, () => ({ id: ITEM_ID }));
+    app.post('/test/claim', { ...OPEN, schema: { response } }, () => ({ id: ITEM_ID }));
     await app.ready();
     expect(documentOf(app).paths['/test/claim']?.post?.responses['409']).toMatchObject({
       description: 'Another request holds the key.',
@@ -264,7 +271,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
   it('refuses to start with a schema the document could only show as "anything"', async () => {
     const { app } = await server();
     const response = { 200: z.object({ at: z.date() }) };
-    app.get('/test/when', { schema: { response }, ...OPEN }, () => ({ at: new Date() }));
+    app.get('/test/when', { ...OPEN, schema: { response } }, () => ({ at: new Date() }));
     await expect(app.ready()).rejects.toThrow(/Date cannot be represented in JSON Schema/);
   });
 
@@ -352,8 +359,8 @@ describe('SEC-DATA-04 every error answer is written as it is, never through a ro
     ) => {
       done(null, { ...(payload as object), note: PLANTED });
     };
-    app.post('/test/item', { schema, preSerialization, ...OPEN }, () => ({ quantity: 1 }));
-    app.get('/test/item', { schema: { response: schema.response }, preSerialization, ...OPEN }, () => {
+    app.post('/test/item', { ...OPEN, schema, preSerialization }, () => ({ quantity: 1 }));
+    app.get('/test/item', { ...OPEN, schema: { response: schema.response }, preSerialization }, () => {
       throw new Error('failed on our side');
     });
     await app.ready();
@@ -361,6 +368,178 @@ describe('SEC-DATA-04 every error answer is written as it is, never through a ro
     expect(response.statusCode).toBe(status);
     expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
     expect(response.json()).toEqual(errorBody(code, 'not-a-uuid'));
+  });
+});
+
+describe('SEC-WEB-06 each route declares what it answers, and the most it reads', () => {
+  it.each<[string, RouteShorthandOptions, string]>([
+    [
+      'no answer for success',
+      { ...OPEN, schema: { response: { 404: ERROR_BODY } } },
+      'it declares no answer for success',
+    ],
+    [
+      'a success answer that is a string',
+      { ...OPEN, schema: { response: { 200: z.string() } } },
+      'its 200 answer is not an object with named fields',
+    ],
+    [
+      'a success answer that is a list',
+      { ...OPEN, schema: { response: { 200: z.array(z.object({ id: z.uuid() })) } } },
+      'its 200 answer is not an object with named fields',
+    ],
+    [
+      'a success answer that could be anything',
+      { ...OPEN, schema: { response: { 201: z.unknown() } } },
+      'its 201 answer is not an object with named fields',
+    ],
+    [
+      'a body but no limit of its own for it',
+      { config: OPEN.config, schema: OPEN.schema },
+      'it takes a body but sets no limit of its own for it',
+    ],
+    [
+      "a body limit over the server's own",
+      { ...OPEN, bodyLimit: 64 * 1024 + 1 },
+      'it takes a body but sets no limit of its own for it',
+    ],
+    [
+      'a body limit of its own in its document',
+      { ...OPEN, schema: { ...OPEN.schema, 'x-body-limit': 10 } as FastifySchema },
+      'the body limit its document shows is not its own (x-body-limit)',
+    ],
+  ])('refuses a write with %s as it is added', async (_what, options, problem) => {
+    const { app } = await server();
+    expect(() => app.post('/test/route', options, () => 'ok')).toThrow(`POST /test/route: ${problem}`);
+  });
+
+  it.each([0, 1.5])(
+    'refuses to start when a later hook sets a body limit of %s, which Fastify checks only as a route is added',
+    async (limit) => {
+      const { app } = await server();
+      await app.register(
+        (child, _options, done) => {
+          child.addHook('onRoute', (route) => {
+            route.bodyLimit = limit;
+          });
+          child.post('/item', OPEN, () => 'ok');
+          done();
+        },
+        { prefix: '/test/plugin' },
+      );
+      await expect(app.ready()).rejects.toThrow('POST /test/plugin/item: it takes a body but sets no limit of its own');
+    },
+  );
+
+  it('takes a read with no body limit, a range of success answers, and a body limit of the most allowed', async () => {
+    const { app } = await server();
+    const read = { config: OPEN.config, schema: { response: { '2xx': z.object({ ok: z.literal(true) }) } } };
+    app.get('/test/read', read, () => ({ ok: true }));
+    const create = { ...OPEN, bodyLimit: 64 * 1024, schema: { response: { 201: z.object({ id: z.uuid() }) } } };
+    app.post('/test/create', create, () => ({ id: ITEM_ID }));
+    await app.ready();
+    const paths = app.swagger().paths as Record<string, Record<string, Record<string, unknown>>>;
+    expect(paths['/test/create']?.post?.['x-body-limit']).toBe(64 * 1024);
+    expect(paths['/test/read']?.get).not.toHaveProperty('x-body-limit');
+  });
+
+  it("refuses a body over the route's own limit, though under the server's", async () => {
+    const { app } = await server();
+    app.post('/test/small', { ...OPEN, bodyLimit: 16 }, () => ({ ok: true }));
+    await app.ready();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/test/small',
+      headers: { origin: PUBLIC_ORIGIN, 'content-type': 'application/json' },
+      payload: JSON.stringify({ note: 'longer than sixteen bytes' }),
+    });
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual(errorBody('PAYLOAD_TOO_LARGE', FIRST_ID));
+  });
+
+  it.each<[string, z.ZodType, string]>([
+    ['open to fields it does not name', z.looseObject({ id: z.uuid() }), 'answer.additionalProperties'],
+    ['a field that could be anything', z.object({ id: z.uuid(), extra: z.unknown() }), 'answer.properties.extra'],
+    ['a list of anything, deeper down', z.object({ items: z.array(z.unknown()) }), 'answer.properties.items.items'],
+    [
+      'a nested object open to more fields',
+      z.object({ owner: z.object({ id: z.uuid() }).catchall(z.string()) }),
+      'answer.properties.owner.additionalProperties',
+    ],
+  ])('refuses to start with a success answer %s', async (_what, answer, where) => {
+    const { app } = await server();
+    app.get('/test/loose', { ...OPEN, schema: { response: { 200: answer } } }, () => ({ id: ITEM_ID }));
+    await expect(app.ready()).rejects.toThrow(
+      `GET /test/loose: its 200 answer lets through what it doesn't name (${where})`,
+    );
+  });
+
+  it('takes answers that name every field at every depth: lists, maps of named values, nullable parts, pairs', async () => {
+    const { app } = await server();
+    const answer = z.object({
+      items: z.array(z.object({ id: z.uuid() })),
+      counts: z.record(z.string(), z.int()),
+      owner: z.object({ name: z.string() }).nullable(),
+      pair: z.tuple([z.string(), z.int()]),
+    });
+    app.get('/test/tight', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
+      items: [],
+      counts: {},
+      owner: null,
+      pair: ['a', 1],
+    }));
+    await app.ready();
+    expect((await app.inject('/test/tight')).statusCode).toBe(200);
+  });
+});
+
+describe('the check for answers that let through what they do not name', () => {
+  const answering = (schema: unknown, components: Record<string, unknown> = {}) => ({
+    paths: { '/a': { get: { responses: { 200: { content: { 'application/json': { schema } } } } } } },
+    components: { schemas: components },
+  });
+  const strict = { type: 'object', properties: { id: { type: 'string' } }, additionalProperties: false };
+
+  it('follows a named schema, once, even one that refers to itself', () => {
+    const tree = {
+      type: 'object',
+      properties: { child: { $ref: '#/components/schemas/Tree' } },
+      additionalProperties: false,
+    };
+    expect(looseAnswers(answering({ $ref: '#/components/schemas/Tree' }, { Tree: tree }))).toEqual([]);
+    expect(looseAnswers(answering({ $ref: '#/components/schemas/Open' }, { Open: {} }))).toEqual([
+      "GET /a: its 200 answer lets through what it doesn't name (#/components/schemas/Open)",
+    ]);
+  });
+
+  it('counts a reference it cannot follow, and a map with no values described, as open', () => {
+    expect(looseAnswers(answering({ $ref: 'https://example.com/schemas/Thing' }))).toHaveLength(1);
+    expect(looseAnswers(answering({ type: 'object' }))).toEqual([
+      "GET /a: its 200 answer lets through what it doesn't name (answer.additionalProperties)",
+    ]);
+  });
+
+  it('looks inside every alternative and every position of a pair, but not past items: false', () => {
+    const alternatives = { anyOf: [strict, { oneOf: [strict, { allOf: [strict, {}] }] }] };
+    expect(looseAnswers(answering(alternatives))).toEqual([
+      "GET /a: its 200 answer lets through what it doesn't name (answer.anyOf[1].oneOf[1].allOf[1])",
+    ]);
+    expect(looseAnswers(answering({ type: 'array', prefixItems: [strict, {}], items: false }))).toHaveLength(1);
+    expect(looseAnswers(answering({ type: 'array', prefixItems: [strict], items: false }))).toEqual([]);
+  });
+
+  it('reads only success answers that have content, in documents of the expected shape', () => {
+    const errorsOnly = {
+      paths: { '/a': { get: { responses: { 400: { content: { 'application/json': { schema: {} } } } } } } },
+    };
+    expect(looseAnswers(errorsOnly)).toEqual([]);
+    expect(looseAnswers({ paths: { '/a': { get: { responses: { 204: { description: 'Done' } } } } } })).toEqual([]);
+    expect(looseAnswers({ paths: { '/a': 'not an item' } })).toEqual([]);
+    expect(looseAnswers({ paths: { '/a': { get: { responses: 'none' } } } })).toEqual([]);
+    expect(
+      looseAnswers({ paths: { '/a': { get: { responses: { 200: { content: { 'application/json': 'x' } } } } } } }),
+    ).toHaveLength(1);
+    expect(looseAnswers('not a document')).toEqual([]);
   });
 });
 
@@ -455,13 +634,13 @@ describe('every route checks and answers through its own zod schemas', () => {
     app.post(
       '/test/items/:id',
       {
+        ...OPEN,
         schema: {
           params: z.object({ id: z.uuid() }),
           querystring: z.object({ mode: z.enum(['quick', 'full']).optional() }),
           body: z.strictObject({ quantity: z.int().positive() }),
           response: { 200: z.object({ id: z.uuid(), quantity: z.int() }) },
         },
-        ...OPEN,
       },
       (request) => {
         reached.push(request.body);
@@ -470,7 +649,7 @@ describe('every route checks and answers through its own zod schemas', () => {
         return { id: ITEM_ID, quantity, note: PLANTED };
       },
     );
-    app.get('/test/broken', { schema: { response: { 200: z.object({ quantity: z.int() }) } }, ...OPEN }, () => ({
+    app.get('/test/broken', { ...OPEN, schema: { response: { 200: z.object({ quantity: z.int() }) } } }, () => ({
       quantity: PLANTED,
     }));
     await app.ready();

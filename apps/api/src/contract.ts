@@ -9,6 +9,9 @@
 //   (errors.ts), which the document names once, with every reason code.
 // - Each route names who may call it (access.ts), which the document shows as
 //   x-access on each of its operations.
+// - Each route declares its answers for success, as objects that name every
+//   field they carry, at every depth, and each route that takes a body sets its
+//   own limit for it, which the document shows as x-body-limit.
 // - A route the document couldn't describe truthfully is refused as it is
 //   added, and every route is checked again once every plugin's hooks have
 //   run. Then the routes served are compared with the document: a route
@@ -37,6 +40,15 @@ const COMPONENT_PREFIX = '#/components/schemas/';
 
 /** Where each operation shows who may call it; the swagger plugin copies `x-` keys of a route's schema into it. */
 const ACCESS_KEY = 'x-access';
+
+/** Where each operation that takes a body shows the most it reads. */
+const BODY_LIMIT_KEY = 'x-body-limit';
+
+/** The most any request body may be: the server's own limit, and the most a route may set for itself. */
+export const BODY_LIMIT_BYTES = 64 * 1024;
+
+/** Methods whose requests Fastify reads no body for. */
+const BODILESS_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
 
 /**
  * A schema the document can't describe (a Date, the output of a transform)
@@ -69,6 +81,9 @@ const isErrorRange = (status: string): boolean => /^[45]xx$/i.test(status) || st
  */
 const isErrorPathStatus = (status: string): boolean => /^(?:4[0-9][0-9]|500)$/.test(status);
 
+/** A success answer's status, or range of statuses: anything below 400. */
+const isSuccessStatus = (status: string): boolean => /^[1-3](?:[0-9][0-9]|xx)$/i.test(status);
+
 /**
  * Route options that would check input, or write answers or errors, other
  * than through the contract. A plugin's own compilers are checked too.
@@ -91,6 +106,11 @@ export class ContractBroken extends Error {
 
 const methodsOf = (route: RouteOptions): readonly string[] =>
   typeof route.method === 'string' ? [route.method] : route.method;
+
+const takesBody = (route: RouteOptions): boolean => methodsOf(route).some((method) => !BODILESS_METHODS.has(method));
+
+const isBodyLimit = (limit: unknown): boolean =>
+  typeof limit === 'number' && Number.isInteger(limit) && limit >= 1 && limit <= BODY_LIMIT_BYTES;
 
 /** A route's responses by status, or none. */
 function responsesOf(route: RouteOptions): object {
@@ -131,6 +151,20 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance): string[] {
     } else if (isErrorPathStatus(status) && !schemas.every((entry) => entry === ERROR_BODY)) {
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
+  }
+  // Allowlisted answers: a success answer names its fields, so nothing it doesn't name leaves.
+  const successes = Object.entries(responsesOf(route)).filter(([status]) => isSuccessStatus(status));
+  if (successes.length === 0) problems.push('it declares no answer for success (a response below 400)');
+  for (const [status, response] of successes) {
+    if (!responseSchemas(response).every((entry) => entry instanceof z.ZodObject)) {
+      problems.push(`its ${status} answer is not an object with named fields`);
+    }
+  }
+  if (takesBody(route) && !isBodyLimit(route.bodyLimit)) {
+    problems.push(`it takes a body but sets no limit of its own for it (bodyLimit, 1 to ${BODY_LIMIT_BYTES} bytes)`);
+  }
+  if (BODY_LIMIT_KEY in schema && schema[BODY_LIMIT_KEY] !== (takesBody(route) ? route.bodyLimit : undefined)) {
+    problems.push('the body limit its document shows is not its own (x-body-limit)');
   }
   problems.push(...accessProblems(route.config?.access, route.url));
   // The document shows the access the contract wrote from the route's own; a route
@@ -183,6 +217,95 @@ export function routeTableProblems(
     ...documented.filter((route) => !onServer.has(route)).map((route) => `${route} is documented but not served`),
     ...[...twins].map((route) => `${route} is served by more than one route`),
   ];
+}
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The keywords by which a JSON Schema says anything about a value: one with none of them takes anything. */
+const CONSTRAINING = [
+  'type',
+  'const',
+  'enum',
+  '$ref',
+  'anyOf',
+  'oneOf',
+  'allOf',
+  'not',
+  'properties',
+  'items',
+  'prefixItems',
+  'additionalProperties',
+];
+
+/**
+ * Where a schema lets through what it doesn't describe, each as a path into
+ * it: a value that could be anything, or an object with fields beyond those it
+ * names. A map (no named fields, every value of one schema) names its values,
+ * so it passes when they do.
+ */
+function looseParts(
+  schema: unknown,
+  at: string,
+  components: Readonly<Record<string, unknown>>,
+  seen: Set<string>,
+): string[] {
+  if (!isRecord(schema) || !CONSTRAINING.some((key) => key in schema)) return [at];
+  const walk = (child: unknown, where: string): string[] => looseParts(child, where, components, seen);
+  if (typeof schema.$ref === 'string') {
+    if (!schema.$ref.startsWith(COMPONENT_PREFIX)) return [at];
+    const name = schema.$ref.slice(COMPONENT_PREFIX.length);
+    if (seen.has(name)) return [];
+    seen.add(name);
+    return walk(components[name], schema.$ref);
+  }
+  const parts: string[] = [];
+  if (isRecord(schema.properties)) {
+    if (schema.additionalProperties !== false) parts.push(`${at}.additionalProperties`);
+    for (const [name, property] of Object.entries(schema.properties)) {
+      parts.push(...walk(property, `${at}.properties.${name}`));
+    }
+  } else if (schema.type === 'object' || 'additionalProperties' in schema) {
+    parts.push(...walk(schema.additionalProperties, `${at}.additionalProperties`));
+  }
+  if ('items' in schema && schema.items !== false) parts.push(...walk(schema.items, `${at}.items`));
+  for (const key of ['prefixItems', 'anyOf', 'oneOf', 'allOf']) {
+    const list = schema[key];
+    if (Array.isArray(list))
+      list.forEach((entry, index) => parts.push(...walk(entry, `${at}.${key}[${String(index)}]`)));
+  }
+  return parts;
+}
+
+/**
+ * Every success answer in the document that lets through what it doesn't
+ * name, at any depth: a field that could be anything, or an object open to
+ * fields it doesn't list. A route's own check sees only the top of its answer.
+ */
+export function looseAnswers(document: unknown): string[] {
+  if (!isRecord(document) || !isRecord(document.paths)) return [];
+  const components =
+    isRecord(document.components) && isRecord(document.components.schemas) ? document.components.schemas : {};
+  const problems: string[] = [];
+  for (const [path, item] of Object.entries(document.paths)) {
+    for (const method of OPENAPI_METHODS) {
+      const operation = isRecord(item) ? item[method] : undefined;
+      const responses = isRecord(operation) ? operation.responses : undefined;
+      for (const [status, response] of Object.entries(isRecord(responses) ? responses : {})) {
+        const content = isRecord(response) ? response.content : undefined;
+        if (!isSuccessStatus(status) || !isRecord(content)) continue;
+        for (const media of Object.values(content)) {
+          const loose = looseParts(isRecord(media) ? media.schema : undefined, 'answer', components, new Set());
+          if (loose.length > 0) {
+            problems.push(
+              `${method.toUpperCase()} ${path}: its ${status} answer lets through what it doesn't name (${loose.join(', ')})`,
+            );
+          }
+        }
+      }
+    }
+  }
+  return problems;
 }
 
 interface WithSchemas {
@@ -241,11 +364,13 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     // to the document nor to a list the route was given can change who may call it.
     const access = Object.freeze([...(route.config?.access ?? [])]);
     route.config = { ...route.config, access };
-    const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> = {
-      ...route.schema,
-      [ACCESS_KEY]: access,
-      response: { ...responsesOf(route), ...ERROR_RESPONSES },
-    };
+    const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> & Partial<Record<typeof BODY_LIMIT_KEY, number>> =
+      {
+        ...route.schema,
+        [ACCESS_KEY]: access,
+        ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
+        response: { ...responsesOf(route), ...ERROR_RESPONSES },
+      };
     route.schema = schema;
     added.push({ route, instance: this });
   });
@@ -274,9 +399,11 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     const served = added.flatMap(({ route }) =>
       methodsOf(route).map((method) => `${method} ${formatParamUrl(route.url)}`),
     );
+    const document = app.swagger();
     const problems = [
       ...added.flatMap(({ route, instance }) => routeProblems(route, instance)),
-      ...routeTableProblems(served, app.swagger()),
+      ...routeTableProblems(served, document),
+      ...looseAnswers(document),
     ];
     done(problems.length > 0 ? new ContractBroken(problems) : undefined);
   });
