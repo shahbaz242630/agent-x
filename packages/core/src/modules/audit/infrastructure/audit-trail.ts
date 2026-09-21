@@ -26,8 +26,8 @@
 // an event sealed with a key the app still holds, though rotated out, which
 // only the chain's check refuses; and the table's owner rewriting its row
 // security so that this query alone skips an event, which leaves the chain
-// check blind too. Only a check of the live schema (planned, A3e) and the
-// owner-login alert cover that.
+// check blind too. The live schema guard (A3e-1b) and the owner-login alert
+// (A3e-2) cover that; owner-tamper.db.test.ts shows the guard naming it.
 //
 // Events about an authority object are its state changes, few in its life;
 // activity goes against other subjects (the rule in signed-states.ts). So the

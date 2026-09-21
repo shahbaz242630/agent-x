@@ -2,8 +2,9 @@
 // against the audit log (verifiedState, record, changeStatus), on a stand-in
 // table built as a module will build one: a tenant table with a status, its
 // guard, and the signed-state columns. The attacker is the server's superuser,
-// past every wall, holding none of the app's keys (FX-TAMPER). A3d adds the
-// catalogue's full tamper scripts; these prove each check bites.
+// past every wall, holding none of the app's keys (FX-TAMPER). These prove
+// each check bites; owner-tamper.db.test.ts (A3d) runs the tampers as the
+// database's owner, and says which layer catches each.
 import { AsyncResource } from 'node:async_hooks';
 
 import {
