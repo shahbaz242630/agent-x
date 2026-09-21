@@ -564,6 +564,11 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
     expect(
       decided([postgres], new Map([['foundation', MIDDLE]]), { [MIDDLE]: ['Deploy/Azure/Modules/Postgres.bicep'] }),
     ).toEqual(red(postgres, runFoundation));
+    // A path git itself gives in capitals, in both diffs.
+    const capitals = 'Deploy/Azure/Modules/Postgres.bicep';
+    expect(decided([capitals], new Map([['foundation', MIDDLE]]), { [MIDDLE]: [capitals] })).toEqual(
+      red(capitals, runFoundation),
+    );
     // Recorded at a commit this one doesn't have: a branch's, or a later one.
     expect(decided([postgres], new Map([['foundation', commit('9')]]))).toEqual(red(postgres, runFoundation));
     expect(decided([postgres], new Map([['foundation', LATER]]))).toEqual(red(postgres, runFoundation));
@@ -592,6 +597,34 @@ describe('deciding a release on the hand deploys records (T1b)', () => {
         'deploy.ts secrets reads it, so run it by hand, its what-if read, then run this release again',
       ),
     );
+  });
+
+  it('judges each release staging runs on its own, against the same records', () => {
+    const older = commit('c');
+    // The job fell behind: it runs an older commit than the API.
+    const split = (records: Records, since: Readonly<Record<string, readonly string[]>>): Decision =>
+      decide(
+        both(running('api'), at(older)('migrate')),
+        NEW,
+        NEW_IMAGE,
+        history([older, OLD, MIDDLE, NEW], { [older]: [postgres], [OLD]: [postgres], ...since }),
+        readers,
+        records,
+      );
+    expect(split(new Map([['foundation', MIDDLE]]), { [MIDDLE]: [] })).toMatchObject({
+      kind: 'release',
+      deployed: [
+        `${postgres} changed since ${older}: deployed by hand, foundation from ${MIDDLE}`,
+        `${postgres} changed since ${OLD}: deployed by hand, foundation from ${MIDDLE}`,
+      ],
+    });
+    expect(split(new Map([['foundation', MIDDLE]]), { [MIDDLE]: [postgres] })).toEqual({
+      kind: 'by-hand',
+      reasons: [
+        `${postgres} changed since ${older}: ${runFoundation}`,
+        `${postgres} changed since ${OLD}: ${runFoundation}`,
+      ],
+    });
   });
 
   it('never takes a record for apps, a file no deployment reads, or when Bicep has not said', () => {
