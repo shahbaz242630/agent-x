@@ -66,6 +66,19 @@ export const APP_VARIABLES = {
   minReplicas: 'AGENTX_AZURE_APP_MIN_REPLICAS',
 } as const;
 
+/**
+ * The parameters file each hand deploy sends, in the order a first deploy runs
+ * them. CI's release asks Bicep what each reads (release.ts), to say which to
+ * run when a file changes; a test holds this to every parameters file here.
+ */
+export const DEPLOYMENTS = {
+  foundation: `${ENVIRONMENT}.bicepparam`,
+  secrets: `${ENVIRONMENT}.secrets.bicepparam`,
+  apps: `${ENVIRONMENT}.apps.bicepparam`,
+  certificates: `${ENVIRONMENT}.certificates.bicepparam`,
+} as const;
+export type Deployment = keyof typeof DEPLOYMENTS;
+
 /** The Container Apps environment the foundation creates (names.bicep), which holds the doors; a test holds the two equal. */
 export const APPS_ENVIRONMENT = 'cae-agentx-staging';
 
@@ -722,7 +735,7 @@ async function deployFoundation(steps: Steps): Promise<number> {
       '--name',
       name,
       '--parameters',
-      `${ENVIRONMENT}.bicepparam`,
+      DEPLOYMENTS.foundation,
       '--confirm-with-what-if',
     ],
     values,
@@ -943,7 +956,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
       '--name',
       name,
       '--parameters',
-      `${ENVIRONMENT}.secrets.bicepparam`,
+      DEPLOYMENTS.secrets,
       '--confirm-with-what-if',
     ],
     values,
@@ -1189,7 +1202,7 @@ async function deployCertificates(steps: Steps): Promise<number> {
       '--name',
       name,
       '--parameters',
-      `${ENVIRONMENT}.certificates.bicepparam`,
+      DEPLOYMENTS.certificates,
       '--confirm-with-what-if',
     ],
     values,
@@ -1283,7 +1296,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
       '--name',
       name,
       '--parameters',
-      `${ENVIRONMENT}.apps.bicepparam`,
+      DEPLOYMENTS.apps,
       '--confirm-with-what-if',
     ],
     values,
