@@ -507,6 +507,11 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
       'answer.row (intersection)',
     ],
     [
+      'a lazy part that turns out open',
+      z.object({ later: z.lazy(() => z.looseObject({ id: z.uuid() })) }),
+      "answer.later (open to fields it doesn't name)",
+    ],
+    [
       'a loose map, which the document shows as a map of described values',
       z.object({ tags: z.looseRecord(z.enum(['a']), z.string()) }),
       'answer.tags (a map whose keys',
@@ -517,6 +522,23 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     expect(() => app.get('/test/loose', options, () => ({ id: ITEM_ID }))).toThrow(
       `GET /test/loose: its 200 answer lets through what it doesn't name: ${where}`,
     );
+  });
+
+  it('sends an answer under a range written in capitals, which Fastify reads as the range', async () => {
+    const { app } = await server();
+    const options = { ...OPEN, schema: { response: { '2XX': z.object({ id: z.uuid() }) } } };
+    app.get('/test/capital', options, (_request, reply) => reply.code(201).send({ id: ITEM_ID, secret: PLANTED }));
+    await app.ready();
+    const answer = await app.inject('/test/capital');
+    expect(answer.statusCode).toBe(201);
+    expect(answer.json()).toEqual({ id: ITEM_ID });
+  });
+
+  it('asks no body limit of a TRACE route, whose requests Fastify reads no body for', async () => {
+    const { app } = await server();
+    app.route({ method: 'TRACE', url: '/test/trace', config: OPEN.config, schema: OPEN.schema, handler: () => 'ok' });
+    await app.ready();
+    expect(operations(app)).toContain('TRACE /test/trace');
   });
 
   it('refuses a loose answer under a range written in capitals, which Fastify reads as the range', async () => {
@@ -553,6 +575,7 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     const answer = z.object({
       items: z.array(z.object({ id: z.uuid() })),
       counts: z.record(z.enum(['open', 'paid']), z.int()),
+      only: z.record(z.literal('total'), z.int()),
       owner: z.object({ name: z.string() }).nullable(),
       nickname: z.string().optional(),
       pair: z.tuple([z.string(), z.int()]),
@@ -567,6 +590,7 @@ describe('SEC-WEB-06 each route declares what it answers, and the most it reads'
     app.get('/test/tight', { ...OPEN, schema: { response: { 200: answer } } }, () => ({
       items: [],
       counts: { open: 1, paid: 2 },
+      only: { total: 3 },
       owner: null,
       pair: ['a', 1],
       fixed: { code: 'A' },

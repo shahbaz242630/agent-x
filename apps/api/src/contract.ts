@@ -115,16 +115,16 @@ const NAMED_LEAVES: ReadonlySet<string> = new Set([
  * unions, optional, nullable or read-only parts, lazy parts, maps whose keys
  * are a fixed list, and the named leaves.
  */
-function unnamedParts(schema: unknown, at: string, seen: Set<unknown>): string[] {
-  if (!(schema instanceof z.ZodType)) return [`${at} (not a zod schema)`];
+function unnamedParts(schema: z.core.$ZodType, at: string, seen: Set<z.core.$ZodType>): string[] {
   if (seen.has(schema)) return [];
   seen.add(schema);
-  const walk = (child: unknown, where: string): string[] => unnamedParts(child, where, seen);
+  const walk = (child: z.core.$ZodType, where: string): string[] => unnamedParts(child, where, seen);
   if (schema instanceof z.ZodObject) {
     const { catchall } = schema._zod.def;
     const open =
       catchall === undefined || catchall instanceof z.ZodNever ? [] : [`${at} (open to fields it doesn't name)`];
-    return [...open, ...Object.entries(schema.shape).flatMap(([name, field]) => walk(field, `${at}.${name}`))];
+    const shape: Readonly<Record<string, z.core.$ZodType>> = schema._zod.def.shape;
+    return [...open, ...Object.entries(shape).flatMap(([name, field]) => walk(field, `${at}.${name}`))];
   }
   if (schema instanceof z.ZodArray) return walk(schema.element, `${at}[]`);
   if (schema instanceof z.ZodTuple) {
@@ -134,7 +134,7 @@ function unnamedParts(schema: unknown, at: string, seen: Set<unknown>): string[]
       ...(rest === null ? [] : walk(rest, `${at}[rest]`)),
     ];
   }
-  if (schema instanceof z.ZodUnion) return schema.options.flatMap((option: unknown) => walk(option, at));
+  if (schema instanceof z.ZodUnion) return schema.options.flatMap((option) => walk(option, at));
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodReadonly) {
     return walk(schema._zod.def.innerType, at);
   }
