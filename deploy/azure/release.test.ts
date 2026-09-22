@@ -2,6 +2,7 @@
 // here reaches Azure or git: the CLI is a stand-in that answers from a script,
 // or a stand-in staging that changes as a release writes to it, and the history
 // is a line of made-up commits (git.test.ts reads a real one).
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,6 +89,17 @@ const builtAt = (release: string): readonly unknown[] =>
 const running = (workload: Workload, overrides: Readonly<Record<string, unknown>> = {}): Running =>
   runningIn(workload, [azureContainer(WORKLOADS[workload].container, overrides)]);
 
+/** What git says of this repository, a line each. */
+function inRepository(...args: readonly string[]): string[] {
+  const done = spawnSync('git', args, {
+    cwd: fileURLToPath(new URL('../../', import.meta.url)),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (done.status !== 0) throw new Error(`git ${args.join(' ')}: ${done.stderr}`);
+  return done.stdout.split('\n').filter((line) => line !== '');
+}
+
 describe('parseArguments', () => {
   it('reads check or release with a full commit and a digest', () => {
     for (const command of ['check', 'release'] as const) {
@@ -129,16 +141,24 @@ describe('what only a person deploys', () => {
 
   it('leaves test files out only because the image does: .dockerignore drops them after all it lets in', () => {
     const root = fileURLToPath(new URL('../../', import.meta.url));
-    // Docker's own reading: a line trimmed, a comment or a blank line skipped, the last matching line wins.
+    // Docker's own reading: a line starting # skipped, then each trimmed, a blank one skipped; the last match wins.
     const rules = readFileSync(`${root}.dockerignore`, 'utf8')
       .split('\n')
+      .filter((line) => !line.startsWith('#'))
       .map((line) => line.trim())
-      .filter((line) => line !== '' && !line.startsWith('#'));
+      .filter((line) => line !== '');
     const dropped = rules.lastIndexOf(`**/*${TEST_FILE}`);
     expect(dropped).toBeGreaterThan(-1);
     expect(rules.slice(dropped + 1).filter((line) => line.startsWith('!'))).toEqual([]);
-    // The build reads that file, not one beside the Dockerfile, which would take its place.
-    expect(existsSync(`${root}Dockerfile.dockerignore`)).toBe(false);
+    // The build reads that file and no other: one beside a Dockerfile, anywhere, would take its place.
+    expect(inRepository('ls-files', '--cached', '--others', '--exclude-standard', '--', '*.dockerignore')).toEqual([
+      '.dockerignore',
+    ]);
+  });
+
+  it('holds no links, so no file a person deploys can take its content from a test file', () => {
+    // A link's content is its target's path: a change to the target changes nothing git lists for the link.
+    expect(inRepository('ls-files', '--stage').filter((line) => line.startsWith('120000 '))).toEqual([]);
   });
 
   it('names files and folders that exist, so a rename leaves no area guarding nothing', () => {
@@ -443,22 +463,23 @@ describe('deciding a release', () => {
   it('goes ahead when only test files changed where a person deploys, since they never ship (partner, S41)', () => {
     const decided = (files: readonly string[]): Decision =>
       decide(both(running('api'), running('migrate')), NEW, NEW_IMAGE, history([OLD, NEW], { [OLD]: files }));
-    // B1c-1's release, stopped by the set-up job's test, and the other areas' tests.
+    // B1c-1's release, stopped by the set-up job's test; another area's test; where a Windows checkout puts
+    // the area, which is still found without case while the ending is matched with it.
     for (const file of [
       'apps/db-setup/src/main.test.ts',
       'apps/db-setup/src/main.db.test.ts',
       'db/bootstrap/roles.test.ts',
-      'Deploy/Azure/apps.test.ts',
+      'Apps/DB-Setup/src/main.test.ts',
     ]) {
       expect(decided(['README.md', file]).kind).toBe('release');
     }
-    // A name the image would hold, however close to a test's: its case, a longer ending, another language, a
-    // folder named like a test.
     const why = HAND_DEPLOYED.find(({ prefix }) => prefix === 'apps/db-setup/')?.why ?? '';
     for (const file of [
+      // A name the image would hold, however close to a test's: its case, a longer ending, another language.
       'apps/db-setup/src/main.Test.ts',
       'apps/db-setup/src/main.test.ts.orig',
       'apps/db-setup/src/main.test.js',
+      // A file in a folder named like a test: the image drops it too, but only a test file's own name counts.
       'apps/db-setup/src/fixtures.test.ts/roles.sql',
     ]) {
       expect(decided([file])).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${why}`] });

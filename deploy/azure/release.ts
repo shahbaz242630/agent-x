@@ -107,6 +107,9 @@ export const HAND_DEPLOYED: readonly HandDeployed[] = handDeployedList(
  * after everything it lets in) and no deployment reads it (what Bicep says,
  * pinned in release.test.ts). Compared with case, as the image build's
  * patterns are, so `main.Test.ts`, which the image would hold, still counts.
+ * Kept here rather than in hand-deployed.json, so narrowing the gate didn't
+ * turn a release red for nothing: like the rest of this tool, a change to it
+ * is reviewed, not gated, and any other ending fails the .dockerignore test.
  */
 export const TEST_FILE = '.test.ts';
 
