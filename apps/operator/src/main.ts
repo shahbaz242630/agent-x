@@ -106,15 +106,12 @@ const problem = (text: string): Problems => ({ problems: [text] });
  */
 function readRequestFile(file: string): { readonly text: string } | Problems {
   if (!statSync(file).isFile()) return problem("the request file isn't a plain file");
+  // One byte more than a request may hold, in one read: a plain file gives all it has up to that.
   const bytes = Buffer.alloc(REQUEST_LIMIT_BYTES + 1);
-  let read = 0;
   const descriptor = openSync(file, 'r');
+  let read: number;
   try {
-    while (read < bytes.length) {
-      const got = readSync(descriptor, bytes, read, bytes.length - read, null);
-      if (got === 0) break;
-      read += got;
-    }
+    read = readSync(descriptor, bytes, 0, bytes.length, 0);
   } finally {
     closeSync(descriptor);
   }

@@ -16,7 +16,22 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { type OperatorProcess, REQUEST_LIMIT_BYTES, REQUEST_USAGE, runOperator, USAGE } from './main.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
-const faults = vi.hoisted(() => ({ keys: undefined as Error | undefined, name: undefined as Error | undefined }));
+const faults = vi.hoisted(() => ({
+  keys: undefined as Error | undefined,
+  name: undefined as Error | undefined,
+  read: undefined as Error | undefined,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    statSync: (...args: Parameters<typeof actual.statSync>) => {
+      if (faults.read !== undefined) throw faults.read;
+      return actual.statSync(...args);
+    },
+  };
+});
 
 vi.mock('@agentx/platform/keys', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/platform/keys')>();
@@ -43,6 +58,7 @@ vi.mock('@agentx/core/modules/organizations', async (importOriginal) => {
 afterEach(() => {
   faults.keys = undefined;
   faults.name = undefined;
+  faults.read = undefined;
 });
 
 /** The command's one key, as the platform mounts it. */
@@ -321,6 +337,12 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
       '--request takes the one file that holds the request, and nothing else',
     ]);
     expect(text).not.toContain('Quartzite');
+  });
+
+  it('lets an unexpected error reading the file end the run, never taking it for a refusal', async () => {
+    faults.read = new TypeError('a bug reading the request');
+
+    await expect(run(['--request', requestFile(request(NAME))])).rejects.toThrow('a bug reading the request');
   });
 
   it("says why a file can't be read by the system's reason alone, and refuses anything but a plain file", async () => {
