@@ -431,18 +431,19 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     ]);
   });
 
-  it('an organisation ID given in capitals: held all the same, under the one organisation', async () => {
+  it('IDs given in capitals: held all the same, under the one organisation, named in lower case', async () => {
     const id = await newAgent();
     await flip(id);
     const shouted = org.toUpperCase();
 
     expect(
       await withSignedStates(app, shouted, services(), (tx, states) =>
-        states.verifiedState(tx, AGENTS, { orgId: shouted, id }, 'share'),
+        states.verifiedState(tx, AGENTS, { orgId: shouted, id: id.toUpperCase() }, 'share'),
       ),
     ).toEqual({ outcome: 'tampered', sign: 'seal' });
 
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: id, findings: 1 });
     expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
   });
 });

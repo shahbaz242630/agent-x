@@ -50,10 +50,7 @@ interface Found {
   readonly count: number;
 }
 
-/**
- * Holds this process found but couldn't record yet, by organisation (lower
- * case), each with the finding it was first tried for.
- */
+/** Holds this process found but couldn't record yet, by organisation (lower case), with their findings. */
 const unrecorded = new Map<string, Found>();
 
 /** The first finding for each organisation, with how many there were. */
@@ -99,9 +96,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     const own = orgId.toLowerCase();
     const waiting = unrecorded.get(own);
     if (waiting !== undefined && !due.has(own)) due.set(own, waiting);
-    for (const [held, now] of due) {
-      // A hold still waiting names the finding it was first tried for.
-      const { finding, count } = unrecorded.get(held) ?? now;
+    for (const [held, { finding, count }] of due) {
       const log = logger.child({ orgId: held });
       try {
         // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
