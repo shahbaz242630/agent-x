@@ -22,10 +22,28 @@ import {
   within,
   writeTestKeys,
 } from '@agentx/testing';
-import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
+
+/** A failure no real run can cause yet, switched on by a test and off after it. */
+const faults = vi.hoisted(() => ({ create: undefined as Error | undefined }));
+
+vi.mock('./create-organization.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./create-organization.ts')>();
+  return {
+    ...actual,
+    createOrganizationAsOperator: (...args: Parameters<typeof actual.createOrganizationAsOperator>) => {
+      if (faults.create !== undefined) return Promise.reject(faults.create);
+      return actual.createOrganizationAsOperator(...args);
+    },
+  };
+});
+
+afterEach(() => {
+  faults.create = undefined;
+});
 
 const server = inject('postgres');
 /** The command's one key, as the platform mounts it. */
@@ -247,6 +265,20 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
+  });
+
+  it("reports any other key's refusal as a failure, never as a request done before", async () => {
+    faults.create = Object.assign(new Error('duplicate key value violates unique constraint'), {
+      code: '23505',
+      constraint: 'one_row_per_organization',
+    });
+
+    const { code, events, line } = await run(['create-organization', '--name', NAME]);
+
+    expect(code).toBe(1);
+    expect(events).toContain('operator.failed');
+    expect(events).not.toContain('operator.done_before');
+    expect(line('operator.failed')).toMatchObject({ command: 'create-organization' });
   });
 });
 
