@@ -17,10 +17,14 @@
 // (audit-trail.ts); or when the chain head stays locked past 5 seconds (the
 // owner holding it, or decisions queued on it), since a hold that waited for
 // ever would hang the request. Such a hold is remembered in this process:
-// every read of it here answers `tampered` with the sign that found it, and
-// every later withSignedStates for the organisation tries again, until it is
-// recorded. A process stopped in between forgets it, leaving the alarm lines;
-// the hold is set again only when the tampering is next found.
+// every read of it here answers `tampered` with the sign that found it, and a
+// later withSignedStates for the organisation tries again, one at a time, so
+// a head held locked can't take a connection for every request. It is kept
+// in this process alone: another replica reads the log's `clear` meanwhile,
+// and a process stopped before it is recorded (staging's API scales to zero
+// when idle) forgets it, leaving the alarm lines. The hold is then set only
+// when the tampering is next found; keeping it outside the process is carried
+// forward.
 //
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
@@ -52,6 +56,11 @@ interface Found {
 
 /** Holds this process found but couldn't record yet, by organisation (lower case), with their findings. */
 const unrecorded = new Map<string, Found>();
+/**
+ * How many holds this process is recording now, by organisation: a waiting
+ * one is tried only while none is, so by one request at a time.
+ */
+const recording = new Map<string, number>();
 
 /** The first finding for each organisation, with how many there were. */
 function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
@@ -84,8 +93,13 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     onTamper: (finding) => found.push(finding),
     unrecorded: (id) => unrecorded.get(id.toLowerCase())?.finding,
   });
+  // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
+  const opened = { began: false };
   try {
-    return await withTenant(db, orgId, (tx) => work(tx, states));
+    return await withTenant(db, orgId, (tx) => {
+      opened.began = true;
+      return work(tx, states);
+    });
   } catch (error) {
     if (error instanceof ChainBroken) {
       logger.child({ orgId }).error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
@@ -95,9 +109,10 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     const due = byOrganisation(found);
     const own = orgId.toLowerCase();
     const waiting = unrecorded.get(own);
-    if (waiting !== undefined && !due.has(own)) due.set(own, waiting);
+    if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
     for (const [held, { finding, count }] of due) {
       const log = logger.child({ orgId: held });
+      recording.set(held, (recording.get(held) ?? 0) + 1);
       try {
         // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
         const holder = createSignedStates({ keys, trail, logger, onTamper: () => undefined });
@@ -121,6 +136,10 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
           reason: 'not_recorded',
           err: error,
         });
+      } finally {
+        const still = (recording.get(held) ?? 1) - 1;
+        if (still > 0) recording.set(held, still);
+        else recording.delete(held);
       }
     }
   }

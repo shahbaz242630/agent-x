@@ -211,7 +211,8 @@ export interface SignedStates {
    * head's lock is taken first, so a hold being set is waited for, and one
    * set later comes after the decision's own events in the chain. That lock
    * comes last of all (ADR-006 §6): every row is locked before this read,
-   * and a row not locked yet is refused after it (`lock_order`). A hold this
+   * and a row this transaction hasn't read through verifiedState yet is
+   * refused after it (`lock_order`). A hold this
    * process found but couldn't record yet reads as `tampered` with the sign
    * that found it, until it is recorded.
    */
@@ -314,12 +315,12 @@ export function createSignedStates({
 
   /** Raises the alarm, hands the finding on, and gives the outcome a read denies. */
   const alarm = (subjectType: string, key: SignedRowKey, sign: TamperSign, seq?: bigint) => {
-    logger.child({ orgId: key.orgId }).error('audit.integrity_failed', {
+    logger.child({ orgId: key.orgId.toLowerCase() }).error('audit.integrity_failed', {
       chain: 'organisation',
       check: 'state',
       reason: sign,
       subjectType,
-      objectId: key.id,
+      objectId: key.id.toLowerCase(),
       ...(seq === undefined ? {} : { seq }),
     });
     onTamper(Object.freeze({ orgId: key.orgId.toLowerCase(), subjectType, objectId: key.id.toLowerCase(), sign }));

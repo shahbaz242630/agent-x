@@ -382,11 +382,22 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
 
     await withHeadLocked('for share', async () => {
       expect(await within(15_000, check(id))).toEqual({ outcome: 'tampered', sign: 'seal' });
+      // Waiting: one request tries it again, and the others go on without queueing on the head.
+      const retrying = check(clean);
+      await waitUntilQueued(attacker, 1);
+      expect(await within(3_000, check(clean))).toMatchObject({ outcome: 'verified' });
+      expect(await within(15_000, retrying)).toMatchObject({ outcome: 'verified' });
     });
+    // A withSignedStates refused outright (here, nested) tries nothing, so raises no false alarm.
+    await expect(
+      withTenant(app, org, () => withSignedStates(app, org, services(), () => Promise.resolve())),
+    ).rejects.toBeInstanceOf(TenantContextError);
 
+    const notRecorded: unknown = expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org });
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ check: 'state', reason: 'seal' }),
-      expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org }),
+      notRecorded,
+      notRecorded,
     ]);
     // Not recorded yet, so never read as clear here; this transaction's end tries again, with the head free.
     expect(await hold()).toEqual({ outcome: 'tampered', sign: 'seal' });
@@ -396,7 +407,7 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     await withHeadLocked('for share', async () => {
       expect(await within(3_000, check(clean))).toMatchObject({ outcome: 'verified' });
     });
-    expect(lines('audit.integrity_failed')).toHaveLength(2);
+    expect(lines('audit.integrity_failed')).toHaveLength(3);
   });
 
   it("refuses to lock a row after the head's lock, and lets a row locked before it be read and changed", async () => {
@@ -410,7 +421,11 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
         name: 'SignedStateFailed',
         reason: 'lock_order',
       });
-      return states.changeStatus(tx, AGENTS, { orgId: org, id: first }, 'suspend', CREATED);
+      return states.changeStatus(tx, AGENTS, { orgId: org, id: first }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: {},
+      });
     });
 
     expect(moved).toMatchObject({ outcome: 'changed', to: 'SUSPENDED' });
@@ -444,6 +459,7 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
 
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
     expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: id, findings: 1 });
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ orgId: org, objectId: id })]);
     expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
   });
 });
