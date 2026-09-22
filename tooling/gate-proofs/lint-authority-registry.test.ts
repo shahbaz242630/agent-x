@@ -314,11 +314,13 @@ const REJECTED: LintCase[] = [
     says: 'agents.agents is an authority table',
   },
   {
-    name: 'a generic helper bound to the names',
+    // Kysely's selectFrom is generic in its table, as here; given a plain
+    // `string` parameter, TypeScript would put the bound in itself.
+    name: 'a generic helper bound to the names, calling a generic query method',
     filePath: `${CORE}/generic-bound-query.ts`,
-    code: query(
+    code:
+      'declare const db: { selectFrom: <Table extends string>(table: Table) => unknown };\n\n' +
       "export const read = <T extends 'agents.agents' | 'audit.events'>(table: T): unknown => db.selectFrom(table);\n",
-    ),
     rule: RULE,
     says: 'agents.agents is an authority table',
   },
