@@ -19,7 +19,14 @@
 // with every later event about the object, read in the same statement as the
 // chain's head: each must be sealed, and none past the head. So an edit to any
 // of them (the newest signed one stripped of its seal, say) shows at once,
-// not only at the next chain check.
+// not only at the next chain check. And a chain holding any event past its
+// head, which refuses every new event (the integrity hold's among them), is
+// read as broken for every object, so a hold kept from being set is never
+// read as clear.
+//
+// The integrity hold's own events are recorded only by the audit module's
+// signed states (recordHoldEvent): `record` refuses its subject type, so no
+// other module can write an event the hold is read from.
 //
 // What this read can't see: a later event about the object deleted, or moved
 // to another object or organisation, which the chain's check and anchor find;
@@ -66,6 +73,7 @@ import {
   eventContent,
   subjectKeyProblems,
 } from '../domain/event.ts';
+import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,8 +94,10 @@ export interface RecordedAuditEvent {
  *   signed yet": verifiedState (signed-states.ts) denies it and raises the alarm
  * - `signed`: the latest one, whole: its seal, the version it made, its ID and place
  * - `broken`: it can't be believed: it or a later event about the object can't
- *   be read, fails its own hash or MAC, or lies past the chain's head; the
- *   head itself fails its MAC; or the seal in its details is malformed.
+ *   be read, fails its own hash or MAC, or lies past the chain's head; any
+ *   event of the chain lies past the head, or there is no head for the events
+ *   there are; the head itself fails its MAC; or the seal in its details is
+ *   malformed.
  *   Someone past the app changed or forged it. `seq` is where, when it could
  *   be read.
  */
@@ -141,19 +151,11 @@ export interface AuditTrail {
   /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
-   * it sealed and none past the head (see the file's comment for what it
-   * can't see). Only in withTenant's transaction for that organisation, like
+   * it sealed and no event of the chain past the head (see the file's comment
+   * for what it can't see). Only in withTenant's transaction for that organisation, like
    * `verify`.
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
-  /**
-   * Locks the organisation's chain head to the end of the transaction, as
-   * recording does, in withTenant's transaction for it. For a change to a
-   * signed state kept in the log alone (the integrity hold): read only once
-   * this is held, so two changes can't both start from the same state. The
-   * head's lock comes last (ADR-006 §6), so nothing else is locked after it.
-   */
-  lockHead(tx: AuditTransaction, orgId: string): Promise<void>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -320,22 +322,76 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader {
   };
 }
 
+/**
+ * Each trail's recording step for the integrity hold's own events, which the
+ * public `record` refuses: only recordHoldEvent reaches it, from this module.
+ */
+const holdRecorders = new WeakMap<AuditTrail, AuditTrail['record']>();
+
+/**
+ * Adds an event about the integrity hold (domain/integrity-hold.ts) to the
+ * chain, as `record` does. For the audit module's signed states alone: the
+ * public `record` refuses the hold's subject type, so no other module can
+ * write an event the hold would be read from.
+ */
+export function recordHoldEvent(
+  trail: AuditTrail,
+  tx: AuditTransaction,
+  orgId: string,
+  event: AuditEvent,
+): Promise<RecordedAuditEvent> {
+  const record = holdRecorders.get(trail);
+  if (record === undefined) throw new TypeError('The trail was not made by createAuditTrail');
+  return record(tx, orgId, event);
+}
+
+/**
+ * Locks the organisation's chain head, when it has one, to the end of the
+ * transaction, as recording does; in withTenant's transaction for it. For the
+ * integrity hold, a state kept in the log alone: it is read only once this is
+ * held, so two changes can't both start from one state, and a decision can't
+ * pass a hold being set. The head's lock comes last (ADR-006 §6), so nothing
+ * else is locked after it. For the audit module alone, like recordHoldEvent.
+ */
+export async function lockChainHead(tx: AuditTransaction, orgId: string): Promise<void> {
+  await assertTenant(tx, orgId);
+  const chain = chainOf(orgId);
+  await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
+}
+
 export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; readonly ids: IdGenerator }): AuditTrail {
-  return Object.freeze({
-    async record(tx: AuditTransaction, orgId: string, input: AuditEvent): Promise<RecordedAuditEvent> {
-      const event = checkedEvent(input, hidesField);
-      if (stateSealIn(event.details) === 'malformed') {
-        throw new AuditEventRefused([
-          'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
-        ]);
-      }
-      const chain = chainOf(orgId);
-      const details = canonicalDetails(event.details);
-      const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details), {
-        nextId: () => ids.next(),
-        content: eventContent(event, details),
-      });
-      return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
+  /** Records the event, which must be about the integrity hold when `hold` says so, and otherwise must not. */
+  const recordAs = async (
+    hold: boolean,
+    tx: AuditTransaction,
+    orgId: string,
+    input: AuditEvent,
+  ): Promise<RecordedAuditEvent> => {
+    const event = checkedEvent(input, hidesField);
+    if ((event.subject.type === HOLD_SUBJECT) !== hold) {
+      throw new AuditEventRefused([
+        hold
+          ? 'only the integrity hold is recorded by its own steps'
+          : `subject.type ${HOLD_SUBJECT} is the integrity hold's, recorded by its own steps`,
+      ]);
+    }
+    if (stateSealIn(event.details) === 'malformed') {
+      throw new AuditEventRefused([
+        'details.stateFingerprint and details.stateKeyVersion must hold a state seal, both of them or neither',
+      ]);
+    }
+    const chain = chainOf(orgId);
+    const details = canonicalDetails(event.details);
+    const sealed = await appendEvent(keys, chain, writerFor(tx, chain.orgId, event, details), {
+      nextId: () => ids.next(),
+      content: eventContent(event, details),
+    });
+    return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
+  };
+
+  const trail: AuditTrail = Object.freeze({
+    record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent> {
+      return recordAs(false, tx, orgId, event);
     },
 
     async verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
@@ -354,6 +410,10 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       const { rows } = await sql<Record<string, unknown>>`
         select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
                h.mac_key_version as head_mac_key_version,
+               (
+                 select pg_catalog.min(p.seq) from audit.events p
+                 where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+               ) as past_head,
                e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
                e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
                e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
@@ -369,11 +429,20 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         order by e.seq
         limit ${LATER_EVENTS_READ + 1}
       `.execute(tx);
-      if (rows.length > LATER_EVENTS_READ) throw new TooManyEventsAboutObject();
       const [first] = rows;
+      // The first event of the chain past its head (or of a chain with no head), if there is one: such a chain
+      // refuses every new event, the integrity hold's among them, so nothing about it is believed.
+      const past = first?.past_head;
+      const pastHead = past !== null;
+      const brokenPast: LatestSignedState =
+        typeof past === 'bigint' ? { kind: 'broken', seq: past } : { kind: 'broken' };
+      if (rows.length > LATER_EVENTS_READ) {
+        if (pastHead) return brokenPast;
+        throw new TooManyEventsAboutObject();
+      }
       const events = rows.filter((row) => row.seq !== null);
       const [newestSigned] = events;
-      if (first === undefined || newestSigned === undefined) return { kind: 'none' };
+      if (first === undefined || newestSigned === undefined) return pastHead ? brokenPast : { kind: 'none' };
 
       const head = first.has_head === true ? headIsWhole(keys, chain, first) : undefined;
       const read = events.map((row) => ({ row, sealed: sealedFields(row), content: contentOf(row) }));
@@ -399,6 +468,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         const seq = (bad ?? read[0])?.row.seq;
         return typeof seq === 'bigint' ? { kind: 'broken', seq } : { kind: 'broken' };
       }
+      if (pastHead) return brokenPast;
       return Object.freeze({
         kind: 'signed',
         id: signed.id,
@@ -408,11 +478,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         seal,
       });
     },
-
-    async lockHead(tx: AuditTransaction, orgId: string): Promise<void> {
-      await assertTenant(tx, orgId);
-      const chain = chainOf(orgId);
-      await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
-    },
   });
+  holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));
+  return trail;
 }

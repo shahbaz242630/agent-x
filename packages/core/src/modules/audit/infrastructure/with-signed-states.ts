@@ -12,13 +12,23 @@
 //
 // A hold that can't be set raises the integrity alarm again (`check: hold`),
 // and the work's own result or error still goes back to the caller. The
-// finding's alarm has been raised already, and a hold can only fail to be set
-// on a chain that refuses new events (its head fails its check), where every
-// read of the hold is denied anyway.
-import type { KeyProvider } from '@agentx/platform/keys';
+// finding's alarm has been raised already. A chain that refuses new events
+// (its head fails its check, or it holds events past its head) can't take the
+// hold, but every read of the hold is then denied anyway (audit-trail.ts); and
+// a hold waits at most 5 seconds for the chain head's lock, which is held only
+// while one event is recorded, rather than hang the request. The findings live only in this process until the hold is set: a
+// process stopped in between leaves the alarm lines alone, and the hold is set
+// when the tampering is next found (the running chain check finds it too,
+// from B1d).
+//
+// A work whose recording meets a chain that refuses new events has met
+// tampering too, and raises the alarm (`check: record`) before its error goes
+// back.
+import { ChainBroken } from '@agentx/platform/audit-chain';
 import { withTenant } from '@agentx/platform/db';
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { Kysely, Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator } from '../../../shared-kernel/index.ts';
 import { createAuditTrail } from './audit-trail.ts';
@@ -61,15 +71,21 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   const states = createSignedStates({ keys, trail, logger, onTamper: (finding) => found.push(finding) });
   try {
     return await withTenant(db, orgId, (tx) => work(tx, states));
+  } catch (error) {
+    if (error instanceof ChainBroken) {
+      logger.child({ orgId }).error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
+    }
+    throw error;
   } finally {
     for (const [held, { finding, count }] of byOrganisation(found)) {
-      const log = logger.child({ orgId: held });
+      const log = logger.child({ orgId: finding.orgId });
       try {
         // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
         const holder = createSignedStates({ keys, trail, logger, onTamper: () => undefined });
-        const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, (tx) =>
-          holder.hold(tx, finding, count),
-        );
+        const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
+          await sql`set local lock_timeout = '5s'`.execute(tx);
+          return holder.hold(tx, finding, count);
+        });
         if (outcome === 'set') {
           log.warn('audit.integrity_hold_set', {
             reason: finding.sign,

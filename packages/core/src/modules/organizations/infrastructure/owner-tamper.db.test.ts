@@ -92,7 +92,7 @@ const freeze = () =>
     states.changeStatus(tx, ORGANIZATIONS, { orgId: org, id: org }, 'freeze', change('organization.freeze')),
   );
 
-const hold = () => withSignedStates(app, org, services(), (tx, states) => states.integrityHold(tx, org));
+const hold = () => withSignedStates(app, org, services(), (tx, states) => states.integrityHold(tx, org, 'none'));
 
 /** The organisation's chain checked whole, against an anchor if one is given. */
 const verifyChain = (anchor?: { seq: bigint; hash: Buffer }) =>
@@ -313,7 +313,7 @@ describe(`FX-TAMPER as the owner on the integrity hold itself (Postgres ${server
     expect(await hold()).toMatchObject({ outcome: 'held', version: 1 });
   });
 
-  it('HELD, then its event edited to say CLEAR: it fails its own check, and is held again over it, from version 1', async () => {
+  it("HELD, then its event's details edited: it fails its own check, and is held again over it, from version 1", async () => {
     await created();
     await owner.setColumn(org, 'status', 'FROZEN');
     await check();
@@ -367,6 +367,48 @@ describe(`FX-TAMPER as the owner on the integrity hold itself (Postgres ${server
     expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created']);
     expect(lines('audit.integrity_hold_set')).toEqual([]);
   });
+
+  it.each([
+    [
+      'an event planted past its head',
+      async () => {
+        await owner.query(
+          `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+             subject_version, details, prev_hash, hash, mac, mac_key_version)
+           select h.org_id, h.seq + 1, gen_random_uuid(), pg_catalog.now(), 'system', 'planted', 'planted.event',
+             'planted', gen_random_uuid(), 1, '{}', h.hash, h.hash, h.mac, 1
+           from audit.heads h where h.org_id = $1`,
+          [org],
+        );
+      },
+    ],
+    [
+      'its head put back to an earlier sealed one, the events after it kept',
+      async () => {
+        const earlier = await owner.saveHead();
+        await freeze();
+        await owner.query('update audit.heads set seq = $2::bigint, hash = $3, mac = $4 where org_id = $1', [
+          org,
+          earlier.seq,
+          earlier.hash,
+          earlier.mac,
+        ]);
+      },
+    ],
+  ])(
+    'the chain refusing new events, %s: no hold can be recorded, and every read is denied, never clear',
+    async (_, tamper) => {
+      await created();
+      await tamper();
+
+      expect(await check()).toEqual({ outcome: 'tampered', sign: 'log' });
+      expect(await hold()).toEqual({ outcome: 'tampered', sign: 'log' });
+      expect(lines('audit.integrity_failed')).toEqual(
+        expect.arrayContaining([expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org })]),
+      );
+      expect(lines('audit.integrity_hold_set')).toEqual([]);
+    },
+  );
 
   it('HELD, and its event deleted from the middle of the chain with the row put back: only the chain check tells', async () => {
     await created();

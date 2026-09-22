@@ -60,7 +60,7 @@ const verified = (orgId: string, id = orgId) =>
   );
 
 const hold = (orgId: string) =>
-  withSignedStates(app, orgId, services(), (tx, states) => states.integrityHold(tx, orgId));
+  withSignedStates(app, orgId, services(), (tx, states) => states.integrityHold(tx, orgId, 'none'));
 
 const listed = async (id: string): Promise<boolean> => {
   const rows = await app.selectFrom('directory.orgs').select('org_id').where('org_id', '=', id).execute();

@@ -25,7 +25,7 @@ import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
-import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
+import { type AuditTrail, createAuditTrail, recordHoldEvent } from './audit-trail.ts';
 import type { SignedStates } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 import { withSignedStates } from './with-signed-states.ts';
@@ -109,33 +109,34 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const inOrg = <T>(work: (tx: Transaction<Tables>, states: SignedStates) => Promise<T>): Promise<T> =>
   withSignedStates(app, org, services(), work);
 
-/** Starts this test's organisation's hold, as creating an organisation does, and adds an agent to it. */
+const CREATED = { actor: OPERATOR, action: 'agent.created', details: {} };
+
+/** Inserts an agent and records its first signed state, in the caller's transaction. */
+async function insertAgent(tx: Transaction<Tables>, states: SignedStates, id: string): Promise<void> {
+  await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE' }).execute();
+  await states.record(tx, AGENTS, { orgId: org, id }, 'new', { status: 'ACTIVE' }, CREATED);
+}
+
+/**
+ * Adds an agent to this test's organisation. The first time, it creates the
+ * organisation as a module does: a row of its own (a stand-in agent whose ID
+ * is the organisation's), then its hold, CLEAR, in the same transaction.
+ */
 async function newAgent(): Promise<string> {
   const id = newId();
   await inOrg(async (tx, states) => {
     if ((await trail.latestSignedState(tx, org, { type: 'integrity_hold', id: org })).kind === 'none') {
+      await insertAgent(tx, states, org);
       await states.startIntegrityHold(tx, org, OPERATOR);
     }
-    await tx.insertInto('probe.agents').values({ org_id: org, id, status: 'ACTIVE' }).execute();
-    await states.record(
-      tx,
-      AGENTS,
-      { orgId: org, id },
-      'new',
-      { status: 'ACTIVE' },
-      {
-        actor: OPERATOR,
-        action: 'agent.created',
-        details: {},
-      },
-    );
+    await insertAgent(tx, states, id);
   });
   return id;
 }
 
 const check = (id: string) => inOrg((tx, states) => states.verifiedState(tx, AGENTS, { orgId: org, id }, 'share'));
 
-const hold = () => inOrg((tx, states) => states.integrityHold(tx, org));
+const hold = () => inOrg((tx, states) => states.integrityHold(tx, org, 'none'));
 
 /** Flips the agent's status past the app, as the server's superuser. */
 const flip = (id: string) =>
@@ -338,6 +339,91 @@ describe(`withSignedStates: the integrity hold follows every tamper sign (B1b, P
   });
 });
 
+describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.version})`, () => {
+  /** A session of the test's own holding the head's lock, in a transaction the test ends. */
+  async function withHeadLocked(mode: 'for share' | 'for no key update', work: () => Promise<void>): Promise<void> {
+    const locker = await database.connect('admin');
+    try {
+      await locker.query('begin');
+      if (mode === 'for share') {
+        await locker.query('select seq from audit.heads where org_id = $1 for share', [org]);
+      } else {
+        await locker.query('select seq from audit.heads where org_id = $1 for no key update', [org]);
+      }
+      await work();
+    } finally {
+      await locker.query('rollback');
+      await locker.end();
+    }
+  }
+
+  it("FX-RACE a decision reading the hold with the head's lock waits for a hold being set, and reads HELD", async () => {
+    const id = await newAgent();
+    await flip(id);
+    let finding: Promise<unknown> | undefined;
+    let deciding: Promise<unknown> | undefined;
+
+    await withHeadLocked('for no key update', async () => {
+      finding = check(id);
+      // The hold, set once the finding transaction has committed, waits on the head first.
+      await waitUntilQueued(attacker, 1);
+      deciding = inOrg((tx, states) => states.integrityHold(tx, org, 'head'));
+      await waitUntilQueued(attacker, 2);
+    });
+
+    expect(await finding).toEqual({ outcome: 'tampered', sign: 'seal' });
+    expect(await deciding).toMatchObject({ outcome: 'held', version: 2 });
+  });
+
+  it("gives up on a head held locked past its limit: the alarm names the hold, and the work's answer still comes back", async () => {
+    const id = await newAgent();
+    await flip(id);
+
+    await withHeadLocked('for share', async () => {
+      expect(await within(15_000, check(id))).toEqual({ outcome: 'tampered', sign: 'seal' });
+    });
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ check: 'state', reason: 'seal' }),
+      expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org }),
+    ]);
+    expect(await hold()).toMatchObject({ outcome: 'clear', version: 1 });
+    // Found again, with the head free: held.
+    await check(id);
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+  });
+
+  it('a write meeting a chain that refuses new events raises the alarm (check: record), and its error comes back', async () => {
+    await newAgent();
+    await attacker.query(
+      "update audit.heads set mac = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex') where org_id = $1",
+      [org],
+    );
+
+    await expect(inOrg((tx, states) => insertAgent(tx, states, newId()))).rejects.toMatchObject({
+      name: 'ChainBroken',
+    });
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'record', orgId: org }),
+    ]);
+  });
+
+  it('an organisation ID given in capitals: held all the same, under the one organisation', async () => {
+    const id = await newAgent();
+    await flip(id);
+    const shouted = org.toUpperCase();
+
+    expect(
+      await withSignedStates(app, shouted, services(), (tx, states) =>
+        states.verifiedState(tx, AGENTS, { orgId: shouted, id }, 'share'),
+      ),
+    ).toEqual({ outcome: 'tampered', sign: 'seal' });
+
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: shouted, findings: 1 })]);
+  });
+});
+
 describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () => {
   it('a sealed state that is neither CLEAR nor HELD: tampered (seal), and held over it at the next version', async () => {
     await newAgent();
@@ -345,7 +431,7 @@ describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () 
     await withTenant(app, org, async (tx) => {
       const subject = { type: 'integrity_hold', id: org, version: 2 };
       const seal = sealState(keys, { orgId: org, subject, fields: [['status', 'OPEN']] });
-      await trail.record(tx, org, {
+      await recordHoldEvent(trail, tx, org, {
         actor: OPERATOR,
         action: 'integrity_hold.set',
         subject,
@@ -362,13 +448,46 @@ describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () 
     });
   });
 
-  it('a new hold where the log holds one already: refused as tampering, with the alarm, and nothing recorded', async () => {
+  it("starts only after its organisation's own row is created in the same transaction, and only once", async () => {
     await newAgent();
+    const refused = { name: 'SignedStateFailed', reason: 'basis' };
 
-    await expect(inOrg((tx, states) => states.startIntegrityHold(tx, org, OPERATOR))).rejects.toMatchObject({
-      name: 'SignedStateFailed',
-      reason: 'tampered',
-    });
+    // Its events deleted, it would otherwise start again as CLEAR, wiping out the sign.
+    await expect(inOrg((tx, states) => states.startIntegrityHold(tx, org, OPERATOR))).rejects.toMatchObject(refused);
+    // Another row created is not the organisation's own.
+    await expect(
+      inOrg(async (tx, states) => {
+        await insertAgent(tx, states, newId());
+        await states.startIntegrityHold(tx, org, OPERATOR);
+      }),
+    ).rejects.toMatchObject(refused);
+    const again = newId();
+    await expect(
+      withSignedStates(app, again, services(), async (tx, states) => {
+        await tx.insertInto('probe.agents').values({ org_id: again, id: again, status: 'ACTIVE' }).execute();
+        await states.record(tx, AGENTS, { orgId: again, id: again }, 'new', { status: 'ACTIVE' }, CREATED);
+        await states.startIntegrityHold(tx, again, OPERATOR);
+        await states.startIntegrityHold(tx, again, OPERATOR);
+      }),
+    ).rejects.toMatchObject(refused);
+    expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created']);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('a new hold where the log holds one already: refused as tampering, with the alarm, and held', async () => {
+    await newAgent();
+    // The organisation's own row and its events deleted past the app, so it can be created again.
+    await attacker.query('delete from probe.agents where org_id = $1 and id = $1', [org]);
+    await attacker.query("delete from audit.events where org_id = $1 and subject_type = 'agent' and subject_id = $1", [
+      org,
+    ]);
+
+    await expect(
+      inOrg(async (tx, states) => {
+        await insertAgent(tx, states, org);
+        await states.startIntegrityHold(tx, org, OPERATOR);
+      }),
+    ).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'tampered' });
 
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ check: 'state', reason: 'log', subjectType: 'integrity_hold', objectId: org }),
@@ -380,14 +499,60 @@ describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () 
     ]);
   });
 
-  it("is read, and its head locked, only in withTenant's transaction for the organisation", async () => {
+  it('more than a thousand events about it since its newest signed state: tampered (log), not an error', async () => {
+    await newAgent();
+    // Unsealed events about the hold, put under the head's number with the head moved past them.
+    await attacker.query(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select h.org_id, h.seq + g, gen_random_uuid(), pg_catalog.now(), 'system', 'planted', 'integrity_hold.cleared',
+         'integrity_hold', h.org_id, 1, '{}', pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'),
+         pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'), 1
+       from audit.heads h, pg_catalog.generate_series(1, 1001) as g where h.org_id = $1`,
+      [org],
+    );
+    await attacker.query('update audit.heads set seq = seq + 1001 where org_id = $1', [org]);
+
+    expect(await hold()).toEqual({ outcome: 'tampered', sign: 'log' });
+  });
+
+  it("is read, with or without the head's lock, only in withTenant's transaction for the organisation", async () => {
     await newAgent();
     const other = newId();
 
+    for (const lock of ['none', 'head'] as const) {
+      await expect(
+        withSignedStates(app, other, services(), (tx, states) => states.integrityHold(tx, org, lock)),
+      ).rejects.toBeInstanceOf(TenantContextError);
+    }
+  });
+
+  it("is recorded only by its own steps: the trail's public record refuses its subject type", async () => {
+    await newAgent();
+    const subject = { type: 'integrity_hold', id: org, version: 2 };
+    const seal = sealState(keys, { orgId: org, subject, fields: [['status', 'CLEAR']] });
+
     await expect(
-      withSignedStates(app, other, services(), (tx, states) => states.integrityHold(tx, org)),
-    ).rejects.toBeInstanceOf(TenantContextError);
-    await expect(withTenant(app, other, (tx) => trail.lockHead(tx, org))).rejects.toBeInstanceOf(TenantContextError);
+      withTenant(app, org, (tx) =>
+        trail.record(tx, org, {
+          actor: OPERATOR,
+          action: 'integrity_hold.cleared',
+          subject,
+          details: { ...stateSealDetails(seal) },
+        }),
+      ),
+    ).rejects.toMatchObject({ name: 'AuditEventRefused' });
+    await expect(
+      withTenant(app, org, (tx) =>
+        recordHoldEvent(trail, tx, org, {
+          actor: OPERATOR,
+          action: 'agent.created',
+          subject: { ...subject, type: 'agent' },
+          details: {},
+        }),
+      ),
+    ).rejects.toMatchObject({ name: 'AuditEventRefused' });
+    expect(await hold()).toMatchObject({ outcome: 'clear', version: 1 });
   });
 
   it("belongs to no table: one recorded under the hold's subject type is refused before any SQL", async () => {

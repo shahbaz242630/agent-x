@@ -56,7 +56,14 @@ import type { Logger } from '@agentx/platform/observability';
 
 import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
 import { HOLD_SUBJECT, INTEGRITY_HOLD } from '../domain/integrity-hold.ts';
-import type { AuditTrail, AuditTransaction, LatestSignedState } from './audit-trail.ts';
+import {
+  type AuditTrail,
+  type AuditTransaction,
+  type LatestSignedState,
+  lockChainHead,
+  recordHoldEvent,
+  TooManyEventsAboutObject,
+} from './audit-trail.ts';
 
 /**
  * Where a row and its signed state part:
@@ -199,14 +206,21 @@ export interface SignedStates {
   /**
    * The organisation's integrity hold, from the log, in the caller's
    * transaction (withTenant's for it). Anything the hold stops goes ahead
-   * only on `clear`.
+   * only on `clear`. A decision that must not pass a hold being set, as a
+   * freeze can't be passed (Tx A), reads it with `lock: 'head'`: the chain
+   * head's lock is taken first, so a hold being set is waited for, and one
+   * set later comes after the decision's own events in the chain. That lock
+   * comes last of all (ADR-006 §6): take every other lock before this read.
    */
-  integrityHold(tx: AuditTransaction, orgId: string): Promise<HoldCheck>;
+  integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck>;
   /**
    * Records a new organisation's integrity hold, CLEAR, as its first state, in
-   * the transaction that creates the organisation. The log must hold no state
-   * for it yet: one there already is tampering (the alarm is raised, and it
-   * throws `tampered`).
+   * the transaction that creates the organisation: after `record(…, 'new')`
+   * of the organisation's own row (its ID the organisation's) with these
+   * signed states, once (otherwise `basis`), so a hold whose events were
+   * deleted can't be started again as CLEAR. The log must hold no state for it
+   * yet: one there already is tampering (the alarm is raised, and it throws
+   * `tampered`).
    */
   startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState>;
 }
@@ -280,6 +294,8 @@ export function createSignedStates({
 }): HoldingSignedStates {
   const statuses = createStatusChanger({ logger });
   const rowsHeld = new WeakMap<AuditTransaction, Map<string, Held>>();
+  /** Organisations whose own row each transaction has created, whose hold it may start. */
+  const created = new WeakMap<AuditTransaction, Set<string>>();
 
   const heldIn = (tx: AuditTransaction): Map<string, Held> => {
     const known = rowsHeld.get(tx) ?? new Map<string, Held>();
@@ -454,6 +470,10 @@ export function createSignedStates({
     ) {
       return notApplied(table, key, "The row didn't take the pointer to its new state's event as sealed");
     }
+    // An organisation's own row, created: its hold may start here (startIntegrityHold).
+    if (from === 'new' && key.id.toLowerCase() === key.orgId.toLowerCase()) {
+      created.set(tx, (created.get(tx) ?? new Set<string>()).add(key.orgId.toLowerCase()));
+    }
     return Object.freeze({ version: row.version, eventId: recorded.id, seq: recorded.seq });
   };
 
@@ -467,7 +487,14 @@ export function createSignedStates({
     orgId: string,
   ): Promise<{ readonly check: HoldCheck; readonly version: number }> => {
     const key = { orgId, id: orgId };
-    const latest = await trail.latestSignedState(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
+    let latest: LatestSignedState;
+    try {
+      latest = await trail.latestSignedState(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
+    } catch (error) {
+      // Every event about the hold is a signed state of its own, so any after the newest signed one is tampering.
+      if (error instanceof TooManyEventsAboutObject) return { check: alarm(HOLD_SUBJECT, key, 'log'), version: 0 };
+      throw error;
+    }
     if (latest.kind === 'none') return { check: alarm(HOLD_SUBJECT, key, 'unsigned'), version: 0 };
     if (latest.kind === 'broken') return { check: alarm(HOLD_SUBJECT, key, 'log', latest.seq), version: 0 };
     const subject = { type: HOLD_SUBJECT, id: orgId, version: latest.version };
@@ -492,7 +519,7 @@ export function createSignedStates({
   ): Promise<RecordedState> => {
     const subject = { type: HOLD_SUBJECT, id: orgId, version };
     const seal = sealState(keys, { orgId, subject, fields: [[STATUS, status]] });
-    const recorded = await trail.record(tx, orgId, {
+    const recorded = await recordHoldEvent(trail, tx, orgId, {
       actor: change.actor,
       action: change.action,
       subject,
@@ -559,11 +586,18 @@ export function createSignedStates({
       });
     },
 
-    async integrityHold(tx: AuditTransaction, orgId: string): Promise<HoldCheck> {
+    async integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> {
+      if (lock === 'head') await lockChainHead(tx, orgId);
       return (await readHold(tx, orgId)).check;
     },
 
     async startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState> {
+      if (created.get(tx)?.delete(orgId.toLowerCase()) !== true) {
+        throw new SignedStateFailed(
+          'basis',
+          "An integrity hold starts only in the transaction that created its organisation's own row, once",
+        );
+      }
       const latest = await trail.latestSignedState(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
       if (latest.kind !== 'none') {
         alarm(HOLD_SUBJECT, { orgId, id: orgId }, 'log', latest.seq);
@@ -581,7 +615,7 @@ export function createSignedStates({
 
     async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {
       const { orgId } = finding;
-      await trail.lockHead(tx, orgId);
+      await lockChainHead(tx, orgId);
       const { check, version } = await readHold(tx, orgId);
       if (check.outcome === 'held') return 'already';
       await recordHold(tx, orgId, version + 1, 'HELD', {
