@@ -2,7 +2,7 @@
 // here reaches Azure or git: the CLI is a stand-in that answers from a script,
 // or a stand-in staging that changes as a release writes to it, and the history
 // is a line of made-up commits (git.test.ts reads a real one).
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,7 @@ import {
   type ReleaseSteps,
   type Running,
   runningIn,
+  TEST_FILE,
   USAGE,
   UsageError,
   type Workload,
@@ -124,6 +125,20 @@ describe('what only a person deploys', () => {
       ['packages/platform/src/config/setup.ts', undefined],
     ]);
     for (const { why } of HAND_DEPLOYED) expect(why).toMatch(/foundation|apps/);
+  });
+
+  it('leaves test files out only because the image does: .dockerignore drops them after all it lets in', () => {
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    // Docker's own reading: a line trimmed, a comment or a blank line skipped, the last matching line wins.
+    const rules = readFileSync(`${root}.dockerignore`, 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'));
+    const dropped = rules.lastIndexOf(`**/*${TEST_FILE}`);
+    expect(dropped).toBeGreaterThan(-1);
+    expect(rules.slice(dropped + 1).filter((line) => line.startsWith('!'))).toEqual([]);
+    // The build reads that file, not one beside the Dockerfile, which would take its place.
+    expect(existsSync(`${root}Dockerfile.dockerignore`)).toBe(false);
   });
 
   it('names files and folders that exist, so a rename leaves no area guarding nothing', () => {
@@ -423,6 +438,36 @@ describe('deciding a release', () => {
         ),
       ).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${why(prefix)}`] });
     }
+  });
+
+  it('goes ahead when only test files changed where a person deploys, since they never ship (partner, S41)', () => {
+    const decided = (files: readonly string[]): Decision =>
+      decide(both(running('api'), running('migrate')), NEW, NEW_IMAGE, history([OLD, NEW], { [OLD]: files }));
+    // B1c-1's release, stopped by the set-up job's test, and the other areas' tests.
+    for (const file of [
+      'apps/db-setup/src/main.test.ts',
+      'apps/db-setup/src/main.db.test.ts',
+      'db/bootstrap/roles.test.ts',
+      'Deploy/Azure/apps.test.ts',
+    ]) {
+      expect(decided(['README.md', file]).kind).toBe('release');
+    }
+    // A name the image would hold, however close to a test's: its case, a longer ending, another language, a
+    // folder named like a test.
+    const why = HAND_DEPLOYED.find(({ prefix }) => prefix === 'apps/db-setup/')?.why ?? '';
+    for (const file of [
+      'apps/db-setup/src/main.Test.ts',
+      'apps/db-setup/src/main.test.ts.orig',
+      'apps/db-setup/src/main.test.js',
+      'apps/db-setup/src/fixtures.test.ts/roles.sql',
+    ]) {
+      expect(decided([file])).toEqual({ kind: 'by-hand', reasons: [`${file} changed since ${OLD}: ${why}`] });
+    }
+    // A test beside a file that ships: red for that file alone.
+    expect(decided(['apps/db-setup/src/main.test.ts', 'apps/db-setup/src/main.ts'])).toEqual({
+      kind: 'by-hand',
+      reasons: [`apps/db-setup/src/main.ts changed since ${OLD}: ${why}`],
+    });
   });
 
   it('stops for a hand deploy when what either runs is not in the commit, and reads the changes since each', () => {
@@ -741,6 +786,8 @@ describe('which hand deploys read each file', () => {
       'deploy/azure/staging.certificates.bicepparam': ['certificates'],
       'deploy/azure/staging.secrets.bicepparam': ['secrets'],
     });
+    // None of it a test file, which a release lets through unasked.
+    expect([...readers.keys()].filter((file) => file.endsWith(TEST_FILE))).toEqual([]);
   }, 60_000);
 });
 
