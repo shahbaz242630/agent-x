@@ -16,13 +16,15 @@ var appWorkloads = [
 
 // Every job, each with an identity of its own: the jobs that set up a server's
 // roles and databases, migrate the app's database, and build Zitadel's (init,
-// then setup). Each is started by hand, never on a schedule (apps.bicep).
+// then setup), and the operator's command (B1c). Each is started by hand, never
+// on a schedule (apps.bicep).
 @export()
 var jobWorkloads = [
   'db-setup'
   'migrate'
   'zitadel-init'
   'zitadel-setup'
+  'operator'
 ]
 
 // Everything that runs, so each can be given only its own secrets (G2c).
@@ -31,11 +33,16 @@ var workloads = concat(appWorkloads, jobWorkloads)
 
 // The app's keys (ADR-011 §2), one vault secret per key version, named as the
 // API reads them: key-<purpose>-v<version>. Each is created once and never
-// written again, and the API alone reads them: secrets.bicep creates them,
+// written again, and the API reads them all: secrets.bicep creates them,
 // apps.bicep mounts them. A rotation adds a version to the list (Azure.md).
 // The list is JSON so the deploy tool and the checks read the same one.
 @export()
 var appKeys = loadJsonContent('app-keys.json')
+
+// The keys the operator's command holds, by how their names start: every
+// version of the audit chains' MAC, and no other (ADR-011 §3, B1c).
+@export()
+var operatorKeys = 'key-audit-mac-v'
 
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')

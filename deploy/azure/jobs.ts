@@ -24,8 +24,15 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
 
-/** The jobs, by the work each does, in the order a first deploy runs them (names.bicep); a test holds the two equal. */
-export const JOBS = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as const;
+/** The jobs a first deploy runs, in its order. */
+const FIRST_DEPLOY = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as const;
+
+/**
+ * The jobs, by the work each does (names.bicep; a test holds the two equal):
+ * a first deploy's, then the operator's command (B1c), which is never started
+ * as it is deployed: it holds no request until a person writes one.
+ */
+export const JOBS = [...FIRST_DEPLOY, 'operator'] as const;
 export type Job = (typeof JOBS)[number];
 
 /** A job's name in Azure (names.bicep `jobName`). */
@@ -87,7 +94,7 @@ export const USAGE = `Usage:
   node deploy/azure/jobs.ts start <job>           start it only
   node deploy/azure/jobs.ts wait <job> <run>      wait for a run to end, read its log
   node deploy/azure/jobs.ts cleanup               clear a step a dead Zitadel setup run left started
-The jobs, in the order a first deploy runs them: ${JOBS.join(', ')}`;
+The jobs, in the order a first deploy runs them: ${FIRST_DEPLOY.join(', ')}; and operator, which only waits.`;
 
 const isJob = (value: string | undefined): value is Job => JOBS.some((job) => job === value);
 
@@ -117,6 +124,11 @@ export function parseArguments(argv: readonly string[]): Request {
     throw new UsageError(`say run, start, wait or cleanup, not ${command ?? 'nothing'}`);
   }
   if (!isJob(job)) throw new UsageError(`${job ?? 'nothing'} isn't a job: ${JOBS.join(', ')}`);
+  if (command !== 'wait' && job === 'operator') {
+    throw new UsageError(
+      `the operator's job isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses`,
+    );
+  }
   if (command !== 'wait') {
     if (rest.length > 0) throw new UsageError(`${command} takes one job, not ${rest.join(' ')} as well`);
     return { command, job };
@@ -306,9 +318,10 @@ function clock(value: string): string {
   return Number.isNaN(at.getTime()) ? `"${value}"` : `${at.toISOString().slice(11, 19)} UTC`;
 }
 
-/** What to run after a job that succeeded, in a first deploy. */
+/** What to run after a job that succeeded, in a first deploy; nothing follows the operator's. */
 function after(job: Job): string {
-  const next = JOBS[JOBS.indexOf(job) + 1];
+  if (job === 'operator') return "The operator's request has run: the lines above say what it did.";
+  const next = FIRST_DEPLOY[FIRST_DEPLOY.indexOf(job) + 1];
   return next === undefined
     ? 'That is the last of the four a first deploy runs.'
     : `In a first deploy, the next is: node deploy/azure/jobs.ts run ${next}`;

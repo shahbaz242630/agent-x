@@ -170,8 +170,9 @@ resource errorAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
 // audit chain changed, removed or wound back, or couldn't check it for three
 // intervals, or the check itself broke (`audit.integrity_failed`,
 // `audit.anchor_check_crashed`). A start refused on a broken platform chain
-// logs the first too. Only the count leaves the workspace; the lines say
-// which chain and why.
+// logs the first too, and so does the operator's command wherever the API
+// would (B1c): its job logs to the same table. Only the count leaves the
+// workspace; the lines say which chain and why.
 resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: integrityAlertName
   location: location
@@ -179,7 +180,7 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   kind: 'LogAlert'
   properties: {
     displayName: 'Audit: a chain failed its integrity check'
-    description: 'SEV-1. The API found an audit chain changed, removed or wound back, could not check it for three intervals, or its check broke (audit.integrity_failed, audit.anchor_check_crashed). Runbook: Incident-Response-Playbook.md section H.'
+    description: 'SEV-1. The API or the operator\'s command found an audit chain changed, removed or wound back, could not check it for three intervals, or its check broke (audit.integrity_failed, audit.anchor_check_crashed). Runbook: Incident-Response-Playbook.md section H.'
     severity: 1
     enabled: true
     scopes: [workspaceId]

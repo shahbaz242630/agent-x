@@ -1,8 +1,9 @@
 // Agent X's apps and jobs on Azure (ADR-002 Amendment G2d): the four jobs that
-// prepare a deployment, each started by hand, and the three apps that serve
-// traffic (the API, Zitadel and its login pages), and the public doors that put
-// an app on a host name (G2e). A deployment of its own, into the resource group
-// main.bicep creates and after secrets.bicep has written the secrets:
+// prepare a deployment and the operator's command (B1c), each started by hand,
+// the three apps that serve traffic (the API, Zitadel and its login pages), and
+// the public doors that put an app on a host name (G2e). A deployment of its
+// own, into the resource group main.bicep creates and after secrets.bicep has
+// written the secrets:
 //
 //   bicep snapshot deploy/azure/staging.apps.bicepparam --resource-group rg-agentx-staging
 //   az deployment group create --resource-group rg-agentx-staging \
@@ -50,6 +51,7 @@ import {
   jobName
   jobWorkloads
   networkAddressSpace
+  operatorKeys
   releaseRoleName
   resourceNames
   resourceTags
@@ -383,11 +385,27 @@ var zitadelPolicy = [
   }
 ]
 
+// The request the operator's job holds (B1c): what its next run is to do, as the
+// command's own arguments in JSON. A run started with arguments of its own
+// loses every mounted file (the start API takes no mounts), its login and key
+// among them, and keeps those arguments in the run's record. So the person
+// starting a run writes this secret first (jobs.ts), the run reads it as a
+// file, and a read of the job never shows its value. Deployed as no request,
+// which the command refuses, so a deployment of the apps clears any request
+// left behind; one run again meanwhile changes nothing, since it names the
+// organisation it makes and the directory refuses a second (apps/operator).
+var operatorRequest = {
+  name: 'operator-request'
+  value: '[]'
+}
+
 // Every job: the work it does (its identity and its name come from that), the
 // image and command, how long one run may take, what it reads as a mounted file
-// with the setting that names each file, and its settings. `secretRef` entries
-// in `settings` name a secret too; `policy.ts` checks that the secrets a job is
-// given are exactly the ones `GRANTS` says it reads, however they reach it.
+// with the setting that names each file, what it holds itself rather than reads
+// from the vault (only the operator's request), and its settings. `secretRef`
+// entries in `settings` name a secret too; `policy.ts` checks that the secrets a
+// job is given are exactly the ones `GRANTS` says it reads, however they reach
+// it, and what it may hold (`HELD`).
 var jobs = [
   {
     // The roles and databases of a server, as the server admin (G2a). Safe to
@@ -419,6 +437,7 @@ var jobs = [
         setting: 'AGENTX_DB_ZITADEL_PASSWORD_FILE'
       }
     ]
+    held: []
     settings: concat(ourSettings, [
       {
         name: 'AGENTX_DB_ADMIN_USER'
@@ -443,6 +462,7 @@ var jobs = [
         setting: 'AGENTX_DB_MIGRATION_PASSWORD_FILE'
       }
     ]
+    held: []
     settings: ourSettings
   }
   {
@@ -453,6 +473,7 @@ var jobs = [
     args: ['init', 'zitadel']
     timeoutSeconds: 900
     files: []
+    held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine)
   }
   {
@@ -476,7 +497,45 @@ var jobs = [
         setting: ''
       }
     ]
+    held: []
     settings: concat(zitadelDatabase, zitadelLogging, zitadelMachine, zitadelAddress, zitadelFirstInstance, zitadelPolicy)
+  }
+  {
+    // The operator's command (B1c; ADR-011 §3), as the app's role and no other,
+    // holding the audit chains' MAC alone: what it does, it does through the
+    // same tenant walls as the API. It reads what it is asked from the request
+    // it holds (above), never from a run's own arguments.
+    workload: 'operator'
+    image: appImage
+    command: ['node', 'apps/operator/src/main.ts']
+    args: ['--request', '${secretsPath}/${operatorRequest.name}']
+    // One organisation and its two audit events: seconds, with every wait for
+    // a chain's head bounded at 10 s (apps/operator).
+    timeoutSeconds: 300
+    files: concat(
+      [
+        {
+          reads: 'db-app-password'
+          setting: 'AGENTX_DB_PASSWORD_FILE'
+        }
+      ],
+      // Found by name in the folder AGENTX_KEYS_DIR names, as the API finds its keys.
+      map(filter(appKeys, key => startsWith(key, operatorKeys)), key => {
+        reads: key
+        setting: ''
+      })
+    )
+    held: [operatorRequest]
+    settings: concat(ourSettings, [
+      {
+        name: 'AGENTX_KEYS_DIR'
+        value: secretsPath
+      }
+      {
+        name: 'AGENTX_DB_USER'
+        value: 'agentx_app'
+      }
+    ])
   }
 ]
 
@@ -689,12 +748,16 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
           parallelism: 1
           replicaCompletionCount: 1
         }
-        // Read from the vault by the job's own identity, never a value held here.
-        secrets: map(secretsOf(job), secret => {
-          name: secret
-          keyVaultUrl: uri(vault.properties.vaultUri, 'secrets/${secret}')
-          identity: identityIds[job.workload]
-        })
+        // Read from the vault by the job's own identity, never a value held
+        // here; then what the job holds itself, which is no secret (above).
+        secrets: concat(
+          map(secretsOf(job), secret => {
+            name: secret
+            keyVaultUrl: uri(vault.properties.vaultUri, 'secrets/${secret}')
+            identity: identityIds[job.workload]
+          }),
+          job.held
+        )
       }
       template: {
         containers: [
@@ -716,7 +779,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               })
             )
-            volumeMounts: empty(job.files)
+            volumeMounts: empty(concat(job.files, job.held))
               ? []
               : [
                   {
@@ -726,7 +789,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 ]
           }
         ]
-        volumes: empty(job.files)
+        volumes: empty(concat(job.files, job.held))
           ? []
           : [
               {
@@ -734,10 +797,16 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 storageType: 'Secret'
                 // Named one by one: a secret volume with no list mounts every
                 // secret the job has.
-                secrets: map(job.files, file => {
-                  secretRef: file.reads
-                  path: file.reads
-                })
+                secrets: concat(
+                  map(job.files, file => {
+                    secretRef: file.reads
+                    path: file.reads
+                  }),
+                  map(job.held, held => {
+                    secretRef: held.name
+                    path: held.name
+                  })
+                )
               }
             ]
       }

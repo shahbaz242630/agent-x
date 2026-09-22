@@ -386,7 +386,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       expect.stringMatching(/^Microsoft\.Insights\/scheduledQueryRules alert-psql-agentx-stg-[a-z0-9]{6}-owner-login$/),
       'Microsoft.App/managedEnvironments cae-agentx-staging',
       'Microsoft.Insights/diagnosticSettings app-logs-to-workspace',
-      ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'].map(
+      ...['api', 'zitadel', 'login', 'db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'].map(
         (workload) => `Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-${workload}`,
       ),
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
@@ -424,6 +424,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'migrate reads db-owner-password',
         'db-setup reads db-app-password',
         'api reads db-app-password',
+        'operator reads db-app-password',
         'db-setup reads db-backup-password',
         'db-setup reads db-zitadel-password',
         'zitadel-init reads db-zitadel-password',
@@ -434,7 +435,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads login-client-public-key',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
-        ...APP_KEYS.map((key) => `api reads ${key}`),
+        // The operator's command reads the audit chains' MAC too, each version (B1c).
+        ...APP_KEYS.flatMap((key) =>
+          key.startsWith('key-audit-mac-v') ? [`api reads ${key}`, `operator reads ${key}`] : [`api reads ${key}`],
+        ),
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
   });
@@ -2098,7 +2102,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // A job the deployment needs, left out. CI's role would then be given on
     // a migration job this deployment doesn't make, and the owner-login alert
     // would pair logins with its starts.
-    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup']) {
+    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
         rules: workload === 'migrate' ? ['owner-login-alert', 'release-access', 'jobs'] : ['jobs'],
@@ -2593,6 +2597,136 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['workload-secrets']);
+  });
+
+  it("workload-secrets and no-secret-literals: the operator's job holds its request once, as none, as a file, and no other job holds one (B1c-2a)", () => {
+    const messages = (snapshotted: Snapshot): string[] => policyProblems(snapshotted, STAGING).map(describeProblem);
+    const operator = JOB('operator');
+    const request = (job: Mutable): Mutable => secretNamed(job, 'operator-request');
+    const mounted = (job: Mutable): Mutable[] =>
+      at(first(at(job, 'properties', 'template', 'volumes')), 'secrets') as Mutable[];
+    const holdOnce =
+      'job-agentx-stg-operator [workload-secrets] must hold operator-request once, as [] and nothing else: a person writes it before a run';
+    // A request written into the deployment: a value in the code, and not none.
+    expect(
+      messages(
+        changed(operator, (job) => {
+          request(job).value = '["create-organization","--name","Quartzite Other Co"]';
+        }),
+      ),
+    ).toEqual([
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[2].value must come from a @secure() parameter, never a value in the code',
+      holdOnce,
+    ]);
+    // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).
+    expect(
+      messages(
+        changed(operator, (job) => {
+          declaredSecrets(job).push(structuredClone(request(job)));
+        }),
+      ),
+    ).toEqual([holdOnce]);
+    for (const field of ['keyVaultUrl', 'identity']) {
+      expect(
+        messages(
+          changed(operator, (job) => {
+            request(job)[field] = String(secretNamed(job, 'db-app-password')[field]);
+          }),
+        ),
+      ).toEqual([holdOnce]);
+    }
+    expect(
+      messages(
+        changed(operator, (job) => {
+          configurationOf(job).secrets = declaredSecrets(job).filter((secret) => secret.name !== 'operator-request');
+          first(at(job, 'properties', 'template', 'volumes')).secrets = mounted(job).filter(
+            (item) => item.secretRef !== 'operator-request',
+          );
+        }),
+      ),
+    ).toEqual([holdOnce]);
+    // Held but never read, or read from the environment, where crash output shows it.
+    expect(
+      messages(
+        changed(operator, (job) => {
+          first(at(job, 'properties', 'template', 'volumes')).secrets = mounted(job).filter(
+            (item) => item.secretRef !== 'operator-request',
+          );
+        }),
+      ),
+    ).toEqual([
+      'job-agentx-stg-operator [workload-secrets] is given operator-request and never reads it; one nobody needs is one more to leak',
+    ]);
+    expect(
+      brokenRules(
+        changed(operator, (job) => {
+          first(at(job, 'properties', 'template', 'volumes')).secrets = mounted(job).filter(
+            (item) => item.secretRef !== 'operator-request',
+          );
+          settingsOf(job).push({ name: 'AGENTX_OPERATOR_REQUEST', secretRef: 'operator-request' });
+        }),
+      ),
+    ).toEqual(['workload-secrets']);
+    // The operator's job holding something else of its own, even as none: only its request.
+    expect(
+      brokenRules(
+        changed(operator, (job) => {
+          declaredSecrets(job).push({ name: 'operator-note', value: '[]' });
+          mounted(job).push({ secretRef: 'operator-note', path: 'operator-note' });
+        }),
+      ),
+    ).toEqual(['no-secret-literals', 'workload-secrets']);
+    // Another job holding one, even as none: only the operator's may.
+    expect(
+      brokenRules(
+        changed(JOB('migrate'), (job) => {
+          declaredSecrets(job).push({ name: 'operator-request', value: '[]' });
+          mounted(job).push({ secretRef: 'operator-request', path: 'operator-request' });
+        }),
+      ),
+    ).toEqual(['no-secret-literals', 'workload-secrets']);
+    // A request in the job's own command or arguments, in place of the file or after it, the file alone with
+    // its flag lost, or a word moved from one to the other.
+    const runAs =
+      "job-agentx-stg-operator [workload-secrets] must run node apps/operator/src/main.ts --request /mnt/secrets/operator-request and nothing else: a request in its command or arguments would sit in the deployment and every run's record";
+    const script = 'apps/operator/src/main.ts';
+    for (const [command, args] of [
+      [
+        ['node', script],
+        ['create-organization', '--name', 'Quartzite Other Co'],
+      ],
+      [
+        ['node', script],
+        ['--request', '/mnt/secrets/operator-request', 'create-organization'],
+      ],
+      [['node', script], ['/mnt/secrets/operator-request']],
+      [['node', script], []],
+      [['node', script, 'create-organization', '--name', 'Quartzite Other Co'], []],
+      // The arguments as they should be, the command not.
+      [
+        ['node', script, 'create-organization', '--name', 'Quartzite Other Co', '--'],
+        ['--request', '/mnt/secrets/operator-request'],
+      ],
+      [
+        ['sh', '-c', `node ${script} create-organization --name "Quartzite Other Co" #`],
+        ['--request', '/mnt/secrets/operator-request'],
+      ],
+      [[], ['--request', '/mnt/secrets/operator-request']],
+      [['sh', '-c', `node ${script} create-organization --name "Quartzite Other Co"`], []],
+      [['node'], [script, '--request', '/mnt/secrets/operator-request']],
+      [['node', script, '--request'], ['/mnt/secrets/operator-request']],
+    ]) {
+      expect({
+        command,
+        args,
+        problems: messages(
+          changed(operator, (job) => {
+            containerOf(job).command = command;
+            containerOf(job).args = args;
+          }),
+        ),
+      }).toEqual({ command, args, problems: [runAs] });
+    }
   });
 
   it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {

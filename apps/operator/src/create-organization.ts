@@ -10,8 +10,9 @@
 // The platform chain's head is locked last, after the organisation's (ADR-006
 // §6: 12, then 13), and the wait for it is bounded (PlatformChain.record).
 //
-// The organisation's ID is made by the server (the command's IdGenerator),
-// never typed, and an ID already listed is refused by the directory's key:
+// The organisation's ID is made by the command (its IdGenerator), or by
+// jobs.ts for a request file (B1c-2a), never typed; an ID already listed is
+// refused by the directory's key, so a request run twice makes one organisation:
 // the command can only ever create a new organisation, never reach one that
 // exists (ADR-005 §6, amended S40: the one operator command that writes
 // tenant tables, and its bounds).
@@ -37,7 +38,7 @@ export interface CreatedOrganization {
 }
 
 export interface NewOrganizationRequest {
-  /** Made by the server's IdGenerator, before the call, so a failure can name it. */
+  /** Made before the call (the command's IdGenerator, or a request file's), so a failure can name it. */
   readonly orgId: string;
   readonly name: string;
   /** The release that runs the command, named in the platform's event. */
