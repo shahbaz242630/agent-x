@@ -25,12 +25,18 @@ import {
 } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { AuditEventRefused } from '../domain/event.ts';
 import { type AuditTrail, type AuditTransaction, createAuditTrail } from './audit-trail.ts';
-import { createSignedStates, type SignedStateFailed, type SignedStates, type TamperSign } from './signed-states.ts';
+import {
+  createSignedStates,
+  type SignedStateFailed,
+  type SignedStates,
+  type TamperFinding,
+  type TamperSign,
+} from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
 const MACHINE = defineStateMachine({
@@ -111,8 +117,11 @@ function loggerFor(destination: LogCapture) {
   });
 }
 
+/** What every alarm handed on, for the integrity hold. */
+let found: TamperFinding[];
+
 const statesWith = (using: AuditTrail): SignedStates =>
-  createSignedStates({ keys, trail: using, logger: loggerFor(capture) });
+  createSignedStates({ keys, trail: using, logger: loggerFor(capture), onTamper: (finding) => found.push(finding) });
 
 let number = 0;
 /** A new UUID, so no two tests share an organisation or a row. */
@@ -185,8 +194,20 @@ afterAll(async () => {
 
 beforeEach(() => {
   capture = new LogCapture();
+  found = [];
   states = statesWith(trail);
   org = newId();
+});
+
+afterEach(() => {
+  // Every alarm hands its finding on, for the hold (B1b): the organisation, the object and the sign it names.
+  const named = alarms().map((line) => ({
+    orgId: line.orgId,
+    subjectType: line.subjectType,
+    objectId: line.objectId,
+    sign: line.reason,
+  }));
+  expect(found).toEqual(named);
 });
 
 describe('ADR-012 §2 an authority row recorded and verified against the log', () => {
