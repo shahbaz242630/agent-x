@@ -835,7 +835,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     /** t.keys, built as a table of idempotency keys must be: its result filled in, nothing else changed. */
     const KEYS = [
       'create schema t',
-      'create table t.keys (org_id uuid not null, key text not null, result text, primary key (org_id, key))',
+      'create table t.keys (org_id uuid not null, key text not null, result text, result_status integer, primary key (org_id, key))',
       ...walls('t.keys'),
       'grant usage on schema t to agentx_app',
       'grant select, insert on t.keys to agentx_app',
@@ -861,10 +861,22 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter(statements, listing())).toEqual([]);
     });
 
-    it('fails a listed column the app is not granted UPDATE on, or one listed twice: the list is exact', async () => {
-      expect(await problemsAfter(KEYS, listing({ reason: 'Keys', columns: ['result', 'key'] }))).toEqual([
-        "t.keys: the fill-in list names column key, which agentx_app isn't granted UPDATE on",
-      ]);
+    it('fails a listed column the app is not granted UPDATE on: the list is exact', async () => {
+      fixtureRoles = ['ci06_keys_writer'];
+      const statements = [
+        ...KEYS,
+        // UPDATE of a column of that name on another table (the real keys) and
+        // to another role, and SELECT of it to the app: none of them counts.
+        ['admin', 'create role ci06_keys_writer nologin'] as const,
+        'grant update (result_status) on t.keys to ci06_keys_writer',
+        'grant select (result_status) on t.keys to agentx_app',
+      ];
+      expect(
+        await problemsAfter(statements, listing({ reason: 'Keys', columns: ['result', 'result_status'] })),
+      ).toEqual(["t.keys: the fill-in list names column result_status, which agentx_app isn't granted UPDATE on"]);
+    });
+
+    it('fails a column listed twice', async () => {
       expect(await problemsAfter(KEYS, listing({ reason: 'Keys', columns: ['result', 'result'] }))).toEqual([
         't.keys: the fill-in list names a column twice',
       ]);

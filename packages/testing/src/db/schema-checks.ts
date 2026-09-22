@@ -598,8 +598,9 @@ function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames
     const problems: string[] = [];
     if (entry.reason.trim() === '') problems.push(`${name}: the fill-in list gives no reason for it`);
     if (entry.columns.length === 0) problems.push(`${name}: the fill-in list names no column the app may change`);
-    if (new Set(entry.columns).size !== entry.columns.length)
+    if (new Set(entry.columns).size !== entry.columns.length) {
       problems.push(`${name}: the fill-in list names a column twice`);
+    }
     if (!facts.relations.some((relation) => relation.name === name)) {
       problems.push(`${name}: is on the fill-in list, but no such table exists`);
       return problems;
@@ -611,9 +612,9 @@ function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames
       problems.push(`${name}: is on the fill-in list, but its schema is append-only`);
     }
     for (const column of new Set(entry.columns)) {
+      // Only a column grant names a column, so this finds column grants alone.
       const granted = facts.grants.some(
         (grant) =>
-          grant.kind === 'column' &&
           grant.relation === name &&
           grant.attribute === column &&
           grant.grantee === roles.app &&
