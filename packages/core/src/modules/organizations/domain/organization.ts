@@ -8,8 +8,10 @@
 //
 // Its name is what people call it: shown to its own members, never logged or
 // put in an audit event, and not an authority field (it grants nothing). It
-// is kept in Unicode's composed form (NFC), so two names that look the same
-// are the same text, and it must be something a person can see and read.
+// is kept in Unicode's composed form (NFC), so a name typed composed or
+// decomposed is kept as the same text, and it must be something a person can
+// see and read. (NFC doesn't merge letters that merely look alike, such as a
+// Latin and a Cyrillic "a": a name is shown only to its own members.)
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 
 export const ORGANIZATION = defineStateMachine({
@@ -36,11 +38,18 @@ const MAX_NAME = 200;
 const INVISIBLE = /[\p{C}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\p{Script=Braille}]/u;
 
 /**
- * The zero-width non-joiner and joiner inside a word, where Persian, Urdu and
- * the Indic scripts need them: between two letters or marks. Anywhere else
- * they are as invisible as any other format character.
+ * The zero-width non-joiner and joiner where a script needs them to shape a
+ * word: after a mark (the Indic scripts' virama: Devanagari, Bengali, Sinhala)
+ * or before one, within a word, and between two Arabic-script letters
+ * (Persian, Urdu). Anywhere else, between two Latin or Han letters say, they
+ * change nothing a person sees, so they are as invisible as any other format
+ * character.
  */
-const JOINER_IN_A_WORD = /(?<=[\p{L}\p{M}])\p{Join_Control}(?=[\p{L}\p{M}])/gu;
+const JOINER_IN_A_WORD =
+  /(?<=\p{M})\p{Join_Control}(?=[\p{L}\p{M}])|(?<=[\p{L}\p{M}])\p{Join_Control}(?=\p{M})|(?<=\p{Script=Arabic})\p{Join_Control}(?=\p{Script=Arabic})/gu;
+
+/** Every joiner, taken out before marks are counted, so none can split a stack. */
+const JOINERS = /\p{Join_Control}/gu;
 
 /** Something a person reads: a letter or a digit. */
 const READABLE = /[\p{L}\p{N}]/u;
@@ -75,7 +84,8 @@ export function organizationName(name: string): string {
   }
   if (composed.trim() !== composed) problems.push('the name starts or ends with a space');
   if (!READABLE.test(composed)) problems.push('the name has no letter or digit');
-  if (STACKED.test(composed)) problems.push('the name starts with a combining mark, or stacks more than 4 on one');
+  if (STACKED.test(composed.replace(JOINERS, '')))
+    problems.push('the name starts with a combining mark, or stacks more than 4 on one');
   if (problems.length > 0) throw new OrganizationRefused(problems);
   return composed;
 }

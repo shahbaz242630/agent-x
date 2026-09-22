@@ -60,6 +60,8 @@ describe("an organisation's name", () => {
     ],
     ['Persian with a zero-width non-joiner inside a word', text(0x645, 0x6cc, ZWNJ, 0x62e, 0x648, 0x627, 0x647, 0x645)],
     ['a Devanagari conjunct with a zero-width joiner after its virama', text(0x915, 0x94d, ZWJ, 0x937)],
+    ['a Bengali ra-phala, a zero-width joiner after its virama', text(0x9b0, 0x9cd, ZWJ, 0x9af)],
+    ['a Sinhala touching conjunct, a zero-width joiner before its virama', text(0xd9a, ZWJ, 0xdca, 0xdc0)],
     ['four combining marks on one character', `A${text(LOW_LINE, LOW_LINE, LOW_LINE, LOW_LINE)}`],
     ['spaces inside it', 'Acme  Trading'],
     ['200 characters', 'a'.repeat(200)],
@@ -94,6 +96,8 @@ describe("an organisation's name", () => {
     ['a zero-width non-joiner at the start', `${text(ZWNJ)}Acme`],
     ['a zero-width joiner before a space', `Acme${text(ZWJ)} Trading`],
     ['a zero-width joiner between two emoji, which are no letters', `Acme ${text(0x1f468, ZWJ, 0x1f469)}`],
+    ['a zero-width joiner between two Latin letters, where it changes nothing', `Ac${text(ZWJ)}me`],
+    ['a zero-width non-joiner between two Han characters', text(0x4e2d, ZWNJ, 0x6587)],
     ['a Hangul filler, a letter that shows as nothing', `Acme${text(0x3164)}`],
     ['a halfwidth Hangul filler', `Acme${text(0xffa0)}`],
     ['a Hangul choseong filler', `Acme${text(0x115f)}`],
@@ -129,6 +133,11 @@ describe("an organisation's name", () => {
     ['a combining mark first', `${text(LOW_LINE)}Acme`, [STACKED]],
     ['five combining marks on one character', `A${text(LOW_LINE, LOW_LINE, LOW_LINE, LOW_LINE, LOW_LINE)}`, [STACKED]],
     ['a letter carrying 199 of them', `A${text(LOW_LINE).repeat(199)}`, [STACKED]],
+    [
+      '120 marks on one letter, split into fours by joiners',
+      `A${text(LOW_LINE, LOW_LINE, LOW_LINE, LOW_LINE, ZWJ).repeat(30)}B`,
+      [STACKED],
+    ],
   ])('refuses %s', (_, name, problems) => {
     expect(problemsOf(name)).toEqual(problems);
   });

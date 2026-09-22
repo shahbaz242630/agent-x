@@ -62,12 +62,15 @@
 // **Where its reach ends** (four review rounds found each of these, and this
 // is the line we stopped at, on purpose):
 // - a query sink nobody listed: the list above is names, and a helper of our
-//   own that takes a table name is not on it;
+//   own that takes a table name is not on it, nor are Kysely's `sql.id` and
+//   `sql.ref`, which take a name in parts or a column's whole path;
 // - a name assembled beyond one `const` or one `+` chain and typed only as
 //   `string`: read from config, built in a loop, or passed in as an argument
 //   of that type (a description passed in as a `SignedStateTable` is one: its
 //   table is a `string` to the step it reaches, which is how the signed-row
-//   steps are written);
+//   steps are written), or a generic parameter bound by nothing narrower;
+// - a value placed in the `sql` tag's text, which is sent as a bound
+//   parameter, never as a table (its text itself is still read);
 // - anything in a file the rule doesn't run on (the exemptions in
 //   eslint.config.js, which are a short and reviewed list).
 // Each of those still meets the signed state: the row's fields must equal its
@@ -314,22 +317,39 @@ export default {
       if (checker === null) return [];
       const typed = services.esTreeNodeToTSNodeMap.get(node);
       if (typed === undefined) return [];
-      const type = checker.getTypeAtLocation(typed);
+      const found = checker.getTypeAtLocation(typed);
+      // A generic parameter is judged by what binds it: `<T extends keyof DB>` can be every table DB holds.
+      const type = found.isTypeParameter() ? (checker.getBaseConstraintOfType(found) ?? found) : found;
       const parts = type.isUnion() ? type.types : [type];
       return parts.flatMap((part) => (part.isStringLiteral() ? [part.value] : []));
     };
 
-    /** Each value a query was given: the argument, or each table in an array of them. */
+    /**
+     * Each value a query was given, with any `as` or `satisfies` taken off (a
+     * cast such as `as never` makes the checker forget a name, not the value
+     * under it): the argument, each table in an array of them, and each piece
+     * of a template or a `+` that joins text to one.
+     */
     const valuesGivenTo = (argument) => {
       const value = withoutWrappers(argument);
-      if (value?.type === 'ArrayExpression') {
+      if (value === undefined || value === null) return [];
+      if (value.type === 'ArrayExpression') {
         return value.elements.flatMap((element) => (element === null ? [] : valuesGivenTo(element)));
       }
-      return [argument];
+      if (value.type === 'TemplateLiteral') return [value, ...value.expressions.flatMap(valuesGivenTo)];
+      if (value.type === 'BinaryExpression' && value.operator === '+') {
+        return [value, ...valuesGivenTo(value.left), ...valuesGivenTo(value.right)];
+      }
+      return [value];
     };
 
-    /** A query on an authority table, wherever the name came from. */
-    const judgeQuery = (node, argument) => {
+    /**
+     * A query on an authority table, wherever the name came from. The `sql`
+     * tag's own text is read as text only: the values placed in it are bound
+     * parameters, and a table inside it is named by a call of its own
+     * (`sql.table`), which is judged as one.
+     */
+    const judgeQuery = (argument, { typed }) => {
       for (const [where, text] of textsGivenTo(argument)) {
         const named = names.find((name) => carries(text, name));
         if (named !== undefined) {
@@ -337,6 +357,7 @@ export default {
           return;
         }
       }
+      if (!typed) return;
       for (const where of valuesGivenTo(argument)) {
         const texts = typedTexts(where);
         const named = names.find((name) => texts.some((text) => carries(text, name)));
@@ -432,11 +453,11 @@ export default {
       },
       CallExpression(node) {
         if (!isQueryMethod(calledName(node))) return;
-        for (const argument of node.arguments) judgeQuery(node, argument);
+        for (const argument of node.arguments) judgeQuery(argument, { typed: true });
       },
       TaggedTemplateExpression(node) {
         if (!isSqlTag(node.tag)) return;
-        judgeQuery(node, node.quasi);
+        judgeQuery(node.quasi, { typed: false });
       },
       Literal: judgeSubject,
       'Program:exit'() {

@@ -302,9 +302,63 @@ const REJECTED: LintCase[] = [
     rule: RULE,
     says: 'agents.agents is an authority table',
   },
+  // The confirmation review's shapes: a cast that makes the checker forget the
+  // name, a generic bound to it, and the name inside a template or a `+`.
+  {
+    name: "the description's table cast away with as never",
+    filePath: `${CORE}/description-table-as-never.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table as never);\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'a generic helper bound to the names',
+    filePath: `${CORE}/generic-bound-query.ts`,
+    code: query(
+      "export const read = <T extends 'agents.agents' | 'audit.events'>(table: T): unknown => db.selectFrom(table);\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table inside a template given to sql.table",
+    filePath: `${CORE}/description-table-template.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const target = sql.table(`${AGENTS.table}`);\n',
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table given an alias with a plus",
+    filePath: `${CORE}/description-table-plus.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table + ' as a');\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
 ];
 
 const ALLOWED: LintCase[] = [
+  {
+    name: 'a generic helper bound by nothing narrower than a string',
+    filePath: `${CORE}/generic-string-query.ts`,
+    code: query('export const read = <T extends string>(table: T): unknown => db.selectFrom(table);\n'),
+    rule: RULE,
+  },
+  {
+    name: "a value typed as the name, placed in the sql tag's text, which binds it as a parameter",
+    filePath: `${CORE}/bound-name-in-sql.ts`,
+    code:
+      'declare const sql: (text: TemplateStringsArray, ...values: unknown[]) => unknown;\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const rows = sql`select 1 where $1 = ${AGENTS.table}`;\n',
+    rule: RULE,
+  },
   {
     name: 'a step given any description, whose table is only a string to it, as the signed-row steps are',
     filePath: `${CORE}/step-given-a-description.ts`,
