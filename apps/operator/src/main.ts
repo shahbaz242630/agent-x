@@ -187,13 +187,12 @@ function readRequest(argv: readonly string[]): Request | Problems {
   }
 }
 
-/** Whether an error is the directory refusing an organisation it lists already (its key, orgs_pkey). */
+/**
+ * Whether an error is the directory refusing an organisation it lists already:
+ * its key, orgs_pkey, which Postgres names only when a row breaks it.
+ */
 const listedAlready = (error: unknown): boolean =>
-  error instanceof Error &&
-  'code' in error &&
-  error.code === '23505' &&
-  'constraint' in error &&
-  error.constraint === 'orgs_pkey';
+  error instanceof Error && 'constraint' in error && error.constraint === 'orgs_pkey';
 
 /**
  * Opens a pool of one connection, one job's share of the server's (the schema
