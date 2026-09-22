@@ -3,7 +3,7 @@
 // module's own table description, not a copy of it, so the checks in CI are
 // made against the very facts the app runs on. That only holds if a module's
 // SignedStateTable and its state machine fit an AuthorityTable exactly, which
-// is what this checks — today, before the first authority table exists
+// is what this checks, on a stand-in module's table and on the real list
 // (packages/testing can't import @agentx/platform or @agentx/core, so the
 // checks describe what they need, as the status change does with StatusRules).
 // Each `@ts-expect-error` below is itself checked: if the line compiled, the
@@ -13,7 +13,11 @@ import { describe, expect, it } from 'vitest';
 import { defineStateMachine } from '../../packages/core/src/shared-kernel/index.ts';
 import type { SignedStateTable } from '../../packages/platform/src/db/index.ts';
 import type { AuthorityMachine, AuthorityTable } from '../../packages/testing/src/index.ts';
-import type { AuthorityTableEntry } from '../../packages/core/src/authority-tables.ts';
+import {
+  AUTHORITY_TABLES as PRODUCT_AUTHORITY_TABLES,
+  type AuthorityTableEntry,
+} from '../../packages/core/src/authority-tables.ts';
+import { ORGANIZATION, ORGANIZATIONS } from '../../packages/core/src/modules/organizations/index.ts';
 import { AUTHORITY_TABLES } from '../authority-tables.ts';
 import { SCHEMA_POLICY } from '../schema-policy.ts';
 
@@ -83,8 +87,22 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it('is empty until the first module has an authority table (slice B1)', () => {
-    expect(AUTHORITY_TABLES).toEqual([]);
+  it("holds each module's own description, not a copy: the organisation's row (B1a)", () => {
+    const [organizations, ...others] = PRODUCT_AUTHORITY_TABLES;
+
+    expect(organizations).toBe(ORGANIZATIONS);
+    expect(others).toEqual([]);
+    // CI's view of it takes the same fields and the same machine, as `status`.
+    expect(AUTHORITY_TABLES).toEqual([
+      {
+        table: ORGANIZATIONS.table,
+        subject: ORGANIZATIONS.subject,
+        fields: ORGANIZATIONS.fields,
+        status: ORGANIZATION,
+      },
+    ]);
+    expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
+    expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

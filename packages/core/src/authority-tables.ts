@@ -9,9 +9,11 @@
 // An entry is the module's own table description, imported from its public
 // interface, never a copy: the SignedStateTable it passes to verifiedState and
 // record, with the state machine that rules its status as `rules`, as
-// changeStatus takes it. Phase 1's first arrives with slice B1
-// (organisations); until then the list is empty.
+// changeStatus takes it. A new authority table goes on it in the same PR as
+// its migration.
 import type { SignedStateTable } from '@agentx/platform/db';
+
+import { ORGANIZATIONS } from './modules/organizations/index.ts';
 
 /**
  * What an entry's status machine must show: its states, the one a new row
@@ -30,4 +32,4 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
 }
 
-export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [];
+export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS];

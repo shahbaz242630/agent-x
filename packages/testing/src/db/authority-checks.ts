@@ -404,7 +404,7 @@ export async function authorityProblems(database: TestDatabase, tables: readonly
   // A registry that names a table twice, or a machine written wrong, would
   // make the facts below ambiguous, so nothing is read until it is sound.
   if (listed.length > 0) return listed;
-  // No authority table yet (main, until slice B1): nothing to read.
+  // No authority table listed (the fixtures that check the list alone): nothing to read.
   if (tables.length === 0) return [];
   const client = await openCatalogue(database);
   try {

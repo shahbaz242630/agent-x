@@ -1,8 +1,9 @@
 // Gate proof for the authority-table rule with a registry (A3c-2; ADR-012 §2,
-// ADR-014 §8). The real registry (tooling/authority-tables.ts) is empty until
-// slice B1, so these snippets are given a registry of two tables — and only
-// these snippets, so the real configuration still decides everywhere else,
-// the paths it turns the rule off for included.
+// ADR-014 §8). These snippets are given a registry of two tables of their own,
+// so no case depends on which tables the product lists today
+// (tooling/authority-tables.ts) — and only these snippets, so the real
+// configuration still decides everywhere else, the paths it turns the rule off
+// for included.
 //
 // The cases are what three review rounds probed: the ways round the rule
 // (Kysely's alias form, a name built with `+`, a name in SQL text, a local
@@ -15,7 +16,7 @@ import { CORE, describes, type LintCase, proveLintRules, TESTING } from './lint-
 
 const RULE = 'agentx/authority-tables-through-signed-state';
 
-/** Two authority tables, as slice B1 will add them. */
+/** Two authority tables of the snippets' own. */
 const TABLES = [
   { table: 'agents.agents', subject: 'agent' },
   { table: 'orgs.organisations', subject: 'organisation' },
@@ -252,9 +253,130 @@ const REJECTED: LintCase[] = [
     rule: RULE,
     says: 'this table records its rows as agent_row, but the registry',
   },
+  // B1a's review: the name read off the module's own description, which the
+  // text can't follow and the type checker can (the description is `as const`).
+  {
+    name: "a query given the description's own table, read off it",
+    filePath: `${CORE}/description-table-query.ts`,
+    code: query(
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+        "export const AGENTS = { table: 'agents.agents', subject: 'agent', fields: [] } as const satisfies SignedStateTable;\n\n" +
+        'export const rows = db.selectFrom(AGENTS.table);\n',
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table, and this is a query on it',
+  },
+  {
+    name: 'the same, with the description imported from another file',
+    filePath: `${CORE}/imported-description-query.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table);\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'a helper whose parameter is typed as the name',
+    filePath: `${CORE}/typed-parameter-query.ts`,
+    code: query("export const read = (table: 'agents.agents' | 'audit.events'): unknown => db.selectFrom(table);\n"),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table in Kysely's array form",
+    filePath: `${CORE}/description-table-array.ts`,
+    code:
+      'declare const db: { selectFrom: (tables: readonly string[]) => unknown };\n' +
+      "declare const ORGS: { readonly table: 'orgs.organisations' };\n\n" +
+      "export const rows = db.selectFrom(['audit.events', ORGS.table]);\n",
+    rule: RULE,
+    says: 'orgs.organisations is an authority table',
+  },
+  {
+    name: "the description's table given to sql.table",
+    filePath: `${CORE}/description-table-sql.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const target = sql.table(AGENTS.table);\n',
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  // The confirmation review's shapes: a cast that makes the checker forget the
+  // name, a generic bound to it, and the name inside a template or a `+`.
+  {
+    name: "the description's table cast away with as never",
+    filePath: `${CORE}/description-table-as-never.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table as never);\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    // Kysely's selectFrom is generic in its table, as here; given a plain
+    // `string` parameter, TypeScript would put the bound in itself.
+    name: 'a generic helper bound to the names, calling a generic query method',
+    filePath: `${CORE}/generic-bound-query.ts`,
+    code:
+      'declare const db: { selectFrom: <Table extends string>(table: Table) => unknown };\n\n' +
+      "export const read = <T extends 'agents.agents' | 'audit.events'>(table: T): unknown => db.selectFrom(table);\n",
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table inside a template given to sql.table",
+    filePath: `${CORE}/description-table-template.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const target = sql.table(`${AGENTS.table}`);\n',
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table given an alias with a plus",
+    filePath: `${CORE}/description-table-plus.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table + ' as a');\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
 ];
 
 const ALLOWED: LintCase[] = [
+  {
+    name: 'a generic helper bound by nothing narrower than a string',
+    filePath: `${CORE}/generic-string-query.ts`,
+    code: query('export const read = <T extends string>(table: T): unknown => db.selectFrom(table);\n'),
+    rule: RULE,
+  },
+  {
+    name: "a value typed as the name, placed in the sql tag's text, which binds it as a parameter",
+    filePath: `${CORE}/bound-name-in-sql.ts`,
+    code:
+      'declare const sql: (text: TemplateStringsArray, ...values: unknown[]) => unknown;\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const rows = sql`select 1 where $1 = ${AGENTS.table}`;\n',
+    rule: RULE,
+  },
+  {
+    name: 'a step given any description, whose table is only a string to it, as the signed-row steps are',
+    filePath: `${CORE}/step-given-a-description.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n\n' +
+      'export const target = (table: { readonly table: string }): unknown => sql.table(table.table);\n',
+    rule: RULE,
+  },
+  {
+    name: "a description's table of no authority, read off it",
+    filePath: `${CORE}/other-description-query.ts`,
+    code: query(
+      "declare const EVENTS: { readonly table: 'audit.events' };\n\nexport const rows = db.selectFrom(EVENTS.table);\n",
+    ),
+    rule: RULE,
+  },
   {
     name: 'the description itself, on the registry and recording what it says',
     filePath: `${CORE}/declares-its-own.ts`,
@@ -358,12 +480,11 @@ const ALLOWED: LintCase[] = [
   },
   {
     name: 'the test harness, which the real configuration exempts',
-    // Judged by the real configuration alone. With the real registry empty the
-    // rule would say nothing here anyway, so the case is thin until slice B1
-    // fills it -- kept because that is the moment it starts to mean something.
+    // Judged by the real configuration alone, on a table the real registry
+    // lists (B1a), so only the exemption keeps the rule quiet here.
     filePath: `${TESTING}/harness-fixture.ts`,
     realConfig: true,
-    code: query("export const rows = db.selectFrom('agents.agents');\n"),
+    code: query("export const rows = db.selectFrom('organizations.organizations');\n"),
     rule: RULE,
   },
 ];
