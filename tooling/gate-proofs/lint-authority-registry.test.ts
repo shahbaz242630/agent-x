@@ -253,9 +253,74 @@ const REJECTED: LintCase[] = [
     rule: RULE,
     says: 'this table records its rows as agent_row, but the registry',
   },
+  // B1a's review: the name read off the module's own description, which the
+  // text can't follow and the type checker can (the description is `as const`).
+  {
+    name: "a query given the description's own table, read off it",
+    filePath: `${CORE}/description-table-query.ts`,
+    code: query(
+      "import type { SignedStateTable } from '@agentx/platform/db';\n\n" +
+        "export const AGENTS = { table: 'agents.agents', subject: 'agent', fields: [] } as const satisfies SignedStateTable;\n\n" +
+        'export const rows = db.selectFrom(AGENTS.table);\n',
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table, and this is a query on it',
+  },
+  {
+    name: 'the same, with the description imported from another file',
+    filePath: `${CORE}/imported-description-query.ts`,
+    code: query(
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\nexport const rows = db.selectFrom(AGENTS.table);\n",
+    ),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: 'a helper whose parameter is typed as the name',
+    filePath: `${CORE}/typed-parameter-query.ts`,
+    code: query("export const read = (table: 'agents.agents' | 'audit.events'): unknown => db.selectFrom(table);\n"),
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
+  {
+    name: "the description's table in Kysely's array form",
+    filePath: `${CORE}/description-table-array.ts`,
+    code:
+      'declare const db: { selectFrom: (tables: readonly string[]) => unknown };\n' +
+      "declare const ORGS: { readonly table: 'orgs.organisations' };\n\n" +
+      "export const rows = db.selectFrom(['audit.events', ORGS.table]);\n",
+    rule: RULE,
+    says: 'orgs.organisations is an authority table',
+  },
+  {
+    name: "the description's table given to sql.table",
+    filePath: `${CORE}/description-table-sql.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n' +
+      "declare const AGENTS: { readonly table: 'agents.agents' };\n\n" +
+      'export const target = sql.table(AGENTS.table);\n',
+    rule: RULE,
+    says: 'agents.agents is an authority table',
+  },
 ];
 
 const ALLOWED: LintCase[] = [
+  {
+    name: 'a step given any description, whose table is only a string to it, as the signed-row steps are',
+    filePath: `${CORE}/step-given-a-description.ts`,
+    code:
+      'declare const sql: { table: (name: string) => unknown };\n\n' +
+      'export const target = (table: { readonly table: string }): unknown => sql.table(table.table);\n',
+    rule: RULE,
+  },
+  {
+    name: "a description's table of no authority, read off it",
+    filePath: `${CORE}/other-description-query.ts`,
+    code: query(
+      "declare const EVENTS: { readonly table: 'audit.events' };\n\nexport const rows = db.selectFrom(EVENTS.table);\n",
+    ),
+    rule: RULE,
+  },
   {
     name: 'the description itself, on the registry and recording what it says',
     filePath: `${CORE}/declares-its-own.ts`,

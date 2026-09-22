@@ -2,9 +2,10 @@
 // owner: agentx_owner, the role the migration job logs in as, holding none of
 // the app's keys, working inside one organisation (forced row security binds
 // it too) through @agentx/testing's tamperAsOwner, the same scripts A3d proved
-// on a stand-in table. Each case is denied by the row check, with the SEV-1
-// alarm; the live schema guard, which now holds this table to its own rights,
-// is clean before and after each one, so a leftover can't hide a miss.
+// on a stand-in table. Each change to a row is denied by the row check, with
+// the SEV-1 alarm; a right given past the migrations is named by the live
+// schema guard, which holds this table to its own rights and is clean before
+// and after each case, so a leftover can't hide a miss.
 //
 // The integrity hold that a mismatch also sets on the organisation is B1b's.
 import {
@@ -123,7 +124,7 @@ afterEach(async () => {
   expect(await guard()).toEqual([]);
 });
 
-/** Creates this test's organisation, as the operator's command will, and clears the log of it. */
+/** Creates this test's organisation, as the operator's command will, logging to a capture of its own. */
 async function created(): Promise<void> {
   await withTenant(app, org, (tx) =>
     createOrganization(tx, createSignedStates({ keys, trail, logger: loggerFor(new LogCapture()) }), {

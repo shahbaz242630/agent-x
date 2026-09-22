@@ -129,22 +129,32 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
     expect(alarms()).toEqual([]);
   });
 
-  it('keeps a name in any script, stored exactly as given', async () => {
+  it.each([
+    ['a name in any script, exactly', String.fromCodePoint(0x634, 0x631, 0x643, 0x629, 0x20, 0x1d49c), null],
+    [
+      'a name typed decomposed, composed (NFC)',
+      `Cafe${String.fromCodePoint(0x301)}`,
+      `Caf${String.fromCodePoint(0xe9)}`,
+    ],
+  ])('stores %s', async (_, name, stored) => {
     const id = newId();
-    const name = String.fromCodePoint(0x634, 0x631, 0x643, 0x629, 0x20, 0x1d49c);
 
     await create(id, name);
 
     const row = await withTenant(app, id, (tx) =>
       tx.selectFrom('organizations.organizations').select('name').executeTakeFirstOrThrow(),
     );
-    expect(row.name).toBe(name);
+    expect(row.name).toBe(stored ?? name);
   });
 
-  it('refuses a name it cannot have before anything is written', async () => {
+  it('refuses a name it cannot have before any SQL runs', async () => {
     const id = newId();
 
     await expect(create(id, ' Acme')).rejects.toBeInstanceOf(OrganizationRefused);
+    // In another organisation's transaction the first statement would be refused as that; the name is refused first.
+    await expect(
+      withTenant(app, newId(), (tx) => createOrganization(tx, statesFor(), { id, name: ' Acme', actor: OPERATOR })),
+    ).rejects.toBeInstanceOf(OrganizationRefused);
 
     expect(await listed(id)).toBe(false);
     expect(await verified(id)).toEqual({ outcome: 'missing' });
@@ -157,7 +167,11 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
     await expect(create(id, 'Another Name')).rejects.toMatchObject({ code: '23505', constraint: 'orgs_pkey' });
 
     expect(await verified(id)).toMatchObject({ outcome: 'verified', version: 1, eventId: first.eventId.toLowerCase() });
-    const chain = await withTenant(app, id, (tx) => trail.verify(tx, id, undefined));
+    const { row, chain } = await withTenant(app, id, async (tx) => ({
+      row: await tx.selectFrom('organizations.organizations').select(['name', 'status']).executeTakeFirstOrThrow(),
+      chain: await trail.verify(tx, id, undefined),
+    }));
+    expect(row).toEqual({ name: 'Acme Trading LLC', status: 'ACTIVE' });
     expect(chain).toMatchObject({ ok: true, seq: 1n });
   });
 
@@ -187,7 +201,8 @@ describe('the walls round an organisation’s row', () => {
     expect(seen).toEqual([{ org_id: mine, id: mine, name: 'Acme Trading LLC' }]);
     // With no tenant at all, nothing.
     expect(await app.selectFrom('organizations.organizations').select('id').execute()).toEqual([]);
-    // Asked for by its key from inside another organisation, it doesn't exist.
+    // Asked for by its key from inside another organisation, it doesn't exist (the row check filters by the
+    // organisation too, so this is the second wall, not row security alone).
     expect(await verified(mine, theirs)).toEqual({ outcome: 'missing' });
     // The directory is the one list of every organisation, and it holds IDs alone.
     expect(await listed(mine)).toBe(true);
@@ -207,7 +222,7 @@ describe('the walls round an organisation’s row', () => {
           .values({ org_id: theirs, id: theirs, name: 'Planted', status: 'ACTIVE' })
           .execute(),
       ),
-    ).rejects.toMatchObject({ code: '42501' });
+    ).rejects.toMatchObject({ code: '42501', message: expect.stringContaining('row-level security') as unknown });
   });
 
   it('the app can’t delete an organisation or rename it, nor take it off the directory or change its entry', async () => {

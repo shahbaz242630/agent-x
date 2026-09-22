@@ -7,18 +7,21 @@
 //
 // An organisation is created in one transaction, withTenant's for its own ID:
 // its directory entry first (the row points at it), then its row, then its
-// first signed state, which starts the organisation's audit chain. The row is
-// inserted through its description because the lint rule refuses the table's
-// name in a query. That is safe for an insert on its own: a row that record
+// first signed state, which starts the organisation's audit chain.
+//
+// The insert is the one query on this table outside the audit module's
+// steps, so the lint rule that refuses any other is switched off for that line
+// alone, with its reason. An insert on its own is safe: a row that record
 // hasn't signed is `unsigned`, which verifiedState denies with the alarm, so
-// an insert can't grant anything; and record refuses a row that isn't new, or
-// one the log already holds a state for.
+// it can't grant anything; and record refuses a row that isn't new, or one
+// the log already holds a state for. It must stay a plain insert: an upsert
+// (ON CONFLICT DO UPDATE) would change a row past the signed state.
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { Transaction } from 'kysely';
 
 import type { AuditActor, AuditTables, RecordedState, SignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, registerOrganization } from '../../directory/index.ts';
-import { checkName, ORGANIZATION } from '../domain/organization.ts';
+import { ORGANIZATION, organizationName } from '../domain/organization.ts';
 import type { OrganizationsTables } from './tables.ts';
 
 /** The organisation's row, as the signed state reads, records and moves it. */
@@ -35,6 +38,7 @@ export type OrganizationsTransaction = Transaction<OrganizationsTables & Directo
 export interface NewOrganization {
   /** Its ID, made by the server, never by a caller: the transaction is withTenant's for it. */
   readonly id: string;
+  /** Stored composed (NFC), as organizationName gives it back. */
   readonly name: string;
   /** Who is creating it. */
   readonly actor: AuditActor;
@@ -51,9 +55,13 @@ export async function createOrganization(
   states: SignedStates,
   { id, name, actor }: NewOrganization,
 ): Promise<RecordedState> {
-  checkName(name);
+  const kept = organizationName(name);
   await registerOrganization(tx, id);
-  await tx.insertInto(ORGANIZATIONS.table).values({ org_id: id, id, name, status: ORGANIZATION.initial }).execute();
+  await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') just below (see the top of this file)
+    .insertInto(ORGANIZATIONS.table)
+    .values({ org_id: id, id, name: kept, status: ORGANIZATION.initial })
+    .execute();
   return states.record(
     tx,
     ORGANIZATIONS,
