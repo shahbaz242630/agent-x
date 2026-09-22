@@ -1,8 +1,9 @@
 // Gate proof for the authority-table rule with a registry (A3c-2; ADR-012 §2,
-// ADR-014 §8). The real registry (tooling/authority-tables.ts) is empty until
-// slice B1, so these snippets are given a registry of two tables — and only
-// these snippets, so the real configuration still decides everywhere else,
-// the paths it turns the rule off for included.
+// ADR-014 §8). These snippets are given a registry of two tables of their own,
+// so no case depends on which tables the product lists today
+// (tooling/authority-tables.ts) — and only these snippets, so the real
+// configuration still decides everywhere else, the paths it turns the rule off
+// for included.
 //
 // The cases are what three review rounds probed: the ways round the rule
 // (Kysely's alias form, a name built with `+`, a name in SQL text, a local
@@ -15,7 +16,7 @@ import { CORE, describes, type LintCase, proveLintRules, TESTING } from './lint-
 
 const RULE = 'agentx/authority-tables-through-signed-state';
 
-/** Two authority tables, as slice B1 will add them. */
+/** Two authority tables of the snippets' own. */
 const TABLES = [
   { table: 'agents.agents', subject: 'agent' },
   { table: 'orgs.organisations', subject: 'organisation' },
@@ -358,12 +359,11 @@ const ALLOWED: LintCase[] = [
   },
   {
     name: 'the test harness, which the real configuration exempts',
-    // Judged by the real configuration alone. With the real registry empty the
-    // rule would say nothing here anyway, so the case is thin until slice B1
-    // fills it -- kept because that is the moment it starts to mean something.
+    // Judged by the real configuration alone, on a table the real registry
+    // lists (B1a), so only the exemption keeps the rule quiet here.
     filePath: `${TESTING}/harness-fixture.ts`,
     realConfig: true,
-    code: query("export const rows = db.selectFrom('agents.agents');\n"),
+    code: query("export const rows = db.selectFrom('organizations.organizations');\n"),
     rule: RULE,
   },
 ];

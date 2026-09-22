@@ -59,6 +59,11 @@ export interface SchemaPolicy {
 
 export const SCHEMA_POLICY: SchemaPolicy = {
   globalTables: {
+    'directory.orgs': {
+      reason:
+        "The directory's list of organisations (ADR-005 §6): IDs only, read by work that runs across organisations (the anchor check, the retention sweeps) before it works inside each one's withTenant",
+      columns: ['org_id'],
+    },
     'migrations.applied': {
       reason:
         'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',

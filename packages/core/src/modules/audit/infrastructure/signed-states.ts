@@ -10,7 +10,7 @@
 // So a field changed past the app, a row pointed back at an older valid event
 // (a key "un-revoked"), a seal stripped or forged, or a row deleted, is denied
 // and raises the integrity alarm (`audit.integrity_failed`, SEV-1). The
-// integrity hold on the organisation joins it when organisations exist (B1).
+// integrity hold on the organisation joins it with slice B1b.
 //
 // The read locks the row (ADR-006 §6): `share` for a decision, `change` when
 // the transaction will change it, never one and then the other. A change must

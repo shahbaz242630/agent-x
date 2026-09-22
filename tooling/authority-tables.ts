@@ -22,10 +22,8 @@ import type { AuthorityTable } from '../packages/testing/src/index.ts';
  * states and moves — and a table whose migration drifts from its module fails
  * here rather than at a status change on staging.
  *
- * Phase 1's first authority table arrives with slice B1 (organisations), in
- * the product's list. Until then both are empty: no module has one yet
- * (main's only tables are the migration ledger and the two audit chains). The
- * rules themselves are proven on broken fixtures, table by table, in
+ * The first entry is the organisation's row (B1a). The rules themselves are
+ * proven on broken fixtures, table by table, in
  * packages/testing/src/db/authority-checks.db.test.ts.
  */
 export const AUTHORITY_TABLES: readonly AuthorityTable[] = PRODUCT_AUTHORITY_TABLES.map(({ rules, ...table }) =>

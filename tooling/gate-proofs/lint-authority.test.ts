@@ -5,10 +5,10 @@
 // one — and so are the ways round it that a review found: a star re-export,
 // computed access, destructuring off a namespace, and a rename on the way out.
 //
-// The authority-table rule needs a registry to say anything, and the real one
-// is empty until slice B1, so what it does with a registry is proven in
-// lint-authority-registry.test.ts. Its one rule that bites on an empty
-// registry — a table that declares itself and isn't on it — is proven here.
+// What the authority-table rule does with a registry is proven in
+// lint-authority-registry.test.ts, on a registry of its own. Its one rule that
+// bites whatever the registry holds — a table that declares itself and isn't
+// on it — is proven here.
 import { API, AUDIT, CORE, describes, type LintCase, PLATFORM, PLATFORM_DB, proveLintRules } from './lint-harness.ts';
 
 const STEPS_RULE = 'agentx/signed-state-steps-in-audit-module';
