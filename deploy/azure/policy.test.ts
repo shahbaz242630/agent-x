@@ -2702,6 +2702,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
       [['node', script], ['/mnt/secrets/operator-request']],
       [['node', script], []],
       [['node', script, 'create-organization', '--name', 'Quartzite Other Co'], []],
+      // The arguments as they should be, the command not.
+      [
+        ['node', script, 'create-organization', '--name', 'Quartzite Other Co', '--'],
+        ['--request', '/mnt/secrets/operator-request'],
+      ],
+      [
+        ['sh', '-c', `node ${script} create-organization --name "Quartzite Other Co" #`],
+        ['--request', '/mnt/secrets/operator-request'],
+      ],
+      [[], ['--request', '/mnt/secrets/operator-request']],
       [['sh', '-c', `node ${script} create-organization --name "Quartzite Other Co"`], []],
       [['node'], [script, '--request', '/mnt/secrets/operator-request']],
       [['node', script, '--request'], ['/mnt/secrets/operator-request']],
