@@ -1,7 +1,8 @@
 // The release tool: its check (G4-3a) and the release itself (G4-3b). Nothing
-// here reaches Azure or git: the CLI is a stand-in that answers from a script,
-// or a stand-in staging that changes as a release writes to it, and the history
-// is a line of made-up commits (git.test.ts reads a real one).
+// here reaches Azure: the CLI is a stand-in that answers from a script, or a
+// stand-in staging that changes as a release writes to it. git is asked only
+// what this checkout holds; the history is a line of made-up commits
+// (git.test.ts reads a real one).
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -90,7 +91,7 @@ const running = (workload: Workload, overrides: Readonly<Record<string, unknown>
   runningIn(workload, [azureContainer(WORKLOADS[workload].container, overrides)]);
 
 /** What git says of this repository, a line each. */
-function inRepository(...args: readonly string[]): string[] {
+function gitSays(...args: readonly string[]): string[] {
   const done = spawnSync('git', args, {
     cwd: fileURLToPath(new URL('../../', import.meta.url)),
     encoding: 'utf8',
@@ -151,14 +152,14 @@ describe('what only a person deploys', () => {
     expect(dropped).toBeGreaterThan(-1);
     expect(rules.slice(dropped + 1).filter((line) => line.startsWith('!'))).toEqual([]);
     // The build reads that file and no other: one beside a Dockerfile, anywhere, would take its place.
-    expect(inRepository('ls-files', '--cached', '--others', '--exclude-standard', '--', '*.dockerignore')).toEqual([
+    expect(gitSays('ls-files', '--cached', '--others', '--exclude-standard', '--', '*.dockerignore')).toEqual([
       '.dockerignore',
     ]);
   });
 
   it('holds no links, so no file a person deploys can take its content from a test file', () => {
     // A link's content is its target's path: a change to the target changes nothing git lists for the link.
-    expect(inRepository('ls-files', '--stage').filter((line) => line.startsWith('120000 '))).toEqual([]);
+    expect(gitSays('ls-files', '--stage').filter((line) => line.startsWith('120000 '))).toEqual([]);
   });
 
   it('names files and folders that exist, so a rename leaves no area guarding nothing', () => {
