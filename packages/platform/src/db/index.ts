@@ -1,5 +1,14 @@
 export { createDatabase, type Database, type DatabaseConnectionOptions, DatabaseOptionsError } from './database.ts';
 export {
+  createIdempotentWrites,
+  type IdempotencyClient,
+  IdempotencyFailed,
+  type IdempotentRequest,
+  type IdempotentResult,
+  type IdempotentWrite,
+  type IdempotentWrites,
+} from './idempotency.ts';
+export {
   MigrationFailed,
   MigrationNotAtomic,
   type MigrationOptions,
