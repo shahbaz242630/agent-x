@@ -97,6 +97,8 @@ function loggerFor(destination: LogCapture) {
 }
 
 const writes = (keys = KEYS) => createIdempotentWrites({ keys, logger: loggerFor(capture) });
+/** How long a race waits for its parties to queue: longer than the default, for a slow CI runner opening connections. */
+const QUEUE_WAIT = { timeoutMs: 20_000 };
 const linesNamed = (event: string) => capture.lines().filter((line) => line.event === event);
 
 let serial = 0;
@@ -195,7 +197,13 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
       result_id: made?.id,
     });
     expect(row?.request_hash).toHaveLength(32);
-    expect(Math.abs((row?.created_at.getTime() ?? 0) - Date.now())).toBeLessThan(60_000);
+    // The database's own clock: the container's may differ from this machine's.
+    expect(
+      await admin.query(
+        "select 1 from idempotency.keys where key = $1 and created_at between pg_catalog.now() - interval '1 minute' and pg_catalog.now()",
+        [key],
+      ),
+    ).toHaveLength(1);
   });
 
   it('SEC-DP-07 answers a retry of the same request with the stored result, without doing the write again', async () => {
@@ -326,6 +334,80 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     expect(await storedKeys(key)).toEqual([]);
     expect(await write(requestFor(key))).toMatchObject({ outcome: 'done' });
   });
+
+  it('leaves the key unused when the caller catches the refusal and commits the rest of its transaction', async () => {
+    const key = newKey();
+    const refusal = new Error('ORG_FROZEN, say');
+    const before = await items();
+    const noted = newId();
+
+    // As a route answering a temporary refusal would: its audit event (here an item) in the same transaction.
+    await withTenant(app, ORG, async (tx) => {
+      await expect(
+        writes().run(tx, requestFor(key), async () => {
+          await createItem(tx, ORG);
+          throw refusal;
+        }),
+      ).rejects.toBe(refusal);
+      await tx.insertInto('probe.items').values({ org_id: ORG, id: noted, label: 'refusal noted' }).execute();
+    });
+
+    expect(await storedKeys(key)).toEqual([]);
+    const after = await items();
+    expect(after).toHaveLength(before.length + 1);
+    expect(after).toContainEqual({ id: noted });
+    expect(await write(requestFor(key))).toMatchObject({ outcome: 'done' });
+  });
+
+  it('lets a request waiting on the key go ahead as soon as a refused claim is rolled back, while its transaction goes on', async () => {
+    const key = newKey();
+    const refusal = new Error('refused along the way');
+    let claimed = (): void => undefined;
+    const hasClaimed = new Promise<void>((resolve) => {
+      claimed = resolve;
+    });
+    // Filled in once the first has claimed; an object, since the first's transaction reads it later.
+    const waiting: { second?: Promise<IdempotentWrite> } = {};
+
+    const first = withTenant(app, ORG, async (tx) => {
+      await writes()
+        .run(tx, requestFor(key), async () => {
+          claimed();
+          await waitUntilQueued(admin, 1, QUEUE_WAIT);
+          throw refusal;
+        })
+        .catch((error: unknown) => {
+          if (error !== refusal) throw error;
+        });
+      // Still open: the waiting request must finish before this transaction ends.
+      return waiting.second;
+    });
+    await hasClaimed;
+    waiting.second = write(requestFor(key, { payload: '{"label":"second"}' }));
+
+    expect(await first).toMatchObject({ outcome: 'done' });
+    expect(await storedKeys(key)).toHaveLength(1);
+  });
+
+  it("leaves no claim behind when the write takes the claim's savepoint away before it fails", async () => {
+    const key = newKey();
+    const refusal = new Error('refused after releasing the savepoint');
+
+    await withTenant(app, ORG, async (tx) => {
+      await expect(
+        writes().run(tx, requestFor(key), async () => {
+          await sql`release savepoint idempotency_claim`.execute(tx);
+          throw refusal;
+        }),
+      ).rejects.toBe(refusal);
+    });
+
+    expect(linesNamed('idempotency.rollback_failed')).toEqual([
+      expect.objectContaining({ level: 'error', idempotencyKey: key }),
+    ]);
+    // The failed rollback aborted the transaction, so its commit rolled back the claim.
+    expect(await storedKeys(key)).toEqual([]);
+  });
 });
 
 describe('the tenant walls (ADR-005)', () => {
@@ -341,7 +423,7 @@ describe('the tenant walls (ADR-005)', () => {
     expect(await storedKeys(key)).toEqual([]);
   });
 
-  it("can't read or claim another organisation's key (SEC-TEN-01)", async () => {
+  it("can't read another organisation's key (SEC-TEN-01), and its own claim of the same key is its own", async () => {
     const key = newKey();
     await firstWrite(requestFor(key, { orgId: OTHER_ORG }));
 
@@ -404,6 +486,23 @@ describe('ADR-006 §6 the key is claimed first in its transaction', () => {
     expect(await storedKeys(outer)).toEqual([]);
   });
 
+  it.each<[string, (key: string) => IdempotentRequest]>([
+    ['a stored result', (key) => requestFor(key)],
+    ['a conflict', (key) => requestFor(key, { payload: '{"label":"other"}' })],
+  ])('refuses a second claim in a transaction whose first was answered with %s', async (_answer, retry) => {
+    const [first, second] = [newKey(), newKey()];
+    await firstWrite(requestFor(first));
+
+    await notFirst(
+      withTenant(app, ORG, async (tx) => {
+        // Answered from the row: the transaction has written nothing, yet it has claimed.
+        await writes().run(tx, retry(first), () => createItem(tx, ORG));
+        return writes().run(tx, requestFor(second), () => createItem(tx, ORG));
+      }),
+      second,
+    );
+  });
+
   it('lets a transaction read before it claims', async () => {
     const key = newKey();
 
@@ -436,6 +535,12 @@ describe('the request hash (ADR-014 §3)', () => {
     // Keyed: the same request, checked with another request-hash key, doesn't match.
     const otherKey = keysWith({ current: 1, versions: new Map([[1, fill(0x04)]]) });
     expect(await write(requestFor(key, { payload }), { keys: otherKey })).toEqual({ outcome: 'conflict' });
+    expect(await write(requestFor(key, { payload }))).toMatchObject({ outcome: 'replayed' });
+    // Nor does it reach the logs: the lines name the key, never the request.
+    expect(linesNamed('idempotency.conflict')).toHaveLength(1);
+    expect(linesNamed('idempotency.replayed')).toHaveLength(1);
+    expect(capture.text).not.toContain(iban);
+    expect(capture.text).not.toContain('iban');
   });
 
   it('SEC-DATA-07 matches a retry during a key rotation, checked with the version its row was made with', async () => {
@@ -460,9 +565,9 @@ describe('the request hash (ADR-014 §3)', () => {
     const refused = write(requestFor(key));
 
     await expect(refused).rejects.toBeInstanceOf(IdempotencyFailed);
-    await expect(refused).rejects.toMatchObject({ reason: 'unreadable' });
-    expect(linesNamed('idempotency.unreadable')).toEqual([
-      expect.objectContaining({ level: 'error', problem: 'key_version_not_held', keyVersion: 2, idempotencyKey: key }),
+    await expect(refused).rejects.toMatchObject({ reason: 'key_not_held' });
+    expect(linesNamed('idempotency.key_not_held')).toEqual([
+      expect.objectContaining({ level: 'error', keyVersion: 2, idempotencyKey: key }),
     ]);
   });
 
@@ -483,7 +588,7 @@ describe('the request hash (ADR-014 §3)', () => {
     const refused = write(requestFor(key), { keys: auditMacRotated });
 
     await expect(refused).rejects.toBeInstanceOf(IdempotencyFailed);
-    await expect(refused).rejects.toMatchObject({ reason: 'unreadable' });
+    await expect(refused).rejects.toMatchObject({ reason: 'key_not_held' });
   });
 
   /** A key row's primary key, as query values. */
@@ -525,7 +630,7 @@ describe('FX-RACE SEC-DP-09 concurrent requests with one key: one record', () =>
   const holdingUntilQueued =
     (waiting: number): Work =>
     async (tx, orgId) => {
-      await waitUntilQueued(admin, waiting);
+      await waitUntilQueued(admin, waiting, QUEUE_WAIT);
       return createItem(tx, orgId);
     };
 
@@ -580,7 +685,7 @@ describe('FX-RACE SEC-DP-09 concurrent requests with one key: one record', () =>
     const first = write(requestFor(key), {
       work: async () => {
         claimed();
-        await waitUntilQueued(admin, 1);
+        await waitUntilQueued(admin, 1, QUEUE_WAIT);
         throw refusal;
       },
     });
@@ -617,6 +722,13 @@ describe('what it refuses to take', () => {
     ['a key with a letter outside ASCII', { key: 'clé' }],
     ['a key with a line break', { key: 'line\nbreak' }],
     ['a payload that is not text', { payload: Buffer.from('bytes') as unknown as string }],
+    // A lone surrogate, which UTF-8 would write as U+FFFD, so it would hash as that.
+    ['a payload that is not well-formed text', { payload: String.fromCharCode(0x7b, 0xd800, 0x7d) }],
+    // Text in a list would pass a pattern once turned into text.
+    ['an organisation ID that is not text', { orgId: [ORG] as unknown as string }],
+    ["a client's ID that is not text", { client: { kind: 'agent', id: [AGENT] as unknown as string } }],
+    ['an operation that is not text', { operation: ['items.create'] as unknown as string }],
+    ['a key that is not text', { key: ['key-listed'] as unknown as string }],
   ])('refuses %s, before asking the database', async (_what, changes) => {
     const key = changes.key ?? newKey();
 
@@ -676,22 +788,49 @@ describe('a key row changed past this step', () => {
     ]);
   });
 
-  it('refuses a claim whose result was written by something else first', async () => {
+  it("records the result on the claimed row alone, though the client's other rows lie without one", async () => {
+    const key = newKey();
+    const claim = requestFor(key);
+    // Rows left without a result by someone past this step, each differing from the claim in one part.
+    const neighbours = [
+      { ...claim, client: { kind: 'user', id: AGENT } },
+      { ...claim, client: { kind: 'agent', id: OTHER_AGENT } },
+      { ...claim, operation: 'items.rename' },
+      { ...claim, key: `${key}-next` },
+    ] satisfies IdempotentRequest[];
+    for (const { client, operation, key: theirKey } of neighbours) {
+      await admin.query(
+        `insert into idempotency.keys
+           (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
+         values ($1, $2, $3, $4, $5, $6, 1, pg_catalog.now())`,
+        [ORG, client.kind, client.id, operation, theirKey, fill(1)],
+      );
+    }
+
+    expect(await write(claim)).toMatchObject({ outcome: 'done' });
+
+    const untouched = await admin.query<{ result_status: number | null }>(
+      'select result_status from idempotency.keys where org_id = $1 and key in ($2, $3) and result_status is null',
+      [ORG, key, `${key}-next`],
+    );
+    expect(untouched).toHaveLength(neighbours.length);
+  });
+
+  it('refuses a claim whose result was written by something else first, and undoes the write', async () => {
     const key = newKey();
     const before = await items();
 
-    await unreadable(
-      write(requestFor(key), {
-        work: async (tx, orgId) => {
-          await sql`update idempotency.keys set result_status = 200, result_id = ${AGENT} where key = ${key}`.execute(
-            tx,
-          );
-          return createItem(tx, orgId);
-        },
-      }),
-    );
-    expect(linesNamed('idempotency.unreadable')).toEqual([
-      expect.objectContaining({ level: 'error', problem: 'claim_lost' }),
+    const refused = write(requestFor(key), {
+      work: async (tx, orgId) => {
+        await sql`update idempotency.keys set result_status = 200, result_id = ${AGENT} where key = ${key}`.execute(tx);
+        return createItem(tx, orgId);
+      },
+    });
+
+    await expect(refused).rejects.toBeInstanceOf(IdempotencyFailed);
+    await expect(refused).rejects.toMatchObject({ reason: 'not_applied' });
+    expect(linesNamed('idempotency.not_applied')).toEqual([
+      expect.objectContaining({ level: 'error', idempotencyKey: key }),
     ]);
     expect(await storedKeys(key)).toEqual([]);
     expect(await items()).toEqual(before);
@@ -796,8 +935,20 @@ describe('the table itself (db/migrations/0006)', () => {
     const backup = database.as('backup');
 
     expect(await backup.query('select org_id from idempotency.keys where key = $1', [key])).toHaveLength(2);
-    await expect(backup.query('delete from idempotency.keys where key = $1', [key])).rejects.toMatchObject({
-      code: '42501',
-    });
+    const refused = { code: '42501' };
+    await expect(backup.query('delete from idempotency.keys where key = $1', [key])).rejects.toMatchObject(refused);
+    await expect(
+      backup.query('update idempotency.keys set result_status = 200 where key = $1', [key]),
+    ).rejects.toMatchObject(refused);
+    await expect(
+      backup.query(
+        "insert into idempotency.keys (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at) select org_id, client_kind, client_id, operation, key || '-copy', request_hash, request_hash_key_version, created_at from idempotency.keys where key = $1",
+        [key],
+      ),
+    ).rejects.toMatchObject(refused);
+    expect(await storedKeys(key)).toEqual([
+      expect.objectContaining({ org_id: ORG, result_status: 201 }),
+      expect.objectContaining({ org_id: OTHER_ORG, result_status: 201 }),
+    ]);
   });
 });

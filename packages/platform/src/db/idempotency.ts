@@ -7,7 +7,7 @@
 // if it asks for anything else.
 //
 // A request that arrives while the first is still running waits on the row's
-// primary key until the first transaction ends. Its insert then finds the row
+// primary key until the first claim ends. Its insert then finds the row
 // committed (the stored result, or a conflict), or gone with a rollback, and
 // then it goes ahead as the first. So there is no in-progress state: the
 // database's own waiting makes one unnecessary (ADR-007 §4).
@@ -21,11 +21,18 @@
 // as its own part, so a hash says which request it is about.
 //
 // The row is claimed first in its transaction (ADR-006 §6, lock order 0): a
-// transaction that has already written or locked anything is refused, so two
-// requests with one key never hold other locks while one waits for the other.
-// A write refused along the way (a temporary refusal such as ORG_FROZEN, or
-// any error) throws; the transaction rolls back with the claim, and the key
-// stays unused, so it works once the refusal is lifted (ADR-007 §4).
+// transaction that has already written or row-locked anything, or claimed a
+// key before, is refused, so two requests with one key never hold other row
+// locks while one waits for the other. (An advisory or table lock taken
+// before the claim isn't seen; tenant code takes neither.)
+//
+// The claim and the write run inside a savepoint. A write refused along the
+// way (a temporary refusal such as ORG_FROZEN, or any error) rolls back to it
+// and throws: the claim goes with the write, so the key stays unused and
+// works once the refusal is lifted (ADR-007 §4), even when the caller catches
+// the refusal and commits the rest of its transaction (an audit event, say).
+// A request waiting on the key goes ahead as the first as soon as the claim
+// is rolled back.
 import { sql, type Transaction } from 'kysely';
 
 import type { KeyProvider } from '../keys/key-provider.ts';
@@ -33,7 +40,11 @@ import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
 import { assertTenant } from './tenant.ts';
 
-/** Who sent the request: a signed-in user, or an agent by its key. */
+/**
+ * Who sent the request: a signed-in user, or an agent, each by its own ID.
+ * Never a credential's ID: rotating an agent's key mid-retry would make the
+ * retry another client's, and do the write again.
+ */
 export interface IdempotencyClient {
   readonly kind: 'user' | 'agent';
   readonly id: string;
@@ -47,7 +58,7 @@ export interface IdempotentRequest {
   readonly operation: string;
   /** The client's idempotency key: 1 to 255 visible ASCII characters. */
   readonly key: string;
-  /** The request's normalized payload, as text: only its keyed hash is kept. */
+  /** The request's normalized payload, as well-formed text: only its keyed hash is kept. */
   readonly payload: string;
 }
 
@@ -72,16 +83,20 @@ export type IdempotentWrite =
  * The write couldn't go ahead:
  * - `bad_request`: the organisation, client, operation, key or payload isn't
  *   in its form (the API refuses a bad key before it gets here)
- * - `not_first`: its transaction had already written or locked something
- *   (ADR-006 §6)
+ * - `not_first`: its transaction had already written, row-locked or claimed a
+ *   key (ADR-006 §6)
  * - `bad_result`: the write's answer isn't a status from 200 to 299 and a UUID
- * - `unreadable`: the key's row holds no result, or was made with a key
- *   version this process doesn't hold; either way someone past this step
- *   changed the table, or a key was retired too early
- * The caller's transaction must roll back: throwing out of withTenant does.
+ * - `not_applied`: the claimed row's result couldn't be recorded, because
+ *   something else wrote one first
+ * - `unreadable`: the key's row holds no result, or row security hides it;
+ *   either way someone past this step changed the table
+ * - `key_not_held`: the key's row was made with a request-hash key version
+ *   this process doesn't hold: retired before the retention ran out, or the
+ *   release is missing it
+ * Whatever the reason, nothing of the claim or the write is left.
  */
 export class IdempotencyFailed extends Error {
-  readonly reason: 'bad_request' | 'not_first' | 'bad_result' | 'unreadable';
+  readonly reason: 'bad_request' | 'not_first' | 'bad_result' | 'not_applied' | 'unreadable' | 'key_not_held';
 
   constructor(reason: IdempotencyFailed['reason'], message: string) {
     super(message);
@@ -94,9 +109,11 @@ export interface IdempotentWrites {
   /**
    * Does `work` once for the request's key, in the caller's transaction, which
    * must be withTenant's for the request's organisation and must not have
-   * written or locked anything yet. `work` runs only when this request is the
-   * first with the key; it does the write in the same transaction and returns
-   * its answer, which is recorded against the key before this resolves.
+   * written, row-locked or claimed a key yet. `work` runs only when this
+   * request is the first with the key; it does the write in the same
+   * transaction and returns its answer, which is recorded against the key
+   * before this resolves. If `work` throws, the claim and everything `work`
+   * wrote are rolled back, and its error is thrown on.
    */
   run<Schema>(
     tx: Transaction<Schema>,
@@ -113,16 +130,20 @@ const OPERATION_MAX = 64;
 /** Visible ASCII, `!` to `~`: no spaces, no control characters, nothing a log or a header could read two ways. */
 const KEY = /^[!-~]{1,255}$/;
 
+/** Whether the value is text the pattern matches: a caller the compiler can't see could pass anything. */
+const matches = (pattern: RegExp, value: unknown): value is string => typeof value === 'string' && pattern.test(value);
+
 /** Why the request can't be taken, or undefined. Never names a value: it may be anything a client sent. */
 function requestProblem({ orgId, client, operation, key, payload }: IdempotentRequest): string | undefined {
-  if (!UUID.test(orgId)) return 'the organisation ID is not a UUID';
+  if (!matches(UUID, orgId)) return 'the organisation ID is not a UUID';
   if (!CLIENT_KINDS.includes(client.kind)) return 'the client is neither a user nor an agent';
-  if (!UUID.test(client.id)) return "the client's ID is not a UUID";
-  if (operation.length > OPERATION_MAX || !OPERATION.test(operation)) {
+  if (!matches(UUID, client.id)) return "the client's ID is not a UUID";
+  if (!matches(OPERATION, operation) || operation.length > OPERATION_MAX) {
     return `the operation is not lower-case words joined by . or -, at most ${OPERATION_MAX} characters`;
   }
-  if (!KEY.test(key)) return 'the key is not 1 to 255 visible ASCII characters';
-  if (typeof payload !== 'string') return 'the payload is not text';
+  if (!matches(KEY, key)) return 'the key is not 1 to 255 visible ASCII characters';
+  // A lone surrogate is written as U+FFFD, so two different payloads could hash alike.
+  if (typeof payload !== 'string' || !payload.isWellFormed()) return 'the payload is not well-formed text';
   return undefined;
 }
 
@@ -130,7 +151,7 @@ function resultProblem({ status, resourceId }: IdempotentResult): string | undef
   if (!Number.isInteger(status) || status < 200 || status > 299) {
     return 'its status is not a whole number from 200 to 299';
   }
-  if (!UUID.test(resourceId)) return 'its resource ID is not a UUID';
+  if (!matches(UUID, resourceId)) return 'its resource ID is not a UUID';
   return undefined;
 }
 
@@ -151,6 +172,24 @@ interface StoredKey {
   readonly result_id: string | null;
 }
 
+/** A key's row, in lower case as Postgres prints its IDs. */
+interface KeyRow {
+  readonly orgId: string;
+  readonly kind: string;
+  readonly clientId: string;
+  readonly operation: string;
+  readonly key: string;
+}
+
+/** Transactions that have claimed a key: one claim each, whatever the first one's outcome. */
+const claimedIn = new WeakSet<object>();
+
+const notFirst = (): IdempotencyFailed =>
+  new IdempotencyFailed(
+    'not_first',
+    'An idempotency key is claimed first in its transaction (ADR-006 §6), but this one has already written, row-locked or claimed a key',
+  );
+
 /**
  * Build it from the request's logger, a child carrying its correlation ID
  * (Rule Book §8); each write adds the organisation.
@@ -170,70 +209,75 @@ export function createIdempotentWrites({
     ): Promise<IdempotentWrite> {
       const problem = requestProblem(request);
       if (problem !== undefined) throw new IdempotencyFailed('bad_request', `An idempotent write refused: ${problem}`);
+      if (claimedIn.has(tx)) throw notFirst();
       await assertTenant(tx, request.orgId);
 
-      // A transaction gets its ID when it first writes or locks a row, so
-      // none yet means nothing has been written or locked before the claim.
+      // A transaction gets its ID when it first writes or row-locks, so none
+      // yet means nothing has been written or row-locked before the claim.
       const { rows: fresh } = await sql<{ first: boolean }>`
         select pg_catalog.pg_current_xact_id_if_assigned() is null as first
       `.execute(tx);
-      if (fresh[0]?.first !== true) {
-        throw new IdempotencyFailed(
-          'not_first',
-          'An idempotency key is claimed first in its transaction (ADR-006 §6), but this one has already written or locked something',
-        );
-      }
+      if (fresh[0]?.first !== true) throw notFirst();
+      claimedIn.add(tx);
 
-      const orgId = request.orgId.toLowerCase();
-      const clientId = request.client.id.toLowerCase();
-      const { kind } = request.client;
-      const { operation, key } = request;
-      const log = logger.child({ orgId });
-      const facts = { operation, clientKind: kind, clientId, idempotencyKey: key };
+      const row: KeyRow = {
+        orgId: request.orgId.toLowerCase(),
+        kind: request.client.kind,
+        clientId: request.client.id.toLowerCase(),
+        operation: request.operation,
+        key: request.key,
+      };
+      const log = logger.child({ orgId: row.orgId });
+      const facts = {
+        operation: row.operation,
+        clientKind: row.kind,
+        clientId: row.clientId,
+        idempotencyKey: row.key,
+      };
       const message = requestMessage(request);
 
-      // Waits, if another transaction holds the key uncommitted, until it
-      // ends: then nothing is inserted if it committed, and this row is if it
-      // rolled back. Every statement filters by org_id too (ADR-005 §7).
+      // Waits, if another transaction holds the key's row uncommitted, until
+      // its claim ends: then nothing is inserted if it committed, and this row
+      // is if it rolled back. Every statement filters by org_id too (ADR-005 §7).
       const { mac, keyVersion } = keys.mac('request-hash', message);
+      await sql`savepoint idempotency_claim`.execute(tx);
       const claimed = await sql<{ claimed: number }>`
         insert into idempotency.keys
           (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
-        values (${orgId}, ${kind}, ${clientId}, ${operation}, ${key}, ${mac}, ${keyVersion}, pg_catalog.now())
+        values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
+          pg_catalog.now())
         on conflict (org_id, client_kind, client_id, operation, key) do nothing
         returning 1 as claimed
       `.execute(tx);
 
       if (claimed.rows.length === 1) {
-        const result = await work();
-        const bad = resultProblem(result);
-        if (bad !== undefined) {
-          throw new IdempotencyFailed('bad_result', `An idempotent write's answer refused: ${bad}`);
+        let result: IdempotentResult;
+        try {
+          result = await doAndRecord(tx, row, work, log, facts);
+        } catch (error) {
+          try {
+            await sql`rollback to savepoint idempotency_claim`.execute(tx);
+          } catch (rollbackError) {
+            // A failed statement aborts the transaction, and a lost connection
+            // ends it, so the claim can't be committed either way: the write's
+            // own error is the one to throw.
+            log.error('idempotency.rollback_failed', { ...facts, err: rollbackError });
+          }
+          throw error;
         }
-        const recorded = await sql<{ recorded: number }>`
-          update idempotency.keys set result_status = ${result.status}, result_id = ${result.resourceId}
-          where org_id = ${orgId} and client_kind = ${kind} and client_id = ${clientId}
-            and operation = ${operation} and key = ${key} and result_status is null
-          returning 1 as recorded
-        `.execute(tx);
-        if (recorded.rows.length !== 1) {
-          log.error('idempotency.unreadable', { ...facts, problem: 'claim_lost' });
-          throw new IdempotencyFailed('unreadable', "The idempotency key's claimed row could not be given its result");
-        }
-        return Object.freeze({
-          outcome: 'done',
-          result: Object.freeze({ status: result.status, resourceId: result.resourceId.toLowerCase() }),
-        });
+        await sql`release savepoint idempotency_claim`.execute(tx);
+        return Object.freeze({ outcome: 'done', result });
       }
+      await sql`release savepoint idempotency_claim`.execute(tx);
 
       // READ COMMITTED: this statement sees the row the insert waited for.
       const { rows } = await sql<StoredKey>`
         select request_hash, request_hash_key_version, result_status, result_id from idempotency.keys
-        where org_id = ${orgId} and client_kind = ${kind} and client_id = ${clientId}
-          and operation = ${operation} and key = ${key}
+        where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
+          and operation = ${row.operation} and key = ${row.key}
       `.execute(tx);
-      const [row] = rows;
-      if (row === undefined) {
+      const [stored] = rows;
+      if (stored === undefined) {
         // The primary key saw a row that row security hides from this read:
         // someone past the app rewrote the table's policy.
         log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
@@ -242,15 +286,15 @@ export function createIdempotentWrites({
           "The idempotency key's row stood in the way of the claim, but can't be read",
         );
       }
-      const { request_hash: hash, request_hash_key_version: hashKeyVersion } = row;
-      if (row.result_status === null || row.result_id === null) {
+      const { request_hash: hash, request_hash_key_version: hashKeyVersion } = stored;
+      if (stored.result_status === null || stored.result_id === null) {
         log.error('idempotency.unreadable', { ...facts, problem: 'no_result' });
         throw new IdempotencyFailed(
           'unreadable',
           "The idempotency key's row holds no result, though its claim committed",
         );
       }
-      const result = Object.freeze({ status: row.result_status, resourceId: row.result_id });
+      const result = Object.freeze({ status: stored.result_status, resourceId: stored.result_id });
 
       // A version retired before the retention ran out (Azure.md, "Rotating a
       // key") can't check the row: refused, never taken for a conflict.
@@ -261,9 +305,9 @@ export function createIdempotentWrites({
             purpose === 'request-hash' && versions.some(({ version }) => version === hashKeyVersion),
         );
       if (!held) {
-        log.error('idempotency.unreadable', { ...facts, problem: 'key_version_not_held', keyVersion: hashKeyVersion });
+        log.error('idempotency.key_not_held', { ...facts, keyVersion: hashKeyVersion });
         throw new IdempotencyFailed(
-          'unreadable',
+          'key_not_held',
           "The idempotency key's row was made with a request-hash key version this process doesn't hold",
         );
       }
@@ -275,4 +319,36 @@ export function createIdempotentWrites({
       return Object.freeze({ outcome: 'replayed', result });
     },
   });
+}
+
+/**
+ * Runs the write, checks its answer and records it on the claimed row. Throws
+ * `bad_result` or `not_applied`, and the write's own errors, for the caller to
+ * roll back.
+ */
+async function doAndRecord<Schema>(
+  tx: Transaction<Schema>,
+  row: KeyRow,
+  work: () => Promise<IdempotentResult>,
+  log: Logger,
+  facts: Readonly<Record<string, string>>,
+): Promise<IdempotentResult> {
+  const answer = await work();
+  const bad = resultProblem(answer);
+  if (bad !== undefined) throw new IdempotencyFailed('bad_result', `An idempotent write's answer refused: ${bad}`);
+  const result = Object.freeze({ status: answer.status, resourceId: answer.resourceId.toLowerCase() });
+  const recorded = await sql<{ recorded: number }>`
+    update idempotency.keys set result_status = ${result.status}, result_id = ${result.resourceId}
+    where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
+      and operation = ${row.operation} and key = ${row.key} and result_status is null
+    returning 1 as recorded
+  `.execute(tx);
+  if (recorded.rows.length !== 1) {
+    log.error('idempotency.not_applied', facts);
+    throw new IdempotencyFailed(
+      'not_applied',
+      "The claimed idempotency key's row was given a result by something else",
+    );
+  }
+  return result;
 }
