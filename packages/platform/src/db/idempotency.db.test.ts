@@ -19,7 +19,7 @@ import { sql, type Transaction } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createKeyProvider, type KeyMaterial, type KeyProvider, type PurposeKeys } from '../keys/key-provider.ts';
-import { PURPOSES } from '../keys/purposes.ts';
+import { type KeyPurpose, PURPOSES } from '../keys/purposes.ts';
 import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import {
@@ -73,12 +73,14 @@ const ROTATED: PurposeKeys = {
   ]),
 };
 
-/** Every purpose's stand-in key, each its own, with the request-hash key given. */
-function keysWith(requestHash: PurposeKeys): KeyProvider {
+/** Every purpose's stand-in key, each its own, with the request-hash key given, and any other purpose's. */
+function keysWith(requestHash: PurposeKeys, others: Partial<Record<KeyPurpose, PurposeKeys>> = {}): KeyProvider {
   const material = Object.fromEntries(
     PURPOSES.map((purpose, index) => [
       purpose,
-      purpose === 'request-hash' ? requestHash : { current: 1, versions: new Map([[1, fill(0x10 + index)]]) },
+      purpose === 'request-hash'
+        ? requestHash
+        : (others[purpose] ?? { current: 1, versions: new Map([[1, fill(0x10 + index)]]) }),
     ]),
   ) as KeyMaterial;
   return createKeyProvider(material);
@@ -244,21 +246,25 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     ]);
   });
 
-  it('keeps each organisation, client and operation to its own keys', async () => {
+  it('keeps each organisation, client and operation to its own keys, and answers each retry from its own row', async () => {
     const key = newKey();
-    const others: readonly Partial<IdempotentRequest>[] = [
-      {},
-      { orgId: OTHER_ORG },
-      { client: { kind: 'agent', id: OTHER_AGENT } },
-      { client: { kind: 'user', id: AGENT } },
-      { operation: 'items.rename' },
+    const neighbours = [
+      requestFor(key),
+      requestFor(key, { orgId: OTHER_ORG }),
+      requestFor(key, { client: { kind: 'agent', id: OTHER_AGENT } }),
+      requestFor(key, { client: { kind: 'user', id: AGENT } }),
+      requestFor(key, { operation: 'items.rename' }),
+      requestFor(`${key}-next`),
     ];
 
-    for (const changes of others) {
-      expect(await write(requestFor(key, changes))).toMatchObject({ outcome: 'done' });
-    }
+    const results: IdempotentResult[] = [];
+    for (const request of neighbours) results.push(await firstWrite(request));
 
-    expect(await storedKeys(key)).toHaveLength(others.length);
+    for (const [index, request] of neighbours.entries()) {
+      expect(await write(request)).toEqual({ outcome: 'replayed', result: results[index] });
+    }
+    expect(new Set(results.map((result) => result.resourceId)).size).toBe(neighbours.length);
+    expect(await storedKeys(key)).toHaveLength(neighbours.length - 1);
   });
 
   it('takes IDs in any case, as Postgres reads a uuid', async () => {
@@ -457,6 +463,26 @@ describe('the request hash (ADR-014 §3)', () => {
     expect(linesNamed('idempotency.unreadable')).toEqual([
       expect.objectContaining({ level: 'error', problem: 'key_version_not_held', keyVersion: 2, idempotencyKey: key }),
     ]);
+  });
+
+  it("looks for the version among the request-hash key's own, not another key's", async () => {
+    const key = newKey();
+    await firstWrite(requestFor(key), { keys: keysWith(ROTATED) });
+    // Another key has a version 2; the request-hash key still has only its first.
+    const auditMacRotated = keysWith(REQUEST_HASH_V1, {
+      'audit-mac': {
+        current: 2,
+        versions: new Map([
+          [1, fill(0x05)],
+          [2, fill(0x06)],
+        ]),
+      },
+    });
+
+    const refused = write(requestFor(key), { keys: auditMacRotated });
+
+    await expect(refused).rejects.toBeInstanceOf(IdempotencyFailed);
+    await expect(refused).rejects.toMatchObject({ reason: 'unreadable' });
   });
 
   /** A key row's primary key, as query values. */
