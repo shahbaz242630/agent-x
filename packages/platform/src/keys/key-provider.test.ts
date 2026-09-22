@@ -439,6 +439,11 @@ describe('a process that holds only some keys', () => {
     expect(() => createKeyProvider(given, ['audit-mac'])).toThrow(KeyError);
   });
 
+  it('refuses to hold no key at all', () => {
+    expect(keyMaterialProblems({}, [])).toEqual(['a process must hold at least one key']);
+    expect(() => createKeyProvider({}, [])).toThrow(KeyError);
+  });
+
   it('refuses a purpose it holds with no keys given', () => {
     expect(keyMaterialProblems({}, ['audit-mac', 'request-hash'])).toEqual([
       'request-hash has no key for its current version 1 (key-request-hash-v1)',

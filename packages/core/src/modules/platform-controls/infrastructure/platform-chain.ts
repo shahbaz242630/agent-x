@@ -39,18 +39,18 @@ export interface RecordedPlatformEvent {
 export interface PlatformChain {
   /**
    * Adds the event to the platform chain, in the caller's transaction. Takes
-   * the chain head's lock, which comes last (ADR-006 §6). Throws
-   * PlatformEventRefused for an event that breaks the rules, and ChainBroken
-   * if the chain fails its check at the head or holds events past it.
+   * the chain head's lock, which comes last (ADR-006 §6), waiting at most 10
+   * seconds for it. Anything else holding it (a session left open by hand, a
+   * stuck operator action) would otherwise hold the caller up with no line
+   * saying why, until the platform gave up on it; this way the event is
+   * refused (Postgres's lock timeout), and says so. The limit is `set local`,
+   * so it holds for the rest of the caller's transaction, which takes no lock
+   * after this one. Throws PlatformEventRefused for an event that breaks the
+   * rules, and ChainBroken if the chain fails its check at the head or holds
+   * events past it.
    */
   record(tx: PlatformTransaction, event: PlatformEvent): Promise<RecordedPlatformEvent>;
-  /**
-   * Records the event in a transaction of its own, as a process does when it
-   * starts, waiting at most 10 seconds for the head's lock. Anything else
-   * holding it (a session left open by hand, a stuck operator action) would
-   * otherwise hold the start up with no line saying why, until the platform
-   * gave up on the container; this way the start is refused, and says so.
-   */
+  /** Records the event in a transaction of its own, as a process does when it starts. */
   recordAlone(db: Kysely<PlatformControlsTables>, event: PlatformEvent): Promise<RecordedPlatformEvent>;
   /** Checks the platform chain up to its head (SEC-EVD-02), and that it still holds its last anchor if given one (SEC-DB-11). Reads only. */
   verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport>;
@@ -196,6 +196,7 @@ export function createPlatformChain({
   const record = async (tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> => {
     const event = checkedPlatformEvent(input, hidesField);
     const details = canonicalDetails(event.details);
+    await sql`set local lock_timeout = '10s'`.execute(tx);
     const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details), {
       nextId: () => ids.next(),
       content: platformEventContent(event, details),
@@ -210,10 +211,7 @@ export function createPlatformChain({
       return db
         .transaction()
         .setIsolationLevel('read committed')
-        .execute(async (tx) => {
-          await sql`set local lock_timeout = '10s'`.execute(tx);
-          return record(tx, event);
-        });
+        .execute((tx) => record(tx, event));
     },
 
     verify(tx: PlatformTransaction, anchor: AnchorPoint | undefined): Promise<ChainReport> {

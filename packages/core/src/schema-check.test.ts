@@ -1,6 +1,7 @@
 // What the live schema check logs, and what it decides. The rules themselves
 // are proven against a real database in schema-guard.db.test.ts; these are
-// about the two answers the API needs — may it start, and what does it say.
+// about the two answers a process needs (the API, the operator's command): may
+// it go on, and what does it say.
 import { LogCapture } from '@agentx/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -40,7 +41,7 @@ beforeEach(() => {
 });
 
 describe('at start-up', () => {
-  it('lets the API go on when the live schema matches, and says so', async () => {
+  it('lets the process go on when the live schema matches, and says so', async () => {
     const log = logger();
     expect(await schemaSoundAtStart(options(log))).toBe(true);
     expect(log.capture.lines()).toMatchObject([{ level: 'info', event: 'db.schema_checked', problems: 0 }]);
@@ -116,7 +117,7 @@ describe('the deadline', () => {
     expect(await schemaSoundAtStart({ ...options(log), deadlineMs: 20 })).toBe(false);
   });
 
-  it('ends at once when the API is stopping, without waiting for the deadline', async () => {
+  it('ends at once when the process is stopping, without waiting for the deadline', async () => {
     guard.result = (): Promise<string[]> => new Promise(() => undefined);
     const log = logger();
     const stopping = new AbortController();
@@ -125,7 +126,7 @@ describe('the deadline', () => {
     const started = performance.now();
     await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000, signal: stopping.signal });
     expect(performance.now() - started).toBeLessThan(5_000);
-    // The stop is the API's own doing, so it raises no alarm: a routine shutdown must not page anyone.
+    // The stop is the process's own doing, so it raises no alarm: a routine shutdown must not page anyone.
     expect(log.capture.lines()).toEqual([]);
   });
 

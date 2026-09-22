@@ -6,9 +6,39 @@
 import { PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type OperatorProcess, runOperator, USAGE } from './main.ts';
+
+/** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
+const faults = vi.hoisted(() => ({ keys: undefined as Error | undefined, name: undefined as Error | undefined }));
+
+vi.mock('@agentx/platform/keys', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/keys')>();
+  return {
+    ...actual,
+    loadKeys: (...args: Parameters<typeof actual.loadKeys>) => {
+      if (faults.keys !== undefined) throw faults.keys;
+      return actual.loadKeys(...args);
+    },
+  };
+});
+
+vi.mock('@agentx/core/modules/organizations', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/organizations')>();
+  return {
+    ...actual,
+    organizationName: (name: string) => {
+      if (faults.name !== undefined) throw faults.name;
+      return actual.organizationName(name);
+    },
+  };
+});
+
+afterEach(() => {
+  faults.keys = undefined;
+  faults.name = undefined;
+});
 
 /** The command's one key, as the platform mounts it. */
 const keys = writeTestKeys(['audit-mac']);
@@ -64,6 +94,7 @@ describe("B1c what the operator's command refuses before it connects", () => {
     ['another command', ['delete-organization', '--name', 'Quartzite Other Co']],
     ['the name another way', ['create-organization', '--name=Quartzite Other Co']],
     ['the name first', ['--name', 'Quartzite Other Co', 'create-organization']],
+    ['a wrong option before the name', ['create-organization', '--title', 'Quartzite Other Co']],
     ['something more', ['create-organization', '--name', 'Quartzite Other Co', '--force']],
     ['the name as two arguments', ['create-organization', '--name', 'Quartzite', 'Other Co']],
   ])('refuses %s, repeating nothing that was typed', async (_what, argv) => {
@@ -128,6 +159,24 @@ describe("B1c what the operator's command refuses before it connects", () => {
       "AGENTX_DB_MIGRATION_PASSWORD belongs to the migration job (apps/migrate); the operator's command reads only the database, log and key settings it needs, as the app's role",
     ]);
     expect(text).not.toContain('owner login');
+  });
+
+  it('logs an unexpected failure at start with its error, not as settings problems', async () => {
+    faults.keys = new Error('the keys folder went away mid-read');
+
+    const { code, host, events, line } = await run(['create-organization', '--name', NAME]);
+
+    expect(code).toBe(1);
+    expect(host.exitCode).toBe(1);
+    expect(events).toEqual(['operator.start_refused']);
+    expect(line('operator.start_refused')).toMatchObject({ err: { message: 'the keys folder went away mid-read' } });
+    expect(line('operator.start_refused')).not.toHaveProperty('problems');
+  });
+
+  it('lets an unexpected error checking the name end the run, never taking it for a refusal', async () => {
+    faults.name = new TypeError('a bug in the name check');
+
+    await expect(run(['create-organization', '--name', NAME])).rejects.toThrow('a bug in the name check');
   });
 
   it("says so when the database can't be reached, once it has checked what it was asked", async () => {

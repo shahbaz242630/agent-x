@@ -8,11 +8,13 @@
 //    the release that did it
 // Both chains or neither: a failure anywhere rolls back the whole creation.
 // The platform chain's head is locked last, after the organisation's (ADR-006
-// §6: 12, then 13).
+// §6: 12, then 13), and the wait for it is bounded (PlatformChain.record).
 //
-// The organisation's ID is made here, never given: the command can only ever
-// create a new organisation, never reach one that exists (ADR-005 §6: operator
-// tooling can't read or change a customer's authority).
+// The organisation's ID is made by the server (the command's IdGenerator),
+// never typed, and an ID already listed is refused by the directory's key:
+// the command can only ever create a new organisation, never reach one that
+// exists (ADR-005 §6, amended S40: the one operator command that writes
+// tenant tables, and its bounds).
 import type { AuditTables, SignedStatesServices } from '@agentx/core/modules/audit';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
@@ -34,17 +36,24 @@ export interface CreatedOrganization {
   readonly platformSeq: bigint;
 }
 
+export interface NewOrganizationRequest {
+  /** Made by the server's IdGenerator, before the call, so a failure can name it. */
+  readonly orgId: string;
+  readonly name: string;
+  /** The release that runs the command, named in the platform's event. */
+  readonly release: string;
+}
+
 /**
- * Creates an organisation named `name`, ACTIVE and with its integrity hold
- * CLEAR, recorded on its own chain and the platform's. Throws
- * OrganizationRefused for a name it can't have, before any change is made.
+ * Creates the organisation, ACTIVE and with its integrity hold CLEAR,
+ * recorded on its own chain and the platform's. Throws OrganizationRefused
+ * for a name it can't have, before any change is made.
  */
 export async function createOrganizationAsOperator(
   database: Database<OperatorTables>,
   services: SignedStatesServices,
-  { name, release }: { readonly name: string; readonly release: string },
+  { orgId, name, release }: NewOrganizationRequest,
 ): Promise<CreatedOrganization> {
-  const orgId = services.ids.next();
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   return withSignedStates(database, orgId, services, async (tx, states) => {
     const created = await createOrganization(tx, states, { id: orgId, name, actor: OPERATOR });

@@ -49,8 +49,8 @@ export interface OperatorProcess {
 }
 
 export interface OperatorOptions {
-  /** What follows the command's path; `process.argv`'s when not given. */
-  readonly argv?: readonly string[] | undefined;
+  /** What follows the command's path. */
+  readonly argv: readonly string[];
   /** The environment variables; `process.env` when not given. */
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   /** Where log lines go; stdout when not given. */
@@ -83,7 +83,8 @@ function readRequest(argv: readonly string[]): Request | { readonly problems: re
 }
 
 /**
- * Opens a pool of one connection (the command runs one step at a time) and
+ * Opens a pool of one connection, one job's share of the server's (the schema
+ * check's reads queue on it; every other step runs one after another), and
  * checks the role it logged in as, or closes it and returns nothing, having
  * said why.
  */
@@ -123,22 +124,26 @@ async function run(
 
   const database = await connect(config, logger);
   if (database === undefined) return 1;
+  // Made here, by the server, so a failure can name it.
+  const orgId = uuidV7Ids.next();
+  const log = logger.child({ orgId });
   try {
     // Before anything is written: the new organisation's rows would go through the same walls.
     if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
     const created = await createOrganizationAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
-      { name: request.name, release: config.release },
+      { orgId, name: request.name, release: config.release },
     );
-    logger
-      .child({ orgId: created.orgId })
-      .info('operator.organization_created', { orgSeq: created.orgSeq, platformSeq: created.platformSeq });
+    log.info('operator.organization_created', { orgSeq: created.orgSeq, platformSeq: created.platformSeq });
     return 0;
   } catch (error) {
-    // Nothing was changed: the creation is one transaction. A chain that
+    // The creation is one transaction, so nothing was changed, unless the
+    // connection was lost as it committed: then the organisation may exist.
+    // The line names its ID; look for it on the platform chain before running
+    // the command again, or the run makes a second organisation. A chain that
     // refused the event has raised the integrity alarm already (withSignedStates).
-    logger.error('operator.failed', { command: request.command, err: error });
+    log.error('operator.failed', { command: request.command, err: error });
     return 1;
   } finally {
     await database.destroy();
@@ -168,7 +173,7 @@ export async function runOperator(host: OperatorProcess, options: OperatorOption
   }
 
   const logger = createLogger({ service: SERVICE, config, destination });
-  const code = await run(config, keys, options.argv ?? process.argv.slice(2), logger);
+  const code = await run(config, keys, options.argv, logger);
   logger.flush();
   host.exitCode = code;
   return code;
@@ -177,4 +182,4 @@ export async function runOperator(host: OperatorProcess, options: OperatorOption
 // Only when Node runs this file itself: a real process, which in-process
 // coverage can't see.
 /* v8 ignore next -- @preserve */
-if (import.meta.main) await runOperator(process, {});
+if (import.meta.main) await runOperator(process, { argv: process.argv.slice(2) });

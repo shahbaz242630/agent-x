@@ -127,13 +127,14 @@ export interface PurposeKeys {
 export type KeyMaterial = Readonly<Partial<Record<KeyPurpose, PurposeKeys>>>;
 
 /**
- * Why a set of keys can't be used, or nothing: every purpose held has its
- * current version, no key is given for a purpose that isn't held, every key is
- * 32 bytes and none is another's copy, and a key that is never rotated in
- * place has only version 1 (ADR-014 §3).
+ * Why a set of keys can't be used, or nothing: at least one purpose is held,
+ * and each has its current version; no key is given for a purpose that isn't
+ * held; every key is 32 bytes and none is another's copy; and a key that is
+ * never rotated in place has only version 1 (ADR-014 §3).
  */
 export function keyMaterialProblems(material: KeyMaterial, held: readonly KeyPurpose[] = PURPOSES): string[] {
-  const problems: string[] = [];
+  // A process that holds nothing has been set up wrongly: every key use would fail.
+  const problems: string[] = held.length === 0 ? ['a process must hold at least one key'] : [];
   const seen = new Map<string, string>();
   for (const purpose of PURPOSES) {
     const given = material[purpose];

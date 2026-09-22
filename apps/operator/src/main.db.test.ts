@@ -11,7 +11,7 @@ import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { createLogger, type Output } from '@agentx/platform/observability';
 import { createTestDatabase, LogCapture, type TestDatabase, type TestRole, writeTestKeys } from '@agentx/testing';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
@@ -80,6 +80,34 @@ async function run(argv: readonly string[], env: Record<string, string> = envFor
     events: lines.map((line) => String(line.event)),
     line: (event: string) => lines.find((line) => line.event === event),
   };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Holds the platform chain's head from a session of its own, as a stuck operator action would, until `release`. */
+async function holdPlatformHead(): Promise<{ release(): Promise<void> }> {
+  const holder = await database.connect('admin');
+  await holder.query('begin');
+  await holder.query('select * from platform_controls.audit_head for update');
+  return {
+    async release() {
+      await holder.query('rollback');
+      await holder.end();
+    },
+  };
+}
+
+/** The relation locks the command's connection holds while it waits on another's lock, as `schema.table mode`. */
+async function locksWhileWaiting(): Promise<string[]> {
+  const rows = await database.as('admin').query<{ lock: string }>(
+    `select c.relnamespace::regnamespace::text || '.' || c.relname || ' ' || l.mode as lock
+       from pg_catalog.pg_stat_activity a
+       join pg_catalog.pg_locks l on l.pid = a.pid and l.granted
+       join pg_catalog.pg_class c on c.oid = l.relation
+      where a.datname = $1 and a.application_name = 'agentx-operator' and a.wait_event_type = 'Lock'`,
+    [database.name],
+  );
+  return rows.map((row) => row.lock);
 }
 
 /** How many organisations the directory lists, and how long the platform chain is: what a refused run must leave alone. */
@@ -178,6 +206,61 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
   });
 });
 
+describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres ${server.version})`, () => {
+  it("writes the organisation's rows and starts its chain before it waits on the platform's head", async () => {
+    // A run first, so the platform chain has a head to hold.
+    expect((await run(['create-organization', '--name', NAME])).code).toBe(0);
+    const head = await holdPlatformHead();
+    try {
+      const running = run(['create-organization', '--name', NAME]);
+      const held = await vi.waitFor(
+        async () => {
+          const locks = await locksWhileWaiting();
+          expect(locks).not.toEqual([]);
+          return locks;
+        },
+        { timeout: 8_000, interval: 100 },
+      );
+
+      expect(held).toEqual(
+        expect.arrayContaining([
+          'directory.orgs RowExclusiveLock',
+          'organizations.organizations RowExclusiveLock',
+          'audit.heads RowExclusiveLock',
+        ]),
+      );
+      await head.release();
+      expect((await running).code).toBe(0);
+    } finally {
+      await head.release().catch(() => undefined);
+    }
+  });
+
+  it("gives up after 10 seconds while the platform's head stays held, naming the organisation it didn't create", async () => {
+    expect((await run(['create-organization', '--name', NAME])).code).toBe(0);
+    const before = await counts();
+    const head = await holdPlatformHead();
+    try {
+      const began = performance.now();
+      const { code, events, line } = await run(['create-organization', '--name', NAME]);
+
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.failed']);
+      const failed = line('operator.failed');
+      expect(failed).toMatchObject({ command: 'create-organization' });
+      expect(JSON.stringify(failed?.err)).toMatch(/lock timeout/);
+      expect(failed?.orgId).toMatch(UUID);
+      expect(await counts()).toEqual(before);
+      expect(
+        await database.as('owner').query('select 1 from directory.orgs where org_id = $1', [failed?.orgId]),
+      ).toEqual([]);
+    } finally {
+      await head.release();
+    }
+  });
+});
+
 describe("B1c what the operator's command refuses, with nothing changed", () => {
   it("refuses to run as the owner's role, which could switch the walls off", async () => {
     const before = await counts();
@@ -222,6 +305,7 @@ describe("B1c what the operator's command refuses, with nothing changed", () => 
       expect(line('audit.integrity_failed')).toMatchObject({ chain: 'platform', check: 'record' });
       expect(line('audit.integrity_failed')).not.toHaveProperty('orgId');
       expect(line('operator.failed')).toMatchObject({ command: 'create-organization', err: { type: 'ChainBroken' } });
+      expect(line('operator.failed')?.orgId).toMatch(UUID);
       expect(await counts()).toEqual(before);
     } finally {
       await owner.query('update platform_controls.audit_head set mac = $1', [kept?.mac]);

@@ -40,7 +40,7 @@ export interface SchemaCheckOptions<Schema = unknown> {
    * never answer, so the app keeps its own — as the anchor check does.
    */
   readonly deadlineMs?: number | undefined;
-  /** Ends the check at once when the API is stopping. */
+  /** Ends the check at once when the process is stopping. */
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -50,7 +50,7 @@ export interface SchemaCheckOptions<Schema = unknown> {
  */
 const SCHEMA_CHECK_DEADLINE_MS = 10_000;
 
-/** The check ended because the API is stopping: the API's own doing, never the database's. */
+/** The check ended because the process is stopping: its own doing, never the database's. */
 class Stopped extends Error {
   constructor() {
     super('the schema check was stopped');
@@ -65,7 +65,7 @@ class Stopped extends Error {
  * A signal that has **already** aborted is checked before anything is waited
  * on: `addEventListener('abort', …)` never fires on one that aborted earlier,
  * so a stop that arrived first would otherwise be missed and the check would
- * sit out its whole deadline while the API was trying to shut down.
+ * sit out its whole deadline while the process was trying to shut down.
  */
 async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: AbortSignal | undefined): Promise<T> {
   if (signal?.aborted === true) throw new Stopped();
@@ -90,10 +90,10 @@ async function withinDeadline<T>(work: Promise<T>, deadlineMs: number, signal: A
 
 /**
  * What the check found: the problems, the reason it couldn't run, or that the
- * API stopped it. A stop is ours, never the database's doing, so it is no sign
- * of anything: raising the integrity alarm for it would page someone on a
- * routine shutdown (found by A3f-2's tests; the anchor check already tells the
- * two apart).
+ * process stopped it. A stop is ours, never the database's doing, so it is no
+ * sign of anything: raising the integrity alarm for it would page someone on
+ * a routine shutdown (found by A3f-2's tests; the anchor check already tells
+ * the two apart).
  */
 type SchemaCheckOutcome =
   | { readonly kind: 'clean' }
@@ -130,17 +130,19 @@ async function checkSchema<Schema>({
     const problems = await withinDeadline(reading, deadlineMs, signal);
     return problems.length === 0 ? { kind: 'clean' } : { kind: 'drift', problems };
   } catch (error) {
-    // Only the stop itself: a read that failed on its own is the alarm, even
-    // if the API began stopping just after (anchor-check.ts draws the same line).
+    // Only the stop itself: a read that failed on its own is the alarm, even if
+    // the process began stopping just after (the API's anchor-check.ts draws
+    // the same line).
     if (error instanceof Stopped) return { kind: 'stopped' };
     return { kind: 'unreadable', error };
   }
 }
 
 /**
- * The check at start-up. Returns whether the API may go on; a refusal for
- * drift or an unreadable catalogue has already been logged, and one because
- * the API was stopped needs no line.
+ * The check at start-up. Returns whether the process may go on (the API to
+ * serve, the operator's command to write); a refusal for drift or an
+ * unreadable catalogue has already been logged, and one because the process
+ * was stopped needs no line.
  */
 export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Schema>): Promise<boolean> {
   const outcome = await checkSchema(options);
@@ -148,7 +150,7 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
     options.logger.info('db.schema_checked', { problems: 0 });
     return true;
   }
-  // Stopped while starting: the API isn't going on either way, and a stop is no alarm.
+  // Stopped while starting: the process isn't going on either way, and a stop is no alarm.
   if (outcome.kind === 'stopped') return false;
   if (outcome.kind === 'drift') {
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', problems: outcome.problems });
@@ -161,8 +163,8 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
 }
 
 /**
- * The check on a scheduled run. It raises the alarm and returns; the API keeps
- * serving, for the reason in this file's header.
+ * The check on the API's scheduled run. It raises the alarm and returns; the
+ * API keeps serving, for the reason in this file's header.
  */
 export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<Schema>): Promise<void> {
   const outcome = await checkSchema(options);

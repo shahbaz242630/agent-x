@@ -112,6 +112,22 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
     expect(await verify()).toMatchObject({ ok: true, seq: 0n });
   });
 
+  it("gives up after 10 seconds when something else holds the head's lock, in the caller's transaction too", async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select * from platform_controls.audit_head for update');
+    try {
+      const began = performance.now();
+      await expect(record(started(2))).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    expect(await verify()).toMatchObject({ ok: true, seq: 1n });
+  });
+
   it('refuses an event that breaks the rules, and writes nothing', async () => {
     await expect(record({ ...started(1), action: 'started' })).rejects.toThrow(PlatformEventRefused);
 
