@@ -357,23 +357,28 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
     expect(notAFile.line('operator.refused')?.problems).toEqual(["the request file isn't a plain file"]);
   });
 
-  // Windows has no such pipe; CI's runners are Linux.
-  it.skipIf(process.platform === 'win32')('refuses a pipe with no writer at once, never waiting on it', () => {
-    const pipe = path.join(folder, 'a-pipe');
-    expect(spawnSync('mkfifo', [pipe]).status).toBe(0);
+  // Windows has no such pipe; CI's runners are Linux. The test's own limit is
+  // above the child's, so a waiting open shows as the child stopped, not a timeout.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a pipe with no writer at once, never waiting on it',
+    { timeout: 30_000 },
+    () => {
+      const pipe = path.join(folder, 'a-pipe');
+      expect(spawnSync('mkfifo', [pipe]).status).toBe(0);
 
-    // A process of its own, with a hard limit: an open that waited would block
-    // the whole thread, where no timer in this one could end it.
-    const ran = spawnSync(process.execPath, [fileURLToPath(new URL('main.ts', import.meta.url)), '--request', pipe], {
-      env: ENV,
-      encoding: 'utf8',
-      timeout: 15_000,
-    });
-    expect({ status: ran.status, signal: ran.signal }).toEqual({ status: 1, signal: null });
-    const refused = ran.stdout
-      .split('\n')
-      .filter((text) => text.includes('"operator.refused"'))
-      .map((text) => (JSON.parse(text) as { problems: unknown }).problems);
-    expect(refused).toEqual([["the request file isn't a plain file"]]);
-  });
+      // A process of its own, with a hard limit: an open that waited would block
+      // the whole thread, where no timer in this one could end it.
+      const ran = spawnSync(process.execPath, [fileURLToPath(new URL('main.ts', import.meta.url)), '--request', pipe], {
+        env: ENV,
+        encoding: 'utf8',
+        timeout: 15_000,
+      });
+      expect({ status: ran.status, signal: ran.signal }).toEqual({ status: 1, signal: null });
+      const refused = ran.stdout
+        .split('\n')
+        .filter((text) => text.includes('"operator.refused"'))
+        .map((text) => (JSON.parse(text) as { problems: unknown }).problems);
+      expect(refused).toEqual([["the request file isn't a plain file"]]);
+    },
+  );
 });
