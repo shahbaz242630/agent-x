@@ -625,11 +625,34 @@ describe('an authority table the product lists (A3f-2)', () => {
 });
 
 describe('a fill-in table the schema policy lists (A5b)', () => {
-  /** Puts back the rights 0006 gives the app on the idempotency keys, whatever a case changed. */
+  /** Every right on the idempotency keys, the table's and each column's, as Postgres records them. */
+  const keyRights = async (): Promise<unknown> =>
+    owner.query(
+      `select '' as column, pg_catalog.pg_get_userbyid(acl.grantee)::text as grantee, acl.privilege_type as privilege
+       from pg_catalog.pg_class c, pg_catalog.aclexplode(c.relacl) acl
+       where c.oid = 'idempotency.keys'::pg_catalog.regclass
+       union all
+       select a.attname::text, pg_catalog.pg_get_userbyid(acl.grantee)::text, acl.privilege_type
+       from pg_catalog.pg_attribute a, pg_catalog.aclexplode(a.attacl) acl
+       where a.attrelid = 'idempotency.keys'::pg_catalog.regclass and a.attnum > 0 and not a.attisdropped
+       order by 1, 2, 3`,
+    );
+  let migrated: unknown;
+
+  beforeAll(async () => {
+    migrated = await keyRights();
+  });
+
+  /**
+   * Puts back the rights 0006 gives the app, whatever a case changed, and
+   * proves they are exactly 0006's: both checkers only allow-list, so a
+   * restore that gave back less would pass unseen.
+   */
   afterEach(async () => {
     await owner.query('revoke all on idempotency.keys from agentx_app');
     await owner.query('grant select, insert on idempotency.keys to agentx_app');
     await owner.query('grant update (result_status, result_id) on idempotency.keys to agentx_app');
+    expect(await keyRights()).toEqual(migrated);
   });
 
   it.each([
@@ -655,13 +678,72 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
     expect(await problems()).toEqual(named);
   });
 
-  it('names UPDATE of the whole table, and every column it opens', async () => {
+  it('names UPDATE of the whole table, and every column it opens but the listed ones', async () => {
     await owner.query('grant update on idempotency.keys to agentx_app');
 
-    const named = await problems();
-    expect(named).toContain('agentx_app may UPDATE on idempotency.keys');
-    expect(named).toContain('agentx_app may UPDATE idempotency.keys\'s column "key"');
-    expect(named).not.toContain('agentx_app may UPDATE idempotency.keys\'s column "result_id"');
+    // The guard lists its problems sorted.
+    expect(await problems()).toEqual([
+      'agentx_app may UPDATE idempotency.keys\'s column "client_id"',
+      'agentx_app may UPDATE idempotency.keys\'s column "client_kind"',
+      'agentx_app may UPDATE idempotency.keys\'s column "created_at"',
+      'agentx_app may UPDATE idempotency.keys\'s column "key"',
+      'agentx_app may UPDATE idempotency.keys\'s column "operation"',
+      'agentx_app may UPDATE idempotency.keys\'s column "org_id"',
+      'agentx_app may UPDATE idempotency.keys\'s column "request_hash"',
+      'agentx_app may UPDATE idempotency.keys\'s column "request_hash_key_version"',
+      'agentx_app may UPDATE on idempotency.keys',
+    ]);
+  });
+
+  it('passes reading and adding granted column by column, as CI-06 allows', async () => {
+    await owner.query('revoke select, insert on idempotency.keys from agentx_app');
+    await owner.query(
+      'grant select (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at, result_status, result_id), insert (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at) on idempotency.keys to agentx_app',
+    );
+
+    expect(await problems()).toEqual([]);
+  });
+
+  it('holds a table on both lists to the columns both allow, and names it', async () => {
+    const asAuthority = {
+      table: 'idempotency.keys',
+      subject: 'idempotency-key',
+      fields: [{ column: 'result_id', type: 'uuid' }],
+    } as const satisfies SignedStateTable;
+
+    expect(await liveSchemaProblems(app, { ...ROLES, authorityTables: [asAuthority] })).toEqual([
+      'agentx_app may UPDATE idempotency.keys\'s column "result_status"',
+      'idempotency.keys is listed as both an authority table and a fill-in table',
+    ]);
+  });
+
+  it('finds a listed table named with a reserved word, by the name Postgres quotes', async () => {
+    await owner.query('create schema probe');
+    try {
+      await owner.query(
+        'create table probe."user" (org_id uuid not null, id uuid not null, note text, primary key (org_id, id))',
+      );
+      await owner.query('alter table probe."user" enable row level security');
+      await owner.query('alter table probe."user" force row level security');
+      await owner.query(
+        `create policy tenant_isolation on probe."user"
+         using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
+         with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)`,
+      );
+      await owner.query('grant usage on schema probe to agentx_app');
+      await owner.query('grant select, insert on probe."user" to agentx_app');
+      await owner.query('grant update (note) on probe."user" to agentx_app');
+      const policy = {
+        ...SCHEMA_POLICY,
+        fillInTables: { ...SCHEMA_POLICY.fillInTables, 'probe."user"': { reason: 'Notes', columns: ['note'] } },
+      };
+
+      expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([]);
+      await owner.query('grant delete on probe."user" to agentx_app');
+      expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual(['agentx_app may DELETE on probe."user"']);
+    } finally {
+      await owner.query('drop schema probe cascade');
+    }
   });
 
   it('holds only a listed table to it: off the list, DELETE is a tenant table’s right', async () => {

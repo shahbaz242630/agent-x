@@ -21,9 +21,10 @@
 // connect, none but the backup role has BYPASSRLS, and none is a member of a
 // role or has members. The backup role only reads. The app role only adds to
 // and reads the tables of append-only schemas, and may also update, never
-// delete, their listed exceptions (SEC-EVD-01); on any other table it holds
-// nothing but SELECT, INSERT, UPDATE and DELETE. The live schema guard holds
-// the running database to the same lists.
+// delete, their listed exceptions (SEC-EVD-01); it only adds to, reads and
+// updates the listed columns of a fill-in table, never deletes (A5b); on any
+// other table it holds nothing but SELECT, INSERT, UPDATE and DELETE. The live
+// schema guard holds the running database to the same lists.
 //
 // Not read: types (every table's row type is usable by PUBLIC by default, and
 // using a type reaches no row); languages (PUBLIC may write plpgsql and SQL,
@@ -65,8 +66,9 @@ export interface SchemaPolicy {
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
   /**
    * Tenant tables outside those schemas that the app may add rows to and read,
-   * and change only in the columns listed, never DELETE: a row filled in once
-   * after it is added, such as an idempotency key's result.
+   * and change only in the columns listed, never DELETE, by schema-qualified
+   * name as Postgres quotes it: a row filled in once after it is added, such
+   * as an idempotency key's result.
    */
   readonly fillInTables: Readonly<Record<string, FillInTable>>;
 }
@@ -75,7 +77,7 @@ export interface SchemaPolicy {
 interface FillInTable {
   /** Why the app needs no more. */
   readonly reason: string;
-  /** The columns the app may UPDATE, each granted on its own. */
+  /** Exactly the columns the app is granted UPDATE on, each on its own. */
   readonly columns: readonly string[];
 }
 
@@ -484,7 +486,22 @@ const FILL_IN_COLUMN_MAY = ['INSERT', 'SELECT', 'UPDATE'];
 
 const LEAKS = "so it could reveal another organisation's rows (SEC-TEN-05)";
 
+/**
+ * The policy's lists these checks read. The product's policy reaches here
+ * through tooling/schema-policy.ts, whose type check only proves the lists
+ * named here are there: a list the product adds is refused below until these
+ * checks read it too, or the live guard would hold a server to a rule CI never
+ * checked the migrations against.
+ */
+const CHECKED_LISTS: readonly string[] = [
+  'globalTables',
+  'appendOnlySchemas',
+  'appendOnlyExceptions',
+  'fillInTables',
+] satisfies readonly (keyof SchemaPolicy)[];
+
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
+  const unchecked = Object.keys(policy).filter((list) => !CHECKED_LISTS.includes(list));
   const isGlobal = (name: string): boolean => Object.hasOwn(policy.globalTables, name);
   const tenantTables = facts.relations
     .filter((relation) => TABLE_KINDS.has(relation.kind) && !isGlobal(relation.name))
@@ -492,9 +509,10 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
   const isTenant = new Set(tenantTables);
 
   return [
+    ...unchecked.map((list) => `the schema policy's ${list} is a list CI-06 doesn't check`),
     ...globalListProblems(policy, facts),
     ...appendOnlyListProblems(policy, facts),
-    ...fillInListProblems(policy, facts),
+    ...fillInListProblems(policy, facts, roles),
     ...facts.relations.flatMap((relation) => relationProblems(relation, isGlobal(relation.name))),
     ...tenantTables.flatMap((table) => [
       ...orgIdProblems(
@@ -571,15 +589,18 @@ function appendOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
 
 /**
  * Every fill-in table has a reason and at least one column, names a tenant
- * table that exists outside the append-only schemas, and lists only columns
- * the table has.
+ * table that exists outside the append-only schemas, and lists exactly the
+ * columns the app is granted UPDATE on, each once: a column listed but not
+ * granted would be one the live schema guard lets a later grant open unseen.
  */
-function fillInListProblems(policy: SchemaPolicy, facts: Facts): string[] {
+function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames): string[] {
   return Object.entries(policy.fillInTables).flatMap(([name, entry]) => {
     const problems: string[] = [];
     if (entry.reason.trim() === '') problems.push(`${name}: the fill-in list gives no reason for it`);
     if (entry.columns.length === 0) problems.push(`${name}: the fill-in list names no column the app may change`);
-    if (!facts.relations.some((relation) => relation.name === name && TABLE_KINDS.has(relation.kind))) {
+    if (new Set(entry.columns).size !== entry.columns.length)
+      problems.push(`${name}: the fill-in list names a column twice`);
+    if (!facts.relations.some((relation) => relation.name === name)) {
       problems.push(`${name}: is on the fill-in list, but no such table exists`);
       return problems;
     }
@@ -589,9 +610,19 @@ function fillInListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     if (policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
       problems.push(`${name}: is on the fill-in list, but its schema is append-only`);
     }
-    for (const column of entry.columns) {
+    for (const column of new Set(entry.columns)) {
+      const granted = facts.grants.some(
+        (grant) =>
+          grant.kind === 'column' &&
+          grant.relation === name &&
+          grant.attribute === column &&
+          grant.grantee === roles.app &&
+          grant.privilege === 'UPDATE',
+      );
       if (!facts.columns.some((row) => row.table === name && row.column === column)) {
         problems.push(`${name}: the fill-in list names column ${column}, which the table doesn't have`);
+      } else if (!granted) {
+        problems.push(`${name}: the fill-in list names column ${column}, which ${roles.app} isn't granted UPDATE on`);
       }
     }
     return problems;
@@ -700,23 +731,22 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     ];
   }
   const fillIn = Object.hasOwn(policy.fillInTables, grant.relation) ? policy.fillInTables[grant.relation] : undefined;
+  // What a fill-in table allows is also what any tenant table allows, so the
+  // rights that pass here go on to the check below and pass it too.
   if (fillIn !== undefined && grant.grantee === roles.app) {
     if (grant.kind === 'relation' && !FILL_IN_APP_MAY.includes(grant.privilege)) {
       return [
-        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed (ADR-007 §4)`,
+        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed`,
       ];
     }
     if (grant.kind === 'column' && !FILL_IN_COLUMN_MAY.includes(grant.privilege)) {
       return [
-        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed (ADR-007 §4)`,
+        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed`,
       ];
     }
     if (grant.kind === 'column' && grant.privilege === 'UPDATE' && !fillIn.columns.includes(grant.attribute)) {
-      return [
-        `${grant.object}: ${roles.app} may UPDATE a column the fill-in list doesn't name; a key's own columns never change (ADR-007 §4)`,
-      ];
+      return [`${grant.object}: ${roles.app} may UPDATE a column the fill-in list doesn't name`];
     }
-    return [];
   }
   const onRows = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
   if (onRows && grant.grantee === roles.app && !APP_MAY.includes(grant.privilege)) {

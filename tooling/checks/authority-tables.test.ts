@@ -15,6 +15,7 @@ import type { SignedStateTable } from '../../packages/platform/src/db/index.ts';
 import type { AuthorityMachine, AuthorityTable } from '../../packages/testing/src/index.ts';
 import type { AuthorityTableEntry } from '../../packages/core/src/authority-tables.ts';
 import { AUTHORITY_TABLES } from '../authority-tables.ts';
+import { SCHEMA_POLICY } from '../schema-policy.ts';
 
 const AGENT = defineStateMachine({
   name: 'agent',
@@ -84,5 +85,11 @@ describe('the authority-table registry takes the modules’ own descriptions', (
 
   it('is empty until the first module has an authority table (slice B1)', () => {
     expect(AUTHORITY_TABLES).toEqual([]);
+  });
+
+  it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {
+    const fillIn = Object.keys(SCHEMA_POLICY.fillInTables);
+
+    expect(AUTHORITY_TABLES.map(({ table }) => table).filter((name) => fillIn.includes(name))).toEqual([]);
   });
 });

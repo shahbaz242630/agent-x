@@ -31,7 +31,7 @@ interface GlobalTable {
 interface FillInTable {
   /** Why the app needs no more: what a row deleted, or another column changed, would allow. */
   readonly reason: string;
-  /** The columns the app may UPDATE, each granted on its own. */
+  /** Exactly the columns the app is granted UPDATE on, each on its own (CI-06 checks it). */
   readonly columns: readonly string[];
 }
 

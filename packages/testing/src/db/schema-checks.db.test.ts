@@ -845,11 +845,36 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ...POLICY,
       fillInTables: { ...POLICY.fillInTables, 't.keys': entry },
     });
-    const table = 'on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed (ADR-007 §4)';
-    const unlisted = "may UPDATE a column the fill-in list doesn't name; a key's own columns never change (ADR-007 §4)";
+    const table = 'on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed';
+    const unlisted = "may UPDATE a column the fill-in list doesn't name";
 
     it('passes one built as it must be', async () => {
       expect(await problemsAfter(KEYS, listing())).toEqual([]);
+    });
+
+    it('passes reading and adding granted column by column, as the live guard allows', async () => {
+      const statements = [
+        ...KEYS,
+        'revoke select, insert on t.keys from agentx_app',
+        'grant select (org_id, key, result), insert (org_id, key, result) on t.keys to agentx_app',
+      ];
+      expect(await problemsAfter(statements, listing())).toEqual([]);
+    });
+
+    it('fails a listed column the app is not granted UPDATE on, or one listed twice: the list is exact', async () => {
+      expect(await problemsAfter(KEYS, listing({ reason: 'Keys', columns: ['result', 'key'] }))).toEqual([
+        "t.keys: the fill-in list names column key, which agentx_app isn't granted UPDATE on",
+      ]);
+      expect(await problemsAfter(KEYS, listing({ reason: 'Keys', columns: ['result', 'result'] }))).toEqual([
+        't.keys: the fill-in list names a column twice',
+      ]);
+    });
+
+    it('fails a list in the schema policy that CI-06 does not check', async () => {
+      const policy = { ...POLICY, laterTables: {} } as SchemaPolicy;
+      expect(await problemsAfter([], policy)).toEqual([
+        "the schema policy's laterTables is a list CI-06 doesn't check",
+      ]);
     });
 
     it('fails DELETE, TRUNCATE or UPDATE of the whole table, UPDATE of a column not listed, or another column right', async () => {
@@ -860,7 +885,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       ];
       expect(await problemsAfter(statements, listing())).toEqual([
         `column t.keys.key: agentx_app ${unlisted}`,
-        "column t.keys.result: agentx_app has REFERENCES on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed (ADR-007 §4)",
+        "column t.keys.result: agentx_app has REFERENCES on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed",
         `table t.keys: agentx_app has DELETE ${table}`,
         `table t.keys: agentx_app has TRUNCATE ${table}`,
         `table t.keys: agentx_app has UPDATE ${table}`,
@@ -904,7 +929,9 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         't.keys: the fill-in list names no column the app may change',
         't.gone: is on the fill-in list, but no such table exists',
         'migrations.applied: is on the fill-in list, but it is a global table',
+        "migrations.applied: the fill-in list names column name, which agentx_app isn't granted UPDATE on",
         'audit.events: is on the fill-in list, but its schema is append-only',
+        "audit.events: the fill-in list names column details, which agentx_app isn't granted UPDATE on",
         `column t.keys.result: agentx_app ${unlisted}`,
       ]);
     });

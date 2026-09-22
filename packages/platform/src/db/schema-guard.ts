@@ -126,8 +126,8 @@ const APP_ROW_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
 
 /**
  * The rights the app role may hold on a narrow table as a whole: adding rows
- * and reading them. It changes a row only column by column, in its own
- * columns; UPDATE of the whole table would cover the row's identity too.
+ * and reading them. It changes a row only column by column, in the columns it
+ * may change; UPDATE of the whole table would cover the row's identity too.
  * Never DELETE.
  * - An authority table (A3f-2) changes only in the sealed fields and the two
  *   signed-state columns, which is all record writes; a row gone takes its
@@ -793,13 +793,17 @@ export async function liveSchemaProblems<Schema>(
   for (const grant of allGrants) {
     held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
   }
-  // Each listed table by the name the rest of this check uses, matched on its
-  // plain name, as the module wrote it and as CI's A3c-1 check matches it.
+  // Tables held to narrower rights than a tenant table's, by the name the rest
+  // of this check uses, each with the columns the app may change:
+  // - an authority table (A3f-2): its sealed fields and its two signed-state
+  //   columns, which is all record writes. Listed by its plain name, as the
+  //   module wrote it and as CI's A3c-1 check matches it;
+  // - a fill-in table (A5b): the columns the schema policy lists, by the name
+  //   Postgres quotes. CI-06 checks the list itself (a reason, a tenant table
+  //   outside the append-only schemas, only columns granted), and the policy
+  //   reaches a server only through CI, so it is taken as it stands here.
+  // A table on both lists may change only in the columns both allow.
   const byPlainName = new Map(allRelations.map((relation) => [relation.plain, relation.name]));
-  // Tables held to narrower rights than a tenant table's, each with the
-  // columns the app may change: an authority table's sealed fields and its two
-  // signed-state columns, which is all record writes (A3f-2); a fill-in
-  // table's listed columns (A5b).
   const narrow = new Map<string, ReadonlySet<string>>();
   for (const table of authorityTables) {
     const name = byPlainName.get(table.table);
@@ -807,8 +811,15 @@ export async function liveSchemaProblems<Schema>(
     else narrow.set(name, new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]));
   }
   for (const [name, entry] of Object.entries(policy.fillInTables)) {
-    if (!known.has(name)) problems.push(`${name} is listed as a fill-in table but is not there`);
-    else narrow.set(name, new Set(entry.columns));
+    const asAuthority = narrow.get(name);
+    if (!known.has(name)) {
+      problems.push(`${name} is listed as a fill-in table but is not there`);
+    } else if (asAuthority === undefined) {
+      narrow.set(name, new Set(entry.columns));
+    } else {
+      problems.push(`${name} is listed as both an authority table and a fill-in table`);
+      narrow.set(name, new Set(entry.columns.filter((column) => asAuthority.has(column))));
+    }
   }
   for (const relation of allRelations) {
     // Held to their own list, below.
@@ -824,8 +835,8 @@ export async function liveSchemaProblems<Schema>(
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
     }
   }
-  // A narrow table: rows added and read, and changed only in its own columns,
-  // each granted on its own.
+  // A narrow table: rows added and read, and changed only in the columns it
+  // may change, each granted on its own.
   const writableIn = new Map<string, string[]>();
   for (const { table, column } of writable) writableIn.set(table, [...(writableIn.get(table) ?? []), column]);
   for (const [name, mayChange] of narrow) {
