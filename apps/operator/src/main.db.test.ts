@@ -10,7 +10,14 @@ import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { createLogger, type Output } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, type TestDatabase, type TestRole, writeTestKeys } from '@agentx/testing';
+import {
+  createTestDatabase,
+  LogCapture,
+  type TestDatabase,
+  type TestRole,
+  within,
+  writeTestKeys,
+} from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { OperatorTables } from './create-organization.ts';
@@ -219,7 +226,8 @@ describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres
           expect(locks).not.toEqual([]);
           return locks;
         },
-        { timeout: 8_000, interval: 100 },
+        // Counted from the command's start: it connects and checks the schema first.
+        { timeout: 20_000, interval: 100 },
       );
 
       expect(held).toEqual(
@@ -230,7 +238,7 @@ describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres
         ]),
       );
       await head.release();
-      expect((await running).code).toBe(0);
+      expect((await within(20_000, running, 'the command')).code).toBe(0);
     } finally {
       await head.release().catch(() => undefined);
     }
@@ -242,7 +250,7 @@ describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres
     const head = await holdPlatformHead();
     try {
       const began = performance.now();
-      const { code, events, line } = await run(['create-organization', '--name', NAME]);
+      const { code, events, line } = await within(20_000, run(['create-organization', '--name', NAME]), 'the command');
 
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
       expect(code).toBe(1);

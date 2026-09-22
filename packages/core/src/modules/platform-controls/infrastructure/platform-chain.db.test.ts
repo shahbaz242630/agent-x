@@ -17,7 +17,9 @@ import {
   SequentialIds,
   type TestDatabase,
   type TestSession,
+  within,
 } from '@agentx/testing';
+import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type PlatformEvent, PlatformEventRefused } from '../domain/event.ts';
@@ -119,13 +121,61 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
     await holder.query('select * from platform_controls.audit_head for update');
     try {
       const began = performance.now();
-      await expect(record(started(2))).rejects.toThrow(/lock timeout/);
+      await expect(within(20_000, record(started(2)), 'the event')).rejects.toThrow(/lock timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');
       await holder.end();
     }
     expect(await verify()).toMatchObject({ ok: true, seq: 1n });
+  });
+
+  it("brings a longer limit the caller's transaction set down to 10 seconds", async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select * from platform_controls.audit_head for update');
+    try {
+      const began = performance.now();
+      await expect(
+        within(
+          20_000,
+          app.transaction().execute(async (tx) => {
+            await sql`set local lock_timeout = '1min'`.execute(tx);
+            return chain.record(tx, started(2));
+          }),
+          'the event',
+        ),
+      ).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it("keeps a shorter limit the caller's transaction set, rather than lengthen it to 10 seconds", async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select * from platform_controls.audit_head for update');
+    try {
+      const began = performance.now();
+      await expect(
+        within(
+          20_000,
+          app.transaction().execute(async (tx) => {
+            await sql`set local lock_timeout = '1s'`.execute(tx);
+            return chain.record(tx, started(2));
+          }),
+          'the event',
+        ),
+      ).rejects.toThrow(/lock timeout/);
+      expect(performance.now() - began).toBeLessThan(5_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('refuses an event that breaks the rules, and writes nothing', async () => {
@@ -150,7 +200,7 @@ describe('recording in a transaction of its own, as a process start does', () =>
     await holder.query('select * from platform_controls.audit_head for update');
     try {
       const began = performance.now();
-      await expect(chain.recordAlone(app, started(2))).rejects.toThrow(/lock timeout/);
+      await expect(within(20_000, chain.recordAlone(app, started(2)), 'the start')).rejects.toThrow(/lock timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');

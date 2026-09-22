@@ -138,6 +138,26 @@ export function successes<T>(outcomes: readonly PromiseSettledResult<T>[]): T[] 
   return outcomes.flatMap((outcome) => (outcome.status === 'fulfilled' ? [outcome.value] : []));
 }
 
+/**
+ * What the work gives back, or a rejection naming it once `ms` have passed. A
+ * test awaiting work that a broken build could leave waiting on a lock for
+ * ever then fails in time, and its `finally` still lets go of what it holds;
+ * without it the test would hang, holding the lock every later test needs.
+ */
+export async function within<T>(ms: number, work: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Waited ${ms.toString()} ms for ${what}`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The errors of the runs that failed, in run order. */
 export function failures(outcomes: readonly PromiseSettledResult<unknown>[]): unknown[] {
   return outcomes.flatMap((outcome): unknown[] => (outcome.status === 'rejected' ? [outcome.reason as unknown] : []));

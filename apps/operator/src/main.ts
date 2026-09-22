@@ -12,7 +12,9 @@
 // 4. connects as the app's role, and refuses one that could get round the tenant walls (ADR-005 §3)
 // 5. checks the live schema, and refuses to write through walls that have been rewritten (A3e-1b)
 // 6. creates the organisation, on its own audit chain and the platform's,
-//    and exits 0; 1 when anything is refused or fails, with nothing changed
+//    and exits 0; 1 when anything is refused or fails, with nothing changed,
+//    unless the connection was lost as the creation committed (see run's
+//    catch: the failure names the organisation's ID, to look for first)
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';

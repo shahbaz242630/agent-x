@@ -40,11 +40,12 @@ export interface PlatformChain {
   /**
    * Adds the event to the platform chain, in the caller's transaction. Takes
    * the chain head's lock, which comes last (ADR-006 §6), waiting at most 10
-   * seconds for it. Anything else holding it (a session left open by hand, a
-   * stuck operator action) would otherwise hold the caller up with no line
-   * saying why, until the platform gave up on it; this way the event is
-   * refused (Postgres's lock timeout), and says so. The limit is `set local`,
-   * so it holds for the rest of the caller's transaction, which takes no lock
+   * seconds for it, or less where the caller's transaction already allows
+   * less. Anything else holding it (a session left open by hand, a stuck
+   * operator action) would otherwise hold the caller up with no line saying
+   * why, until the platform gave up on it; this way recording fails with
+   * Postgres's lock-timeout error, and says so. The limit is `set local`, so
+   * it holds for the rest of the caller's transaction, which takes no lock
    * after this one. Throws PlatformEventRefused for an event that breaks the
    * rules, and ChainBroken if the chain fails its check at the head or holds
    * events past it.
@@ -186,6 +187,19 @@ function readerFor(tx: PlatformTransaction): ChainReader {
   };
 }
 
+/**
+ * Bounds how long the transaction waits for a lock from here on: 10 seconds,
+ * unless the caller has already set a shorter limit, which is kept (Postgres's
+ * `0` is no limit at all). A limit that can't be read is replaced by 10 s.
+ */
+async function boundHeadWait(tx: PlatformTransaction): Promise<void> {
+  const { rows } = await sql<{ longer: boolean | null }>`
+    select (limit_now = interval '0' or limit_now > interval '10 seconds') as longer
+    from (select pg_catalog.current_setting('lock_timeout')::interval as limit_now) as setting
+  `.execute(tx);
+  if (rows[0]?.longer !== false) await sql`set local lock_timeout = '10s'`.execute(tx);
+}
+
 export function createPlatformChain({
   keys,
   ids,
@@ -196,7 +210,7 @@ export function createPlatformChain({
   const record = async (tx: PlatformTransaction, input: PlatformEvent): Promise<RecordedPlatformEvent> => {
     const event = checkedPlatformEvent(input, hidesField);
     const details = canonicalDetails(event.details);
-    await sql`set local lock_timeout = '10s'`.execute(tx);
+    await boundHeadWait(tx);
     const sealed = await appendEvent(keys, CHAIN, writerFor(tx, event, details), {
       nextId: () => ids.next(),
       content: platformEventContent(event, details),
