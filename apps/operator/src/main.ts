@@ -23,7 +23,7 @@
 //    and exits 0; 1 when anything is refused or fails, with nothing changed,
 //    unless the connection was lost as the creation committed (see run's
 //    catch: the failure names the organisation's ID, to look for first)
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -102,15 +102,18 @@ const problem = (text: string): Problems => ({ problems: [text] });
  * A request file's text: a plain file (never a pipe or a device, which could
  * hold a read open or never end), at most REQUEST_LIMIT_BYTES of UTF-8, a
  * byte-order mark allowed. Text that isn't UTF-8 is refused, not repaired: a
- * repaired name would be kept for good.
+ * repaired name would be kept for good. What is checked is what was opened,
+ * so nothing can be swapped in between; opened without waiting (O_NONBLOCK,
+ * which Windows lacks and ignores here), so a pipe with no writer is refused
+ * rather than waited on.
  */
 function readRequestFile(file: string): { readonly text: string } | Problems {
-  if (!statSync(file).isFile()) return problem("the request file isn't a plain file");
+  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK);
   // One byte more than a request may hold, in one read: a plain file gives all it has up to that.
   const bytes = Buffer.alloc(REQUEST_LIMIT_BYTES + 1);
-  const descriptor = openSync(file, 'r');
   let read: number;
   try {
+    if (!fstatSync(descriptor).isFile()) return problem("the request file isn't a plain file");
     read = readSync(descriptor, bytes, 0, bytes.length, 0);
   } finally {
     closeSync(descriptor);
