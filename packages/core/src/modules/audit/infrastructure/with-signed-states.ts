@@ -102,7 +102,9 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     });
   } catch (error) {
     if (error instanceof ChainBroken) {
-      logger.child({ orgId }).error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
+      logger
+        .child({ orgId: orgId.toLowerCase() })
+        .error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
     }
     throw error;
   } finally {
