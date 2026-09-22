@@ -152,8 +152,8 @@ export interface AuditTrail {
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
    * it sealed and no event of the chain past the head (see the file's comment
-   * for what it can't see). Only in withTenant's transaction for that organisation, like
-   * `verify`.
+   * for what it can't see). Only in withTenant's transaction for that
+   * organisation, like `verify`.
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
 }
@@ -347,14 +347,15 @@ export function recordHoldEvent(
 
 /**
  * Locks the organisation's chain head, when it has one, to the end of the
- * transaction, as recording does; in withTenant's transaction for it. For the
- * integrity hold, a state kept in the log alone: it is read only once this is
- * held, so two changes can't both start from one state, and a decision can't
- * pass a hold being set. The head's lock comes last (ADR-006 §6), so nothing
- * else is locked after it. For the audit module alone, like recordHoldEvent.
+ * transaction, as recording does. For the integrity hold, a state kept in the
+ * log alone: it is read only once this is held, so two changes can't both
+ * start from one state, and a decision can't pass a hold being set. Every
+ * caller reads the log straight after, in a read that checks the transaction
+ * is withTenant's for the organisation. The head's lock comes last (ADR-006
+ * §6), so nothing else is locked after it. For the audit module alone, like
+ * recordHoldEvent.
  */
 export async function lockChainHead(tx: AuditTransaction, orgId: string): Promise<void> {
-  await assertTenant(tx, orgId);
   const chain = chainOf(orgId);
   await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
 }
@@ -409,16 +410,16 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       // One statement, so the head and the events come from the same moment.
       const { rows } = await sql<Record<string, unknown>>`
         select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-               h.mac_key_version as head_mac_key_version,
-               (
-                 select pg_catalog.min(p.seq) from audit.events p
-                 where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-               ) as past_head,
+               h.mac_key_version as head_mac_key_version, past.past_head,
                e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
                e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
                e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
         from (values (1)) as one (x)
         left join audit.heads h on h.org_id = ${chain.orgId}
+        cross join lateral (
+          select pg_catalog.min(p.seq) as past_head from audit.events p
+          where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+        ) as past
         left join audit.events e on e.org_id = ${chain.orgId} and e.subject_type = ${subject.type}
           and e.subject_id = ${id}
           and e.seq >= (

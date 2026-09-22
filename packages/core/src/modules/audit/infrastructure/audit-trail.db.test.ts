@@ -845,6 +845,19 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
     await expect(latest(org)).rejects.toBeInstanceOf(TooManyEventsAboutObject);
   });
 
+  it('past 1,000 events about the object, one of them past the head: broken, not thrown', async () => {
+    await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 999 }, () => unsigned(1)));
+    await tamper(
+      `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version)
+       select org_id, seq + 1, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+         subject_version, details, prev_hash, hash, mac, mac_key_version
+       from audit.events where org_id = $1 and seq = 1000`,
+    );
+
+    expect(await latest(org)).toEqual({ kind: 'broken', seq: 1001n });
+  });
+
   it('finds an object by its ID in any case', async () => {
     await record(org, signed(org, 1, 'ACTIVE'));
 
@@ -931,6 +944,19 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       await attacker.query('update audit.events set org_id = $1, seq = 9 where org_id = $2 and seq = 1', [org, other]);
 
       expect(await latest(org)).toEqual({ kind: 'broken', seq: 9n });
+    });
+
+    it('an event about another object planted past the head: every object broken, one with no events too', async () => {
+      await tamper(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, 4, gen_random_uuid(), recorded_at, actor_type, actor_id, action, 'planted', gen_random_uuid(), 1,
+           '{}', prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 3`,
+      );
+
+      expect(await latest(org)).toEqual({ kind: 'broken', seq: 4n });
+      expect(await latest(org, { type: 'agent_key', id: AGENT })).toEqual({ kind: 'broken', seq: 4n });
     });
 
     it.each([

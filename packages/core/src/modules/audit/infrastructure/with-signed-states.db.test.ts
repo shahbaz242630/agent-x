@@ -375,8 +375,9 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(await deciding).toMatchObject({ outcome: 'held', version: 2 });
   });
 
-  it("gives up on a head held locked past its limit: the alarm names the hold, and the work's answer still comes back", async () => {
+  it('a head held locked past its limit: the work answers, the hold reads as tampered, and is tried again until recorded', async () => {
     const id = await newAgent();
+    const clean = await newAgent();
     await flip(id);
 
     await withHeadLocked('for share', async () => {
@@ -387,10 +388,32 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
       expect.objectContaining({ check: 'state', reason: 'seal' }),
       expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org }),
     ]);
-    expect(await hold()).toMatchObject({ outcome: 'clear', version: 1 });
-    // Found again, with the head free: held.
-    await check(id);
+    // Not recorded yet, so never read as clear here; this transaction's end tries again, with the head free.
+    expect(await hold()).toEqual({ outcome: 'tampered', sign: 'seal' });
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({ reason: 'seal', objectId: id, findings: 1 });
+    // Recorded, it is tried no more: a later transaction isn't held up by the head's lock.
+    await withHeadLocked('for share', async () => {
+      expect(await within(3_000, check(clean))).toMatchObject({ outcome: 'verified' });
+    });
+    expect(lines('audit.integrity_failed')).toHaveLength(2);
+  });
+
+  it("refuses to lock a row after the head's lock, and lets a row locked before it be read and changed", async () => {
+    const first = await newAgent();
+    const second = await newAgent();
+
+    const moved = await inOrg(async (tx, states) => {
+      await states.verifiedState(tx, AGENTS, { orgId: org, id: first }, 'change');
+      expect(await states.integrityHold(tx, org, 'head')).toMatchObject({ outcome: 'clear' });
+      await expect(states.verifiedState(tx, AGENTS, { orgId: org, id: second }, 'share')).rejects.toMatchObject({
+        name: 'SignedStateFailed',
+        reason: 'lock_order',
+      });
+      return states.changeStatus(tx, AGENTS, { orgId: org, id: first }, 'suspend', CREATED);
+    });
+
+    expect(moved).toMatchObject({ outcome: 'changed', to: 'SUSPENDED' });
   });
 
   it('a write meeting a chain that refuses new events raises the alarm (check: record), and its error comes back', async () => {
@@ -420,7 +443,7 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     ).toEqual({ outcome: 'tampered', sign: 'seal' });
 
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
-    expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: shouted, findings: 1 })]);
+    expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
   });
 });
 
@@ -474,9 +497,8 @@ describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () 
     expect(lines('audit.integrity_failed')).toEqual([]);
   });
 
-  it('a new hold where the log holds one already: refused as tampering, with the alarm, and held', async () => {
+  it("refused when the organisation's own row is created again, its first deleted past the app: not the chain's first event", async () => {
     await newAgent();
-    // The organisation's own row and its events deleted past the app, so it can be created again.
     await attacker.query('delete from probe.agents where org_id = $1 and id = $1', [org]);
     await attacker.query("delete from audit.events where org_id = $1 and subject_type = 'agent' and subject_id = $1", [
       org,
@@ -487,15 +509,10 @@ describe(`the integrity hold's own state (B1b, Postgres ${server.version})`, () 
         await insertAgent(tx, states, org);
         await states.startIntegrityHold(tx, org, OPERATOR);
       }),
-    ).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'tampered' });
+    ).rejects.toMatchObject({ name: 'SignedStateFailed', reason: 'basis' });
 
-    expect(lines('audit.integrity_failed')).toEqual([
-      expect.objectContaining({ check: 'state', reason: 'log', subjectType: 'integrity_hold', objectId: org }),
-    ]);
-    // The refusal is itself a tamper sign, so the hold is set over the CLEAR already there.
     expect((await holdEvents()).map(({ action, version }) => [action, version])).toEqual([
       ['integrity_hold.created', 1],
-      ['integrity_hold.set', 2],
     ]);
   });
 

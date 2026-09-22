@@ -11,15 +11,16 @@
 //   the other for ever
 //
 // A hold that can't be set raises the integrity alarm again (`check: hold`),
-// and the work's own result or error still goes back to the caller. The
-// finding's alarm has been raised already. A chain that refuses new events
-// (its head fails its check, or it holds events past its head) can't take the
-// hold, but every read of the hold is then denied anyway (audit-trail.ts); and
-// a hold waits at most 5 seconds for the chain head's lock, which is held only
-// while one event is recorded, rather than hang the request. The findings live only in this process until the hold is set: a
-// process stopped in between leaves the alarm lines alone, and the hold is set
-// when the tampering is next found (the running chain check finds it too,
-// from B1d).
+// and the work's own result or error still goes back to the caller. That
+// happens on a chain that refuses new events (its head fails its check, or it
+// holds events past its head), where every read of the hold is denied anyway
+// (audit-trail.ts); or when the chain head stays locked past 5 seconds (the
+// owner holding it, or decisions queued on it), since a hold that waited for
+// ever would hang the request. Such a hold is remembered in this process:
+// every read of it here answers `tampered` with the sign that found it, and
+// every later withSignedStates for the organisation tries again, until it is
+// recorded. A process stopped in between forgets it, leaving the alarm lines;
+// the hold is set again only when the tampering is next found.
 //
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
@@ -43,13 +44,24 @@ export interface SignedStatesServices {
   readonly logger: Logger;
 }
 
+/** The first finding for an organisation, with how many there were. */
+interface Found {
+  readonly finding: TamperFinding;
+  readonly count: number;
+}
+
+/**
+ * Holds this process found but couldn't record yet, by organisation (lower
+ * case), each with the finding it was first tried for.
+ */
+const unrecorded = new Map<string, Found>();
+
 /** The first finding for each organisation, with how many there were. */
-function byOrganisation(found: readonly TamperFinding[]): Map<string, { finding: TamperFinding; count: number }> {
-  const each = new Map<string, { finding: TamperFinding; count: number }>();
+function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
+  const each = new Map<string, Found>();
   for (const finding of found) {
-    const orgId = finding.orgId.toLowerCase();
-    const seen = each.get(orgId);
-    each.set(orgId, seen === undefined ? { finding, count: 1 } : { ...seen, count: seen.count + 1 });
+    const seen = each.get(finding.orgId);
+    each.set(finding.orgId, seen === undefined ? { finding, count: 1 } : { ...seen, count: seen.count + 1 });
   }
   return each;
 }
@@ -68,7 +80,13 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
 ): Promise<Result> {
   const trail = createAuditTrail({ keys, ids });
   const found: TamperFinding[] = [];
-  const states = createSignedStates({ keys, trail, logger, onTamper: (finding) => found.push(finding) });
+  const states = createSignedStates({
+    keys,
+    trail,
+    logger,
+    onTamper: (finding) => found.push(finding),
+    unrecorded: (id) => unrecorded.get(id.toLowerCase())?.finding,
+  });
   try {
     return await withTenant(db, orgId, (tx) => work(tx, states));
   } catch (error) {
@@ -77,8 +95,14 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     }
     throw error;
   } finally {
-    for (const [held, { finding, count }] of byOrganisation(found)) {
-      const log = logger.child({ orgId: finding.orgId });
+    const due = byOrganisation(found);
+    const own = orgId.toLowerCase();
+    const waiting = unrecorded.get(own);
+    if (waiting !== undefined && !due.has(own)) due.set(own, waiting);
+    for (const [held, now] of due) {
+      // A hold still waiting names the finding it was first tried for.
+      const { finding, count } = unrecorded.get(held) ?? now;
+      const log = logger.child({ orgId: held });
       try {
         // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
         const holder = createSignedStates({ keys, trail, logger, onTamper: () => undefined });
@@ -86,6 +110,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
           await sql`set local lock_timeout = '5s'`.execute(tx);
           return holder.hold(tx, finding, count);
         });
+        unrecorded.delete(held);
         if (outcome === 'set') {
           log.warn('audit.integrity_hold_set', {
             reason: finding.sign,
@@ -94,6 +119,7 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
           });
         }
       } catch (error) {
+        unrecorded.set(held, { finding, count });
         log.error('audit.integrity_failed', {
           chain: 'organisation',
           check: 'hold',
