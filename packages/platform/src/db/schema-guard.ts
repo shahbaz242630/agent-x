@@ -125,16 +125,21 @@ const EXCEPTION_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 const APP_ROW_RIGHTS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
 
 /**
- * The rights the app role may hold on an authority table as a whole (A3f-2):
- * adding rows and reading them. It changes a row only column by column, and
- * only the sealed fields and the two signed-state columns, which is all record
- * writes; UPDATE of the whole table would cover the row's identity too. Never
- * DELETE: a row gone takes its authority out of reach of the log that signed it
- * (ADR-012 §2). A3c-1 holds the migrations to the same rule in CI.
+ * The rights the app role may hold on a narrow table as a whole: adding rows
+ * and reading them. It changes a row only column by column, in its own
+ * columns; UPDATE of the whole table would cover the row's identity too.
+ * Never DELETE.
+ * - An authority table (A3f-2) changes only in the sealed fields and the two
+ *   signed-state columns, which is all record writes; a row gone takes its
+ *   authority out of reach of the log that signed it (ADR-012 §2). A3c-1 holds
+ *   the migrations to the same rule in CI.
+ * - A fill-in table (A5b) changes only in the columns the schema policy lists:
+ *   an idempotency key gone, or its hash changed, lets a retry do its write
+ *   again. CI-06 holds the migrations to the same rule.
  */
-const AUTHORITY_RIGHTS = ['SELECT', 'INSERT'] as const;
-/** What the app may hold on an authority table's columns; UPDATE only on the ones it may change. */
-const AUTHORITY_COLUMN_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
+const NARROW_RIGHTS = ['SELECT', 'INSERT'] as const;
+/** What the app may hold on a narrow table's columns; UPDATE only on the ones it may change. */
+const NARROW_COLUMN_RIGHTS = ['SELECT', 'INSERT', 'UPDATE'] as const;
 
 /**
  * Every privilege Postgres can grant on a table: the ones the app role is
@@ -791,15 +796,23 @@ export async function liveSchemaProblems<Schema>(
   // Each listed table by the name the rest of this check uses, matched on its
   // plain name, as the module wrote it and as CI's A3c-1 check matches it.
   const byPlainName = new Map(allRelations.map((relation) => [relation.plain, relation.name]));
-  const authority = new Map<string, SignedStateTable>();
+  // Tables held to narrower rights than a tenant table's, each with the
+  // columns the app may change: an authority table's sealed fields and its two
+  // signed-state columns, which is all record writes (A3f-2); a fill-in
+  // table's listed columns (A5b).
+  const narrow = new Map<string, ReadonlySet<string>>();
   for (const table of authorityTables) {
     const name = byPlainName.get(table.table);
     if (name === undefined) problems.push(`${table.table} is listed as an authority table but is not there`);
-    else authority.set(name, table);
+    else narrow.set(name, new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]));
+  }
+  for (const [name, entry] of Object.entries(policy.fillInTables)) {
+    if (!known.has(name)) problems.push(`${name} is listed as a fill-in table but is not there`);
+    else narrow.set(name, new Set(entry.columns));
   }
   for (const relation of allRelations) {
     // Held to their own list, below.
-    if (authority.has(relation.name)) continue;
+    if (narrow.has(relation.name)) continue;
     const allowed = new Set<string>(
       appendOnly.has(relation.schema)
         ? exceptions.has(relation.name)
@@ -811,24 +824,23 @@ export async function liveSchemaProblems<Schema>(
       if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
     }
   }
-  // An authority table (A3f-2): rows added and read, and changed only in the
-  // columns record writes, each granted on its own.
+  // A narrow table: rows added and read, and changed only in its own columns,
+  // each granted on its own.
   const writableIn = new Map<string, string[]>();
   for (const { table, column } of writable) writableIn.set(table, [...(writableIn.get(table) ?? []), column]);
-  for (const [name, table] of authority) {
+  for (const [name, mayChange] of narrow) {
     const grantsOn = allGrants.filter((grant) => grant.table === name);
     const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
     for (const right of onTable) {
-      if (!(AUTHORITY_RIGHTS as readonly string[]).includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
+      if (!(NARROW_RIGHTS as readonly string[]).includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
     }
     for (const grant of grantsOn) {
       // A right on the whole table shows on its columns too; it is named once, above.
       if (grant.level !== 'column' || onTable.has(grant.privilege)) continue;
-      if (!(AUTHORITY_COLUMN_RIGHTS as readonly string[]).includes(grant.privilege)) {
+      if (!(NARROW_COLUMN_RIGHTS as readonly string[]).includes(grant.privilege)) {
         problems.push(`${appRole} may ${grant.privilege} on columns of ${name}`);
       }
     }
-    const mayChange = new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]);
     for (const column of writableIn.get(name) ?? []) {
       if (!mayChange.has(column)) problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
     }

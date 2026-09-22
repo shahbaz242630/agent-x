@@ -20,6 +20,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 import { liveSchemaProblems } from './schema-guard.ts';
+import { SCHEMA_POLICY } from './schema-policy.ts';
 import type { SignedStateTable } from './signed-rows.ts';
 
 const server = inject('postgres');
@@ -619,6 +620,64 @@ describe('an authority table the product lists (A3f-2)', () => {
   it('names a listed table that is not there', async () => {
     expect(await listed([AGENTS, { ...AGENTS, table: 'probe.gone' }])).toEqual([
       'probe.gone is listed as an authority table but is not there',
+    ]);
+  });
+});
+
+describe('a fill-in table the schema policy lists (A5b)', () => {
+  /** Puts back the rights 0006 gives the app on the idempotency keys, whatever a case changed. */
+  afterEach(async () => {
+    await owner.query('revoke all on idempotency.keys from agentx_app');
+    await owner.query('grant select, insert on idempotency.keys to agentx_app');
+    await owner.query('grant update (result_status, result_id) on idempotency.keys to agentx_app');
+  });
+
+  it.each([
+    [
+      'DELETE, which would let a retry do its write again',
+      'grant delete on idempotency.keys to agentx_app',
+      ['agentx_app may DELETE on idempotency.keys'],
+    ],
+    [
+      "UPDATE of a key's hash",
+      'grant update (request_hash) on idempotency.keys to agentx_app',
+      ['agentx_app may UPDATE idempotency.keys\'s column "request_hash"'],
+    ],
+    [
+      'a column right it never needs',
+      'grant references (result_id) on idempotency.keys to agentx_app',
+      ['agentx_app may REFERENCES on columns of idempotency.keys'],
+    ],
+  ])('names %s on the idempotency keys', async (_, grant, named) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await owner.query(grant);
+
+    expect(await problems()).toEqual(named);
+  });
+
+  it('names UPDATE of the whole table, and every column it opens', async () => {
+    await owner.query('grant update on idempotency.keys to agentx_app');
+
+    const named = await problems();
+    expect(named).toContain('agentx_app may UPDATE on idempotency.keys');
+    expect(named).toContain('agentx_app may UPDATE idempotency.keys\'s column "key"');
+    expect(named).not.toContain('agentx_app may UPDATE idempotency.keys\'s column "result_id"');
+  });
+
+  it('holds only a listed table to it: off the list, DELETE is a tenant table’s right', async () => {
+    await owner.query('grant delete on idempotency.keys to agentx_app');
+
+    expect(await liveSchemaProblems(app, { ...ROLES, policy: { ...SCHEMA_POLICY, fillInTables: {} } })).toEqual([]);
+  });
+
+  it('names a listed table that is not there', async () => {
+    const policy = {
+      ...SCHEMA_POLICY,
+      fillInTables: { ...SCHEMA_POLICY.fillInTables, 'probe.gone': { reason: 'Removed', columns: ['result'] } },
+    };
+
+    expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([
+      'probe.gone is listed as a fill-in table but is not there',
     ]);
   });
 });

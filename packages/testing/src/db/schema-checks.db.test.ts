@@ -28,6 +28,7 @@ const POLICY: SchemaPolicy = {
   globalTables: { ...SCHEMA_POLICY.globalTables, 'migrations.applied': LEDGER },
   appendOnlySchemas: [...SCHEMA_POLICY.appendOnlySchemas, 'journal'],
   appendOnlyExceptions: REAL_EXCEPTIONS,
+  fillInTables: SCHEMA_POLICY.fillInTables,
 };
 /** The real global tables but the ledger, for the fixtures about the ledger alone. */
 const OTHER_GLOBALS = Object.fromEntries(
@@ -826,6 +827,85 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         `table t.items: agentx_app has REFERENCES; ${rows}`,
         `table t.items: agentx_app has TRIGGER; ${rows}`,
         `table t.items: agentx_app has TRUNCATE; ${rows}`,
+      ]);
+    });
+  });
+
+  describe('ADR-007 §4: a fill-in table is added to and read, and changed only in its listed columns (A5b)', () => {
+    /** t.keys, built as a table of idempotency keys must be: its result filled in, nothing else changed. */
+    const KEYS = [
+      'create schema t',
+      'create table t.keys (org_id uuid not null, key text not null, result text, primary key (org_id, key))',
+      ...walls('t.keys'),
+      'grant usage on schema t to agentx_app',
+      'grant select, insert on t.keys to agentx_app',
+      'grant update (result) on t.keys to agentx_app',
+    ];
+    const listing = (entry = { reason: 'A key, its result filled in once', columns: ['result'] }): SchemaPolicy => ({
+      ...POLICY,
+      fillInTables: { ...POLICY.fillInTables, 't.keys': entry },
+    });
+    const table = 'on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed (ADR-007 §4)';
+    const unlisted = "may UPDATE a column the fill-in list doesn't name; a key's own columns never change (ADR-007 §4)";
+
+    it('passes one built as it must be', async () => {
+      expect(await problemsAfter(KEYS, listing())).toEqual([]);
+    });
+
+    it('fails DELETE, TRUNCATE or UPDATE of the whole table, UPDATE of a column not listed, or another column right', async () => {
+      const statements = [
+        ...KEYS,
+        'grant delete, truncate, update on t.keys to agentx_app',
+        'grant update (key), references (result) on t.keys to agentx_app',
+      ];
+      expect(await problemsAfter(statements, listing())).toEqual([
+        `column t.keys.key: agentx_app ${unlisted}`,
+        "column t.keys.result: agentx_app has REFERENCES on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed (ADR-007 §4)",
+        `table t.keys: agentx_app has DELETE ${table}`,
+        `table t.keys: agentx_app has TRUNCATE ${table}`,
+        `table t.keys: agentx_app has UPDATE ${table}`,
+      ]);
+    });
+
+    it('holds only a listed table to it: the same rights on a table off the list are a tenant table’s', async () => {
+      const statements = [
+        ...KEYS,
+        'grant delete, update on t.keys to agentx_app',
+        'grant update (key) on t.keys to agentx_app',
+      ];
+      expect(await problemsAfter(statements)).toEqual([]);
+    });
+
+    it("fails the real idempotency keys given DELETE, or UPDATE of a key's hash", async () => {
+      const statements = [
+        'grant delete on idempotency.keys to agentx_app',
+        'grant update (request_hash) on idempotency.keys to agentx_app',
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        `column idempotency.keys.request_hash: agentx_app ${unlisted}`,
+        `table idempotency.keys: agentx_app has DELETE ${table}`,
+      ]);
+    });
+
+    it('fails an entry with no reason or no column, for a missing or global table, in an append-only schema, or naming a column the table lacks', async () => {
+      const policy: SchemaPolicy = {
+        ...POLICY,
+        fillInTables: {
+          'idempotency.keys': { reason: 'Keys', columns: ['result_status', 'result_id', 'result_body'] },
+          't.keys': { reason: ' ', columns: [] },
+          't.gone': { reason: 'Removed', columns: ['result'] },
+          'migrations.applied': { reason: 'Not a key', columns: ['name'] },
+          'audit.events': { reason: 'Not a key', columns: ['details'] },
+        },
+      };
+      expect(await problemsAfter(KEYS, policy)).toEqual([
+        "idempotency.keys: the fill-in list names column result_body, which the table doesn't have",
+        't.keys: the fill-in list gives no reason for it',
+        't.keys: the fill-in list names no column the app may change',
+        't.gone: is on the fill-in list, but no such table exists',
+        'migrations.applied: is on the fill-in list, but it is a global table',
+        'audit.events: is on the fill-in list, but its schema is append-only',
+        `column t.keys.result: agentx_app ${unlisted}`,
       ]);
     });
   });

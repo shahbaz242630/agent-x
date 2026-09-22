@@ -63,6 +63,20 @@ export interface SchemaPolicy {
    * its reason: a row the app locks and moves on, such as a chain head.
    */
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
+  /**
+   * Tenant tables outside those schemas that the app may add rows to and read,
+   * and change only in the columns listed, never DELETE: a row filled in once
+   * after it is added, such as an idempotency key's result.
+   */
+  readonly fillInTables: Readonly<Record<string, FillInTable>>;
+}
+
+/** A tenant table the app adds rows to and reads, and changes only in the columns named. */
+interface FillInTable {
+  /** Why the app needs no more. */
+  readonly reason: string;
+  /** The columns the app may UPDATE, each granted on its own. */
+  readonly columns: readonly string[];
 }
 
 /** The name every tenant table's one policy has. */
@@ -216,7 +230,7 @@ const DEFINER_ROUTINES = `
  * where format('%I') would fail.
  */
 const GRANTS = `
-  select g.object, g.kind, g.schema, g.relation, g.grantee = 0 as to_public,
+  select g.object, g.kind, g.schema, g.relation, g.attribute, g.grantee = 0 as to_public,
          case when g.grantee = 0 then null else pg_catalog.pg_get_userbyid(g.grantee)::text end as grantee,
          g.privilege
   from (
@@ -225,34 +239,35 @@ const GRANTS = `
            'relation' as kind,
            n.nspname::text as schema,
            case c.relkind when 'S' then '' else pg_catalog.format('%I.%I', n.nspname, c.relname) end as relation,
-           acl.grantee, acl.privilege_type as privilege
+           '' as attribute, acl.grantee, acl.privilege_type as privilege
     from pg_catalog.pg_class c
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(c.relacl) acl
     where c.relnamespace = any($1::pg_catalog.oid[]) and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
     union all
     select 'column ' || pg_catalog.format('%I.%I.%I', n.nspname, c.relname, a.attname), 'column',
-           n.nspname::text, pg_catalog.format('%I.%I', n.nspname, c.relname), acl.grantee, acl.privilege_type
+           n.nspname::text, pg_catalog.format('%I.%I', n.nspname, c.relname), a.attname::text, acl.grantee,
+           acl.privilege_type
     from pg_catalog.pg_attribute a
     join pg_catalog.pg_class c on c.oid = a.attrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace,
     pg_catalog.aclexplode(a.attacl) acl
     where c.relnamespace = any($1::pg_catalog.oid[]) and a.attnum > 0 and not a.attisdropped
     union all
-    select 'schema ' || pg_catalog.format('%I', n.nspname), 'schema', n.nspname::text, '',
+    select 'schema ' || pg_catalog.format('%I', n.nspname), 'schema', n.nspname::text, '', '',
            acl.grantee, acl.privilege_type
     from pg_catalog.pg_namespace n,
     pg_catalog.aclexplode(n.nspacl) acl
     where n.oid = any($1::pg_catalog.oid[])
     union all
-    select 'function ' || p.oid::pg_catalog.regprocedure::text, 'function', n.nspname::text, '',
+    select 'function ' || p.oid::pg_catalog.regprocedure::text, 'function', n.nspname::text, '', '',
            acl.grantee, acl.privilege_type
     from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace,
     pg_catalog.aclexplode(coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
     where p.pronamespace = any($1::pg_catalog.oid[])
     union all
-    select 'database ' || pg_catalog.format('%I', d.datname), 'database', '', '',
+    select 'database ' || pg_catalog.format('%I', d.datname), 'database', '', '', '',
            acl.grantee, acl.privilege_type
     from pg_catalog.pg_database d,
     pg_catalog.aclexplode(coalesce(d.datacl, pg_catalog.acldefault('d', d.datdba))) acl
@@ -262,7 +277,7 @@ const GRANTS = `
              case da.defaclobjtype when 'r' then 'tables' when 'S' then 'sequences' when 'f' then 'functions'
                when 'n' then 'schemas' when 'L' then 'large objects' else da.defaclobjtype::text end)
              || coalesce(' in schema ' || pg_catalog.quote_ident(dn.nspname), ''),
-           'default', coalesce(dn.nspname::text, ''), '', acl.grantee, acl.privilege_type
+           'default', coalesce(dn.nspname::text, ''), '', '', acl.grantee, acl.privilege_type
     from pg_catalog.pg_default_acl da
     left join pg_catalog.pg_namespace dn on dn.oid = da.defaclnamespace,
     pg_catalog.aclexplode(da.defaclacl) acl
@@ -338,6 +353,8 @@ interface Grant {
   schema: string;
   /** The table a table or column grant is on, or '' for anything else, sequences included. */
   relation: string;
+  /** The column a column grant is on, or '' for anything else. */
+  attribute: string;
   to_public: boolean;
   grantee: string | null;
   privilege: string;
@@ -456,6 +473,15 @@ const EXCEPTION_APP_MAY = ['INSERT', 'SELECT', 'UPDATE'];
  */
 const APP_MAY = ['DELETE', 'INSERT', 'SELECT', 'UPDATE'];
 
+/**
+ * What it may hold on a fill-in table (the policy's `fillInTables`): adding
+ * rows and reading them, and UPDATE only column by column, on the columns
+ * listed. Never DELETE: an idempotency key gone lets a retry do its write
+ * again. The live schema guard holds the running database to the same rule.
+ */
+const FILL_IN_APP_MAY = ['INSERT', 'SELECT'];
+const FILL_IN_COLUMN_MAY = ['INSERT', 'SELECT', 'UPDATE'];
+
 const LEAKS = "so it could reveal another organisation's rows (SEC-TEN-05)";
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -468,6 +494,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
   return [
     ...globalListProblems(policy, facts),
     ...appendOnlyListProblems(policy, facts),
+    ...fillInListProblems(policy, facts),
     ...facts.relations.flatMap((relation) => relationProblems(relation, isGlobal(relation.name))),
     ...tenantTables.flatMap((table) => [
       ...orgIdProblems(
@@ -537,6 +564,35 @@ function appendOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
       problems.push(`${name}: is on the append-only exception list, but no such table exists`);
     } else if (!policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
       problems.push(`${name}: is on the append-only exception list, but its schema isn't append-only`);
+    }
+    return problems;
+  });
+}
+
+/**
+ * Every fill-in table has a reason and at least one column, names a tenant
+ * table that exists outside the append-only schemas, and lists only columns
+ * the table has.
+ */
+function fillInListProblems(policy: SchemaPolicy, facts: Facts): string[] {
+  return Object.entries(policy.fillInTables).flatMap(([name, entry]) => {
+    const problems: string[] = [];
+    if (entry.reason.trim() === '') problems.push(`${name}: the fill-in list gives no reason for it`);
+    if (entry.columns.length === 0) problems.push(`${name}: the fill-in list names no column the app may change`);
+    if (!facts.relations.some((relation) => relation.name === name && TABLE_KINDS.has(relation.kind))) {
+      problems.push(`${name}: is on the fill-in list, but no such table exists`);
+      return problems;
+    }
+    if (Object.hasOwn(policy.globalTables, name)) {
+      problems.push(`${name}: is on the fill-in list, but it is a global table`);
+    }
+    if (policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
+      problems.push(`${name}: is on the fill-in list, but its schema is append-only`);
+    }
+    for (const column of entry.columns) {
+      if (!facts.columns.some((row) => row.table === name && row.column === column)) {
+        problems.push(`${name}: the fill-in list names column ${column}, which the table doesn't have`);
+      }
     }
     return problems;
   });
@@ -642,6 +698,25 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only exception; it may only INSERT, SELECT and UPDATE (SEC-EVD-01)`,
     ];
+  }
+  const fillIn = Object.hasOwn(policy.fillInTables, grant.relation) ? policy.fillInTables[grant.relation] : undefined;
+  if (fillIn !== undefined && grant.grantee === roles.app) {
+    if (grant.kind === 'relation' && !FILL_IN_APP_MAY.includes(grant.privilege)) {
+      return [
+        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed (ADR-007 §4)`,
+      ];
+    }
+    if (grant.kind === 'column' && !FILL_IN_COLUMN_MAY.includes(grant.privilege)) {
+      return [
+        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed (ADR-007 §4)`,
+      ];
+    }
+    if (grant.kind === 'column' && grant.privilege === 'UPDATE' && !fillIn.columns.includes(grant.attribute)) {
+      return [
+        `${grant.object}: ${roles.app} may UPDATE a column the fill-in list doesn't name; a key's own columns never change (ADR-007 §4)`,
+      ];
+    }
+    return [];
   }
   const onRows = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
   if (onRows && grant.grantee === roles.app && !APP_MAY.includes(grant.privilege)) {

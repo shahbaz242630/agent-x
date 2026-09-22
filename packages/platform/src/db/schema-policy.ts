@@ -17,13 +17,21 @@
 // columns, so a new global table, or a new column on one, is always a reviewed
 // change to this file (SEC-TEN-08). An entry for a table that no longer exists
 // fails CI-06, so the list can't go stale; the same holds for the append-only
-// exceptions.
+// exceptions and the fill-in tables.
 
 /** A table with no org_id and no row-level security, allowed by name (ADR-005 §6). */
 interface GlobalTable {
   /** Why it can't be a tenant table. */
   readonly reason: string;
   /** Every column it has, exactly: a new column is a reviewed entry (SEC-TEN-08). */
+  readonly columns: readonly string[];
+}
+
+/** A tenant table the app adds rows to and reads, and changes only in the columns named. */
+interface FillInTable {
+  /** Why the app needs no more: what a row deleted, or another column changed, would allow. */
+  readonly reason: string;
+  /** The columns the app may UPDATE, each granted on its own. */
   readonly columns: readonly string[];
 }
 
@@ -40,6 +48,13 @@ export interface SchemaPolicy {
    * its reason: a row the app locks and moves on, such as a chain head.
    */
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
+  /**
+   * Tenant tables outside those schemas that the app may add rows to and read,
+   * and change only in the columns listed, never DELETE, by schema-qualified
+   * name as Postgres quotes it: a row filled in once after it is added, such as
+   * an idempotency key's result. Any other tenant table allows every row right.
+   */
+  readonly fillInTables: Readonly<Record<string, FillInTable>>;
 }
 
 export const SCHEMA_POLICY: SchemaPolicy = {
@@ -78,5 +93,12 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       "Each organisation's chain head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
     'platform_controls.audit_head':
       "The platform chain's head: the app locks it and moves it on with every event it records (ADR-006 §6, ADR-011 §3)",
+  },
+  fillInTables: {
+    'idempotency.keys': {
+      reason:
+        "Each write's idempotency key (ADR-007 §4): the app adds the key and fills in the write's result. A key deleted, or its namespace or hash changed, would let a retry do the write again",
+      columns: ['result_status', 'result_id'],
+    },
   },
 };
