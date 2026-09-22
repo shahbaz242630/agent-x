@@ -5,9 +5,11 @@
 // list (packages/core/src/authority-tables.ts), which CI, the lint rules and
 // the live schema guard all read.
 //
-// An organisation is created in one transaction, withTenant's for its own ID:
-// its directory entry first (the row points at it), then its row, then its
-// first signed state, which starts the organisation's audit chain.
+// An organisation is created in one transaction, withSignedStates' for its own
+// ID: its directory entry first (the row points at it), then its row, then its
+// first signed state, which starts the organisation's audit chain, then its
+// integrity hold, CLEAR (the audit module's; it has no row, so nothing done to
+// this one can keep it from being set).
 //
 // The insert is the one query on this table outside the audit module's
 // steps, so the lint rule that refuses any other is switched off for that line
@@ -45,10 +47,11 @@ export interface NewOrganization {
 }
 
 /**
- * Creates the organisation, ACTIVE, in the caller's transaction, which must
- * be withTenant's for its ID; `states` is that transaction's signed states. A
- * name it can't have is refused before any SQL runs (`OrganizationRefused`);
- * an organisation that exists already is refused by the directory's key.
+ * Creates the organisation, ACTIVE and with its integrity hold CLEAR, in the
+ * caller's transaction, which must be withSignedStates' for its ID; `states`
+ * are that transaction's. A name it can't have is refused before any SQL runs
+ * (`OrganizationRefused`); an organisation that exists already is refused by
+ * the directory's key.
  */
 export async function createOrganization(
   tx: OrganizationsTransaction,
@@ -62,7 +65,7 @@ export async function createOrganization(
     .insertInto(ORGANIZATIONS.table)
     .values({ org_id: id, id, name: kept, status: ORGANIZATION.initial })
     .execute();
-  return states.record(
+  const recorded = await states.record(
     tx,
     ORGANIZATIONS,
     { orgId: id, id },
@@ -70,4 +73,6 @@ export async function createOrganization(
     { status: ORGANIZATION.initial },
     { actor, action: 'organization.created', details: {} },
   );
+  await states.startIntegrityHold(tx, id, actor);
+  return recorded;
 }

@@ -1,7 +1,9 @@
 // The audit module (ADR-004, ADR-011 §3): every organisation's append-only,
 // hash-chained audit trail, the only store for organisation audit events
 // (ADR-014 §8). Any module may record to it; evidence reads it. Its signed
-// states are how every authority row is checked against the log (ADR-012 §2).
+// states are how every authority row is checked against the log (ADR-012 §2),
+// and they come only through withSignedStates, which puts an organisation on
+// its integrity hold for anything they find tampered with.
 export {
   type ActorType,
   type AuditActor,
@@ -21,7 +23,6 @@ export {
   TooManyEventsAboutObject,
 } from './infrastructure/audit-trail.ts';
 export {
-  createSignedStates,
   type RecordedState,
   type SignedChange,
   SignedStateFailed,
@@ -32,3 +33,4 @@ export {
   type VerifiedState,
 } from './infrastructure/signed-states.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
+export { type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';

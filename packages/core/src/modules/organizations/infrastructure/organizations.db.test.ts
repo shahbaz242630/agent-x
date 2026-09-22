@@ -1,13 +1,13 @@
 // B1a: an organisation's row and its directory entry (0007, 0008), on the
-// real migrated schema, as the app role. What the owner can do past the app
-// is owner-tamper.db.test.ts.
+// real migrated schema, as the app role, with its integrity hold started
+// CLEAR (B1b). What the owner can do past the app is owner-tamper.db.test.ts.
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { type AuditTables, type AuditTrail, createAuditTrail, createSignedStates } from '../../audit/index.ts';
+import { type AuditTables, type AuditTrail, createAuditTrail, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { OrganizationRefused } from '../domain/organization.ts';
 import { createOrganization, ORGANIZATIONS, type OrganizationsTransaction } from './organizations.ts';
@@ -25,19 +25,20 @@ const keys = createKeyProvider(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
   ) as unknown as KeyMaterial,
 );
-const trail: AuditTrail = createAuditTrail({ keys, ids: new SequentialIds(0x400) });
+const ids = new SequentialIds(0x400);
+const trail: AuditTrail = createAuditTrail({ keys, ids });
 
 let capture: LogCapture;
-const statesFor = () =>
-  createSignedStates({
-    keys,
-    trail,
-    logger: createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: capture,
-    }),
-  });
+/** What withSignedStates builds a transaction's signed states from, logging to this test's capture. */
+const services = () => ({
+  keys,
+  ids,
+  logger: createLogger({
+    service: 'test',
+    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+    destination: capture,
+  }),
+});
 
 let number = 0;
 /** A new UUID, so no two tests share an organisation. */
@@ -48,13 +49,18 @@ const newId = (): string => {
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
-const create = (id: string, name = 'Acme Trading LLC') =>
-  withTenant(app, id, (tx: OrganizationsTransaction) =>
-    createOrganization(tx, statesFor(), { id, name, actor: OPERATOR }),
+const create = (id: string, name = 'Acme Trading LLC', inside = id) =>
+  withSignedStates(app, inside, services(), (tx: OrganizationsTransaction, states) =>
+    createOrganization(tx, states, { id, name, actor: OPERATOR }),
   );
 
 const verified = (orgId: string, id = orgId) =>
-  withTenant(app, orgId, (tx) => statesFor().verifiedState(tx, ORGANIZATIONS, { orgId, id }, 'share'));
+  withSignedStates(app, orgId, services(), (tx, states) =>
+    states.verifiedState(tx, ORGANIZATIONS, { orgId, id }, 'share'),
+  );
+
+const hold = (orgId: string) =>
+  withSignedStates(app, orgId, services(), (tx, states) => states.integrityHold(tx, orgId));
 
 const listed = async (id: string): Promise<boolean> => {
   const rows = await app.selectFrom('directory.orgs').select('org_id').where('org_id', '=', id).execute();
@@ -85,7 +91,7 @@ beforeEach(() => {
 });
 
 describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
-  it('creates it ACTIVE and listed in the directory, its first signed state starting its audit chain', async () => {
+  it('creates it ACTIVE and listed in the directory, its first signed state starting its audit chain, its hold CLEAR', async () => {
     const id = newId();
 
     const recorded = await create(id);
@@ -103,6 +109,7 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
       events: await tx
         .selectFrom('audit.events')
         .select(['seq', 'actor_type', 'actor_id', 'action', 'subject_type', 'subject_id', 'subject_version'])
+        .orderBy('seq')
         .execute(),
       chain: await trail.verify(tx, id, undefined),
     }));
@@ -124,8 +131,18 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
         subject_id: id,
         subject_version: 1,
       },
+      {
+        seq: 2n,
+        actor_type: 'system',
+        actor_id: 'test-operator',
+        action: 'integrity_hold.created',
+        subject_type: 'integrity_hold',
+        subject_id: id,
+        subject_version: 1,
+      },
     ]);
-    expect(chain).toMatchObject({ ok: true, seq: 1n });
+    expect(chain).toMatchObject({ ok: true, seq: 2n });
+    expect(await hold(id)).toMatchObject({ outcome: 'clear', version: 1 });
     expect(alarms()).toEqual([]);
   });
 
@@ -152,9 +169,7 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
 
     await expect(create(id, ' Acme')).rejects.toBeInstanceOf(OrganizationRefused);
     // In another organisation's transaction the first statement would be refused as that; the name is refused first.
-    await expect(
-      withTenant(app, newId(), (tx) => createOrganization(tx, statesFor(), { id, name: ' Acme', actor: OPERATOR })),
-    ).rejects.toBeInstanceOf(OrganizationRefused);
+    await expect(create(id, ' Acme', newId())).rejects.toBeInstanceOf(OrganizationRefused);
 
     expect(await listed(id)).toBe(false);
     expect(await verified(id)).toEqual({ outcome: 'missing' });
@@ -172,16 +187,15 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
       chain: await trail.verify(tx, id, undefined),
     }));
     expect(row).toEqual({ name: 'Acme Trading LLC', status: 'ACTIVE' });
-    expect(chain).toMatchObject({ ok: true, seq: 1n });
+    expect(chain).toMatchObject({ ok: true, seq: 2n });
+    expect(await hold(id)).toMatchObject({ outcome: 'clear', version: 1 });
   });
 
   it("refuses a transaction that isn't withTenant's for the organisation, writing nothing for either", async () => {
     const id = newId();
     const other = newId();
 
-    await expect(
-      withTenant(app, other, (tx) => createOrganization(tx, statesFor(), { id, name: 'Acme', actor: OPERATOR })),
-    ).rejects.toBeInstanceOf(TenantContextError);
+    await expect(create(id, 'Acme', other)).rejects.toBeInstanceOf(TenantContextError);
 
     expect(await listed(id)).toBe(false);
     expect(await listed(other)).toBe(false);
@@ -306,8 +320,8 @@ describe('the walls round an organisation’s row', () => {
 describe('an organisation’s status', () => {
   const change = (action: string) => ({ actor: { type: 'user' as const, id: newId() }, action, details: {} });
   const move = (id: string, event: 'freeze' | 'unfreeze') =>
-    withTenant(app, id, (tx) =>
-      statesFor().changeStatus(tx, ORGANIZATIONS, { orgId: id, id }, event, change(`organization.${event}`)),
+    withSignedStates(app, id, services(), (tx, states) =>
+      states.changeStatus(tx, ORGANIZATIONS, { orgId: id, id }, event, change(`organization.${event}`)),
     );
 
   it('moves by freeze and unfreeze, each a new signed state', async () => {

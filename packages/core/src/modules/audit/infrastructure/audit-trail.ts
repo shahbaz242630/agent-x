@@ -146,6 +146,14 @@ export interface AuditTrail {
    * `verify`.
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
+  /**
+   * Locks the organisation's chain head to the end of the transaction, as
+   * recording does, in withTenant's transaction for it. For a change to a
+   * signed state kept in the log alone (the integrity hold): read only once
+   * this is held, so two changes can't both start from the same state. The
+   * head's lock comes last (ADR-006 §6), so nothing else is locked after it.
+   */
+  lockHead(tx: AuditTransaction, orgId: string): Promise<void>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -399,6 +407,12 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         version,
         seal,
       });
+    },
+
+    async lockHead(tx: AuditTransaction, orgId: string): Promise<void> {
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      await tx.selectFrom('audit.heads').select('seq').where('org_id', '=', chain.orgId).forNoKeyUpdate().execute();
     },
   });
 }

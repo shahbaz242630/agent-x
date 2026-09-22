@@ -35,7 +35,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
-import { createSignedStates, type SignedStates, type TamperSign } from './signed-states.ts';
+import { createSignedStates, type SignedStates, type TamperFinding, type TamperSign } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
 const MACHINE = defineStateMachine({
@@ -159,6 +159,8 @@ const verifyChain = (anchor?: { seq: bigint; hash: Buffer }) =>
 const guard = (): Promise<string[]> => liveSchemaProblems(app, { ...ROLES, authorityTables: [AGENTS] });
 
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+/** What every alarm handed on, for the integrity hold. */
+let found: TamperFinding[];
 
 const alarmFor = (id: string, reason: TamperSign): unknown =>
   expect.objectContaining({
@@ -203,7 +205,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   capture = new LogCapture();
-  states = createSignedStates({ keys, trail, logger: loggerFor(capture) });
+  found = [];
+  states = createSignedStates({ keys, trail, logger: loggerFor(capture), onTamper: (finding) => found.push(finding) });
   org = newId();
   owner = await tamperAsOwner(database, AGENTS, org);
   // Every case starts from a schema the guard is happy with, so a leftover can't hide a miss.
@@ -212,6 +215,15 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await owner.end();
+  // Every alarm hands its finding on, for the hold (B1b).
+  expect(found).toEqual(
+    alarms().map((line) => ({
+      orgId: line.orgId,
+      subjectType: line.subjectType,
+      objectId: line.objectId,
+      sign: line.reason,
+    })),
+  );
   // And ends with its tampering undone, or the next case would pass for the wrong reason.
   expect(await guard()).toEqual([]);
 });

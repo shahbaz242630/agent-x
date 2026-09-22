@@ -9,8 +9,15 @@
 //    someone with only the database can't make
 // So a field changed past the app, a row pointed back at an older valid event
 // (a key "un-revoked"), a seal stripped or forged, or a row deleted, is denied
-// and raises the integrity alarm (`audit.integrity_failed`, SEV-1). The
-// integrity hold on the organisation joins it with slice B1b.
+// and raises the integrity alarm (`audit.integrity_failed`, SEV-1). Every
+// tamper sign is also handed to `onTamper`, and withSignedStates, the one way
+// product code gets signed states, puts the organisation on its integrity
+// hold for each once the transaction has ended (with-signed-states.ts).
+//
+// The hold itself is a signed state kept in the log alone, with no row
+// (domain/integrity-hold.ts): read by integrityHold, started CLEAR with the
+// organisation, and set HELD by `hold`, which adds its event whatever state
+// the rest of the organisation is in.
 //
 // The read locks the row (ADR-006 §6): `share` for a decision, `change` when
 // the transaction will change it, never one and then the other. A change must
@@ -48,6 +55,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
+import { HOLD_SUBJECT, INTEGRITY_HOLD } from '../domain/integrity-hold.ts';
 import type { AuditTrail, AuditTransaction, LatestSignedState } from './audit-trail.ts';
 
 /**
@@ -67,6 +75,24 @@ import type { AuditTrail, AuditTransaction, LatestSignedState } from './audit-tr
  */
 export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status';
 
+/** A tamper sign, as the alarm names it: the organisation, the object's type and ID, and the sign. */
+export interface TamperFinding {
+  readonly orgId: string;
+  readonly subjectType: string;
+  readonly objectId: string;
+  readonly sign: TamperSign;
+}
+
+/**
+ * The organisation's integrity hold, from its newest signed event: verified
+ * `clear` or `held`, or tampered with (the alarm is raised, and the hold is
+ * set once the transaction ends). Only a verified `clear` lets anything the
+ * hold stops through.
+ */
+type HoldCheck =
+  | { readonly outcome: 'clear' | 'held'; readonly version: number; readonly eventId: string }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
 /** The row's state, matched with its latest signed event. */
 export interface VerifiedState {
   readonly outcome: 'verified';
@@ -79,8 +105,9 @@ export interface VerifiedState {
 /**
  * The row verified; no such row in this organisation; or tampered with (the
  * alarm is already raised). The caller denies both of the last two: a missing
- * row never means "no limit", so a hold or a freeze is a status on a row that
- * always exists, never a row whose absence lifts it.
+ * row never means "no limit", so a freeze is a status on a row that always
+ * exists, never a row whose absence lifts it (and the integrity hold a state
+ * the log holds from the organisation's creation on).
  */
 export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -169,6 +196,37 @@ export interface SignedStates {
     event: NoInfer<Event>,
     change: SignedChange,
   ): Promise<SignedStatusChange<State>>;
+  /**
+   * The organisation's integrity hold, from the log, in the caller's
+   * transaction (withTenant's for it). Anything the hold stops goes ahead
+   * only on `clear`.
+   */
+  integrityHold(tx: AuditTransaction, orgId: string): Promise<HoldCheck>;
+  /**
+   * Records a new organisation's integrity hold, CLEAR, as its first state, in
+   * the transaction that creates the organisation. The log must hold no state
+   * for it yet: one there already is tampering (the alarm is raised, and it
+   * throws `tampered`).
+   */
+  startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState>;
+}
+
+/**
+ * The signed states withSignedStates works with: these can also set the hold,
+ * which only it does, in a transaction of its own once the one that found the
+ * tampering has ended.
+ */
+export interface HoldingSignedStates extends SignedStates {
+  /**
+   * Puts the finding's organisation on hold, in this transaction (withTenant's
+   * for it): HELD, recorded as its newest signed state, unless a verified
+   * HELD is already there (`already`). Over a hold that can't be verified the
+   * event is added all the same, so the hold can be set whatever has been
+   * tampered with, as long as the chain takes new events. Locks the chain head
+   * first, so two can't both start from the same state; the transaction takes
+   * no other lock.
+   */
+  hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'>;
 }
 
 type FoundRow = Extract<SignedRow, { outcome: 'found' }>;
@@ -182,6 +240,10 @@ interface Held {
 const MISSING = Object.freeze({ outcome: 'missing' as const });
 /** The status column, which only changeStatus writes on a row that exists. */
 const STATUS = 'status';
+/** Who sets a hold: the app itself, on a tamper sign. */
+const HOLDER: AuditActor = Object.freeze({ type: 'system', id: 'integrity-hold' });
+
+type HoldStatus = (typeof INTEGRITY_HOLD.states)[number];
 
 const lockOrder = (): SignedStateFailed =>
   new SignedStateFailed(
@@ -192,21 +254,30 @@ const lockOrder = (): SignedStateFailed =>
 const sameFields = (row: readonly FieldText[], expected: (column: string) => string | null | undefined): boolean =>
   row.every(([column, value]) => value === expected(column));
 
+/** The hold's subject type is its own: a row recorded under it would be read as the organisation's hold. */
+const notTheHold = (table: SignedStateTable): void => {
+  if (table.subject === HOLD_SUBJECT)
+    throw new RangeError(`The subject type ${HOLD_SUBJECT} is the integrity hold's own`);
+};
+
 /**
  * Build one from the request's or job's logger, a child carrying its
- * correlation ID (Rule Book §8); each alarm adds the organisation. What it
- * knows of each transaction's rows (locks and verified states) is its own:
- * use one for the whole transaction.
+ * correlation ID (Rule Book §8); each alarm adds the organisation, and is
+ * handed to `onTamper` as it is raised. What it knows of each transaction's
+ * rows (locks and verified states) is its own: use one for the whole
+ * transaction. Outside tests, only withSignedStates builds one.
  */
 export function createSignedStates({
   keys,
   trail,
   logger,
+  onTamper,
 }: {
   readonly keys: KeyProvider;
   readonly trail: AuditTrail;
   readonly logger: Logger;
-}): SignedStates {
+  readonly onTamper: (finding: TamperFinding) => void;
+}): HoldingSignedStates {
   const statuses = createStatusChanger({ logger });
   const rowsHeld = new WeakMap<AuditTransaction, Map<string, Held>>();
 
@@ -218,21 +289,23 @@ export function createSignedStates({
   const rowName = (table: SignedStateTable, { orgId, id }: SignedRowKey): string =>
     `${table.table}|${orgId.toLowerCase()}|${id.toLowerCase()}`;
 
-  const alarm = (table: SignedStateTable, key: SignedRowKey, sign: TamperSign, seq?: bigint) => {
+  /** Raises the alarm, hands the finding on, and gives the outcome a read denies. */
+  const alarm = (subjectType: string, key: SignedRowKey, sign: TamperSign, seq?: bigint) => {
     logger.child({ orgId: key.orgId }).error('audit.integrity_failed', {
       chain: 'organisation',
       check: 'state',
       reason: sign,
-      subjectType: table.subject,
+      subjectType,
       objectId: key.id,
       ...(seq === undefined ? {} : { seq }),
     });
+    onTamper(Object.freeze({ orgId: key.orgId, subjectType, objectId: key.id, sign }));
     return Object.freeze({ outcome: 'tampered' as const, sign });
   };
 
   /** Raises the alarm and fails: the locked row didn't hold what was just written to it. */
   const notApplied = (table: SignedStateTable, key: SignedRowKey, what: string): never => {
-    alarm(table, key, 'row');
+    alarm(table.subject, key, 'row');
     throw new SignedStateFailed('not_applied', what);
   };
 
@@ -246,16 +319,16 @@ export function createSignedStates({
     row: FoundRow,
     latest: LatestSignedState,
   ): StateCheck => {
-    if (latest.kind === 'none') return alarm(table, key, 'unsigned');
-    if (latest.kind === 'broken') return alarm(table, key, 'log', latest.seq);
-    if (row.eventId !== latest.id.toLowerCase()) return alarm(table, key, 'pointer');
-    if (row.version !== latest.version) return alarm(table, key, 'version');
+    if (latest.kind === 'none') return alarm(table.subject, key, 'unsigned');
+    if (latest.kind === 'broken') return alarm(table.subject, key, 'log', latest.seq);
+    if (row.eventId !== latest.id.toLowerCase()) return alarm(table.subject, key, 'pointer');
+    if (row.version !== latest.version) return alarm(table.subject, key, 'version');
     const facts = {
       orgId: key.orgId,
       subject: { type: table.subject, id: key.id, version: row.version },
       fields: row.fields,
     };
-    if (!stateSealMatches(keys, facts, latest.seal)) return alarm(table, key, 'seal');
+    if (!stateSealMatches(keys, facts, latest.seal)) return alarm(table.subject, key, 'seal');
     const eventId = latest.id.toLowerCase();
     return Object.freeze({ outcome: 'verified', version: row.version, eventId, fields: new Map(row.fields) });
   };
@@ -266,22 +339,23 @@ export function createSignedStates({
     key: SignedRowKey,
     lock: RowLock,
   ): Promise<StateCheck> => {
+    notTheHold(table);
     const rows = heldIn(tx);
     const name = rowName(table, key);
     const held = rows.get(name);
     if (held?.lock === 'share' && lock === 'change') throw lockOrder();
     let row = await readSignedRow(tx, table, key, lock);
     rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
-    if (row.outcome === 'unreadable') return alarm(table, key, 'row');
+    if (row.outcome === 'unreadable') return alarm(table.subject, key, 'row');
     let latest = await latestOf(tx, table, key);
     if (row.outcome === 'missing') {
       if (latest.kind === 'none') return MISSING;
-      if (latest.kind === 'broken') return alarm(table, key, 'log', latest.seq);
+      if (latest.kind === 'broken') return alarm(table.subject, key, 'log', latest.seq);
       // The row commits with its first event, so with the event in the log,
       // the row is gone, unless it was created since it was read: read again.
       row = await readSignedRow(tx, table, key, lock);
-      if (row.outcome === 'missing') return alarm(table, key, 'deleted');
-      if (row.outcome === 'unreadable') return alarm(table, key, 'row');
+      if (row.outcome === 'missing') return alarm(table.subject, key, 'deleted');
+      if (row.outcome === 'unreadable') return alarm(table.subject, key, 'row');
       latest = await latestOf(tx, table, key);
     }
     const checked = compare(table, key, row, latest);
@@ -301,13 +375,14 @@ export function createSignedStates({
     from: VerifiedState | 'new',
     set: SignedFieldValues,
   ): Promise<FoundRow> => {
+    notTheHold(table);
     const rows = heldIn(tx);
     const name = rowName(table, key);
     if (from === 'new') {
       if (rows.get(name)?.lock === 'share') throw lockOrder();
       const read = await readSignedRow(tx, table, key, 'change');
       if (read.outcome === 'unreadable') {
-        alarm(table, key, 'row');
+        alarm(table.subject, key, 'row');
         throw new SignedStateFailed('tampered', 'A row being created is not as the app writes one');
       }
       if (read.outcome !== 'found' || read.version !== 1 || read.eventId !== null) {
@@ -321,7 +396,7 @@ export function createSignedStates({
         throw new RangeError('A new row keeps the status it was inserted in; it moves only through changeStatus');
       }
       if ((await latestOf(tx, table, key)).kind !== 'none') {
-        alarm(table, key, 'log');
+        alarm(table.subject, key, 'log');
         throw new SignedStateFailed('tampered', 'The log already holds a signed state for a row being created');
       }
       rows.set(name, { lock: 'change' });
@@ -382,6 +457,50 @@ export function createSignedStates({
     return Object.freeze({ version: row.version, eventId: recorded.id, seq: recorded.seq });
   };
 
+  /**
+   * The hold as its newest signed event holds it, and that event's version:
+   * 0 when there is none to go on (no state, or none that can be believed).
+   * The seal says which status it is: it matches one or neither.
+   */
+  const readHold = async (
+    tx: AuditTransaction,
+    orgId: string,
+  ): Promise<{ readonly check: HoldCheck; readonly version: number }> => {
+    const key = { orgId, id: orgId };
+    const latest = await trail.latestSignedState(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
+    if (latest.kind === 'none') return { check: alarm(HOLD_SUBJECT, key, 'unsigned'), version: 0 };
+    if (latest.kind === 'broken') return { check: alarm(HOLD_SUBJECT, key, 'log', latest.seq), version: 0 };
+    const subject = { type: HOLD_SUBJECT, id: orgId, version: latest.version };
+    const status = INTEGRITY_HOLD.states.find((state) =>
+      stateSealMatches(keys, { orgId, subject, fields: [[STATUS, state]] }, latest.seal),
+    );
+    if (status === undefined) return { check: alarm(HOLD_SUBJECT, key, 'seal'), version: latest.version };
+    const outcome = status === 'HELD' ? 'held' : 'clear';
+    return {
+      check: Object.freeze({ outcome, version: latest.version, eventId: latest.id.toLowerCase() }),
+      version: latest.version,
+    };
+  };
+
+  /** Seals the hold's status at this version and adds its event to the chain. */
+  const recordHold = async (
+    tx: AuditTransaction,
+    orgId: string,
+    version: number,
+    status: HoldStatus,
+    change: SignedChange,
+  ): Promise<RecordedState> => {
+    const subject = { type: HOLD_SUBJECT, id: orgId, version };
+    const seal = sealState(keys, { orgId, subject, fields: [[STATUS, status]] });
+    const recorded = await trail.record(tx, orgId, {
+      actor: change.actor,
+      action: change.action,
+      subject,
+      details: { ...change.details, ...stateSealDetails(seal) },
+    });
+    return Object.freeze({ version, eventId: recorded.id, seq: recorded.seq });
+  };
+
   return Object.freeze({
     verifiedState,
 
@@ -416,7 +535,7 @@ export function createSignedStates({
       const moved = await statuses.change(tx, table, key, event).catch((error: unknown) => {
         // The row is verified and locked: its status can't be unreadable or
         // left unchanged unless something past the app is at work on it.
-        if (error instanceof StatusChangeFailed) alarm(table, key, 'status');
+        if (error instanceof StatusChangeFailed) alarm(table.subject, key, 'status');
         throw error;
       });
       if (moved.outcome === 'refused') return moved;
@@ -438,6 +557,47 @@ export function createSignedStates({
         version: recorded.version,
         eventId: recorded.eventId,
       });
+    },
+
+    async integrityHold(tx: AuditTransaction, orgId: string): Promise<HoldCheck> {
+      return (await readHold(tx, orgId)).check;
+    },
+
+    async startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState> {
+      const latest = await trail.latestSignedState(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
+      if (latest.kind !== 'none') {
+        alarm(HOLD_SUBJECT, { orgId, id: orgId }, 'log', latest.seq);
+        throw new SignedStateFailed(
+          'tampered',
+          'The log already holds a state for the integrity hold of an organisation being created',
+        );
+      }
+      return recordHold(tx, orgId, 1, INTEGRITY_HOLD.initial, {
+        actor,
+        action: 'integrity_hold.created',
+        details: {},
+      });
+    },
+
+    async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {
+      const { orgId } = finding;
+      await trail.lockHead(tx, orgId);
+      const { check, version } = await readHold(tx, orgId);
+      if (check.outcome === 'held') return 'already';
+      await recordHold(tx, orgId, version + 1, 'HELD', {
+        actor: HOLDER,
+        action: 'integrity_hold.set',
+        details: {
+          // From a verified CLEAR, or over a hold that can't be believed.
+          statusFrom: check.outcome === 'clear' ? 'CLEAR' : null,
+          statusTo: 'HELD',
+          reason: finding.sign,
+          foundOn: finding.subjectType,
+          objectId: finding.objectId,
+          findings,
+        },
+      });
+      return 'set';
     },
   });
 }
