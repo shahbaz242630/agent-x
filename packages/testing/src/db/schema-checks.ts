@@ -21,10 +21,10 @@
 // connect, none but the backup role has BYPASSRLS, and none is a member of a
 // role or has members. The backup role only reads. The app role only adds to
 // and reads the tables of append-only schemas, and may also update, never
-// delete, their listed exceptions (SEC-EVD-01); it only adds to, reads and
-// updates the listed columns of a fill-in table, never deletes (A5b); on any
-// other table it holds nothing but SELECT, INSERT, UPDATE and DELETE. The live
-// schema guard holds the running database to the same lists.
+// delete, their listed exceptions (SEC-EVD-01); it adds to and reads a fill-in
+// table, updates only its listed columns and never deletes (A5b); on any other
+// table it holds nothing but SELECT, INSERT, UPDATE and DELETE. The live schema
+// guard holds the running database to the same lists.
 //
 // Not read: types (every table's row type is usable by PUBLIC by default, and
 // using a type reaches no row); languages (PUBLIC may write plpgsql and SQL,

@@ -88,6 +88,10 @@ describe('the authority-table registry takes the modules’ own descriptions', (
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {
+    // Authority tables go by their plain name and fill-in tables by the name
+    // Postgres quotes, which are the same for any name that needs no quotes;
+    // a reserved word such as `user` is left to the live guard, which names
+    // a table on both lists.
     const fillIn = Object.keys(SCHEMA_POLICY.fillInTables);
 
     expect(AUTHORITY_TABLES.map(({ table }) => table).filter((name) => fillIn.includes(name))).toEqual([]);

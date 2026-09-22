@@ -705,13 +705,19 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   });
 
   it('holds a table on both lists to the columns both allow, and names it', async () => {
+    // result_id on both lists, result_status on the fill-in list alone, key on the authority list alone.
     const asAuthority = {
       table: 'idempotency.keys',
       subject: 'idempotency-key',
-      fields: [{ column: 'result_id', type: 'uuid' }],
+      fields: [
+        { column: 'result_id', type: 'uuid' },
+        { column: 'key', type: 'text' },
+      ],
     } as const satisfies SignedStateTable;
+    await owner.query('grant update (key) on idempotency.keys to agentx_app');
 
     expect(await liveSchemaProblems(app, { ...ROLES, authorityTables: [asAuthority] })).toEqual([
+      'agentx_app may UPDATE idempotency.keys\'s column "key"',
       'agentx_app may UPDATE idempotency.keys\'s column "result_status"',
       'idempotency.keys is listed as both an authority table and a fill-in table',
     ]);
