@@ -446,10 +446,11 @@ describe('the request hash (ADR-014 §3)', () => {
     expect(await write(requestFor(key), { keys: rotated })).toEqual({ outcome: 'replayed', result });
     expect(await write(requestFor(key, { payload: 'changed' }), { keys: rotated })).toEqual({ outcome: 'conflict' });
 
-    // New keys are hashed with the current version.
+    // New keys are hashed with the current version, and checked with it.
     const fresh = newKey();
-    await firstWrite(requestFor(fresh), { keys: rotated });
+    const freshResult = await firstWrite(requestFor(fresh), { keys: rotated });
     expect(await storedKeys(fresh)).toEqual([expect.objectContaining({ request_hash_key_version: 2 })]);
+    expect(await write(requestFor(fresh), { keys: rotated })).toEqual({ outcome: 'replayed', result: freshResult });
   });
 
   it("refuses a row made with a key version this process doesn't hold, rather than call it a conflict", async () => {
@@ -737,20 +738,55 @@ describe('the table itself (db/migrations/0006)', () => {
     expect(await storedKeys(key)).toHaveLength(1);
   });
 
-  it.each([
-    ['a result status without its resource', 201, null],
-    ['a resource without its result status', null, AGENT],
-    ['a result status outside 200 to 299', 404, AGENT],
-  ])('refuses %s', async (_what, status, resourceId) => {
-    const insert = withTenant(app, ORG, (tx) =>
+  /** A row the app could insert by hand, past this step: sound, but for the changes given. */
+  interface HandRow {
+    client_kind: string;
+    operation: string;
+    key: string;
+    request_hash: Buffer;
+    request_hash_key_version: number;
+    result_status: number | null;
+    result_id: string | null;
+  }
+  const insertByHand = (changes: Partial<HandRow>) => {
+    const row: HandRow = {
+      client_kind: 'agent',
+      operation: 'items.create',
+      key: newKey(),
+      request_hash: fill(1),
+      request_hash_key_version: 1,
+      result_status: 201,
+      result_id: AGENT,
+      ...changes,
+    };
+    return withTenant(app, ORG, (tx) =>
       sql`insert into idempotency.keys
             (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at, result_status, result_id)
-          values (${ORG}, 'agent', ${AGENT}, 'items.create', ${newKey()}, ${fill(1)}, 1, pg_catalog.now(), ${status}, ${resourceId})`.execute(
+          values (${ORG}, ${row.client_kind}, ${AGENT}, ${row.operation}, ${row.key}, ${row.request_hash},
+                  ${row.request_hash_key_version}, pg_catalog.now(), ${row.result_status}, ${row.result_id})`.execute(
         tx,
       ),
     );
+  };
 
-    await expect(insert).rejects.toMatchObject({ code: '23514' });
+  it('takes a sound row by hand, so each refusal below is its own check', async () => {
+    await expect(insertByHand({})).resolves.toBeDefined();
+  });
+
+  it.each<[string, Partial<HandRow>]>([
+    ['a result status without its resource', { result_id: null }],
+    ['a resource without its result status', { result_status: null }],
+    ['a result status below 200', { result_status: 199 }],
+    ['a result status above 299', { result_status: 300 }],
+    ['a client of another kind', { client_kind: 'operator' }],
+    ['an empty operation', { operation: '' }],
+    ['an operation longer than 64 bytes', { operation: 'o'.repeat(65) }],
+    ['an empty key', { key: '' }],
+    ['a key longer than 255 bytes', { key: 'k'.repeat(256) }],
+    ['a request hash that is not 32 bytes', { request_hash: Buffer.alloc(31, 1) }],
+    ['a key version below 1', { request_hash_key_version: 0 }],
+  ])('refuses %s', async (_what, changes) => {
+    await expect(insertByHand(changes)).rejects.toMatchObject({ code: '23514' });
   });
 
   it('lets the backup role read every organisation, and nothing more', async () => {
