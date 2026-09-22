@@ -2685,23 +2685,37 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['no-secret-literals', 'workload-secrets']);
-    // A request in the job's own arguments, in place of the file or after it, or the file alone with its flag lost.
+    // A request in the job's own command or arguments, in place of the file or after it, the file alone with
+    // its flag lost, or a word moved from one to the other.
     const runAs =
-      "job-agentx-stg-operator [workload-secrets] must be run as --request /mnt/secrets/operator-request and nothing else: a request in its arguments would sit in the deployment and every run's record";
-    for (const args of [
-      ['create-organization', '--name', 'Quartzite Other Co'],
-      ['--request', '/mnt/secrets/operator-request', 'create-organization'],
-      ['/mnt/secrets/operator-request'],
-      [],
+      "job-agentx-stg-operator [workload-secrets] must run node apps/operator/src/main.ts --request /mnt/secrets/operator-request and nothing else: a request in its command or arguments would sit in the deployment and every run's record";
+    const script = 'apps/operator/src/main.ts';
+    for (const [command, args] of [
+      [
+        ['node', script],
+        ['create-organization', '--name', 'Quartzite Other Co'],
+      ],
+      [
+        ['node', script],
+        ['--request', '/mnt/secrets/operator-request', 'create-organization'],
+      ],
+      [['node', script], ['/mnt/secrets/operator-request']],
+      [['node', script], []],
+      [['node', script, 'create-organization', '--name', 'Quartzite Other Co'], []],
+      [['sh', '-c', `node ${script} create-organization --name "Quartzite Other Co"`], []],
+      [['node'], [script, '--request', '/mnt/secrets/operator-request']],
+      [['node', script, '--request'], ['/mnt/secrets/operator-request']],
     ]) {
       expect({
+        command,
         args,
         problems: messages(
           changed(operator, (job) => {
+            containerOf(job).command = command;
             containerOf(job).args = args;
           }),
         ),
-      }).toEqual({ args, problems: [runAs] });
+      }).toEqual({ command, args, problems: [runAs] });
     }
   });
 

@@ -6,10 +6,10 @@
 //   node apps/operator/src/main.ts --request <file>
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
-// same words as a JSON list, written by the person starting the run (jobs.ts),
-// since a run started with arguments of its own would lose its mounted files.
-// The file names the new organisation's ID too (`--id`), so the same request
-// run twice makes one organisation: the second run is refused, changing nothing.
+// same words and the new organisation's ID (`--id`) as a JSON list, written by
+// the person starting the run (jobs.ts), since a run started with arguments of
+// its own would lose its mounted files. With the ID named, the same request run
+// twice makes one organisation: the second run is refused, changing nothing.
 //
 // It:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
@@ -262,9 +262,10 @@ async function run(
     }
     // The creation is one transaction, so nothing was changed, unless the
     // connection was lost as it committed: then the organisation may exist.
-    // The line names its ID; look for it on the platform chain before running
-    // the command again, or the run makes a second organisation. A chain that
-    // refused the event has raised the integrity alarm already (withSignedStates).
+    // The line names its ID. A request file can simply be run again; a typed
+    // command makes a new ID, so look for this one on the platform chain first,
+    // or the run makes a second organisation. A chain that refused the event
+    // has raised the integrity alarm already (withSignedStates).
     log.error('operator.failed', { command: request.command, err: error });
     return 1;
   } finally {

@@ -270,13 +270,27 @@ const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init',
  * request. It isn't a secret: it is kept as one so that a read of the job never
  * shows what a person writes into it before a run (jobs.ts). It reaches the job
  * as a file, like everything else it is given, and is in no vault and no grant.
- * The job is run with that file and nothing else as its arguments: a request
- * written there instead would sit in the deployment and every run's record.
+ * The job runs its own command with that file and nothing else as its
+ * arguments: a request written into either would sit in the deployment and
+ * every run's record.
  */
 const HELD: Readonly<
-  Record<string, { readonly name: string; readonly value: string; readonly args: readonly string[] }>
+  Record<
+    string,
+    {
+      readonly name: string;
+      readonly value: string;
+      readonly command: readonly string[];
+      readonly args: readonly string[];
+    }
+  >
 > = {
-  operator: { name: 'operator-request', value: '[]', args: ['--request', '/mnt/secrets/operator-request'] },
+  operator: {
+    name: 'operator-request',
+    value: '[]',
+    command: ['node', 'apps/operator/src/main.ts'],
+    args: ['--request', '/mnt/secrets/operator-request'],
+  },
 };
 
 /**
@@ -2302,10 +2316,11 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
       ) {
         problem(`must hold ${held.name} once, as ${held.value} and nothing else: a person writes it before a run`);
       }
+      const run = JSON.stringify([...held.command, '|', ...held.args]);
       for (const container of containersOf(job)) {
-        if (JSON.stringify(list(at(container, 'args'))) !== JSON.stringify(held.args)) {
+        if (JSON.stringify([...list(at(container, 'command')), '|', ...list(at(container, 'args'))]) !== run) {
           problem(
-            `must be run as ${held.args.join(' ')} and nothing else: a request in its arguments would sit in the deployment and every run's record`,
+            `must run ${held.command.join(' ')} ${held.args.join(' ')} and nothing else: a request in its command or arguments would sit in the deployment and every run's record`,
           );
         }
       }
