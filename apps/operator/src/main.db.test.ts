@@ -3,6 +3,10 @@
 // platform's, in one transaction; it refuses the owner's role and rewritten
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
@@ -210,6 +214,39 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     expect(first.line('operator.organization_created')?.orgId).not.toBe(
       second.line('operator.organization_created')?.orgId,
     );
+  });
+
+  it('makes one organisation of a request file however often it runs, with the ID it names (B1c-2a)', async () => {
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-request-'));
+    try {
+      const file = path.join(folder, 'operator-request');
+      const id = uuidV7Ids.next();
+      writeFileSync(file, JSON.stringify(['create-organization', '--name', NAME, '--id', id]));
+      const before = await counts();
+
+      const first = await run(['--request', file]);
+      expect(first.code).toBe(0);
+      expect(first.line('operator.organization_created')).toMatchObject({ orgId: id });
+      const made = await counts();
+      expect(made).toEqual({ orgs: before.orgs + 1, platform: before.platform + 1 });
+
+      // Left on the job and run again: the directory refuses the second, and nothing changes.
+      const again = await run(['--request', file]);
+      expect(again.code).toBe(1);
+      expect(again.host.exitCode).toBe(1);
+      expect(again.line('operator.done_before')).toMatchObject({
+        level: 'error',
+        orgId: id,
+        command: 'create-organization',
+      });
+      expect(again.events).not.toContain('operator.organization_created');
+      expect(again.events).not.toContain('operator.failed');
+      expect(again.events).not.toContain('audit.integrity_failed');
+      expect(await counts()).toEqual(made);
+      expect(`${first.text}${again.text}`).not.toContain(NAME);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
   });
 });
 

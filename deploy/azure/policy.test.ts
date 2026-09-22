@@ -437,7 +437,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads zitadel-masterkey',
         // The operator's command reads the audit chains' MAC too, each version (B1c).
         ...APP_KEYS.flatMap((key) =>
-          key.startsWith('key-audit-mac-') ? [`api reads ${key}`, `operator reads ${key}`] : [`api reads ${key}`],
+          key.startsWith('key-audit-mac-v') ? [`api reads ${key}`, `operator reads ${key}`] : [`api reads ${key}`],
         ),
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -2685,6 +2685,24 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['no-secret-literals', 'workload-secrets']);
+    // A request in the job's own arguments, in place of the file or after it, or the file alone with its flag lost.
+    const runAs =
+      "job-agentx-stg-operator [workload-secrets] must be run as --request /mnt/secrets/operator-request and nothing else: a request in its arguments would sit in the deployment and every run's record";
+    for (const args of [
+      ['create-organization', '--name', 'Quartzite Other Co'],
+      ['--request', '/mnt/secrets/operator-request', 'create-organization'],
+      ['/mnt/secrets/operator-request'],
+      [],
+    ]) {
+      expect({
+        args,
+        problems: messages(
+          changed(operator, (job) => {
+            containerOf(job).args = args;
+          }),
+        ),
+      }).toEqual({ args, problems: [runAs] });
+    }
   });
 
   it('container-telemetry: an OpenTelemetry exporter, or Zitadel left to phone home', () => {

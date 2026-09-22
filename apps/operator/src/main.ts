@@ -8,6 +8,8 @@
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words as a JSON list, written by the person starting the run (jobs.ts),
 // since a run started with arguments of its own would lose its mounted files.
+// The file names the new organisation's ID too (`--id`), so the same request
+// run twice makes one organisation: the second run is refused, changing nothing.
 //
 // It:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
@@ -21,7 +23,7 @@
 //    and exits 0; 1 when anything is refused or fails, with nothing changed,
 //    unless the connection was lost as the creation committed (see run's
 //    catch: the failure names the organisation's ID, to look for first)
-import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -54,8 +56,14 @@ export const USAGE = 'create-organization --name <name>';
 /** How the job names the file its request is in. */
 const REQUEST_FLAG = '--request';
 
+/** What a request file holds, as a JSON list: the same words, and the new organisation's ID. */
+export const REQUEST_USAGE = 'create-organization --name <name> --id <new ID>';
+
 /** The most a request file may hold: a command and one name, with room to spare. */
 export const REQUEST_LIMIT_BYTES = 4096;
+
+/** A UUIDv7 in lower case, as the product makes every ID (ADR-007). */
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** The parts of `process` the command uses. Tests pass a stand-in. */
 export interface OperatorProcess {
@@ -78,6 +86,8 @@ interface Request {
   readonly command: 'create-organization';
   /** As it will be kept (NFC). */
   readonly name: string;
+  /** The new organisation's ID, which a request file names; typed, the command makes one. */
+  readonly id: string | undefined;
 }
 
 /** Why a request can't be done, each rule broken. */
@@ -85,13 +95,36 @@ interface Problems {
   readonly problems: readonly string[];
 }
 
-/** A file's text, or nothing when it is longer than a request can be. */
-function readLimited(file: string): string | undefined {
+/** One problem. */
+const problem = (text: string): Problems => ({ problems: [text] });
+
+/**
+ * A request file's text: a plain file (never a pipe or a device, which could
+ * hold a read open or never end), at most REQUEST_LIMIT_BYTES of UTF-8, a
+ * byte-order mark allowed. Text that isn't UTF-8 is refused, not repaired: a
+ * repaired name would be kept for good.
+ */
+function readRequestFile(file: string): { readonly text: string } | Problems {
+  if (!statSync(file).isFile()) return problem("the request file isn't a plain file");
+  const bytes = Buffer.alloc(REQUEST_LIMIT_BYTES + 1);
+  let read = 0;
   const descriptor = openSync(file, 'r');
   try {
-    return fstatSync(descriptor).size > REQUEST_LIMIT_BYTES ? undefined : readFileSync(descriptor, 'utf8');
+    while (read < bytes.length) {
+      const got = readSync(descriptor, bytes, read, bytes.length - read, null);
+      if (got === 0) break;
+      read += got;
+    }
   } finally {
     closeSync(descriptor);
+  }
+  if (read > REQUEST_LIMIT_BYTES) {
+    return problem(`the request file holds more than ${String(REQUEST_LIMIT_BYTES)} bytes`);
+  }
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, read)) };
+  } catch {
+    return problem("the request file isn't UTF-8 text");
   }
 }
 
@@ -102,30 +135,28 @@ function readLimited(file: string): string | undefined {
 function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
   const [, file, ...rest] = argv;
   if (file === undefined || rest.length > 0) {
-    return { problems: [`${REQUEST_FLAG} takes the one file that holds the request, and nothing else`] };
+    return problem(`${REQUEST_FLAG} takes the one file that holds the request, and nothing else`);
   }
-  let text: string | undefined;
+  let read: { readonly text: string } | Problems;
   try {
-    text = readLimited(file);
+    read = readRequestFile(file);
   } catch (error) {
-    // The system's reason alone (ENOENT, EACCES, EISDIR…); anything else is a bug.
+    // The system's reason alone (ENOENT, EACCES…); anything else is a bug.
     if (!(error instanceof Error && 'code' in error && typeof error.code === 'string')) throw error;
-    return { problems: [`the request file can't be read (${error.code})`] };
+    return problem(`the request file can't be read (${error.code})`);
   }
-  if (text === undefined) {
-    return { problems: [`the request file holds more than ${String(REQUEST_LIMIT_BYTES)} bytes`] };
-  }
+  if ('problems' in read) return read;
   let words: unknown;
   try {
-    words = JSON.parse(text);
+    words = JSON.parse(read.text);
   } catch {
     words = undefined;
   }
   if (!Array.isArray(words) || !words.every((word) => typeof word === 'string')) {
-    return { problems: ["the request file must hold a JSON list of the command's words"] };
+    return problem("the request file must hold a JSON list of the command's words");
   }
   if (words.length === 0) {
-    return { problems: ['no request was written for this run: the job holds none until a person writes one'] };
+    return problem('no request was written for this run: the job holds none until a person writes one');
   }
   return { words };
 }
@@ -133,22 +164,39 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
 /**
  * What the operator asked for, or the problems. Nothing typed is repeated in
  * a problem: the name could be anywhere among the arguments, and a name is
- * never logged.
+ * never logged. A request file also names the new organisation's ID, so a
+ * request left on the job can never make a second one: run again, it meets
+ * the directory's key and changes nothing.
  */
 function readRequest(argv: readonly string[]): Request | Problems {
-  const asked = argv[0] === REQUEST_FLAG ? requestWords(argv) : { words: argv };
+  const fromFile = argv[0] === REQUEST_FLAG;
+  const asked = fromFile ? requestWords(argv) : { words: argv };
   if ('problems' in asked) return asked;
   const [command, flag, name, ...rest] = asked.words;
-  if (command !== 'create-organization' || flag !== '--name' || name === undefined || rest.length > 0) {
-    return { problems: [`the command is ${USAGE}, with the name quoted as one argument, and nothing else`] };
+  const [idFlag, id, ...more] = rest;
+  const shaped = command === 'create-organization' && flag === '--name' && name !== undefined;
+  if (!fromFile && !(shaped && rest.length === 0)) {
+    return problem(`the command is ${USAGE}, with the name quoted as one argument, and nothing else`);
   }
+  if (fromFile && !(shaped && idFlag === '--id' && id !== undefined && more.length === 0)) {
+    return problem(`the request file holds ${REQUEST_USAGE} as a JSON list, and nothing else`);
+  }
+  if (id !== undefined && !UUID_V7.test(id)) return problem("the organisation's ID must be a UUIDv7, in lower case");
   try {
-    return { command, name: organizationName(name) };
+    return { command: 'create-organization', name: organizationName(String(name)), id };
   } catch (error) {
     if (error instanceof OrganizationRefused) return { problems: error.problems };
     throw error;
   }
 }
+
+/** Whether an error is the directory refusing an organisation it lists already (its key, orgs_pkey). */
+const listedAlready = (error: unknown): boolean =>
+  error instanceof Error &&
+  'code' in error &&
+  error.code === '23505' &&
+  'constraint' in error &&
+  error.constraint === 'orgs_pkey';
 
 /**
  * Opens a pool of one connection, one job's share of the server's (the schema
@@ -192,8 +240,8 @@ async function run(
 
   const database = await connect(config, logger);
   if (database === undefined) return 1;
-  // Made here, by the server, so a failure can name it.
-  const orgId = uuidV7Ids.next();
+  // The request file's, or made here, by the server: known before the work, so a failure can name it.
+  const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
   try {
     // Before anything is written: the new organisation's rows would go through the same walls.
@@ -206,6 +254,12 @@ async function run(
     log.info('operator.organization_created', { orgSeq: created.orgSeq, platformSeq: created.platformSeq });
     return 0;
   } catch (error) {
+    // A request run again (one left on the job): its organisation exists, and
+    // the directory's key refused the second, changing nothing.
+    if (listedAlready(error)) {
+      log.error('operator.done_before', { command: request.command });
+      return 1;
+    }
     // The creation is one transaction, so nothing was changed, unless the
     // connection was lost as it committed: then the organisation may exist.
     // The line names its ID; look for it on the platform chain before running

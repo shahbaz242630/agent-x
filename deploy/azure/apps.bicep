@@ -2,8 +2,8 @@
 // prepare a deployment and the operator's command (B1c), each started by hand,
 // the three apps that serve traffic (the API, Zitadel and its login pages), and
 // the public doors that put an app on a host name (G2e). A deployment of its
-// own, into the resource group
-// main.bicep creates and after secrets.bicep has written the secrets:
+// own, into the resource group main.bicep creates and after secrets.bicep has
+// written the secrets:
 //
 //   bicep snapshot deploy/azure/staging.apps.bicepparam --resource-group rg-agentx-staging
 //   az deployment group create --resource-group rg-agentx-staging \
@@ -390,8 +390,10 @@ var zitadelPolicy = [
 // loses every mounted file (the start API takes no mounts), its login and key
 // among them, and keeps those arguments in the run's record. So the person
 // starting a run writes this secret first (jobs.ts), the run reads it as a
-// file, and Azure never shows its value back. Deployed as no request, which the
-// command refuses, so a deployment of the apps clears any request left behind.
+// file, and a read of the job never shows its value. Deployed as no request,
+// which the command refuses, so a deployment of the apps clears any request
+// left behind; one run again meanwhile changes nothing, since it names the
+// organisation it makes and the directory refuses a second (apps/operator).
 var operatorRequest = {
   name: 'operator-request'
   value: '[]'
@@ -777,7 +779,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 value: '${secretsPath}/${file.reads}'
               })
             )
-            volumeMounts: empty(job.files)
+            volumeMounts: empty(concat(job.files, job.held))
               ? []
               : [
                   {
@@ -787,7 +789,7 @@ resource deployedJobs 'Microsoft.App/jobs@2026-01-01' = [
                 ]
           }
         ]
-        volumes: empty(job.files)
+        volumes: empty(concat(job.files, job.held))
           ? []
           : [
               {

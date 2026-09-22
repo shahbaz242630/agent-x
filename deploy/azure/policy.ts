@@ -224,7 +224,7 @@ const TELEMETRY_SETTINGS = [
  */
 const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.map((key) => `api reads ${key}`),
-  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-')).map((key) => `operator reads ${key}`),
+  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `operator reads ${key}`),
   'api reads db-app-password',
   'operator reads db-app-password',
   'db-setup reads db-admin-password',
@@ -267,12 +267,16 @@ const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init',
 /**
  * What a job may hold itself rather than read from the vault, by the job: only
  * the operator's request (apps.bicep `operatorRequest`), and only as no
- * request. It isn't a secret: it is kept as one so Azure never shows back what
- * a person writes into it before a run (jobs.ts). It reaches the job as a file,
- * like everything else it is given, and is in no vault and no grant.
+ * request. It isn't a secret: it is kept as one so that a read of the job never
+ * shows what a person writes into it before a run (jobs.ts). It reaches the job
+ * as a file, like everything else it is given, and is in no vault and no grant.
+ * The job is run with that file and nothing else as its arguments: a request
+ * written there instead would sit in the deployment and every run's record.
  */
-const HELD: Readonly<Record<string, { readonly name: string; readonly value: string }>> = {
-  operator: { name: 'operator-request', value: '[]' },
+const HELD: Readonly<
+  Record<string, { readonly name: string; readonly value: string; readonly args: readonly string[] }>
+> = {
+  operator: { name: 'operator-request', value: '[]', args: ['--request', '/mnt/secrets/operator-request'] },
 };
 
 /**
@@ -768,9 +772,9 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
     });
   };
   const literal = (value: unknown): boolean => typeof value === 'string' && !PARAMETER_REFERENCE.test(value);
-  /** Whether a Container Apps secret is what its job may hold: its name and value exactly as `HELD` gives them. */
+  /** Whether a Container Apps secret is what its app or job may hold: its name and value exactly as `HELD` gives them. */
   const heldBy = (resource: PredictedResource, entry: unknown): boolean => {
-    const held = resource.type === TYPES.job ? HELD[jobWorkloadOf(resource.name)] : undefined;
+    const held = HELD[jobWorkloadOf(resource.name)];
     return held !== undefined && at(entry, 'name') === held.name && at(entry, 'value') === held.value;
   };
   const walk = (resource: PredictedResource, value: unknown, trail: string): void => {
@@ -1948,7 +1952,7 @@ const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
  * Apps has no lock between runs, so starting one at a time is the operator's
  * (Azure.md "The jobs"); what this rule holds is that no run is a clock's or an
  * event's, and that one replica does the work. Together
- * they are the five jobs a deployment needs, so a dropped one is caught here
+ * they are the five jobs the deployment holds, so a dropped one is caught here
  * rather than at the first deployment.
  */
 const jobs: Check = (snapshot, _expected, add) => {
@@ -2288,14 +2292,22 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     const held = HELD[workload];
     const holding = all.filter((secret) => text(at(secret, 'name')) === held?.name);
     if (held !== undefined) {
-      const [kept] = holding;
+      // None held fails the value; twice held, the second.
+      const [kept, ...again] = holding;
       const fields = typeof kept === 'object' && kept !== null ? Object.keys(kept) : [];
       if (
-        holding.length !== 1 ||
+        again.length > 0 ||
         at(kept, 'value') !== held.value ||
         fields.some((field) => field !== 'name' && field !== 'value')
       ) {
         problem(`must hold ${held.name} once, as ${held.value} and nothing else: a person writes it before a run`);
+      }
+      for (const container of containersOf(job)) {
+        if (JSON.stringify(list(at(container, 'args'))) !== JSON.stringify(held.args)) {
+          problem(
+            `must be run as ${held.args.join(' ')} and nothing else: a request in its arguments would sit in the deployment and every run's record`,
+          );
+        }
       }
     }
     const declared = all.filter((secret) => !holding.includes(secret));

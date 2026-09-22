@@ -42,7 +42,7 @@ var appKeys = loadJsonContent('app-keys.json')
 // The keys the operator's command holds, by how their names start: every
 // version of the audit chains' MAC, and no other (ADR-011 §3, B1c).
 @export()
-var operatorKeys = 'key-audit-mac-'
+var operatorKeys = 'key-audit-mac-v'
 
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')
