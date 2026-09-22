@@ -239,6 +239,8 @@ export function createIdempotentWrites({
       // Waits, if another transaction holds the key's row uncommitted, until
       // its claim ends: then nothing is inserted if it committed, and this row
       // is if it rolled back. Every statement filters by org_id too (ADR-005 §7).
+      // The savepoint is never released: the commit ends it with the
+      // transaction, and a release would cost a round trip and change nothing.
       const { mac, keyVersion } = keys.mac('request-hash', message);
       await sql`savepoint idempotency_claim`.execute(tx);
       const claimed = await sql<{ claimed: number }>`
@@ -265,10 +267,8 @@ export function createIdempotentWrites({
           }
           throw error;
         }
-        await sql`release savepoint idempotency_claim`.execute(tx);
         return Object.freeze({ outcome: 'done', result });
       }
-      await sql`release savepoint idempotency_claim`.execute(tx);
 
       // READ COMMITTED: this statement sees the row the insert waited for.
       const { rows } = await sql<StoredKey>`
