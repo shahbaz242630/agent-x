@@ -4,7 +4,7 @@ import {
   ChainStoreError,
   createMemoryAnchorStore,
 } from '@agentx/platform/audit-chain';
-import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { FixedClock, LogCapture } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,7 +14,7 @@ import { type AnchorCheck, type CheckedChain, createAnchorCheck, scheduleAnchorC
 const keys = createKeyProvider(
   Object.fromEntries(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
-  ) as unknown as KeyMaterial,
+  ),
 );
 const ORG = '0199a0f0-0000-7000-8000-000000000001';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-000000000002';

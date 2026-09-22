@@ -221,7 +221,7 @@ const COMMON: readonly SettingName[] = [
 /** Where the database is and how the connection is protected. */
 const LOCATION: readonly SettingName[] = ['AGENTX_DB_HOST', 'AGENTX_DB_PORT', 'AGENTX_DB_NAME', 'AGENTX_DB_TLS'];
 
-export type Process = 'app' | 'migrate' | 'setup';
+export type Process = 'app' | 'migrate' | 'setup' | 'operator';
 
 /**
  * Each process's settings, and the reason it gives when it refuses one that
@@ -280,6 +280,19 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_DB_ZITADEL_PASSWORD_FILE',
     ],
     reason: 'the set-up job reads only the database, log and login settings it needs',
+  },
+  operator: {
+    job: "the operator's command (apps/operator)",
+    reads: [
+      ...COMMON,
+      'AGENTX_KEYS_DIR',
+      'AGENTX_KEYS_CURRENT',
+      ...LOCATION,
+      'AGENTX_DB_USER',
+      'AGENTX_DB_PASSWORD',
+      'AGENTX_DB_PASSWORD_FILE',
+    ],
+    reason: "the operator's command reads only the database, log and key settings it needs, as the app's role",
   },
 };
 

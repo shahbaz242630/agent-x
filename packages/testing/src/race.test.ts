@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Barrier, BarrierBroken, failures, race, successes } from './race.ts';
+import { Barrier, BarrierBroken, failures, race, successes, within } from './race.ts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -107,6 +107,19 @@ describe('Barrier', () => {
 
   it.each([0, -1, 0.5, Number.POSITIVE_INFINITY])('refuses a timeout of %s ms', (timeoutMs) => {
     expect(() => new Barrier(2, timeoutMs)).toThrow(RangeError);
+  });
+});
+
+describe('within', () => {
+  it('gives back what the work gives back, and what it throws', async () => {
+    await expect(within(1_000, Promise.resolve('done'), 'the work')).resolves.toBe('done');
+    await expect(within(1_000, Promise.reject(new Error('refused')), 'the work')).rejects.toThrow('refused');
+  });
+
+  it('rejects, naming the work, once the time has passed', async () => {
+    await expect(within(20, new Promise(() => undefined), 'the stuck work')).rejects.toThrow(
+      'Waited 20 ms for the stuck work',
+    );
   });
 });
 

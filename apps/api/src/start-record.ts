@@ -15,9 +15,9 @@ export interface StartFacts {
 }
 
 /**
- * Writes `platform.started` in a transaction of its own, waiting only so long
- * for the chain's head (PlatformChain.recordAlone), and gives back its place in
- * the chain.
+ * Writes `platform.started` in a transaction of its own (PlatformChain.recordAlone),
+ * waiting only so long for the chain's head (PlatformChain.record), and gives
+ * back its place in the chain.
  */
 export async function recordStart(
   database: Database<PlatformControlsTables>,

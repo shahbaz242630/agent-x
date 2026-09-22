@@ -1,0 +1,13 @@
+{
+  "name": "@agentx/operator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentx/core": "workspace:*",
+    "@agentx/platform": "workspace:*"
+  },
+  "devDependencies": {
+    "@agentx/testing": "workspace:*"
+  }
+}

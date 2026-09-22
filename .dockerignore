@@ -9,6 +9,7 @@
 !apps/api/**
 !apps/migrate/**
 !apps/db-setup/**
+!apps/operator/**
 !packages/core/**
 !packages/platform/**
 !db/**

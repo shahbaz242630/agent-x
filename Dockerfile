@@ -1,5 +1,5 @@
-# The one image for the API, the migration job, the database set-up job and,
-# later, the worker (ADR-001): the same files, different start commands. Node
+# The one image for the API, the migration job, the database set-up job, the
+# operator's command and, later, the worker (ADR-001): the same files, different start commands. Node
 # 24 runs the TypeScript source itself (type stripping), so there is no build
 # step and the image holds exactly the files the repository holds.
 #
@@ -19,25 +19,27 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/
 COPY apps/migrate/package.json apps/migrate/
 COPY apps/db-setup/package.json apps/db-setup/
+COPY apps/operator/package.json apps/operator/
 COPY packages/core/package.json packages/core/
 COPY packages/platform/package.json packages/platform/
 
 # The apps and what they depend on inside the workspace (the `...` suffix), production dependencies only.
 RUN corepack enable pnpm \
-  && pnpm install --frozen-lockfile --prod --filter "@agentx/api..." --filter "@agentx/migrate..." --filter "@agentx/db-setup..."
+  && pnpm install --frozen-lockfile --prod --filter "@agentx/api..." --filter "@agentx/migrate..." --filter "@agentx/db-setup..." --filter "@agentx/operator..."
 
 FROM node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
 
 ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
   org.opencontainers.image.revision="${AGENTX_RELEASE}" \
-  org.opencontainers.image.description="Agent X: the API, the migration job, the database set-up job and the worker"
+  org.opencontainers.image.description="Agent X: the API, the migration job, the database set-up job, the operator's command and the worker"
 
 WORKDIR /app
 COPY --from=dependencies /app /app
 COPY apps/api apps/api
 COPY apps/migrate apps/migrate
 COPY apps/db-setup apps/db-setup
+COPY apps/operator apps/operator
 COPY packages/core packages/core
 COPY packages/platform packages/platform
 COPY db db

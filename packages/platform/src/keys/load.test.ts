@@ -35,9 +35,13 @@ function everyPurpose(): Record<string, string> {
 }
 
 /** The problems a start is refused with. */
-function problemsOf(directory: string, current: Partial<Record<KeyPurpose, number>> = {}): readonly string[] {
+function problemsOf(
+  directory: string,
+  current: Partial<Record<KeyPurpose, number>> = {},
+  held: readonly KeyPurpose[] = PURPOSES,
+): readonly string[] {
   try {
-    loadKeys({ directory, current });
+    loadKeys({ directory, current }, held);
   } catch (error) {
     if (error instanceof ConfigError) return error.problems;
     throw error;
@@ -179,6 +183,35 @@ describe('reading the keys from the files the platform mounts', () => {
       `key-unknown-v1 is not a key the app knows: key files are named key-<purpose>-v<version>, the purpose one of ${PURPOSES.join(', ')}`,
       'audit-mac has no key for its current version 1 (key-audit-mac-v1)',
       'field-encryption has no key for its current version 2 (key-field-encryption-v2)',
+    ]);
+  });
+});
+
+describe('a process that holds only some keys', () => {
+  it('reads the keys of the purposes it holds, and holds no others', () => {
+    const keys = loadKeys({ directory: keysDirectory({ 'key-audit-mac-v1': encoded(3) }), current: {} }, ['audit-mac']);
+
+    expect(keys.describe().map((entry) => entry.purpose)).toEqual(['audit-mac']);
+    expect(keys.mac('audit-mac', ['x']).keyVersion).toBe(1);
+  });
+
+  it("refuses a key file for a purpose it doesn't hold, rather than ignore it, and never reads it", () => {
+    const directory = keysDirectory({ 'key-audit-mac-v1': encoded(3), 'key-field-encryption-v1': 'not a key' });
+
+    expect(problemsOf(directory, {}, ['audit-mac'])).toEqual([
+      "key-field-encryption-v1 is a key this process doesn't hold: only audit-mac may be mounted for it",
+    ]);
+  });
+
+  it("refuses a current version for a purpose it doesn't hold", () => {
+    expect(problemsOf(keysDirectory({ 'key-audit-mac-v1': encoded(3) }), { 'request-hash': 2 }, ['audit-mac'])).toEqual(
+      ["AGENTX_KEYS_CURRENT names request-hash, a key this process doesn't hold"],
+    );
+  });
+
+  it('still needs the current version of each purpose it holds', () => {
+    expect(problemsOf(keysDirectory({}), { 'audit-mac': 2 }, ['audit-mac'])).toEqual([
+      'audit-mac has no key for its current version 2 (key-audit-mac-v2)',
     ]);
   });
 });

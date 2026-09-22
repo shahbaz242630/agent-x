@@ -1,6 +1,7 @@
 // What the live schema check logs, and what it decides. The rules themselves
 // are proven against a real database in schema-guard.db.test.ts; these are
-// about the two answers the API needs — may it start, and what does it say.
+// about the two answers a process needs (the API, the operator's command): may
+// it go on, and what does it say.
 import { LogCapture } from '@agentx/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -40,7 +41,7 @@ beforeEach(() => {
 });
 
 describe('at start-up', () => {
-  it('lets the API go on when the live schema matches, and says so', async () => {
+  it('lets the process go on when the live schema matches, and says so', async () => {
     const log = logger();
     expect(await schemaSoundAtStart(options(log))).toBe(true);
     expect(log.capture.lines()).toMatchObject([{ level: 'info', event: 'db.schema_checked', problems: 0 }]);
@@ -68,7 +69,7 @@ describe('at start-up', () => {
     const log = logger();
     expect(await schemaSoundAtStart(options(log))).toBe(false);
     const events = log.capture.lines().map((line) => line.event);
-    expect(events).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(events).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
     expect(log.capture.lines()[0]).toMatchObject({ check: 'schema', reason: 'unreadable' });
   });
 });
@@ -93,7 +94,7 @@ describe('on a scheduled run', () => {
     guard.result = (): Promise<string[]> => Promise.reject(new Error('connection reset'));
     const log = logger();
     await expect(checkSchemaOnSchedule(options(log))).resolves.toBeUndefined();
-    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
   });
 });
 
@@ -106,7 +107,7 @@ describe('the deadline', () => {
     guard.result = (): Promise<string[]> => new Promise(() => undefined);
     const log = logger();
     await expect(checkSchemaOnSchedule({ ...options(log), deadlineMs: 20 })).resolves.toBeUndefined();
-    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
     expect(log.capture.lines()[0]).toMatchObject({ check: 'schema', reason: 'unreadable' });
   });
 
@@ -116,15 +117,16 @@ describe('the deadline', () => {
     expect(await schemaSoundAtStart({ ...options(log), deadlineMs: 20 })).toBe(false);
   });
 
-  it('ends at once when the API is stopping, without waiting for the deadline', async () => {
+  it('ends at once when the process is stopping, without waiting for the deadline', async () => {
     guard.result = (): Promise<string[]> => new Promise(() => undefined);
     const log = logger();
     const stopping = new AbortController();
     stopping.abort();
-    const started = Date.now();
+    // A monotonic timer: this measures how long the check took, not what time it is.
+    const started = performance.now();
     await checkSchemaOnSchedule({ ...options(log), deadlineMs: 60_000, signal: stopping.signal });
-    expect(Date.now() - started).toBeLessThan(5_000);
-    // The stop is the API's own doing, so it raises no alarm: a routine shutdown must not page anyone.
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // The stop is the process's own doing, so it raises no alarm: a routine shutdown must not page anyone.
     expect(log.capture.lines()).toEqual([]);
   });
 
@@ -153,7 +155,7 @@ describe('the deadline', () => {
     const log = logger();
     await checkSchemaOnSchedule({ ...options(log), signal: stopping.signal });
     expect(stopping.signal.aborted).toBe(true);
-    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
   });
 
   it('declines a start that is stopped mid-check, with no alarm', async () => {
@@ -169,7 +171,7 @@ describe('the deadline', () => {
     guard.result = (): Promise<string[]> => Promise.reject(new Error('permission denied for table pg_class'));
     const log = logger();
     await checkSchemaOnSchedule({ ...options(log), signal: new AbortController().signal });
-    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'api.schema_unreadable']);
+    expect(log.capture.lines().map((line) => line.event)).toEqual(['audit.integrity_failed', 'db.schema_unreadable']);
   });
 
   it('lets a read that answers in time through untouched', async () => {

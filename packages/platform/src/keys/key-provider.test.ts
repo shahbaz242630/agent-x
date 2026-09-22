@@ -334,7 +334,7 @@ describe('each key does only its own job', () => {
     [
       "a purpose that doesn't exist",
       (keys: KeyProvider) => keys.mac('api-token' as MacPurpose, REQUEST),
-      'api-token is not a mac key',
+      'api-token is not a key this process holds',
     ],
   ])('refuses %s', (_what, use, message) => {
     expect(() => use(provider())).toThrow(new KeyError(message));
@@ -390,9 +390,65 @@ describe('the keys stay inside the provider (ADR-011 §2)', () => {
     const given = material();
     const keys = createKeyProvider(given);
     const before = keys.mac('audit-mac', REQUEST);
-    for (const purpose of PURPOSES) for (const bytes of given[purpose].versions.values()) bytes.fill(0);
+    for (const purpose of PURPOSES) for (const bytes of given[purpose]?.versions.values() ?? []) bytes.fill(0);
 
     expect(keys.mac('audit-mac', REQUEST)).toEqual(before);
+  });
+});
+
+describe('a process that holds only some keys', () => {
+  const auditOnly = (): KeyProvider => createKeyProvider({ 'audit-mac': oneVersion(3) }, ['audit-mac']);
+
+  it('holds exactly the purposes it is told, and uses them as any provider does', () => {
+    const keys = auditOnly();
+
+    expect(keys.describe().map((entry) => entry.purpose)).toEqual(['audit-mac']);
+    expect(keys.mac('audit-mac', REQUEST)).toEqual(provider().mac('audit-mac', REQUEST));
+  });
+
+  it.each([
+    ['a keyed hash', (keys: KeyProvider) => keys.mac('request-hash', REQUEST), 'request-hash'],
+    [
+      'checking a keyed hash',
+      (keys: KeyProvider) => keys.verifyMac('agent-key-pepper', 1, REQUEST, key(1)),
+      'agent-key-pepper',
+    ],
+    ['encrypting', (keys: KeyProvider) => keys.encrypt('field-encryption', key(9), ROW), 'field-encryption'],
+    [
+      'decrypting',
+      (keys: KeyProvider) => keys.decrypt('field-encryption', { keyVersion: 1, ciphertext: key(9) }, ROW),
+      'field-encryption',
+    ],
+    ['signing', (keys: KeyProvider) => keys.sign('audit-anchor', REQUEST), 'audit-anchor'],
+    [
+      'checking a signature',
+      (keys: KeyProvider) => keys.verifySignature('audit-anchor', 1, REQUEST, Buffer.alloc(64)),
+      'audit-anchor',
+    ],
+  ])('refuses %s with a key it does not hold', (_what, use, purpose) => {
+    expect(() => use(auditOnly())).toThrow(new KeyError(`${purpose} is not a key this process holds`));
+  });
+
+  it('refuses keys given for a purpose it does not hold', () => {
+    const given = { 'audit-mac': oneVersion(3), 'payee-index': oneVersion(4), 'audit-anchor': oneVersion(6) };
+
+    expect(keyMaterialProblems(given, ['audit-mac'])).toEqual([
+      'payee-index is not a key this process holds, so none may be given',
+      'audit-anchor is not a key this process holds, so none may be given',
+    ]);
+    expect(() => createKeyProvider(given, ['audit-mac'])).toThrow(KeyError);
+  });
+
+  it('refuses to hold no key at all', () => {
+    expect(keyMaterialProblems({}, [])).toEqual(['a process must hold at least one key']);
+    expect(() => createKeyProvider({}, [])).toThrow(KeyError);
+  });
+
+  it('refuses a purpose it holds with no keys given', () => {
+    expect(keyMaterialProblems({}, ['audit-mac', 'request-hash'])).toEqual([
+      'request-hash has no key for its current version 1 (key-request-hash-v1)',
+      'audit-mac has no key for its current version 1 (key-audit-mac-v1)',
+    ]);
   });
 });
 
@@ -432,6 +488,17 @@ describe('which sets of keys can be used', () => {
     expect(keyMaterialProblems(material({ 'audit-mac': rotated(95, 95) }))).toEqual([
       'key-audit-mac-v2 holds the same key as key-audit-mac-v1: every key must be its own',
     ]);
+  });
+
+  it('holds every purpose unless told otherwise, so a missing one is refused', () => {
+    expect(() => createKeyProvider({ 'audit-mac': oneVersion(3) })).toThrow(
+      new KeyError(
+        "The keys can't be used:\n" +
+          PURPOSES.filter((purpose) => purpose !== 'audit-mac')
+            .map((purpose) => `- ${purpose} has no key for its current version 1 (key-${purpose}-v1)`)
+            .join('\n'),
+      ),
+    );
   });
 
   it('is refused by the provider too, with every problem listed', () => {

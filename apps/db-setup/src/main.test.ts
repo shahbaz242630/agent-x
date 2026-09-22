@@ -51,7 +51,7 @@ describe('SEC-AV-03 the set-up job refuses to run on a bad config', () => {
         service: 'db-setup',
         event: 'db_setup.start_refused',
         problems: [
-          'AGENTX_DB_PASSWORD belongs to the app (apps/api); the set-up job reads only the database, log and login settings it needs',
+          "AGENTX_DB_PASSWORD belongs to the app (apps/api) and the operator's command (apps/operator); the set-up job reads only the database, log and login settings it needs",
           'AGENTX_DB_APP_PASSWORD is required, or AGENTX_DB_APP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
           'AGENTX_DB_BACKUP_PASSWORD is required, or AGENTX_DB_BACKUP_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',
           'AGENTX_DB_ZITADEL_PASSWORD is required, or AGENTX_DB_ZITADEL_PASSWORD_FILE with the path of a file that holds it (a mounted secret)',

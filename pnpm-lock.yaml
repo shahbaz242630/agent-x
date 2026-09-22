@@ -108,6 +108,19 @@ importers:
         specifier: workspace:*
         version: link:../../packages/testing
 
+  apps/operator:
+    dependencies:
+      '@agentx/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@agentx/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
+    devDependencies:
+      '@agentx/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
+
   packages/core:
     dependencies:
       '@agentx/platform':

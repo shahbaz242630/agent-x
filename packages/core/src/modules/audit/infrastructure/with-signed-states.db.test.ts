@@ -3,7 +3,7 @@
 // when the hold is set, in which transaction, how often, and what the caller
 // gets back. The organisation's own row, and the owner's scripts on it and on
 // the hold, are the organizations module's owner-tamper.db.test.ts.
-import { sealState, stateSealDetails } from '@agentx/platform/audit-chain';
+import { ChainBroken, sealState, stateSealDetails } from '@agentx/platform/audit-chain';
 import {
   createTestDatabase,
   LogCapture,
@@ -19,7 +19,7 @@ import {
   TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
-import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -78,7 +78,7 @@ let attacker: TestSession;
 const keys = createKeyProvider(
   Object.fromEntries(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
-  ) as unknown as KeyMaterial,
+  ),
 );
 const ids = new SequentialIds(0x600);
 const trail: AuditTrail = createAuditTrail({ keys, ids });
@@ -444,6 +444,17 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ level: 'error', chain: 'organisation', check: 'record', orgId: org }),
     ]);
+  });
+
+  it("names the platform's chain when that is the one refusing, as an operator action's work may meet it (B1c)", async () => {
+    await expect(inOrg(() => Promise.reject(new ChainBroken({ kind: 'platform' })))).rejects.toMatchObject({
+      name: 'ChainBroken',
+      chain: { kind: 'platform' },
+    });
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ level: 'error', chain: 'platform', check: 'record' }),
+    ]);
+    expect(lines('audit.integrity_failed')[0]).not.toHaveProperty('orgId');
   });
 
   it('IDs given in capitals: held all the same, under the one organisation, named in lower case', async () => {

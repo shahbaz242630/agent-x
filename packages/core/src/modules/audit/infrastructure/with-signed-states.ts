@@ -101,7 +101,11 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
       return work(tx, states);
     });
   } catch (error) {
-    if (error instanceof ChainBroken) {
+    // Named by the chain that refused: the work may record on the platform's
+    // too (an operator action records on both, ADR-006 §6).
+    if (error instanceof ChainBroken && error.chain.kind === 'platform') {
+      logger.error('audit.integrity_failed', { chain: 'platform', check: 'record' });
+    } else if (error instanceof ChainBroken) {
       logger
         .child({ orgId: orgId.toLowerCase() })
         .error('audit.integrity_failed', { chain: 'organisation', check: 'record' });
