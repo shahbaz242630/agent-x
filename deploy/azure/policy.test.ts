@@ -2102,7 +2102,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // A job the deployment needs, left out. CI's role would then be given on
     // a migration job this deployment doesn't make, and the owner-login alert
     // would pair logins with its starts.
-    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup']) {
+    for (const workload of ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator']) {
       expect({ workload, rules: brokenRules(without(JOB(workload))) }).toEqual({
         workload,
         rules: workload === 'migrate' ? ['owner-login-alert', 'release-access', 'jobs'] : ['jobs'],

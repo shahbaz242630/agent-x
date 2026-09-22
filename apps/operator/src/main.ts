@@ -142,8 +142,8 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
     read = readRequestFile(file);
   } catch (error) {
     // The system's reason alone (ENOENT, EACCES…); anything else is a bug.
-    if (!(error instanceof Error && 'code' in error && typeof error.code === 'string')) throw error;
-    return problem(`the request file can't be read (${error.code})`);
+    if (!(error instanceof Error && 'code' in error)) throw error;
+    return problem(`the request file can't be read (${String(error.code)})`);
   }
   if ('problems' in read) return read;
   let words: unknown;
