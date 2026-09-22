@@ -284,6 +284,8 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
       client: { kind: 'agent', id: AGENT.toUpperCase() },
     });
     expect(await write(shouted)).toEqual({ outcome: 'replayed', result });
+    // Logged in lower case too, so one search finds every line about the client.
+    expect(linesNamed('idempotency.replayed')).toEqual([expect.objectContaining({ orgId: ORG, clientId: AGENT })]);
   });
 
   it("answers the resource's ID as Postgres prints it, whatever case the write gave it in", async () => {
@@ -389,14 +391,16 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     expect(await storedKeys(key)).toHaveLength(1);
   });
 
-  it("leaves no claim behind when the write takes the claim's savepoint away before it fails", async () => {
+  it("leaves no claim behind when the write rolls back past the claim's savepoint before it fails", async () => {
     const key = newKey();
-    const refusal = new Error('refused after releasing the savepoint');
+    const refusal = new Error('refused after rolling back to an earlier savepoint');
 
     await withTenant(app, ORG, async (tx) => {
+      await sql`savepoint before_the_claim`.execute(tx);
       await expect(
         writes().run(tx, requestFor(key), async () => {
-          await sql`release savepoint idempotency_claim`.execute(tx);
+          // Undoes the claim and ends its savepoint, which then can't be rolled back to.
+          await sql`rollback to savepoint before_the_claim`.execute(tx);
           throw refusal;
         }),
       ).rejects.toBe(refusal);
@@ -405,7 +409,28 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     expect(linesNamed('idempotency.rollback_failed')).toEqual([
       expect.objectContaining({ level: 'error', idempotencyKey: key }),
     ]);
-    // The failed rollback aborted the transaction, so its commit rolled back the claim.
+    expect(await storedKeys(key)).toEqual([]);
+  });
+
+  it('leaves its transaction usable when the claim itself fails', async () => {
+    const key = newKey();
+    const noted = newId();
+    const owner = database.as('owner');
+    // The claim's insert fails: the app's right to add keys taken away, as the table's owner could.
+    await owner.query('revoke insert on idempotency.keys from agentx_app');
+    try {
+      await withTenant(app, ORG, async (tx) => {
+        await expect(writes().run(tx, requestFor(key), () => createItem(tx, ORG))).rejects.toMatchObject({
+          code: '42501',
+        });
+        // Rolled back to before the claim, so the transaction goes on and commits.
+        await tx.insertInto('probe.items').values({ org_id: ORG, id: noted, label: 'after a failed claim' }).execute();
+      });
+    } finally {
+      await owner.query('grant insert on idempotency.keys to agentx_app');
+    }
+
+    expect(await items()).toContainEqual({ id: noted });
     expect(await storedKeys(key)).toEqual([]);
   });
 });

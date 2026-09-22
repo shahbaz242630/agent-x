@@ -181,8 +181,17 @@ interface KeyRow {
   readonly key: string;
 }
 
-/** Transactions that have claimed a key: one claim each, whatever the first one's outcome. */
+/**
+ * Transactions that have claimed a key: one claim each, whatever the first
+ * one's outcome. Matched by the transaction object; a handle made from it
+ * (`withSchema`, `withPlugin`) is another object, but a second claim through
+ * one after an answer from a row holds no lock the first took, so no one can
+ * wait on both.
+ */
 const claimedIn = new WeakSet<object>();
+
+/** How many claims this process has made: each savepoint's name. */
+let claims = 0;
 
 const notFirst = (): IdempotencyFailed =>
   new IdempotencyFailed(
@@ -236,89 +245,112 @@ export function createIdempotentWrites({
       };
       const message = requestMessage(request);
 
-      // Waits, if another transaction holds the key's row uncommitted, until
-      // its claim ends: then nothing is inserted if it committed, and this row
-      // is if it rolled back. Every statement filters by org_id too (ADR-005 §7).
-      // The savepoint is never released: the commit ends it with the
+      const at: Claim<Schema> = { tx, row, log, facts };
+
+      // Named afresh for each claim, so no savepoint of the write's own can
+      // stand in for it. Never released: the commit ends it with the
       // transaction, and a release would cost a round trip and change nothing.
-      const { mac, keyVersion } = keys.mac('request-hash', message);
-      await sql`savepoint idempotency_claim`.execute(tx);
-      const claimed = await sql<{ claimed: number }>`
-        insert into idempotency.keys
-          (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
-        values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
-          pg_catalog.now())
-        on conflict (org_id, client_kind, client_id, operation, key) do nothing
-        returning 1 as claimed
-      `.execute(tx);
-
-      if (claimed.rows.length === 1) {
-        let result: IdempotentResult;
-        try {
-          result = await doAndRecord(tx, row, work, log, facts);
-        } catch (error) {
-          try {
-            await sql`rollback to savepoint idempotency_claim`.execute(tx);
-          } catch (rollbackError) {
-            // A failed statement aborts the transaction, and a lost connection
-            // ends it, so the claim can't be committed either way: the write's
-            // own error is the one to throw.
-            log.error('idempotency.rollback_failed', { ...facts, err: rollbackError });
-          }
-          throw error;
+      claims += 1;
+      const savepoint = sql.id(`idempotency_claim_${claims.toString()}`);
+      await sql`savepoint ${savepoint}`.execute(tx);
+      try {
+        // Waits, if another transaction holds the key's row uncommitted, until
+        // its claim ends: then nothing is inserted if it committed, and this
+        // row is if it rolled back. Every statement filters by org_id too
+        // (ADR-005 §7).
+        const { mac, keyVersion } = keys.mac('request-hash', message);
+        const claimed = await sql<{ claimed: number }>`
+          insert into idempotency.keys
+            (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
+          values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
+            pg_catalog.now())
+          on conflict (org_id, client_kind, client_id, operation, key) do nothing
+          returning 1 as claimed
+        `.execute(tx);
+        if (claimed.rows.length === 1) {
+          return Object.freeze({ outcome: 'done', result: await doAndRecord(at, work) });
         }
-        return Object.freeze({ outcome: 'done', result });
+        return await answerFromRow(at, keys, message);
+      } catch (error) {
+        // Whatever failed, the transaction is left as it was before the claim,
+        // and usable: a caller that catches the error can still commit the rest.
+        try {
+          await sql`rollback to savepoint ${savepoint}`.execute(tx);
+        } catch (rollbackError) {
+          // The write's own error is thrown either way. The failed rollback
+          // aborts the savepoint level the write left the transaction in, and a
+          // lost connection ends the transaction, so the claim can't be
+          // committed, unless the write itself released or replaced the
+          // caller's savepoints, which no step may do.
+          log.error('idempotency.rollback_failed', { ...facts, err: rollbackError });
+        }
+        throw error;
       }
-
-      // READ COMMITTED: this statement sees the row the insert waited for.
-      const { rows } = await sql<StoredKey>`
-        select request_hash, request_hash_key_version, result_status, result_id from idempotency.keys
-        where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
-          and operation = ${row.operation} and key = ${row.key}
-      `.execute(tx);
-      const [stored] = rows;
-      if (stored === undefined) {
-        // The primary key saw a row that row security hides from this read:
-        // someone past the app rewrote the table's policy.
-        log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
-        throw new IdempotencyFailed(
-          'unreadable',
-          "The idempotency key's row stood in the way of the claim, but can't be read",
-        );
-      }
-      const { request_hash: hash, request_hash_key_version: hashKeyVersion } = stored;
-      if (stored.result_status === null || stored.result_id === null) {
-        log.error('idempotency.unreadable', { ...facts, problem: 'no_result' });
-        throw new IdempotencyFailed(
-          'unreadable',
-          "The idempotency key's row holds no result, though its claim committed",
-        );
-      }
-      const result = Object.freeze({ status: stored.result_status, resourceId: stored.result_id });
-
-      // A version retired before the retention ran out (Azure.md, "Rotating a
-      // key") can't check the row: refused, never taken for a conflict.
-      const held = keys
-        .describe()
-        .some(
-          ({ purpose, versions }) =>
-            purpose === 'request-hash' && versions.some(({ version }) => version === hashKeyVersion),
-        );
-      if (!held) {
-        log.error('idempotency.key_not_held', { ...facts, keyVersion: hashKeyVersion });
-        throw new IdempotencyFailed(
-          'key_not_held',
-          "The idempotency key's row was made with a request-hash key version this process doesn't hold",
-        );
-      }
-      if (!keys.verifyMac('request-hash', hashKeyVersion, message, hash)) {
-        log.warn('idempotency.conflict', facts);
-        return Object.freeze({ outcome: 'conflict' });
-      }
-      log.info('idempotency.replayed', { ...facts, resultStatus: result.status });
-      return Object.freeze({ outcome: 'replayed', result });
     },
   });
+}
+
+/** One claim's transaction, row and logging. */
+interface Claim<Schema> {
+  readonly tx: Transaction<Schema>;
+  readonly row: KeyRow;
+  readonly log: Logger;
+  readonly facts: Readonly<Record<string, string>>;
+}
+
+/**
+ * The answer for a key some earlier request claimed: its stored result for
+ * the same request, a conflict for another. Throws for a row it can't trust.
+ */
+async function answerFromRow<Schema>(
+  { tx, row, log, facts }: Claim<Schema>,
+  keys: KeyProvider,
+  message: Message,
+): Promise<IdempotentWrite> {
+  // READ COMMITTED: this statement sees the row the insert waited for.
+  const { rows } = await sql<StoredKey>`
+    select request_hash, request_hash_key_version, result_status, result_id from idempotency.keys
+    where org_id = ${row.orgId} and client_kind = ${row.kind} and client_id = ${row.clientId}
+      and operation = ${row.operation} and key = ${row.key}
+  `.execute(tx);
+  const [stored] = rows;
+  if (stored === undefined) {
+    // The primary key saw a row that row security hides from this read:
+    // someone past the app rewrote the table's policy.
+    log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
+    throw new IdempotencyFailed(
+      'unreadable',
+      "The idempotency key's row stood in the way of the claim, but can't be read",
+    );
+  }
+  const { request_hash: hash, request_hash_key_version: hashKeyVersion } = stored;
+  if (stored.result_status === null || stored.result_id === null) {
+    log.error('idempotency.unreadable', { ...facts, problem: 'no_result' });
+    throw new IdempotencyFailed('unreadable', "The idempotency key's row holds no result, though its claim committed");
+  }
+  const result = Object.freeze({ status: stored.result_status, resourceId: stored.result_id });
+
+  // A version retired before the retention ran out (Azure.md, "Rotating a
+  // key") can't check the row: refused, never taken for a conflict.
+  const held = keys
+    .describe()
+    .some(
+      ({ purpose, versions }) =>
+        purpose === 'request-hash' && versions.some(({ version }) => version === hashKeyVersion),
+    );
+  if (!held) {
+    log.error('idempotency.key_not_held', { ...facts, keyVersion: hashKeyVersion });
+    throw new IdempotencyFailed(
+      'key_not_held',
+      "The idempotency key's row was made with a request-hash key version this process doesn't hold",
+    );
+  }
+  if (!keys.verifyMac('request-hash', hashKeyVersion, message, hash)) {
+    log.warn('idempotency.conflict', facts);
+    return Object.freeze({ outcome: 'conflict' });
+  }
+  log.info('idempotency.replayed', { ...facts, resultStatus: result.status });
+  return Object.freeze({ outcome: 'replayed', result });
 }
 
 /**
@@ -327,11 +359,8 @@ export function createIdempotentWrites({
  * roll back.
  */
 async function doAndRecord<Schema>(
-  tx: Transaction<Schema>,
-  row: KeyRow,
+  { tx, row, log, facts }: Claim<Schema>,
   work: () => Promise<IdempotentResult>,
-  log: Logger,
-  facts: Readonly<Record<string, string>>,
 ): Promise<IdempotentResult> {
   const answer = await work();
   const bad = resultProblem(answer);
