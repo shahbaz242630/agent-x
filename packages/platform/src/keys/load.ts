@@ -4,10 +4,10 @@
 // base64url. Other files there (a database password) are left alone.
 //
 // Anything wrong refuses the start, with every problem listed: a key file
-// with a name the app doesn't know, one that can't be read or doesn't hold a
-// key, a purpose without its current version, a copy of another key, or a
-// second version of a key that is never rotated in place. Problems name the
-// file, never what it holds.
+// with a name the app doesn't know, or for a purpose the process doesn't
+// hold, one that can't be read or doesn't hold a key, a purpose without its
+// current version, a copy of another key, or a second version of a key that
+// is never rotated in place. Problems name the file, never what it holds.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -19,7 +19,7 @@ import {
   keyMaterialProblems,
   type KeyProvider,
 } from './key-provider.ts';
-import { byPurpose, isKeyPurpose, type KeyPurpose, PURPOSES } from './purposes.ts';
+import { isKeyPurpose, type KeyPurpose, PURPOSES } from './purposes.ts';
 
 export interface KeySettings {
   /** Where the key files are. */
@@ -65,8 +65,14 @@ function readKey(path: string, name: string): Buffer | string {
     : `${name} must hold one key: ${KEY_BYTES} random bytes written as base64url, 43 characters`;
 }
 
-/** Reads every key file, or throws a ConfigError listing every problem. */
-export function loadKeys(settings: KeySettings): KeyProvider {
+/**
+ * Reads every key file, or throws a ConfigError listing every problem. A
+ * process holds the keys of the purposes `held` (every purpose when not
+ * given: the API's) and no others: a file or a current version for another
+ * purpose is refused, not ignored, since a key mounted where it has no use is
+ * one more place it can leak from.
+ */
+export function loadKeys(settings: KeySettings, held: readonly KeyPurpose[] = PURPOSES): KeyProvider {
   let names: string[];
   try {
     names = readdirSync(settings.directory);
@@ -82,16 +88,31 @@ export function loadKeys(settings: KeySettings): KeyProvider {
       problems.push(found.problem);
       continue;
     }
+    if (!held.includes(found.purpose)) {
+      // Left unread: what it holds changes nothing.
+      problems.push(`${name} is a key this process doesn't hold: only ${held.join(', ')} may be mounted for it`);
+      continue;
+    }
     const key = readKey(join(settings.directory, name), name);
     if (typeof key === 'string') problems.push(key);
     else keys.push({ ...found, key });
   }
+  for (const purpose of PURPOSES) {
+    if (settings.current[purpose] !== undefined && !held.includes(purpose)) {
+      problems.push(`AGENTX_KEYS_CURRENT names ${purpose}, a key this process doesn't hold`);
+    }
+  }
 
-  const material: KeyMaterial = byPurpose((purpose) => ({
-    current: settings.current[purpose] ?? 1,
-    versions: new Map(keys.filter((found) => found.purpose === purpose).map((found) => [found.version, found.key])),
-  }));
-  problems.push(...keyMaterialProblems(material));
+  const material: KeyMaterial = Object.fromEntries(
+    held.map((purpose) => [
+      purpose,
+      {
+        current: settings.current[purpose] ?? 1,
+        versions: new Map(keys.filter((found) => found.purpose === purpose).map((found) => [found.version, found.key])),
+      },
+    ]),
+  );
+  problems.push(...keyMaterialProblems(material, held));
   if (problems.length > 0) throw new ConfigError(problems);
-  return createKeyProvider(material);
+  return createKeyProvider(material, held);
 }

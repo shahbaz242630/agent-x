@@ -83,7 +83,7 @@ const schemaCheck = vi.hoisted(() => ({
   scheduledRuns: 0,
 }));
 
-vi.mock('./schema-check.ts', () => ({
+vi.mock('@agentx/core/schema-check', () => ({
   OWNER_ROLE: 'agentx_owner',
   schemaSoundAtStart: () => {
     fake.steps.push('schema checked');

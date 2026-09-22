@@ -13,6 +13,7 @@
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
@@ -30,7 +31,6 @@ import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { buildServer } from './server.ts';
-import { checkSchemaOnSchedule, schemaSoundAtStart } from './schema-check.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */

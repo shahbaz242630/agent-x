@@ -194,8 +194,8 @@ describe('SEC-AV-03 the set-up job refuses a bad config, naming each problem', (
   });
 
   it.each([
-    ['AGENTX_DB_PASSWORD', 'the app (apps/api)'],
-    ['AGENTX_DB_USER', 'the app (apps/api)'],
+    ['AGENTX_DB_PASSWORD', "the app (apps/api) and the operator's command (apps/operator)"],
+    ['AGENTX_DB_USER', "the app (apps/api) and the operator's command (apps/operator)"],
     ['AGENTX_HTTP_PORT', 'the app (apps/api)'],
     ['AGENTX_DB_MIGRATION_PASSWORD', 'the migration job (apps/migrate)'],
   ])("refuses %s, another job's setting, by name", (name, job) => {
@@ -210,7 +210,10 @@ describe("SEC-AV-03 the other jobs refuse the set-up job's settings", () => {
     const readers = Object.values(READERS);
     for (const reader of readers) expect(new Set(reader.reads).size).toBe(reader.reads.length);
     const setupOnly = READERS.setup.reads.filter(
-      (name) => !READERS.app.reads.includes(name) && !READERS.migrate.reads.includes(name),
+      (name) =>
+        !READERS.app.reads.includes(name) &&
+        !READERS.migrate.reads.includes(name) &&
+        !READERS.operator.reads.includes(name),
     );
     expect(setupOnly).toEqual([
       'AGENTX_DB_ADMIN_USER',

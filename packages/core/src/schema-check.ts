@@ -1,5 +1,6 @@
 // A3e-1b: the API checks the database's security-relevant catalogue against
-// what the migrations built, at start and on every anchor-check run.
+// what the migrations built, at start and on every anchor-check run; the
+// operator's command (B1c) checks it at its start, before it writes anything.
 //
 // **At start it refuses to start.** A database whose walls have been rewritten
 // must not be served from, the same way A2b-2 refuses to start on a broken
@@ -15,9 +16,10 @@
 // the SEV-1 alert rule A2c-2 installed already matches, so this needs no new
 // alert. The problems name rules and objects, never a value read from the
 // database, so the alarm can't carry tampered text into the log.
-import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { type Database, liveSchemaProblems, type SchemaProblem } from '@agentx/platform/db';
 import type { Logger } from '@agentx/platform/observability';
+
+import { AUTHORITY_TABLES } from './authority-tables.ts';
 
 /**
  * The role that owns the database and everything the migrations make, fixed by
@@ -153,7 +155,7 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
   } else {
     // A database that won't answer is not a database we can vouch for.
     options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', reason: 'unreadable' });
-    options.logger.error('api.schema_unreadable', { err: outcome.error });
+    options.logger.error('db.schema_unreadable', { err: outcome.error });
   }
   return false;
 }
@@ -170,5 +172,5 @@ export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<
     return;
   }
   options.logger.error('audit.integrity_failed', { check: 'schema', when: 'running', reason: 'unreadable' });
-  options.logger.error('api.schema_unreadable', { err: outcome.error });
+  options.logger.error('db.schema_unreadable', { err: outcome.error });
 }

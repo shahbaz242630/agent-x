@@ -1,5 +1,5 @@
 // The owner role's name is written in two places that can't import each other:
-// `db/bootstrap/roles.sql`, which creates it, and the API's schema check, which
+// `db/bootstrap/roles.sql`, which creates it, and the live schema check, which
 // compares every object's owner against it (A3e-1b). A rename in the SQL alone
 // would leave the guard comparing against a role that no longer exists — every
 // table would look like it had changed hands, and every start would be refused.
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { OWNER_ROLE } from '../../apps/api/src/schema-check.ts';
+import { OWNER_ROLE } from '../../packages/core/src/schema-check.ts';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const roles = (): string => readFileSync(path.join(ROOT, 'db', 'bootstrap', 'roles.sql'), 'utf8');

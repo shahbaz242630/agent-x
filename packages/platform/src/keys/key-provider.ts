@@ -113,7 +113,7 @@ export interface KeyProvider {
   decrypt(purpose: AeadPurpose, sealed: Sealed, associatedData: Message): Buffer;
   sign(purpose: SigningPurpose, message: Message): Signature;
   verifySignature(purpose: SigningPurpose, keyVersion: number, message: Message, signature: Uint8Array): boolean;
-  /** Every purpose's versions, current version and check values. */
+  /** Each purpose held: its versions, current version and check values. */
   describe(): readonly KeyDescription[];
 }
 
@@ -123,18 +123,25 @@ export interface PurposeKeys {
   readonly versions: ReadonlyMap<number, Uint8Array>;
 }
 
-export type KeyMaterial = Readonly<Record<KeyPurpose, PurposeKeys>>;
+/** The keys of each purpose a process holds; a purpose it doesn't hold has none. */
+export type KeyMaterial = Readonly<Partial<Record<KeyPurpose, PurposeKeys>>>;
 
 /**
- * Why a set of keys can't be used, or nothing: every purpose has its current
- * version, every key is 32 bytes and none is another's copy, and a key that is
- * never rotated in place has only version 1 (ADR-014 §3).
+ * Why a set of keys can't be used, or nothing: every purpose held has its
+ * current version, no key is given for a purpose that isn't held, every key is
+ * 32 bytes and none is another's copy, and a key that is never rotated in
+ * place has only version 1 (ADR-014 §3).
  */
-export function keyMaterialProblems(material: KeyMaterial): string[] {
+export function keyMaterialProblems(material: KeyMaterial, held: readonly KeyPurpose[] = PURPOSES): string[] {
   const problems: string[] = [];
   const seen = new Map<string, string>();
   for (const purpose of PURPOSES) {
-    const { current, versions } = material[purpose];
+    const given = material[purpose];
+    if (!held.includes(purpose)) {
+      if (given !== undefined) problems.push(`${purpose} is not a key this process holds, so none may be given`);
+      continue;
+    }
+    const { current, versions } = given ?? { current: 1, versions: new Map<number, Uint8Array>() };
     if (!versions.has(current)) {
       problems.push(`${purpose} has no key for its current version ${current} (key-${purpose}-v${current})`);
     }
@@ -201,24 +208,34 @@ function hold(purpose: KeyPurpose, { current, versions }: PurposeKeys): Held {
 }
 
 /**
- * The in-process provider, holding its own copy of each key. Throws a
- * KeyError if the keys break a rule of `keyMaterialProblems`.
+ * The in-process provider, holding its own copy of each key of the purposes
+ * `held` (every purpose when not given: the API's). A process that needs only
+ * some keys holds only those, so a key it has no use for can't leak from it
+ * (the operator's command holds `audit-mac` alone). Throws a KeyError if the
+ * keys break a rule of `keyMaterialProblems`.
  *
  * Nothing clears the bytes it was given: JavaScript can't clear the strings a
  * key was read through, so the protection is the process's own memory, not
  * wiping one copy of several (ADR-011 §2: an HSM adapter is the answer for a
  * bank that needs more).
  */
-export function createKeyProvider(material: KeyMaterial): KeyProvider {
-  const problems = keyMaterialProblems(material);
+export function createKeyProvider(material: KeyMaterial, held: readonly KeyPurpose[] = PURPOSES): KeyProvider {
+  const problems = keyMaterialProblems(material, held);
   if (problems.length > 0) throw new KeyError(`The keys can't be used:\n- ${problems.join('\n- ')}`);
-  const held = new Map(PURPOSES.map((purpose) => [purpose, hold(purpose, material[purpose])]));
+  const holding = new Map<KeyPurpose, Held>();
+  for (const purpose of PURPOSES) {
+    const given = material[purpose];
+    // Given only for a purpose held, which then has its keys (keyMaterialProblems).
+    if (given !== undefined) holding.set(purpose, hold(purpose, given));
+  }
 
   // A caller the compiler can't see (plain JavaScript, or a cast) could still
-  // name another kind's purpose: refuse it rather than use a key for the wrong job.
+  // name a purpose not held, or another kind's: refuse it rather than use a key
+  // for the wrong job.
   const heldAs = (purpose: KeyPurpose, kind: KeyKind): Held => {
-    const entry = held.get(purpose);
-    if (entry?.kind !== kind) throw new KeyError(`${purpose} is not a ${kind} key`);
+    const entry = holding.get(purpose);
+    if (entry === undefined) throw new KeyError(`${purpose} is not a key this process holds`);
+    if (entry.kind !== kind) throw new KeyError(`${purpose} is not a ${kind} key`);
     return entry;
   };
   const keyFor = (purpose: KeyPurpose, kind: KeyKind, version: number): KeyObject => {
@@ -286,7 +303,7 @@ export function createKeyProvider(material: KeyMaterial): KeyProvider {
     },
 
     describe(): readonly KeyDescription[] {
-      return Object.freeze([...held.values()].map((entry) => entry.description));
+      return Object.freeze([...holding.values()].map((entry) => entry.description));
     },
   });
 }

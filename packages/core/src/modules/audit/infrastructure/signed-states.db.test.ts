@@ -23,7 +23,7 @@ import {
   TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
-import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -103,7 +103,7 @@ let attacker: TestSession;
 const keys = createKeyProvider(
   Object.fromEntries(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
-  ) as unknown as KeyMaterial,
+  ),
 );
 const trail: AuditTrail = createAuditTrail({ keys, ids: new SequentialIds(0x100) });
 let capture: LogCapture;

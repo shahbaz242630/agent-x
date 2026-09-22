@@ -7,7 +7,7 @@ import { AsyncResource } from 'node:async_hooks';
 
 import { ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createKeyProvider, type KeyMaterial, PURPOSES } from '@agentx/platform/keys';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
@@ -33,7 +33,7 @@ let attacker: TestSession;
 const keys = createKeyProvider(
   Object.fromEntries(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
-  ) as unknown as KeyMaterial,
+  ),
 );
 const chain = createPlatformChain({ keys, ids: new SequentialIds(0x200) });
 

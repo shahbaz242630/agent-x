@@ -268,15 +268,15 @@ describe("SEC-AV-03 the other job's settings are refused by name", () => {
   );
 
   it.each([
-    'AGENTX_HTTP_PORT',
-    'AGENTX_PUBLIC_ORIGIN',
-    'AGENTX_DB_USER',
-    'AGENTX_DB_PASSWORD',
-    'AGENTX_DB_PASSWORD_FILE',
-    'AGENTX_DB_POOL_MAX',
-  ])('the migration job refuses %s', (name) => {
+    ['AGENTX_HTTP_PORT', 'the app (apps/api)'],
+    ['AGENTX_PUBLIC_ORIGIN', 'the app (apps/api)'],
+    ['AGENTX_DB_USER', "the app (apps/api) and the operator's command (apps/operator)"],
+    ['AGENTX_DB_PASSWORD', "the app (apps/api) and the operator's command (apps/operator)"],
+    ['AGENTX_DB_PASSWORD_FILE', "the app (apps/api) and the operator's command (apps/operator)"],
+    ['AGENTX_DB_POOL_MAX', 'the app (apps/api)'],
+  ])('the migration job refuses %s', (name, owners) => {
     expect(jobProblems({ ...JOB, [name]: 'x' })).toEqual([
-      `${name} belongs to the app (apps/api); the migration job reads only the database and log settings`,
+      `${name} belongs to ${owners}; the migration job reads only the database and log settings`,
     ]);
   });
 
