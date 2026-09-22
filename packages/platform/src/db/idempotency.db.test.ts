@@ -412,6 +412,24 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
     expect(await storedKeys(key)).toEqual([]);
   });
 
+  it("keeps a savepoint the write opens of its own from standing in for the claim's", async () => {
+    const key = newKey();
+    const refusal = new Error('refused inside a savepoint of its own');
+
+    await withTenant(app, ORG, async (tx) => {
+      await expect(
+        writes().run(tx, requestFor(key), async () => {
+          await sql`savepoint idempotency_claim`.execute(tx);
+          await createItem(tx, ORG);
+          throw refusal;
+        }),
+      ).rejects.toBe(refusal);
+    });
+
+    expect(await storedKeys(key)).toEqual([]);
+    expect(linesNamed('idempotency.rollback_failed')).toEqual([]);
+  });
+
   it('leaves its transaction usable when the claim itself fails', async () => {
     const key = newKey();
     const noted = newId();

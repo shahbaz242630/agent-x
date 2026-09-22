@@ -190,8 +190,12 @@ interface KeyRow {
  */
 const claimedIn = new WeakSet<object>();
 
-/** How many claims this process has made: each savepoint's name. */
-let claims = 0;
+/**
+ * The claim's savepoint, a name no other step may use: a rollback goes to the
+ * newest savepoint of its name, so a write's own savepoint of the same name
+ * would stand in for the claim's, and a refused claim could then be committed.
+ */
+const CLAIM_SAVEPOINT = 'agentx_idempotency_claim';
 
 const notFirst = (): IdempotencyFailed =>
   new IdempotencyFailed(
@@ -247,11 +251,9 @@ export function createIdempotentWrites({
 
       const at: Claim<Schema> = { tx, row, log, facts };
 
-      // Named afresh for each claim, so no savepoint of the write's own can
-      // stand in for it. Never released: the commit ends it with the
-      // transaction, and a release would cost a round trip and change nothing.
-      claims += 1;
-      const savepoint = sql.id(`idempotency_claim_${claims.toString()}`);
+      // Never released: the commit ends it with the transaction, and a release
+      // would cost a round trip and change nothing.
+      const savepoint = sql.id(CLAIM_SAVEPOINT);
       await sql`savepoint ${savepoint}`.execute(tx);
       try {
         // Waits, if another transaction holds the key's row uncommitted, until
