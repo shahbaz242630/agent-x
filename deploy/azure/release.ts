@@ -93,11 +93,25 @@ export function handDeployedList(parsed: unknown): readonly HandDeployed[] {
  * reads, not the TypeScript there (the tools, this one among them). The list is
  * a data file beside the Bicep for that reason: changing it counts as changing
  * Azure's set-up, so a change to the gate itself goes red once. The set-up
- * job's own files count too, wherever they are: only a person runs it.
+ * job's own files count too, wherever they are: only a person runs it. A test
+ * file never counts (TEST_FILE).
  */
 export const HAND_DEPLOYED: readonly HandDeployed[] = handDeployedList(
   JSON.parse(readFileSync(new URL('./hand-deployed.json', import.meta.url), 'utf8')) as unknown,
 );
+
+/**
+ * How a test file's name ends: in any area, a change to one needs no hand
+ * deploy (partner, S41, narrowing S23), since it reaches nothing a person
+ * deploys. The image leaves it out (.dockerignore's last rule for test files,
+ * after everything it lets in) and no deployment reads it (what Bicep says,
+ * pinned in release.test.ts). Compared with case, as the image build's
+ * patterns are, so `main.Test.ts`, which the image would hold, still counts.
+ * Kept here rather than in hand-deployed.json, so narrowing the gate didn't
+ * turn a release red for nothing: like the rest of this tool, a change to it
+ * is reviewed, not gated, and any other ending fails the .dockerignore test.
+ */
+export const TEST_FILE = '.test.ts';
 
 /**
  * The hand-deployed area a file belongs to, if any. The start is compared
@@ -105,10 +119,12 @@ export const HAND_DEPLOYED: readonly HandDeployed[] = handDeployedList(
  * where `deploy/azure/x` goes; the exception with it, so `.TS` still counts.
  */
 const handDeployed = (file: string): HandDeployed | undefined =>
-  HAND_DEPLOYED.find(
-    ({ prefix, except }) =>
-      file.toLowerCase().startsWith(prefix.toLowerCase()) && (except === undefined || !file.endsWith(except)),
-  );
+  file.endsWith(TEST_FILE)
+    ? undefined
+    : HAND_DEPLOYED.find(
+        ({ prefix, except }) =>
+          file.toLowerCase().startsWith(prefix.toLowerCase()) && (except === undefined || !file.endsWith(except)),
+      );
 
 /** The repository, whose paths git gives relative to it. */
 const REPOSITORY = path.resolve(import.meta.dirname, '../..');
