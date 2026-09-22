@@ -4,5 +4,6 @@
     ".": {
       "project": ["**/*.{js,mjs,ts,tsx}", "!tooling/gate-proofs/fixtures/**"]
     }
-  }
+  },
+  "ignoreBinaries": ["mkfifo"]
 }
