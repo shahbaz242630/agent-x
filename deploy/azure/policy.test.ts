@@ -2667,6 +2667,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual(['workload-secrets']);
+    // The operator's job holding something else of its own, even as none: only its request.
+    expect(
+      brokenRules(
+        changed(operator, (job) => {
+          declaredSecrets(job).push({ name: 'operator-note', value: '[]' });
+          mounted(job).push({ secretRef: 'operator-note', path: 'operator-note' });
+        }),
+      ),
+    ).toEqual(['no-secret-literals', 'workload-secrets']);
     // Another job holding one, even as none: only the operator's may.
     expect(
       brokenRules(
