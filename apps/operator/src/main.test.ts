@@ -1,14 +1,19 @@
 // B1c: what the operator's command refuses before it connects to a database,
-// and that it never repeats what was typed. Its settings point at a port
+// and that it never repeats what was typed or what its job's request file
+// holds (B1c-2a). Its settings point at a port
 // nothing listens on, so a refusal that connected first would say the
 // database was unavailable instead. What it does once connected is
 // main.db.test.ts.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { type OperatorProcess, REQUEST_LIMIT_BYTES, runOperator, USAGE } from './main.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ keys: undefined as Error | undefined, name: undefined as Error | undefined }));
@@ -192,5 +197,119 @@ describe("B1c what the operator's command refuses before it connects", () => {
     });
     expect(text).not.toContain(NAME);
     expect(text).not.toContain(APP_LOGIN);
+  });
+});
+
+describe("B1c-2a the request the operator's job reads from its file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-request-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  let written = 0;
+  /** A request file holding exactly this text. */
+  const requestFile = (text: string): string => {
+    written += 1;
+    const file = path.join(folder, `request-${String(written)}`);
+    writeFileSync(file, text);
+    return file;
+  };
+
+  it('reads the words the file holds as if they were typed, repeating none of them', async () => {
+    const file = requestFile(JSON.stringify(['create-organization', '--name', NAME]));
+
+    const { code, events, line, text } = await run(['--request', file]);
+
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: 'create-organization' });
+    expect(text).not.toContain(NAME);
+  });
+
+  it(`reads a file of exactly ${String(REQUEST_LIMIT_BYTES)} bytes, and refuses one byte more`, async () => {
+    const words = JSON.stringify(['create-organization', '--name', NAME]);
+    const full = `${words}${' '.repeat(REQUEST_LIMIT_BYTES - words.length)}`;
+
+    expect((await run(['--request', requestFile(full)])).events).toEqual([
+      'operator.starting',
+      'operator.database_unavailable',
+    ]);
+    const over = await run(['--request', requestFile(`${full} `)]);
+    expect(over.events).toEqual(['operator.refused']);
+    expect(over.line('operator.refused')?.problems).toEqual([
+      `the request file holds more than ${String(REQUEST_LIMIT_BYTES)} bytes`,
+    ]);
+    expect(over.text).not.toContain(NAME);
+  });
+
+  it.each([
+    [
+      'the job as deployed, which holds no request',
+      '[]',
+      'no request was written for this run: the job holds none until a person writes one',
+    ],
+    [
+      'text that is not JSON',
+      'create-organization --name Quartzite Other Co',
+      "the request file must hold a JSON list of the command's words",
+    ],
+    [
+      'an object',
+      '{"create-organization":"Quartzite Other Co"}',
+      "the request file must hold a JSON list of the command's words",
+    ],
+    [
+      'a word that is not text',
+      '["create-organization","--name",["Quartzite Other Co"]]',
+      "the request file must hold a JSON list of the command's words",
+    ],
+    [
+      'a command it does not know',
+      '["delete-organization","--name","Quartzite Other Co"]',
+      `the command is ${USAGE}, with the name quoted as one argument, and nothing else`,
+    ],
+    [
+      'a second request inside it',
+      '["--request","Quartzite Other Co"]',
+      `the command is ${USAGE}, with the name quoted as one argument, and nothing else`,
+    ],
+  ])('refuses %s, repeating nothing it holds', async (_what, contents, problem) => {
+    const { code, host, events, line, text } = await run(['--request', requestFile(contents)]);
+
+    expect(code).toBe(1);
+    expect(host.exitCode).toBe(1);
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([problem]);
+    expect(text).not.toContain('Quartzite');
+  });
+
+  it('refuses a name the file holds that breaks the rules, naming the rule', async () => {
+    const { events, line, text } = await run([
+      '--request',
+      requestFile(JSON.stringify(['create-organization', '--name', ' Leading Quartzite Co'])),
+    ]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual(['the name starts or ends with a space']);
+    expect(text).not.toContain('Quartzite');
+  });
+
+  it.each([
+    ['no file', ['--request']],
+    ['more than the file', ['--request', path.join(folder, 'request-0'), 'Quartzite Other Co']],
+  ])('refuses %s after --request', async (_what, argv) => {
+    const { events, line, text } = await run(argv);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      '--request takes the one file that holds the request, and nothing else',
+    ]);
+    expect(text).not.toContain('Quartzite');
+  });
+
+  it("says why a file can't be read by the system's reason alone", async () => {
+    const { events, line } = await run(['--request', path.join(folder, 'never-written')]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual(["the request file can't be read (ENOENT)"]);
   });
 });

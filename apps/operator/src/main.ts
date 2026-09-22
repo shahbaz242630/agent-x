@@ -3,18 +3,26 @@
 // tenant walls hold it as hold the API. Its one command, for now:
 //
 //   node apps/operator/src/main.ts create-organization --name <name>
+//   node apps/operator/src/main.ts --request <file>
+//
+// The second is how its job on Azure runs it (apps.bicep): the file holds the
+// same words as a JSON list, written by the person starting the run (jobs.ts),
+// since a run started with arguments of its own would lose its mounted files.
 //
 // It:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
 // 2. reads its settings and its one key (`audit-mac`), or refuses to run and says why (SEC-AV-03)
 // 3. reads what it was asked and checks the name, before it connects: a
-//    refusal names each rule broken, never the name, which is never logged
+//    refusal names each rule broken, never the name, which is never logged,
+//    nor anything else a request file holds
 // 4. connects as the app's role, and refuses one that could get round the tenant walls (ADR-005 §3)
 // 5. checks the live schema, and refuses to write through walls that have been rewritten (A3e-1b)
 // 6. creates the organisation, on its own audit chain and the platform's,
 //    and exits 0; 1 when anything is refused or fails, with nothing changed,
 //    unless the connection was lost as the creation committed (see run's
 //    catch: the failure names the organisation's ID, to look for first)
+import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
+
 import { OrganizationRefused, organizationName } from '@agentx/core/modules/organizations';
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -43,6 +51,12 @@ const HELD_KEYS = ['audit-mac'] as const;
 /** What the operator types after the command's path, the name as one argument. */
 export const USAGE = 'create-organization --name <name>';
 
+/** How the job names the file its request is in. */
+const REQUEST_FLAG = '--request';
+
+/** The most a request file may hold: a command and one name, with room to spare. */
+export const REQUEST_LIMIT_BYTES = 4096;
+
 /** The parts of `process` the command uses. Tests pass a stand-in. */
 export interface OperatorProcess {
   readonly stdout: Output;
@@ -66,13 +80,65 @@ interface Request {
   readonly name: string;
 }
 
+/** Why a request can't be done, each rule broken. */
+interface Problems {
+  readonly problems: readonly string[];
+}
+
+/** A file's text, or nothing when it is longer than a request can be. */
+function readLimited(file: string): string | undefined {
+  const descriptor = openSync(file, 'r');
+  try {
+    return fstatSync(descriptor).size > REQUEST_LIMIT_BYTES ? undefined : readFileSync(descriptor, 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+/**
+ * The words a request file holds, a JSON list of the command's arguments, or
+ * the problems. A problem says what is wrong with the file, never what is in it.
+ */
+function requestWords(argv: readonly string[]): { readonly words: readonly string[] } | Problems {
+  const [, file, ...rest] = argv;
+  if (file === undefined || rest.length > 0) {
+    return { problems: [`${REQUEST_FLAG} takes the one file that holds the request, and nothing else`] };
+  }
+  let text: string | undefined;
+  try {
+    text = readLimited(file);
+  } catch (error) {
+    // The system's reason alone (ENOENT, EACCES, EISDIR…); anything else is a bug.
+    if (!(error instanceof Error && 'code' in error && typeof error.code === 'string')) throw error;
+    return { problems: [`the request file can't be read (${error.code})`] };
+  }
+  if (text === undefined) {
+    return { problems: [`the request file holds more than ${String(REQUEST_LIMIT_BYTES)} bytes`] };
+  }
+  let words: unknown;
+  try {
+    words = JSON.parse(text);
+  } catch {
+    words = undefined;
+  }
+  if (!Array.isArray(words) || !words.every((word) => typeof word === 'string')) {
+    return { problems: ["the request file must hold a JSON list of the command's words"] };
+  }
+  if (words.length === 0) {
+    return { problems: ['no request was written for this run: the job holds none until a person writes one'] };
+  }
+  return { words };
+}
+
 /**
  * What the operator asked for, or the problems. Nothing typed is repeated in
  * a problem: the name could be anywhere among the arguments, and a name is
  * never logged.
  */
-function readRequest(argv: readonly string[]): Request | { readonly problems: readonly string[] } {
-  const [command, flag, name, ...rest] = argv;
+function readRequest(argv: readonly string[]): Request | Problems {
+  const asked = argv[0] === REQUEST_FLAG ? requestWords(argv) : { words: argv };
+  if ('problems' in asked) return asked;
+  const [command, flag, name, ...rest] = asked.words;
   if (command !== 'create-organization' || flag !== '--name' || name === undefined || rest.length > 0) {
     return { problems: [`the command is ${USAGE}, with the name quoted as one argument, and nothing else`] };
   }

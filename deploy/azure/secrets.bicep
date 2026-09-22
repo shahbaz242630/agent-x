@@ -23,7 +23,7 @@
 //   holds the same list
 // - every value comes from the shell that deploys, never from this repository
 //   (Rule Book §7), and none is ever an output
-import { appKeys, resourceNames, uniqueSuffix } from 'names.bicep'
+import { appKeys, operatorKeys, resourceNames, uniqueSuffix } from 'names.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -100,7 +100,7 @@ var secrets = [
   {
     name: 'db-app-password'
     value: dbAppPassword
-    readers: ['db-setup', 'api']
+    readers: ['db-setup', 'api', 'operator']
   }
   {
     name: 'db-backup-password'
@@ -142,9 +142,11 @@ var access = concat(
     readers: secret.readers
   }),
   [masterKey],
+  // The API reads every key; the operator's command the audit chains' MAC
+  // alone, each version of it, as the API does (ADR-011 §3).
   map(appKeys, key => {
     name: key
-    readers: ['api']
+    readers: startsWith(key, operatorKeys) ? ['api', 'operator'] : ['api']
   })
 )
 

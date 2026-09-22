@@ -217,12 +217,16 @@ const TELEMETRY_SETTINGS = [
  * again here so that changing who reads what takes both. A sentence each,
  * because GitGuardian read an app's name beside a secret's name as a password,
  * whichever held which (PRs #27 and #28). The set-up job reads every database
- * login, since each of its runs sets them all. The API alone reads each of the
- * app's keys (ADR-011 §2), from the one list of them (app-keys.json).
+ * login, since each of its runs sets them all. The API reads each of the app's
+ * keys (ADR-011 §2), from the one list of them (app-keys.json); the operator's
+ * command, the app's login and every version of the audit chains' MAC alone
+ * (ADR-011 §3, B1c).
  */
 const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.map((key) => `api reads ${key}`),
+  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-')).map((key) => `operator reads ${key}`),
   'api reads db-app-password',
+  'operator reads db-app-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
   'db-setup reads db-app-password',
@@ -255,10 +259,21 @@ const secretsRead = (workload: string): ReadonlySet<string> =>
 
 /**
  * Every job the deployment runs, each started by hand (ADR-002 Amendment G2d):
- * a server's roles and databases, the app's migrations, and Zitadel's own init
- * and setup. This list is what must be there.
+ * a server's roles and databases, the app's migrations, Zitadel's own init and
+ * setup, and the operator's command (B1c). This list is what must be there.
  */
-const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'];
+const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup', 'operator'];
+
+/**
+ * What a job may hold itself rather than read from the vault, by the job: only
+ * the operator's request (apps.bicep `operatorRequest`), and only as no
+ * request. It isn't a secret: it is kept as one so Azure never shows back what
+ * a person writes into it before a run (jobs.ts). It reaches the job as a file,
+ * like everything else it is given, and is in no vault and no grant.
+ */
+const HELD: Readonly<Record<string, { readonly name: string; readonly value: string }>> = {
+  operator: { name: 'operator-request', value: '[]' },
+};
 
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): the API, Zitadel and
@@ -741,7 +756,8 @@ const isOwnKeyMember = (secret: PredictedResource, value: unknown): boolean =>
  * any property whose name ends in "password" or "secret" (a switch named after
  * one, like `passwordAuth`, doesn't), a key vault secret's value, and the value
  * of every entry in a `secrets` list (Container Apps' own secrets). One of the
- * app's keys holds its own member of the parameter they arrive in.
+ * app's keys holds its own member of the parameter they arrive in, and a job
+ * holds what `HELD` gives it, which is no secret, as written there.
  */
 const noSecretLiterals: Check = (snapshot, _expected, add) => {
   const refuse = (resource: PredictedResource, where: string): void => {
@@ -752,6 +768,11 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
     });
   };
   const literal = (value: unknown): boolean => typeof value === 'string' && !PARAMETER_REFERENCE.test(value);
+  /** Whether a Container Apps secret is what its job may hold: its name and value exactly as `HELD` gives them. */
+  const heldBy = (resource: PredictedResource, entry: unknown): boolean => {
+    const held = resource.type === TYPES.job ? HELD[jobWorkloadOf(resource.name)] : undefined;
+    return held !== undefined && at(entry, 'name') === held.name && at(entry, 'value') === held.value;
+  };
   const walk = (resource: PredictedResource, value: unknown, trail: string): void => {
     if (typeof value !== 'object' || value === null) return;
     for (const [key, child] of Object.entries(value)) {
@@ -759,7 +780,9 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
       if (/(?:password|secret)$/i.test(key) && literal(child)) refuse(resource, where);
       if (key === 'secrets') {
         list(child).forEach((entry, index) => {
-          if (literal(at(entry, 'value'))) refuse(resource, `${where}[${String(index)}].value`);
+          if (literal(at(entry, 'value')) && !heldBy(resource, entry)) {
+            refuse(resource, `${where}[${String(index)}].value`);
+          }
         });
       }
       walk(resource, child, where);
@@ -1925,7 +1948,7 @@ const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
  * Apps has no lock between runs, so starting one at a time is the operator's
  * (Azure.md "The jobs"); what this rule holds is that no run is a clock's or an
  * event's, and that one replica does the work. Together
- * they are the four jobs a deployment needs, so a dropped one is caught here
+ * they are the five jobs a deployment needs, so a dropped one is caught here
  * rather than at the first deployment.
  */
 const jobs: Check = (snapshot, _expected, add) => {
@@ -2244,6 +2267,7 @@ const secretsUsed = (job: PredictedResource): { readonly environment: string[]; 
  * of them read, and nothing read that it wasn't given. A secret reaches a
  * container as a mounted file, except in the few settings
  * `SECRETS_IN_ENVIRONMENT` lists for an image that has no file form for them.
+ * Besides, a job holds what `HELD` says it may, exactly once and as given there.
  */
 const workloadSecrets: Check = (snapshot, _expected, add) => {
   const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
@@ -2260,10 +2284,24 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     if (assigned.length !== 1 || workloadOf(only.slice(only.lastIndexOf('/') + 1)) !== workload) {
       problem(`must run as its own identity alone, the one named for ${workload}`);
     }
-    const declared = list(at(job.properties, 'configuration', 'secrets'));
-    const given = declared.map((secret) => text(at(secret, 'name')));
+    const all = list(at(job.properties, 'configuration', 'secrets'));
+    const held = HELD[workload];
+    const holding = all.filter((secret) => text(at(secret, 'name')) === held?.name);
+    if (held !== undefined) {
+      const [kept] = holding;
+      const fields = typeof kept === 'object' && kept !== null ? Object.keys(kept) : [];
+      if (
+        holding.length !== 1 ||
+        at(kept, 'value') !== held.value ||
+        fields.some((field) => field !== 'name' && field !== 'value')
+      ) {
+        problem(`must hold ${held.name} once, as ${held.value} and nothing else: a person writes it before a run`);
+      }
+    }
+    const declared = all.filter((secret) => !holding.includes(secret));
+    const given = all.map((secret) => text(at(secret, 'name')));
     const needed = secretsRead(workload);
-    for (const name of given.filter((secret) => !needed.has(secret))) {
+    for (const name of declared.map((secret) => text(at(secret, 'name'))).filter((secret) => !needed.has(secret))) {
       problem(`is given ${name}, which GRANTS doesn't let ${workload} read`);
     }
     for (const name of [...needed].filter((secret) => !given.includes(secret))) {

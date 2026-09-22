@@ -274,10 +274,20 @@ describe('parseArguments', () => {
     expect(parseArguments(['cleanup'])).toEqual({ command: 'cleanup', job: 'zitadel-setup' });
   });
 
-  it('reads the three ways the runner is used, for every job', () => {
+  it("reads the three ways the runner is used, for every job, and only waits for the operator's", () => {
     for (const job of JOBS) {
-      expect(parseArguments(['run', job])).toEqual({ command: 'run', job });
-      expect(parseArguments(['start', job])).toEqual({ command: 'start', job });
+      if (job === 'operator') {
+        // Started as deployed, it holds no request and refuses (B1c-2a).
+        expect(() => parseArguments(['run', job])).toThrow(
+          new UsageError("the operator's job isn't run as it is deployed: it holds no request, and refuses"),
+        );
+        expect(() => parseArguments(['start', job])).toThrow(
+          new UsageError("the operator's job isn't started as it is deployed: it holds no request, and refuses"),
+        );
+      } else {
+        expect(parseArguments(['run', job])).toEqual({ command: 'run', job });
+        expect(parseArguments(['start', job])).toEqual({ command: 'start', job });
+      }
       expect(parseArguments(['wait', job, `${jobName(job)}-o2jp673`])).toEqual({
         command: 'wait',
         job,
@@ -389,16 +399,21 @@ describe('run', () => {
 
   it('names the next job in the order a first deploy runs them, and says when there is none', async () => {
     const next: string[] = [];
-    for (const job of JOBS) {
+    for (const job of JOBS.filter((each) => each !== 'operator')) {
       const done = await run(['run', job], { started: `${jobName(job)}-abc1234` });
       expect(done.status).toBe(0);
       next.push(done.said.at(-1) ?? '');
     }
+    // The operator's is no part of a first deploy.
+    const operator = await run(['wait', 'operator', `${jobName('operator')}-abc1234`]);
+    expect(operator.status).toBe(0);
+    next.push(operator.said.at(-1) ?? '');
     expect(next).toEqual([
       'In a first deploy, the next is: node deploy/azure/jobs.ts run migrate',
       'In a first deploy, the next is: node deploy/azure/jobs.ts run zitadel-init',
       'In a first deploy, the next is: node deploy/azure/jobs.ts run zitadel-setup',
       'That is the last of the four a first deploy runs.',
+      "The operator's request has run: the lines above say what it did.",
     ]);
   });
 
