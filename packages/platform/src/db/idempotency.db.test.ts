@@ -99,6 +99,22 @@ function loggerFor(destination: LogCapture) {
 const writes = (keys = KEYS) => createIdempotentWrites({ keys, logger: loggerFor(capture) });
 /** How long a race waits for its parties to queue: longer than the default, for a slow CI runner opening connections. */
 const QUEUE_WAIT = { timeoutMs: 20_000 };
+
+/** The promise's value, or a failure once `ms` have passed without one. */
+async function within<T>(ms: number, promise: Promise<T> | undefined, what: string): Promise<T> {
+  if (promise === undefined) throw new Error(`Nothing to wait for: ${what}`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Waited ${ms.toString()} ms for ${what}`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const linesNamed = (event: string) => capture.lines().filter((line) => line.event === event);
 
 let serial = 0;
@@ -381,8 +397,10 @@ describe('ADR-007 §4 a write with an idempotency key is done once', () => {
         .catch((error: unknown) => {
           if (error !== refusal) throw error;
         });
-      // Still open: the waiting request must finish before this transaction ends.
-      return waiting.second;
+      // Still open: the waiting request must finish before this transaction
+      // ends. Bounded, so a claim still held fails the test rather than hanging
+      // it; this transaction then rolls back, and the waiter goes on.
+      return within(QUEUE_WAIT.timeoutMs, waiting.second, 'the waiting request to finish');
     });
     await hasClaimed;
     waiting.second = write(requestFor(key, { payload: '{"label":"second"}' }));
