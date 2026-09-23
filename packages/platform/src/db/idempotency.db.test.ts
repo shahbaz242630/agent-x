@@ -916,14 +916,15 @@ describe('a key row changed past this step', () => {
     expect(linesNamed('idempotency.unreadable')).toEqual([
       expect.objectContaining({ level: 'error', problem: 'row_hidden' }),
     ]);
+    // Taken first for a key swept since (B1e-2): claimed again once, and hidden still.
+    expect(linesNamed('idempotency.claimed_again')).toEqual([expect.objectContaining({ idempotencyKey: key })]);
     expect(await write(requestFor(key))).toMatchObject({ outcome: 'replayed' });
   });
 });
 
 describe('the retention sweep (B1e, db/migrations/0009)', () => {
   /** A claimed key in the organisation, its claim moved back `age` (a Postgres interval) past the app. */
-  async function keyAged(orgId: string, age: string): Promise<string> {
-    const key = newKey();
+  async function keyAged(orgId: string, age: string, key = newKey()): Promise<string> {
     await firstWrite(requestFor(key, { orgId }));
     await admin.query(
       'update idempotency.keys set created_at = pg_catalog.now() - $3::interval where org_id = $1 and key = $2',
@@ -997,6 +998,66 @@ describe('the retention sweep (B1e, db/migrations/0009)', () => {
       name: 'IdempotencyFailed',
       reason: 'bad_request',
     });
+  });
+
+  it('B1e-2 claims a key again when it is swept between the claim meeting it and the claim reading it', async () => {
+    const org = newId();
+    const key = await keyAged(org, '31 days', 'swept-mid-claim');
+    const owner = database.as('owner');
+    // The sweep, landing at that very moment: the claim's read of the key's
+    // old row (the one with a result) deletes it, as the app may delete a key
+    // past its retention, and doesn't see it. Once only, so the delete's own
+    // read and every later one see rows as they are.
+    await owner.query(
+      `create function probe.swept_on_read(swept text, result integer) returns boolean
+       language plpgsql set search_path = pg_catalog as $$
+       begin
+         if swept <> 'swept-mid-claim' or result is null or current_setting('probe.swept', true) = 'yes' then return true; end if;
+         perform set_config('probe.swept', 'yes', true);
+         delete from idempotency.keys where key = swept;
+         return false;
+       end $$`,
+    );
+    await owner.query('grant execute on function probe.swept_on_read(text, integer) to agentx_app');
+    await owner.query(
+      'create policy swept_on_read on idempotency.keys as restrictive for select using (probe.swept_on_read(key, result_status))',
+    );
+    let outcome: IdempotentWrite;
+    try {
+      outcome = await write(requestFor(key, { orgId: org, payload: '{"label":"again"}' }));
+    } finally {
+      await owner.query('drop policy swept_on_read on idempotency.keys');
+      await owner.query('drop function probe.swept_on_read(text, integer)');
+    }
+
+    expect(outcome).toMatchObject({ outcome: 'done' });
+    expect(linesNamed('idempotency.claimed_again')).toEqual([
+      expect.objectContaining({ level: 'info', idempotencyKey: key, orgId: org }),
+    ]);
+    expect(linesNamed('idempotency.unreadable')).toEqual([]);
+    expect(await kept(org)).toEqual([key]);
+  });
+
+  it('FX-RACE a claim meeting a sweep still deleting its key waits for the sweep, then claims the key afresh', async () => {
+    const org = newId();
+    const key = await keyAged(org, '31 days');
+    let swept = (): void => undefined;
+    const hasSwept = new Promise<void>((resolve) => {
+      swept = resolve;
+    });
+    const sweeping = withTenant(app, org, async (tx) => {
+      const count = await sweepIdempotencyKeys(tx, org, 100);
+      swept();
+      // Still open, so the key's deletion isn't committed until the claim waits on it.
+      await waitUntilQueued(admin, 1, QUEUE_WAIT);
+      return count;
+    });
+    await hasSwept;
+    const claiming = write(requestFor(key, { orgId: org, payload: '{"label":"again"}' }));
+
+    expect(await sweeping).toBe(1);
+    expect(await within(QUEUE_WAIT.timeoutMs, claiming, 'the claim to finish')).toMatchObject({ outcome: 'done' });
+    expect(linesNamed('idempotency.claimed_again')).toEqual([]);
   });
 
   it("takes 10,000, and refuses to sweep outside the organisation's own withTenant", async () => {
