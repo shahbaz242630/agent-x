@@ -53,8 +53,9 @@ export function createRetentionSweep({
   // A step still under way past its deadline: one at most, so a hung database can't take every connection.
   let inFlight = false;
 
-  /** One step, within the deadline, and never beside another still running. */
+  /** One step, within the deadline, never beside another still running, and never once the run is stopped. */
   const step = async <T>(doing: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> => {
+    if (signal?.aborted === true) throw new Stopped('the sweep was stopped');
     if (inFlight) throw new Error('the last step of the sweep has not finished');
     inFlight = true;
     const running = Promise.resolve().then(doing);
@@ -70,7 +71,7 @@ export function createRetentionSweep({
   const sweepOne = async (orgId: string, signal: AbortSignal | undefined): Promise<number | 'failed'> => {
     let deleted = 0;
     try {
-      for (let round = 0; round < mostBatches && signal?.aborted !== true; round += 1) {
+      for (let round = 0; round < mostBatches; round += 1) {
         const swept = await step(() => sweep(orgId, batch), signal);
         deleted += swept;
         if (swept < batch) break;
@@ -101,8 +102,8 @@ export function createRetentionSweep({
         }
         let keys = 0;
         let failed = 0;
+        // Once stopped, each step refuses to start, so the rest go by without a query.
         for (const orgId of organizations) {
-          if (signal?.aborted === true) return;
           const outcome = await sweepOne(orgId, signal);
           if (outcome === 'failed') failed += 1;
           else keys += outcome;
