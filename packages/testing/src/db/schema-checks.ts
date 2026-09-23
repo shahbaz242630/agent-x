@@ -49,6 +49,21 @@ interface GlobalTable {
   readonly reason: string;
   /** Every column it has, exactly: a new column is a reviewed change to the list (SEC-TEN-08). */
   readonly columns: readonly string[];
+  /**
+   * Every right the app role may hold on it, whole or column by column: named
+   * for each global table outside the append-only schemas, and for none inside
+   * them, whose own rule holds them (B1d-1).
+   */
+  readonly appMay?: readonly string[];
+}
+
+/** A foreign key that must be there, validated (B1d-1). */
+interface RequiredForeignKey {
+  readonly reason: string;
+  readonly table: string;
+  readonly columns: readonly string[];
+  readonly references: string;
+  readonly referencedColumns: readonly string[];
 }
 
 export interface SchemaPolicy {
@@ -71,6 +86,12 @@ export interface SchemaPolicy {
    * as an idempotency key's result.
    */
   readonly fillInTables: Readonly<Record<string, FillInTable>>;
+  /**
+   * Foreign keys the migrations must make, validated, each with
+   * its reason: ones a check across organisations rests on, which the live
+   * schema guard holds the running database to as well.
+   */
+  readonly requiredForeignKeys: readonly RequiredForeignKey[];
 }
 
 /** A tenant table the app adds rows to and reads, and changes only in the columns named. */
@@ -124,10 +145,10 @@ const RELATIONS = `
  * NULL constraint NOT VALID, which marks the column NOT NULL while old rows
  * may still be null, so an unvalidated one doesn't count.
  *
- * **The NOT NULL expression is also in authority-checks.ts's COLUMNS query**:
- * the one piece of catalogue reading the two checkers hold twice. A Postgres
+ * **The NOT NULL expression is also in authority-checks.ts's COLUMNS query
+ * and in the live schema guard's foreignKeys** (schema-guard.ts): a Postgres
  * version that changes how an unvalidated NOT NULL is recorded has to be
- * followed in both.
+ * followed in all three.
  */
 const COLUMNS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
@@ -188,10 +209,13 @@ const KEYS_WITHOUT_ORG = `
 `;
 
 /**
- * Foreign keys in our schemas, and whether they pair org_id with org_id. A
- * partitioned table's key is listed for each partition too, since each
- * partition holds its own copy. unnest over two arrays is SQL syntax rather
- * than a function, like coalesce below, so neither is written with pg_catalog.
+ * Foreign keys in our schemas, whether they pair org_id with org_id, their
+ * columns and the ones they point at in order, and whether they are validated
+ * (a key added NOT VALID isn't, nor one Postgres 18 makes NOT ENFORCED, which
+ * it always marks not valid). A partitioned
+ * table's key is listed for each partition too, since each partition holds its
+ * own copy. unnest over two arrays is SQL syntax rather than a function, like
+ * coalesce below, so neither is written with pg_catalog.
  */
 const FOREIGN_KEYS = `
   select pg_catalog.format('%I.%I', sn.nspname, s.relname) as table, con.conname::text as name,
@@ -202,7 +226,20 @@ const FOREIGN_KEYS = `
            join pg_catalog.pg_attribute fa on fa.attrelid = con.conrelid and fa.attnum = k.from_attnum
            join pg_catalog.pg_attribute ta on ta.attrelid = con.confrelid and ta.attnum = k.to_attnum
            where fa.attname = 'org_id' and ta.attname = 'org_id'
-         ) as pairs_org_id
+         ) as pairs_org_id,
+         array(
+           select fa.attname::text
+           from unnest(con.conkey) with ordinality as k(attnum, position)
+           join pg_catalog.pg_attribute fa on fa.attrelid = con.conrelid and fa.attnum = k.attnum
+           order by k.position
+         ) as columns,
+         array(
+           select ta.attname::text
+           from unnest(con.confkey) with ordinality as k(attnum, position)
+           join pg_catalog.pg_attribute ta on ta.attrelid = con.confrelid and ta.attnum = k.attnum
+           order by k.position
+         ) as target_columns,
+         con.convalidated as holds
   from pg_catalog.pg_constraint con
   join pg_catalog.pg_class s on s.oid = con.conrelid
   join pg_catalog.pg_namespace sn on sn.oid = s.relnamespace
@@ -345,6 +382,10 @@ interface ForeignKey {
   name: string;
   target: string;
   pairs_org_id: boolean;
+  columns: string[];
+  target_columns: string[];
+  /** Validated: neither NOT VALID nor, on Postgres 18, NOT ENFORCED. */
+  holds: boolean;
 }
 
 interface Grant {
@@ -498,6 +539,7 @@ const CHECKED_LISTS: readonly string[] = [
   'appendOnlySchemas',
   'appendOnlyExceptions',
   'fillInTables',
+  'requiredForeignKeys',
 ] satisfies readonly (keyof SchemaPolicy)[];
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -513,6 +555,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
     ...globalListProblems(policy, facts),
     ...appendOnlyListProblems(policy, facts),
     ...fillInListProblems(policy, facts, roles),
+    ...requiredForeignKeyProblems(policy, facts),
     ...facts.relations.flatMap((relation) => relationProblems(relation, isGlobal(relation.name))),
     ...tenantTables.flatMap((table) => [
       ...orgIdProblems(
@@ -568,6 +611,44 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     }
     for (const column of table.columns.filter((column) => !actual.includes(column))) {
       problems.push(`${name}: the global-table list names column ${column}, which the table doesn't have`);
+    }
+    const appendOnly = policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`));
+    if (appendOnly && table.appMay !== undefined) {
+      problems.push(`${name}: the global-table list names the app's rights, but its schema is append-only`);
+    } else if (!appendOnly && table.appMay === undefined) {
+      problems.push(`${name}: the global-table list doesn't name the app's rights on it (B1d-1)`);
+    } else if (table.appMay !== undefined && new Set(table.appMay).size !== table.appMay.length) {
+      problems.push(`${name}: the global-table list names one of the app's rights twice`);
+    }
+    return problems;
+  });
+}
+
+/**
+ * Every required foreign key has a reason, and the migrations make it (an
+ * entry with no columns, or unpaired ones, matches no key), validated: from exactly its
+ * columns to exactly the ones it points at, each of them NOT NULL.
+ */
+function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[] {
+  const same = (a: readonly string[], b: readonly string[]): boolean =>
+    a.length === b.length && a.every((each, index) => each === b[index]);
+  return policy.requiredForeignKeys.flatMap((required) => {
+    const named = `${required.table}: the required foreign key to ${required.references}`;
+    const problems: string[] = [];
+    if (required.reason.trim() === '') problems.push(`${named} gives no reason for it`);
+    const matching = facts.foreignKeys.filter(
+      (key) =>
+        key.table === required.table &&
+        key.target === required.references &&
+        same(key.columns, required.columns) &&
+        same(key.target_columns, required.referencedColumns),
+    );
+    if (matching.length === 0) problems.push(`${named} is not made by the migrations`);
+    else if (!matching.some((key) => key.holds)) problems.push(`${named} is not validated`);
+    // A key lets a row with a null column through unchecked.
+    for (const column of required.columns) {
+      const found = facts.columns.find((row) => row.table === required.table && row.column === column);
+      if (found !== undefined && !found.not_null) problems.push(`${named}: column ${column} may be null`);
     }
     return problems;
   });
@@ -730,6 +811,15 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     return [
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only exception; it may only INSERT, SELECT and UPDATE (SEC-EVD-01)`,
     ];
+  }
+  // A global table that names the app's rights holds it to them, whole or
+  // column by column. Only a table's or a column's grant names a table.
+  const listed = Object.hasOwn(policy.globalTables, grant.relation)
+    ? policy.globalTables[grant.relation]?.appMay
+    : undefined;
+  if (listed !== undefined && grant.grantee === roles.app && !listed.includes(grant.privilege)) {
+    const may = listed.length === 0 ? 'it may hold nothing on it' : `it may only ${listed.join(', ')}`;
+    return [`${grant.object}: ${roles.app} has ${grant.privilege} on a global table; ${may} (B1d-1)`];
   }
   const fillIn = Object.hasOwn(policy.fillInTables, grant.relation) ? policy.fillInTables[grant.relation] : undefined;
   // What a fill-in table allows is also what any tenant table allows, so the

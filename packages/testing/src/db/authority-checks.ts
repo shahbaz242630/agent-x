@@ -164,11 +164,11 @@ const RELATION = `
  * Postgres 18 constraint that is NOT VALID marks the column while old rows may
  * still be null, so it doesn't count) and its default.
  *
- * **The NOT NULL expression is also in schema-checks.ts's COLUMNS query**; it
- * is the one piece of catalogue reading the two checkers still hold twice (the
- * connection and the query step are shared, in catalogue.ts). A Postgres
- * version that changes how an unvalidated NOT NULL is recorded has to be
- * followed in both.
+ * **The NOT NULL expression is also in schema-checks.ts's COLUMNS query and
+ * in the live schema guard's foreignKeys** (schema-guard.ts); the two CI
+ * checkers share the connection and the query step, in catalogue.ts. A
+ * Postgres version that changes how an unvalidated NOT NULL is recorded has to
+ * be followed in all three.
  */
 const COLUMNS = `
   select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, a.attname::text as column,

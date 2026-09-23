@@ -22,13 +22,14 @@ const major = Number(server.version.split('.')[0]);
  * fixture starts with no problems. The fixtures' own append-only tables go in
  * schema `journal`, apart from the real audit tables.
  */
-const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'] };
+const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'], appMay: [] };
 const REAL_EXCEPTIONS = SCHEMA_POLICY.appendOnlyExceptions;
 const POLICY: SchemaPolicy = {
   globalTables: { ...SCHEMA_POLICY.globalTables, 'migrations.applied': LEDGER },
   appendOnlySchemas: [...SCHEMA_POLICY.appendOnlySchemas, 'journal'],
   appendOnlyExceptions: REAL_EXCEPTIONS,
   fillInTables: SCHEMA_POLICY.fillInTables,
+  requiredForeignKeys: SCHEMA_POLICY.requiredForeignKeys,
 };
 /** The real global tables but the ledger, for the fixtures about the ledger alone. */
 const OTHER_GLOBALS = Object.fromEntries(
@@ -124,7 +125,11 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
       ...POLICY,
       globalTables: {
         ...POLICY.globalTables,
-        'g.people': { reason: 'A person can belong to several organisations', columns: ['id', 'joined_at'] },
+        'g.people': {
+          reason: 'A person can belong to several organisations',
+          columns: ['id', 'joined_at'],
+          appMay: ['SELECT'],
+        },
       },
     };
     const statements = [
@@ -179,7 +184,10 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
   it('ignores a dropped column of a global table', async () => {
     const policy: SchemaPolicy = {
       ...POLICY,
-      globalTables: { ...POLICY.globalTables, 'g.people': { reason: 'A test person', columns: ['id', 'joined_at'] } },
+      globalTables: {
+        ...POLICY.globalTables,
+        'g.people': { reason: 'A test person', columns: ['id', 'joined_at'], appMay: [] },
+      },
     };
     const statements = [
       'create schema g',
@@ -430,7 +438,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     it('fails rewrite rules on a table, global or tenant', async () => {
       const policy: SchemaPolicy = {
         ...POLICY,
-        globalTables: { ...POLICY.globalTables, 'g.people': { reason: 'A test person', columns: ['id'] } },
+        globalTables: { ...POLICY.globalTables, 'g.people': { reason: 'A test person', columns: ['id'], appMay: [] } },
       };
       const statements = [
         ...TENANT_TABLE,
@@ -546,7 +554,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         ...POLICY,
         globalTables: {
           ...POLICY.globalTables,
-          'g.links': { reason: 'A test link', columns: ['id', 'org_id', 'item_id'] },
+          'g.links': { reason: 'A test link', columns: ['id', 'org_id', 'item_id'], appMay: [] },
         },
       };
       const statements = [
@@ -578,7 +586,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         ...POLICY,
         globalTables: {
           ...OTHER_GLOBALS,
-          'migrations.applied': { reason: ' ', columns: ['name', 'name', 'checksum', 'applied_at'] },
+          'migrations.applied': { reason: ' ', columns: ['name', 'name', 'checksum', 'applied_at'], appMay: [] },
         },
       };
       expect(await problemsAfter([], policy)).toEqual([
@@ -945,6 +953,105 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         'audit.events: is on the fill-in list, but its schema is append-only',
         "audit.events: the fill-in list names column details, which agentx_app isn't granted UPDATE on",
         `column t.keys.result: agentx_app ${unlisted}`,
+      ]);
+    });
+  });
+
+  describe('B1d-1: a global table names the app’s rights, and the keys other checks rest on are made', () => {
+    const global = 'on a global table; it may only SELECT, INSERT (B1d-1)';
+
+    it('fails the directory given UPDATE or DELETE, whole or on its column', async () => {
+      const statements = [
+        'grant update, delete on directory.orgs to agentx_app',
+        'grant update (org_id) on directory.orgs to agentx_app',
+      ];
+      expect(await problemsAfter(statements)).toEqual([
+        `column directory.orgs.org_id: agentx_app has UPDATE ${global}`,
+        `table directory.orgs: agentx_app has DELETE ${global}`,
+        `table directory.orgs: agentx_app has UPDATE ${global}`,
+      ]);
+    });
+
+    it('fails any right on a global table that allows the app nothing', async () => {
+      expect(await problemsAfter(['grant select on migrations.applied to agentx_app'])).toEqual([
+        'table migrations.applied: agentx_app has SELECT on a global table; it may hold nothing on it (B1d-1)',
+      ]);
+    });
+
+    it('fails a global table outside the append-only schemas that names no rights, or one twice, and one inside that names any', async () => {
+      const policy: SchemaPolicy = {
+        ...POLICY,
+        globalTables: {
+          ...POLICY.globalTables,
+          'directory.orgs': { reason: 'The list', columns: ['org_id'] },
+          'migrations.applied': { ...LEDGER, appMay: ['SELECT', 'SELECT'] },
+          'platform_controls.audit_head': {
+            ...(POLICY.globalTables['platform_controls.audit_head'] ?? { reason: '', columns: [] }),
+            // What the head is granted, so only the list is at fault.
+            appMay: ['SELECT', 'INSERT', 'UPDATE'],
+          },
+        },
+      };
+      expect(await problemsAfter([], policy)).toEqual([
+        "directory.orgs: the global-table list doesn't name the app's rights on it (B1d-1)",
+        "migrations.applied: the global-table list names one of the app's rights twice",
+        "platform_controls.audit_head: the global-table list names the app's rights, but its schema is append-only",
+      ]);
+    });
+
+    const ORGS_KEY = 'organizations.organizations: the required foreign key to directory.orgs';
+
+    it('fails the organisations’ key to the directory left out of the migrations', async () => {
+      expect(
+        await problemsAfter(['alter table organizations.organizations drop constraint organizations_org_id_fkey']),
+      ).toEqual([`${ORGS_KEY} is not made by the migrations`]);
+    });
+
+    it('fails the key made NOT VALID', async () => {
+      const statements = [
+        'alter table organizations.organizations drop constraint organizations_org_id_fkey',
+        'alter table organizations.organizations add foreign key (org_id) references directory.orgs (org_id) not valid',
+      ];
+      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated`]);
+    });
+
+    it.runIf(major >= 18)('fails the key made NOT ENFORCED (Postgres 18 on)', async () => {
+      const statements = [
+        'alter table organizations.organizations alter constraint organizations_org_id_fkey not enforced',
+      ];
+      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated`]);
+    });
+
+    it('fails the key’s column left nullable', async () => {
+      const statements = [
+        'alter table organizations.organizations drop constraint organizations_pkey',
+        'alter table organizations.organizations alter column org_id drop not null',
+      ];
+      const problems = await problemsAfter(statements);
+      expect(problems).toContain(`${ORGS_KEY}: column org_id may be null`);
+    });
+
+    it('fails a key from other columns, or to another table, than the entry names', async () => {
+      const entry = SCHEMA_POLICY.requiredForeignKeys[0];
+      if (entry === undefined) throw new Error('The product requires the organisations’ key');
+      const policy: SchemaPolicy = {
+        ...POLICY,
+        requiredForeignKeys: [
+          { ...entry, columns: ['id'] },
+          { ...entry, referencedColumns: ['id'] },
+          { ...entry, references: 'migrations.applied' },
+          { ...entry, table: 'idempotency.keys' },
+          { ...entry, reason: ' ', columns: [], referencedColumns: [] },
+        ],
+      };
+      const missing = `${ORGS_KEY} is not made by the migrations`;
+      expect(await problemsAfter([], policy)).toEqual([
+        missing,
+        missing,
+        'organizations.organizations: the required foreign key to migrations.applied is not made by the migrations',
+        'idempotency.keys: the required foreign key to directory.orgs is not made by the migrations',
+        `${ORGS_KEY} gives no reason for it`,
+        missing,
       ]);
     });
   });
