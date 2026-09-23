@@ -10,20 +10,25 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { writeTestKeys } from '../../packages/testing/src/keys.ts';
+import { type TestKeys, writeTestKeys } from '../../packages/testing/src/keys.ts';
 
 const COMMAND = path.resolve('apps/operator/src/main.ts');
-const keys = writeTestKeys(['audit-mac']);
-const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-pipe-'));
-
-afterAll(() => {
-  keys.remove();
-  rmSync(folder, { recursive: true, force: true });
-});
 
 describe.skipIf(process.platform === 'win32')("B1c-2a the operator's request file", () => {
+  // Made and removed here, not as the file loads: where the tests are skipped, nothing is left behind.
+  let keys: TestKeys;
+  let folder: string;
+  beforeAll(() => {
+    keys = writeTestKeys(['audit-mac']);
+    folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-pipe-'));
+  });
+  afterAll(() => {
+    keys.remove();
+    rmSync(folder, { recursive: true, force: true });
+  });
+
   // The test's own limit sits above the child's, so a waiting open shows as the child stopped, not a timeout.
   it('refuses a pipe with no writer at once, never waiting on it', { timeout: 30_000 }, () => {
     const pipe = path.join(folder, 'a-pipe');

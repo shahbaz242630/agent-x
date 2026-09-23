@@ -200,6 +200,8 @@ interface Script {
   readonly interloper?: boolean;
   /** How many readings show another change to the job going, once the run has started. */
   readonly busy?: number;
+  /** The workspace refusing the log query. */
+  readonly logRefused?: boolean;
   /** Each PATCH's CLI status, in order: 0 sends it. */
   readonly patchStatus?: readonly number[];
   readonly startStatus?: number;
@@ -267,6 +269,9 @@ class FakeAzure implements Az {
       }
       if (method === 'get' && url === WORKSPACE_URL) return json({ properties: { customerId: WORKSPACE_ID } });
       if (method === 'post' && url === `https://api.loganalytics.azure.com/v1/workspaces/${WORKSPACE_ID}/query`) {
+        if (script.logRefused === true) {
+          return { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"InsufficientAccessError"}})' };
+        }
         return json(this.#log());
       }
       throw new Error(`unexpected az ${args.join(' ')}`);
@@ -483,9 +488,13 @@ const idHeld = (az: FakeAzure): string => String((JSON.parse(az.heldAtStart ?? '
 /** The ID the tool said it made, from its second line. */
 const idSaid = (lines: readonly string[]): string => /ID is (\S+)\. /.exec(lines[1] ?? '')?.[1] ?? '';
 
-/** What the tool says of a request still on the job, and what takes it off. */
-const stillHeld = (id: string): string =>
-  `The request is still on job-agentx-stg-operator. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+/** What the tool says of a request that may still be on the job, and what takes it off. */
+const mayStillHold = (id: string): string =>
+  `The request may still be on job-agentx-stg-operator. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+
+/** The tool's last word on any failure once the ID is made. */
+const tryAgain = (id: string): string =>
+  `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the organisation exists, that run ends "Already done"; none is made twice.`;
 
 describe('creating an organisation', () => {
   it("writes the request with the API's build, runs it, puts [] back and says it was created", async () => {
@@ -854,6 +863,7 @@ describe('what stops it, and what it leaves', () => {
     expect(done.az.sent).toHaveLength(2);
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.az.sequence).not.toContain('containerapp job start');
+    expect(done.said.at(-1)).toBe(tryAgain(idSaid(done.said)));
   });
 
   it('puts [] back when the start is refused, and the refusal stands', async () => {
@@ -861,18 +871,20 @@ describe('what stops it, and what it leaves', () => {
 
     expect(done.error).toBeInstanceOf(Error);
     expect(done.az.request).toBe(NO_REQUEST);
-    expect(done.said.at(-1)).toBe(
+    expect(done.said.slice(-2)).toEqual([
       'Put [] back on job-agentx-stg-operator: its next run holds no request until one is written.',
-    );
+      tryAgain(idSaid(done.said)),
+    ]);
   });
 
   it('says what holds the request, and what takes it off, when putting [] back fails after another failure', async () => {
     const done = await run(create, { startStatus: 1, patchStatus: [0, 1] });
 
     expect(messageOf(done.error)).toMatch(/^az containerapp job start /);
-    expect(done.said.at(-1)).toBe(
-      `Putting [] back failed too: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${stillHeld(idSaid(done.said))}`,
-    );
+    expect(done.said.slice(-2)).toEqual([
+      `Putting [] back failed too: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${mayStillHold(idSaid(done.said))}`,
+      tryAgain(idSaid(done.said)),
+    ]);
   });
 
   it('says what the run did before saying [] could not be put back, and then ends 1', async () => {
@@ -883,7 +895,7 @@ describe('what stops it, and what it leaves', () => {
     expect(done.status).toBe(1);
     expect(done.said.slice(-2)).toEqual([
       `Created the organisation ${id}.`,
-      `Putting [] back failed: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${stillHeld(id)}`,
+      `Putting [] back failed: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${mayStillHold(id)}`,
     ]);
   });
 
@@ -906,9 +918,10 @@ describe('what stops it, and what it leaves', () => {
       message:
         "Azure hadn't settled writing the request and bringing the job to the API's build on job-agentx-stg-operator after 10 minutes (InProgress).",
     });
-    expect(done.said.at(-1)).toBe(
-      `Putting [] back failed too: job-agentx-stg-operator was still taking a change after 10 minutes, so nothing more was sent. ${stillHeld(id)}`,
-    );
+    expect(done.said.slice(-2)).toEqual([
+      `Putting [] back failed too: job-agentx-stg-operator was still taking a change after 10 minutes, so nothing more was sent. ${mayStillHold(id)}`,
+      tryAgain(id),
+    ]);
     // No PATCH made while the first was still going: 10 minutes for it to settle, then 10 for the job to be free.
     expect(done.az.sent).toHaveLength(1);
     expect(done.slept).toEqual(Array.from({ length: 80 }, () => 15_000));
@@ -921,9 +934,17 @@ describe('what stops it, and what it leaves', () => {
     // A reading every 15 s until the 10 minutes are up, and none past them: then [] can't go back, the request still going.
     expect(done.slept).toEqual(Array.from({ length: 40 }, () => 15_000));
     expect(done.az.sequence.filter((call) => call === 'get job')).toHaveLength(1 + 41 + 1);
-    expect(done.said.at(-1)).toMatch(
+    expect(done.said.at(-2)).toMatch(
       /^Putting \[\] back failed too: Azure refused putting \[\] back \(Conflict, ContainerAppOperationInProgress\)\. /,
     );
+  });
+
+  it("says how to find out and finish when the run ended but its log can't be read", async () => {
+    const done = await run(create, { logRefused: true });
+
+    expect(messageOf(done.error)).toMatch(/^az rest --method post /);
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.at(-1)).toBe(tryAgain(idHeld(done.az)));
   });
 });
 

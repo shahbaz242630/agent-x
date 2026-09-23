@@ -92,9 +92,17 @@ const SOME_ID = '00000000-0000-7000-8000-000000000000';
 /** An error's message, or what was thrown when it isn't an Error. */
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** What now holds the request when [] couldn't be put back, and what takes it off. */
-const stillHeld = (id: string): string =>
-  `The request is still on ${jobName('operator')}. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+/** What may now hold the request when [] couldn't be put back, and what takes it off. */
+const mayStillHold = (id: string): string =>
+  `The request may still be on ${jobName('operator')}. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+
+/**
+ * The last word on any failure once the ID is made: what the run did may be
+ * unknown, and the same command with the same ID both finds out and finishes
+ * it, making none twice.
+ */
+const tryAgain = (id: string): string =>
+  `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the organisation exists, that run ends "Already done"; none is made twice.`;
 
 export const USAGE = `Usage:
   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
@@ -385,8 +393,9 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   } catch (error) {
     // Whatever stopped it, the request comes off the job; a failure to take it off is said, and the first error stands.
     await clearRequest(steps, target).catch((failure: unknown) => {
-      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${stillHeld(id)}`);
+      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${mayStillHold(id)}`);
     });
+    steps.say(tryAgain(id));
     throw error;
   }
   // The request comes off before the log is read; a failure to take it off still lets the run's outcome be said first.
@@ -398,8 +407,12 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
     if (run === undefined) return 1;
     const said = outcome(steps, run, await readLog(steps, target, execution, run), id);
     return left === undefined ? said : 1;
+  } catch (error) {
+    // The run ended, but what it did couldn't be read.
+    steps.say(tryAgain(id));
+    throw error;
   } finally {
-    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${stillHeld(id)}`);
+    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${mayStillHold(id)}`);
   }
 }
 
