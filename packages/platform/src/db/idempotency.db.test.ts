@@ -953,9 +953,10 @@ describe('the retention sweep (B1e, db/migrations/0009)', () => {
 
   it('deletes at most as many as asked, oldest first, so a caller sweeps again while it gets that many', async () => {
     const org = newId();
-    await keyAged(org, '60 days');
-    await keyAged(org, '50 days');
+    // Claimed youngest first, so the table's own order isn't oldest first.
     const old = await keyAged(org, '40 days');
+    await keyAged(org, '50 days');
+    await keyAged(org, '60 days');
 
     expect(await sweep(org, 2)).toBe(2);
     expect(await kept(org)).toEqual([old]);
