@@ -242,10 +242,13 @@ export function createAnchorCheck({
     try {
       if (inFlight.has(LIST)) throw new Error('the last read of the list has not finished');
       inFlight.add(LIST);
-      const reading = Promise.all([
-        Promise.resolve().then(() => from.list()),
-        Promise.resolve().then(() => from.recorded()),
-      ]);
+      // The record first, then the list: an organisation is recorded and listed
+      // in one transaction, so any recorded before the list is read is in it,
+      // and one created between the two reads can't be taken for one unlisted.
+      // One after the other, so the guard holds until both have ended.
+      const reading = Promise.resolve()
+        .then(() => from.recorded())
+        .then(async (recorded): Promise<readonly [unknown, unknown]> => [await from.list(), recorded]);
       void reading.then(
         () => inFlight.delete(LIST),
         () => inFlight.delete(LIST),

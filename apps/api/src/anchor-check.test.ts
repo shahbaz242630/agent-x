@@ -607,6 +607,44 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     expect(events()).toEqual([orgAlarm('unlisted', ORG), anchored(OTHER_ORG)]);
   });
 
+  it('reads the record of created organisations before the list, and the list only once the record is in', async () => {
+    const reads: string[] = [];
+    const organizations: OrganisationChains = {
+      recorded: () => {
+        reads.push('recorded');
+        return Promise.resolve([ORG]);
+      },
+      list: () => {
+        reads.push('list');
+        return Promise.resolve([ORG]);
+      },
+      verify: () => Promise.resolve(ok(1n)),
+    };
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(reads).toEqual(['recorded', 'list']);
+  });
+
+  it('reads no list when the record fails, so nothing is left reading behind it', async () => {
+    let lists = 0;
+    const organizations: OrganisationChains = {
+      recorded: () => Promise.reject(unreachable()),
+      list: () => {
+        lists += 1;
+        return Promise.resolve([ORG]);
+      },
+      verify: () => Promise.resolve(ok(1n)),
+    };
+    const { check, events } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(lists).toBe(0);
+    expect(events()).toEqual([
+      { level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation', check: 'list' },
+    ]);
+  });
+
   it.each([
     ['an entry that is not text', [ORG, null]],
     ['an entry that is not an ID', [ORG, 'not-an-id']],
