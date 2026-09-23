@@ -909,8 +909,9 @@ describe('what stops it, and what it leaves', () => {
     expect(done.said.at(-1)).toBe(
       `Putting [] back failed too: job-agentx-stg-operator was still taking a change after 10 minutes, so nothing more was sent. ${stillHeld(id)}`,
     );
-    // No PATCH made while the first was still going.
+    // No PATCH made while the first was still going: 10 minutes for it to settle, then 10 for the job to be free.
     expect(done.az.sent).toHaveLength(1);
+    expect(done.slept).toEqual(Array.from({ length: 80 }, () => 15_000));
   });
 
   it('says a change not yet taken when Azure still shows the job as it was, at exactly 10 minutes', async () => {
