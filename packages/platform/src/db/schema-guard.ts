@@ -42,6 +42,26 @@ import { TENANT_POLICY_EXPRESSION } from './tenant.ts';
 /** The name every tenant table's one policy has (ADR-005 §2). */
 const TENANT_POLICY = 'tenant_isolation';
 
+/**
+ * The name of the one other policy a table may have: a fill-in table's
+ * retention (B1e), restrictive, for DELETE, beside its tenant policy.
+ */
+const RETENTION_POLICY = 'retention';
+
+/**
+ * A retention policy's expression as Postgres prints it (16 and 18 alike):
+ * the migration writes `column < pg_catalog.now() - pg_catalog.make_interval(days => N)`.
+ */
+export function retentionPolicyExpression({
+  column,
+  days,
+}: {
+  readonly column: string;
+  readonly days: number;
+}): string {
+  return `(${column} < (now() - make_interval(days => ${String(days)})))`;
+}
+
 /** The one trigger our schema is allowed, and the function it must call (0004_state_rules.sql, ADR-007 §1.1). */
 const STATUS_GUARD = 'status_guard';
 const STATUS_GUARD_FUNCTION = 'state_rules.guard_status';
@@ -230,6 +250,8 @@ interface PolicyRow {
   readonly table: string;
   readonly name: string;
   readonly command: string;
+  /** False for a restrictive policy, which narrows what the permissive ones allow. */
+  readonly permissive: boolean;
   readonly expression: string | null;
   readonly check_expression: string | null;
   /**
@@ -390,6 +412,7 @@ async function policies<Schema>(db: Kysely<Schema>): Promise<PolicyRow[]> {
     select ${QUALIFIED} as table,
            p.polname as name,
            p.polcmd as command,
+           p.polpermissive as permissive,
            pg_catalog.pg_get_expr(p.polqual, p.polrelid) as expression,
            pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) as check_expression,
            p.polroles = '{0}'::pg_catalog.oid[] as everyone
@@ -740,6 +763,28 @@ const quoted = (name: string): string => `"${name}"`;
  * database that refuses the read throws, and the caller treats that as a failed
  * check in its own right.
  */
+type FillInSweep = NonNullable<SchemaPolicy['fillInTables'][string]['sweptAfter']>;
+
+/**
+ * A table's retention policy (named `retention`): there, restrictive, for DELETE, applying to every role, reading as its entry says,
+ * with no WITH CHECK (DELETE has none).
+ */
+function retentionProblems(table: string, found: readonly PolicyRow[], sweep: FillInSweep): SchemaProblem[] {
+  // Postgres names a table's policies uniquely, so there is one at most.
+  const [one] = found;
+  if (one === undefined) return [`${table} has lost its ${RETENTION_POLICY} policy`];
+  const problems: SchemaProblem[] = [];
+  if (one.permissive) problems.push(`${table}'s ${RETENTION_POLICY} policy is no longer restrictive`);
+  // 'd' is DELETE.
+  if (one.command !== 'd') problems.push(`${table}'s ${RETENTION_POLICY} policy no longer covers DELETE alone`);
+  if (!one.everyone) problems.push(`${table}'s ${RETENTION_POLICY} policy is limited to named roles`);
+  if (one.expression !== retentionPolicyExpression(sweep)) {
+    problems.push(`${table}'s ${RETENTION_POLICY} policy reads differently`);
+  }
+  if (one.check_expression !== null) problems.push(`${table}'s ${RETENTION_POLICY} policy has a WITH CHECK`);
+  return problems;
+}
+
 export async function liveSchemaProblems<Schema>(
   db: Kysely<Schema>,
   { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [] }: SchemaGuardOptions,
@@ -814,14 +859,25 @@ export async function liveSchemaProblems<Schema>(
   }
 
   // Policies: a tenant table has exactly the tenant policy, and its expression
-  // is the one ADR-005 §2 gives.
+  // is the one ADR-005 §2 gives. A fill-in table with a retention has its
+  // retention policy too, exactly as its entry says, and no other (B1e).
+  const sweptAfter = (table: string): FillInSweep | undefined =>
+    Object.hasOwn(policy.fillInTables, table) ? policy.fillInTables[table]?.sweptAfter : undefined;
+  const retentionPolicies = new Set<PolicyRow>();
   const byTable = new Map<string, PolicyRow[]>();
   for (const one of allPolicies) byTable.set(one.table, [...(byTable.get(one.table) ?? []), one]);
   for (const relation of allRelations) {
-    const forTable = byTable.get(relation.name) ?? [];
+    let forTable = byTable.get(relation.name) ?? [];
     if (globalTables.has(relation.name)) {
       if (forTable.length > 0) problems.push(`${relation.name} is a global table but carries a policy`);
       continue;
+    }
+    const sweep = sweptAfter(relation.name);
+    if (sweep !== undefined) {
+      const retention = forTable.filter((one) => one.name === RETENTION_POLICY);
+      forTable = forTable.filter((one) => one.name !== RETENTION_POLICY);
+      for (const one of retention) retentionPolicies.add(one);
+      problems.push(...retentionProblems(relation.name, retention, sweep));
     }
     if (forTable.length !== 1) {
       problems.push(`${relation.name} does not have exactly one row-security policy`);
@@ -843,7 +899,9 @@ export async function liveSchemaProblems<Schema>(
   // makes it differ from the rest, which is the attack as it would really
   // happen.
   const expressions = new Set(
-    allPolicies.filter((one) => !globalTables.has(one.table)).map((one) => one.expression ?? ''),
+    allPolicies
+      .filter((one) => !globalTables.has(one.table) && !retentionPolicies.has(one))
+      .map((one) => one.expression ?? ''),
   );
   if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
 
@@ -960,8 +1018,10 @@ export async function liveSchemaProblems<Schema>(
   for (const [name, mayChange] of narrow) {
     const grantsOn = allGrants.filter((grant) => grant.table === name);
     const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
+    // A fill-in table with a retention may be deleted from too: its retention policy holds each DELETE (B1e).
+    const tableMay: readonly string[] = sweptAfter(name) === undefined ? NARROW_RIGHTS : [...NARROW_RIGHTS, 'DELETE'];
     for (const right of onTable) {
-      if (!(NARROW_RIGHTS as readonly string[]).includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
+      if (!tableMay.includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
     }
     for (const grant of grantsOn) {
       // A right on the whole table shows on its columns too; it is named once, above.

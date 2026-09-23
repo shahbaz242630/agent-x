@@ -33,6 +33,12 @@
 // the refusal and commits the rest of its transaction (an audit event, say).
 // A request waiting on the key goes ahead as the first as soon as the claim
 // is rolled back.
+//
+// A key is kept for its retention, 30 days from its claim (ADR-014 §3), and
+// then swept (B1e): sweepIdempotencyKeys deletes an organisation's keys past
+// it, in that organisation's withTenant. The database holds the same line
+// (0009's restrictive `retention` policy), so no DELETE the app sends reaches
+// a younger key.
 import { sql, type Transaction } from 'kysely';
 
 import type { KeyProvider } from '../keys/key-provider.ts';
@@ -121,6 +127,18 @@ export interface IdempotentWrites {
     work: () => Promise<IdempotentResult>,
   ): Promise<IdempotentWrite>;
 }
+
+/**
+ * How long a key is kept after its claim, in whole days (ADR-014 §3's
+ * default): a retry within it gets the first request's answer. The schema
+ * policy and 0009's `retention` policy hold the database to the same number.
+ * A request-hash key is kept at least as long, so every kept key can be
+ * checked (Azure.md, "Rotating a key").
+ */
+export const IDEMPOTENCY_RETENTION_DAYS = 30;
+
+/** The most keys one sweep deletes: each is a short transaction, and a caller sweeps again while it deletes this many. */
+const MOST_SWEPT = 10_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Every kind of client, as a list of text: a caller the compiler can't see (a cast) could name another. */
@@ -382,4 +400,41 @@ async function doAndRecord<Schema>(
     );
   }
   return result;
+}
+
+/**
+ * Deletes up to `most` (at most 10,000) of the organisation's idempotency keys
+ * whose retention has run out, in the caller's transaction, which must be
+ * withTenant's for the organisation, and returns how many it deleted. A
+ * caller sweeps again while it gets `most` back. A key being claimed again
+ * meanwhile waits for the sweep's transaction, then is claimed afresh.
+ */
+export async function sweepIdempotencyKeys<Schema>(
+  tx: Transaction<Schema>,
+  orgId: string,
+  most: number,
+): Promise<number> {
+  if (!matches(UUID, orgId))
+    throw new IdempotencyFailed('bad_request', 'A sweep refused: the organisation ID is not a UUID');
+  if (!Number.isInteger(most) || most < 1 || most > MOST_SWEPT) {
+    throw new IdempotencyFailed(
+      'bad_request',
+      `A sweep refused: it deletes a whole number of keys from 1 to ${String(MOST_SWEPT)}`,
+    );
+  }
+  await assertTenant(tx, orgId);
+  const org = orgId.toLowerCase();
+  // By primary key, oldest first; the retention policy holds the same line.
+  const { rows } = await sql<{ swept: number }>`
+    delete from idempotency.keys
+    where org_id = ${org}
+      and (client_kind, client_id, operation, key) in (
+        select client_kind, client_id, operation, key from idempotency.keys
+        where org_id = ${org} and created_at < pg_catalog.now() - pg_catalog.make_interval(days => ${IDEMPOTENCY_RETENTION_DAYS})
+        order by created_at
+        limit ${most}
+      )
+    returning 1 as swept
+  `.execute(tx);
+  return rows.length;
 }

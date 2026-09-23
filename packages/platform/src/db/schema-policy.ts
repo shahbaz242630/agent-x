@@ -19,6 +19,8 @@
 // fails CI-06, so the list can't go stale; the same holds for the append-only
 // exceptions, the fill-in tables and the required foreign keys.
 
+import { IDEMPOTENCY_RETENTION_DAYS } from './idempotency.ts';
+
 /** The rights on a table's rows the app role can be allowed. */
 type RowRight = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
 
@@ -62,6 +64,14 @@ interface FillInTable {
   readonly reason: string;
   /** Exactly the columns the app is granted UPDATE on, each on its own (CI-06 checks it). */
   readonly columns: readonly string[];
+  /**
+   * When the app may also delete a row (B1e): once its `column` is `days` whole
+   * days old, and never before. The column is a timestamptz NOT NULL the app
+   * can't change; a restrictive DELETE policy named `retention` holds the rule,
+   * reading `column < now() - make_interval(days => days)` exactly (CI-06 and
+   * the live guard check both). Without it, the app never deletes.
+   */
+  readonly sweptAfter?: { readonly column: string; readonly days: number };
 }
 
 export interface SchemaPolicy {
@@ -79,7 +89,8 @@ export interface SchemaPolicy {
   readonly appendOnlyExceptions: Readonly<Record<string, string>>;
   /**
    * Tenant tables outside those schemas that the app may add rows to and read,
-   * and change only in the columns listed, never DELETE, by schema-qualified
+   * and change only in the columns listed, never DELETE (but past a retention
+   * its entry names, `sweptAfter`), by schema-qualified
    * name as Postgres quotes it: a row filled in once after it is added, such as
    * an idempotency key's result. Any other tenant table allows every row right.
    */
@@ -141,8 +152,10 @@ export const SCHEMA_POLICY: SchemaPolicy = {
   fillInTables: {
     'idempotency.keys': {
       reason:
-        "Each write's idempotency key (ADR-007 §4): the app adds the key and fills in the write's result. A key deleted, or its namespace or hash changed, would let a retry do the write again",
+        "Each write's idempotency key (ADR-007 §4): the app adds the key and fills in the write's result. A key deleted before its retention, or its namespace or hash changed, would let a retry do the write again",
       columns: ['result_status', 'result_id'],
+      // The retention sweep (B1e, 0009); ADR-014 §3's default.
+      sweptAfter: { column: 'created_at', days: IDEMPOTENCY_RETENTION_DAYS },
     },
   },
   requiredForeignKeys: [
