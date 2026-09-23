@@ -40,12 +40,12 @@
 // (0009's restrictive `retention` policy), so no DELETE the app sends reaches
 // a younger key. A key swept after a claim met it but before the claim read it
 // is claimed again, once (B1e-2): a key past its retention is a new request.
-import { sql, type Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
-import { assertTenant } from './tenant.ts';
+import { assertTenant, withTenant } from './tenant.ts';
 
 /**
  * Who sent the request: a signed-in user, or an agent, each by its own ID.
@@ -449,4 +449,16 @@ export async function sweepIdempotencyKeys<Schema>(
     returning 1 as swept
   `.execute(tx);
   return rows.length;
+}
+
+/**
+ * Sweeps up to `most` of the organisation's keys past their retention in a
+ * transaction of its own, the organisation's withTenant, each statement held
+ * to 10 seconds: the retention sweep's one step (B1e-3).
+ */
+export function sweepExpiredKeys<Schema>(db: Kysely<Schema>, orgId: string, most: number): Promise<number> {
+  return withTenant(db, orgId, async (tx) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    return sweepIdempotencyKeys(tx, orgId, most);
+  });
 }

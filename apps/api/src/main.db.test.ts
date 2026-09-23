@@ -279,6 +279,46 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it("sweeps each listed organisation's idempotency keys past their 30 days once it listens (B1e-3)", async () => {
+    const orgId = '0199a0f0-0000-7000-8000-00000000b1e3';
+    const writer = createDatabase<DirectoryTables>(
+      { ...database.connection('app'), tls: 'disable', maxConnections: 1 },
+      createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 1000 } },
+        destination: new LogCapture(),
+      }),
+    );
+    try {
+      await withTenant(writer, orgId, (tx) => registerOrganization(tx, orgId));
+    } finally {
+      await writer.destroy();
+    }
+    const admin = database.as('admin');
+    for (const [key, age] of [
+      ['swept-at-start', '31 days'],
+      ['kept-at-start', '29 days'],
+    ] as const) {
+      await admin.query(
+        `insert into idempotency.keys (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at, result_status, result_id)
+         values ($1, 'agent', $1, 'items.create', $2, pg_catalog.decode(pg_catalog.repeat('01', 32), 'hex'), 1, pg_catalog.now() - $3::interval, 201, $1)`,
+        [orgId, key, age],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'idempotency.sweep_done')).toBeDefined();
+    });
+    expect(run.capture.lines().find((line) => line.event === 'idempotency.swept')).toEqual(
+      expect.objectContaining({ level: 'info', orgId, keys: 1 }),
+    );
+    expect(
+      await admin.query<{ key: string }>('select key from idempotency.keys where org_id = $1 order by key', [orgId]),
+    ).toEqual([{ key: 'kept-at-start' }]);
+    await stop(run);
+  });
+
   it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
     // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
     await stop(await start(envFor('app')));

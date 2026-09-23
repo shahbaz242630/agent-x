@@ -129,6 +129,35 @@ const anchorChecks = vi.hoisted(() => ({
   runs: 0,
 }));
 
+/** What main.ts gave the retention sweep and its schedule (B1e-3). */
+const sweeps = vi.hoisted(() => ({
+  options: [] as { batch: number; mostBatches: number; deadlineMs: number }[],
+  everyMs: [] as number[],
+  stopped: 0,
+}));
+
+vi.mock('./retention-sweep.ts', () => ({
+  createRetentionSweep: (options: { batch: number; mostBatches: number; deadlineMs: number }) => {
+    sweeps.options.push(options);
+    return { run: () => Promise.resolve() };
+  },
+  scheduleRetentionSweep: (_sweep: unknown, everyMs: number) => {
+    sweeps.everyMs.push(everyMs);
+    return {
+      // Slower than the anchor check's stop, so the pool is seen to wait for it:
+      // the API stops both at once, so this order is the fake's, not a promise.
+      stop: () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            sweeps.stopped += 1;
+            fake.steps.push('sweep stopped');
+            resolve();
+          }, 30);
+        }),
+    };
+  },
+}));
+
 vi.mock('./anchor-check.ts', () => ({
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
@@ -234,6 +263,9 @@ beforeEach(() => {
   schemaCheck.sound = (): Promise<boolean> => Promise.resolve(true);
   schemaCheck.scheduledRuns = 0;
   anchorChecks.scheduled.length = 0;
+  sweeps.options.length = 0;
+  sweeps.everyMs.length = 0;
+  sweeps.stopped = 0;
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
@@ -393,6 +425,13 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // Three intervals without a completed check are the alarm.
     expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
     expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+  });
+
+  it('sweeps the idempotency keys on a timer of its own, hourly, a batch of 1,000 at a time (B1e-3)', async () => {
+    await start();
+
+    expect(sweeps.everyMs).toEqual([3_600_000]);
+    expect(sweeps.options).toEqual([expect.objectContaining({ batch: 1_000, mostBatches: 100, deadlineMs: 120_000 })]);
   });
 
   it("checks the platform chain in a transaction of its own, with the database's limits on each statement", async () => {
@@ -613,6 +652,7 @@ describe('the API stops cleanly on a signal', () => {
         'anchor check started',
         'anchor check stopping',
         'anchor check stopped',
+        'sweep stopped',
         'pool closed',
       ]);
     },
@@ -641,8 +681,10 @@ describe('the API stops cleanly on a signal', () => {
       'http closing',
       'anchor check stopping',
     ]);
-    expect(fake.steps.slice(6, 8)).toEqual(expect.arrayContaining(['http closed', 'anchor check stopped']));
-    expect(fake.steps.slice(8)).toEqual(['pool closed']);
+    expect(fake.steps.slice(6, 9)).toEqual(
+      expect.arrayContaining(['http closed', 'anchor check stopped', 'sweep stopped']),
+    );
+    expect(fake.steps.slice(9)).toEqual(['pool closed']);
   });
 
   it.each([
