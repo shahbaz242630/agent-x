@@ -4,7 +4,7 @@ import { createDatabase, type Database, TenantContextError, withTenant } from '@
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { registerOrganization } from './organizations.ts';
+import { listedOrganizations, registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -61,6 +61,16 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     );
 
     expect(await listed(id)).toEqual([]);
+  });
+
+  it('gives every organisation listed, in lower case and in order, to work outside any tenant (B1d-2)', async () => {
+    const [first, second] = [newId(), newId()];
+    await withTenant(app, second, (tx) => registerOrganization(tx, second.toUpperCase()));
+    await withTenant(app, first, (tx) => registerOrganization(tx, first));
+
+    const all = await listedOrganizations(app);
+    expect(all.filter((id) => id === first || id === second)).toEqual([first, second]);
+    expect(all).toEqual([...all].sort());
   });
 
   it('refuses one listed already', async () => {

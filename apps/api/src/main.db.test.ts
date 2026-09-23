@@ -3,9 +3,11 @@
 // reported without the login, and a stop closes every connection.
 import { EventEmitter } from 'node:events';
 
+import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
+import { type DirectoryTables, registerOrganization } from '@agentx/core/modules/directory';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
-import { createDatabase } from '@agentx/platform/db';
+import { createDatabase, withTenant } from '@agentx/platform/db';
 import { loadKeys, PURPOSES } from '@agentx/platform/keys';
 import { createLogger, type Output } from '@agentx/platform/observability';
 import {
@@ -223,6 +225,48 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         expect.objectContaining({ level: 'info', chain: 'platform', seq: '1' }),
       );
     });
+    await stop(run);
+  });
+
+  it("anchors each organisation's chain from the directory's list, and raises the alarm for one tampered with (B1d-2)", async () => {
+    const [kept, broken] = ['0199a0f0-0000-7000-8000-00000000b1d1', '0199a0f0-0000-7000-8000-00000000b1d2'];
+    const writer = createDatabase<DirectoryTables & AuditTables>(
+      { ...database.connection('app'), tls: 'disable', maxConnections: 2 },
+      createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'error', eventCapPerMinute: 1000 } },
+        destination: new LogCapture(),
+      }),
+    );
+    const trail = createAuditTrail({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
+    try {
+      for (const orgId of [kept, broken]) {
+        await withTenant(writer, orgId, async (tx) => {
+          await registerOrganization(tx, orgId);
+          await trail.record(tx, orgId, {
+            actor: { type: 'system', id: 'test' },
+            action: 'probe.made',
+            subject: { type: 'probe', id: orgId, version: 1 },
+            details: {},
+          });
+        });
+      }
+    } finally {
+      await writer.destroy();
+    }
+    await database.as('admin').query('update audit.heads set seq = seq + 5 where org_id = $1', [broken]);
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'audit.anchor_check_done')).toBeDefined();
+    });
+    const lines = run.capture.lines();
+    expect(lines.find((line) => line.event === 'audit.anchored' && line.orgId === kept)).toEqual(
+      expect.objectContaining({ level: 'info', chain: 'organisation', seq: '1' }),
+    );
+    expect(lines.find((line) => line.event === 'audit.integrity_failed' && line.orgId === broken)).toEqual(
+      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor' }),
+    );
     await stop(run);
   });
 

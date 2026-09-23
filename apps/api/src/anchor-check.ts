@@ -13,8 +13,13 @@
 // intervals. Anything else that stops a check (the database unreachable, or
 // a check past its deadline) is a warning until then. Every run ends with one
 // line, so a check that has stopped can be told from one with nothing to say.
-// The platform chain is checked from the start; the organisations' chains
-// join when organisations exist (B1).
+// The platform chain is checked every run; each organisation's chain too,
+// found from the directory's list at each run (B1d-2). An organisation this
+// process has seen listed that is no longer there is the alarm: the app never
+// deletes an entry, so one gone is tampering, and its chain would otherwise
+// never be checked again. So is a list the database refuses; a list that
+// can't be read otherwise is a warning until an organisation already seen has
+// gone three intervals unchecked.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type AnchorPoint,
@@ -42,8 +47,19 @@ export interface AnchorCheck {
   run(signal?: AbortSignal): Promise<void>;
 }
 
+/** Where the organisations' chains come from (B1d-2). */
+export interface OrganisationChains {
+  /** Every organisation the directory lists, by ID in lower case. */
+  list(): Promise<readonly string[]>;
+  /** Checks one organisation's chain against its last anchor, if it has one. */
+  verify(orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+}
+
 export interface AnchorCheckOptions {
+  /** The chains checked every run: the platform's. */
   readonly chains: readonly CheckedChain[];
+  /** The organisations' chains, listed afresh each run. None when not given. */
+  readonly organizations?: OrganisationChains;
   readonly keys: KeyProvider;
   readonly clock: Clock;
   readonly logger: Logger;
@@ -100,6 +116,7 @@ async function withinDeadline<T>(
 
 export function createAnchorCheck({
   chains,
+  organizations,
   keys,
   clock,
   logger,
@@ -113,6 +130,8 @@ export function createAnchorCheck({
   const keyOf = (chain: Chain): string => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   // Chains whose check is still under way past its deadline: one each at most, so a hung database can't take every connection.
   const inFlight = new Set<string>();
+  // Every organisation this process has seen listed, so one that leaves the list is noticed.
+  const seen = new Set<string>();
 
   const checkOne = async ({ chain, verify }: CheckedChain, signal: AbortSignal | undefined): Promise<Outcome> => {
     // An organisation's ID goes on the line as the logger's own field, which an event can't set.
@@ -175,12 +194,78 @@ export function createAnchorCheck({
     }
   };
 
+  /**
+   * The organisations to check this run, or what stopped the list being read:
+   * `stopped` when the run was, `refused` for a database that refuses the
+   * read, `failed` for anything else.
+   */
+  const listOrganizations = async (
+    from: OrganisationChains,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly string[] | 'stopped' | 'refused' | 'failed'> => {
+    try {
+      return await withinDeadline(
+        Promise.resolve().then(() => from.list()),
+        deadlineMs,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof Stopped) return 'stopped';
+      if (refusedByDatabase(error)) {
+        logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'list' });
+        return 'refused';
+      }
+      logger.warn('audit.anchor_check_failed', { chain: 'organisation', check: 'list', err: error });
+      return 'failed';
+    }
+  };
+
+  /** An organisation seen before and not reached this run: unlisted, or its chain gone unchecked too long. */
+  const missed = (orgId: string, reason: 'unlisted' | 'unchecked'): Outcome => {
+    const since = clock.now().getTime() - (lastChecked.get(orgId) ?? started);
+    if (reason === 'unchecked' && since < staleAfterMs) return 'unchecked';
+    const last = anchors.latest({ kind: 'organisation', orgId });
+    logger.child({ orgId }).error('audit.integrity_failed', {
+      chain: 'organisation',
+      check: 'anchor',
+      reason,
+      ...(last === undefined ? {} : { anchorSeq: last.seq }),
+    });
+    return reason === 'unlisted' ? 'failed' : 'unchecked';
+  };
+
+  const checkOrganizations = async (from: OrganisationChains, signal: AbortSignal | undefined): Promise<Outcome[]> => {
+    const listed = await listOrganizations(from, signal);
+    if (listed === 'stopped') return [];
+    if (typeof listed === 'string') {
+      // No list to go by: each organisation already seen counts as not checked this run.
+      return [...seen].map((orgId) => missed(orgId, 'unchecked'));
+    }
+    const outcomes: Outcome[] = [];
+    const now = new Set(listed.map((orgId) => orgId.toLowerCase()));
+    for (const orgId of seen) if (!now.has(orgId)) outcomes.push(missed(orgId, 'unlisted'));
+    for (const orgId of now) {
+      if (signal?.aborted === true) break;
+      seen.add(orgId);
+      outcomes.push(
+        await checkOne(
+          { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
+          signal,
+        ),
+      );
+    }
+    return outcomes;
+  };
+
   return Object.freeze({
     async run(signal?: AbortSignal): Promise<void> {
       const outcomes: Outcome[] = [];
       for (const one of chains) {
         if (signal?.aborted === true) break;
         outcomes.push(await checkOne(one, signal));
+      }
+      if (organizations !== undefined && signal?.aborted !== true) {
+        outcomes.push(...(await checkOrganizations(organizations, signal)));
       }
       const count = (outcome: Outcome): number => outcomes.filter((each) => each === outcome).length;
       logger.info('audit.anchor_check_done', {
