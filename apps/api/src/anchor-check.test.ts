@@ -691,7 +691,8 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
 
   it.each([
     ['an entry that is not text', [ORG, null]],
-    ['an ID with more around it', [`${ORG}0`]],
+    ['an ID with more after it', [`${ORG}0`]],
+    ['an ID with more before it', [`x${ORG}`]],
     ['an entry that is not an ID', [ORG, 'not-an-id']],
     ['more organisations than any real list', Array.from({ length: 10_001 }, () => ORG)],
   ])('raises the alarm for a list holding %s, and checks none of it', async (_, list) => {
