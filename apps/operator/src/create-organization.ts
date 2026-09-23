@@ -4,8 +4,9 @@
 // 1. the organisation itself (the organizations module): its directory entry,
 //    its row, ACTIVE, and its first signed state, which starts its audit chain
 //    (`organization.created`), then its integrity hold, CLEAR
-// 2. the same act on the platform audit chain, naming the organisation and
-//    the release that did it
+// 2. the same act on the platform audit chain, naming the organisation, the
+//    release that did it and the job's run (B1c-2b), which leads to Azure's
+//    record of the run and of who started it
 // Both chains or neither: a failure anywhere rolls back the whole creation.
 // The platform chain's head is locked last, after the organisation's (ADR-006
 // §6: 12, then 13), and the wait for it is bounded (PlatformChain.record).
@@ -43,6 +44,8 @@ export interface NewOrganizationRequest {
   readonly name: string;
   /** The release that runs the command, named in the platform's event. */
   readonly release: string;
+  /** The job's run, as Azure names it, named in the platform's event; null for a run by hand (development and test). */
+  readonly run: string | null;
 }
 
 /**
@@ -53,7 +56,7 @@ export interface NewOrganizationRequest {
 export async function createOrganizationAsOperator(
   database: Database<OperatorTables>,
   services: SignedStatesServices,
-  { orgId, name, release }: NewOrganizationRequest,
+  { orgId, name, release, run }: NewOrganizationRequest,
 ): Promise<CreatedOrganization> {
   const platform = createPlatformChain({ keys: services.keys, ids: services.ids });
   return withSignedStates(database, orgId, services, async (tx, states) => {
@@ -61,7 +64,7 @@ export async function createOrganizationAsOperator(
     const recorded = await platform.record(tx, {
       actor: OPERATOR,
       action: 'organization.created',
-      details: { orgId, release },
+      details: { orgId, release, run },
     });
     return Object.freeze({ orgId, orgSeq: created.seq, platformSeq: recorded.seq });
   });
