@@ -43,6 +43,8 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { Stopped, withinDeadline } from './deadline.ts';
+
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
   readonly chain: Chain;
@@ -122,34 +124,6 @@ type Outcome = 'anchored' | 'unchanged' | 'failed' | 'unchecked';
 
 /** The in-flight key of the organisations' list, which no chain's key can be. */
 const LIST = 'list';
-
-/** The run was stopped while a chain's check was under way. */
-class Stopped extends Error {}
-
-/** The check, or a rejection once the deadline passes or the run is stopped, whichever comes first. */
-async function withinDeadline<T>(
-  checking: Promise<T>,
-  deadlineMs: number,
-  signal: AbortSignal | undefined,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let stop: (() => void) | undefined;
-  const cut = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`the check did not finish within ${String(deadlineMs)} ms`));
-    }, deadlineMs);
-    stop = () => {
-      reject(new Stopped('the check was stopped'));
-    };
-    signal?.addEventListener('abort', stop, { once: true });
-  });
-  try {
-    return await Promise.race([checking, cut]);
-  } finally {
-    clearTimeout(timer);
-    if (stop !== undefined) signal?.removeEventListener('abort', stop);
-  }
-}
 
 export function createAnchorCheck({
   chains,

@@ -20,7 +20,13 @@ import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-c
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
-import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
+import {
+  assertRuntimeRole,
+  createDatabase,
+  type Database,
+  sweepExpiredKeys,
+  UnsafeDatabaseRole,
+} from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import {
   createLogger,
@@ -33,6 +39,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { createRetentionSweep } from './retention-sweep.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
@@ -58,6 +65,13 @@ const STOP_DEADLINE_MS = 25_000;
  * (verifyAlone); this bounds the whole check, whatever the database does.
  */
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
+
+/**
+ * The idempotency keys' retention sweep (B1e-3): at each start, then at most
+ * hourly; a batch of 1,000 keys at a time, at most 100 batches an organisation
+ * a run, each within the anchor check's deadline.
+ */
+const SWEEP = { everyMs: 3_600_000, batch: 1_000, mostBatches: 100 } as const;
 
 /** The parts of `process` the API uses. Tests pass a stand-in. */
 export interface ApiProcess {
@@ -260,18 +274,31 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     staleAfterMs: config.audit.anchorSeconds * 3 * 1000,
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
   });
+  const retention = createRetentionSweep({
+    list: () => listedOrganizations(database),
+    sweep: (orgId, most) => sweepExpiredKeys(database, orgId, most),
+    clock: systemClock,
+    logger,
+    deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+    ...SWEEP,
+  });
   // The schema is checked on the same schedule as the chains, so there is one
   // timer and one pace. It runs first: a chain read through rewritten walls is
-  // worth less than knowing the walls were rewritten.
+  // worth less than knowing the walls were rewritten. The retention sweep runs
+  // last, on the same timer, when its hour has come round (B1e-3).
   const anchorCheck = scheduleAnchorCheck(
     {
       async run(signal?: AbortSignal): Promise<void> {
         // Within its own deadline and ending at once when the API stops, so a
         // database that accepts a read and never answers cannot hold the
         // schedule open and silence every later check.
+        // A function, not a check the compiler narrows: each await may stop the run.
+        const stopped = (): boolean => signal?.aborted === true;
         await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal });
-        if (signal?.aborted === true) return;
+        if (stopped()) return;
         await anchors.run(signal);
+        if (stopped()) return;
+        await retention.run(signal);
       },
     },
     config.audit.anchorSeconds * 1000,

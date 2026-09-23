@@ -30,6 +30,7 @@ import {
   type IdempotentRequest,
   type IdempotentResult,
   type IdempotentWrite,
+  sweepExpiredKeys,
   sweepIdempotencyKeys,
 } from './idempotency.ts';
 import { TenantContextError, withTenant } from './tenant.ts';
@@ -1095,6 +1096,38 @@ describe('the retention sweep (B1e, db/migrations/0009)', () => {
     expect(await sweeping).toBe(1);
     expect(await within(QUEUE_WAIT.timeoutMs, claiming, 'the claim to finish')).toMatchObject({ outcome: 'done' });
     expect(linesNamed('idempotency.claimed_again')).toEqual([]);
+  });
+
+  it("B1e-3 sweepExpiredKeys sweeps in a transaction of its own, the organisation's", async () => {
+    const [org, other] = [newId(), newId()];
+    await keyAged(org, '31 days');
+    const young = await keyAged(org, '1 day');
+    const othersOld = await keyAged(other, '31 days');
+
+    expect(await sweepExpiredKeys(app, org, 100)).toBe(1);
+    expect(await kept(org)).toEqual([young]);
+    expect(await kept(other)).toEqual([othersOld]);
+  });
+
+  it('B1e-3 sweepExpiredKeys cuts off a statement slowed past the app, rather than wait on it', async () => {
+    const org = newId();
+    await keyAged(org, '31 days');
+    const owner = database.as('owner');
+    await owner.query(
+      'create function probe.slow_sweep() returns trigger language plpgsql as $$ begin perform pg_catalog.pg_sleep(30); return old; end $$',
+    );
+    await owner.query(
+      'create trigger slow_sweep before delete on idempotency.keys for each row execute function probe.slow_sweep()',
+    );
+    try {
+      await expect(within(15_000, sweepExpiredKeys(app, org, 100), 'the sweep to be cut off')).rejects.toMatchObject({
+        code: '57014',
+      });
+    } finally {
+      await owner.query('drop trigger slow_sweep on idempotency.keys');
+      await owner.query('drop function probe.slow_sweep()');
+    }
+    expect(await kept(org)).toHaveLength(1);
   });
 
   it("takes 10,000, and refuses to sweep outside the organisation's own withTenant", async () => {
