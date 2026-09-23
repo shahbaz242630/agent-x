@@ -8,9 +8,10 @@
 // 5. writes the fingerprint's hash to the platform audit chain, or refuses to
 //    start (SEC-OPS-05)
 // 6. listens, and starts the audit chains' anchor check (ADR-012 §2): the
-//    platform's, and each organisation's from the directory's list (B1d-2)
+//    platform's, and each organisation's from the directory's list (B1d-2);
+//    and, on a timer of its own, the idempotency keys' retention sweep (B1e-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
-//    request in flight is answered, then the anchor check, then the pool
+//    request in flight is answered, then the anchor check and the sweep, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
@@ -39,7 +40,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { createRetentionSweep } from './retention-sweep.ts';
+import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
@@ -67,11 +68,12 @@ const STOP_DEADLINE_MS = 25_000;
 const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 
 /**
- * The idempotency keys' retention sweep (B1e-3): at each start, then at most
- * hourly; a batch of 1,000 keys at a time, at most 100 batches an organisation
- * a run, each within the anchor check's deadline.
+ * The idempotency keys' retention sweep (B1e-3): at each start, then an hour
+ * after each sweep ends; a batch of 1,000 keys at a time, at most 100 batches
+ * an organisation a run, each within the anchor check's deadline.
  */
-const SWEEP = { everyMs: 3_600_000, batch: 1_000, mostBatches: 100 } as const;
+const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+const SWEEP_EVERY_MS = 3_600_000;
 
 /** The parts of `process` the API uses. Tests pass a stand-in. */
 export interface ApiProcess {
@@ -98,7 +100,7 @@ export interface RunOptions {
 function onStopSignals(
   host: ApiProcess,
   server: FastifyInstance,
-  anchorCheck: { stop(): Promise<void> },
+  background: { stop(): Promise<void> },
   database: Database<ApiTables>,
   logger: Logger,
 ): void {
@@ -116,8 +118,8 @@ function onStopSignals(
     try {
       // Requests are still answered while the server stops (return503OnClosing is
       // off), so the pool closes only once the last of them, and the anchor
-      // check, have finished with it.
-      await Promise.all([server.close(), anchorCheck.stop()]);
+      // check and the sweep, have finished with it.
+      await Promise.all([server.close(), background.stop()]);
       await database.destroy();
       logger.info('api.stopped');
       logger.flush();
@@ -277,33 +279,39 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const retention = createRetentionSweep({
     list: () => listedOrganizations(database),
     sweep: (orgId, most) => sweepExpiredKeys(database, orgId, most),
-    clock: systemClock,
     logger,
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     ...SWEEP,
   });
   // The schema is checked on the same schedule as the chains, so there is one
   // timer and one pace. It runs first: a chain read through rewritten walls is
-  // worth less than knowing the walls were rewritten. The retention sweep runs
-  // last, on the same timer, when its hour has come round (B1e-3).
+  // worth less than knowing the walls were rewritten.
   const anchorCheck = scheduleAnchorCheck(
     {
       async run(signal?: AbortSignal): Promise<void> {
         // Within its own deadline and ending at once when the API stops, so a
         // database that accepts a read and never answers cannot hold the
         // schedule open and silence every later check.
-        // A function, not a check the compiler narrows: each await may stop the run.
-        const stopped = (): boolean => signal?.aborted === true;
         await checkSchemaOnSchedule({ database, appRole: config.db.user, logger, signal });
-        if (stopped()) return;
+        if (signal?.aborted === true) return;
         await anchors.run(signal);
-        if (stopped()) return;
-        await retention.run(signal);
       },
     },
     config.audit.anchorSeconds * 1000,
   );
-  onStopSignals(host, server, anchorCheck, database, logger);
+  // On a timer of its own (B1e-3): a long sweep must never hold up the anchor check.
+  const sweeping = scheduleRetentionSweep(retention, SWEEP_EVERY_MS);
+  onStopSignals(
+    host,
+    server,
+    {
+      stop: async () => {
+        await Promise.all([anchorCheck.stop(), sweeping.stop()]);
+      },
+    },
+    database,
+    logger,
+  );
   return server;
 }
 

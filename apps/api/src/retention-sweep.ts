@@ -1,7 +1,8 @@
 // The idempotency keys' retention sweep (B1e-3, ADR-014 §3): a key is kept 30
-// days from its claim, then deleted. The API sweeps when it starts and then at
-// most once an interval, on the anchor check's schedule, so there is one timer:
-// staging's API scales to zero when idle, so each start sweeps too.
+// days from its claim, then deleted. The API sweeps when it starts and then an
+// hour after each sweep ends, on a timer of its own: a long sweep (a backlog)
+// must never hold up the anchor check, whose missed runs are the alarm.
+// Staging's API scales to zero when idle, so each start sweeps too.
 //
 // Each run reads the directory's list and sweeps each organisation in its own
 // withTenant (sweepExpiredKeys), a batch at a time until a batch comes back
@@ -12,20 +13,16 @@
 // nothing (a retry of it is answered, as it would have been a day earlier).
 // Every run ends with one line, so a sweep that has stopped can be told from
 // one with nothing to delete.
-import type { Clock } from '@agentx/core/shared-kernel';
 import type { Logger } from '@agentx/platform/observability';
 
-import { Stopped, withinDeadline } from './deadline.ts';
+import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 export interface RetentionSweepOptions {
   /** Every organisation the directory lists, by ID. */
   readonly list: () => Promise<readonly string[]>;
   /** Deletes up to `most` of the organisation's keys past their retention, and says how many. */
   readonly sweep: (orgId: string, most: number) => Promise<number>;
-  readonly clock: Clock;
   readonly logger: Logger;
-  /** The least time between two runs: a run sooner after the last does nothing. */
-  readonly everyMs: number;
   /** How long one step (the list, or one batch) may take before it counts as failed. */
   readonly deadlineMs: number;
   /** How many keys one batch deletes. */
@@ -35,21 +32,18 @@ export interface RetentionSweepOptions {
 }
 
 export interface RetentionSweep {
-  /** Sweeps every organisation, if an interval has passed since the last run. Never throws. */
+  /** Sweeps every listed organisation once. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
 export function createRetentionSweep({
   list,
   sweep,
-  clock,
   logger,
-  everyMs,
   deadlineMs,
   batch,
   mostBatches,
 }: RetentionSweepOptions): RetentionSweep {
-  let lastRun: number | undefined;
   // A step still under way past its deadline: one at most, so a hung database can't take every connection.
   let inFlight = false;
 
@@ -88,9 +82,6 @@ export function createRetentionSweep({
 
   return Object.freeze({
     async run(signal?: AbortSignal): Promise<void> {
-      const now = clock.now().getTime();
-      if (lastRun !== undefined && now - lastRun < everyMs) return;
-      lastRun = now;
       try {
         let organizations: readonly string[];
         try {
@@ -116,4 +107,9 @@ export function createRetentionSweep({
       }
     },
   });
+}
+
+/** Sweeps now and then `everyMs` after each sweep ends, on a timer of its own (scheduleRuns). */
+export function scheduleRetentionSweep(sweep: RetentionSweep, everyMs: number): { stop(): Promise<void> } {
+  return scheduleRuns(sweep, everyMs);
 }

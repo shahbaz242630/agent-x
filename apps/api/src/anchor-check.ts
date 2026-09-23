@@ -43,7 +43,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { Stopped, withinDeadline } from './deadline.ts';
+import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
 
 /** A chain the check covers, and how to check it against its last anchor, if it has one. */
 export interface CheckedChain {
@@ -375,29 +375,9 @@ export function createAnchorCheck({
 }
 
 /**
- * Runs the check now and then `intervalMs` after each run ends, so runs never
- * overlap. `stop` ends a run in flight at once and waits for it to end; a
- * statement it had begun is left to the database's own limit, which closing
- * the pool waits for.
+ * Runs the check now and then `intervalMs` after each run ends (scheduleRuns):
+ * runs never overlap, and `stop` ends a run in flight at once and waits for it.
  */
 export function scheduleAnchorCheck(check: AnchorCheck, intervalMs: number): { stop(): Promise<void> } {
-  const stopping = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let running: Promise<void> = Promise.resolve();
-  const tick = (): void => {
-    running = check.run(stopping.signal).then(() => {
-      if (stopping.signal.aborted) return;
-      timer = setTimeout(tick, intervalMs);
-      // The server keeps the process alive; the check alone shouldn't.
-      timer.unref();
-    });
-  };
-  tick();
-  return Object.freeze({
-    async stop(): Promise<void> {
-      stopping.abort();
-      clearTimeout(timer);
-      await running;
-    },
-  });
+  return scheduleRuns(check, intervalMs);
 }
