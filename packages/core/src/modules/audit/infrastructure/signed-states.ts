@@ -79,8 +79,10 @@ import {
  * - `seal`: the row's fields aren't the ones sealed
  * - `status`: a status change on a verified row failed as only something
  *   past the app could make it fail
+ * - `chain`: the organisation's audit chain failed the anchor check (B1d-3;
+ *   its alarm line names how), found by no read of a row
  */
-export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status';
+export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {

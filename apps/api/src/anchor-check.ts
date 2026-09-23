@@ -23,6 +23,10 @@
 // checked again, even after a restart. A list the database refuses, or one
 // that isn't IDs, or too many of them, is the alarm (`list`); a list that
 // can't be read otherwise is a warning until three intervals pass without one.
+// An organisation whose chain fails, for any of these reasons, is put on its
+// integrity hold (B1d-3), and each run tries again a hold this process could
+// not record yet: an unlisted organisation's too, since its chain is still
+// reached by its ID.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type AnchorPoint,
@@ -58,6 +62,12 @@ export interface OrganisationChains {
   recorded(): Promise<readonly string[]>;
   /** Checks one organisation's chain against its last anchor, if it has one. */
   verify(orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * Puts the organisation on its integrity hold when its chain `failed`, or
+   * else tries again a hold waiting in this process for it, if one is. Never
+   * throws: every outcome is logged (B1d-3).
+   */
+  hold(orgId: string, failed: boolean): Promise<void>;
 }
 
 export interface AnchorCheckOptions {
@@ -279,6 +289,38 @@ export function createAnchorCheck({
     return 'failed';
   };
 
+  /**
+   * Puts an organisation that failed on its integrity hold, or tries again a
+   * hold waiting for one that didn't, within the check's deadline and one at a
+   * time for each organisation, so a hold hung on the database can't take a
+   * connection every run. A hold not set in time is the alarm: the hold
+   * records its own outcome if it ends later.
+   */
+  const settle = async (
+    from: OrganisationChains,
+    orgId: string,
+    outcome: Outcome,
+    signal: AbortSignal | undefined,
+  ): Promise<void> => {
+    if (signal?.aborted === true) return;
+    const key = `hold|${orgId}`;
+    try {
+      if (inFlight.has(key)) throw new Error('the last hold of this organisation has not finished');
+      inFlight.add(key);
+      const holding = Promise.resolve().then(() => from.hold(orgId, outcome === 'failed'));
+      void holding.then(
+        () => inFlight.delete(key),
+        () => inFlight.delete(key),
+      );
+      await withinDeadline(holding, deadlineMs, signal);
+    } catch (error) {
+      if (error instanceof Stopped) return;
+      logger
+        .child({ orgId })
+        .error('audit.integrity_failed', { chain: 'organisation', check: 'hold', reason: 'not_recorded', err: error });
+    }
+  };
+
   const remember = (orgId: string): void => {
     if (seen.has(orgId)) return;
     seen.add(orgId);
@@ -295,21 +337,31 @@ export function createAnchorCheck({
         logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'list' });
       }
       // Each organisation already seen counts as not checked this run.
-      return [...seen].map((orgId) => missed(orgId, 'unchecked'));
+      const outcomes: Outcome[] = [];
+      for (const orgId of seen) {
+        const outcome = missed(orgId, 'unchecked');
+        outcomes.push(outcome);
+        await settle(from, orgId, outcome, signal);
+      }
+      return outcomes;
     }
     const now = new Set(read.listed);
     for (const orgId of read.recorded) remember(orgId);
     const outcomes: Outcome[] = [];
-    for (const orgId of seen) if (!now.has(orgId)) outcomes.push(missed(orgId, 'unlisted'));
+    for (const orgId of seen) {
+      if (now.has(orgId)) continue;
+      outcomes.push(missed(orgId, 'unlisted'));
+      await settle(from, orgId, 'failed', signal);
+    }
     for (const orgId of now) {
       if (signal?.aborted === true) break;
       remember(orgId);
-      outcomes.push(
-        await checkOne(
-          { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
-          signal,
-        ),
+      const outcome = await checkOne(
+        { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
+        signal,
       );
+      outcomes.push(outcome);
+      await settle(from, orgId, outcome, signal);
     }
     return outcomes;
   };

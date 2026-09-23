@@ -19,12 +19,14 @@
 // ever would hang the request. Such a hold is remembered in this process:
 // every read of it here answers `tampered` with the sign that found it, and a
 // later withSignedStates for the organisation tries again, one at a time, so
-// a head held locked can't take a connection for every request. It is kept
-// in this process alone: another replica reads the log's `clear` meanwhile,
-// and a process stopped before it is recorded (staging's API scales to zero
-// when idle) forgets it, leaving the alarm lines. The hold is then set only
-// when the tampering is next found; keeping it outside the process is carried
-// forward.
+// a head held locked can't take a connection for every request; so does each
+// run of the anchor check (holdOrganisation, B1d-3). It is kept in this
+// process alone: another replica reads the log's `clear` meanwhile, and a
+// process stopped before it is recorded (staging's API scales to zero when
+// idle) forgets it, leaving the alarm lines. The hold is then set only when
+// the tampering is next found; keeping it outside the process is carried
+// forward. A hold's transaction is bounded by the head's lock (5 s) and each
+// statement's time (10 s).
 //
 // A work whose recording meets a chain that refuses new events has met
 // tampering too, and raises the alarm (`check: record`) before its error goes
@@ -62,6 +64,9 @@ const unrecorded = new Map<string, Found>();
  */
 const recording = new Map<string, number>();
 
+/** What a hold names as found tampered with when the organisation's whole chain failed the anchor check. */
+const CHAIN_SUBJECT = 'audit_chain';
+
 /** The first finding for each organisation, with how many there were. */
 function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
   const each = new Map<string, Found>();
@@ -70,6 +75,81 @@ function byOrganisation(found: readonly TamperFinding[]): Map<string, Found> {
     each.set(finding.orgId, seen === undefined ? { finding, count: 1 } : { ...seen, count: seen.count + 1 });
   }
   return each;
+}
+
+/**
+ * Records the organisation's hold for a finding, in withTenant's transaction
+ * for it, bounded by the head's lock (5 s) and each statement's time (10 s),
+ * so neither a locked head nor a slow database holds the caller up for long.
+ * One that can't be recorded raises the alarm (`check: hold`) and waits in
+ * this process. Never throws.
+ */
+async function setHold(
+  db: Kysely<AuditTables>,
+  held: string,
+  { finding, count }: Found,
+  { keys, ids, logger }: SignedStatesServices,
+): Promise<void> {
+  const log = logger.child({ orgId: held });
+  recording.set(held, (recording.get(held) ?? 0) + 1);
+  try {
+    // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
+    const holder = createSignedStates({
+      keys,
+      trail: createAuditTrail({ keys, ids }),
+      logger,
+      onTamper: () => undefined,
+    });
+    const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
+      await sql`set local lock_timeout = '5s'`.execute(tx);
+      await sql`set local statement_timeout = '10s'`.execute(tx);
+      return holder.hold(tx, finding, count);
+    });
+    unrecorded.delete(held);
+    if (outcome === 'set') {
+      log.warn('audit.integrity_hold_set', {
+        reason: finding.sign,
+        subjectType: finding.subjectType,
+        findings: count,
+      });
+    }
+  } catch (error) {
+    unrecorded.set(held, { finding, count });
+    log.error('audit.integrity_failed', {
+      chain: 'organisation',
+      check: 'hold',
+      reason: 'not_recorded',
+      err: error,
+    });
+  } finally {
+    const still = (recording.get(held) ?? 1) - 1;
+    if (still > 0) recording.set(held, still);
+    else recording.delete(held);
+  }
+}
+
+/**
+ * Puts the organisation on its integrity hold for its audit chain failing the
+ * anchor check (B1d-3), recorded as the sign `chain` on the subject
+ * `audit_chain`. With `failed` false, tries again a hold waiting in this
+ * process, if one is and none is being recorded, so one that met a locked
+ * head is retried every run, even with no request for the organisation.
+ * Never throws: every outcome is logged.
+ */
+export async function holdOrganisation(
+  db: Kysely<AuditTables>,
+  orgId: string,
+  services: SignedStatesServices,
+  failed: boolean,
+): Promise<void> {
+  const held = orgId.toLowerCase();
+  const waiting = unrecorded.get(held);
+  if (failed) {
+    const finding: TamperFinding = { orgId: held, subjectType: CHAIN_SUBJECT, objectId: held, sign: 'chain' };
+    await setHold(db, held, { finding, count: 1 }, services);
+  } else if (waiting !== undefined && !recording.has(held)) {
+    await setHold(db, held, waiting, services);
+  }
 }
 
 /**
@@ -116,37 +196,6 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
     const own = orgId.toLowerCase();
     const waiting = unrecorded.get(own);
     if (opened.began && waiting !== undefined && !due.has(own) && !recording.has(own)) due.set(own, waiting);
-    for (const [held, { finding, count }] of due) {
-      const log = logger.child({ orgId: held });
-      recording.set(held, (recording.get(held) ?? 0) + 1);
-      try {
-        // Its own signed states: a hold that can't be believed is set over, right here, not handed on again.
-        const holder = createSignedStates({ keys, trail, logger, onTamper: () => undefined });
-        const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
-          await sql`set local lock_timeout = '5s'`.execute(tx);
-          return holder.hold(tx, finding, count);
-        });
-        unrecorded.delete(held);
-        if (outcome === 'set') {
-          log.warn('audit.integrity_hold_set', {
-            reason: finding.sign,
-            subjectType: finding.subjectType,
-            findings: count,
-          });
-        }
-      } catch (error) {
-        unrecorded.set(held, { finding, count });
-        log.error('audit.integrity_failed', {
-          chain: 'organisation',
-          check: 'hold',
-          reason: 'not_recorded',
-          err: error,
-        });
-      } finally {
-        const still = (recording.get(held) ?? 1) - 1;
-        if (still > 0) recording.set(held, still);
-        else recording.delete(held);
-      }
-    }
+    for (const [held, one] of due) await setHold(db, held, one, { keys, ids, logger });
   }
 }
