@@ -227,8 +227,8 @@ describe('what a workload runs', () => {
     refused([], 'it must run exactly one container');
     refused([container, container], 'it must run exactly one container');
     refused(container, 'it must run exactly one container');
-    // A field a release doesn't copy, such as a probe it would drop.
-    refused(with_({ probes: [], stdin: true }), "its container has probes, stdin, which a release doesn't copy");
+    // A field this tool doesn't copy, such as a probe it would drop.
+    refused(with_({ probes: [], stdin: true }), "its container has probes, stdin, which this tool doesn't copy");
     refused(with_({ name: 'migrate' }), "its container isn't named api");
     // Another image, one whose name is as long as ours, a tag in place of a
     // digest, or a repository whose name only starts like ours.
@@ -249,7 +249,7 @@ describe('what a workload runs', () => {
     refused(with_({ resources: undefined }), 'its size is not given');
     refused(
       with_({ resources: { cpu: 0.5, memory: '1Gi', gpu: 1 } }),
-      "its size has gpu, which a release doesn't copy",
+      "its size has gpu, which this tool doesn't copy",
     );
     refused(withSettings(undefined as never), 'its settings are not a list');
     refused(with_({ env: {} }), 'its settings are not a list');

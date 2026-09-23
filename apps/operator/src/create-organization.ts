@@ -12,11 +12,11 @@
 // §6: 12, then 13), and the wait for it is bounded (PlatformChain.record).
 //
 // The organisation's ID is made by the command (its IdGenerator), or by
-// jobs.ts for a request file (B1c-2a), never typed; an ID already listed is
-// refused by the directory's key, so a request run twice makes one organisation:
-// the command can only ever create a new organisation, never reach one that
-// exists (ADR-005 §6, amended S40: the one operator command that writes
-// tenant tables, and its bounds).
+// deploy/azure/operator.ts for a request file (B1c-2b), never typed; an ID
+// already listed is refused by the directory's key, so a request run twice
+// makes one organisation: the command can only ever create a new
+// organisation, never reach one that exists (ADR-005 §6, amended S40: the one
+// operator command that writes tenant tables, and its bounds).
 import type { AuditTables, SignedStatesServices } from '@agentx/core/modules/audit';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
