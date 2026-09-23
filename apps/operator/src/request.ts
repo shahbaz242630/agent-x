@@ -1,8 +1,9 @@
 // The request the operator's job reads from its file (B1c-2a), in the one
 // place both sides take it from: the command that reads it (main.ts) and
-// jobs.ts, which writes it onto the job before a run (B1c-2b). A JSON list of
-// the command's words and the new organisation's ID, at most
-// REQUEST_LIMIT_BYTES of UTF-8. Nothing here logs anything: a name never is.
+// deploy/azure/operator.ts, which writes it onto the job before a run
+// (B1c-2b). A JSON list of the command's words and the new organisation's ID,
+// at most REQUEST_LIMIT_BYTES of UTF-8. Nothing here logs anything: a name
+// never is.
 
 /** The most a request file may hold: a command and one name, with room to spare. */
 export const REQUEST_LIMIT_BYTES = 4096;

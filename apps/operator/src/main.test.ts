@@ -88,7 +88,7 @@ const ENV: Record<string, string> = {
 
 const NAME = 'Zephyrine Trading Test Co';
 
-/** A new organisation's ID, as jobs.ts makes one for a request (a UUIDv7). */
+/** A new organisation's ID, as deploy/azure/operator.ts makes one for a request (a UUIDv7). */
 const NEW_ID = '0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b';
 
 class FakeProcess implements OperatorProcess {
@@ -249,7 +249,7 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
     writeFileSync(file, contents);
     return file;
   };
-  /** A request as jobs.ts writes one (B1c-2b): the words, then the new organisation's ID. */
+  /** A request as deploy/azure/operator.ts writes one (B1c-2b): the words, then the new organisation's ID. */
   const request = (name: string, id: string = NEW_ID): string => createOrganizationRequest(name, id);
   const reached = ['operator.starting', 'operator.database_unavailable'];
   const shape = `the request file holds ${REQUEST_USAGE} as a JSON list, and nothing else`;

@@ -325,7 +325,7 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
   const found = record(containers[0]);
   const unknown = Object.keys(found).filter((field) => !CONTAINER_FIELDS.has(field));
-  if (unknown.length > 0) return refuse(`its container has ${unknown.join(', ')}, which a release doesn't copy`);
+  if (unknown.length > 0) return refuse(`its container has ${unknown.join(', ')}, which this tool doesn't copy`);
   const { name, image, command, args, env, resources, volumeMounts } = found;
   if (name !== expected) return refuse(`its container isn't named ${expected}`);
   if (typeof image !== 'string' || !isOurImage(image)) return refuse(`it doesn't run ${IMAGE_REPOSITORY} by digest`);
@@ -333,7 +333,7 @@ export function runningAs(spec: WorkloadSpec, known: string, containers: unknown
   const size = record(resources);
   if (typeof size.cpu !== 'number' || typeof size.memory !== 'string') return refuse('its size is not given');
   const sized = Object.keys(size).filter((field) => !SIZE_FIELDS.has(field));
-  if (sized.length > 0) return refuse(`its size has ${sized.join(', ')}, which a release doesn't copy`);
+  if (sized.length > 0) return refuse(`its size has ${sized.join(', ')}, which this tool doesn't copy`);
   if (!Array.isArray(env)) return refuse('its settings are not a list');
   const settings = env.map((entry): Setting => {
     const { name: setting, value, secretRef, ...other } = record(entry);

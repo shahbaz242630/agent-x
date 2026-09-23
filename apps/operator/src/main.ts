@@ -7,9 +7,10 @@
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
-// the person starting the run (jobs.ts), since a run started with arguments of
-// its own would lose its mounted files. With the ID named, the same request run
-// twice makes one organisation: the second run is refused, changing nothing.
+// the person starting the run (deploy/azure/operator.ts), since a run started
+// with arguments of its own would lose its mounted files. With the ID named,
+// the same request run twice makes one organisation: the second run is
+// refused, changing nothing.
 //
 // It:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)

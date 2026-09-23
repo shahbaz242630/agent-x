@@ -15,14 +15,21 @@
 //    job's container to the image and build the API runs (CI's release moves
 //    the API and migrate alone), then waits until Azure has taken it
 // 4. starts the job as it is, never with containers of its own, and waits
-// 5. puts [] back whatever happened, and waits until Azure has taken that
-// 6. reads the run's log and says what the run did: created the
-//    organisation, found it done already (nothing changed), or neither
+// 5. puts [] back whatever happened, once no change to the job is still
+//    going, and waits until Azure has taken that
+// 6. reads the run's log and says what the run did for this request's ID:
+//    created the organisation, found it done already (nothing changed), or
+//    neither; a line about another ID is never taken for this one's
+// One run at a time: Azure can't say whose change it took. A run stopped
+// part-way (the terminal closed, say) leaves the request on the job, which
+// can't make a second organisation, since it names its ID; the same command
+// again with that --id takes it off at its end, as does deploy.ts apps.
 // The request is never printed, nor put on a command line: it goes to Azure in
-// a file only this user can read, removed straight after, with every character
-// past ASCII escaped so the CLI can't misread its encoding. A read of the job
-// never shows it back. Starting the job is the partner's (ADR-005 §6: the
-// right to start it is the API's own authority), so this runs from their `!`.
+// a file in this user's own temporary folder, removed straight after, with
+// every character past ASCII escaped so the CLI can't misread its encoding. A
+// read of the job never shows it back. Starting the job is the partner's
+// (ADR-005 §6: the right to start it is the API's own authority), so this runs
+// from their `!`.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -76,11 +83,18 @@ export const NO_REQUEST = '[]';
 /** What the job runs: the command, reading its request from the file the secret is mounted as (policy.ts `HELD`). */
 const RUNS = ['node', 'apps/operator/src/main.ts', '--request', `/mnt/secrets/${REQUEST_SECRET}`];
 
-/** How long a change to the job may take to settle. */
-const SETTLE_MS = 5 * 60_000;
+/** How long a change to the job may take to settle: as long as a release gives one (release.ts). */
+const SETTLE_MS = 10 * 60_000;
 
 /** Any ID, for the size of a request before its own is made: every ID is as long. */
 const SOME_ID = '00000000-0000-7000-8000-000000000000';
+
+/** An error's message, or what was thrown when it isn't an Error. */
+const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** What now holds the request when [] couldn't be put back, and what takes it off. */
+const stillHeld = (id: string): string =>
+  `The request is still on ${jobName('operator')}. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
 
 export const USAGE = `Usage:
   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
@@ -164,7 +178,9 @@ function readOperatorJob(steps: JobSteps, target: Target): OperatorJob {
       typeof identity === 'string' &&
       Object.keys(other).length === 0
         ? { name, keyVaultUrl, identity }
-        : refuse('a secret other than its request is more than a reference to the vault'),
+        : refuse(
+            'a secret other than its request must be exactly a reference to the vault: a name, a URL and an identity',
+          ),
     );
   const limit = configuration.replicaTimeout;
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) return refuse('it has no time limit');
@@ -197,9 +213,12 @@ const patchBody = (job: OperatorJob, value: string, container?: Container): stri
   );
 
 /**
- * Sends a PATCH to the job from a file only this user can read, removed
+ * Sends a PATCH to the job from a file in a folder of its own in this user's
+ * temporary folder (inside their profile on Windows, so theirs alone), removed
  * straight after: the request stays off every command line. Azure's message
- * isn't shown, since it can quote what was sent.
+ * isn't shown, since it can quote what was sent. A folder that can't be
+ * removed (a scanner holding the file, say) is said, never taken for a PATCH
+ * that failed.
  */
 function patch(steps: JobSteps, target: Target, body: string, what: string): void {
   const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-'));
@@ -221,7 +240,11 @@ function patch(steps: JobSteps, target: Target, body: string, what: string): voi
       );
     }
   } finally {
-    rmSync(folder, { recursive: true, force: true });
+    try {
+      rmSync(folder, { recursive: true, force: true, maxRetries: 5 });
+    } catch (error) {
+      steps.say(`Couldn't remove ${folder}, which holds what was sent: remove it by hand (${reason(error)}).`);
+    }
   }
 }
 
@@ -255,44 +278,62 @@ async function settled(
   }
 }
 
-/** Puts [] back as the job's request, every vault reference as it is now, and waits until Azure has taken it. */
+/** Waits until no change to the job is still going, so the next is taken rather than refused: the job then. */
+async function idle(steps: JobSteps, target: Target): Promise<OperatorJob> {
+  const deadline = steps.now().getTime() + SETTLE_MS;
+  for (;;) {
+    const job = readOperatorJob(steps, target);
+    if (job.state !== 'InProgress') return job;
+    if (steps.now().getTime() >= deadline) {
+      throw new Error(
+        `${jobName('operator')} was still taking a change after ${String(SETTLE_MS / 60_000)} minutes, so nothing more was sent.`,
+      );
+    }
+    await steps.sleep(POLL_MS);
+  }
+}
+
+/**
+ * Puts [] back as the job's request, every vault reference as it is now, once
+ * no change is still going (Azure may refuse one made during another), and
+ * waits until Azure has taken it.
+ */
 async function clearRequest(steps: JobSteps, target: Target): Promise<void> {
-  const job = readOperatorJob(steps, target);
+  const job = await idle(steps, target);
   const what = `putting ${NO_REQUEST} back`;
   patch(steps, target, patchBody(job, NO_REQUEST), what);
   await settled(steps, target, job.modified, job.running.container, what);
   steps.say(`Put ${NO_REQUEST} back on ${jobName('operator')}: its next run holds no request until one is written.`);
 }
 
-/** The operator's command's own lines in a run: JSON, each naming its `event`. */
+/** The command's own lines in a run: its JSON ones, since neither Azure's lines nor Node's own are JSON. */
 function commandLines(lines: readonly LogLine[]): Readonly<Record<string, unknown>>[] {
-  return lines
-    .filter((line) => line.source !== 'platform')
-    .flatMap((line) => {
-      try {
-        const said = record(JSON.parse(line.text));
-        return typeof said.event === 'string' ? [said] : [];
-      } catch (error) {
-        // A line that isn't the command's JSON (Node's own, say) is shown above and read as none of its own.
-        if (error instanceof SyntaxError) return [];
-        throw error;
-      }
-    });
+  return lines.flatMap((line) => {
+    try {
+      return [record(JSON.parse(line.text))];
+    } catch (error) {
+      // A line that isn't JSON is shown above and read as none of the command's own.
+      if (error instanceof SyntaxError) return [];
+      throw error;
+    }
+  });
 }
 
 /**
- * What the run did, from Azure's end of it and the command's own lines: 0 once
- * the organisation with this ID exists, made now or by an earlier run of the
- * same request, and 1 otherwise, saying what to do next.
+ * What the run did, from the command's own lines about this request's ID and
+ * Azure's end of the run: 0 once the organisation with this ID exists, made
+ * now or by an earlier run of the same request, and 1 otherwise, saying what to
+ * do next. A line about another ID (another request run in this one's place)
+ * is never taken for this one's.
  */
 function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string): number {
-  // The command ends 0 only once it has created the organisation.
-  if (run.status === 'Succeeded') {
+  const said = commandLines(lines);
+  const about = (event: string): boolean => said.some((line) => line.event === event && line.orgId === id);
+  if (about('operator.organization_created')) {
     steps.say(`Created the organisation ${id}.`);
     return 0;
   }
-  const said = commandLines(lines);
-  if (said.some((line) => line.event === 'operator.done_before')) {
+  if (about('operator.done_before')) {
     steps.say(`Already done: the organisation ${id} exists from an earlier run of this request, and nothing changed.`);
     return 0;
   }
@@ -304,7 +345,9 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: str
     return 1;
   }
   steps.say(
-    `The organisation may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which can't make a second one.`,
+    run.status === 'Succeeded'
+      ? `The run succeeded, but its lines don't show the organisation ${id} made: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${id}, which can't make a second one.`
+      : `The organisation may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which can't make a second one.`,
   );
   return 1;
 }
@@ -327,7 +370,7 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   const moved = !same(job.running.container, synced);
   const id = request.id ?? uuidV7Ids.next();
   steps.say(
-    `The new organisation's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second organisation.`,
+    `The new organisation's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second organisation, and it takes the request off the job at its end.`,
   );
   let execution: string;
   let run: Ended | undefined;
@@ -342,16 +385,22 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   } catch (error) {
     // Whatever stopped it, the request comes off the job; a failure to take it off is said, and the first error stands.
     await clearRequest(steps, target).catch((failure: unknown) => {
-      steps.say(
-        `Putting ${NO_REQUEST} back failed too: ${failure instanceof Error ? failure.message : String(failure)}`,
-      );
+      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${stillHeld(id)}`);
     });
     throw error;
   }
-  await clearRequest(steps, target);
-  if (run === undefined) return 1;
-  const lines = await readLog(steps, target, execution, run);
-  return outcome(steps, run, lines, id);
+  // The request comes off before the log is read; a failure to take it off still lets the run's outcome be said first.
+  const left = await clearRequest(steps, target).then(
+    () => undefined,
+    (failure: unknown) => failure,
+  );
+  try {
+    if (run === undefined) return 1;
+    const said = outcome(steps, run, await readLog(steps, target, execution, run), id);
+    return left === undefined ? said : 1;
+  } finally {
+    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${stillHeld(id)}`);
+  }
 }
 
 export async function main(

@@ -3,9 +3,10 @@
 // from them and recording each call. A PATCH is read from the file it is sent
 // in, as it is sent, and taken only after a few readings, as Azure settles a
 // change in the background; time moves only when the runner sleeps.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createOrganizationRequest,
@@ -25,6 +26,27 @@ import {
   USAGE,
 } from './operator.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
+
+/** A failure no real run chooses: the next removals of a folder refused, as Windows refuses a file a scanner holds. */
+const faults = vi.hoisted(() => ({ remove: 0 }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (faults.remove > 0) {
+        faults.remove -= 1;
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      }
+      actual.rmSync(...args);
+    },
+  };
+});
+
+afterEach(() => {
+  faults.remove = 0;
+});
 
 const SUBSCRIPTION = '00000000-0000-0000-0000-00000000000b';
 const WORKSPACE_ID = '00000000-0000-0000-0000-00000000000c';
@@ -108,7 +130,19 @@ const said = (fields: Readonly<Record<string, unknown>>): Row => [
 ];
 
 /** How a run ends, and what its lines say, for the ID its request names. */
-type Ending = 'created' | 'done-before' | 'no-request' | 'refused' | 'failed';
+type Ending =
+  | 'created'
+  | 'done-before'
+  | 'no-request'
+  | 'refused'
+  | 'failed'
+  | 'created-other'
+  | 'done-before-other'
+  | 'created-then-failed'
+  | 'silent';
+
+/** Another request's ID, as if that request had run in this one's place. */
+const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
 
 const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   created: (id) => [
@@ -129,7 +163,23 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     said({ event: 'operator.failed', orgId: id }),
     TERMINATED,
   ],
+  'created-other': () => [
+    said({ event: 'operator.starting' }),
+    said({ event: 'operator.organization_created', orgId: OTHER_ID }),
+    TERMINATED,
+  ],
+  'done-before-other': () => [said({ event: 'operator.done_before', orgId: OTHER_ID }), TERMINATED],
+  // Created, and then stopped before it could end well (its end cut short).
+  'created-then-failed': (id) => [said({ event: 'operator.organization_created', orgId: id }), TERMINATED],
+  // Azure delivered none of the command's own lines.
+  silent: () => [TERMINATED],
 };
+
+/** The endings whose command exits 0, so Azure ends the run Succeeded. */
+const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent']);
+
+/** How Azure settles a change: the state it ends in, or never. */
+type Settles = 'Succeeded' | 'Failed' | 'Canceled' | 'never';
 
 interface Script {
   /** What the job and the API run before anything. */
@@ -145,7 +195,11 @@ interface Script {
   readonly runs?: unknown;
   /** How many readings after a PATCH still show the job as it was, and how each PATCH settles, in order. */
   readonly lag?: number;
-  readonly settles?: readonly ('Succeeded' | 'Failed' | 'never')[];
+  readonly settles?: readonly Settles[];
+  /** Another deploy's change to the job landing just before this tool's first. */
+  readonly interloper?: boolean;
+  /** How many readings show another change to the job going, once the run has started. */
+  readonly busy?: number;
   /** Each PATCH's CLI status, in order: 0 sends it. */
   readonly patchStatus?: readonly number[];
   readonly startStatus?: number;
@@ -158,11 +212,15 @@ interface Script {
 interface Settling {
   left: number;
   applied: boolean;
-  readonly settles: 'Succeeded' | 'Failed' | 'never';
+  readonly settles: Settles;
   readonly apply: () => void;
 }
 
-/** Azure as the runner meets it: the job and the API, and every call recorded. */
+/**
+ * Azure as the runner meets it: the job and the API, and every call recorded.
+ * A change to the job made while another is still going is refused, as Azure
+ * refuses one.
+ */
 class FakeAzure implements Az {
   readonly calls: (readonly string[])[] = [];
   /** Each PATCH as it was sent: the file's text, and its JSON. */
@@ -175,6 +233,7 @@ class FakeAzure implements Az {
   modified = '2026-09-22T17:20:12.062971';
   readonly #script: Script;
   #settling: Settling | undefined;
+  #busy = 0;
   #changes = 0;
   #readings = 0;
 
@@ -223,11 +282,10 @@ class FakeAzure implements Az {
           return { status: script.startStatus, stdout: '', stderr: 'ERROR: Conflict({"error":{"code":"JobBusy"}})' };
         }
         this.heldAtStart = this.request;
+        this.#busy = script.busy ?? 0;
         return json({ id: '/subscriptions/x', name: RUN });
       case 'containerapp job execution show': {
-        const states = script.states ?? [
-          script.ending === undefined || script.ending === 'created' ? 'Succeeded' : 'Failed',
-        ];
+        const states = script.states ?? [SUCCEEDS.has(script.ending ?? 'created') ? 'Succeeded' : 'Failed'];
         const state = states[Math.min(this.#readings, states.length - 1)];
         this.#readings += 1;
         return json({
@@ -256,11 +314,13 @@ class FakeAzure implements Az {
         this.#settling = undefined;
       }
     }
+    const going = this.#busy > 0;
+    if (going) this.#busy -= 1;
     const answer: Record<string, unknown> = {
       id: '/subscriptions/x',
       name: jobName('operator'),
       properties: {
-        provisioningState: this.state,
+        provisioningState: going ? 'InProgress' : this.state,
         configuration: {
           replicaTimeout: 300,
           replicaRetryLimit: 0,
@@ -288,6 +348,14 @@ class FakeAzure implements Az {
     this.sent.push({ text, body: parsed, file });
     const index = this.#changes;
     this.#changes += 1;
+    if (this.#settling !== undefined || this.#busy > 0) {
+      return {
+        status: 1,
+        stdout: '',
+        stderr:
+          'ERROR: Conflict({"error":{"code":"ContainerAppOperationInProgress","message":"another operation is in progress"}})',
+      };
+    }
     const status = this.#script.patchStatus?.[index] ?? 0;
     if (status !== 0) {
       return {
@@ -295,6 +363,11 @@ class FakeAzure implements Az {
         stdout: '',
         stderr: `ERROR: Bad Request({"error":{"code":"InvalidParameter","message":"${text}"}})`,
       };
+    }
+    if (index === 0 && this.#script.interloper === true) {
+      // Another deploy's change lands first: the job's last change moves on, with this tool's still to come.
+      this.modified = '2026-09-23T07:59:30.000000';
+      this.state = 'Succeeded';
     }
     const properties = parsed.properties as {
       configuration: { secrets: { name: string; value?: string }[] };
@@ -404,6 +477,16 @@ describe('parseArguments', () => {
   });
 });
 
+/** The ID a run's request named, as the job held it when the run started. */
+const idHeld = (az: FakeAzure): string => String((JSON.parse(az.heldAtStart ?? '[]') as string[])[4]);
+
+/** The ID the tool said it made, from its second line. */
+const idSaid = (lines: readonly string[]): string => /ID is (\S+)\. /.exec(lines[1] ?? '')?.[1] ?? '';
+
+/** What the tool says of a request still on the job, and what takes it off. */
+const stillHeld = (id: string): string =>
+  `The request is still on job-agentx-stg-operator. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+
 describe('creating an organisation', () => {
   it("writes the request with the API's build, runs it, puts [] back and says it was created", async () => {
     const done = await run(create);
@@ -433,7 +516,7 @@ describe('creating an organisation', () => {
       'post log',
     ]);
     const [write, clear] = done.az.sent;
-    const id = String((JSON.parse(done.az.heldAtStart ?? '[]') as string[])[4]);
+    const id = idHeld(done.az);
     expect(id).toMatch(UUID_V7);
     // The run started holding this request, and the job holds none now.
     expect(done.az.heldAtStart).toBe(createOrganizationRequest(NAME, id));
@@ -454,7 +537,7 @@ describe('creating an organisation', () => {
     expect(done.az.container).toEqual(operatorContainer(image('b'), commit('b')));
     expect(done.said).toEqual([
       `Signed in to the subscription "Azure subscription 1" (${SUBSCRIPTION}).`,
-      `The new organisation's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second organisation.`,
+      `The new organisation's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second organisation, and it takes the request off the job at its end.`,
       `Bringing job-agentx-stg-operator to the API's build: image ${image('a')} → ${image('b')}; AGENTX_RELEASE ${commit('a')} → ${commit('b')}.`,
       'Wrote the request onto job-agentx-stg-operator.',
       `Started ${RUN}.`,
@@ -465,16 +548,14 @@ describe('creating an organisation', () => {
       'Put [] back on job-agentx-stg-operator: its next run holds no request until one is written.',
       `Reading ${RUN}'s log: Azure delivers a container's lines up to 10 minutes after they are written, so this can take that long...`,
       `${RUN}'s log, 1 from the platform and 2 from the container:`,
-      expect.stringMatching(
-        /^ {2}08:02:12 {2}stdout {4}\{"level":"info","service":"operator","event":"operator.starting"\}$/,
-      ),
-      expect.stringMatching(/"event":"operator.organization_created"/),
+      '  08:02:12  stdout    {"level":"info","service":"operator","event":"operator.starting"}',
+      `  08:02:12  stdout    {"level":"info","service":"operator","event":"operator.organization_created","orgId":"${id}"}`,
       "  08:02:12  platform  ContainerTerminated: Container 'operator' was terminated with exit code '0' and reason 'ProcessExited'",
       `Created the organisation ${id}.`,
     ]);
   });
 
-  it('sends no container when the job already runs what the API runs', async () => {
+  it('sends no container when the job already runs what the API runs, and still starts only once the request is taken', async () => {
     const done = await run(create, { jobImage: image('b'), jobBuild: commit('b') });
 
     expect(done.status).toBe(0);
@@ -483,6 +564,8 @@ describe('creating an organisation', () => {
       ['configuration'],
     ]);
     expect(done.said.filter((line) => line.startsWith('Bringing'))).toEqual([]);
+    // Only the time of the job's last change tells the request taken here: the container is the same throughout.
+    expect(done.az.heldAtStart).toBe(createOrganizationRequest(NAME, idHeld(done.az)));
   });
 
   it('never prints the name, never puts it on a command line, and removes the file it was sent in', async () => {
@@ -494,6 +577,21 @@ describe('creating an organisation', () => {
     for (const each of done.az.sent) expect(existsSync(each.file)).toBe(false);
   });
 
+  it("says a folder it couldn't remove, and still counts the PATCH Azure took", async () => {
+    faults.remove = 1;
+    const done = await run(create);
+    const folder = path.dirname(done.az.sent[0]?.file ?? '');
+    try {
+      expect(done.status).toBe(0);
+      expect(done.said).toContain(
+        `Couldn't remove ${folder}, which holds what was sent: remove it by hand (EBUSY: resource busy or locked).`,
+      );
+      expect(done.az.heldAtStart).toBe(createOrganizationRequest(NAME, idHeld(done.az)));
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
   it('sends a name past ASCII as escapes, so it reads the same in any encoding, and it arrives whole', async () => {
     // Arabic, an accented letter, and a letter from beyond the first 65,536 (two UTF-16 units).
     const name = `${String.fromCharCode(0x0645, 0x0624, 0x0633, 0x0633, 0x0629)} Caf${String.fromCharCode(0xe9)} ${String.fromCodePoint(0x1d49c)}`;
@@ -501,8 +599,7 @@ describe('creating an organisation', () => {
 
     expect(done.status).toBe(0);
     expect(done.az.sent[0]?.text).toMatch(/^[ -~]+$/);
-    const id = String((JSON.parse(done.az.heldAtStart ?? '[]') as string[])[4]);
-    expect(done.az.heldAtStart).toBe(createOrganizationRequest(name, id));
+    expect(done.az.heldAtStart).toBe(createOrganizationRequest(name, idHeld(done.az)));
   });
 
   it('writes the ID given for a retry, and calls a request done before already done', async () => {
@@ -516,13 +613,39 @@ describe('creating an organisation', () => {
     expect(done.az.request).toBe(NO_REQUEST);
   });
 
+  it('takes a line saying this ID was created for the truth, even from a run whose end was cut short', async () => {
+    const done = await run(create, { ending: 'created-then-failed' });
+
+    expect(done.status).toBe(0);
+    expect(done.said.at(-1)).toBe(`Created the organisation ${idHeld(done.az)}.`);
+  });
+
+  it('never takes a line about another ID for this one: another request may have run in its place', async () => {
+    const other = await run(create, { ending: 'created-other' });
+    const id = idHeld(other.az);
+    expect(other.status).toBe(1);
+    expect(other.said.at(-1)).toBe(
+      `The run succeeded, but its lines don't show the organisation ${id} made: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${id}, which can't make a second one.`,
+    );
+
+    const doneBefore = await run([...create, '--id', EARLIER_ID], { ending: 'done-before-other' });
+    expect(doneBefore.status).toBe(1);
+    expect(doneBefore.said.at(-1)).toMatch(/^The organisation may not have been created: /);
+  });
+
+  it("says so when a run succeeded but none of the command's lines arrived", async () => {
+    const done = await run(create, { ending: 'silent' });
+
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toMatch(/^The run succeeded, but its lines don't show the organisation /);
+  });
+
   it('says so when the run found no request, Azure not having put it in place in time', async () => {
     const done = await run(create, { ending: 'no-request' });
 
     expect(done.status).toBe(1);
-    const id = String((JSON.parse(done.az.heldAtStart ?? '[]') as string[])[4]);
     expect(done.said.at(-1)).toBe(
-      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${id}.`,
+      `The run found no request, so nothing changed: Azure hadn't put it in place when the run started. Run the same command again with --id ${idHeld(done.az)}.`,
     );
     expect(done.az.request).toBe(NO_REQUEST);
   });
@@ -533,9 +656,8 @@ describe('creating an organisation', () => {
       const done = await run(create, { ending });
 
       expect(done.status).toBe(1);
-      const id = String((JSON.parse(done.az.heldAtStart ?? '[]') as string[])[4]);
       expect(done.said.at(-1)).toBe(
-        `The organisation may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which can't make a second one.`,
+        `The organisation may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${idHeld(done.az)}, which can't make a second one.`,
       );
       expect(done.az.request).toBe(NO_REQUEST);
     },
@@ -558,7 +680,23 @@ describe('creating an organisation', () => {
     expect(done.status).toBe(0);
     // After each PATCH: three readings as it was, one taking it, one settled.
     expect(done.az.sequence.slice(4, 10)).toEqual(['patch job', 'get job', 'get job', 'get job', 'get job', 'get job']);
-    expect(done.az.heldAtStart).not.toBe(NO_REQUEST);
+    expect(done.az.heldAtStart).toBe(createOrganizationRequest(NAME, idHeld(done.az)));
+  });
+
+  it("waits out another deploy's change landing first, which moves the job's last change but not to its container", async () => {
+    const done = await run(create, { interloper: true });
+
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(createOrganizationRequest(NAME, idHeld(done.az)));
+  });
+
+  it('waits for another change to the job to end before taking the request off, since Azure refuses one made during it', async () => {
+    const done = await run(create, { busy: 2 });
+
+    expect(done.status).toBe(0);
+    expect(done.az.request).toBe(NO_REQUEST);
+    // After the run: two readings of the other change going, then one idle, and only then the PATCH.
+    expect(done.az.sequence.slice(11, 15)).toEqual(['get job', 'get job', 'get job', 'patch job']);
   });
 });
 
@@ -582,6 +720,9 @@ describe('what stops it, and what it leaves', () => {
     expect(done.az.sequence).not.toContain('containerapp job start');
   });
 
+  const NOT_A_REFERENCE =
+    'a secret other than its request must be exactly a reference to the vault: a name, a URL and an identity';
+
   it.each([
     [
       'a container field it would drop',
@@ -589,7 +730,7 @@ describe('what stops it, and what it leaves', () => {
         const container = firstContainer(at(job, 'properties'));
         if (container !== undefined) container.probes = [];
       },
-      "its container has probes, which a release doesn't copy",
+      "its container has probes, which this tool doesn't copy",
     ],
     [
       'another command',
@@ -629,14 +770,37 @@ describe('what stops it, and what it leaves', () => {
       (job: Record<string, unknown>) => {
         at(job, 'properties', 'configuration').secrets = [{ name: 'other' }, { name: REQUEST_SECRET }];
       },
-      'a secret other than its request is more than a reference to the vault',
+      NOT_A_REFERENCE,
     ],
     [
       'a reference with more to it',
       (job: Record<string, unknown>) => {
         at(job, 'properties', 'configuration').secrets = [{ ...REFERENCES[0], value: 'x' }, { name: REQUEST_SECRET }];
       },
-      'a secret other than its request is more than a reference to the vault',
+      NOT_A_REFERENCE,
+    ],
+    [
+      // Sent back as read, it would break the reference.
+      'a reference without its identity',
+      (job: Record<string, unknown>) => {
+        const [first] = REFERENCES;
+        at(job, 'properties', 'configuration').secrets = [
+          { name: first?.name, keyVaultUrl: first?.keyVaultUrl },
+          { name: REQUEST_SECRET },
+        ];
+      },
+      NOT_A_REFERENCE,
+    ],
+    [
+      'a reference without its name',
+      (job: Record<string, unknown>) => {
+        const [first] = REFERENCES;
+        at(job, 'properties', 'configuration').secrets = [
+          { keyVaultUrl: first?.keyVaultUrl, identity: first?.identity },
+          { name: REQUEST_SECRET },
+        ];
+      },
+      NOT_A_REFERENCE,
     ],
     [
       'secrets that are not a list',
@@ -702,50 +866,63 @@ describe('what stops it, and what it leaves', () => {
     );
   });
 
-  it('says so when putting [] back fails after another failure, and the first failure stands', async () => {
+  it('says what holds the request, and what takes it off, when putting [] back fails after another failure', async () => {
     const done = await run(create, { startStatus: 1, patchStatus: [0, 1] });
 
     expect(messageOf(done.error)).toMatch(/^az containerapp job start /);
     expect(done.said.at(-1)).toBe(
-      "Putting [] back failed too: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it.",
+      `Putting [] back failed too: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${stillHeld(idSaid(done.said))}`,
     );
   });
 
-  it('fails when putting [] back fails after the run, reading no log', async () => {
+  it('says what the run did before saying [] could not be put back, and then ends 1', async () => {
     const done = await run(create, { patchStatus: [0, 1] });
+    const id = idHeld(done.az);
 
-    expect(messageOf(done.error)).toMatch(/^Azure refused putting \[\] back/);
-    expect(done.az.sequence).not.toContain('post log');
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(1);
+    expect(done.said.slice(-2)).toEqual([
+      `Created the organisation ${id}.`,
+      `Putting [] back failed: Azure refused putting [] back (Bad Request, InvalidParameter). Its message isn't shown, since it can quote what was sent: the resource group's activity log has it. ${stillHeld(id)}`,
+    ]);
   });
 
-  it('stops when Azure ends a change as failed, or never settles it, and puts [] back', async () => {
-    const failed = await run(create, { settles: ['Failed'] });
-    expect(failed.error).toMatchObject({
-      message:
-        "Azure's change to job-agentx-stg-operator for writing the request and bringing the job to the API's build ended Failed.",
-    });
-    expect(failed.az.sequence).not.toContain('containerapp job start');
-    expect(failed.az.request).toBe(NO_REQUEST);
+  it('stops when Azure ends a change as failed or cancelled, and puts [] back', async () => {
+    for (const settles of ['Failed', 'Canceled'] as const) {
+      const done = await run(create, { settles: [settles] });
+      expect(done.error).toMatchObject({
+        message: `Azure's change to job-agentx-stg-operator for writing the request and bringing the job to the API's build ended ${settles}.`,
+      });
+      expect(done.az.sequence).not.toContain('containerapp job start');
+      expect(done.az.request).toBe(NO_REQUEST);
+    }
+  });
 
-    const never = await run(create, { settles: ['never'] });
-    expect(never.error).toMatchObject({
+  it("gives a change that never settles 10 minutes, then says the request can't come off while it is still going", async () => {
+    const done = await run(create, { settles: ['never'] });
+    const id = idSaid(done.said);
+
+    expect(done.error).toMatchObject({
       message:
-        "Azure hadn't settled writing the request and bringing the job to the API's build on job-agentx-stg-operator after 5 minutes (InProgress).",
+        "Azure hadn't settled writing the request and bringing the job to the API's build on job-agentx-stg-operator after 10 minutes (InProgress).",
     });
-    expect(never.said.at(-1)).toBe(
-      'Put [] back on job-agentx-stg-operator: its next run holds no request until one is written.',
+    expect(done.said.at(-1)).toBe(
+      `Putting [] back failed too: job-agentx-stg-operator was still taking a change after 10 minutes, so nothing more was sent. ${stillHeld(id)}`,
     );
-    expect(never.az.request).toBe(NO_REQUEST);
-
-    const neither = await run(create, { settles: ['never', 'never'] });
-    expect(messageOf(neither.error)).toMatch(/^Azure hadn't settled writing the request/);
-    expect(neither.said.at(-1)).toMatch(/^Putting \[\] back failed too: Azure hadn't settled putting \[\] back on /);
+    // No PATCH made while the first was still going.
+    expect(done.az.sent).toHaveLength(1);
   });
 
-  it('says a change not yet taken when Azure still shows the job as it was at the end', async () => {
+  it('says a change not yet taken when Azure still shows the job as it was, at exactly 10 minutes', async () => {
     const done = await run(create, { lag: 1_000 });
 
-    expect(messageOf(done.error)).toMatch(/after 5 minutes \(Succeeded, not yet taken\)\.$/);
+    expect(messageOf(done.error)).toMatch(/after 10 minutes \(Succeeded, not yet taken\)\.$/);
+    // A reading every 15 s until the 10 minutes are up, and none past them: then [] can't go back, the request still going.
+    expect(done.slept).toEqual(Array.from({ length: 40 }, () => 15_000));
+    expect(done.az.sequence.filter((call) => call === 'get job')).toHaveLength(1 + 41 + 1);
+    expect(done.said.at(-1)).toMatch(
+      /^Putting \[\] back failed too: Azure refused putting \[\] back \(Conflict, ContainerAppOperationInProgress\)\. /,
+    );
   });
 });
 

@@ -269,7 +269,7 @@ const JOB_WORKLOADS: readonly string[] = ['db-setup', 'migrate', 'zitadel-init',
  * What a job may hold itself rather than read from the vault, by the job: only
  * the operator's request (apps.bicep `operatorRequest`), and only as no
  * request. It isn't a secret: it is kept as one so that a read of the job never
- * shows what a person writes into it before a run (jobs.ts). It reaches the job
+ * shows what a person writes into it before a run (operator.ts). It reaches the job
  * as a file, like everything else it is given, and is in no vault and no grant.
  * The job runs its own command with that file and nothing else as its
  * arguments: a request written into either would sit in the deployment and
