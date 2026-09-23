@@ -204,7 +204,8 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
       actor_type: 'system',
       actor_id: 'operator',
       action: 'organization.created',
-      details: JSON.stringify({ orgId, release: 'r-operator' }),
+      // A run by hand, as a test's is: no job's run to name.
+      details: JSON.stringify({ orgId, release: 'r-operator', run: null }),
     });
     const platformChain = createPlatformChain({ keys: auditKeys, ids: uuidV7Ids });
     await expect(app.transaction().execute((tx) => platformChain.verify(tx, undefined))).resolves.toMatchObject({
@@ -262,6 +263,32 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
       expect(again.events).not.toContain('audit.integrity_failed');
       expect(await counts()).toEqual(made);
       expect(`${first.text}${again.text}`).not.toContain(NAME);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("names the job's run in the platform's event, as Azure names it, so the event leads to who started it (B1c-2b)", async () => {
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-request-'));
+    try {
+      const file = path.join(folder, 'operator-request');
+      const id = uuidV7Ids.next();
+      writeFileSync(file, JSON.stringify(['create-organization', '--name', NAME, '--id', id]));
+      const jobRun = 'job-agentx-stg-operator-7x2kq9m';
+
+      const { code } = await run(['--request', file], envFor('app', { CONTAINER_APP_JOB_EXECUTION_NAME: jobRun }));
+
+      expect(code).toBe(0);
+      const event = await app
+        .selectFrom('platform_controls.audit_events')
+        .select(['action', 'details'])
+        .orderBy('seq', 'desc')
+        .limit(1)
+        .executeTakeFirstOrThrow();
+      expect(event).toEqual({
+        action: 'organization.created',
+        details: JSON.stringify({ orgId: id, release: 'r-operator', run: jobRun }),
+      });
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }

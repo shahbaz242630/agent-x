@@ -172,6 +172,21 @@ describe("B1c what the operator's command refuses before it connects", () => {
     );
   });
 
+  it("refuses a run name Azure wouldn't give, naming the rule, never the name, before anything else", async () => {
+    const { code, host, events, line, text } = await run(['create-organization', '--name', NAME], {
+      ...ENV,
+      CONTAINER_APP_JOB_EXECUTION_NAME: 'Quartzite Run',
+    });
+
+    expect(code).toBe(1);
+    expect(host.exitCode).toBe(1);
+    expect(events).toEqual(['operator.start_refused']);
+    expect(line('operator.start_refused')?.problems).toEqual([
+      "CONTAINER_APP_JOB_EXECUTION_NAME: must be a job run's name as Azure gives it, at most 64 characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter",
+    ]);
+    expect(text).not.toContain('Quartzite');
+  });
+
   it("refuses another job's setting, naming it, never its value", async () => {
     const { code, events, line, text } = await run(['create-organization', '--name', NAME], {
       ...ENV,

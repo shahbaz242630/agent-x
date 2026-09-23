@@ -1,9 +1,10 @@
-// The AGENTX_ variable registry and the checks a value goes through. Three
+// The AGENTX_ variable registry and the checks a value goes through. Four
 // processes read settings, each through its own loader: the app (loadConfig,
-// config.ts), the migration job (loadMigrationConfig, migration.ts) and the
-// database set-up job (loadSetupConfig, setup.ts). Each knows every
-// registered name, so a variable meant for another job is refused by name
-// rather than mistaken for a typo.
+// config.ts), the migration job (loadMigrationConfig, migration.ts), the
+// database set-up job (loadSetupConfig, setup.ts) and the operator's command
+// (loadOperatorConfig, operator.ts). Each knows every registered name, so a
+// variable meant for another job is refused by name rather than mistaken for
+// a typo.
 import { isAbsolute } from 'node:path';
 
 import { z } from 'zod';

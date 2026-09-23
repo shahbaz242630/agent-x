@@ -13,7 +13,9 @@
 //
 // It:
 // 1. guards stdout and stderr, so anything written outside the logger is cleaned (ADR-013)
-// 2. reads its settings and its one key (`audit-mac`), or refuses to run and says why (SEC-AV-03)
+// 2. reads its settings (the name Azure gives its job's run among them, which
+//    its platform event records: B1c-2b) and its one key (`audit-mac`), or
+//    refuses to run and says why (SEC-AV-03)
 // 3. reads what it was asked and checks the name, before it connects: a
 //    refusal names each rule broken, never the name, which is never logged,
 //    nor anything else a request file holds
@@ -248,7 +250,7 @@ async function run(
     const created = await createOrganizationAsOperator(
       database,
       { keys, ids: uuidV7Ids, logger },
-      { orgId, name: request.name, release: config.release },
+      { orgId, name: request.name, release: config.release, run: config.run },
     );
     log.info('operator.organization_created', { orgSeq: created.orgSeq, platformSeq: created.platformSeq });
     return 0;

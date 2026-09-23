@@ -55,7 +55,8 @@ export type RuleId =
   | 'public-doors'
   | 'door-certificates'
   | 'workload-secrets'
-  | 'container-telemetry';
+  | 'container-telemetry'
+  | 'platform-settings';
 
 export interface Problem {
   readonly rule: RuleId;
@@ -2405,6 +2406,31 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** How the variables Azure sets itself in every container start: the job's run, the app's revision, the port… */
+const PLATFORM_PREFIX = 'CONTAINER_APP_';
+
+/**
+ * No container, job or app, sets one of Azure's own variables: one the
+ * deployment set could stand in for the platform's, and the operator's
+ * platform event records the run's name as Azure gives it (B1c-2b). Names
+ * are matched as written, since Linux tells capitals apart: a name that
+ * differs only in them is a variable of its own.
+ */
+const platformSettings: Check = (snapshot, _expected, add) => {
+  for (const job of workloadsIn(snapshot)) {
+    for (const container of containersOf(job)) {
+      for (const name of list(at(container, 'env')).map((entry) => text(at(entry, 'name')))) {
+        if (!name.startsWith(PLATFORM_PREFIX)) continue;
+        add({
+          rule: 'platform-settings',
+          resource: job.name,
+          message: `sets ${name}: Azure sets its ${PLATFORM_PREFIX} variables in every container itself, and one set here could stand in for the platform's`,
+        });
+      }
+    }
+  }
+};
+
 const CHECKS: readonly Check[] = [
   complete,
   required,
@@ -2439,6 +2465,7 @@ const CHECKS: readonly Check[] = [
   doorCertificates,
   workloadSecrets,
   containerTelemetry,
+  platformSettings,
 ];
 
 /** Every rule a snapshot breaks; none for a deployment we can ship. */

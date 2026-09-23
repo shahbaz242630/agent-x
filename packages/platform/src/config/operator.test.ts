@@ -8,6 +8,10 @@ type Env = Record<string, string | undefined>;
 /** Plain words, so secret scanners ignore it. */
 const APP_LOGIN = 'app login for these tests';
 const KEYS_DIR = '/mnt/keys';
+/** Where Azure names each run of a job (Container Apps' built-in environment variables). */
+const RUN_VARIABLE = 'CONTAINER_APP_JOB_EXECUTION_NAME';
+/** A run's name as Azure gives one: the job's name, a hyphen, the run's own letters and digits. */
+const RUN = 'job-agentx-prd-operator-7x2kq9m';
 const LOCAL: Env = {
   AGENTX_ENV: 'development',
   AGENTX_DB_HOST: 'db',
@@ -20,7 +24,9 @@ const DEPLOYED: Env = {
   AGENTX_DB_HOST: 'db.internal.example',
   AGENTX_DB_PASSWORD: APP_LOGIN,
   AGENTX_KEYS_DIR: KEYS_DIR,
+  [RUN_VARIABLE]: RUN,
 };
+const RUN_RULE = `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most 64 characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter`;
 
 function problemsWith(env: Env): readonly string[] {
   try {
@@ -37,6 +43,7 @@ describe("the operator's command's config loads", () => {
     expect(loadOperatorConfig(LOCAL)).toEqual({
       environment: 'development',
       release: 'local',
+      run: null,
       log: { level: 'info', eventCapPerMinute: 600 },
       db: { host: 'db', port: 5432, database: 'agentx', user: 'agentx_app', password: APP_LOGIN, tls: 'verify-full' },
       keys: { directory: KEYS_DIR, current: {} },
@@ -58,10 +65,12 @@ describe("the operator's command's config loads", () => {
         AGENTX_DB_TLS: 'disable',
         AGENTX_DB_USER: 'agentx_app_uae',
         AGENTX_DB_PASSWORD: APP_LOGIN,
+        [RUN_VARIABLE]: RUN,
       }),
     ).toEqual({
       environment: 'test',
       release: 'r-2',
+      run: RUN,
       log: { level: 'warn', eventCapPerMinute: 1200 },
       db: {
         host: '10.0.0.5',
@@ -82,8 +91,71 @@ describe("the operator's command's config loads", () => {
     ).toEqual([true, true, true, true, true]);
   });
 
-  it('ignores variables that are not AGENTX_ or PG settings', () => {
-    expect(problemsWith({ ...DEPLOYED, PATH: '/usr/bin', HOME: '/home/app', HOSTNAME: 'replica-7' })).toEqual([]);
+  it("ignores every variable but the AGENTX_ and PG settings and the run's name, Azure's others among them", () => {
+    expect(
+      problemsWith({
+        ...DEPLOYED,
+        PATH: '/usr/bin',
+        HOME: '/home/app',
+        HOSTNAME: 'replica-7',
+        CONTAINER_APP_JOB_NAME: 'Not A Name Azure Gives',
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("B1c-2b the operator's config names the job's run, as Azure does", () => {
+  it.each(['staging', 'production'])('reads the run in %s', (environment) => {
+    expect(loadOperatorConfig({ ...DEPLOYED, AGENTX_ENV: environment }).run).toBe(RUN);
+  });
+
+  it.each(['staging', 'production'])(
+    'needs it in %s, where the command only ever runs as a job, so no platform event goes without it',
+    (environment) => {
+      expect(problemsWith({ ...DEPLOYED, AGENTX_ENV: environment, [RUN_VARIABLE]: undefined })).toEqual([
+        `${RUN_VARIABLE}: is required in ${environment}, so the platform's event names the run that did it (Azure sets it in every run of a job)`,
+      ]);
+    },
+  );
+
+  it.each(['development', 'test'])('takes a run by hand in %s as no run at all', (environment) => {
+    expect(loadOperatorConfig({ ...LOCAL, AGENTX_ENV: environment }).run).toBeNull();
+  });
+
+  it('takes a run name of exactly 64 characters', () => {
+    const longest = `job-${'q'.repeat(60)}`;
+    expect(loadOperatorConfig({ ...DEPLOYED, [RUN_VARIABLE]: longest }).run).toBe(longest);
+  });
+
+  it('takes digits in any word after its first letter, the first word too', () => {
+    expect(loadOperatorConfig({ ...DEPLOYED, [RUN_VARIABLE]: 'job2-agentx-prd-operator-7x2kq9m' }).run).toBe(
+      'job2-agentx-prd-operator-7x2kq9m',
+    );
+  });
+
+  it.each([
+    ['empty', ''],
+    ['one character more than 64', `job-${'q'.repeat(61)}`],
+    ['in capitals', 'Job-agentx-prd-operator-7x2kq9m'],
+    ['with a capital inside its first word', 'jOb-agentx-prd-operator-7x2kq9m'],
+    ['with a capital later on', 'job-agentx-prd-operator-7X2kq9m'],
+    ['starting with a digit', '7job-agentx-prd-operator-7x2kq9m'],
+    ['starting with a hyphen', '-job-agentx-prd-operator-7x2kq9m'],
+    ['ending with a hyphen', 'job-agentx-prd-operator-'],
+    ['with two hyphens together', 'job-agentx--prd-operator-7x2kq9m'],
+    ['one word, with no run of its own', 'operator'],
+    ['with a space', 'job-agentx-prd operator-7x2kq9m'],
+    ['with a dot', 'job-agentx-prd.operator-7x2kq9m'],
+    ['with an underscore', 'job_agentx-prd-operator-7x2kq9m'],
+    ['with a line break after it', `${RUN}\n`],
+    // A Cyrillic letter that looks like a Latin c.
+    ['with a letter from another script', `job-agentx-prd-operator-7x2kq9${String.fromCharCode(0x0441)}`],
+  ])('refuses a run name %s, never repeating it', (_what, run) => {
+    expect(problemsWith({ ...DEPLOYED, [RUN_VARIABLE]: run })).toEqual([RUN_RULE]);
+  });
+
+  it.each(['development', 'test'])('refuses a malformed run name in %s too', (environment) => {
+    expect(problemsWith({ ...LOCAL, AGENTX_ENV: environment, [RUN_VARIABLE]: 'operator' })).toEqual([RUN_RULE]);
   });
 });
 
@@ -182,9 +254,10 @@ describe("SEC-AV-03 the operator's command refuses to start on a bad config", ()
       AGENTX_DB_MIGRATION_PASSWORD: misplaced,
       AGENTX_MISSPELT: misplaced,
       PGPASSWORD: misplaced,
+      [RUN_VARIABLE]: misplaced,
     });
     // Every variable but the app's login, which any text may be. The migration login is refused by name.
-    expect(problems).toHaveLength(14);
+    expect(problems).toHaveLength(15);
     expect(problems.filter((problem) => problem.toLowerCase().includes(misplaced))).toEqual([]);
   });
 });

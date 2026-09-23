@@ -2818,6 +2818,40 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual([]);
   });
+
+  it("platform-settings: a container setting one of Azure's own variables, the run's name above all (B1c-2b)", () => {
+    const sets = (pick: (resource: PredictedResource) => boolean, name: string) =>
+      brokenRules(
+        changed(pick, (resource) => {
+          settingsOf(resource).push({ name, value: 'job-agentx-stg-operator-7x2kq9m' });
+        }),
+      );
+    for (const name of ['CONTAINER_APP_JOB_EXECUTION_NAME', 'CONTAINER_APP_NAME']) {
+      expect({ name, rules: sets(JOB('operator'), name) }).toEqual({ name, rules: ['platform-settings'] });
+    }
+    // Any container of ours, the apps' as well as the jobs'.
+    expect(sets(APP('api'), 'CONTAINER_APP_REVISION')).toEqual(['platform-settings']);
+    expect(sets(JOB('migrate'), 'CONTAINER_APP_JOB_NAME')).toEqual(['platform-settings']);
+    // Names that only look like one are variables of their own: a longer word, other capitals (Linux tells them apart), a word before.
+    for (const name of ['CONTAINER_APPLICATION_NAME', 'container_app_job_execution_name', 'MY_CONTAINER_APP_NAME']) {
+      expect({ name, rules: sets(JOB('operator'), name) }).toEqual({ name, rules: [] });
+    }
+    expect(
+      policyProblems(
+        changed(JOB('operator'), (job) => {
+          settingsOf(job).push({ name: 'CONTAINER_APP_JOB_EXECUTION_NAME', value: 'job-agentx-stg-operator-7x2kq9m' });
+        }),
+        STAGING,
+      ),
+    ).toEqual([
+      {
+        rule: 'platform-settings',
+        resource: 'job-agentx-stg-operator',
+        message:
+          "sets CONTAINER_APP_JOB_EXECUTION_NAME: Azure sets its CONTAINER_APP_ variables in every container itself, and one set here could stand in for the platform's",
+      },
+    ]);
+  });
 });
 
 describe('what each job is told', () => {
