@@ -38,7 +38,8 @@
 // then swept (B1e): sweepIdempotencyKeys deletes an organisation's keys past
 // it, in that organisation's withTenant. The database holds the same line
 // (0009's restrictive `retention` policy), so no DELETE the app sends reaches
-// a younger key.
+// a younger key. A key swept after a claim met it but before the claim read it
+// is claimed again, once (B1e-2): a key past its retention is a new request.
 import { sql, type Transaction } from 'kysely';
 
 import type { KeyProvider } from '../keys/key-provider.ts';
@@ -279,18 +280,35 @@ export function createIdempotentWrites({
         // row is if it rolled back. Every statement filters by org_id too
         // (ADR-005 §7).
         const { mac, keyVersion } = keys.mac('request-hash', message);
-        const claimed = await sql<{ claimed: number }>`
-          insert into idempotency.keys
-            (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
-          values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
-            pg_catalog.now())
-          on conflict (org_id, client_kind, client_id, operation, key) do nothing
-          returning 1 as claimed
-        `.execute(tx);
-        if (claimed.rows.length === 1) {
-          return Object.freeze({ outcome: 'done', result: await doAndRecord(at, work) });
-        }
-        return await answerFromRow(at, keys, message);
+        const claim = async (): Promise<boolean> => {
+          const claimed = await sql<{ claimed: number }>`
+            insert into idempotency.keys
+              (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
+            values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
+              pg_catalog.now())
+            on conflict (org_id, client_kind, client_id, operation, key) do nothing
+            returning 1 as claimed
+          `.execute(tx);
+          return claimed.rows.length === 1;
+        };
+        const done = async (): Promise<IdempotentWrite> =>
+          Object.freeze({ outcome: 'done', result: await doAndRecord(at, work) });
+
+        if (await claim()) return await done();
+        const answer = await answerFromRow(at, keys, message);
+        if (answer !== undefined) return answer;
+        // No row, though one stood in the claim's way: swept since (B1e-2), so
+        // claimed again, once. A row still in the way and still unread is one
+        // row security hides: someone past the app rewrote the table's policy.
+        log.info('idempotency.claimed_again', facts);
+        if (await claim()) return await done();
+        const second = await answerFromRow(at, keys, message);
+        if (second !== undefined) return second;
+        log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
+        throw new IdempotencyFailed(
+          'unreadable',
+          "The idempotency key's row stood in the way of the claim, but can't be read",
+        );
       } catch (error) {
         // Whatever failed, the transaction is left as it was before the claim,
         // and usable: a caller that catches the error can still commit the rest.
@@ -320,13 +338,14 @@ interface Claim<Schema> {
 
 /**
  * The answer for a key some earlier request claimed: its stored result for
- * the same request, a conflict for another. Throws for a row it can't trust.
+ * the same request, a conflict for another, or nothing when the row can't be
+ * read (the caller decides why). Throws for a row it can't trust.
  */
 async function answerFromRow<Schema>(
   { tx, row, log, facts }: Claim<Schema>,
   keys: KeyProvider,
   message: Message,
-): Promise<IdempotentWrite> {
+): Promise<IdempotentWrite | undefined> {
   // READ COMMITTED: this statement sees the row the insert waited for.
   const { rows } = await sql<StoredKey>`
     select request_hash, request_hash_key_version, result_status, result_id from idempotency.keys
@@ -334,15 +353,8 @@ async function answerFromRow<Schema>(
       and operation = ${row.operation} and key = ${row.key}
   `.execute(tx);
   const [stored] = rows;
-  if (stored === undefined) {
-    // The primary key saw a row that row security hides from this read:
-    // someone past the app rewrote the table's policy.
-    log.error('idempotency.unreadable', { ...facts, problem: 'row_hidden' });
-    throw new IdempotencyFailed(
-      'unreadable',
-      "The idempotency key's row stood in the way of the claim, but can't be read",
-    );
-  }
+  // Swept since the claim met it, or hidden by row security: the caller tells which.
+  if (stored === undefined) return undefined;
   const { request_hash: hash, request_hash_key_version: hashKeyVersion } = stored;
   if (stored.result_status === null || stored.result_id === null) {
     log.error('idempotency.unreadable', { ...facts, problem: 'no_result' });
