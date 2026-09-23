@@ -1,6 +1,6 @@
 // What our schema is allowed to look like (ADR-005 §6, §8, §9): which tables
-// may stand outside the tenant walls, and what the app role may do in the
-// audit trails' schemas.
+// may stand outside the tenant walls and what the app may do to them, what it
+// may do in the audit trails' schemas, and the foreign keys that must stay.
 //
 // **It lives in the product, not in tooling, because two readers need it and
 // they must never hold different lists** (the A3c-2 lesson):
@@ -17,7 +17,10 @@
 // columns, so a new global table, or a new column on one, is always a reviewed
 // change to this file (SEC-TEN-08). An entry for a table that no longer exists
 // fails CI-06, so the list can't go stale; the same holds for the append-only
-// exceptions and the fill-in tables.
+// exceptions, the fill-in tables and the required foreign keys.
+
+/** The rights on a table's rows the app role can be allowed. */
+type RowRight = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
 
 /** A table with no org_id and no row-level security, allowed by name (ADR-005 §6). */
 interface GlobalTable {
@@ -25,6 +28,32 @@ interface GlobalTable {
   readonly reason: string;
   /** Every column it has, exactly: a new column is a reviewed entry (SEC-TEN-08). */
   readonly columns: readonly string[];
+  /**
+   * Every right the app role may hold on it, on the whole table or any of its
+   * columns: nothing it needn't do, since no tenant wall stands behind a
+   * global table (B1d-1). Named for every global table outside the
+   * append-only schemas, and for none inside them, which their own rule holds
+   * (CI-06 checks both).
+   */
+  readonly appMay?: readonly RowRight[];
+}
+
+/**
+ * A foreign key the running database must still hold, enforced (B1d-1): one a
+ * check reaching across organisations rests on, which the owner could drop or
+ * switch off without touching a row.
+ */
+interface RequiredForeignKey {
+  /** Why it matters: what could happen without it. */
+  readonly reason: string;
+  /** The table it runs from, by schema-qualified name as Postgres quotes it. */
+  readonly table: string;
+  /** Its columns, in order. */
+  readonly columns: readonly string[];
+  /** The table it points at, named the same way. */
+  readonly references: string;
+  /** The columns it points at, in the same order. */
+  readonly referencedColumns: readonly string[];
 }
 
 /** A tenant table the app adds rows to and reads, and changes only in the columns named. */
@@ -55,6 +84,12 @@ export interface SchemaPolicy {
    * an idempotency key's result. Any other tenant table allows every row right.
    */
   readonly fillInTables: Readonly<Record<string, FillInTable>>;
+  /**
+   * Foreign keys that must be there, validated and enforced, with their
+   * reasons. CI-06 checks each against the migrations; the live schema guard
+   * checks the running database still holds it.
+   */
+  readonly requiredForeignKeys: readonly RequiredForeignKey[];
 }
 
 export const SCHEMA_POLICY: SchemaPolicy = {
@@ -63,11 +98,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       reason:
         "The directory's list of organisations (ADR-005 §6): IDs only, read by work that runs across organisations (the anchor check, the retention sweeps) before it works inside each one's withTenant",
       columns: ['org_id'],
+      // Added with its organisation and read; an entry changed or deleted
+      // would be an organisation no anchor check or sweep reaches.
+      appMay: ['SELECT', 'INSERT'],
     },
     'migrations.applied': {
       reason:
         'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
       columns: ['name', 'checksum', 'applied_at'],
+      appMay: [],
     },
     'platform_controls.audit_events': {
       reason:
@@ -106,4 +145,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['result_status', 'result_id'],
     },
   },
+  requiredForeignKeys: [
+    {
+      reason:
+        "An organisation's row points at its directory entry (0008), so no organisation exists that the directory's list leaves out, and so none that the anchor check of every chain never reaches",
+      table: 'organizations.organizations',
+      columns: ['org_id'],
+      references: 'directory.orgs',
+      referencedColumns: ['org_id'],
+    },
+  ],
 };

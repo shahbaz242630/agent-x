@@ -770,6 +770,123 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   });
 });
 
+describe('the directory, and the key the organisations rest on (B1d-1)', () => {
+  const DROP_KEY = 'alter table organizations.organizations drop constraint organizations_org_id_fkey';
+  const ADD_KEY =
+    'alter table organizations.organizations add constraint organizations_org_id_fkey foreign key (org_id) references directory.orgs (org_id)';
+  const MISSING = "organizations.organizations's foreign key to directory.orgs is not there";
+
+  /** Puts 0008's foreign key back as the migration made it, whatever a case did to it. */
+  afterEach(async () => {
+    await owner.query('alter table organizations.organizations drop constraint if exists organizations_org_id_fkey');
+    await owner.query(ADD_KEY);
+    await owner.query('revoke all on directory.orgs from agentx_app');
+    await owner.query('grant select, insert on directory.orgs to agentx_app');
+    await owner.query('revoke all on migrations.applied from agentx_app');
+  });
+
+  it.each([
+    ['DELETE, which would take an organisation off every check', 'grant delete on directory.orgs to agentx_app'],
+    ['UPDATE of the whole table', 'grant update on directory.orgs to agentx_app'],
+    ['UPDATE of its one column', 'grant update (org_id) on directory.orgs to agentx_app'],
+  ])('names %s on the directory’s list, which the app only adds to and reads', async (_, grant) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await owner.query(grant);
+
+    expect(await problems()).toEqual([`agentx_app may ${grant.split(' ')[1]?.toUpperCase() ?? ''} on directory.orgs`]);
+  });
+
+  it('names any right on the migration ledger, which the app never touches', async () => {
+    await owner.query('grant select on migrations.applied to agentx_app');
+
+    expect(await problems()).toEqual(['agentx_app may SELECT on migrations.applied']);
+  });
+
+  it('names the key dropped', async () => {
+    await owner.query(DROP_KEY);
+
+    expect(await problems()).toEqual([MISSING]);
+  });
+
+  it('names the key re-added NOT VALID, which leaves the rows already there unchecked', async () => {
+    await owner.query(DROP_KEY);
+    await owner.query(
+      'alter table organizations.organizations add constraint organizations_org_id_fkey foreign key (org_id) references directory.orgs (org_id) not valid',
+    );
+
+    expect(await problems()).toEqual(["organizations.organizations's foreign key to directory.orgs is not validated"]);
+  });
+
+  it.runIf(Number(server.version.split('.')[0]) >= 18)(
+    'names the key made NOT ENFORCED, which checks nothing (Postgres 18 on)',
+    async () => {
+      await owner.query(
+        'alter table organizations.organizations alter constraint organizations_org_id_fkey not enforced',
+      );
+
+      expect(await problems()).toContain("organizations.organizations's foreign key to directory.orgs is not enforced");
+    },
+  );
+
+  it.each([
+    [
+      'at another table',
+      'create table directory.shadow (org_id uuid primary key)',
+      'alter table organizations.organizations add constraint organizations_org_id_fkey foreign key (org_id) references directory.shadow (org_id)',
+    ],
+    [
+      'from another column',
+      'alter table organizations.organizations add column other uuid',
+      'alter table organizations.organizations add constraint organizations_org_id_fkey foreign key (other) references directory.orgs (org_id)',
+    ],
+  ])('names the key pointed %s in its place', async (_, prepare, key) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+    await owner.query(prepare);
+    try {
+      await owner.query(DROP_KEY);
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await owner.query(key);
+
+      expect(await problems()).toContain(MISSING);
+    } finally {
+      await owner.query(DROP_KEY);
+      await owner.query('alter table organizations.organizations drop column if exists other');
+      await owner.query('drop table if exists directory.shadow');
+    }
+  });
+
+  it('passes a second key that holds beside one that doesn’t: one is enough', async () => {
+    await owner.query(
+      'alter table organizations.organizations add constraint spare_fkey foreign key (org_id) references directory.orgs (org_id) not valid',
+    );
+    try {
+      expect(await problems()).toEqual([]);
+    } finally {
+      await owner.query('alter table organizations.organizations drop constraint spare_fkey');
+    }
+  });
+
+  it('names a required key the policy lists that no table has', async () => {
+    const policy = {
+      ...SCHEMA_POLICY,
+      requiredForeignKeys: [
+        ...SCHEMA_POLICY.requiredForeignKeys,
+        {
+          reason: 'A test',
+          table: 'idempotency.keys',
+          columns: ['org_id'],
+          references: 'directory.orgs',
+          referencedColumns: ['org_id'],
+        },
+      ],
+    };
+
+    expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([
+      "idempotency.keys's foreign key to directory.orgs is not there",
+    ]);
+  });
+});
+
 describe('what only the server admin can do', () => {
   // A role of this file's own to hand things to. The shared agentx_* roles
   // belong to the whole test server, and other files check them while this one
@@ -813,6 +930,33 @@ describe('what only the server admin can do', () => {
       expect(await problems()).toContain('audit.events is owned by another role');
     } finally {
       await admin.query('alter table audit.events owner to agentx_owner');
+    }
+  });
+
+  it.each([
+    [
+      'organizations.organizations',
+      'alter table organizations.organizations disable trigger all',
+      'alter table organizations.organizations enable trigger all',
+    ],
+    [
+      'directory.orgs',
+      'alter table directory.orgs disable trigger all',
+      'alter table directory.orgs enable trigger all',
+    ],
+  ])('sees the triggers that enforce the organisations’ key switched off on %s', async (_, disable, enable) => {
+    // Postgres enforces a foreign key with triggers on both tables; only a
+    // superuser may switch those off.
+    const admin = database.as('admin');
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written above.
+    await admin.query(disable);
+    try {
+      expect(await problems()).toContain(
+        "organizations.organizations's foreign key to directory.orgs has a trigger switched off",
+      );
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above.
+      await admin.query(enable);
     }
   });
 
