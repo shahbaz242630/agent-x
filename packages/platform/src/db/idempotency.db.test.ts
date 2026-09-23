@@ -1038,6 +1038,43 @@ describe('the retention sweep (B1e, db/migrations/0009)', () => {
     expect(await kept(org)).toEqual([key]);
   });
 
+  it('B1e-2 answers from the row of a request that claimed the swept key first, never taking it for hidden', async () => {
+    const org = newId();
+    const key = await keyAged(org, '31 days', 'swept-and-reclaimed');
+    const owner = database.as('owner');
+    // As above, and another request claims the key between the sweep and this
+    // claim's second try: its row, with its own request's hash, stands there.
+    await owner.query(
+      `create function probe.reclaimed_on_read(swept text, result integer, org uuid) returns boolean
+       language plpgsql set search_path = pg_catalog as $$
+       begin
+         if swept <> 'swept-and-reclaimed' or result is null or current_setting('probe.swept', true) = 'yes' then return true; end if;
+         perform set_config('probe.swept', 'yes', true);
+         delete from idempotency.keys where key = swept;
+         insert into idempotency.keys
+           (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at, result_status, result_id)
+         values (org, 'agent', '0199a0f1-0000-7000-8000-0000000000a1', 'items.create', swept,
+           pg_catalog.decode(pg_catalog.repeat('07', 32), 'hex'), 1, pg_catalog.now(), 201, org);
+         return false;
+       end $$`,
+    );
+    await owner.query('grant execute on function probe.reclaimed_on_read(text, integer, uuid) to agentx_app');
+    await owner.query(
+      'create policy reclaimed_on_read on idempotency.keys as restrictive for select using (probe.reclaimed_on_read(key, result_status, org_id))',
+    );
+    let outcome: IdempotentWrite;
+    try {
+      outcome = await write(requestFor(key, { orgId: org }));
+    } finally {
+      await owner.query('drop policy reclaimed_on_read on idempotency.keys');
+      await owner.query('drop function probe.reclaimed_on_read(text, integer, uuid)');
+    }
+
+    expect(outcome).toEqual({ outcome: 'conflict' });
+    expect(linesNamed('idempotency.claimed_again')).toHaveLength(1);
+    expect(linesNamed('idempotency.unreadable')).toEqual([]);
+  });
+
   it('FX-RACE a claim meeting a sweep still deleting its key waits for the sweep, then claims the key afresh', async () => {
     const org = newId();
     const key = await keyAged(org, '31 days');
