@@ -3,7 +3,8 @@
 // (ADR-014 §8). Any module may record to it; evidence reads it. Its signed
 // states are how every authority row is checked against the log (ADR-012 §2),
 // and they come only through withSignedStates, which puts an organisation on
-// its integrity hold for anything they find tampered with.
+// its integrity hold for anything they find tampered with; holdOrganisation
+// does the same for a chain the anchor check finds failing (B1d-3).
 export {
   type ActorType,
   type AuditActor,
@@ -33,4 +34,4 @@ export {
   type VerifiedState,
 } from './infrastructure/signed-states.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
-export { type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';
+export { holdOrganisation, type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';

@@ -13,7 +13,7 @@
 //    request in flight is answered, then the anchor check, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
-import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
+import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
@@ -250,6 +250,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       list: () => listedOrganizations(database),
       recorded: () => platform.createdOrganizations(database),
       verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
+      // The run's own logger: the hold's lines name the organisation themselves.
+      hold: (orgId, failure) => holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure),
     },
     keys,
     clock: systemClock,

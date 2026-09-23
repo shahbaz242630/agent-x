@@ -28,7 +28,7 @@ import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { type AuditTrail, createAuditTrail, recordHoldEvent } from './audit-trail.ts';
 import type { SignedStates } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
-import { withSignedStates } from './with-signed-states.ts';
+import { holdOrganisation, withSignedStates } from './with-signed-states.ts';
 
 const MACHINE = defineStateMachine({
   name: 'agent',
@@ -472,6 +472,132 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect((await holdEvents()).at(-1)?.details).toMatchObject({ objectId: id, findings: 1 });
     expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ orgId: org, objectId: id })]);
     expect(lines('audit.integrity_hold_set')).toEqual([expect.objectContaining({ orgId: org, findings: 1 })]);
+  });
+
+  it('holdOrganisation: a chain failing the anchor check holds its organisation once, naming the chain (B1d-3)', async () => {
+    await newAgent();
+    await holdOrganisation(app, org.toUpperCase(), services(), 'head');
+    await holdOrganisation(app, org, services(), 'anchor');
+
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created', 'integrity_hold.set']);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({
+      statusFrom: 'CLEAR',
+      statusTo: 'HELD',
+      reason: 'chain',
+      foundOn: 'audit_chain',
+      objectId: org,
+      chainFailure: 'head',
+      findings: 1,
+    });
+    expect(lines('audit.integrity_hold_set')).toEqual([
+      expect.objectContaining({ orgId: org, reason: 'chain', subjectType: 'audit_chain', findings: 1 }),
+    ]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('holdOrganisation: with nothing failed and nothing waiting, touches nothing, a locked head included', async () => {
+    await newAgent();
+    await withHeadLocked('for no key update', async () => {
+      await within(1_000, holdOrganisation(app, org, services(), undefined));
+    });
+
+    expect(await hold()).toMatchObject({ outcome: 'clear', version: 1 });
+    expect(capture.lines()).toEqual([]);
+  });
+
+  it('holdOrganisation: a hold waiting from a request is recorded by the next run, with its own finding', async () => {
+    const id = await newAgent();
+    await flip(id);
+    await withHeadLocked('for share', async () => {
+      expect(await within(15_000, check(id))).toEqual({ outcome: 'tampered', sign: 'seal' });
+    });
+    await holdOrganisation(app, org, services(), undefined);
+
+    expect((await holdEvents()).at(-1)).toMatchObject({
+      action: 'integrity_hold.set',
+      details: { reason: 'seal', objectId: id, findings: 1 },
+    });
+    expect((await holdEvents()).at(-1)?.details).not.toHaveProperty('chainFailure');
+    // Recorded, it waits no more: the next run touches nothing.
+    await withHeadLocked('for no key update', async () => {
+      await within(1_000, holdOrganisation(app, org, services(), undefined));
+    });
+  });
+
+  it('holdOrganisation: a hold meeting a locked head is the alarm, waits in the process, and is recorded by a later run', async () => {
+    await newAgent();
+    await withHeadLocked('for share', async () => {
+      await within(15_000, holdOrganisation(app, org, services(), 'hash'));
+    });
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org }),
+    ]);
+    expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created']);
+
+    await holdOrganisation(app, org, services(), undefined);
+    expect((await holdEvents()).at(-1)?.details).toMatchObject({
+      reason: 'chain',
+      foundOn: 'audit_chain',
+      chainFailure: 'hash',
+    });
+  });
+
+  it("holdOrganisation: a statement slowed past the app on the hold's way is cut off, not waited on for ever", async () => {
+    await newAgent();
+    const owner = database.as('owner');
+    await owner.query(
+      'create function probe.slow() returns trigger language plpgsql as $$ begin perform pg_catalog.pg_sleep(30); return new; end $$',
+    );
+    // eslint-disable-next-line agentx/no-string-built-sql -- The organisation's ID is this test's own UUID.
+    await owner.query(
+      `create trigger slow before insert on audit.events for each row when (new.org_id = '${org}') execute function probe.slow()`,
+    );
+    try {
+      await within(15_000, holdOrganisation(app, org, services(), 'hash'));
+    } finally {
+      await owner.query('drop trigger slow on audit.events');
+      await owner.query('drop function probe.slow()');
+    }
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ check: 'hold', reason: 'not_recorded', orgId: org }),
+    ]);
+    expect(lines('audit.integrity_failed')[0]?.err).toMatchObject({ code: '57014' });
+    expect(await hold()).toMatchObject({ outcome: 'tampered', sign: 'chain' });
+  });
+
+  it('FX-RACE holdOrganisation and a request finding tampering at once: one HELD event, and neither waits on the other for ever', async () => {
+    const id = await newAgent();
+    await flip(id);
+    let finding: Promise<unknown> | undefined;
+    let holding: Promise<void> | undefined;
+    await withHeadLocked('for no key update', async () => {
+      finding = check(id);
+      await waitUntilQueued(attacker, 1);
+      holding = holdOrganisation(app, org, services(), 'head');
+      await waitUntilQueued(attacker, 2);
+    });
+    expect(await within(15_000, finding ?? Promise.resolve())).toEqual({ outcome: 'tampered', sign: 'seal' });
+    await within(15_000, holding ?? Promise.resolve());
+
+    expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created', 'integrity_hold.set']);
+    expect(lines('audit.integrity_hold_set')).toHaveLength(1);
+    expect(lines('audit.integrity_failed').filter((line) => line.check === 'hold')).toEqual([]);
+  });
+
+  it('holdOrganisation leaves a waiting hold to the request already recording it, rather than queue on the head beside it', async () => {
+    const id = await newAgent();
+    const clean = await newAgent();
+    await flip(id);
+    await withHeadLocked('for share', async () => {
+      expect(await within(15_000, check(id))).toEqual({ outcome: 'tampered', sign: 'seal' });
+      // A request is now retrying the waiting hold, queued on the head.
+      const retrying = check(clean);
+      await waitUntilQueued(attacker, 1);
+      await within(1_000, holdOrganisation(app, org, services(), undefined));
+      expect(await within(15_000, retrying)).toMatchObject({ outcome: 'verified' });
+    });
   });
 });
 

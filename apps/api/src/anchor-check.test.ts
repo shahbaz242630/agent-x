@@ -473,6 +473,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
         verified.push(orgId);
         return Promise.resolve(reports[orgId] ?? ok(1n));
       },
+      hold: () => Promise.resolve(),
     };
     return { organizations, verified };
   }
@@ -610,6 +611,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   it('reads the record of created organisations before the list, and the list only once the record is in', async () => {
     const reads: string[] = [];
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       recorded: () => {
         reads.push('recorded');
         return Promise.resolve([ORG]);
@@ -629,6 +631,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   it('reads no list when the record fails, so nothing is left reading behind it', async () => {
     let lists = 0;
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       recorded: () => Promise.reject(unreachable()),
       list: () => {
         lists += 1;
@@ -657,6 +660,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     const stopping = new AbortController();
     const verified: string[] = [];
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       recorded: () => Promise.resolve([]),
       list: () => Promise.resolve([ORG, OTHER_ORG]),
       verify: (orgId) => {
@@ -674,6 +678,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   it('counts nothing for the organisations it knows when stopped while the list is read', async () => {
     let hang = false;
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       recorded: () => Promise.resolve([]),
       list: () => (hang ? new Promise<never>(() => undefined) : Promise.resolve([ORG])),
       verify: () => Promise.resolve(ok(1n)),
@@ -742,6 +747,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
 
   it('contains a list that throws before giving a promise, as a warning', async () => {
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       list: () => {
         throw new Error('the list broke');
       },
@@ -778,6 +784,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     try {
       let reads = 0;
       const organizations: OrganisationChains = {
+        hold: () => Promise.resolve(),
         list: () => {
           reads += 1;
           return new Promise<never>(() => undefined);
@@ -802,6 +809,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     vi.useFakeTimers();
     try {
       const organizations: OrganisationChains = {
+        hold: () => Promise.resolve(),
         list: () => new Promise<never>(() => undefined),
         recorded: () => Promise.resolve([]),
         verify: () => Promise.resolve(ok(1n)),
@@ -821,6 +829,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
 
   it('ends at once, raising nothing, when stopped while the list is read', async () => {
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       list: () => new Promise<never>(() => undefined),
       recorded: () => Promise.resolve([]),
       verify: () => Promise.resolve(ok(1n)),
@@ -838,6 +847,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   it('reads no list in a run stopped during the platform’s check', async () => {
     let listed = 0;
     const organizations: OrganisationChains = {
+      hold: () => Promise.resolve(),
       list: () => {
         listed += 1;
         return Promise.resolve([ORG]);
@@ -857,6 +867,228 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     await check.run(stopping.signal);
 
     expect(listed).toBe(0);
+  });
+});
+
+describe('an organisation that fails is put on its integrity hold (B1d-3)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A directory giving the lists in turn (the last again once they run out;
+   * an Error refuses), recording ORG as created, whose chains check out at
+   * seq 1 or as `reports` says, and whose holds are recorded in turn, each
+   * ending as `holdWith` says.
+   */
+  function holding(
+    lists: readonly (readonly string[] | Error)[],
+    reports: Record<string, ChainReport | Error> = {},
+    holdWith: (orgId: string) => Promise<void> = () => Promise.resolve(),
+  ) {
+    const steps: string[] = [];
+    let turn = 0;
+    const organizations: OrganisationChains = {
+      list: () => {
+        const listed = lists[Math.min(turn, lists.length - 1)] ?? [];
+        turn += 1;
+        return listed instanceof Error ? Promise.reject(listed) : Promise.resolve(listed);
+      },
+      recorded: () => Promise.resolve([ORG]),
+      verify: (orgId) => {
+        steps.push(`verify ${orgId}`);
+        const report = reports[orgId] ?? ok(1n);
+        return report instanceof Error ? Promise.reject(report) : Promise.resolve(report);
+      },
+      // A hold given no failure (`-`) only tries one waiting.
+      hold: (orgId, failure) => {
+        steps.push(`hold ${orgId} ${failure ?? '-'}`);
+        return holdWith(orgId);
+      },
+    };
+    return { organizations, steps };
+  }
+  const holdAlarm = (orgId: string) => ({
+    level: 'error',
+    event: 'audit.integrity_failed',
+    chain: 'organisation',
+    check: 'hold',
+    reason: 'not_recorded',
+    orgId,
+  });
+
+  it('holds an organisation whose chain fails, straight after its check, and tries a waiting hold for each that passes', async () => {
+    const { organizations, steps } = holding([[ORG, OTHER_ORG]], {
+      [ORG]: { ok: false, problem: { reason: 'hash', seq: 2n } },
+    });
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} hash`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
+  });
+
+  it('holds an organisation that fails its anchor, every run, as the alarm repeats', async () => {
+    const reports: Record<string, ChainReport> = { [ORG]: ok(3n) };
+    const { organizations, steps } = holding([[ORG]], reports);
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+    reports[ORG] = ok(2n);
+    await check.run();
+    await check.run();
+
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([
+      `hold ${ORG} -`,
+      `hold ${ORG} anchor`,
+      `hold ${ORG} anchor`,
+    ]);
+  });
+
+  it('holds only for this run’s failure: a chain that fails and then checks out is not held again', async () => {
+    const reports: Record<string, ChainReport> = { [ORG]: { ok: false, problem: { reason: 'hash', seq: 2n } } };
+    const { organizations, steps } = holding([[ORG]], reports);
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+    reports[ORG] = ok(1n);
+    await check.run();
+
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([`hold ${ORG} hash`, `hold ${ORG} -`]);
+  });
+
+  it('stops among the organisations that have left the list: no alarm or hold for those after', async () => {
+    const stopping = new AbortController();
+    const steps: string[] = [];
+    const organizations: OrganisationChains = {
+      list: () => Promise.resolve([]),
+      recorded: () => Promise.resolve([ORG, OTHER_ORG]),
+      verify: () => Promise.resolve(ok(1n)),
+      hold: (orgId) => {
+        steps.push(orgId);
+        stopping.abort();
+        return Promise.resolve();
+      },
+    };
+    const { check, events } = checking([], undefined, organizations);
+    await check.run(stopping.signal);
+
+    expect(steps).toEqual([ORG]);
+    expect(events().filter((line) => line.reason === 'unlisted')).toEqual([expect.objectContaining({ orgId: ORG })]);
+  });
+
+  it('holds an organisation that has left the list, by its ID', async () => {
+    const { organizations, steps } = holding([[OTHER_ORG]]);
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(steps).toEqual([`hold ${ORG} unlisted`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
+  });
+
+  it('holds a chain the database refuses to check, but not one unchecked, even past its stale period, which is the alarm alone', async () => {
+    const { organizations, steps } = holding([[ORG, OTHER_ORG]], {
+      [ORG]: refused('42501'),
+      [OTHER_ORG]: unreachable(),
+    });
+    const { check, clock, events } = checking([], undefined, organizations);
+    await check.run();
+    clock.advanceBy(STALE_MS);
+    await check.run();
+
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([
+      `hold ${ORG} store`,
+      `hold ${OTHER_ORG} -`,
+      `hold ${ORG} store`,
+      `hold ${OTHER_ORG} -`,
+    ]);
+    expect(events().filter((line) => line.orgId === OTHER_ORG && line.event === 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'unchecked' }),
+    ]);
+  });
+
+  it('with no list to go by, only tries a waiting hold for each organisation seen, stale or not', async () => {
+    const { organizations, steps } = holding([[ORG], unreachable()]);
+    const { check, clock } = checking([], undefined, organizations);
+    await check.run();
+    await check.run();
+    clock.advanceBy(STALE_MS);
+    await check.run();
+
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`, `hold ${ORG} -`, `hold ${ORG} -`]);
+  });
+
+  it('a hold that throws, against its word, is the alarm, and the run goes on to the next organisation', async () => {
+    const { organizations, steps } = holding([[ORG, OTHER_ORG]], {}, (orgId) =>
+      orgId === ORG ? Promise.reject(new Error('the hold broke its word')) : Promise.resolve(),
+    );
+    const { check, events, done } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
+    expect(events().filter((line) => line.event === 'audit.integrity_failed')).toEqual([holdAlarm(ORG)]);
+    expect(done()).toEqual([{ level: 'info', chains: 2, anchored: 2, unchanged: 0, failed: 0, unchecked: 0 }]);
+  });
+
+  it('a hold past the deadline is the alarm, and no second hold of that organisation starts while it hangs', async () => {
+    vi.useFakeTimers();
+    const { organizations, steps } = holding(
+      [[ORG]],
+      { [ORG]: { ok: false, problem: { reason: 'hash', seq: 2n } } },
+      () => new Promise<never>(() => undefined),
+    );
+    const { check, events, capture } = checking([], undefined, organizations);
+    const first = check.run();
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS - 1);
+    expect(events().filter((line) => line.check === 'hold')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await first;
+    const second = check.run();
+    await vi.advanceTimersByTimeAsync(0);
+    await second;
+
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} hash`, `verify ${ORG}`]);
+    expect(events().filter((line) => line.check === 'hold')).toEqual([holdAlarm(ORG), holdAlarm(ORG)]);
+    expect(
+      capture
+        .lines()
+        .filter((line) => line.check === 'hold')
+        .map((line) => (line.err as { message?: string } | undefined)?.message),
+    ).toEqual([
+      `the check did not finish within ${String(DEADLINE_MS)} ms`,
+      'the last hold of this organisation has not finished',
+    ]);
+  });
+
+  it('ends at once when stopped during a hold, raising nothing, and checks no more organisations', async () => {
+    const stopping = new AbortController();
+    const { organizations, steps } = holding([[ORG, OTHER_ORG]], {}, () => {
+      stopping.abort();
+      return new Promise<never>(() => undefined);
+    });
+    const { check, events } = checking([], undefined, organizations);
+    await check.run(stopping.signal);
+
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`]);
+    expect(events().filter((line) => line.check === 'hold')).toEqual([]);
+  });
+
+  it('tries no hold for an organisation whose check was stopped', async () => {
+    const stopping = new AbortController();
+    const steps: string[] = [];
+    const organizations: OrganisationChains = {
+      list: () => Promise.resolve([ORG]),
+      recorded: () => Promise.resolve([]),
+      verify: () => {
+        steps.push('verify');
+        stopping.abort();
+        return new Promise<never>(() => undefined);
+      },
+      hold: () => {
+        steps.push('hold');
+        return Promise.resolve();
+      },
+    };
+    const { check } = checking([], undefined, organizations);
+    await check.run(stopping.signal);
+
+    expect(steps).toEqual(['verify']);
   });
 });
 

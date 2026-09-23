@@ -228,7 +228,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
-  it("anchors each organisation's chain from the directory's list, and raises the alarm for one tampered with (B1d-2)", async () => {
+  it("anchors each organisation's chain from the directory's list, and raises the alarm for one tampered with and tries its hold (B1d-2, B1d-3)", async () => {
     const [kept, broken] = ['0199a0f0-0000-7000-8000-00000000b1d1', '0199a0f0-0000-7000-8000-00000000b1d2'];
     const writer = createDatabase<DirectoryTables & AuditTables>(
       { ...database.connection('app'), tls: 'disable', maxConnections: 2 },
@@ -267,6 +267,15 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     expect(lines.find((line) => line.event === 'audit.integrity_failed' && line.orgId === broken)).toEqual(
       expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor', reason: 'head' }),
     );
+    // B1d-3: its hold is tried at once, and here can't be recorded on a chain that refuses new events.
+    expect(lines.filter((line) => line.check === 'hold')).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        event: 'audit.integrity_failed',
+        reason: 'not_recorded',
+        orgId: broken,
+      }),
+    ]);
     await stop(run);
   });
 
