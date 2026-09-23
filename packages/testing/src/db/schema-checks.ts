@@ -145,10 +145,10 @@ const RELATIONS = `
  * NULL constraint NOT VALID, which marks the column NOT NULL while old rows
  * may still be null, so an unvalidated one doesn't count.
  *
- * **The NOT NULL expression is also in authority-checks.ts's COLUMNS query**:
- * the one piece of catalogue reading the two checkers hold twice. A Postgres
+ * **The NOT NULL expression is also in authority-checks.ts's COLUMNS query
+ * and in the live schema guard's foreignKeys** (schema-guard.ts): a Postgres
  * version that changes how an unvalidated NOT NULL is recorded has to be
- * followed in both.
+ * followed in all three.
  */
 const COLUMNS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
@@ -625,8 +625,8 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
 }
 
 /**
- * Every required foreign key has a reason and its columns, paired one for one,
- * and the migrations make it, validated: from exactly its
+ * Every required foreign key has a reason, and the migrations make it (an
+ * entry with no columns, or unpaired ones, matches no key), validated: from exactly its
  * columns to exactly the ones it points at, each of them NOT NULL.
  */
 function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[] {
@@ -636,9 +636,6 @@ function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[
     const named = `${required.table}: the required foreign key to ${required.references}`;
     const problems: string[] = [];
     if (required.reason.trim() === '') problems.push(`${named} gives no reason for it`);
-    if (required.columns.length === 0 || required.columns.length !== required.referencedColumns.length) {
-      problems.push(`${named} doesn't pair its columns one for one`);
-    }
     const matching = facts.foreignKeys.filter(
       (key) =>
         key.table === required.table &&

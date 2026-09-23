@@ -1038,16 +1038,20 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         ...POLICY,
         requiredForeignKeys: [
           { ...entry, columns: ['id'] },
+          { ...entry, referencedColumns: ['id'] },
           { ...entry, references: 'migrations.applied' },
+          { ...entry, table: 'idempotency.keys' },
           { ...entry, reason: ' ', columns: [], referencedColumns: [] },
         ],
       };
+      const missing = `${ORGS_KEY} is not made by the migrations`;
       expect(await problemsAfter([], policy)).toEqual([
-        `${ORGS_KEY} is not made by the migrations`,
+        missing,
+        missing,
         'organizations.organizations: the required foreign key to migrations.applied is not made by the migrations',
+        'idempotency.keys: the required foreign key to directory.orgs is not made by the migrations',
         `${ORGS_KEY} gives no reason for it`,
-        `${ORGS_KEY} doesn't pair its columns one for one`,
-        `${ORGS_KEY} is not made by the migrations`,
+        missing,
       ]);
     });
   });

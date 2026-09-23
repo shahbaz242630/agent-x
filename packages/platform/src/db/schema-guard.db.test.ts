@@ -826,7 +826,7 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
 
       // Postgres marks a key it no longer enforces not valid, and drops its triggers.
       expect(await problems()).toEqual([
-        "organizations.organizations's foreign key to directory.orgs has a trigger switched off",
+        "organizations.organizations's foreign key to directory.orgs has its triggers missing or switched off",
         "organizations.organizations's foreign key to directory.orgs is not validated",
       ]);
     },
@@ -1026,7 +1026,7 @@ describe('what only the server admin can do', () => {
     await admin.query(disable);
     try {
       expect(await problems()).toContain(
-        "organizations.organizations's foreign key to directory.orgs has a trigger switched off",
+        "organizations.organizations's foreign key to directory.orgs has its triggers missing or switched off",
       );
     } finally {
       // eslint-disable-next-line agentx/no-string-built-sql -- As above.

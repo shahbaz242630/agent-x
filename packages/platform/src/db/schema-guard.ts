@@ -613,6 +613,7 @@ async function foreignKeys<Schema>(db: Kysely<Schema>): Promise<ForeignKeyRow[]>
              ) as triggers_on,
            -- Postgres 18 can add a NOT NULL constraint NOT VALID, which marks the
            -- column NOT NULL while rows from before may still be null; 16 has none.
+           -- The same expression is in CI-06's and A3c-1's COLUMNS queries.
            fa.attnotnull and not exists (
              select 1 from pg_catalog.pg_constraint nn
              where nn.conrelid = fa.attrelid and nn.contype = 'n' and not nn.convalidated
@@ -1013,7 +1014,7 @@ export async function liveSchemaProblems<Schema>(
     if (first === undefined) problems.push(`${named} is not there`);
     else if (!matching.some(({ holds }) => holds.validated && holds.triggers_on)) {
       if (!first.holds.validated) problems.push(`${named} is not validated`);
-      if (!first.holds.triggers_on) problems.push(`${named} has a trigger switched off`);
+      if (!first.holds.triggers_on) problems.push(`${named} has its triggers missing or switched off`);
     }
     if (first !== undefined && !first.notNull) problems.push(`${named} has a column that may be null`);
   }
