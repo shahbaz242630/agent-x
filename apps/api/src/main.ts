@@ -251,7 +251,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       recorded: () => platform.createdOrganizations(database),
       verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
       // The run's own logger: the hold's lines name the organisation themselves.
-      hold: (orgId, failed) => holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failed),
+      hold: (orgId, failure) => holdOrganisation(database, orgId, { keys, ids: uuidV7Ids, logger }, failure),
     },
     keys,
     clock: systemClock,

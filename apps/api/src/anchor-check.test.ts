@@ -884,7 +884,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
   function holding(
     lists: readonly (readonly string[] | Error)[],
     reports: Record<string, ChainReport | Error> = {},
-    holdWith: (orgId: string, failed: boolean) => Promise<void> = () => Promise.resolve(),
+    holdWith: (orgId: string) => Promise<void> = () => Promise.resolve(),
   ) {
     const steps: string[] = [];
     let turn = 0;
@@ -900,9 +900,10 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
         const report = reports[orgId] ?? ok(1n);
         return report instanceof Error ? Promise.reject(report) : Promise.resolve(report);
       },
-      hold: (orgId, failed) => {
-        steps.push(`hold ${orgId} ${String(failed)}`);
-        return holdWith(orgId, failed);
+      // A hold given no failure (`-`) only tries one waiting.
+      hold: (orgId, failure) => {
+        steps.push(`hold ${orgId} ${failure ?? '-'}`);
+        return holdWith(orgId);
       },
     };
     return { organizations, steps };
@@ -923,7 +924,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { check } = checking([], undefined, organizations);
     await check.run();
 
-    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} true`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} false`]);
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} hash`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
   });
 
   it('holds an organisation that fails its anchor, every run, as the alarm repeats', async () => {
@@ -936,9 +937,9 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     await check.run();
 
     expect(steps.filter((step) => step.startsWith('hold'))).toEqual([
-      `hold ${ORG} false`,
-      `hold ${ORG} true`,
-      `hold ${ORG} true`,
+      `hold ${ORG} -`,
+      `hold ${ORG} anchor`,
+      `hold ${ORG} anchor`,
     ]);
   });
 
@@ -947,28 +948,31 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { check } = checking([], undefined, organizations);
     await check.run();
 
-    expect(steps).toEqual([`hold ${ORG} true`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} false`]);
+    expect(steps).toEqual([`hold ${ORG} unlisted`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
   });
 
-  it('holds a chain the database refuses to check, and one past its stale period, but not one merely unreachable', async () => {
+  it('holds a chain the database refuses to check, but not one unchecked, even past its stale period, which is the alarm alone', async () => {
     const { organizations, steps } = holding([[ORG, OTHER_ORG]], {
       [ORG]: refused('42501'),
       [OTHER_ORG]: unreachable(),
     });
-    const { check, clock } = checking([], undefined, organizations);
+    const { check, clock, events } = checking([], undefined, organizations);
     await check.run();
     clock.advanceBy(STALE_MS);
     await check.run();
 
     expect(steps.filter((step) => step.startsWith('hold'))).toEqual([
-      `hold ${ORG} true`,
-      `hold ${OTHER_ORG} false`,
-      `hold ${ORG} true`,
-      `hold ${OTHER_ORG} true`,
+      `hold ${ORG} store`,
+      `hold ${OTHER_ORG} -`,
+      `hold ${ORG} store`,
+      `hold ${OTHER_ORG} -`,
+    ]);
+    expect(events().filter((line) => line.orgId === OTHER_ORG && line.event === 'audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'unchecked' }),
     ]);
   });
 
-  it('with no list to go by, holds each organisation seen once it goes stale, and until then only tries a waiting hold', async () => {
+  it('with no list to go by, only tries a waiting hold for each organisation seen, stale or not', async () => {
     const { organizations, steps } = holding([[ORG], unreachable()]);
     const { check, clock } = checking([], undefined, organizations);
     await check.run();
@@ -976,7 +980,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     clock.advanceBy(STALE_MS);
     await check.run();
 
-    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} false`, `hold ${ORG} false`, `hold ${ORG} true`]);
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`, `hold ${ORG} -`, `hold ${ORG} -`]);
   });
 
   it('a hold that throws, against its word, is the alarm, and the run goes on to the next organisation', async () => {
@@ -986,7 +990,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { check, events, done } = checking([], undefined, organizations);
     await check.run();
 
-    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} false`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} false`]);
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`, `verify ${OTHER_ORG}`, `hold ${OTHER_ORG} -`]);
     expect(events().filter((line) => line.event === 'audit.integrity_failed')).toEqual([holdAlarm(ORG)]);
     expect(done()).toEqual([{ level: 'info', chains: 2, anchored: 2, unchanged: 0, failed: 0, unchecked: 0 }]);
   });
@@ -1008,7 +1012,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     await vi.advanceTimersByTimeAsync(0);
     await second;
 
-    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} true`, `verify ${ORG}`]);
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} hash`, `verify ${ORG}`]);
     expect(events().filter((line) => line.check === 'hold')).toEqual([holdAlarm(ORG), holdAlarm(ORG)]);
     expect(
       capture
@@ -1030,7 +1034,7 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     const { check, events } = checking([], undefined, organizations);
     await check.run(stopping.signal);
 
-    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} false`]);
+    expect(steps).toEqual([`verify ${ORG}`, `hold ${ORG} -`]);
     expect(events().filter((line) => line.check === 'hold')).toEqual([]);
   });
 

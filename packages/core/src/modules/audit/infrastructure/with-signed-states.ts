@@ -131,21 +131,27 @@ async function setHold(
 /**
  * Puts the organisation on its integrity hold for its audit chain failing the
  * anchor check (B1d-3), recorded as the sign `chain` on the subject
- * `audit_chain`. With `failed` false, tries again a hold waiting in this
- * process, if one is and none is being recorded, so one that met a locked
- * head is retried every run, even with no request for the organisation.
- * Never throws: every outcome is logged.
+ * `audit_chain`, with how it failed (`failure`, the alarm's reason). Given no
+ * failure, tries again a hold waiting in this process, if one is and none is
+ * being recorded, so one that met a locked head is retried every run, even
+ * with no request for the organisation. Never throws: every outcome is logged.
  */
 export async function holdOrganisation(
   db: Kysely<AuditTables>,
   orgId: string,
   services: SignedStatesServices,
-  failed: boolean,
+  failure: string | undefined,
 ): Promise<void> {
   const held = orgId.toLowerCase();
   const waiting = unrecorded.get(held);
-  if (failed) {
-    const finding: TamperFinding = { orgId: held, subjectType: CHAIN_SUBJECT, objectId: held, sign: 'chain' };
+  if (failure !== undefined) {
+    const finding: TamperFinding = {
+      orgId: held,
+      subjectType: CHAIN_SUBJECT,
+      objectId: held,
+      sign: 'chain',
+      chainFailure: failure,
+    };
     await setHold(db, held, { finding, count: 1 }, services);
   } else if (waiting !== undefined && !recording.has(held)) {
     await setHold(db, held, waiting, services);

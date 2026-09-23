@@ -90,6 +90,8 @@ export interface TamperFinding {
   readonly subjectType: string;
   readonly objectId: string;
   readonly sign: TamperSign;
+  /** For the sign `chain`: how the chain failed the anchor check, as its alarm names it. */
+  readonly chainFailure?: string;
 }
 
 /**
@@ -643,6 +645,7 @@ export function createSignedStates({
           reason: finding.sign,
           foundOn: finding.subjectType,
           objectId: finding.objectId,
+          ...(finding.chainFailure === undefined ? {} : { chainFailure: finding.chainFailure }),
           findings,
         },
       });

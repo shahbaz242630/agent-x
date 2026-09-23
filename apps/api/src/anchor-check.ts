@@ -23,10 +23,13 @@
 // checked again, even after a restart. A list the database refuses, or one
 // that isn't IDs, or too many of them, is the alarm (`list`); a list that
 // can't be read otherwise is a warning until three intervals pass without one.
-// An organisation whose chain fails, for any of these reasons, is put on its
-// integrity hold (B1d-3), and each run tries again a hold this process could
-// not record yet: an unlisted organisation's too, since its chain is still
-// reached by its ID.
+// An organisation whose chain fails is put on its integrity hold (B1d-3),
+// naming the alarm's reason, and each run tries again a hold this process
+// could not record yet: an unlisted organisation's too, since its chain is
+// still reached by its ID. A chain left unchecked too long is the alarm but
+// no hold: that is as often the database slow or away as anything done to
+// it, and a hold on every organisation at once, each cleared only by its
+// own admin, would do an attacker's work for them. People look at the alarm.
 import type { Clock } from '@agentx/core/shared-kernel';
 import {
   type AnchorPoint,
@@ -63,11 +66,11 @@ export interface OrganisationChains {
   /** Checks one organisation's chain against its last anchor, if it has one. */
   verify(orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
   /**
-   * Puts the organisation on its integrity hold when its chain `failed`, or
-   * else tries again a hold waiting in this process for it, if one is. Never
-   * throws: every outcome is logged (B1d-3).
+   * Puts the organisation on its integrity hold for how its chain failed (the
+   * alarm's reason), or, given none, tries again a hold waiting in this
+   * process for it, if one is. Never throws: every outcome is logged (B1d-3).
    */
-  hold(orgId: string, failed: boolean): Promise<void>;
+  hold(orgId: string, failure: string | undefined): Promise<void>;
 }
 
 export interface AnchorCheckOptions {
@@ -161,6 +164,8 @@ export function createAnchorCheck({
   // From when this process began, so a check that never once completes is caught too.
   const started = clock.now().getTime();
   const lastChecked = new Map<string, number>();
+  // Each organisation's alarm reason this run, until its hold is tried.
+  const failures = new Map<string, string>();
   const keyOf = (chain: Chain): string => (chain.kind === 'platform' ? 'platform' : chain.orgId);
   // Chains whose check is still under way past its deadline: one each at most, so a hung database can't take every connection.
   const inFlight = new Set<string>();
@@ -180,6 +185,7 @@ export function createAnchorCheck({
     try {
       const last = anchors.latest(chain);
       const alarm = (reason: string, seq?: bigint): Outcome => {
+        if (chain.kind === 'organisation') failures.set(key, reason);
         log.error('audit.integrity_failed', {
           chain: chain.kind,
           check: 'anchor',
@@ -280,6 +286,7 @@ export function createAnchorCheck({
   const missed = (orgId: string, reason: 'unlisted' | 'unchecked'): Outcome => {
     if (reason === 'unchecked' && clock.now().getTime() - since(orgId) < staleAfterMs) return 'unchecked';
     const last = anchors.latest({ kind: 'organisation', orgId });
+    failures.set(orgId, reason);
     logger.child({ orgId }).error('audit.integrity_failed', {
       chain: 'organisation',
       check: 'anchor',
@@ -290,24 +297,23 @@ export function createAnchorCheck({
   };
 
   /**
-   * Puts an organisation that failed on its integrity hold, or tries again a
-   * hold waiting for one that didn't, within the check's deadline and one at a
-   * time for each organisation, so a hold hung on the database can't take a
-   * connection every run. A hold not set in time is the alarm: the hold
-   * records its own outcome if it ends later.
+   * Puts an organisation whose chain failed this run on its integrity hold,
+   * or tries again a hold waiting for one that didn't (or only went
+   * unchecked), within the check's deadline and one at a time for each
+   * organisation, so a hold hung on the database can't take a connection
+   * every run. A hold not set in time is the alarm: the hold records its own
+   * outcome if it ends later.
    */
-  const settle = async (
-    from: OrganisationChains,
-    orgId: string,
-    outcome: Outcome,
-    signal: AbortSignal | undefined,
-  ): Promise<void> => {
+  const settle = async (from: OrganisationChains, orgId: string, signal: AbortSignal | undefined): Promise<void> => {
+    const reason = failures.get(orgId);
+    failures.delete(orgId);
     if (signal?.aborted === true) return;
+    const failure = reason === 'unchecked' ? undefined : reason;
     const key = `hold|${orgId}`;
     try {
       if (inFlight.has(key)) throw new Error('the last hold of this organisation has not finished');
       inFlight.add(key);
-      const holding = Promise.resolve().then(() => from.hold(orgId, outcome === 'failed'));
+      const holding = Promise.resolve().then(() => from.hold(orgId, failure));
       void holding.then(
         () => inFlight.delete(key),
         () => inFlight.delete(key),
@@ -339,9 +345,8 @@ export function createAnchorCheck({
       // Each organisation already seen counts as not checked this run.
       const outcomes: Outcome[] = [];
       for (const orgId of seen) {
-        const outcome = missed(orgId, 'unchecked');
-        outcomes.push(outcome);
-        await settle(from, orgId, outcome, signal);
+        outcomes.push(missed(orgId, 'unchecked'));
+        await settle(from, orgId, signal);
       }
       return outcomes;
     }
@@ -349,19 +354,21 @@ export function createAnchorCheck({
     for (const orgId of read.recorded) remember(orgId);
     const outcomes: Outcome[] = [];
     for (const orgId of seen) {
+      if (signal?.aborted === true) break;
       if (now.has(orgId)) continue;
       outcomes.push(missed(orgId, 'unlisted'));
-      await settle(from, orgId, 'failed', signal);
+      await settle(from, orgId, signal);
     }
     for (const orgId of now) {
       if (signal?.aborted === true) break;
       remember(orgId);
-      const outcome = await checkOne(
-        { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
-        signal,
+      outcomes.push(
+        await checkOne(
+          { chain: { kind: 'organisation', orgId }, verify: (anchor) => from.verify(orgId, anchor) },
+          signal,
+        ),
       );
-      outcomes.push(outcome);
-      await settle(from, orgId, outcome, signal);
+      await settle(from, orgId, signal);
     }
     return outcomes;
   };
