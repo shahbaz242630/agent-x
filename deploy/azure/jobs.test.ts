@@ -279,10 +279,14 @@ describe('parseArguments', () => {
       if (job === 'operator') {
         // Started as deployed, it holds no request and refuses (B1c-2a).
         expect(() => parseArguments(['run', job])).toThrow(
-          new UsageError("the operator's job isn't run as it is deployed: it holds no request, and refuses"),
+          new UsageError(
+            "the operator's job isn't run as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it",
+          ),
         );
         expect(() => parseArguments(['start', job])).toThrow(
-          new UsageError("the operator's job isn't started as it is deployed: it holds no request, and refuses"),
+          new UsageError(
+            "the operator's job isn't started as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it",
+          ),
         );
       } else {
         expect(parseArguments(['run', job])).toEqual({ command: 'run', job });

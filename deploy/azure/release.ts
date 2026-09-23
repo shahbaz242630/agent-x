@@ -196,11 +196,17 @@ export function recordsIn(tags: Readonly<Record<string, unknown>>, say: (line: s
   return records;
 }
 
+/** A workload as Azure names it, and the one container it runs (apps.bicep). */
+export interface WorkloadSpec {
+  readonly path: string;
+  readonly container: string;
+}
+
 /** The two things a release changes, as Azure names them and the one container each runs (apps.bicep). */
 export const WORKLOADS = {
   migrate: { path: 'jobs/job-agentx-stg-migrate', container: 'migrate' },
   api: { path: 'containerApps/ca-agentx-stg-api', container: 'api' },
-} as const;
+} as const satisfies Readonly<Record<string, WorkloadSpec>>;
 export type Workload = keyof typeof WORKLOADS;
 
 /** The order a release updates them in: the migration first, and the API only once its run has succeeded (G4-3b). */
@@ -295,21 +301,26 @@ export interface Running {
 const isStrings = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
 
-function record(value: unknown): Readonly<Record<string, unknown>> {
+export function record(value: unknown): Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+/** What a release workload runs (runningAs), refused as not "the <workload> a release knows". */
+export const runningIn = (workload: Workload, containers: unknown): Running =>
+  runningAs(WORKLOADS[workload], `the ${workload} a release knows`, containers);
+
 /**
  * What a workload runs, read from its containers as Azure gives them, or an
- * error saying why this isn't the workload a release knows: exactly one
- * container, named as apps.bicep names it, running our image by digest, with
- * one AGENTX_RELEASE naming a commit, and no field this tool doesn't copy, in
- * the container, its size, a setting or a mount.
+ * error saying why this isn't `known`: exactly one container, named as
+ * apps.bicep names it, running our image by digest, with one AGENTX_RELEASE
+ * naming a commit, and no field this tool doesn't copy, in the container, its
+ * size, a setting or a mount. The operator's job is read this way too, to be
+ * kept on the API's build (operator.ts).
  */
-export function runningIn(workload: Workload, containers: unknown): Running {
-  const { container: expected, path } = WORKLOADS[workload];
+export function runningAs(spec: WorkloadSpec, known: string, containers: unknown): Running {
+  const { container: expected, path } = spec;
   const refuse = (why: string): never => {
-    throw new Error(`${path} isn't the ${workload} a release knows (${why}): deploy it by hand.`);
+    throw new Error(`${path} isn't ${known} (${why}): deploy it by hand.`);
   };
   if (!Array.isArray(containers) || containers.length !== 1) return refuse('it must run exactly one container');
   const found = record(containers[0]);
@@ -456,8 +467,12 @@ export function decide(
 }
 
 /** A workload's URL in Resource Manager, at the version apps.bicep deploys it with. */
+export const resourceUrl = (subscription: string, spec: WorkloadSpec): string =>
+  `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/${spec.path}?api-version=${JOBS_API}`;
+
+/** A release workload's URL in Resource Manager. */
 export const workloadUrl = (subscription: string, workload: Workload): string =>
-  `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/${WORKLOADS[workload].path}?api-version=${JOBS_API}`;
+  resourceUrl(subscription, WORKLOADS[workload]);
 
 /**
  * Why Azure refused, from what `az rest` printed: the HTTP reason and the
@@ -466,7 +481,7 @@ export const workloadUrl = (subscription: string, workload: Workload): string =>
  * among them, and names the subscription, and CI's log is public. The
  * resource group's activity log holds the whole of it.
  */
-function azureRefusal(stderr: string): string {
+export function azureRefusal(stderr: string): string {
   const reason = /ERROR:\s*([A-Za-z][A-Za-z ]*?)\s*\(/.exec(stderr)?.[1];
   const code = /"code"\s*:\s*"([A-Za-z0-9.]+)"/.exec(stderr)?.[1];
   const said = [reason, code].filter((part) => part !== undefined);
@@ -487,7 +502,7 @@ function parsed(stdout: string, what: string): Readonly<Record<string, unknown>>
  * What Azure answers a GET, or an error naming what was read and why it
  * failed: never the URL, which names the subscription, nor Azure's message.
  */
-function get(az: Az, url: string, what: string): Readonly<Record<string, unknown>> {
+export function get(az: Az, url: string, what: string): Readonly<Record<string, unknown>> {
   const done = az.run(['rest', '--method', 'get', '--url', url, '--output', 'json']);
   if (done.status !== 0) throw new Error(`Azure didn't answer the read of ${what} (${azureRefusal(done.stderr)}).`);
   return parsed(done.stdout, what);
@@ -510,7 +525,7 @@ function signedIn(az: Az, say: (line: string) => void): string {
 }
 
 /** A workload as Azure has it: its properties, and what it runs. */
-interface Read {
+export interface Read {
   readonly properties: Readonly<Record<string, unknown>>;
   /** Its tags: the migration job's hold the hand deploys' records (T1b). */
   readonly tags: Readonly<Record<string, unknown>>;
@@ -518,7 +533,7 @@ interface Read {
 }
 
 /** A workload, read from Azure. */
-function readWorkload(az: Az, subscription: string, workload: Workload): Read {
+export function readWorkload(az: Az, subscription: string, workload: Workload): Read {
   const found = get(az, workloadUrl(subscription, workload), workload);
   const properties = record(found.properties);
   return { properties, tags: record(found.tags), running: runningIn(workload, record(properties.template).containers) };
@@ -531,7 +546,7 @@ const buildOf = (container: Container): string => {
 };
 
 /** Whether two containers are the same, field for field. */
-const same = (one: Container, other: Container): boolean => JSON.stringify(one) === JSON.stringify(other);
+export const same = (one: Container, other: Container): boolean => JSON.stringify(one) === JSON.stringify(other);
 
 /**
  * What changed in a container, in words: its image and its build, the two a

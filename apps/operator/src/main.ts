@@ -43,6 +43,7 @@ import {
 } from '@agentx/platform/observability';
 
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
+import { NO_REQUEST_PROBLEM, REQUEST_LIMIT_BYTES, REQUEST_USAGE, UUID_V7 } from './request.ts';
 
 const SERVICE = 'operator';
 
@@ -57,15 +58,6 @@ export const USAGE = 'create-organization --name <name>';
 
 /** How the job names the file its request is in. */
 const REQUEST_FLAG = '--request';
-
-/** What a request file holds, as a JSON list: the same words, and the new organisation's ID. */
-export const REQUEST_USAGE = 'create-organization --name <name> --id <new ID>';
-
-/** The most a request file may hold: a command and one name, with room to spare. */
-export const REQUEST_LIMIT_BYTES = 4096;
-
-/** A UUIDv7 in lower case, as the product makes every ID (ADR-007). */
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** The parts of `process` the command uses. Tests pass a stand-in. */
 export interface OperatorProcess {
@@ -157,9 +149,7 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
   if (!Array.isArray(words) || !words.every((word) => typeof word === 'string')) {
     return problem("the request file must hold a JSON list of the command's words");
   }
-  if (words.length === 0) {
-    return problem('no request was written for this run: the job holds none until a person writes one');
-  }
+  if (words.length === 0) return problem(NO_REQUEST_PROBLEM);
   return { words };
 }
 

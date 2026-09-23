@@ -13,7 +13,8 @@ import type { Output } from '@agentx/platform/observability';
 import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type OperatorProcess, REQUEST_LIMIT_BYTES, REQUEST_USAGE, runOperator, USAGE } from './main.ts';
+import { type OperatorProcess, runOperator, USAGE } from './main.ts';
+import { createOrganizationRequest, REQUEST_LIMIT_BYTES, REQUEST_USAGE } from './request.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({
@@ -248,9 +249,8 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
     writeFileSync(file, contents);
     return file;
   };
-  /** A request as jobs.ts writes one: the words, then the new organisation's ID. */
-  const request = (name: string, id: string = NEW_ID): string =>
-    JSON.stringify(['create-organization', '--name', name, '--id', id]);
+  /** A request as jobs.ts writes one (B1c-2b): the words, then the new organisation's ID. */
+  const request = (name: string, id: string = NEW_ID): string => createOrganizationRequest(name, id);
   const reached = ['operator.starting', 'operator.database_unavailable'];
   const shape = `the request file holds ${REQUEST_USAGE} as a JSON list, and nothing else`;
   const notList = "the request file must hold a JSON list of the command's words";

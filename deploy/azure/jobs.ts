@@ -20,6 +20,10 @@
 // ever ("migration already started"). Once that waiting run is stopped,
 // `cleanup` runs the setup job once as `zitadel setup cleanup`, which cancels
 // the marker; then `run zitadel-setup` goes again.
+//
+// The operator's job is never run or started here: it holds no request as it
+// is deployed. operator.ts writes one onto it, runs it and takes it off again
+// (B1c-2b), with this file's steps; a run of it can still be waited for here.
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
@@ -94,7 +98,7 @@ export const USAGE = `Usage:
   node deploy/azure/jobs.ts start <job>           start it only
   node deploy/azure/jobs.ts wait <job> <run>      wait for a run to end, read its log
   node deploy/azure/jobs.ts cleanup               clear a step a dead Zitadel setup run left started
-The jobs, in the order a first deploy runs them: ${FIRST_DEPLOY.join(', ')}; and operator, which only waits.`;
+The jobs, in the order a first deploy runs them: ${FIRST_DEPLOY.join(', ')}; and operator, which only waits here (deploy/azure/operator.ts runs it).`;
 
 const isJob = (value: string | undefined): value is Job => JOBS.some((job) => job === value);
 
@@ -126,7 +130,7 @@ export function parseArguments(argv: readonly string[]): Request {
   if (!isJob(job)) throw new UsageError(`${job ?? 'nothing'} isn't a job: ${JOBS.join(', ')}`);
   if (command !== 'wait' && job === 'operator') {
     throw new UsageError(
-      `the operator's job isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses`,
+      `the operator's job isn't ${command === 'run' ? 'run' : 'started'} as it is deployed: it holds no request, and refuses; node deploy/azure/operator.ts writes one and runs it`,
     );
   }
   if (command !== 'wait') {
@@ -151,7 +155,7 @@ export interface JobSteps {
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A job in the subscription the operator is signed in to. */
-interface Target {
+export interface Target {
   readonly subscription: string;
   readonly job: Job;
 }
@@ -279,7 +283,7 @@ function startWith(steps: JobSteps, target: Target, containers: readonly RunCont
 }
 
 /** The job's runs that haven't ended, with their states. */
-function unfinishedRuns(steps: JobSteps, target: Target): string[] {
+export function unfinishedRuns(steps: JobSteps, target: Target): string[] {
   const runs = azJson(steps.az, ['containerapp', 'job', 'execution', 'list', ...jobArgs(target)]);
   if (!Array.isArray(runs)) throw new Error(`Azure's list of ${jobName(target.job)}'s runs wasn't a list.`);
   return (runs as readonly { name?: unknown; properties?: { status?: unknown } }[])
@@ -291,7 +295,7 @@ function unfinishedRuns(steps: JobSteps, target: Target): string[] {
  * Starts the job, once nothing of it is still going, as it is deployed or with
  * the containers given: the new run's name.
  */
-function start(steps: JobSteps, target: Target, containers?: readonly RunContainer[]): string {
+export function start(steps: JobSteps, target: Target, containers?: readonly RunContainer[]): string {
   const name = jobName(target.job);
   const going = unfinishedRuns(steps, target);
   if (going.length > 0) {
@@ -328,14 +332,19 @@ function after(job: Job): string {
 }
 
 /** How a run ended: its state, and its start and end as Azure gave them. */
-interface Ended {
+export interface Ended {
   readonly status: string;
   readonly began: string;
   readonly ended: string;
 }
 
 /** Waits for a run to end, `limit` being the job's time limit: how it ended, or nothing when it didn't in time. */
-async function waitFor(steps: JobSteps, target: Target, execution: string, limit: number): Promise<Ended | undefined> {
+export async function waitFor(
+  steps: JobSteps,
+  target: Target,
+  execution: string,
+  limit: number,
+): Promise<Ended | undefined> {
   const deadline = steps.now().getTime() + (limit + START_ALLOWANCE_SECONDS) * 1000;
   steps.say(`Waiting for ${execution} to end (the job gives up after ${String(limit)} s)...`);
   let last: string | undefined;
@@ -400,7 +409,7 @@ const logQuery = (job: Job, execution: string): string =>
     '| order by TimeGenerated asc',
   ].join('\n');
 
-interface LogLine {
+export interface LogLine {
   readonly time: string;
   readonly source: string;
   readonly reason: string;
@@ -433,12 +442,17 @@ function shown(line: LogLine): string {
 }
 
 /**
- * Reads a run's log once it has all arrived, and shows it. It has arrived when
- * the platform has logged the container's end and two readings a minute apart
- * hold the same container lines, or when the run ended long enough ago that
- * nothing more will come.
+ * Reads a run's log once it has all arrived, shows it, and gives its lines
+ * back. It has arrived when the platform has logged the container's end and
+ * two readings a minute apart hold the same container lines, or when the run
+ * ended long enough ago that nothing more will come.
  */
-async function readLog(steps: JobSteps, target: Target, execution: string, run: Ended): Promise<void> {
+export async function readLog(
+  steps: JobSteps,
+  target: Target,
+  execution: string,
+  run: Ended,
+): Promise<readonly LogLine[]> {
   const began = Date.parse(run.began);
   const ended = Date.parse(run.ended);
   if (!Number.isFinite(began) || !Number.isFinite(ended)) {
@@ -479,7 +493,7 @@ async function readLog(steps: JobSteps, target: Target, execution: string, run: 
         // Late with the lines still changing: a run read long after it ended has had no earlier reading to differ from.
         steps.say("The container's lines were still arriving 15 minutes after the run ended, so more may be missing.");
       }
-      return;
+      return lines;
     }
     if (reading === 0) {
       steps.say(
