@@ -144,7 +144,8 @@ vi.mock('./retention-sweep.ts', () => ({
   scheduleRetentionSweep: (_sweep: unknown, everyMs: number) => {
     sweeps.everyMs.push(everyMs);
     return {
-      // Slower than the anchor check's stop, so the pool is seen to wait for it.
+      // Slower than the anchor check's stop, so the pool is seen to wait for it:
+      // the API stops both at once, so this order is the fake's, not a promise.
       stop: () =>
         new Promise<void>((resolve) => {
           setTimeout(() => {

@@ -283,8 +283,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
     ...SWEEP,
   });
-  // The schema is checked on the same schedule as the chains, so there is one
-  // timer and one pace. It runs first: a chain read through rewritten walls is
+  // The schema is checked on the same schedule as the chains, so the two share
+  // one timer and one pace (the retention sweep has its own, below). It runs first: a chain read through rewritten walls is
   // worth less than knowing the walls were rewritten.
   const anchorCheck = scheduleAnchorCheck(
     {
@@ -299,7 +299,10 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     },
     config.audit.anchorSeconds * 1000,
   );
-  // On a timer of its own (B1e-3): a long sweep must never hold up the anchor check.
+  // On a timer of its own (B1e-3): a long sweep must never hold up the anchor
+  // check. The two share the pool, and both start at once: each statement is
+  // bounded, and a pool at its limit queues rather than refuses. Nothing orders
+  // the sweep after a schema check: 0009's `retention` policy is its wall.
   const sweeping = scheduleRetentionSweep(retention, SWEEP_EVERY_MS);
   onStopSignals(
     host,
