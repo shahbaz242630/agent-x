@@ -248,6 +248,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     ],
     organizations: {
       list: () => listedOrganizations(database),
+      recorded: () => platform.createdOrganizations(database),
       verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
     },
     keys,

@@ -265,7 +265,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
       expect.objectContaining({ level: 'info', chain: 'organisation', seq: '1' }),
     );
     expect(lines.find((line) => line.event === 'audit.integrity_failed' && line.orgId === broken)).toEqual(
-      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor' }),
+      expect.objectContaining({ level: 'error', chain: 'organisation', check: 'anchor', reason: 'head' }),
     );
     await stop(run);
   });

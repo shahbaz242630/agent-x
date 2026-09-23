@@ -239,6 +239,64 @@ describe('checking in a transaction of its own, as the anchor check does', () =>
   });
 });
 
+describe('the organisations it records as created, for the anchor check (B1d-2)', () => {
+  const ORGS = ['0199a0f0-0000-7000-8000-00000000c001', '0199a0f0-0000-7000-8000-00000000c002'];
+  const created = (orgId: string): PlatformEvent => ({
+    actor: { type: 'system', id: 'operator' },
+    action: 'organization.created',
+    details: { orgId, release: 'r-1', run: null },
+  });
+
+  it('gives each organisation created, in the order recorded, and nothing from other events', async () => {
+    await record(started(1), created(ORGS[1] ?? ''), started(2), created(ORGS[0] ?? ''));
+
+    expect(await chain.createdOrganizations(app)).toEqual([ORGS[1], ORGS[0]]);
+  });
+
+  it('gives nothing for details planted without an orgId text, which the chain check names', async () => {
+    await record(created(ORGS[0] ?? ''));
+    // The owner can drop the table's check that details are a JSON object, as here.
+    await tamper('alter table platform_controls.audit_events drop constraint audit_events_details_check');
+    try {
+      await tamper(
+        `insert into platform_controls.audit_events
+         select seq + 1, gen_random_uuid(), recorded_at, actor_type, actor_id, action, '{"orgId":7}', prev_hash, hash, mac,
+                mac_key_version from platform_controls.audit_events where seq = 1`,
+        `insert into platform_controls.audit_events
+         select seq + 2, gen_random_uuid(), recorded_at, actor_type, actor_id, action, '[]', prev_hash, hash, mac,
+                mac_key_version from platform_controls.audit_events where seq = 1`,
+        `insert into platform_controls.audit_events
+         select seq + 3, gen_random_uuid(), recorded_at, actor_type, actor_id, action, '{}', prev_hash, hash, mac,
+                mac_key_version from platform_controls.audit_events where seq = 1`,
+        `insert into platform_controls.audit_events
+         select seq + 4, gen_random_uuid(), recorded_at, actor_type, actor_id, action, 'not json', prev_hash, hash, mac,
+                mac_key_version from platform_controls.audit_events where seq = 1`,
+      );
+
+      expect(await chain.createdOrganizations(app)).toEqual([ORGS[0]]);
+    } finally {
+      await tamper(
+        'truncate platform_controls.audit_events, platform_controls.audit_head',
+        "alter table platform_controls.audit_events add constraint audit_events_details_check check (pg_catalog.jsonb_typeof(details::jsonb) = 'object')",
+      );
+    }
+  });
+
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table platform_controls.audit_events in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(chain.createdOrganizations(app)).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
 describe('SEC-EVD-01 the app role only adds to and reads the platform chain', () => {
   // Postgres checks the table right before anything else.
   // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.

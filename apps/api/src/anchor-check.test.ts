@@ -454,7 +454,11 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
    * A directory whose list gives the answers in turn (the last one again once
    * they run out), and chains that check out at seq 1, or as `reports` says.
    */
-  function directory(lists: readonly (readonly string[] | Error)[], reports: Record<string, ChainReport> = {}) {
+  function directory(
+    lists: readonly (readonly unknown[] | Error)[],
+    reports: Record<string, ChainReport> = {},
+    recorded: readonly unknown[] | Error = [],
+  ) {
     const verified: string[] = [];
     let turn = 0;
     const organizations: OrganisationChains = {
@@ -462,8 +466,9 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
         const answer = lists[Math.min(turn, lists.length - 1)];
         turn += 1;
         if (answer === undefined) throw new Error('The test gave no lists');
-        return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+        return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer as string[]);
       },
+      recorded: () => (recorded instanceof Error ? Promise.reject(recorded) : Promise.resolve(recorded as string[])),
       verify: (orgId) => {
         verified.push(orgId);
         return Promise.resolve(reports[orgId] ?? ok(1n));
@@ -567,7 +572,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     expect(events().slice(2)).toEqual([listAlarm, orgAlarm('unchecked', ORG, { anchorSeq: '1' })]);
   });
 
-  it('warns, without the alarm, for a list that cannot be read for any other reason, until an organisation seen goes stale', async () => {
+  it('warns, without the alarm, for a list that cannot be read for any other reason, until the list and each organisation seen go stale', async () => {
     const { organizations } = directory([[ORG], unreachable()]);
     const { check, events, clock } = checking([], undefined, organizations);
     await check.run();
@@ -578,7 +583,135 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
 
     clock.advanceBy(1);
     await check.run();
-    expect(events().slice(2)).toEqual([listWarning, orgAlarm('unchecked', ORG, { anchorSeq: '1' })]);
+    expect(events().slice(2)).toEqual([
+      listWarning,
+      { level: 'error', event: 'audit.integrity_failed', chain: 'organisation', check: 'anchor', reason: 'list' },
+      orgAlarm('unchecked', ORG, { anchorSeq: '1' }),
+    ]);
+  });
+
+  const listAlarm = {
+    level: 'error',
+    event: 'audit.integrity_failed',
+    chain: 'organisation',
+    check: 'anchor',
+    reason: 'list',
+  };
+
+  it('raises the alarm, from the first run, for an organisation the platform chain records but the list leaves out', async () => {
+    const { organizations, verified } = directory([[OTHER_ORG]], {}, [ORG, OTHER_ORG]);
+    const { check, events } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(verified).toEqual([OTHER_ORG]);
+    expect(events()).toEqual([orgAlarm('unlisted', ORG), anchored(OTHER_ORG)]);
+  });
+
+  it.each([
+    ['an entry that is not text', [ORG, null]],
+    ['an entry that is not an ID', [ORG, 'not-an-id']],
+    ['more organisations than any real list', Array.from({ length: 10_001 }, () => ORG)],
+  ])('raises the alarm for a list holding %s, and checks none of it', async (_, list) => {
+    const { organizations, verified } = directory([list]);
+    const { check, events } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(verified).toEqual([]);
+    expect(events()).toEqual([listAlarm]);
+  });
+
+  it('raises the alarm for a record of created organisations that is not IDs, or that the database refuses', async () => {
+    for (const recorded of [[42], refused('42501')]) {
+      const { organizations, verified } = directory([[ORG]], {}, recorded);
+      const { check, events } = checking([], undefined, organizations);
+      await check.run();
+
+      expect(verified).toEqual([]);
+      expect(events()).toEqual([listAlarm]);
+    }
+  });
+
+  it('raises the alarm for a list never read for a whole stale period, though no organisation is known yet', async () => {
+    const { organizations } = directory([unreachable()]);
+    const { check, events, clock } = checking([], undefined, organizations);
+    await check.run();
+    clock.advanceBy(STALE_MS - 1);
+    await check.run();
+    const listWarning = { level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation', check: 'list' };
+    expect(events()).toEqual([listWarning, listWarning]);
+
+    clock.advanceBy(1);
+    await check.run();
+    expect(events().slice(2)).toEqual([listWarning, listAlarm]);
+  });
+
+  it('counts the list’s stale period from its last whole read', async () => {
+    const { organizations } = directory([[], unreachable()]);
+    const { check, events, clock } = checking([], undefined, organizations);
+    clock.advanceBy(STALE_MS);
+    await check.run();
+    clock.advanceBy(STALE_MS - 1);
+    await check.run();
+
+    expect(events().map((line) => line.level)).toEqual(['warn']);
+  });
+
+  it('contains a list that throws before giving a promise, as a warning', async () => {
+    const organizations: OrganisationChains = {
+      list: () => {
+        throw new Error('the list broke');
+      },
+      recorded: () => Promise.resolve([]),
+      verify: () => Promise.resolve(ok(1n)),
+    };
+    const { check, events, done } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(events()).toEqual([
+      { level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation', check: 'list' },
+    ]);
+    expect(done()).toHaveLength(1);
+  });
+
+  it('starts a newly listed organisation’s stale period when it is first seen, not when the process began', async () => {
+    const { organizations } = directory([[], [ORG]], { [ORG]: unreachable() as unknown as ChainReport });
+    const failing: OrganisationChains = {
+      ...organizations,
+      verify: () => Promise.reject(unreachable()),
+    };
+    const { check, events, clock } = checking([], undefined, failing);
+    await check.run();
+    clock.advanceBy(STALE_MS);
+    await check.run();
+
+    expect(events()).toEqual([
+      { level: 'warn', event: 'audit.anchor_check_failed', chain: 'organisation', orgId: ORG },
+    ]);
+  });
+
+  it('never reads the list twice at once: a read still hung is a warning, and no second read starts', async () => {
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      const organizations: OrganisationChains = {
+        list: () => {
+          reads += 1;
+          return new Promise<never>(() => undefined);
+        },
+        recorded: () => Promise.resolve([]),
+        verify: () => Promise.resolve(ok(1n)),
+      };
+      const { check, events } = checking([], undefined, organizations);
+      const first = check.run();
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      await first;
+      await check.run();
+
+      expect(reads).toBe(1);
+      expect(events()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts a list past its deadline as not read', async () => {
@@ -586,6 +719,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     try {
       const organizations: OrganisationChains = {
         list: () => new Promise<never>(() => undefined),
+        recorded: () => Promise.resolve([]),
         verify: () => Promise.resolve(ok(1n)),
       };
       const { check, events } = checking([], undefined, organizations);
@@ -604,6 +738,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
   it('ends at once, raising nothing, when stopped while the list is read', async () => {
     const organizations: OrganisationChains = {
       list: () => new Promise<never>(() => undefined),
+      recorded: () => Promise.resolve([]),
       verify: () => Promise.resolve(ok(1n)),
     };
     const { check, events, done } = checking([], undefined, organizations);
@@ -623,6 +758,7 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
         listed += 1;
         return Promise.resolve([ORG]);
       },
+      recorded: () => Promise.resolve([]),
       verify: () => Promise.resolve(ok(1n)),
     };
     const stopping = new AbortController();

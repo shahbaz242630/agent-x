@@ -73,6 +73,20 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     expect(all).toEqual([...all].sort());
   });
 
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table directory.orgs in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(listedOrganizations(app)).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it('refuses one listed already', async () => {
     const id = newId();
     await withTenant(app, id, (tx) => registerOrganization(tx, id));
