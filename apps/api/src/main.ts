@@ -7,11 +7,14 @@
 //    could get round the tenant walls (ADR-005 §3, APP-02)
 // 5. writes the fingerprint's hash to the platform audit chain, or refuses to
 //    start (SEC-OPS-05)
-// 6. listens, and starts the audit chains' anchor check (ADR-012 §2)
+// 6. listens, and starts the audit chains' anchor check (ADR-012 §2): the
+//    platform's, and each organisation's from the directory's list (B1d-2)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
+import { type AuditTables, createAuditTrail } from '@agentx/core/modules/audit';
+import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -34,7 +37,7 @@ import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
-type ApiTables = PlatformControlsTables;
+type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables;
 
 const SERVICE = 'api';
 
@@ -235,6 +238,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   }
   logger.info('api.listening', { ports: server.addresses().map((address) => address.port) });
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
+  const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const anchors = createAnchorCheck({
     chains: [
       {
@@ -242,6 +246,11 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
         verify: (anchor) => platform.verifyAlone(database, anchor),
       },
     ],
+    organizations: {
+      list: () => listedOrganizations(database),
+      recorded: () => platform.createdOrganizations(database),
+      verify: (orgId, anchor) => trail.verifyAlone(database, orgId, anchor),
+    },
     keys,
     clock: systemClock,
     logger,

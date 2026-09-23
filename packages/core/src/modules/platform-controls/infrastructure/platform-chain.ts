@@ -63,6 +63,30 @@ export interface PlatformChain {
    * database can get round this one.
    */
   verifyAlone(db: Kysely<PlatformControlsTables>, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * Every organisation the chain records as created (`organization.created`'s
+   * `orgId`, B1c-2b), in the order recorded, in a transaction of its own, 10
+   * seconds per statement: the anchor check holds the directory's list to it
+   * (B1d-2). Read as stored; the chain's own check is what shows an event
+   * changed, added or deleted. Details that aren't an object with an `orgId`
+   * text give nothing.
+   */
+  createdOrganizations(db: Kysely<PlatformControlsTables>): Promise<string[]>;
+}
+
+/** The platform event that records an organisation made, with its `orgId` in the details. */
+const ORGANIZATION_CREATED = 'organization.created';
+
+/** The `orgId` text in an event's stored details, if they hold one. */
+function orgIdIn(details: unknown): string | undefined {
+  if (typeof details !== 'string') return undefined;
+  try {
+    const parsed: unknown = JSON.parse(details);
+    if (typeof parsed !== 'object' || parsed === null || !('orgId' in parsed)) return undefined;
+    return typeof parsed.orgId === 'string' ? parsed.orgId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const CHAIN: Chain = { kind: 'platform' };
@@ -240,6 +264,22 @@ export function createPlatformChain({
           // Each statement, waits for locks included, so the pool can be closed soon after a stop.
           await sql`set local statement_timeout = '10s'`.execute(tx);
           return verifyChain(keys, CHAIN, readerFor(tx), anchor);
+        });
+    },
+
+    createdOrganizations(db: Kysely<PlatformControlsTables>): Promise<string[]> {
+      return db
+        .transaction()
+        .setIsolationLevel('read committed')
+        .execute(async (tx) => {
+          await sql`set local statement_timeout = '10s'`.execute(tx);
+          const rows = await tx
+            .selectFrom('platform_controls.audit_events')
+            .select('details')
+            .where('action', '=', ORGANIZATION_CREATED)
+            .orderBy('seq')
+            .execute();
+          return rows.map((row) => orgIdIn(row.details)).filter((id) => id !== undefined);
         });
     },
   });

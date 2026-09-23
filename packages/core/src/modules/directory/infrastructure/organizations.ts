@@ -5,7 +5,7 @@
 // so the two can't part: the row can't be written without its entry, and the
 // app can't delete an entry.
 import { assertTenant } from '@agentx/platform/db';
-import type { Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { DirectoryTables } from './tables.ts';
 
@@ -18,4 +18,22 @@ import type { DirectoryTables } from './tables.ts';
 export async function registerOrganization(tx: Transaction<DirectoryTables>, orgId: string): Promise<void> {
   await assertTenant(tx, orgId);
   await tx.insertInto('directory.orgs').values({ org_id: orgId }).execute();
+}
+
+/**
+ * Every organisation the directory lists, by ID in lower case as Postgres
+ * prints a uuid, in order: for work across organisations, which then works
+ * inside each one's own withTenant (B1d-2: the anchor check). Its own
+ * transaction, each statement limited to 10 seconds, so a hung read gives
+ * its connection back.
+ */
+export function listedOrganizations(db: Kysely<DirectoryTables>): Promise<string[]> {
+  return db
+    .transaction()
+    .setIsolationLevel('read committed')
+    .execute(async (tx) => {
+      await sql`set local statement_timeout = '10s'`.execute(tx);
+      const rows = await tx.selectFrom('directory.orgs').select('org_id').orderBy('org_id').execute();
+      return rows.map((row) => row.org_id);
+    });
 }

@@ -1,10 +1,10 @@
 // The directory's list of organisations (0007), as the app role.
-import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { registerOrganization } from './organizations.ts';
+import { listedOrganizations, registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -61,6 +61,30 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     );
 
     expect(await listed(id)).toEqual([]);
+  });
+
+  it('gives every organisation listed, in lower case and in order, to work outside any tenant (B1d-2)', async () => {
+    const [first, second] = [newId(), newId()];
+    await withTenant(app, second, (tx) => registerOrganization(tx, second.toUpperCase()));
+    await withTenant(app, first, (tx) => registerOrganization(tx, first));
+
+    const all = await listedOrganizations(app);
+    expect(all.filter((id) => id === first || id === second)).toEqual([first, second]);
+    expect(all).toEqual([...all].sort());
+  });
+
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table directory.orgs in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, listedOrganizations(app), 'the read')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('refuses one listed already', async () => {

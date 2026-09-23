@@ -58,10 +58,10 @@ import {
   type StoredEntry,
   verifyChain,
 } from '@agentx/platform/audit-chain';
-import { assertTenant } from '@agentx/platform/db';
+import { assertTenant, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { sql, type Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
 import {
@@ -148,6 +148,14 @@ export interface AuditTrail {
    * row security would show its chain as empty.
    */
   verify(tx: AuditTransaction, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
+  /**
+   * `verify` in a transaction of its own, withTenant's for the organisation,
+   * each statement limited to 10 seconds (waits for locks included), so a stop
+   * can close the pool soon after: for the anchor check of every
+   * organisation's chain (B1d-2). The check keeps its own deadline too, since
+   * someone who owns the database can get round this one.
+   */
+  verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport>;
   /**
    * The object's latest signed state (ADR-012 §2): of the events about it,
    * the newest whose details carry a state seal, with every later event about
@@ -399,6 +407,13 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       return verifyChain(keys, chain, readerFor(tx, chain.orgId), anchor);
+    },
+
+    verifyAlone(db: Kysely<AuditTables>, orgId: string, anchor: AnchorPoint | undefined): Promise<ChainReport> {
+      return withTenant(db, orgId, async (tx) => {
+        await sql`set local statement_timeout = '10s'`.execute(tx);
+        return trail.verify(tx, orgId, anchor);
+      });
     },
 
     async latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState> {

@@ -9,6 +9,7 @@ import {
   successes,
   type TestDatabase,
   type TestSession,
+  within,
 } from '@agentx/testing';
 import {
   ChainBroken,
@@ -699,6 +700,47 @@ describe('SEC-EVD-02, FX-TAMPER: changes made past the app are found', () => {
       ok: false,
       problem: { reason: 'anchor', seq: 6n },
     });
+  });
+});
+
+describe('checking a chain alone, for the anchor check (B1d-2)', () => {
+  it('checks the whole chain in a withTenant of its own, against the anchor it is given', async () => {
+    await record(org, event(1), event(2), event(3));
+    const report = await trail.verifyAlone(app, org, undefined);
+    expect(report).toMatchObject({ ok: true, seq: 3n });
+    if (!report.ok) throw new Error('the chain should check out');
+
+    await attacker.query('delete from audit.events where org_id = $1 and seq = 3', [org]);
+    await attacker.query(
+      `update audit.heads h set seq = e.seq, hash = e.hash, mac = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+       from audit.events e where h.org_id = $1 and e.org_id = h.org_id and e.seq = 2`,
+      [org],
+    );
+    expect(await trail.verifyAlone(app, org, { seq: report.seq, hash: report.hash })).toMatchObject({ ok: false });
+  });
+
+  it('gives up on a statement after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    await record(org, event(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table audit.events in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, trail.verifyAlone(app, org, undefined), 'the check')).rejects.toThrow(
+        /statement timeout/,
+      );
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('reads an organisation with no chain as empty, and refuses to run inside another withTenant', async () => {
+    expect(await trail.verifyAlone(app, org, undefined)).toMatchObject({ ok: true, seq: 0n });
+    await expect(withTenant(app, newOrg(), () => trail.verifyAlone(app, org, undefined))).rejects.toThrow(
+      TenantContextError,
+    );
   });
 });
 
