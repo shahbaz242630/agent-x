@@ -24,6 +24,8 @@ const major = Number(server.version.split('.')[0]);
  */
 const LEDGER = { reason: 'The migration ledger', columns: ['name', 'checksum', 'applied_at'], appMay: [] };
 const REAL_EXCEPTIONS = SCHEMA_POLICY.appendOnlyExceptions;
+/** The real idempotency keys' fill-in entry, retention and all. */
+const REAL_KEYS = SCHEMA_POLICY.fillInTables['idempotency.keys'] ?? { reason: '', columns: [] };
 const POLICY: SchemaPolicy = {
   globalTables: { ...SCHEMA_POLICY.globalTables, 'migrations.applied': LEDGER },
   appendOnlySchemas: [...SCHEMA_POLICY.appendOnlySchemas, 'journal'],
@@ -921,22 +923,16 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter(statements)).toEqual([]);
     });
 
-    it("fails the real idempotency keys given DELETE, or UPDATE of a key's hash", async () => {
-      const statements = [
-        'grant delete on idempotency.keys to agentx_app',
-        'grant update (request_hash) on idempotency.keys to agentx_app',
-      ];
-      expect(await problemsAfter(statements)).toEqual([
-        `column idempotency.keys.request_hash: agentx_app ${unlisted}`,
-        `table idempotency.keys: agentx_app has DELETE ${table}`,
-      ]);
+    it("fails the real idempotency keys given UPDATE of a key's hash", async () => {
+      const statements = ['grant update (request_hash) on idempotency.keys to agentx_app'];
+      expect(await problemsAfter(statements)).toEqual([`column idempotency.keys.request_hash: agentx_app ${unlisted}`]);
     });
 
     it('fails an entry with no reason or no column, for a missing or global table, in an append-only schema, or naming a column the table lacks', async () => {
       const policy: SchemaPolicy = {
         ...POLICY,
         fillInTables: {
-          'idempotency.keys': { reason: 'Keys', columns: ['result_status', 'result_id', 'result_body'] },
+          'idempotency.keys': { ...REAL_KEYS, reason: 'Keys', columns: ['result_status', 'result_id', 'result_body'] },
           't.keys': { reason: ' ', columns: [] },
           't.gone': { reason: 'Removed', columns: ['result'] },
           'migrations.applied': { reason: 'Not a key', columns: ['name'] },
@@ -953,6 +949,122 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         'audit.events: is on the fill-in list, but its schema is append-only',
         "audit.events: the fill-in list names column details, which agentx_app isn't granted UPDATE on",
         `column t.keys.result: agentx_app ${unlisted}`,
+      ]);
+    });
+  });
+
+  describe('B1e: a fill-in table with a retention is deleted from only past it, held by its retention policy', () => {
+    /** t.keys, built as a table of idempotency keys with a retention must be. */
+    const KEYS = [
+      'create schema t',
+      'create table t.keys (org_id uuid not null, key text not null, result text, created_at timestamptz not null, primary key (org_id, key))',
+      ...walls('t.keys'),
+      'create policy retention on t.keys as restrictive for delete using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 7))',
+      'grant usage on schema t to agentx_app',
+      'grant select, insert, delete on t.keys to agentx_app',
+      'grant update (result) on t.keys to agentx_app',
+    ];
+    const WEEK = { column: 'created_at', days: 7 };
+    const listing = (sweptAfter?: { column: string; days: number }, columns = ['result']): SchemaPolicy => ({
+      ...POLICY,
+      fillInTables: {
+        ...POLICY.fillInTables,
+        't.keys': { reason: 'A key, swept after a week', columns, ...(sweptAfter === undefined ? {} : { sweptAfter }) },
+      },
+    });
+    const RETENTION = 't.keys: policy retention is not its retention as the fill-in list gives it (B1e)';
+    const without = (dropped: string): string[] => KEYS.filter((statement) => !statement.startsWith(dropped));
+
+    it('passes one built as it must be, and the real idempotency keys', async () => {
+      expect(await problemsAfter(KEYS, listing(WEEK))).toEqual([]);
+      expect(REAL_KEYS.sweptAfter).toEqual({ column: 'created_at', days: 30 });
+    });
+
+    it('fails DELETE, or a retention policy, on a fill-in table whose entry names no retention', async () => {
+      expect(await problemsAfter(KEYS, listing())).toEqual([
+        't.keys: has 2 policies; a tenant table has exactly one, the tenant policy (ADR-005 §2)',
+        'table t.keys: agentx_app has DELETE on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed',
+      ]);
+    });
+
+    it('fails a retention with no retention policy', async () => {
+      expect(await problemsAfter(without('create policy retention'), listing(WEEK))).toEqual([
+        't.keys: its retention needs a retention policy (B1e)',
+      ]);
+    });
+
+    it.each([
+      [
+        'permissive',
+        'create policy retention on t.keys as permissive for delete using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 7))',
+        'it is permissive',
+      ],
+      [
+        'for another command',
+        'create policy retention on t.keys as restrictive for select using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 7))',
+        'it covers SELECT',
+      ],
+      [
+        'for named roles',
+        'create policy retention on t.keys as restrictive for delete to agentx_app using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 7))',
+        'it applies to named roles only',
+      ],
+      [
+        'reading another number of days',
+        'create policy retention on t.keys as restrictive for delete using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 1))',
+        'its USING is (created_at < (now() - make_interval(days => 1)))',
+      ],
+      [
+        'with a WITH CHECK',
+        'create policy retention on t.keys as restrictive for update using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 7)) with check (true)',
+        'it covers UPDATE; it has a WITH CHECK, true',
+      ],
+    ])('fails a retention policy %s', async (_, policy, difference) => {
+      expect(await problemsAfter([...without('create policy retention'), policy], listing(WEEK))).toEqual([
+        `${RETENTION}: ${difference}`,
+      ]);
+    });
+
+    it('fails a policy of another name beside the two', async () => {
+      const statements = [...KEYS, 'create policy sweep_all on t.keys for delete using (true)'];
+      expect(await problemsAfter(statements, listing(WEEK))).toEqual([
+        't.keys: has 2 policies; a tenant table has exactly one, the tenant policy (ADR-005 §2)',
+      ]);
+    });
+
+    it('fails a retention of no whole days, or on a column not plain, missing, not timestamptz NOT NULL, or one the app may change', async () => {
+      const statements = [
+        ...KEYS,
+        "alter table t.keys add column noted text not null default ''",
+        'alter table t.keys add column seen timestamptz',
+      ];
+      const problems = async (sweptAfter: { column: string; days: number }, columns?: string[]) =>
+        problemsAfter(statements, listing(sweptAfter, columns));
+      const using = `${RETENTION}: its USING is (created_at < (now() - make_interval(days => 7)))`;
+      const twoPolicies = 't.keys: has 2 policies; a tenant table has exactly one, the tenant policy (ADR-005 §2)';
+      expect(await problems({ column: 'created_at', days: 0 })).toEqual([
+        "t.keys: the fill-in list's retention is not a whole number of days from 1 to 36,500",
+        twoPolicies,
+      ]);
+      expect(await problems({ column: 'Created', days: 7 })).toEqual([
+        "t.keys: the fill-in list's retention names a column that isn't a plain name",
+        twoPolicies,
+      ]);
+      expect(await problems({ column: 'gone', days: 7 })).toEqual([
+        "t.keys: the fill-in list's retention names column gone, which the table doesn't have",
+        using,
+      ]);
+      expect(await problems({ column: 'noted', days: 7 })).toEqual([
+        "t.keys: the fill-in list's retention column noted must be timestamptz NOT NULL",
+        using,
+      ]);
+      expect(await problems({ column: 'seen', days: 7 })).toEqual([
+        "t.keys: the fill-in list's retention column seen must be timestamptz NOT NULL",
+        using,
+      ]);
+      expect(await problems(WEEK, ['result', 'created_at'])).toEqual([
+        "t.keys: the fill-in list's retention column created_at is one the app may change",
+        "t.keys: the fill-in list names column created_at, which agentx_app isn't granted UPDATE on",
       ]);
     });
   });

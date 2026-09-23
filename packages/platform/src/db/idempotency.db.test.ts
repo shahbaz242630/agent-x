@@ -24,11 +24,13 @@ import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import {
   createIdempotentWrites,
+  IDEMPOTENCY_RETENTION_DAYS,
   type IdempotencyClient,
   IdempotencyFailed,
   type IdempotentRequest,
   type IdempotentResult,
   type IdempotentWrite,
+  sweepIdempotencyKeys,
 } from './idempotency.ts';
 import { TenantContextError, withTenant } from './tenant.ts';
 
@@ -918,6 +920,94 @@ describe('a key row changed past this step', () => {
   });
 });
 
+describe('the retention sweep (B1e, db/migrations/0009)', () => {
+  /** A claimed key in the organisation, its claim moved back `age` (a Postgres interval) past the app. */
+  async function keyAged(orgId: string, age: string): Promise<string> {
+    const key = newKey();
+    await firstWrite(requestFor(key, { orgId }));
+    await admin.query(
+      'update idempotency.keys set created_at = pg_catalog.now() - $3::interval where org_id = $1 and key = $2',
+      [orgId, key, age],
+    );
+    return key;
+  }
+  const kept = async (orgId: string): Promise<string[]> =>
+    (
+      await admin.query<{ key: string }>('select key from idempotency.keys where org_id = $1 order by key', [orgId])
+    ).map((row) => row.key);
+  const sweep = (orgId: string, most = 100) => withTenant(app, orgId, (tx) => sweepIdempotencyKeys(tx, orgId, most));
+
+  it('deletes only the keys past their 30 days, of this organisation alone, and says how many', async () => {
+    const [org, other] = [newId(), newId()];
+    await keyAged(org, '30 days 1 minute');
+    const young = await keyAged(org, '29 days 23 hours');
+    const fresh = await keyAged(org, '0 seconds');
+    const othersOld = await keyAged(other, '90 days');
+
+    expect(IDEMPOTENCY_RETENTION_DAYS).toBe(30);
+    expect(await sweep(org)).toBe(1);
+    expect(await kept(org)).toEqual([fresh, young].sort());
+    expect(await kept(other)).toEqual([othersOld]);
+    expect(await sweep(org)).toBe(0);
+  });
+
+  it('deletes at most as many as asked, oldest first, so a caller sweeps again while it gets that many', async () => {
+    const org = newId();
+    // Claimed youngest first, so the table's own order isn't oldest first.
+    const old = await keyAged(org, '40 days');
+    await keyAged(org, '50 days');
+    await keyAged(org, '60 days');
+
+    expect(await sweep(org, 2)).toBe(2);
+    expect(await kept(org)).toEqual([old]);
+    expect(await sweep(org, 2)).toBe(1);
+    expect(await kept(org)).toEqual([]);
+  });
+
+  it('lets a swept key be claimed again, as a new request', async () => {
+    const org = newId();
+    const key = await keyAged(org, '31 days');
+    await sweep(org);
+
+    expect(await write(requestFor(key, { orgId: org, payload: '{"label":"again"}' }))).toMatchObject({
+      outcome: 'done',
+    });
+  });
+
+  it("is held by the database too: the app's own DELETE reaches no key younger than 30 days", async () => {
+    const org = newId();
+    const young = await keyAged(org, '29 days');
+    const old = await keyAged(org, '31 days');
+
+    const deleted = await withTenant(app, org, (tx) =>
+      sql<{ key: string }>`delete from idempotency.keys returning key`.execute(tx),
+    );
+    expect(deleted.rows).toEqual([{ key: old }]);
+    expect(await kept(org)).toEqual([young]);
+  });
+
+  it.each([
+    ['an organisation ID that is not a UUID', 'not-a-uuid', 100],
+    ['no keys', undefined, 0],
+    ['more than 10,000 keys', undefined, 10_001],
+    ['part of a key', undefined, 1.5],
+  ])('refuses a sweep of %s, before any SQL', async (_, orgId, most) => {
+    const org = newId();
+    await expect(withTenant(app, org, (tx) => sweepIdempotencyKeys(tx, orgId ?? org, most))).rejects.toMatchObject({
+      name: 'IdempotencyFailed',
+      reason: 'bad_request',
+    });
+  });
+
+  it("takes 10,000, and refuses to sweep outside the organisation's own withTenant", async () => {
+    const [org, other] = [newId(), newId()];
+    expect(await sweep(org, 10_000)).toBe(0);
+    await expect(withTenant(app, other, (tx) => sweepIdempotencyKeys(tx, org, 1))).rejects.toBeInstanceOf(
+      TenantContextError,
+    );
+  });
+});
+
 describe('the table itself (db/migrations/0006)', () => {
   it.each([
     [
@@ -926,10 +1016,14 @@ describe('the table itself (db/migrations/0006)', () => {
     ],
     ['change a key', (key: string) => sql`update idempotency.keys set key = 'another' where key = ${key}`],
     [
+      'move a key past its retention, where a sweep could reach it (B1e)',
+      (key: string) =>
+        sql`update idempotency.keys set created_at = pg_catalog.now() - pg_catalog.make_interval(days => 31) where key = ${key}`,
+    ],
+    [
       'move a key to another client',
       (key: string) => sql`update idempotency.keys set client_id = ${OTHER_AGENT} where key = ${key}`,
     ],
-    ['delete a key', (key: string) => sql`delete from idempotency.keys where key = ${key}`],
   ])("doesn't let the app %s", async (_what, statement) => {
     const key = newKey();
     await firstWrite(requestFor(key));

@@ -19,7 +19,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { liveSchemaProblems } from './schema-guard.ts';
+import { liveSchemaProblems, retentionPolicyExpression } from './schema-guard.ts';
 import { SCHEMA_POLICY } from './schema-policy.ts';
 import type { SignedStateTable } from './signed-rows.ts';
 
@@ -644,22 +644,22 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
   });
 
   /**
-   * Puts back the rights 0006 gives the app, whatever a case changed, and
-   * proves they are exactly 0006's: both checkers only allow-list, so a
+   * Puts back the rights 0006 and 0009 give the app, whatever a case changed,
+   * and proves they are exactly theirs: both checkers only allow-list, so a
    * restore that gave back less would pass unseen.
    */
   afterEach(async () => {
     await owner.query('revoke all on idempotency.keys from agentx_app');
-    await owner.query('grant select, insert on idempotency.keys to agentx_app');
+    await owner.query('grant select, insert, delete on idempotency.keys to agentx_app');
     await owner.query('grant update (result_status, result_id) on idempotency.keys to agentx_app');
     expect(await keyRights()).toEqual(migrated);
   });
 
   it.each([
     [
-      'DELETE, which would let a retry do its write again',
-      'grant delete on idempotency.keys to agentx_app',
-      ['agentx_app may DELETE on idempotency.keys'],
+      'TRUNCATE, which empties the table past every policy',
+      'grant truncate on idempotency.keys to agentx_app',
+      ['agentx_app may TRUNCATE on idempotency.keys'],
     ],
     [
       "UPDATE of a key's hash",
@@ -752,10 +752,24 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
     }
   });
 
-  it('holds only a listed table to it: off the list, DELETE is a tenant table’s right', async () => {
-    await owner.query('grant delete on idempotency.keys to agentx_app');
+  it('holds only a listed table to it: off the list, its DELETE and UPDATE are a tenant table’s, but not its second policy', async () => {
+    await owner.query('grant update on idempotency.keys to agentx_app');
 
-    expect(await liveSchemaProblems(app, { ...ROLES, policy: { ...SCHEMA_POLICY, fillInTables: {} } })).toEqual([]);
+    expect(await liveSchemaProblems(app, { ...ROLES, policy: { ...SCHEMA_POLICY, fillInTables: {} } })).toEqual([
+      'idempotency.keys does not have exactly one row-security policy',
+      'the tenant policies no longer all read the same way',
+    ]);
+  });
+
+  it('names DELETE on a listed table with no retention', async () => {
+    const { sweptAfter: _, ...entry } = SCHEMA_POLICY.fillInTables['idempotency.keys'] ?? { reason: '', columns: [] };
+    const policy = { ...SCHEMA_POLICY, fillInTables: { 'idempotency.keys': entry } };
+
+    expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([
+      'agentx_app may DELETE on idempotency.keys',
+      'idempotency.keys does not have exactly one row-security policy',
+      'the tenant policies no longer all read the same way',
+    ]);
   });
 
   it('names a listed table that is not there', async () => {
@@ -767,6 +781,74 @@ describe('a fill-in table the schema policy lists (A5b)', () => {
     expect(await liveSchemaProblems(app, { ...ROLES, policy })).toEqual([
       'probe.gone is listed as a fill-in table but is not there',
     ]);
+  });
+});
+
+describe("the idempotency keys' retention policy (B1e)", () => {
+  const MIGRATED =
+    'create policy retention on idempotency.keys as restrictive for delete using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 30))';
+
+  /** Puts 0009's policy back as the migration made it, whatever a case did to it. */
+  afterEach(async () => {
+    await owner.query('drop policy if exists retention on idempotency.keys');
+    await owner.query('drop policy if exists sweep_all on idempotency.keys');
+    await owner.query(MIGRATED);
+    expect(await problems()).toEqual([]);
+  });
+
+  it('reads as the entry says on this server, the expression the guard expects', async () => {
+    const [printed] = await owner.query<{ expression: string }>(
+      "select pg_catalog.pg_get_expr(polqual, polrelid) as expression from pg_catalog.pg_policy where polrelid = 'idempotency.keys'::pg_catalog.regclass and polname = 'retention'",
+    );
+
+    expect(printed?.expression).toBe(retentionPolicyExpression({ column: 'created_at', days: 30 }));
+  });
+
+  it.each([
+    ['gone', 'drop policy retention on idempotency.keys', ['idempotency.keys has lost its retention policy']],
+    [
+      'permissive, so any row of the organisation could be deleted',
+      'drop policy retention on idempotency.keys; create policy retention on idempotency.keys as permissive for delete using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 30))',
+      ["idempotency.keys's retention policy is no longer restrictive"],
+    ],
+    [
+      'for every command',
+      'drop policy retention on idempotency.keys; create policy retention on idempotency.keys as restrictive using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 30))',
+      ["idempotency.keys's retention policy no longer covers DELETE alone"],
+    ],
+    [
+      'a day, not 30',
+      'alter policy retention on idempotency.keys using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 1))',
+      ["idempotency.keys's retention policy reads differently"],
+    ],
+    [
+      'for named roles only',
+      'alter policy retention on idempotency.keys to agentx_owner',
+      ["idempotency.keys's retention policy is limited to named roles"],
+    ],
+    [
+      'with a WITH CHECK',
+      'drop policy retention on idempotency.keys; create policy retention on idempotency.keys as restrictive for update using (created_at < pg_catalog.now() - pg_catalog.make_interval(days => 30)) with check (true)',
+      [
+        "idempotency.keys's retention policy has a WITH CHECK",
+        "idempotency.keys's retention policy no longer covers DELETE alone",
+      ],
+    ],
+    [
+      'joined by a policy of another name',
+      'create policy sweep_all on idempotency.keys for delete using (true)',
+      [
+        'idempotency.keys does not have exactly one row-security policy',
+        'the tenant policies no longer all read the same way',
+      ],
+    ],
+  ])('names a retention policy %s', async (_, statements, named) => {
+    for (const statement of statements.split('; ')) {
+      // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the table above.
+      await owner.query(statement);
+    }
+
+    expect(await problems()).toEqual(named);
   });
 });
 

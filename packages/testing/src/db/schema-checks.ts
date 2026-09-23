@@ -22,7 +22,9 @@
 // role or has members. The backup role only reads. The app role only adds to
 // and reads the tables of append-only schemas, and may also update, never
 // delete, their listed exceptions (SEC-EVD-01); it adds to and reads a fill-in
-// table, updates only its listed columns and never deletes (A5b); on any other
+// table, updates only its listed columns and never deletes (A5b), unless its
+// entry names a retention: then it deletes, held by a restrictive DELETE policy
+// reading exactly as the entry says (B1e); on any other
 // table it holds nothing but SELECT, INSERT, UPDATE and DELETE. The live schema
 // guard holds the running database to the same lists.
 //
@@ -100,10 +102,37 @@ interface FillInTable {
   readonly reason: string;
   /** Exactly the columns the app is granted UPDATE on, each on its own. */
   readonly columns: readonly string[];
+  /** When the app may also delete a row: once its `column` is `days` whole days old (B1e). */
+  readonly sweptAfter?: { readonly column: string; readonly days: number };
 }
 
 /** The name every tenant table's one policy has. */
 const TENANT_POLICY = 'tenant_isolation';
+
+/** The name of a fill-in table's retention policy, the one other policy a table may have (B1e). */
+const RETENTION_POLICY = 'retention';
+
+/** A column name a retention may give: plain, so it prints unquoted and can go into the reference's DDL. */
+const PLAIN_COLUMN = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/**
+ * A retention policy as a migration writes it, on a temporary table, as DDL
+ * Postgres writes from the column and the days (format with %I and %s): the
+ * reference its printed expression is compared with. Created inside a
+ * transaction that is rolled back.
+ */
+const RETENTION_REFERENCE_DDL = `
+  select pg_catalog.format('create temporary table ci06_retention (%I timestamptz not null)', $1::text) as make_table,
+         pg_catalog.format(
+           'create policy retention on ci06_retention as restrictive for delete using (%I < pg_catalog.now() - pg_catalog.make_interval(days => %s))',
+           $1::text, $2::integer
+         ) as make_policy
+`;
+const RETENTION_REFERENCE_EXPRESSION = `
+  select pg_catalog.pg_get_expr(p.polqual, p.polrelid) as expression
+  from pg_catalog.pg_policy p
+  where p.polrelid = 'pg_temp.ci06_retention'::pg_catalog.regclass
+`;
 
 /**
  * The tenant policy's expression, which ADR-005 §2 gives for both USING and
@@ -153,6 +182,7 @@ const RELATIONS = `
 const COLUMNS = `
   select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, a.attname::text as column,
          a.atttypid = 'pg_catalog.uuid'::pg_catalog.regtype as is_uuid,
+         a.atttypid = 'pg_catalog.timestamptz'::pg_catalog.regtype as is_timestamptz,
          a.attnotnull and not exists (
            select 1 from pg_catalog.pg_constraint k
            where k.conrelid = a.attrelid and k.contype = 'n' and not k.convalidated and k.conkey = array[a.attnum]
@@ -358,6 +388,7 @@ interface Column {
   table: string;
   column: string;
   is_uuid: boolean;
+  is_timestamptz: boolean;
   not_null: boolean;
 }
 
@@ -418,6 +449,8 @@ interface Facts {
   columns: Column[];
   /** The tenant policy's expression, as this server prints it. */
   reference: string;
+  /** Each fill-in table's retention policy expression, as this server prints it, by table (B1e). */
+  retentionReferences: ReadonlyMap<string, string>;
   policies: Policy[];
   keysWithoutOrg: KeyWithoutOrg[];
   foreignKeys: ForeignKey[];
@@ -446,7 +479,7 @@ export async function schemaProblems(database: TestDatabase, policy: SchemaPolic
   // current_setting prints without one.)
   const client = await openCatalogue(database);
   try {
-    return checkFacts(await readFacts(client), policy, roles);
+    return checkFacts(await readFacts(client, policy), policy, roles);
   } finally {
     await client.end();
   }
@@ -465,7 +498,41 @@ async function referenceExpression(client: pg.Client): Promise<string> {
   }
 }
 
-async function readFacts(client: pg.Client): Promise<Facts> {
+/**
+ * Each retention the policy names, as this server prints its policy, by table.
+ * One whose column isn't plain or whose days aren't a whole number from 1 is
+ * left out: the list's own check names it.
+ */
+async function retentionReferences(client: pg.Client, policy: SchemaPolicy): Promise<Map<string, string>> {
+  const references = new Map<string, string>();
+  for (const [table, entry] of Object.entries(policy.fillInTables)) {
+    const sweep = entry.sweptAfter;
+    if (sweep === undefined || !retentionWellFormed(sweep)) continue;
+    await client.query('begin');
+    try {
+      const [ddl] = await rows<{ make_table: string; make_policy: string }>(client, RETENTION_REFERENCE_DDL, [
+        sweep.column,
+        sweep.days,
+      ]);
+      if (ddl === undefined) throw new Error("The reference retention policy's DDL was not written");
+      // eslint-disable-next-line agentx/no-string-built-sql -- Postgres wrote this DDL itself (format with %I and %s above), and DDL takes no bound parameters.
+      await client.query(ddl.make_table);
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above: Postgres's own DDL from a plain column name and a whole number.
+      await client.query(ddl.make_policy);
+      const [reference] = await rows<{ expression: string }>(client, RETENTION_REFERENCE_EXPRESSION, []);
+      if (reference === undefined) throw new Error('The reference retention policy was not created');
+      references.set(table, reference.expression);
+    } finally {
+      await client.query('rollback');
+    }
+  }
+  return references;
+}
+
+const retentionWellFormed = ({ column, days }: { readonly column: string; readonly days: number }): boolean =>
+  PLAIN_COLUMN.test(column) && Number.isInteger(days) && days >= 1 && days <= 36_500;
+
+async function readFacts(client: pg.Client, policy: SchemaPolicy): Promise<Facts> {
   const schemas = (await rows<{ oid: number }>(client, SCHEMAS, [])).map((row) => row.oid);
   const reference = await referenceExpression(client);
   const inScope = await rows<Role>(client, ROLES, []);
@@ -473,6 +540,7 @@ async function readFacts(client: pg.Client): Promise<Facts> {
     relations: await rows<Relation>(client, RELATIONS, [schemas]),
     columns: await rows<Column>(client, COLUMNS, [schemas]),
     reference,
+    retentionReferences: await retentionReferences(client, policy),
     policies: await rows<Policy>(client, POLICIES, [schemas]),
     keysWithoutOrg: await rows<KeyWithoutOrg>(client, KEYS_WITHOUT_ORG, [schemas]),
     foreignKeys: await rows<ForeignKey>(client, FOREIGN_KEYS, [schemas]),
@@ -566,6 +634,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
         table,
         facts.policies.filter((row) => row.table === table),
         facts.reference,
+        Object.hasOwn(policy.fillInTables, table) ? facts.retentionReferences.get(table) : undefined,
       ),
     ]),
     ...facts.keysWithoutOrg
@@ -692,6 +761,7 @@ function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames
     if (policy.appendOnlySchemas.some((schema) => name.startsWith(`${schema}.`))) {
       problems.push(`${name}: is on the fill-in list, but its schema is append-only`);
     }
+    if (entry.sweptAfter !== undefined) problems.push(...sweptAfterProblems(name, entry, facts));
     for (const column of new Set(entry.columns)) {
       // Only a column grant names a column, so this finds column grants alone.
       const granted = facts.grants.some(
@@ -709,6 +779,33 @@ function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames
     }
     return problems;
   });
+}
+
+/**
+ * A retention's column and days (B1e): a plain timestamptz NOT NULL column the
+ * app can't change (not one of the listed columns), and a whole number of days
+ * from 1 to 36,500.
+ */
+function sweptAfterProblems(name: string, entry: FillInTable, facts: Facts): string[] {
+  const { column, days } = entry.sweptAfter ?? { column: '', days: 0 };
+  const problems: string[] = [];
+  if (!Number.isInteger(days) || days < 1 || days > 36_500) {
+    problems.push(`${name}: the fill-in list's retention is not a whole number of days from 1 to 36,500`);
+  }
+  if (!PLAIN_COLUMN.test(column)) {
+    problems.push(`${name}: the fill-in list's retention names a column that isn't a plain name`);
+    return problems;
+  }
+  const found = facts.columns.find((row) => row.table === name && row.column === column);
+  if (found === undefined) {
+    problems.push(`${name}: the fill-in list's retention names column ${column}, which the table doesn't have`);
+  } else if (!found.is_timestamptz || !found.not_null) {
+    problems.push(`${name}: the fill-in list's retention column ${column} must be timestamptz NOT NULL`);
+  }
+  if (entry.columns.includes(column)) {
+    problems.push(`${name}: the fill-in list's retention column ${column} is one the app may change`);
+  }
+  return problems;
 }
 
 /**
@@ -744,8 +841,30 @@ function orgIdProblems(table: string, orgId: Column | undefined): string[] {
   return [];
 }
 
-/** Exactly one policy, the tenant policy: permissive, for every command and role, with the reference expression in both clauses. */
-function tenantPolicyProblems(table: string, policies: readonly Policy[], reference: string): string[] {
+/**
+ * Exactly one policy, the tenant policy: permissive, for every command and
+ * role, with the reference expression in both clauses. A fill-in table with a
+ * retention (`retention`, its expression as this server prints it) has its
+ * retention policy too, and no other.
+ */
+function tenantPolicyProblems(
+  table: string,
+  policies: readonly Policy[],
+  reference: string,
+  retention: string | undefined,
+): string[] {
+  if (retention !== undefined) {
+    const kept = policies.filter((one) => one.name === RETENTION_POLICY);
+    return [
+      ...retentionPolicyProblems(table, kept, retention),
+      ...tenantPolicyProblems(
+        table,
+        policies.filter((one) => one.name !== RETENTION_POLICY),
+        reference,
+        undefined,
+      ),
+    ];
+  }
   const [only, ...others] = policies;
   if (only === undefined || others.length > 0) {
     return [
@@ -766,6 +885,27 @@ function tenantPolicyProblems(table: string, policies: readonly Policy[], refere
   return differences.length === 0
     ? []
     : [`${table}: policy ${only.name} is not the tenant policy (ADR-005 §2): ${differences.join('; ')}`];
+}
+
+/**
+ * A table's retention policy (B1e): there, restrictive, for DELETE, for
+ * every role, reading as the reference does, with no WITH CHECK.
+ */
+function retentionPolicyProblems(table: string, policies: readonly Policy[], reference: string): string[] {
+  // Postgres names a table's policies uniquely, so there is one at most.
+  const [only] = policies;
+  if (only === undefined) return [`${table}: its retention needs a ${RETENTION_POLICY} policy (B1e)`];
+  const differences: string[] = [];
+  if (only.permissive) differences.push('it is permissive');
+  if (only.command !== 'DELETE') differences.push(`it covers ${only.command}`);
+  if (!only.to_public) differences.push('it applies to named roles only');
+  if (only.using_expression !== reference) differences.push(`its USING is ${only.using_expression ?? 'missing'}`);
+  if (only.check_expression !== null) differences.push(`it has a WITH CHECK, ${only.check_expression}`);
+  return differences.length === 0
+    ? []
+    : [
+        `${table}: policy ${RETENTION_POLICY} is not its retention as the fill-in list gives it (B1e): ${differences.join('; ')}`,
+      ];
 }
 
 /**
@@ -825,7 +965,9 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
   // What a fill-in table allows is also what any tenant table allows, so the
   // rights that pass here go on to the check below and pass it too.
   if (fillIn !== undefined && grant.grantee === roles.app) {
-    if (grant.kind === 'relation' && !FILL_IN_APP_MAY.includes(grant.privilege)) {
+    // A retention allows DELETE, which its policy holds to rows past it (B1e).
+    const swept = fillIn.sweptAfter !== undefined && grant.privilege === 'DELETE';
+    if (grant.kind === 'relation' && !swept && !FILL_IN_APP_MAY.includes(grant.privilege)) {
       return [
         `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed`,
       ];

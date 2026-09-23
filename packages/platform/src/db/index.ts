@@ -1,12 +1,14 @@
 export { createDatabase, type Database, type DatabaseConnectionOptions, DatabaseOptionsError } from './database.ts';
 export {
   createIdempotentWrites,
+  IDEMPOTENCY_RETENTION_DAYS,
   type IdempotencyClient,
   IdempotencyFailed,
   type IdempotentRequest,
   type IdempotentResult,
   type IdempotentWrite,
   type IdempotentWrites,
+  sweepIdempotencyKeys,
 } from './idempotency.ts';
 export {
   MigrationFailed,
