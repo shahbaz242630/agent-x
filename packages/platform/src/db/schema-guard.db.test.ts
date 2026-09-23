@@ -824,7 +824,11 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
         'alter table organizations.organizations alter constraint organizations_org_id_fkey not enforced',
       );
 
-      expect(await problems()).toContain("organizations.organizations's foreign key to directory.orgs is not enforced");
+      // Postgres marks a key it no longer enforces not valid, and drops its triggers.
+      expect(await problems()).toEqual([
+        "organizations.organizations's foreign key to directory.orgs has a trigger switched off",
+        "organizations.organizations's foreign key to directory.orgs is not validated",
+      ]);
     },
   );
 
@@ -849,7 +853,7 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
 
       expect(await problems()).toContain(MISSING);
     } finally {
-      await owner.query(DROP_KEY);
+      await owner.query('alter table organizations.organizations drop constraint if exists organizations_org_id_fkey');
       await owner.query('alter table organizations.organizations drop column if exists other');
       await owner.query('drop table if exists directory.shadow');
     }
@@ -857,14 +861,51 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
 
   it('passes a second key that holds beside one that doesn’t: one is enough', async () => {
     await owner.query(
-      'alter table organizations.organizations add constraint spare_fkey foreign key (org_id) references directory.orgs (org_id) not valid',
+      // Named to sort first, so the check can't pass by reading the first key alone.
+      'alter table organizations.organizations add constraint a_spare_fkey foreign key (org_id) references directory.orgs (org_id) not valid',
     );
     try {
       expect(await problems()).toEqual([]);
     } finally {
-      await owner.query('alter table organizations.organizations drop constraint spare_fkey');
+      await owner.query('alter table organizations.organizations drop constraint a_spare_fkey');
     }
   });
+
+  it('names the key’s column made nullable, which lets a row with no directory entry through', async () => {
+    // The owner's route (the B1d-1 review): drop the primary key, let org_id
+    // be null, and a row with a null org_id passes the key unchecked.
+    await owner.query('alter table organizations.organizations drop constraint organizations_pkey');
+    await owner.query('alter table organizations.organizations alter column org_id drop not null');
+    try {
+      expect(await problems()).toContain(
+        "organizations.organizations's foreign key to directory.orgs has a column that may be null",
+      );
+    } finally {
+      await owner.query('alter table organizations.organizations alter column org_id set not null');
+      await owner.query('alter table organizations.organizations add primary key (org_id, id)');
+    }
+  });
+
+  it.runIf(Number(server.version.split('.')[0]) >= 18)(
+    'names the column’s NOT NULL put back NOT VALID, which leaves the rows already there unchecked (Postgres 18 on)',
+    async () => {
+      // The primary key holds org_id NOT NULL too, so it goes first, as the owner would take it.
+      await owner.query('alter table organizations.organizations drop constraint organizations_pkey');
+      await owner.query('alter table organizations.organizations alter column org_id drop not null');
+      await owner.query(
+        'alter table organizations.organizations add constraint org_id_given not null org_id not valid',
+      );
+      try {
+        expect(await problems()).toContain(
+          "organizations.organizations's foreign key to directory.orgs has a column that may be null",
+        );
+      } finally {
+        await owner.query('alter table organizations.organizations drop constraint org_id_given');
+        await owner.query('alter table organizations.organizations alter column org_id set not null');
+        await owner.query('alter table organizations.organizations add primary key (org_id, id)');
+      }
+    },
+  );
 
   it('matches a key of several columns in its order, not as a set', async () => {
     await owner.query('create schema probe');
@@ -888,10 +929,12 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
           found.filter((problem) => problem.startsWith("probe.notes's")),
         );
 
+      const missing = ["probe.notes's foreign key to probe.items is not there"];
       expect(await named(required(['item_id', 'org_id'], ['id', 'org_id']))).toEqual([]);
-      expect(await named(required(['org_id', 'item_id'], ['org_id', 'id']))).toEqual([
-        "probe.notes's foreign key to probe.items is not there",
-      ]);
+      // Its columns in another order; the ones it points at in another order; a key longer than the one there.
+      expect(await named(required(['org_id', 'item_id'], ['org_id', 'id']))).toEqual(missing);
+      expect(await named(required(['item_id', 'org_id'], ['org_id', 'id']))).toEqual(missing);
+      expect(await named(required(['item_id', 'org_id', 'id'], ['id', 'org_id', 'org_id']))).toEqual(missing);
     } finally {
       await owner.query('drop schema probe cascade');
     }

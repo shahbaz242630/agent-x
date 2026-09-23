@@ -163,25 +163,30 @@ const MAINTAIN_FROM = 170_000;
  */
 const COLUMN_RIGHTS = new Set(['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']);
 
+/** The oldest version we support (16.0), as `server_version_num` counts. */
+const OLDEST_SUPPORTED = 160_000;
+
 /**
- * The server's version number, read as text and turned into a number here
- * rather than cast in SQL: a cast to integer is one more thing a planted cast
- * could answer for (see PresentRow).
+ * The server's version number, read once per check, as text and turned into a
+ * number here rather than cast in SQL: a cast to integer is one more thing a
+ * planted cast could answer for (see PresentRow). An answer that is no version
+ * we support throws, so the check fails rather than asking an older server's
+ * questions of a newer one (B1d-1 review).
  */
 async function serverVersion<Schema>(db: Kysely<Schema>): Promise<number> {
   const { rows } = await sql<{ version: string }>`
     select pg_catalog.current_setting('server_version_num') as version
   `.execute(db);
-  return Number(rows[0]?.version ?? '0');
+  const version = Number(rows[0]?.version);
+  if (!Number.isInteger(version) || version < OLDEST_SUPPORTED) {
+    throw new Error('The server did not give a version this check supports');
+  }
+  return version;
 }
 
-async function rightsThisServerKnows<Schema>(db: Kysely<Schema>): Promise<string[]> {
-  const version = await serverVersion(db);
+function rightsThisServerKnows(version: number): string[] {
   return version >= MAINTAIN_FROM ? [...TABLE_RIGHTS] : TABLE_RIGHTS.filter((right) => right !== 'MAINTAIN');
 }
-
-/** The first version whose foreign keys can be NOT ENFORCED (18.0), as `server_version_num` counts. */
-const NOT_ENFORCED_FROM = 180_000;
 
 export interface SchemaGuardOptions {
   /** The role the app connects as; its rights are the ones checked. */
@@ -294,12 +299,20 @@ interface ForeignKeyRow {
   readonly target: string;
   readonly column: string;
   readonly target_column: string;
-  /** False for a key added NOT VALID and never validated: rows from before it may break it. */
+  /**
+   * False for a key added NOT VALID and never validated, whose rows from
+   * before may break it, and for one made NOT ENFORCED (Postgres 18 on), which
+   * Postgres always marks not valid, and whose triggers it drops.
+   */
   readonly validated: boolean;
-  /** False for a key made NOT ENFORCED (Postgres 18 on), which checks nothing. */
-  readonly enforced: boolean;
-  /** Whether every trigger Postgres made to enforce it still fires. */
+  /** Whether it has triggers, and every one Postgres made to enforce it still fires. */
   readonly triggers_on: boolean;
+  /**
+   * Whether this column is NOT NULL, validated: a key skips a row whose column
+   * is null, so a null org_id would be an organisation the directory's list
+   * leaves out (B1d-1 review).
+   */
+  readonly not_null: boolean;
 }
 
 /**
@@ -512,8 +525,8 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
  * otherwise be able to change what this file sees — as one did in the first
  * draft (see PresentRow).
  */
-async function grants<Schema>(db: Kysely<Schema>, appRole: string): Promise<GrantRow[]> {
-  const known = await rightsThisServerKnows(db);
+async function grants<Schema>(db: Kysely<Schema>, appRole: string, version: number): Promise<GrantRow[]> {
+  const known = rightsThisServerKnows(version);
   const columnWise = known.filter((right) => COLUMN_RIGHTS.has(right));
   const { rows } = await sql<GrantRow>`
     select ${QUALIFIED} as table, r.privilege, 'table' as level
@@ -580,13 +593,13 @@ async function columns<Schema>(db: Kysely<Schema>): Promise<ColumnRow[]> {
 /**
  * Every foreign key from our tables, and what would stop it holding (B1d-1).
  * The owner can drop one, or re-add it NOT VALID, or (from Postgres 18) make
- * it NOT ENFORCED, all without touching a row; switching off the triggers
+ * it NOT ENFORCED, which Postgres marks not valid too, all without touching a
+ * row; switching off the triggers
  * that enforce it takes a superuser, a tier above, as a planted cast does.
  * One row per column, in the key's order; unnest over two arrays is SQL
  * syntax, not a function, so it takes no pg_catalog.
  */
 async function foreignKeys<Schema>(db: Kysely<Schema>): Promise<ForeignKeyRow[]> {
-  const enforced = (await serverVersion(db)) >= NOT_ENFORCED_FROM ? sql`con.conenforced` : sql`true`;
   const { rows } = await sql<ForeignKeyRow>`
     select ${QUALIFIED} as table,
            con.conname as name,
@@ -594,10 +607,17 @@ async function foreignKeys<Schema>(db: Kysely<Schema>): Promise<ForeignKeyRow[]>
            fa.attname as column,
            ta.attname as target_column,
            con.convalidated as validated,
-           ${enforced} as enforced,
-           not exists (
-             select 1 from pg_catalog.pg_trigger tr where tr.tgconstraint = con.oid and tr.tgenabled <> 'O'
-           ) as triggers_on
+           exists (select 1 from pg_catalog.pg_trigger tr where tr.tgconstraint = con.oid)
+             and not exists (
+               select 1 from pg_catalog.pg_trigger tr where tr.tgconstraint = con.oid and tr.tgenabled <> 'O'
+             ) as triggers_on,
+           -- Postgres 18 can add a NOT NULL constraint NOT VALID, which marks the
+           -- column NOT NULL while rows from before may still be null; 16 has none.
+           fa.attnotnull and not exists (
+             select 1 from pg_catalog.pg_constraint nn
+             where nn.conrelid = fa.attrelid and nn.contype = 'n' and not nn.convalidated
+               and nn.conkey = array[fa.attnum]
+           ) as not_null
     from pg_catalog.pg_constraint con
     join pg_catalog.pg_class c on c.oid = con.conrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -618,11 +638,13 @@ interface ForeignKey {
   readonly target: string;
   readonly columns: readonly string[];
   readonly targetColumns: readonly string[];
-  readonly holds: { readonly validated: boolean; readonly enforced: boolean; readonly triggers_on: boolean };
+  readonly holds: { readonly validated: boolean; readonly triggers_on: boolean };
+  /** Whether every one of its columns is NOT NULL. */
+  readonly notNull: boolean;
 }
 
 function wholeKeys(rows: readonly ForeignKeyRow[]): ForeignKey[] {
-  const keys = new Map<string, ForeignKey & { columns: string[]; targetColumns: string[] }>();
+  const keys = new Map<string, ForeignKey & { columns: string[]; targetColumns: string[]; notNull: boolean }>();
   for (const row of rows) {
     // A table's key names are unique on it.
     const id = JSON.stringify([row.table, row.name]);
@@ -631,9 +653,11 @@ function wholeKeys(rows: readonly ForeignKeyRow[]): ForeignKey[] {
       target: row.target,
       columns: [],
       targetColumns: [],
-      holds: { validated: row.validated, enforced: row.enforced, triggers_on: row.triggers_on },
+      holds: { validated: row.validated, triggers_on: row.triggers_on },
+      notNull: true,
     };
     key.columns.push(row.column);
+    key.notNull &&= row.not_null;
     key.targetColumns.push(row.target_column);
     keys.set(id, key);
   }
@@ -720,6 +744,7 @@ export async function liveSchemaProblems<Schema>(
   { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [] }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const problems: SchemaProblem[] = [];
+  const version = await serverVersion(db);
   const [
     allRelations,
     allSchemas,
@@ -743,7 +768,7 @@ export async function liveSchemaProblems<Schema>(
     functions(db),
     rules(db),
     indexes(db),
-    grants(db, appRole),
+    grants(db, appRole, version),
     publicGrants(db),
     columns(db),
     updatableColumns(db, appRole),
@@ -970,7 +995,8 @@ export async function liveSchemaProblems<Schema>(
 
   // The foreign keys something rests on: each still there, from exactly its
   // columns to exactly the ones it points at, and holding. Any number of keys
-  // may match; one that holds is enough.
+  // may match; one that holds is enough. Its columns must be NOT NULL too: a
+  // key lets a row with a null column through unchecked.
   const keys = wholeKeys(allForeignKeys);
   const same = (a: readonly string[], b: readonly string[]): boolean =>
     a.length === b.length && a.every((each, index) => each === b[index]);
@@ -985,11 +1011,11 @@ export async function liveSchemaProblems<Schema>(
     );
     const [first] = matching;
     if (first === undefined) problems.push(`${named} is not there`);
-    else if (!matching.some(({ holds }) => holds.validated && holds.enforced && holds.triggers_on)) {
+    else if (!matching.some(({ holds }) => holds.validated && holds.triggers_on)) {
       if (!first.holds.validated) problems.push(`${named} is not validated`);
-      if (!first.holds.enforced) problems.push(`${named} is not enforced`);
       if (!first.holds.triggers_on) problems.push(`${named} has a trigger switched off`);
     }
+    if (first !== undefined && !first.notNull) problems.push(`${named} has a column that may be null`);
   }
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');

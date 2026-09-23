@@ -1012,14 +1012,23 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         'alter table organizations.organizations drop constraint organizations_org_id_fkey',
         'alter table organizations.organizations add foreign key (org_id) references directory.orgs (org_id) not valid',
       ];
-      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated and enforced`]);
+      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated`]);
     });
 
     it.runIf(major >= 18)('fails the key made NOT ENFORCED (Postgres 18 on)', async () => {
       const statements = [
         'alter table organizations.organizations alter constraint organizations_org_id_fkey not enforced',
       ];
-      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated and enforced`]);
+      expect(await problemsAfter(statements)).toEqual([`${ORGS_KEY} is not validated`]);
+    });
+
+    it('fails the key’s column left nullable', async () => {
+      const statements = [
+        'alter table organizations.organizations drop constraint organizations_pkey',
+        'alter table organizations.organizations alter column org_id drop not null',
+      ];
+      const problems = await problemsAfter(statements);
+      expect(problems).toContain(`${ORGS_KEY}: column org_id may be null`);
     });
 
     it('fails a key from other columns, or to another table, than the entry names', async () => {

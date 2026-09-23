@@ -57,7 +57,7 @@ interface GlobalTable {
   readonly appMay?: readonly string[];
 }
 
-/** A foreign key that must be there, validated and enforced (B1d-1). */
+/** A foreign key that must be there, validated (B1d-1). */
 interface RequiredForeignKey {
   readonly reason: string;
   readonly table: string;
@@ -87,7 +87,7 @@ export interface SchemaPolicy {
    */
   readonly fillInTables: Readonly<Record<string, FillInTable>>;
   /**
-   * Foreign keys the migrations must make, validated and enforced, each with
+   * Foreign keys the migrations must make, validated, each with
    * its reason: ones a check across organisations rests on, which the live
    * schema guard holds the running database to as well.
    */
@@ -210,9 +210,9 @@ const KEYS_WITHOUT_ORG = `
 
 /**
  * Foreign keys in our schemas, whether they pair org_id with org_id, their
- * columns and the ones they point at in order, and whether they hold (a key
- * added NOT VALID, or from Postgres 18 NOT ENFORCED, doesn't; 16 has no
- * conenforced, read through to_jsonb so one query serves both). A partitioned
+ * columns and the ones they point at in order, and whether they are validated
+ * (a key added NOT VALID isn't, nor one Postgres 18 makes NOT ENFORCED, which
+ * it always marks not valid). A partitioned
  * table's key is listed for each partition too, since each partition holds its
  * own copy. unnest over two arrays is SQL syntax rather than a function, like
  * coalesce below, so neither is written with pg_catalog.
@@ -239,7 +239,7 @@ const FOREIGN_KEYS = `
            join pg_catalog.pg_attribute ta on ta.attrelid = con.confrelid and ta.attnum = k.attnum
            order by k.position
          ) as target_columns,
-         con.convalidated and coalesce((pg_catalog.to_jsonb(con) ->> 'conenforced')::boolean, true) as holds
+         con.convalidated as holds
   from pg_catalog.pg_constraint con
   join pg_catalog.pg_class s on s.oid = con.conrelid
   join pg_catalog.pg_namespace sn on sn.oid = s.relnamespace
@@ -384,7 +384,7 @@ interface ForeignKey {
   pairs_org_id: boolean;
   columns: string[];
   target_columns: string[];
-  /** Validated, and enforced where Postgres lets a key not be (18 on). */
+  /** Validated: neither NOT VALID nor, on Postgres 18, NOT ENFORCED. */
   holds: boolean;
 }
 
@@ -626,8 +626,8 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
 
 /**
  * Every required foreign key has a reason and its columns, paired one for one,
- * and the migrations make it, validated and enforced: from exactly its
- * columns to exactly the ones it points at.
+ * and the migrations make it, validated: from exactly its
+ * columns to exactly the ones it points at, each of them NOT NULL.
  */
 function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[] {
   const same = (a: readonly string[], b: readonly string[]): boolean =>
@@ -647,7 +647,12 @@ function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[
         same(key.target_columns, required.referencedColumns),
     );
     if (matching.length === 0) problems.push(`${named} is not made by the migrations`);
-    else if (!matching.some((key) => key.holds)) problems.push(`${named} is not validated and enforced`);
+    else if (!matching.some((key) => key.holds)) problems.push(`${named} is not validated`);
+    // A key lets a row with a null column through unchecked.
+    for (const column of required.columns) {
+      const found = facts.columns.find((row) => row.table === required.table && row.column === column);
+      if (found !== undefined && !found.not_null) problems.push(`${named}: column ${column} may be null`);
+    }
     return problems;
   });
 }

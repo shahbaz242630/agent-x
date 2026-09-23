@@ -39,7 +39,7 @@ interface GlobalTable {
 }
 
 /**
- * A foreign key the running database must still hold, enforced (B1d-1): one a
+ * A foreign key the running database must still hold, validated (B1d-1): one a
  * check reaching across organisations rests on, which the owner could drop or
  * switch off without touching a row.
  */
@@ -85,7 +85,7 @@ export interface SchemaPolicy {
    */
   readonly fillInTables: Readonly<Record<string, FillInTable>>;
   /**
-   * Foreign keys that must be there, validated and enforced, with their
+   * Foreign keys that must be there, validated, with their
    * reasons. CI-06 checks each against the migrations; the live schema guard
    * checks the running database still holds it.
    */
