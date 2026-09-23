@@ -32,10 +32,10 @@ const LOCAL_RELEASE = 'local';
 const RUN_VARIABLE = 'CONTAINER_APP_JOB_EXECUTION_NAME';
 
 /**
- * A run's name: lower-case words of letters and digits joined by single
- * hyphens, the first starting with a letter. Each word after the first starts
- * at its hyphen, so the pattern has only one way to match and nothing to
- * backtrack over; the length is checked before it.
+ * A run's name: two or more lower-case words of letters and digits joined by
+ * single hyphens, the first starting with a letter. Each word after the first
+ * starts at its hyphen, so the pattern has only one way to match and takes
+ * time in proportion to the name, whose length is checked before it.
  */
 const RUN_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/;
 const RUN_NAME_LENGTH = 64;
@@ -48,7 +48,7 @@ function runSetting(env: Env): Checked<string | undefined> {
     ? { ok: true, value: run }
     : {
         ok: false,
-        problem: `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most ${String(RUN_NAME_LENGTH)} characters: lower-case words of letters and digits joined by single hyphens, the first starting with a letter`,
+        problem: `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most ${String(RUN_NAME_LENGTH)} characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter`,
       };
 }
 

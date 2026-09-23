@@ -182,7 +182,7 @@ describe("B1c what the operator's command refuses before it connects", () => {
     expect(host.exitCode).toBe(1);
     expect(events).toEqual(['operator.start_refused']);
     expect(line('operator.start_refused')?.problems).toEqual([
-      "CONTAINER_APP_JOB_EXECUTION_NAME: must be a job run's name as Azure gives it, at most 64 characters: lower-case words of letters and digits joined by single hyphens, the first starting with a letter",
+      "CONTAINER_APP_JOB_EXECUTION_NAME: must be a job run's name as Azure gives it, at most 64 characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter",
     ]);
     expect(text).not.toContain('Quartzite');
   });

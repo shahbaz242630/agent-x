@@ -3,7 +3,7 @@
 export const ENVIRONMENTS = ['development', 'test', 'staging', 'production'] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];
 
-/** Where nothing real is at stake, so a local stack may talk plain http and needs no release name. */
+/** Where nothing real is at stake, so a local stack may talk plain http and needs no release name, nor a job run's name. */
 export const LOCAL_ONLY: readonly Environment[] = ['development', 'test'];
 
 /** The logging standard's levels, most to least severe. */

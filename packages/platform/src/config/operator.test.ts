@@ -26,7 +26,7 @@ const DEPLOYED: Env = {
   AGENTX_KEYS_DIR: KEYS_DIR,
   [RUN_VARIABLE]: RUN,
 };
-const RUN_RULE = `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most 64 characters: lower-case words of letters and digits joined by single hyphens, the first starting with a letter`;
+const RUN_RULE = `${RUN_VARIABLE}: must be a job run's name as Azure gives it, at most 64 characters: two or more lower-case words of letters and digits joined by single hyphens, the first starting with a letter`;
 
 function problemsWith(env: Env): readonly string[] {
   try {
@@ -91,7 +91,7 @@ describe("the operator's command's config loads", () => {
     ).toEqual([true, true, true, true, true]);
   });
 
-  it("ignores variables that are not AGENTX_ or PG settings, or the run's name", () => {
+  it("ignores every variable but the AGENTX_ and PG settings and the run's name, Azure's others among them", () => {
     expect(
       problemsWith({
         ...DEPLOYED,
@@ -127,10 +127,17 @@ describe("B1c-2b the operator's config names the job's run, as Azure does", () =
     expect(loadOperatorConfig({ ...DEPLOYED, [RUN_VARIABLE]: longest }).run).toBe(longest);
   });
 
+  it('takes digits in any word after its first letter, the first word too', () => {
+    expect(loadOperatorConfig({ ...DEPLOYED, [RUN_VARIABLE]: 'job2-agentx-prd-operator-7x2kq9m' }).run).toBe(
+      'job2-agentx-prd-operator-7x2kq9m',
+    );
+  });
+
   it.each([
     ['empty', ''],
     ['one character more than 64', `job-${'q'.repeat(61)}`],
     ['in capitals', 'Job-agentx-prd-operator-7x2kq9m'],
+    ['with a capital later on', 'job-agentx-prd-operator-7X2kq9m'],
     ['starting with a digit', '7job-agentx-prd-operator-7x2kq9m'],
     ['starting with a hyphen', '-job-agentx-prd-operator-7x2kq9m'],
     ['ending with a hyphen', 'job-agentx-prd-operator-'],
@@ -138,14 +145,16 @@ describe("B1c-2b the operator's config names the job's run, as Azure does", () =
     ['one word, with no run of its own', 'operator'],
     ['with a space', 'job-agentx-prd operator-7x2kq9m'],
     ['with a dot', 'job-agentx-prd.operator-7x2kq9m'],
+    ['with an underscore', 'job_agentx-prd-operator-7x2kq9m'],
     ['with a line break after it', `${RUN}\n`],
-    ['with a letter from another script', 'job-agentx-prd-operator-7x2kq9с'],
+    // A Cyrillic letter that looks like a Latin c.
+    ['with a letter from another script', `job-agentx-prd-operator-7x2kq9${String.fromCharCode(0x0441)}`],
   ])('refuses a run name %s, never repeating it', (_what, run) => {
     expect(problemsWith({ ...DEPLOYED, [RUN_VARIABLE]: run })).toEqual([RUN_RULE]);
   });
 
-  it('refuses a malformed run name in development and test too', () => {
-    expect(problemsWith({ ...LOCAL, AGENTX_ENV: 'test', [RUN_VARIABLE]: 'operator' })).toEqual([RUN_RULE]);
+  it.each(['development', 'test'])('refuses a malformed run name in %s too', (environment) => {
+    expect(problemsWith({ ...LOCAL, AGENTX_ENV: environment, [RUN_VARIABLE]: 'operator' })).toEqual([RUN_RULE]);
   });
 });
 
