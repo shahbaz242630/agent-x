@@ -810,12 +810,12 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only exception; it may only INSERT, SELECT and UPDATE (SEC-EVD-01)`,
     ];
   }
-  // A global table that names the app's rights holds it to them, whole or column by column.
+  // A global table that names the app's rights holds it to them, whole or
+  // column by column. Only a table's or a column's grant names a table.
   const listed = Object.hasOwn(policy.globalTables, grant.relation)
     ? policy.globalTables[grant.relation]?.appMay
     : undefined;
-  const onTable = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
-  if (listed !== undefined && onTable && grant.grantee === roles.app && !listed.includes(grant.privilege)) {
+  if (listed !== undefined && grant.grantee === roles.app && !listed.includes(grant.privilege)) {
     const may = listed.length === 0 ? 'it may hold nothing on it' : `it may only ${listed.join(', ')}`;
     return [`${grant.object}: ${roles.app} has ${grant.privilege} on a global table; ${may} (B1d-1)`];
   }

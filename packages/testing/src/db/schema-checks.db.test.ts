@@ -1030,7 +1030,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         requiredForeignKeys: [
           { ...entry, columns: ['id'] },
           { ...entry, references: 'migrations.applied' },
-          { ...entry, reason: ' ', columns: [] },
+          { ...entry, reason: ' ', columns: [], referencedColumns: [] },
         ],
       };
       expect(await problemsAfter([], policy)).toEqual([

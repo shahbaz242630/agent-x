@@ -866,6 +866,37 @@ describe('the directory, and the key the organisations rest on (B1d-1)', () => {
     }
   });
 
+  it('matches a key of several columns in its order, not as a set', async () => {
+    await owner.query('create schema probe');
+    try {
+      await owner.query('create table probe.items (org_id uuid not null, id uuid not null, primary key (org_id, id))');
+      await owner.query(
+        'create table probe.notes (org_id uuid not null, id uuid not null, item_id uuid not null, primary key (org_id, id))',
+      );
+      await owner.query(
+        'alter table probe.notes add constraint notes_item foreign key (item_id, org_id) references probe.items (id, org_id)',
+      );
+      const required = (columns: string[], referencedColumns: string[]) => ({
+        ...SCHEMA_POLICY,
+        requiredForeignKeys: [
+          ...SCHEMA_POLICY.requiredForeignKeys,
+          { reason: 'A test', table: 'probe.notes', columns, references: 'probe.items', referencedColumns },
+        ],
+      });
+      const named = (policy: ReturnType<typeof required>) =>
+        liveSchemaProblems(app, { ...ROLES, policy }).then((found) =>
+          found.filter((problem) => problem.startsWith("probe.notes's")),
+        );
+
+      expect(await named(required(['item_id', 'org_id'], ['id', 'org_id']))).toEqual([]);
+      expect(await named(required(['org_id', 'item_id'], ['org_id', 'id']))).toEqual([
+        "probe.notes's foreign key to probe.items is not there",
+      ]);
+    } finally {
+      await owner.query('drop schema probe cascade');
+    }
+  });
+
   it('names a required key the policy lists that no table has', async () => {
     const policy = {
       ...SCHEMA_POLICY,
