@@ -1016,6 +1016,11 @@ describe('the table itself (db/migrations/0006)', () => {
     ],
     ['change a key', (key: string) => sql`update idempotency.keys set key = 'another' where key = ${key}`],
     [
+      'move a key past its retention, where a sweep could reach it (B1e)',
+      (key: string) =>
+        sql`update idempotency.keys set created_at = pg_catalog.now() - pg_catalog.make_interval(days => 31) where key = ${key}`,
+    ],
+    [
       'move a key to another client',
       (key: string) => sql`update idempotency.keys set client_id = ${OTHER_AGENT} where key = ${key}`,
     ],
