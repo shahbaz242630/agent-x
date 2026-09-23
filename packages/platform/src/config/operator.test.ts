@@ -137,6 +137,7 @@ describe("B1c-2b the operator's config names the job's run, as Azure does", () =
     ['empty', ''],
     ['one character more than 64', `job-${'q'.repeat(61)}`],
     ['in capitals', 'Job-agentx-prd-operator-7x2kq9m'],
+    ['with a capital inside its first word', 'jOb-agentx-prd-operator-7x2kq9m'],
     ['with a capital later on', 'job-agentx-prd-operator-7X2kq9m'],
     ['starting with a digit', '7job-agentx-prd-operator-7x2kq9m'],
     ['starting with a hyphen', '-job-agentx-prd-operator-7x2kq9m'],

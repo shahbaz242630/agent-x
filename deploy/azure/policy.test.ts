@@ -2826,14 +2826,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
           settingsOf(resource).push({ name, value: 'job-agentx-stg-operator-7x2kq9m' });
         }),
       );
-    for (const name of ['CONTAINER_APP_JOB_EXECUTION_NAME', 'container_app_job_execution_name', 'CONTAINER_APP_NAME']) {
+    for (const name of ['CONTAINER_APP_JOB_EXECUTION_NAME', 'CONTAINER_APP_NAME']) {
       expect({ name, rules: sets(JOB('operator'), name) }).toEqual({ name, rules: ['platform-settings'] });
     }
     // Any container of ours, the apps' as well as the jobs'.
     expect(sets(APP('api'), 'CONTAINER_APP_REVISION')).toEqual(['platform-settings']);
     expect(sets(JOB('migrate'), 'CONTAINER_APP_JOB_NAME')).toEqual(['platform-settings']);
-    // A name that only starts like one is its own.
-    expect(sets(JOB('operator'), 'CONTAINER_APPLICATION_NAME')).toEqual([]);
+    // Names that only look like one are variables of their own: a longer word, other capitals (Linux tells them apart), a word before.
+    for (const name of ['CONTAINER_APPLICATION_NAME', 'container_app_job_execution_name', 'MY_CONTAINER_APP_NAME']) {
+      expect({ name, rules: sets(JOB('operator'), name) }).toEqual({ name, rules: [] });
+    }
     expect(
       policyProblems(
         changed(JOB('operator'), (job) => {

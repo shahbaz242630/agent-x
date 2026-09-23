@@ -2406,23 +2406,25 @@ const containerTelemetry: Check = (snapshot, _expected, add) => {
   }
 };
 
-/** What Azure names the variables it sets itself in every container: the job's run, the app's revision, the port… */
-const PLATFORM_SETTINGS = 'CONTAINER_APP_';
+/** How the variables Azure sets itself in every container start: the job's run, the app's revision, the port… */
+const PLATFORM_PREFIX = 'CONTAINER_APP_';
 
 /**
- * No container, job or app, sets one of Azure's own variables, in any
- * capitals: one the deployment set could stand in for the platform's, and the
- * operator's platform event records the run's name as Azure gives it (B1c-2b).
+ * No container, job or app, sets one of Azure's own variables: one the
+ * deployment set could stand in for the platform's, and the operator's
+ * platform event records the run's name as Azure gives it (B1c-2b). Names
+ * are matched as written, since Linux tells capitals apart: a name that
+ * differs only in them is a variable of its own.
  */
 const platformSettings: Check = (snapshot, _expected, add) => {
   for (const job of workloadsIn(snapshot)) {
     for (const container of containersOf(job)) {
       for (const name of list(at(container, 'env')).map((entry) => text(at(entry, 'name')))) {
-        if (!name.toUpperCase().startsWith(PLATFORM_SETTINGS)) continue;
+        if (!name.startsWith(PLATFORM_PREFIX)) continue;
         add({
           rule: 'platform-settings',
           resource: job.name,
-          message: `sets ${name}: Azure sets its ${PLATFORM_SETTINGS} variables in every container itself, and one set here could stand in for the platform's`,
+          message: `sets ${name}: Azure sets its ${PLATFORM_PREFIX} variables in every container itself, and one set here could stand in for the platform's`,
         });
       }
     }
