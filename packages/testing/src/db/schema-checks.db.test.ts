@@ -1035,7 +1035,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     it('fails a retention of no whole days, or on a column not plain, missing, not timestamptz NOT NULL, or one the app may change', async () => {
       const statements = [
         ...KEYS,
-        'alter table t.keys add column noted text',
+        "alter table t.keys add column noted text not null default ''",
         'alter table t.keys add column seen timestamptz',
       ];
       const problems = async (sweptAfter: { column: string; days: number }, columns?: string[]) =>
