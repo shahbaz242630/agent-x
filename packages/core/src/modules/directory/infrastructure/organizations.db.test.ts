@@ -1,5 +1,5 @@
 // The directory's list of organisations (0007), as the app role.
-import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -79,7 +79,7 @@ describe(`the directory's list of organisations (Postgres ${server.version})`, (
     await holder.query('lock table directory.orgs in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(listedOrganizations(app)).rejects.toThrow(/statement timeout/);
+      await expect(within(20_000, listedOrganizations(app), 'the read')).rejects.toThrow(/statement timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');

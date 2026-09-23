@@ -645,8 +645,53 @@ describe("the organisations' chains, from the directory's list at each run (B1d-
     ]);
   });
 
+  it('takes a list of the most organisations it allows', async () => {
+    const { organizations, verified } = directory([Array.from({ length: 10_000 }, () => ORG)]);
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+
+    expect(verified).toEqual([ORG]);
+  });
+
+  it('checks no more organisations once stopped during one’s check', async () => {
+    const stopping = new AbortController();
+    const verified: string[] = [];
+    const organizations: OrganisationChains = {
+      recorded: () => Promise.resolve([]),
+      list: () => Promise.resolve([ORG, OTHER_ORG]),
+      verify: (orgId) => {
+        verified.push(orgId);
+        stopping.abort();
+        return Promise.resolve(ok(1n));
+      },
+    };
+    const { check } = checking([], undefined, organizations);
+    await check.run(stopping.signal);
+
+    expect(verified).toEqual([ORG]);
+  });
+
+  it('counts nothing for the organisations it knows when stopped while the list is read', async () => {
+    let hang = false;
+    const organizations: OrganisationChains = {
+      recorded: () => Promise.resolve([]),
+      list: () => (hang ? new Promise<never>(() => undefined) : Promise.resolve([ORG])),
+      verify: () => Promise.resolve(ok(1n)),
+    };
+    const { check, done } = checking([], undefined, organizations);
+    await check.run();
+    hang = true;
+    const stopping = new AbortController();
+    const run = check.run(stopping.signal);
+    stopping.abort();
+    await run;
+
+    expect(done().at(-1)).toEqual({ level: 'info', chains: 0, anchored: 0, unchanged: 0, failed: 0, unchecked: 0 });
+  });
+
   it.each([
     ['an entry that is not text', [ORG, null]],
+    ['an ID with more around it', [`${ORG}0`]],
     ['an entry that is not an ID', [ORG, 'not-an-id']],
     ['more organisations than any real list', Array.from({ length: 10_001 }, () => ORG)],
   ])('raises the alarm for a list holding %s, and checks none of it', async (_, list) => {

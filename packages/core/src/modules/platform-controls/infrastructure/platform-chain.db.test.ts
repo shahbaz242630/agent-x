@@ -248,7 +248,13 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
   });
 
   it('gives each organisation created, in the order recorded, and nothing from other events', async () => {
-    await record(started(1), created(ORGS[1] ?? ''), started(2), created(ORGS[0] ?? ''));
+    // Another action carrying an orgId counts for nothing.
+    const noted: PlatformEvent = {
+      actor: { type: 'system', id: 'api' },
+      action: 'probe.noted',
+      details: { orgId: ORGS[0] ?? '' },
+    };
+    await record(started(1), created(ORGS[1] ?? ''), noted, started(2), created(ORGS[0] ?? ''));
 
     expect(await chain.createdOrganizations(app)).toEqual([ORGS[1], ORGS[0]]);
   });
@@ -288,7 +294,7 @@ describe('the organisations it records as created, for the anchor check (B1d-2)'
     await holder.query('lock table platform_controls.audit_events in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(chain.createdOrganizations(app)).rejects.toThrow(/statement timeout/);
+      await expect(within(20_000, chain.createdOrganizations(app), 'the read')).rejects.toThrow(/statement timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');

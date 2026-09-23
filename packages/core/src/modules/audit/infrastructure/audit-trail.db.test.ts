@@ -9,6 +9,7 @@ import {
   successes,
   type TestDatabase,
   type TestSession,
+  within,
 } from '@agentx/testing';
 import {
   ChainBroken,
@@ -725,7 +726,9 @@ describe('checking a chain alone, for the anchor check (B1d-2)', () => {
     await holder.query('lock table audit.events in access exclusive mode');
     try {
       const began = performance.now();
-      await expect(trail.verifyAlone(app, org, undefined)).rejects.toThrow(/statement timeout/);
+      await expect(within(20_000, trail.verifyAlone(app, org, undefined), 'the check')).rejects.toThrow(
+        /statement timeout/,
+      );
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');
