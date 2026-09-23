@@ -943,6 +943,37 @@ describe('an organisation that fails is put on its integrity hold (B1d-3)', () =
     ]);
   });
 
+  it('holds only for this run’s failure: a chain that fails and then checks out is not held again', async () => {
+    const reports: Record<string, ChainReport> = { [ORG]: { ok: false, problem: { reason: 'hash', seq: 2n } } };
+    const { organizations, steps } = holding([[ORG]], reports);
+    const { check } = checking([], undefined, organizations);
+    await check.run();
+    reports[ORG] = ok(1n);
+    await check.run();
+
+    expect(steps.filter((step) => step.startsWith('hold'))).toEqual([`hold ${ORG} hash`, `hold ${ORG} -`]);
+  });
+
+  it('stops among the organisations that have left the list: no alarm or hold for those after', async () => {
+    const stopping = new AbortController();
+    const steps: string[] = [];
+    const organizations: OrganisationChains = {
+      list: () => Promise.resolve([]),
+      recorded: () => Promise.resolve([ORG, OTHER_ORG]),
+      verify: () => Promise.resolve(ok(1n)),
+      hold: (orgId) => {
+        steps.push(orgId);
+        stopping.abort();
+        return Promise.resolve();
+      },
+    };
+    const { check, events } = checking([], undefined, organizations);
+    await check.run(stopping.signal);
+
+    expect(steps).toEqual([ORG]);
+    expect(events().filter((line) => line.reason === 'unlisted')).toEqual([expect.objectContaining({ orgId: ORG })]);
+  });
+
   it('holds an organisation that has left the list, by its ID', async () => {
     const { organizations, steps } = holding([[OTHER_ORG]]);
     const { check } = checking([], undefined, organizations);
