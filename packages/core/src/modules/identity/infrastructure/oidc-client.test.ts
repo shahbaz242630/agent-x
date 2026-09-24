@@ -88,7 +88,8 @@ class LoginService {
       return Response.json({ keys });
     }
     if (target === `${ISSUER}/oauth/v2/token`) {
-      return new Response(await this.tokenBody(this.pendingNonce ?? ''), {
+      const verifier = new URLSearchParams(init.body as string).get('code_verifier') ?? '';
+      return new Response(await this.tokenBody(this.flows.get(verifier) ?? ''), {
         status: this.tokenStatus,
         headers: { 'content-type': 'application/json' },
       });
@@ -96,8 +97,13 @@ class LoginService {
     return new Response('not found', { status: 404 });
   };
 
-  /** The nonce the next token carries: the flow's, unless a test says otherwise. */
-  pendingNonce: string | undefined;
+  /** Each flow's nonce by its PKCE verifier, so each token carries its own flow's nonce, as the real service's would. */
+  readonly flows = new Map<string, string>();
+
+  /** A flow the service will answer for, as if `start` had sent the browser to it. */
+  expect(flow: LoginFlow): void {
+    this.flows.set(flow.verifier, flow.nonce);
+  }
 
   callsTo(path: string): Call[] {
     return this.calls.filter((call) => call.url === `${ISSUER}${path}`);
@@ -121,7 +127,7 @@ beforeEach(() => {
 /** Starts a flow and finishes it with the service's current behaviour. */
 async function signIn(returned: Partial<{ code: string; state: string }> = {}, flowChange: Partial<LoginFlow> = {}) {
   const { flow } = await client.start();
-  service.pendingNonce ??= flow.nonce;
+  service.expect(flow);
   return client.finish({ ...flow, ...flowChange }, { code: CODE, state: flow.state, ...returned });
 }
 
@@ -207,7 +213,7 @@ describe('starting a sign-in', () => {
 describe('finishing a sign-in', () => {
   it('trades the code with the client’s secret and verifier, and gives who signed in and what they proved', async () => {
     const { flow } = await client.start();
-    service.pendingNonce = flow.nonce;
+    service.expect(flow);
 
     const signedIn = await client.finish(flow, { code: CODE, state: flow.state });
 
@@ -414,13 +420,11 @@ describe('finishing a sign-in', () => {
   describe('the keys', () => {
     it('are fetched once, and again when the login service signs with a new one', async () => {
       await signIn();
-      service.pendingNonce = undefined;
       await signIn();
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
 
       clock.advanceBy(60_000);
       service.published = [FIRST, SECOND];
-      service.pendingNonce = undefined;
       service.tokenBody = async (nonce) =>
         JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
       await expect(signIn()).resolves.toBeDefined();
@@ -434,17 +438,14 @@ describe('finishing a sign-in', () => {
       service.keysStatus = 503;
       service.tokenBody = async (nonce) =>
         JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
-      service.pendingNonce = undefined;
       await expectFailure(signIn(), 'provider_unavailable', /key set answered 503/);
 
       service.keysStatus = 200;
       clock.advanceBy(4_999);
-      service.pendingNonce = undefined;
       await expectFailure(signIn(), 'token_invalid', /ERR_JWKS_NO_MATCHING_KEY/);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
 
       clock.advanceBy(1);
-      service.pendingNonce = undefined;
       await expect(signIn()).resolves.toBeDefined();
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(3);
     });
@@ -452,13 +453,11 @@ describe('finishing a sign-in', () => {
     it('are not sent for again within five seconds when none are held yet and the fetch failed', async () => {
       service.keysStatus = 503;
       await expectFailure(signIn(), 'provider_unavailable', /key set answered 503/);
-      service.pendingNonce = undefined;
       await expectFailure(signIn(), 'provider_unavailable', /not tried again yet/);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
 
       service.keysStatus = 200;
       clock.advanceBy(5_000);
-      service.pendingNonce = undefined;
       await expect(signIn()).resolves.toBeDefined();
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });
@@ -472,13 +471,26 @@ describe('finishing a sign-in', () => {
       const flows = await Promise.all([client.start(), client.start(), client.start()]);
       const results = await Promise.allSettled(
         flows.map(({ flow }) => {
-          service.pendingNonce = flow.nonce;
+          service.expect(flow);
           return client.finish(flow, { code: CODE, state: flow.state });
         }),
       );
 
-      expect(results.filter((result) => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(1);
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
+    });
+
+    it('are sent for once, and waited on by all, when several sign-ins arrive before any are held', async () => {
+      const flows = await Promise.all([client.start(), client.start(), client.start()]);
+      const results = await Promise.allSettled(
+        flows.map(({ flow }) => {
+          service.expect(flow);
+          return client.finish(flow, { code: CODE, state: flow.state });
+        }),
+      );
+
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
     });
 
     it('are fetched again at most once a minute, however many tokens name a key not held', async () => {
@@ -487,13 +499,11 @@ describe('finishing a sign-in', () => {
         JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        service.pendingNonce = undefined;
         await expectFailure(signIn(), 'token_invalid', /ERR_JWKS_NO_MATCHING_KEY/);
       }
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
 
       clock.advanceBy(60_000);
-      service.pendingNonce = undefined;
       await expectFailure(signIn(), 'token_invalid');
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });

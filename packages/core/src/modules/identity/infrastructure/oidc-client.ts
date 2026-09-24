@@ -225,9 +225,16 @@ export function createOidcClient({
   let keys: ReturnType<typeof createLocalJWKSet> | undefined;
   /** When the keys may next be fetched, in ms since 1970. */
   let keysFetchableAt = 0;
+  /** The fetch of the keys under way, which every sign-in needing them waits on rather than starting its own. */
+  let keysFetch: Promise<ReturnType<typeof createLocalJWKSet>> | undefined;
   const mayFetchKeys = (): boolean => clock.now().getTime() >= keysFetchableAt;
-  async function fetchKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
-    // Set before any wait, so sign-ins arriving together send for the keys once.
+  function fetchKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
+    keysFetch ??= fetchKeysNow().finally(() => {
+      keysFetch = undefined;
+    });
+    return keysFetch;
+  }
+  async function fetchKeysNow(): Promise<ReturnType<typeof createLocalJWKSet>> {
     const began = clock.now().getTime();
     keysFetchableAt = began + KEYS_RETRY_MS;
     const { jwksUri } = await discover();
@@ -243,9 +250,10 @@ export function createOidcClient({
     return keys;
   }
 
-  /** The keys held, or fetched if none are and a fetch may be tried now. */
+  /** The keys held; or the fetch under way; or a new fetch, if none failed moments ago. */
   function heldKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
     if (keys !== undefined) return Promise.resolve(keys);
+    if (keysFetch !== undefined) return keysFetch;
     if (!mayFetchKeys()) {
       return Promise.reject(
         new SignInFailed('provider_unavailable', 'the key set failed moments ago; not tried again yet'),
@@ -272,8 +280,11 @@ export function createOidcClient({
       try {
         result = await verify(await heldKeys());
       } catch (error) {
-        if (!(error instanceof joseErrors.JWKSNoMatchingKey) || !mayFetchKeys()) throw error;
-        result = await verify(await fetchKeys());
+        if (!(error instanceof joseErrors.JWKSNoMatchingKey)) throw error;
+        // A key not held: wait on a fetch under way, or start one if the last was long enough ago.
+        const fresh = keysFetch ?? (mayFetchKeys() ? fetchKeys() : undefined);
+        if (fresh === undefined) throw error;
+        result = await verify(await fresh);
       }
     } catch (error) {
       if (error instanceof SignInFailed) throw error;
