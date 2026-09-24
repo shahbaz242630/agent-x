@@ -59,6 +59,8 @@ export interface Config {
     readonly trustedProxies: readonly string[];
     /** ADR-011 §4: the most requests one client address may make per minute. */
     readonly rateLimitPerMinute: number;
+    /** ADR-011 §4 (B2-5c): the most requests one signed-in person may make per minute, from any address. */
+    readonly rateLimitPerUserPerMinute: number;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -135,11 +137,16 @@ function trustedProxiesProblems(environment: Environment, proxies: readonly stri
  * with its first request, so it can straddle two clock minutes and fit up to
  * twice its limit in one: the limit must be at most half the cap.
  */
-function rateLimitProblems(rateLimitPerMinute: number, eventCapPerMinute: number): string[] {
-  return rateLimitPerMinute * 2 > eventCapPerMinute
+function rateLimitProblems(
+  name: 'AGENTX_RATE_LIMIT_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
+  perMinute: number,
+  eventCapPerMinute: number,
+): string[] {
+  const whose = name === 'AGENTX_RATE_LIMIT_PER_MINUTE' ? "one client's" : "one person's";
+  return perMinute * 2 > eventCapPerMinute
     ? [
-        `AGENTX_RATE_LIMIT_PER_MINUTE: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (${eventCapPerMinute}), ` +
-          "so one client's requests can't fill the request log on their own",
+        `${name}: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (${eventCapPerMinute}), ` +
+          `so ${whose} requests can't fill the request log on their own`,
       ]
     : [];
 }
@@ -216,6 +223,7 @@ export function loadConfig(env: Env = process.env): Config {
     origin: setting(env, 'AGENTX_PUBLIC_ORIGIN'),
     trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
+    rateLimitPerUser: setting(env, 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
@@ -253,7 +261,13 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && origin.ok ? publicOriginProblems(environment.value, origin.value) : []),
     ...(environment.ok && httpPort.ok ? portProblems(environment.value, httpPort.value) : []),
     ...(environment.ok && trustedProxies.ok ? trustedProxiesProblems(environment.value, trustedProxies.value) : []),
-    ...(rateLimit.ok && eventCap.ok ? rateLimitProblems(rateLimit.value, eventCap.value) : []),
+    ...(rateLimit.ok && eventCap.ok
+      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_MINUTE', rateLimit.value, eventCap.value)
+      : []),
+    // B2-5c: a person reaching us from many addresses, each under its own limit, is held by theirs.
+    ...(checks.rateLimitPerUser.ok && eventCap.ok
+      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser.value, eventCap.value)
+      : []),
     ...(environment.ok &&
     checks.oidcIssuer.ok &&
     checks.oidcClientId.ok &&
@@ -287,6 +301,7 @@ export function loadConfig(env: Env = process.env): Config {
       publicOrigin: checks.origin.value ?? LOCAL_PUBLIC_ORIGIN,
       trustedProxies: Object.freeze(checks.trustedProxies.value ?? []),
       rateLimitPerMinute: checks.rateLimit.value,
+      rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
     }),
     db: Object.freeze({
       host: checks.dbHost.value,

@@ -6,6 +6,8 @@
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
 // 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
 //    signed-in person is found by their session cookie (B2-4b)
+// 5. a signed-in person's request is counted against their own rate limit
+//    too (B2-5c); a refusal is noted as a security event with the person
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
@@ -24,7 +26,7 @@ import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isForeignWrite } from './origin-check.ts';
-import { createCounter, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
+import { createCounter, createPersonCounter, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
 import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
@@ -152,6 +154,13 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
 
   const signIn = options.signIn?.service;
   registerAccess(app, signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie));
+  // After the access hook, which finds the person.
+  app.addHook(
+    'onRequest',
+    createPersonCounter(app, config.http.rateLimitPerUserPerMinute, trust, (ip, userId) => {
+      securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
+    }),
+  );
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
