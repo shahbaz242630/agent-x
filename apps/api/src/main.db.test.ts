@@ -379,6 +379,28 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it('writes the rate-limit refusals it counted as it stops, before the pool closes (B2-5b)', async () => {
+    const admin = database.as('admin');
+    const run = await start(envFor('app', { AGENTX_RATE_LIMIT_PER_MINUTE: '10' }));
+    const statuses = [];
+    for (let i = 0; i < 13; i += 1) {
+      statuses.push((await run.api?.inject({ url: '/health', remoteAddress: '198.51.100.23' }))?.statusCode);
+    }
+    expect(statuses.filter((status) => status === 429)).toHaveLength(3);
+
+    await stop(run);
+
+    // Summed: a minute that ends during the test counts the refusals in two rows.
+    expect(
+      await admin.query<{ ip: string; count: number }>(
+        `select host(ip) as ip, sum(count)::int as count from security.events
+         where kind = 'rate_limited' and reason = 'per_address' group by ip`,
+      ),
+    ).toEqual([{ ip: '198.51.100.23', count: 3 }]);
+    const written = run.capture.lines().filter((line) => line.event === 'security.events_written');
+    expect(written.reduce((sum, line) => sum + Number(line.count), 0)).toBe(3);
+  });
+
   it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
     // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
     await stop(await start(envFor('app')));
