@@ -26,7 +26,9 @@
 //
 // All three are public: each answers whoever calls it, and each acts only on
 // what the caller's own cookies name. With sign-in off (no login service set,
-// B2-6), all three answer NOT_FOUND, as a feature that is off does.
+// B2-6), all three answer NOT_FOUND, as a feature that is off does. So does a
+// HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
+// must neither start a flow nor use one up.
 import { isReturnPath, type SignIn, SignInFailed } from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -118,7 +120,7 @@ export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, l
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
-    if (signIn === undefined) return off(request, reply);
+    if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
     const { url, flowId } = await signIn.begin(request.query.returnTo);
     return reply
       .code(302)
@@ -128,7 +130,7 @@ export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, l
   });
 
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
-    if (signIn === undefined) return off(request, reply);
+    if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
     const log = logger.child({ correlationId: request.id });
     const { code, state, error } = request.query;
     if (error !== undefined || code === undefined || state === undefined) {

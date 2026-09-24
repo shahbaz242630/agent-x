@@ -245,6 +245,23 @@ describe('signing out', () => {
   });
 });
 
+describe('a HEAD of either GET', () => {
+  it.each(['/v1/auth/sign-in', '/v1/auth/callback?code=a-code&state=a-state'])(
+    'does nothing at %s, and answers NOT_FOUND',
+    async (url) => {
+      const standIn = new StandIn();
+      const { app } = await server(standIn);
+
+      const response = await app.inject({ method: 'HEAD', url, headers: { cookie: `${FLOW_COOKIE}=${FLOW_ID}` } });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(standIn.begun).toEqual([]);
+      expect(standIn.completed).toEqual([]);
+    },
+  );
+});
+
 describe('with sign-in off', () => {
   it.each([
     { method: 'GET' as const, url: '/v1/auth/sign-in' },
