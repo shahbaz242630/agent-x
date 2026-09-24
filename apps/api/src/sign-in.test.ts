@@ -154,6 +154,11 @@ describe('coming back from the login service', () => {
 
   it.each([
     ['the login service said no', '?error=access_denied&state=a-state', 'provider_refused'],
+    [
+      'the login service said no, with a code all the same',
+      '?error=access_denied&code=a-code&state=a-state',
+      'provider_refused',
+    ],
     ['no code', '?state=a-state', 'callback_incomplete'],
     ['no state', '?code=a-code', 'callback_incomplete'],
   ])('refuses as SIGN_IN_FAILED when %s, asking nothing of the sign-in', async (_, query, failure) => {
@@ -267,6 +272,7 @@ describe('reading our cookies', () => {
     ['a value with more after it', `${FLOW_COOKIE}=${FLOW_ID}x`],
     ['the cookie twice', `${FLOW_COOKIE}=${FLOW_ID}; ${FLOW_COOKIE}=${'G'.repeat(43)}`],
     ['a name that only starts like ours', `${FLOW_COOKIE}x=${FLOW_ID}`],
+    ['a name that runs into a value', `${FLOW_COOKIE}x${FLOW_ID}`],
   ])('finds none with %s', (_, header) => {
     expect(cookieValue(header, FLOW_COOKIE)).toBeUndefined();
   });
