@@ -134,7 +134,7 @@ async function startStepUp(page: Page, challengeId: string) {
   return page.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${challengeId}&returnTo=${encodeURIComponent(RETURN_TO)}`);
 }
 
-describe('SEC-HA-03 to 07 a step-up through the API with an authenticator app, in a real browser', () => {
+describe('SEC-HA-03, 07 a step-up through the API with an authenticator app, in a real browser', () => {
   const user = users.stepUpApp;
   let context: BrowserContext;
   let page: Page;
@@ -157,7 +157,7 @@ describe('SEC-HA-03 to 07 a step-up through the API with an authenticator app, i
     await context.close();
   });
 
-  it('SEC-HA-01 asks for the password and the code again, then records the evidence on the challenge', async () => {
+  it('asks for the password and the code again (prompt=login), then records the evidence on the challenge', async () => {
     challengeId = await openChallenge(user);
     const sessionId = await sessionOf(user);
     await startStepUp(page, challengeId);
@@ -190,17 +190,9 @@ describe('SEC-HA-03 to 07 a step-up through the API with an authenticator app, i
     expect(await response?.json()).toMatchObject({ error: { code: 'STEP_UP_FAILED' } });
     expect(pageNameOf(page.url())).toBeUndefined();
   });
-
-  it("SEC-HA-04 refuses to step up for another person's challenge", async () => {
-    const theirs = await openChallenge(users.stepUpKey).catch(() => undefined);
-    // The other person may not have signed in yet; a made-up challenge is refused the same way.
-    const response = await startStepUp(page, theirs ?? '0199a0f0-0000-7000-8000-00000000dead');
-    expect(response?.status()).toBe(403);
-    expect(await response?.json()).toMatchObject({ error: { code: 'STEP_UP_FAILED' } });
-  });
 });
 
-describe('SEC-HA-12 a step-up with a security key says so: user in amr', () => {
+describe("SEC-HA-12, 04 a step-up with a security key says so, and another person's challenge is refused", () => {
   const user = users.stepUpKey;
   let context: BrowserContext;
   let page: Page;
@@ -251,6 +243,15 @@ describe('SEC-HA-12 a step-up with a security key says so: user in amr', () => {
     expect(await evidenceOf(challengeId)).toEqual({ verified: true, amr: ['mfa', 'pwd', 'user'], freshEnough: true });
     const cookie = await sessionCookie(context);
     if (cookie !== undefined) cookiesSeen.push(cookie.value);
+  });
+
+  it("SEC-HA-04 refuses to step up for another person's real, pending challenge, leaving it pending", async () => {
+    // The app user is still signed in from the first describe; this is a challenge of their session.
+    const theirs = await openChallenge(users.stepUpApp);
+    const response = await startStepUp(page, theirs);
+    expect(response?.status()).toBe(403);
+    expect(await response?.json()).toMatchObject({ error: { code: 'STEP_UP_FAILED' } });
+    expect(await evidenceOf(theirs)).toEqual({ verified: false, amr: [], freshEnough: false });
   });
 });
 
