@@ -11,7 +11,7 @@
 //   x-access on each of its operations.
 // - Each write route but a public one names its operation, one of its own, for
 //   its idempotency keys (write-operations.ts), which the document shows as
-//   its operationId.
+//   its operationId, with the Idempotency-Key header it requires.
 // - Each route declares its answers for success, as zod objects that name all
 //   they carry, at every depth, and each route that takes a body sets its own
 //   limit for it, which the document shows as x-body-limit.
@@ -48,7 +48,12 @@ import { z } from 'zod';
 import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
-import { operationProblems, sharedOperations } from './write-operations.ts';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_SCHEMA,
+  operationProblems,
+  sharedOperations,
+} from './write-operations.ts';
 import { aboutToWrite, recordingWrites, writtenText } from './written-answers.ts';
 
 /** The methods an OpenAPI path can hold. A route served with any other can't be documented. */
@@ -437,6 +442,17 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (operation !== undefined && methodsOf(route).length !== 1) {
     problems.push('it names an operation but serves more than one method: make a route for each');
   }
+  const headers: unknown = schema.headers;
+  if (operation !== undefined && headers !== undefined && !(headers instanceof z.ZodObject)) {
+    problems.push('it names an operation, but its headers schema is not an object to carry the idempotency key');
+  }
+  if (
+    written &&
+    operation !== undefined &&
+    !(headers instanceof z.ZodObject && headers.shape[IDEMPOTENCY_KEY_HEADER] === IDEMPOTENCY_KEY_SCHEMA)
+  ) {
+    problems.push("its document doesn't show the idempotency key it requires (headers)");
+  }
   // As with its access: the document shows the name the contract wrote from the route's own.
   if ((written || keys.has(OPERATION_ID_KEY)) && keys.get(OPERATION_ID_KEY) !== operation) {
     problems.push('the operation its document shows is not its own (operationId)');
@@ -557,6 +573,11 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
       };
+    if (route.config.operation !== undefined) {
+      // Loose, so the route's check of its headers keeps every other header it was sent.
+      const own = route.schema?.headers instanceof z.ZodObject ? route.schema.headers : z.object({}).loose();
+      schema.headers = own.extend({ [IDEMPOTENCY_KEY_HEADER]: IDEMPOTENCY_KEY_SCHEMA });
+    }
     route.schema = schema;
     route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
     route.onSend = [...hooksOf(route.onSend), answerLeaves];

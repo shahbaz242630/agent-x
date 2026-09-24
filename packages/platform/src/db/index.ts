@@ -8,6 +8,7 @@ export {
   type IdempotentResult,
   type IdempotentWrite,
   type IdempotentWrites,
+  isIdempotencyKey,
   isOperation,
   sweepExpiredKeys,
   sweepIdempotencyKeys,
