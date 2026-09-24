@@ -7,6 +7,7 @@
     "./authority-tables": "./src/authority-tables.ts",
     "./modules/audit": "./src/modules/audit/index.ts",
     "./modules/directory": "./src/modules/directory/index.ts",
+    "./modules/identity": "./src/modules/identity/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",
     "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
     "./schema-check": "./src/schema-check.ts",

@@ -38,6 +38,14 @@ interface GlobalTable {
    * (CI-06 checks both).
    */
   readonly appMay?: readonly RowRight[];
+  /**
+   * The only columns the app may UPDATE, each granted on its own (B2-1): a
+   * table the app changes in part only, such as a session's cookie hash, and
+   * never in who or what it is about. UPDATE is then left out of `appMay`,
+   * and a grant of UPDATE on the whole table, or on any other column, is a
+   * problem to CI-06 and the live guard alike.
+   */
+  readonly appMayUpdate?: readonly string[];
 }
 
 /**
@@ -112,6 +120,34 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Added with its organisation and read; an entry changed or deleted
       // would be an organisation no anchor check or sweep reaches.
       appMay: ['SELECT', 'INSERT'],
+    },
+    'identity.users': {
+      reason:
+        "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
+      columns: ['id', 'issuer', 'subject', 'created_at'],
+      // Made at the first sign-in and read; a user changed or deleted would
+      // move or orphan every membership and event pointing at them.
+      appMay: ['SELECT', 'INSERT'],
+    },
+    'identity.sessions': {
+      reason:
+        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs",
+      columns: [
+        'id',
+        'user_id',
+        'cookie_hash',
+        'idp_session_id',
+        'auth_time',
+        'amr',
+        'created_at',
+        'last_seen_at',
+        'ends_at',
+      ],
+      // Opened, read and ended; changed only in its cookie ID (rotated) and
+      // its last-seen time, never moved to another person, nor what it
+      // proved or when it ends.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['cookie_hash', 'last_seen_at'],
     },
     'migrations.applied': {
       reason:

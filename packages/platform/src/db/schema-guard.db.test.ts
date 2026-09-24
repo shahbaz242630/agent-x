@@ -852,6 +852,39 @@ describe("the idempotency keys' retention policy (B1e)", () => {
   });
 });
 
+describe('a session, which the app changes only in its cookie hash and last use (B2-1)', () => {
+  /** Puts 0010's rights back as the migration made them, whatever a case changed. */
+  afterEach(async () => {
+    await owner.query('revoke all on identity.sessions from agentx_app');
+    await owner.query('grant select, insert, delete on identity.sessions to agentx_app');
+    await owner.query('grant update (cookie_hash, last_seen_at) on identity.sessions to agentx_app');
+  });
+
+  it('names UPDATE on a column that says who or what a session is', async () => {
+    await owner.query('grant update (user_id, amr) on identity.sessions to agentx_app');
+
+    expect(await problems()).toEqual([
+      `agentx_app may UPDATE identity.sessions's column "amr"`,
+      `agentx_app may UPDATE identity.sessions's column "user_id"`,
+    ]);
+  });
+
+  it('names UPDATE on the whole table, and every column it reaches', async () => {
+    await owner.query('grant update on identity.sessions to agentx_app');
+
+    const named = await problems();
+    expect(named).toContain('agentx_app may UPDATE on identity.sessions');
+    expect(named).toContain(`agentx_app may UPDATE identity.sessions's column "ends_at"`);
+    expect(named).not.toContain(`agentx_app may UPDATE identity.sessions's column "cookie_hash"`);
+  });
+
+  it('names a right the list leaves out', async () => {
+    await owner.query('grant truncate on identity.sessions to agentx_app');
+
+    expect(await problems()).toEqual(['agentx_app may TRUNCATE on identity.sessions']);
+  });
+});
+
 describe('the directory, and the key the organisations rest on (B1d-1)', () => {
   const DROP_KEY = 'alter table organizations.organizations drop constraint organizations_org_id_fkey';
   const ADD_KEY =

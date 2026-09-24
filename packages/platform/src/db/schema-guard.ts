@@ -998,7 +998,14 @@ export async function liveSchemaProblems<Schema>(
     if (narrow.has(relation.name)) continue;
     // A global table that names its rights is held to them, on the table and
     // on each column alike (B1d-1): the directory's list is added to and read.
-    const listed = globalTables.has(relation.name) ? policy.globalTables[relation.name]?.appMay : undefined;
+    const entry = globalTables.has(relation.name) ? policy.globalTables[relation.name] : undefined;
+    // A table changed in part only may hold UPDATE on its listed columns, checked below.
+    const listed =
+      entry?.appMay === undefined
+        ? undefined
+        : entry.appMayUpdate === undefined
+          ? entry.appMay
+          : [...entry.appMay, 'UPDATE'];
     const allowed = new Set<string>(
       listed ??
         (appendOnly.has(relation.schema)
@@ -1032,6 +1039,18 @@ export async function liveSchemaProblems<Schema>(
     }
     for (const column of writableIn.get(name) ?? []) {
       if (!mayChange.has(column)) problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
+    }
+  }
+  // A global table changed in part only (B2-1): UPDATE on its listed columns,
+  // each granted on its own, never on the whole table or any other column.
+  for (const [name, entry] of Object.entries(policy.globalTables)) {
+    if (entry.appMayUpdate === undefined) continue;
+    if (allGrants.some((grant) => grant.table === name && grant.level === 'table' && grant.privilege === 'UPDATE')) {
+      problems.push(`${appRole} may UPDATE on ${name}`);
+    }
+    for (const column of writableIn.get(name) ?? []) {
+      if (!entry.appMayUpdate.includes(column))
+        problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
     }
   }
   // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
