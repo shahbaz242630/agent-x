@@ -984,6 +984,8 @@ function armList(steps: Steps, first: string, what: string): unknown[] {
 interface Listed {
   readonly name: string;
   readonly version: string;
+  /** False only when Azure says so: a disabled secret can't be read by the app that holds its URL. */
+  readonly enabled: boolean;
 }
 
 /**
@@ -996,8 +998,15 @@ function secretsInVault(steps: Steps, subscription: string, vault: string): List
     `${ARM}subscriptions/${subscription}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${vault}/secrets?api-version=2025-05-01`,
     "the vault's secrets",
   ).map((secret) => {
-    const listed = secret as { name?: unknown; properties?: { secretUriWithVersion?: unknown } };
-    return { name: text(listed.name), version: text(listed.properties?.secretUriWithVersion) };
+    const listed = secret as {
+      name?: unknown;
+      properties?: { secretUriWithVersion?: unknown; attributes?: { enabled?: unknown } };
+    };
+    return {
+      name: text(listed.name),
+      version: text(listed.properties?.secretUriWithVersion),
+      enabled: listed.properties?.attributes?.enabled !== false,
+    };
   });
 }
 
@@ -1008,7 +1017,10 @@ function secretsInVault(steps: Steps, subscription: string, vault: string): List
  * and what it signed unchecked, so every run checks that `@onlyIfNotExists()`
  * held for each key in the list.
  */
-export function keyProblems(before: readonly Listed[], after: readonly Listed[]): string[] {
+export function keyProblems(
+  before: readonly Pick<Listed, 'name' | 'version'>[],
+  after: readonly Pick<Listed, 'name' | 'version'>[],
+): string[] {
   return APP_KEYS.flatMap((key) => {
     const now = after.find((secret) => secret.name === key);
     if (now === undefined) return [`${key} isn't in the vault, so the API won't start: run secrets --keys again`];
@@ -1382,12 +1394,15 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   // Before anything else is asked: the API reads its client secret from the vault.
+  // A disabled one counts as missing: the API couldn't read it either (the confirmation review).
   const missing = issuedMissing(
-    secretsInVault(steps, subscription, vaultIn(steps, subscription)).map((listed) => listed.name),
+    secretsInVault(steps, subscription, vaultIn(steps, subscription))
+      .filter((listed) => listed.enabled)
+      .map((listed) => listed.name),
   );
   if (missing.length > 0) {
     throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, which the API reads, so the API couldn't start. Register the API with Zitadel, then run secrets --rotate ${missing.join(' ')} (Azure.md, "Sign-in"). A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Register the API with Zitadel, then run secrets --rotate ${missing.join(' ')} (Azure.md, "Sign-in"). A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
   const release = commit ?? (await images.latestCommit());

@@ -472,12 +472,18 @@ interface Call {
 }
 
 /** A secret in the vault: its name, or its name and current version. */
-type Held = string | { readonly name: string; readonly version: string };
+type Held = string | { readonly name: string; readonly version: string; readonly disabled?: boolean };
 
 /** How the vault lists a secret: its name and its current version's URL, never its value. */
 const listed = (held: Held) => {
-  const { name, version } = typeof held === 'string' ? { name: held, version: '1' } : held;
-  return { name, properties: { secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}` } };
+  const { name, version, disabled } = typeof held === 'string' ? { name: held, version: '1', disabled: false } : held;
+  return {
+    name,
+    properties: {
+      secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}`,
+      attributes: { enabled: disabled !== true },
+    },
+  };
 };
 
 interface AzAnswers {
@@ -1211,13 +1217,23 @@ describe('deploy apps', () => {
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret yet, .*secrets --rotate api-oidc-client-secret .*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret .*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
     expect(images.asked).toEqual([]);
     // Only which subscription, before the vault is read.
     expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+  });
+
+  it('counts a disabled client secret as missing: the API could no more read it', async () => {
+    const done = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ before: [{ name: 'api-oidc-client-secret', version: '1', disabled: true }] }),
+    });
+    expect(done.error).toMatchObject({ message: expect.stringMatching(/or holds it disabled/) as unknown });
+    expect(done.az.deployment).toBeUndefined();
   });
 
   it('names only the issued secrets a vault lacks', () => {
