@@ -153,6 +153,17 @@ describe('SEC-DP-07 a write carries its idempotency key', () => {
     expect(response.statusCode).toBe(401);
   });
 
+  it('refuses a write from another origin first, as ORIGIN_REFUSED, key or no key', async () => {
+    const { app } = await withWrite();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/profile',
+      headers: { origin: 'https://elsewhere.example', cookie: `${SESSION_COOKIE}=${COOKIE}` },
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('ORIGIN_REFUSED', FIRST_ID));
+  });
+
   it('asks no key of a read or a public write', async () => {
     const { app } = await withWrite();
     const read = await app.inject({

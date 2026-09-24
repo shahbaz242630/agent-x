@@ -83,15 +83,12 @@ export const IDEMPOTENCY_KEY_SCHEMA = z
  */
 export function registerIdempotencyKeys(app: FastifyInstance): void {
   app.addHook('onRequest', (request, reply, done) => {
-    if (request.routeOptions.config.operation === undefined) {
+    const { operation } = request.routeOptions.config;
+    if (operation === undefined || isIdempotencyKey(request.headers[IDEMPOTENCY_KEY_HEADER])) {
       done();
-      return;
-    }
-    if (!isIdempotencyKey(request.headers[IDEMPOTENCY_KEY_HEADER])) {
+    } else {
       void sendErrorBody(reply, 400, 'IDEMPOTENCY_KEY_INVALID', request.id);
-      return;
     }
-    done();
   });
 }
 

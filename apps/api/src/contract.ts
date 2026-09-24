@@ -574,8 +574,8 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
       };
     if (route.config.operation !== undefined) {
-      // Loose, so the route's check of its headers keeps every other header it was sent.
-      const own = route.schema?.headers instanceof z.ZodObject ? route.schema.headers : z.object({}).loose();
+      // Fastify lays the checked headers over those sent, so every other header stays.
+      const own = route.schema?.headers instanceof z.ZodObject ? route.schema.headers : z.object({});
       schema.headers = own.extend({ [IDEMPOTENCY_KEY_HEADER]: IDEMPOTENCY_KEY_SCHEMA });
     }
     route.schema = schema;
