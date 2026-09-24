@@ -60,6 +60,8 @@ export interface VerifiedSignIn {
 
 /** Why a sign-in failed, for its answer and its security event (B2-5). */
 export type SignInFailure =
+  /** The browser came back with no flow of ours in time: none started, one used already, or past its ten minutes. */
+  | 'flow_missing'
   /** The browser came back with a state that isn't the flow's: another flow's, or a forged one. */
   | 'state_mismatch'
   /** The login service couldn't be reached, or answered in a way that isn't OIDC. */

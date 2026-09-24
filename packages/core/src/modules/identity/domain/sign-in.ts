@@ -57,3 +57,19 @@ export function checkEvidence({ idpSessionId, authTime, amr }: SignInEvidence): 
     throw new SignInRefused('an authentication method is not 1 to 32 visible ASCII characters');
   }
 }
+
+/**
+ * Where a browser may be sent back to after signing in (SEC-WEB-04): a path
+ * on our own origin, never another site. It starts with one `/` (two would
+ * name another host, and a backslash is read as a slash by browsers), holds
+ * only letters, digits and `-._~/%?=&`, and is at most 512 characters, so
+ * nothing in it can end the Location header or reach another origin.
+ */
+// The class holds no backslash, so a second slash is the only way to another host.
+const RETURN_PATH = /^\/(?!\/)[A-Za-z0-9\-._~/%?=&]{0,511}$/;
+
+/** The path to send the browser to when it asks for none. */
+export const HOME_PATH = '/';
+
+/** True when the browser may be sent back to this path. */
+export const isReturnPath = (value: unknown): value is string => typeof value === 'string' && RETURN_PATH.test(value);

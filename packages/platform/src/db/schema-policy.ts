@@ -149,6 +149,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       appMay: ['SELECT', 'INSERT', 'DELETE'],
       appMayUpdate: ['cookie_hash', 'last_seen_at'],
     },
+    'identity.login_flows': {
+      reason:
+        "The sign-in flows under way (ADR-003 §5, B2-3a): each browser's state, nonce and PKCE verifier until it returns from the login service, before anyone is known",
+      columns: ['cookie_hash', 'state', 'nonce', 'verifier', 'return_to', 'created_at', 'ends_at'],
+      // Added, and taken once (deleted as it is read); never changed.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+    },
     'migrations.applied': {
       reason:
         'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
