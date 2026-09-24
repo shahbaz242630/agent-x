@@ -42,6 +42,7 @@ class StandIn implements SignIn {
   completed: CallbackInput[] = [];
   signedOut: (string | undefined)[] = [];
   failWith: Error | undefined;
+  beginFailsWith: Error | undefined;
   /** The live sessions, by cookie, and every cookie a request was looked up by. */
   live = new Map<string, LiveSession>();
   looked: string[] = [];
@@ -49,6 +50,7 @@ class StandIn implements SignIn {
 
   begin(returnTo?: string) {
     this.begun.push(returnTo);
+    if (this.beginFailsWith !== undefined) return Promise.reject(this.beginFailsWith);
     return Promise.resolve({ url: LOGIN_URL, flowId: FLOW_ID });
   }
 
@@ -252,6 +254,68 @@ describe('coming back from the login service', () => {
 
     expect(response.statusCode).toBe(302);
     expect(noted).toEqual([]);
+  });
+});
+
+describe('S47 a login service that cannot be reached, such as one still waking from zero', () => {
+  const unreachable = () =>
+    new SignInFailed('provider_unavailable', 'a call to https://zitadel.internal.example failed');
+
+  it.each([
+    [
+      'starting a sign-in',
+      (standIn: StandIn) => {
+        standIn.beginFailsWith = unreachable();
+      },
+      { url: '/v1/auth/sign-in' },
+    ],
+    [
+      'coming back from it',
+      (standIn: StandIn) => {
+        standIn.failWith = unreachable();
+      },
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`),
+    ],
+  ])(
+    'answers %s with SIGN_IN_UNAVAILABLE, 503 and Retry-After, sets no cookie, and notes no security event',
+    async (_what, fail, request) => {
+      const standIn = new StandIn();
+      fail(standIn);
+      const { app, capture, noted } = await server(standIn);
+
+      const response = await app.inject(request);
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual(errorBody('SIGN_IN_UNAVAILABLE', response.headers['x-correlation-id'] as string));
+      expect(response.headers['retry-after']).toBe('15');
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(noted).toEqual([]);
+      expect(capture.lines()).toContainEqual(
+        expect.objectContaining({ event: 'auth.sign_in_unavailable', level: 'warn' }),
+      );
+    },
+  );
+
+  it('still fails on our side, not as unavailable, for any other failure at the start', async () => {
+    const standIn = new StandIn();
+    standIn.beginFailsWith = new Error('the database is away');
+    const { app } = await server(standIn);
+
+    const response = await app.inject('/v1/auth/sign-in');
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
+  });
+
+  it('refuses a sign-in the login service refused as SIGN_IN_FAILED, as before, not as unavailable', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new SignInFailed('code_rejected', 'the login service refused the code');
+    const { app } = await server(standIn);
+
+    const response = await app.inject(callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`));
+
+    expect(response.statusCode).toBe(401);
+    expect(response.headers['retry-after']).toBeUndefined();
   });
 });
 
