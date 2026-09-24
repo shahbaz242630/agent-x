@@ -766,6 +766,156 @@ describe('FX-RACE SEC-DP-09 concurrent requests with one key: one record', () =>
   });
 });
 
+describe('B2b-3a the wait for a key another request holds is bounded', () => {
+  /** A first write that claims its key, then holds it uncommitted until let go. */
+  function holdKey(key: string) {
+    let letGo = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    let claimed = (): void => undefined;
+    const hasClaimed = new Promise<void>((resolve) => {
+      claimed = resolve;
+    });
+    const first = write(requestFor(key), {
+      work: async (tx, orgId) => {
+        claimed();
+        await released;
+        return createItem(tx, orgId);
+      },
+    });
+    return { first, hasClaimed, letGo };
+  }
+
+  /** The transaction's lock timeout as Postgres shows it. */
+  async function lockTimeout(tx: Transaction<ProbeTables>): Promise<string | undefined> {
+    const { rows } = await sql<{ limit: string }>`select pg_catalog.current_setting('lock_timeout') as limit`.execute(
+      tx,
+    );
+    return rows[0]?.limit;
+  }
+
+  it('answers busy once the wait runs out, leaving the transaction usable with its own limit', async () => {
+    const key = newKey();
+    const held = holdKey(key);
+    try {
+      await held.hasClaimed;
+      const done = writesDone;
+      const started = Date.now();
+
+      const { outcome, after, itemId } = await withTenant(app, ORG, async (tx) => {
+        // Shorter than the bound, so it is the claim's wait.
+        await sql`set local lock_timeout = '200ms'`.execute(tx);
+        const answer = await writes().run(tx, requestFor(key), () => createItem(tx, ORG));
+        // The claim left nothing behind, so the transaction goes on and commits.
+        const id = newId();
+        await tx.insertInto('probe.items').values({ org_id: ORG, id, label: 'after busy' }).execute();
+        return { outcome: answer, after: await lockTimeout(tx), itemId: id };
+      });
+
+      expect(outcome).toEqual({ outcome: 'busy' });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+      expect(after).toBe('200ms');
+      expect(writesDone).toBe(done);
+      expect(await items()).toContainEqual({ id: itemId });
+      expect(linesNamed('idempotency.busy')).toEqual([
+        expect.objectContaining({
+          level: 'warn',
+          orgId: ORG,
+          operation: 'items.create',
+          clientKind: 'agent',
+          clientId: AGENT,
+          idempotencyKey: key,
+        }),
+      ]);
+    } finally {
+      held.letGo();
+    }
+    const first = await held.first;
+    if (first.outcome !== 'done') throw new Error('the first write was not done');
+    // Sent again once the first committed: its answer.
+    expect(await write(requestFor(key))).toEqual({ outcome: 'replayed', result: first.result });
+    expect(await storedKeys(key)).toHaveLength(1);
+  });
+
+  it.each([
+    ['no limit', '0', '5s'],
+    ['a longer limit', '7s', '5s'],
+    ['a shorter limit', '150ms', '150ms'],
+  ])('holds the write to at most 5 seconds for a lock: from %s to %s', async (_what, before, during) => {
+    const seen = await withTenant(app, ORG, async (tx) => {
+      await sql`select pg_catalog.set_config('lock_timeout', ${before}, true)`.execute(tx);
+      let inWork: string | undefined;
+      await writes().run(tx, requestFor(newKey()), async () => {
+        inWork = await lockTimeout(tx);
+        return createItem(tx, ORG);
+      });
+      return { inWork, after: await lockTimeout(tx) };
+    });
+    expect(seen).toEqual({ inWork: during, after: during });
+  });
+
+  it("leaves the caller's own limit as it was when the claim is refused", async () => {
+    const after = await withTenant(app, ORG, async (tx) => {
+      await sql`set local lock_timeout = '7s'`.execute(tx);
+      await expect(writes().run(tx, requestFor('two words'), () => createItem(tx, ORG))).rejects.toThrow(
+        IdempotencyFailed,
+      );
+      await expect(
+        writes().run(tx, requestFor(newKey()), () => Promise.reject(new Error('refused along the way'))),
+      ).rejects.toThrow('refused along the way');
+      return lockTimeout(tx);
+    });
+    expect(after).toBe('7s');
+  });
+
+  it('answers as usual when the first commits within the wait', async () => {
+    const key = newKey();
+    const held = holdKey(key);
+    await held.hasClaimed;
+    const second = write(requestFor(key));
+    await waitUntilQueued(admin, 1, QUEUE_WAIT);
+    held.letGo();
+    const first = await held.first;
+    if (first.outcome !== 'done') throw new Error('the first write was not done');
+    expect(await second).toEqual({ outcome: 'replayed', result: first.result });
+    expect(linesNamed('idempotency.busy')).toEqual([]);
+  });
+
+  it("throws a lock timeout of the write's own as the write's error, never busy", async () => {
+    const lockedId = newId();
+    await admin.query('insert into probe.items (org_id, id, label) values ($1, $2, $3)', [ORG, lockedId, 'locked']);
+    let letGo = (): void => undefined;
+    const released = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    let locked = (): void => undefined;
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = withTenant(app, ORG, async (tx) => {
+      await sql`select id from probe.items where org_id = ${ORG} and id = ${lockedId} for update`.execute(tx);
+      locked();
+      await released;
+    });
+    try {
+      await isLocked;
+      const outcome = withTenant(app, ORG, async (tx) => {
+        await sql`set local lock_timeout = '150ms'`.execute(tx);
+        return writes().run(tx, requestFor(newKey()), async () => {
+          await sql`update probe.items set label = 'changed' where org_id = ${ORG} and id = ${lockedId}`.execute(tx);
+          return { status: 200, resourceId: lockedId };
+        });
+      });
+      await expect(within(10_000, outcome, 'the write to time out')).rejects.toMatchObject({ code: '55P03' });
+    } finally {
+      letGo();
+      await holder;
+    }
+    expect(linesNamed('idempotency.busy')).toEqual([]);
+  });
+});
+
 describe('what it refuses to take', () => {
   it.each<[string, Partial<IdempotentRequest>]>([
     ['an organisation ID that is not a UUID', { orgId: 'org-1' }],
