@@ -49,6 +49,8 @@ export interface LiveSession extends SignInEvidence {
   readonly lastSeenAt: Date;
   /** Its absolute end. */
   readonly endsAt: Date;
+  /** When it ends if it goes unused from now: its idle timeout from its last use, or its absolute end if that is sooner. */
+  readonly idleEndsAt: Date;
 }
 
 export interface Sessions {
@@ -157,6 +159,7 @@ export function createSessions({
         .returning(['id', 'user_id', 'idp_session_id', 'auth_time', 'amr', 'created_at', 'last_seen_at', 'ends_at'])
         .executeTakeFirst();
       if (row === undefined) return undefined;
+      const idleEnd = row.last_seen_at.getTime() + idleSeconds * 1000;
       return {
         sessionId: row.id,
         userId: row.user_id,
@@ -166,6 +169,7 @@ export function createSessions({
         createdAt: row.created_at,
         lastSeenAt: row.last_seen_at,
         endsAt: row.ends_at,
+        idleEndsAt: new Date(Math.min(idleEnd, row.ends_at.getTime())),
       };
     },
 

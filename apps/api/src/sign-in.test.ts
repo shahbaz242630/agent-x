@@ -1,11 +1,14 @@
 // B2-3a-2: the sign-in routes over HTTP, with a stand-in sign-in (the real
-// one: the identity module's sign-in-flow.db.test.ts).
-import { type CallbackInput, type SignIn, SignInFailed } from '@agentx/core/modules/identity';
+// one: the identity module's sign-in-flow.db.test.ts). B2-4b: a signed-in
+// request, found by its session cookie, and the person's own session.
+import { type CallbackInput, type LiveSession, type SignIn, SignInFailed } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
+import { SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
 import { buildServer } from './server.ts';
 import { cookieValue, FLOW_COOKIE, SESSION_COOKIE } from './sign-in.ts';
@@ -19,12 +22,29 @@ const USER_ID = '0199a0f0-0000-7000-8000-000000000011';
 const RECORD_ID = '0199a0f0-0000-7000-8000-000000000022';
 const SESSION_SECONDS = 43_200;
 
+/** A live session, as the sign-in finds it for a request. */
+const LIVE: LiveSession = {
+  sessionId: RECORD_ID,
+  userId: USER_ID,
+  idpSessionId: 'V1_1',
+  authTime: new Date('2026-09-24T09:00:00.000Z'),
+  amr: ['pwd', 'otp', 'mfa'],
+  createdAt: new Date('2026-09-24T09:00:05.000Z'),
+  lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
+  endsAt: new Date('2026-09-24T21:00:05.000Z'),
+  idleEndsAt: new Date('2026-09-24T09:40:00.000Z'),
+};
+
 /** The stand-in: what each route asked of it, and what it answers. */
 class StandIn implements SignIn {
   begun: (string | undefined)[] = [];
   completed: CallbackInput[] = [];
   signedOut: (string | undefined)[] = [];
   failWith: Error | undefined;
+  /** The live sessions, by cookie, and every cookie a request was looked up by. */
+  live = new Map<string, LiveSession>();
+  looked: string[] = [];
+  lookupFails: Error | undefined;
 
   begin(returnTo?: string) {
     this.begun.push(returnTo);
@@ -40,6 +60,12 @@ class StandIn implements SignIn {
   signOut(cookie: string | undefined) {
     this.signedOut.push(cookie);
     return Promise.resolve(cookie !== undefined);
+  }
+
+  signedIn(cookie: string) {
+    this.looked.push(cookie);
+    if (this.lookupFails !== undefined) return Promise.reject(this.lookupFails);
+    return Promise.resolve(this.live.get(cookie));
   }
 }
 
@@ -274,6 +300,123 @@ describe('with sign-in off', () => {
 
     expect(response.statusCode).toBe(404);
     expect(response.json()).toMatchObject({ error: { code: 'NOT_FOUND' } });
+  });
+});
+
+describe("B2-4b a signed-in request, and the person's own session", () => {
+  const asking = (cookie?: string, method: 'GET' | 'HEAD' = 'GET') => ({
+    method,
+    url: '/v1/auth/session',
+    headers: cookie === undefined ? {} : { cookie: `theme=dark; ${SESSION_COOKIE}=${cookie}` },
+  });
+
+  it('answers a live session with its own details, found by the session cookie alone', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(asking(SESSION_ID));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      userId: USER_ID,
+      authenticatedAt: '2026-09-24T09:00:00.000Z',
+      methods: ['pwd', 'otp', 'mfa'],
+      idleExpiresAt: '2026-09-24T09:40:00.000Z',
+      expiresAt: '2026-09-24T21:00:05.000Z',
+    });
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(standIn.looked).toEqual([SESSION_ID]);
+  });
+
+  it('answers a HEAD of it the same way, with no body', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(asking(SESSION_ID, 'HEAD'));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBe('');
+  });
+
+  it.each([
+    ['no session cookie', undefined, []],
+    ['a cookie we could never have set, asking nothing', 'short', []],
+    ['a cookie with no live session behind it', NEW_SESSION, [NEW_SESSION]],
+  ])('refuses %s as UNAUTHENTICATED, with the challenge that says how to sign in', async (_, cookie, looked) => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(asking(cookie));
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual(errorBody('UNAUTHENTICATED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['www-authenticate']).toBe(SESSION_CHALLENGE);
+    expect(standIn.looked).toEqual(looked);
+  });
+
+  it('refuses a signed-in person on a route for roles only as FORBIDDEN, never running it', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+    const reached: string[] = [];
+    app.get(
+      '/test/members',
+      { config: { access: ['admin'] }, schema: { response: { 200: z.object({ ok: z.literal(true) }) } } },
+      () => {
+        reached.push('members');
+        return { ok: true as const };
+      },
+    );
+
+    const response = await app.inject({ url: '/test/members', headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` } });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('FORBIDDEN', response.headers['x-correlation-id'] as string));
+    expect(reached).toEqual([]);
+  });
+
+  it('asks nothing for a public route, whatever cookie it carries', async () => {
+    const standIn = new StandIn();
+    const { app } = await server(standIn);
+
+    const response = await app.inject({ url: '/health', headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` } });
+
+    expect(response.statusCode).toBe(200);
+    expect(standIn.looked).toEqual([]);
+  });
+
+  it('fails on our side, never letting the request through, when the session cannot be looked up', async () => {
+    const standIn = new StandIn();
+    standIn.lookupFails = new Error('the database is away');
+    const { app } = await server(standIn);
+    // A route that would answer whoever reached it: only the hook stands in the way.
+    const reached: string[] = [];
+    app.get(
+      '/test/mine',
+      { config: { access: ['person'] }, schema: { response: { 200: z.object({ ok: z.literal(true) }) } } },
+      () => {
+        reached.push('mine');
+        return { ok: true as const };
+      },
+    );
+
+    const response = await app.inject({ url: '/test/mine', headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` } });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
+    expect(reached).toEqual([]);
+  });
+
+  it('with sign-in off, refuses it as UNAUTHENTICATED: no one can be signed in', async () => {
+    const { app } = await server(undefined);
+
+    const response = await app.inject(asking(SESSION_ID));
+
+    expect(response.statusCode).toBe(401);
+    expect(response.headers['www-authenticate']).toBe(SESSION_CHALLENGE);
   });
 });
 

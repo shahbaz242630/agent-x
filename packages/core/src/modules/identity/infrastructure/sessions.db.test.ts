@@ -77,7 +77,31 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       createdAt: START,
       lastSeenAt: START,
       endsAt: new Date(START.getTime() + ABSOLUTE * SECOND),
+      idleEndsAt: new Date(START.getTime() + IDLE * SECOND),
     });
+  });
+
+  it('says when a session ends if unused: its idle timeout from this use, never past its absolute end (B2-4b)', async () => {
+    const { userId, clock, sessions } = await setUp();
+    const { sessionId, cookie } = await sessions.open(app, userId, evidence);
+    const end = START.getTime() + ABSOLUTE * SECOND;
+
+    clock.advanceBy((IDLE - 1) * SECOND);
+    expect(await sessions.use(app, cookie)).toMatchObject({
+      idleEndsAt: new Date(clock.now().getTime() + IDLE * SECOND),
+    });
+    // In use until moments before its absolute end: its idle end would come later, so it is the absolute end.
+    await app
+      .updateTable('identity.sessions')
+      .set({ last_seen_at: new Date(end - 10 * SECOND) })
+      .where('id', '=', sessionId)
+      .execute();
+    const late = createSessions({
+      ids,
+      clock: new FixedClock(new Date(end - SECOND)),
+      timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+    });
+    expect(await late.use(app, cookie)).toMatchObject({ idleEndsAt: new Date(end) });
   });
 
   it('keeps only the hash of the cookie ID, never the cookie ID', async () => {
