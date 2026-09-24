@@ -11,8 +11,8 @@
 //    (B2-3a-2), and starts the audit chains' anchor check (ADR-012 §2): the
 //    platform's, and each organisation's from the directory's list (B1d-2);
 //    and, each on a timer of its own, the idempotency keys' retention sweep
-//    (B1e-3), the sign-in flows' sweep (B2-3a-2) and the ended sessions'
-//    sweep (B2-4a)
+//    (B1e-3), the sign-in flows' sweep (B2-3a-2), the ended sessions'
+//    sweep (B2-4a) and the security events' retention sweep (B2-5a)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check and the sweep, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
@@ -30,6 +30,7 @@ import {
   type SignIn,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
@@ -54,13 +55,13 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { createIdentitySweep, scheduleIdentitySweep } from './identity-sweep.ts';
+import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
-type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables & IdentityTables;
+type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables & IdentityTables & SecurityEventsTables;
 
 const SERVICE = 'api';
 
@@ -91,11 +92,11 @@ const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 const SWEEP_EVERY_MS = 3_600_000;
 
 /**
- * The identity tables' sweeps: the sign-in flows' (B2-3a-2) and the ended
- * sessions' (B2-4a), each a batch of 1,000 rows at a time, at most 100
- * batches a run.
+ * The global tables' sweeps: the sign-in flows' (B2-3a-2), the ended
+ * sessions' (B2-4a) and the security events' past their retention (B2-5a),
+ * each a batch of 1,000 rows at a time, at most 100 batches a run.
  */
-const IDENTITY_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+const ROW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 
 /**
  * The console's sign-in (ADR-003 §5), when the config names a login service;
@@ -364,23 +365,39 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // The sign-in flows' and the ended sessions' own sweeps, each on its own
   // timer too, whether or not sign-in is on: rows left from when it was on
   // still go (B2-3a-2, B2-4a).
-  const flowSweeping = scheduleIdentitySweep(
-    createIdentitySweep({
-      kind: 'flow',
+  const flowSweeping = scheduleRowSweep(
+    createRowSweep({
+      rows: 'identity.flow',
       sweep: (most) => flows.sweep(database, most),
       logger,
       deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...IDENTITY_SWEEP,
+      ...ROW_SWEEP,
     }),
     SWEEP_EVERY_MS,
   );
-  const sessionSweeping = scheduleIdentitySweep(
-    createIdentitySweep({
-      kind: 'session',
+  const sessionSweeping = scheduleRowSweep(
+    createRowSweep({
+      rows: 'identity.session',
       sweep: (most) => sessions.sweep(database, most),
       logger,
       deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...IDENTITY_SWEEP,
+      ...ROW_SWEEP,
+    }),
+    SWEEP_EVERY_MS,
+  );
+  // The security events past the retention the config names (B2-5a), on a timer of its own too.
+  const securityEvents = createSecurityEvents({
+    ids: uuidV7Ids,
+    clock: systemClock,
+    retentionDays: config.securityEvents.retentionDays,
+  });
+  const eventSweeping = scheduleRowSweep(
+    createRowSweep({
+      rows: 'security.event',
+      sweep: (most) => securityEvents.sweep(database, most),
+      logger,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+      ...ROW_SWEEP,
     }),
     SWEEP_EVERY_MS,
   );
@@ -389,7 +406,13 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     server,
     {
       stop: async () => {
-        await Promise.all([anchorCheck.stop(), sweeping.stop(), flowSweeping.stop(), sessionSweeping.stop()]);
+        await Promise.all([
+          anchorCheck.stop(),
+          sweeping.stop(),
+          flowSweeping.stop(),
+          sessionSweeping.stop(),
+          eventSweeping.stop(),
+        ]);
       },
     },
     database,

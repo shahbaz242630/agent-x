@@ -177,6 +177,17 @@ const SETTINGS = {
     schema: wholeNumber({ min: 1, max: 24, unit: 'hours', minimumReason: 'shorter would sign people out mid-task' }),
     default: '12',
   },
+  // ADR-005 §6, ADR-011 §7: how long a security event (a failed sign-in, a
+  // rate-limit hit, with its IP address) is kept before the sweep deletes it.
+  AGENTX_SECURITY_EVENT_RETENTION_DAYS: {
+    schema: wholeNumber({
+      min: 30,
+      max: 400,
+      unit: 'days',
+      minimumReason: 'shorter would lose the evidence before a slow attack is noticed',
+    }),
+    default: '90',
+  },
   AGENTX_PAYEE_COOLING_OFF_HOURS: {
     schema: wholeNumber({
       min: 24,
@@ -269,6 +280,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_OIDC_CLIENT_SECRET_FILE',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
+      'AGENTX_SECURITY_EVENT_RETENTION_DAYS',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_KEYS_DIR',

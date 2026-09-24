@@ -2,10 +2,10 @@ import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createIdentitySweep, type IdentitySweepKind } from './identity-sweep.ts';
+import { createRowSweep, type SweptRows } from './row-sweep.ts';
 
 function setUp(
-  kind: IdentitySweepKind,
+  rows: SweptRows,
   answers: (number | Error | 'hang')[],
   options: { batch?: number; mostBatches?: number } = {},
 ) {
@@ -16,8 +16,8 @@ function setUp(
     destination: capture,
   });
   const asked: number[] = [];
-  const sweep = createIdentitySweep({
-    kind,
+  const sweep = createRowSweep({
+    rows,
     sweep: (most) => {
       asked.push(most);
       const answer = answers.shift() ?? 0;
@@ -33,58 +33,58 @@ function setUp(
   return { sweep, asked, lines, capture };
 }
 
-describe.each(['flow', 'session'] as const)("the identity tables' %s sweep", (kind) => {
+describe.each(['identity.flow', 'identity.session', 'security.event'] as const)('the %s sweep', (rows) => {
   it('sweeps a batch at a time until one comes back short, then says how many', async () => {
-    const { sweep, asked, lines } = setUp(kind, [10, 10, 3]);
+    const { sweep, asked, lines } = setUp(rows, [10, 10, 3]);
 
     await sweep.run();
 
     expect(asked).toEqual([10, 10, 10]);
-    expect(lines()).toEqual([{ event: `identity.${kind}_sweep_done`, count: 23 }]);
+    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 23 }]);
   });
 
   it('says so when there was nothing to sweep', async () => {
-    const { sweep, lines } = setUp(kind, [0]);
+    const { sweep, lines } = setUp(rows, [0]);
 
     await sweep.run();
 
-    expect(lines()).toEqual([{ event: `identity.${kind}_sweep_done`, count: 0 }]);
+    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 0 }]);
   });
 
   it('stops at its most batches a run, leaving the rest for the next', async () => {
-    const { sweep, asked, lines } = setUp(kind, [10, 10, 10, 10], { mostBatches: 2 });
+    const { sweep, asked, lines } = setUp(rows, [10, 10, 10, 10], { mostBatches: 2 });
 
     await sweep.run();
 
     expect(asked).toHaveLength(2);
-    expect(lines()).toEqual([{ event: `identity.${kind}_sweep_done`, count: 20 }]);
+    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 20 }]);
   });
 
   it('warns when a batch fails, with what it swept before, and never throws', async () => {
-    const { sweep, lines, capture } = setUp(kind, [10, new Error('the database is away')]);
+    const { sweep, lines, capture } = setUp(rows, [10, new Error('the database is away')]);
 
     await expect(sweep.run()).resolves.toBeUndefined();
 
-    expect(lines()).toEqual([{ event: `identity.${kind}_sweep_failed`, count: 10 }]);
+    expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 10 }]);
     expect(capture.lines()[0]).toMatchObject({ level: 'warn' });
   });
 
   it('warns when a batch outlasts its deadline', async () => {
-    const { sweep, lines } = setUp(kind, ['hang']);
+    const { sweep, lines } = setUp(rows, ['hang']);
 
     await sweep.run();
 
-    expect(lines()).toEqual([{ event: `identity.${kind}_sweep_failed`, count: 0 }]);
+    expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 0 }]);
   });
 
   it('ends quietly when stopped, before a batch or during one', async () => {
-    const before = setUp(kind, [10]);
+    const before = setUp(rows, [10]);
     const stopped = new AbortController();
     stopped.abort();
     await before.sweep.run(stopped.signal);
     expect(before.asked).toEqual([]);
 
-    const during = setUp(kind, ['hang']);
+    const during = setUp(rows, ['hang']);
     const stopping = new AbortController();
     const running = during.sweep.run(stopping.signal);
     stopping.abort();

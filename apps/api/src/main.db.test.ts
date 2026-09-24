@@ -353,6 +353,32 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it('sweeps the security events past their retention once it listens, keeping the rest (B2-5a)', async () => {
+    const admin = database.as('admin');
+    for (const [id, age] of [
+      ['0199a0f0-0000-7000-8000-0000000b25a1', '91 days'],
+      ['0199a0f0-0000-7000-8000-0000000b25a2', '89 days'],
+    ] as const) {
+      await admin.query(
+        `insert into security.events (id, kind, reason, ip, user_id, window_start, count, created_at)
+         values ($1, 'rate_limited', 'address', '203.0.113.7', null, pg_catalog.now() - $2::interval, 1, pg_catalog.now() - $2::interval)`,
+        [id, age],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'security.event_sweep_done')).toEqual(
+        expect.objectContaining({ level: 'info', deleted: 1 }),
+      );
+    });
+    // The default retention is 90 days.
+    expect(await admin.query<{ id: string }>('select id from security.events')).toEqual([
+      { id: '0199a0f0-0000-7000-8000-0000000b25a2' },
+    ]);
+    await stop(run);
+  });
+
   it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
     // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
     await stop(await start(envFor('app')));

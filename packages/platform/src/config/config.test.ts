@@ -68,6 +68,7 @@ describe('config: a correct config loads', () => {
       outbound: { allowedOrigins: [] },
       signIn: undefined,
       sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
+      securityEvents: { retentionDays: 90 },
       payees: { coolingOffHours: 24 },
       audit: { anchorSeconds: 300 },
       keys: { directory: KEYS_DIR, current: {} },
@@ -96,6 +97,7 @@ describe('config: a correct config loads', () => {
       AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
       AGENTX_SESSION_IDLE_MINUTES: '60',
       AGENTX_SESSION_ABSOLUTE_HOURS: '8',
+      AGENTX_SECURITY_EVENT_RETENTION_DAYS: '180',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
       AGENTX_AUDIT_ANCHOR_SECONDS: '600',
       AGENTX_DB_HOST: '10.0.0.5',
@@ -141,6 +143,7 @@ describe('config: a correct config loads', () => {
         clientSecret: CLIENT_PASS,
       },
       sessions: { idleSeconds: 3600, absoluteSeconds: 28_800 },
+      securityEvents: { retentionDays: 180 },
       payees: { coolingOffHours: 48 },
       audit: { anchorSeconds: 600 },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
@@ -876,6 +879,18 @@ describe('config: sign-in (ADR-003 §5, §7)', () => {
     ['a client ID with a space', { AGENTX_OIDC_CLIENT_ID: 'agentx api' }, /^AGENTX_OIDC_CLIENT_ID/],
   ])('refuses %s', (_, change, problem) => {
     expect(problemsWith({ ...SIGN_IN, ...change })).toEqual([expect.stringMatching(problem)]);
+  });
+
+  it('keeps security events 90 days unless told otherwise, and never fewer than 30 (ADR-011 §7)', () => {
+    expect(loadConfig({ ...MINIMAL, AGENTX_SECURITY_EVENT_RETENTION_DAYS: '30' }).securityEvents).toEqual({
+      retentionDays: 30,
+    });
+    expect(problemsWith({ ...MINIMAL, AGENTX_SECURITY_EVENT_RETENTION_DAYS: '29' })).toEqual([
+      expect.stringMatching(/^AGENTX_SECURITY_EVENT_RETENTION_DAYS/),
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_SECURITY_EVENT_RETENTION_DAYS: '401' })).toEqual([
+      expect.stringMatching(/^AGENTX_SECURITY_EVENT_RETENTION_DAYS/),
+    ]);
   });
 
   it('reads the sessions’ timeouts, and holds them to their minimums and to each other', () => {

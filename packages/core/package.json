@@ -10,6 +10,7 @@
     "./modules/identity": "./src/modules/identity/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",
     "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
+    "./modules/security-events": "./src/modules/security-events/index.ts",
     "./schema-check": "./src/schema-check.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"
   },
