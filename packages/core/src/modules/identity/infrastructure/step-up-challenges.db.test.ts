@@ -3,7 +3,15 @@
 // once, inside a transaction, only for that change (SEC-HA-03, 04).
 import { createHash } from 'node:crypto';
 
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -180,6 +188,49 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await challenges.consume(app, opened.challengeId, binding)).toBeUndefined();
     expect(await rowsFor(binding.sessionId)).toEqual([]);
   });
+
+  it.each([
+    ['commits', true],
+    ['rolls back', false],
+  ])(
+    'FX-RACE SEC-HA-03 two changes consuming it at once: the second waits, and gets it only if the first rolls back (the first %s)',
+    async (_what, commits) => {
+      const { challenges, binding } = await setUp();
+      const opened = await challenges.open(app, binding);
+      if (opened === undefined) throw new Error('no challenge');
+      await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
+
+      let letGo = (): void => undefined;
+      const released = new Promise<void>((resolve) => {
+        letGo = resolve;
+      });
+      let consumed = (): void => undefined;
+      const hasConsumed = new Promise<void>((resolve) => {
+        consumed = resolve;
+      });
+      const refusal = new Error('the first change was refused');
+      const first = app.transaction().execute(async (tx) => {
+        const got = await challenges.consume(tx, opened.challengeId, binding);
+        consumed();
+        await released;
+        if (!commits) throw refusal;
+        return got;
+      });
+      await hasConsumed;
+      const second = app.transaction().execute((tx) => challenges.consume(tx, opened.challengeId, binding));
+      await waitUntilQueued(database.as('admin'), 1);
+      letGo();
+
+      if (commits) {
+        expect(await first).toBeDefined();
+        expect(await within(10_000, second, 'the second consume')).toBeUndefined();
+      } else {
+        await expect(first).rejects.toBe(refusal);
+        expect(await within(10_000, second, 'the second consume')).toBeDefined();
+      }
+      expect(await rowsFor(binding.sessionId)).toEqual([]);
+    },
+  );
 
   it('SEC-HA-03 is not used up by a change that rolls back', async () => {
     const { challenges, binding } = await setUp();
