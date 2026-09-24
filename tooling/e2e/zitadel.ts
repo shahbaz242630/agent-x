@@ -91,6 +91,46 @@ export async function createOidcApp(
   return { clientId };
 }
 
+/**
+ * A confidential web client, as the API is (ADR-003 §5): the authorization
+ * code with PKCE, and the client's secret sent to the token endpoint in the
+ * Authorization header (client_secret_basic). In development mode, so its
+ * redirect may be plain http on localhost. Zitadel shows the secret only here.
+ */
+export async function createConfidentialApp(
+  client: ZitadelClient,
+  projectId: string,
+  name: string,
+  redirectUri: string,
+): Promise<{ clientId: string; clientSecret: string }> {
+  return client.post(`/management/v1/projects/${projectId}/apps/oidc`, {
+    name,
+    redirectUris: [redirectUri],
+    responseTypes: ['OIDC_RESPONSE_TYPE_CODE'],
+    grantTypes: ['OIDC_GRANT_TYPE_AUTHORIZATION_CODE'],
+    appType: 'OIDC_APP_TYPE_WEB',
+    authMethodType: 'OIDC_AUTH_METHOD_TYPE_BASIC',
+    accessTokenType: 'OIDC_TOKEN_TYPE_BEARER',
+    devMode: true,
+  });
+}
+
+/** The IDs of the projects with exactly this name. */
+export async function projectsNamed(client: ZitadelClient, name: string): Promise<string[]> {
+  const { result = [] } = await client.post<{ result?: { id: string }[] }>('/management/v1/projects/_search', {
+    queries: [{ nameQuery: { name, method: 'TEXT_QUERY_METHOD_EQUALS' } }],
+  });
+  return result.map(({ id }) => id);
+}
+
+/** The OIDC client IDs of a project's apps. */
+export async function clientIdsOf(client: ZitadelClient, projectId: string): Promise<string[]> {
+  const { result = [] } = await client.post<{ result?: { oidcConfig?: { clientId: string } }[] }>(
+    `/management/v1/projects/${projectId}/apps/_search`,
+  );
+  return result.flatMap(({ oidcConfig }) => (oidcConfig === undefined ? [] : [oidcConfig.clientId]));
+}
+
 export const deleteProject = (client: ZitadelClient, projectId: string): Promise<void> =>
   client.delete(`/management/v1/projects/${projectId}`);
 

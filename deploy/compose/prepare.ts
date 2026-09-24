@@ -18,6 +18,11 @@
 // - deploy/compose/secrets/app-keys, with the app's own keys (ADR-011 §2), one
 //   file per key as the API reads them (`key-<purpose>-v1`, 32 random bytes as
 //   base64url). A key once written is kept: the stack's data depends on it
+// - deploy/compose/secrets/api-sign-in, an empty folder the API mounts, where
+//   the end-to-end suite puts the API's OIDC client secret once it registers
+//   the API with the login service (tooling/e2e/api-sign-in.ts). Made here,
+//   before the stack starts, so the folder is this user's: one Docker made
+//   would be root's on Linux, and the suite couldn't write into it
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -61,6 +66,9 @@ export const LOGIN_CLIENT_KEYS = {
  * alone, at the path Azure mounts them (AGENTX_KEYS_DIR is /mnt/secrets in both).
  */
 export const APP_KEYS = 'app-keys';
+
+/** The API's sign-in secret, in a folder of its own that compose mounts into the API alone. */
+export const API_SIGN_IN = 'api-sign-in';
 
 /** Every variable the .env file holds, in the order it's written. */
 export const VARIABLES: readonly string[] = [...PASSWORDS, MASTER_KEY];
@@ -241,14 +249,21 @@ export function prepareEnv(file: string = ENV_FILE, random: Random = randomBytes
   return 'kept';
 }
 
-/** What one run did to each of the three, so the operator is told which was already there. */
+/** What one run did to each of the four, so the operator is told which was already there. */
 export interface Prepared {
   readonly env: 'created' | 'kept';
   readonly keys: 'created' | 'kept';
   readonly appKeys: 'created' | 'kept';
+  readonly signInDir: 'created' | 'kept';
 }
 
-/** The whole preparation: the logins, the login key pair, then the app's keys. */
+/** The folder for the API's sign-in secret, empty until the end-to-end suite registers the API. */
+export function prepareSignInDir(dir: string = path.join(SECRETS_DIR, API_SIGN_IN)): 'created' | 'kept' {
+  // mkdirSync names the first folder it made, or nothing if the folder was there.
+  return mkdirSync(dir, { recursive: true }) === undefined ? 'kept' : 'created';
+}
+
+/** The whole preparation: the logins, the login key pair, the app's keys, then the sign-in folder. */
 export function prepare(
   file: string = ENV_FILE,
   dir: string = SECRETS_DIR,
@@ -259,6 +274,7 @@ export function prepare(
     env: prepareEnv(file, random),
     keys: prepareKeys(dir, keyPair),
     appKeys: prepareAppKeys(path.join(dir, APP_KEYS), random),
+    signInDir: prepareSignInDir(path.join(dir, API_SIGN_IN)),
   };
 }
 
@@ -280,6 +296,7 @@ if (import.meta.main) {
         ? `Wrote the app's missing keys to ${path.join(SECRETS_DIR, APP_KEYS)}.`
         : `Kept the app's keys in ${path.join(SECRETS_DIR, APP_KEYS)}.`,
     );
+    if (done.signInDir === 'created') console.log(`Made ${path.join(SECRETS_DIR, API_SIGN_IN)} for the API's sign-in.`);
   } catch (error) {
     const told = error instanceof IncompleteEnvFile || error instanceof HalfKeyPair || error instanceof NotAKeyFile;
     if (!told) throw error;

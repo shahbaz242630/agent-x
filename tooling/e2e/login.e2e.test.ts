@@ -9,7 +9,7 @@
 import { type Browser, type BrowserContext, chromium, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { CALLBACK_PORT, type TestUser } from './global-setup.ts';
+import { CALLBACK_PORT } from './global-setup.ts';
 import {
   authorizationRequest,
   type AuthorizationOptions,
@@ -19,25 +19,13 @@ import {
   listenForCallback,
   verifyIdToken,
 } from './oidc.ts';
-import { totp } from './totp.ts';
+import { loginDriver, where } from './login-pages.ts';
 
 const fixtures = inject('e2e');
 const { issuer, clientId, redirectUri, password, users } = fixtures;
 
-/** The pages Zitadel's login can show on the way, and where the way ends. */
-const PAGES = {
-  loginName: /\/ui\/v2\/login\/loginname/,
-  accounts: /\/ui\/v2\/login\/accounts/,
-  password: /\/ui\/v2\/login\/password/,
-  factorSetup: /\/ui\/v2\/login\/mfa\/set/,
-  u2fSet: /\/ui\/v2\/login\/u2f\/set/,
-  otp: /\/ui\/v2\/login\/otp\/time-based(?:\?|$)/,
-  callback: /^http:\/\/127\.0\.0\.1:\d+\/callback/,
-} as const;
-type PageName = keyof typeof PAGES;
-
-const pageNameOf = (href: string): PageName | undefined =>
-  (Object.keys(PAGES) as PageName[]).find((name) => PAGES[name].test(href));
+/** The login comes back to the suite's own callback listener. */
+const { drive } = loginDriver({ password, callback: new RegExp(`^${redirectUri.replaceAll('.', '[.]')}`) });
 
 let browser: Browser;
 let callbacks: Awaited<ReturnType<typeof listenForCallback>>;
@@ -56,104 +44,10 @@ afterAll(async () => {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Where the page is, for a failure message. */
-const where = (page: Page): string => `at ${page.url()}`;
-
 async function begin(page: Page, options: AuthorizationOptions = {}): Promise<AuthorizationRequest> {
   const request = await authorizationRequest(issuer, clientId, redirectUri, options);
   await page.goto(request.url);
   return request;
-}
-
-/** Waits until the page is one of the known ones, and says which. */
-async function knownPage(page: Page): Promise<PageName> {
-  await page
-    .waitForURL((url) => pageNameOf(url.href) !== undefined, { timeout: 30_000 })
-    .catch(() => {
-      throw new Error(`the login went somewhere unexpected ${where(page)}`);
-    });
-  const name = pageNameOf(page.url());
-  if (name === undefined) throw new Error(`the login went somewhere unexpected ${where(page)}`);
-  return name;
-}
-
-/** Submits the page's form and waits for the login to move on. */
-async function submitAndLeave(page: Page, current: PageName): Promise<void> {
-  await page.getByTestId('submit-button').click();
-  await page
-    .waitForURL((url) => pageNameOf(url.href) !== current, { timeout: 30_000 })
-    .catch(() => {
-      throw new Error(`the login did not move on from the ${current} page ${where(page)}`);
-    });
-}
-
-const TOTP_STEP_MS = 30_000;
-
-/**
- * A one-time code never used before in this run (Zitadel refuses a repeat, so
- * a new step is waited for), and never from the last seconds of a step, so it
- * is still current when the login page checks it.
- */
-let lastCode = '';
-async function freshCode(secret: string): Promise<string> {
-  const remaining = TOTP_STEP_MS - (Date.now() % TOTP_STEP_MS);
-  if (remaining < 3000) await sleep(remaining + 100);
-  let code = totp(secret, Date.now());
-  while (code === lastCode) {
-    await sleep(1000);
-    code = totp(secret, Date.now());
-  }
-  lastCode = code;
-  return code;
-}
-
-interface Driven {
-  /** Where the login stopped: one of `until`, or the callback. */
-  readonly stoppedAt: PageName;
-  /** Every page the login showed on the way, in order. */
-  readonly shown: PageName[];
-}
-
-/**
- * Drives the login through whatever Zitadel shows (it skips steps a live
- * session has already done) until one of the `until` pages or the callback.
- * A page it can't get past is a failure that names the page.
- */
-async function drive(page: Page, user: TestUser & { totpSecret?: string }, until: PageName[]): Promise<Driven> {
-  const shown: PageName[] = [];
-  for (let step = 0; step < 10; step += 1) {
-    const current = await knownPage(page);
-    shown.push(current);
-    if (current === 'callback' || until.includes(current)) return { stoppedAt: current, shown };
-    switch (current) {
-      case 'loginName':
-        await page.fill('input[name=loginName]', user.loginName);
-        await submitAndLeave(page, current);
-        break;
-      case 'accounts':
-        // The session chooser: pick this user, by the login name it shows.
-        await page.getByText(user.loginName, { exact: false }).first().click();
-        await page
-          .waitForURL((url) => pageNameOf(url.href) !== 'accounts', { timeout: 30_000 })
-          .catch(() => {
-            throw new Error(`the login did not move on from the account chooser ${where(page)}`);
-          });
-        break;
-      case 'password':
-        await page.fill('input[name=password]', password);
-        await submitAndLeave(page, current);
-        break;
-      case 'otp':
-        if (user.totpSecret === undefined) throw new Error(`asked for a code the user cannot give ${where(page)}`);
-        await page.fill('input[name=code]', await freshCode(user.totpSecret));
-        await submitAndLeave(page, current);
-        break;
-      case 'factorSetup':
-      case 'u2fSet':
-        throw new Error(`the login stopped to set up a factor ${where(page)}`);
-    }
-  }
-  throw new Error(`the login went round in circles ${where(page)}`);
 }
 
 /** The callback, or nothing within the wait: the login did not complete. */
@@ -227,7 +121,7 @@ describe('SEC-HA-01 no login without a second factor', () => {
     const { stoppedAt } = await drive(page, users.noFactor, ['factorSetup']);
     expect(stoppedAt, where(page)).toBe('factorSetup');
     await page.locator('a[href*="/ui/v2/login/u2f/set"]').click();
-    await page.waitForURL(PAGES.u2fSet);
+    await page.waitForURL(/\/ui\/v2\/login\/u2f\/set/);
     const deviceName = page.locator('input[name=name]');
     if ((await deviceName.count()) > 0) await deviceName.fill('end-to-end key');
     await page.getByTestId('submit-button').click();

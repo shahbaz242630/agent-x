@@ -11,6 +11,9 @@ import { firstFileIn } from './tar.ts';
 const COMPOSE_FILE = fileURLToPath(new URL('../../deploy/compose/compose.yaml', import.meta.url));
 const ENV_FILE = fileURLToPath(new URL('../../deploy/compose/.env', import.meta.url));
 
+/** The stack's gitignored secrets folder (deploy/compose/prepare.ts). */
+export const SECRETS_DIR = fileURLToPath(new URL('../../deploy/compose/secrets', import.meta.url));
+
 /** The edge's published ports (compose.yaml): the API, and the login service. */
 export const API_ORIGIN = 'http://localhost:8080';
 export const LOGIN_ORIGIN = 'http://localhost:8081';
@@ -23,10 +26,18 @@ export interface Run {
   readonly code: number | null;
 }
 
-/** Runs the Docker CLI. Rejects only if it can't be started or runs too long. */
-function docker(args: readonly string[], timeoutMs = 120_000): Promise<Run> {
+/**
+ * Runs the Docker CLI. Rejects only if it can't be started or runs too long.
+ * `env` adds variables to the CLI's own environment, for a value that must
+ * not be on its command line (`exec -e NAME` passes it on from there).
+ */
+function docker(args: readonly string[], timeoutMs = 120_000, env: Record<string, string> = {}): Promise<Run> {
   return new Promise((resolve, reject) => {
-    const child = spawn('docker', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('docker', args, {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
     const stdout: Buffer[] = [];
     let stderr = '';
     const timer = setTimeout(() => {
@@ -48,8 +59,8 @@ function docker(args: readonly string[], timeoutMs = 120_000): Promise<Run> {
 }
 
 /** `docker compose` against the stack's file. */
-const compose = (args: readonly string[], timeoutMs?: number): Promise<Run> =>
-  docker(['compose', '-f', COMPOSE_FILE, ...args], timeoutMs);
+const compose = (args: readonly string[], timeoutMs?: number, env?: Record<string, string>): Promise<Run> =>
+  docker(['compose', '-f', COMPOSE_FILE, ...args], timeoutMs, env);
 
 /** Runs a compose command, or throws with Docker's own message. */
 async function composeRun(args: readonly string[], timeoutMs?: number): Promise<Run> {
@@ -80,9 +91,21 @@ export async function readAutomationToken(): Promise<string> {
 export const serviceLogs = (service: string): Promise<string> =>
   composeOk(['logs', '--no-color', '--no-log-prefix', service]);
 
-/** Runs a command inside a running service. */
-export const execIn = (service: string, command: readonly string[]): Promise<Run> =>
-  compose(['exec', '-T', service, ...command]);
+/** Runs a command inside a running service, with `env`'s variables passed on by name alone. */
+export const execIn = (service: string, command: readonly string[], env: Record<string, string> = {}): Promise<Run> =>
+  compose(['exec', '-T', ...Object.keys(env).flatMap((name) => ['-e', name]), service, ...command], undefined, env);
+
+/**
+ * Starts these services again, alone (`--no-deps`), and waits until they are
+ * up; `recreate` makes new containers even if compose sees no change, as it
+ * doesn't for a changed file they mount.
+ */
+export async function restart(services: readonly string[], recreate: boolean): Promise<void> {
+  await composeRun(
+    ['up', '--detach', '--no-deps', '--wait', ...(recreate ? ['--force-recreate'] : []), ...services],
+    300_000,
+  );
+}
 
 /** The state compose reports for one service, from `ps --format json`. */
 export async function serviceState(service: string): Promise<{ State: string; ExitCode: number }> {
@@ -92,10 +115,19 @@ export async function serviceState(service: string): Promise<{ State: string; Ex
   return JSON.parse(line) as { State: string; ExitCode: number };
 }
 
-/** The logins prepare generated, so a test can check none of them reaches a log. Never printed. */
-export function localLogins(): string[] {
-  return readFileSync(ENV_FILE, 'utf8')
+/** The .env file's lines, as name and value. */
+const envEntries = (): [string, string][] =>
+  readFileSync(ENV_FILE, 'utf8')
     .split('\n')
     .filter((line) => line !== '' && !line.startsWith('#'))
-    .map((line) => line.slice(line.indexOf('=') + 1).trim());
+    .map((line) => [line.slice(0, line.indexOf('=')).trim(), line.slice(line.indexOf('=') + 1).trim()]);
+
+/** The logins prepare generated, so a test can check none of them reaches a log. Never printed. */
+export const localLogins = (): string[] => envEntries().map(([, value]) => value);
+
+/** One login prepare generated, by its name. Never printed. */
+export function localLogin(name: string): string {
+  const found = envEntries().find(([entry]) => entry === name);
+  if (found === undefined) throw new Error(`deploy/compose/.env has no ${name}`);
+  return found[1];
 }

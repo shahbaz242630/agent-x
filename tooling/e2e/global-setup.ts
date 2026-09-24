@@ -3,11 +3,15 @@
 // stack and provisions what the login tests need, named by this run: an OIDC
 // client, a user with a password and no second factor, and a user with an
 // authenticator app, then waits until the login can see both. It reads the
-// policies the tests assert on. Teardown removes what it created.
+// policies the tests assert on. Teardown removes what it created. It also
+// registers the API as the login service's client and starts it with sign-in
+// on (api-sign-in.ts), with a user of its own for the sign-in tests; that
+// registration is the stack's, and stays.
 import { randomBytes } from 'node:crypto';
 
 import type { TestProject } from 'vitest/node';
 
+import { type ApiSignIn, apiSignIn } from './api-sign-in.ts';
 import { LOGIN_ORIGIN, readAutomationToken } from './compose.ts';
 import { totp } from './totp.ts';
 import {
@@ -44,7 +48,11 @@ export interface E2eFixtures {
     readonly noFactor: TestUser;
     /** A password and an authenticator app whose secret the test holds. */
     readonly totp: TestUser & { readonly totpSecret: string };
+    /** As `totp`, for the sign-in through the API alone, so no code is ever used twice across the two files. */
+    readonly signIn: TestUser & { readonly totpSecret: string };
   };
+  /** The API as the login service's client. */
+  readonly api: ApiSignIn;
   readonly policy: LoginPolicy;
   readonly impersonation: boolean;
 }
@@ -73,15 +81,22 @@ export default async function setup(project: TestProject): Promise<() => Promise
     created.push(withTotp);
     const totpSecret = await registerTotp(client, withTotp.userId);
     await verifyTotp(client, withTotp.userId, totp(totpSecret, Date.now()));
+    const signIn = await createHumanUser(client, `${run}-signin`, password);
+    created.push(signIn);
+    const signInSecret = await registerTotp(client, signIn.userId);
+    await verifyTotp(client, signIn.userId, totp(signInSecret, Date.now()));
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, withTotp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    const api = await apiSignIn(client);
 
     project.provide('e2e', {
       issuer: LOGIN_ORIGIN,
       clientId: app.clientId,
       redirectUri: REDIRECT_URI,
       password,
-      users: { noFactor, totp: { ...withTotp, totpSecret } },
+      users: { noFactor, totp: { ...withTotp, totpSecret }, signIn: { ...signIn, totpSecret: signInSecret } },
+      api,
       policy: await loginPolicy(client),
       impersonation: await impersonationEnabled(client),
     });
