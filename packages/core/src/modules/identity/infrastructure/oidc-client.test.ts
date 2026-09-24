@@ -46,6 +46,7 @@ class LoginService {
   tokenBody: (nonce: string) => Promise<string> = async (nonce) =>
     JSON.stringify({ access_token: 'unused', token_type: 'Bearer', id_token: await this.idToken({ nonce }) });
   failNetwork = false;
+  keysStatus = 200;
 
   /** A signed ID token: the usual claims, changed by `claims`, from `key` with `alg`. */
   async idToken(
@@ -75,6 +76,7 @@ class LoginService {
       return Response.json(this.discovery, { status: this.discoveryStatus });
     }
     if (target === `${ISSUER}/oauth/v2/keys`) {
+      if (this.keysStatus !== 200) return new Response('unavailable', { status: this.keysStatus });
       const keys = await Promise.all(
         this.published.map(async ({ kid, publicKey }) => ({
           ...(await exportJWK(publicKey)),
@@ -373,6 +375,11 @@ describe('finishing a sign-in', () => {
         /session is not text/,
       ],
       ['with no authentication methods', (nonce) => service.idToken({ nonce, amr: [] }), /authentication methods/],
+      [
+        'with a subject that isn’t text',
+        (nonce) => service.idToken({ nonce, sub: 7 as unknown as string }),
+        /subject is not text/,
+      ],
       ['with a subject too long to keep', (nonce) => service.idToken({ nonce, sub: '1'.repeat(256) }), /the subject/],
     ])('is refused when %s', async (_, make, message) => {
       withToken(make);
@@ -417,6 +424,60 @@ describe('finishing a sign-in', () => {
       service.tokenBody = async (nonce) =>
         JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
       await expect(signIn()).resolves.toBeDefined();
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
+    });
+
+    it('are tried again five seconds after a fetch that failed, and not sooner', async () => {
+      await signIn();
+      clock.advanceBy(60_000);
+      service.published = [FIRST, SECOND];
+      service.keysStatus = 503;
+      service.tokenBody = async (nonce) =>
+        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+      service.pendingNonce = undefined;
+      await expectFailure(signIn(), 'provider_unavailable', /key set answered 503/);
+
+      service.keysStatus = 200;
+      clock.advanceBy(4_999);
+      service.pendingNonce = undefined;
+      await expectFailure(signIn(), 'token_invalid', /ERR_JWKS_NO_MATCHING_KEY/);
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
+
+      clock.advanceBy(1);
+      service.pendingNonce = undefined;
+      await expect(signIn()).resolves.toBeDefined();
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(3);
+    });
+
+    it('are not sent for again within five seconds when none are held yet and the fetch failed', async () => {
+      service.keysStatus = 503;
+      await expectFailure(signIn(), 'provider_unavailable', /key set answered 503/);
+      service.pendingNonce = undefined;
+      await expectFailure(signIn(), 'provider_unavailable', /not tried again yet/);
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
+
+      service.keysStatus = 200;
+      clock.advanceBy(5_000);
+      service.pendingNonce = undefined;
+      await expect(signIn()).resolves.toBeDefined();
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
+    });
+
+    it('are sent for once when several sign-ins name a key not held at the same moment', async () => {
+      await signIn();
+      clock.advanceBy(60_000);
+      service.published = [FIRST, SECOND];
+      service.tokenBody = async (nonce) =>
+        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+      const flows = await Promise.all([client.start(), client.start(), client.start()]);
+      const results = await Promise.allSettled(
+        flows.map(({ flow }) => {
+          service.pendingNonce = flow.nonce;
+          return client.finish(flow, { code: CODE, state: flow.state });
+        }),
+      );
+
+      expect(results.filter((result) => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(1);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });
 

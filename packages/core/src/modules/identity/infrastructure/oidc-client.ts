@@ -16,8 +16,10 @@
 // (SEC-WEB-05). The discovery document must name the configured issuer
 // exactly, and every endpoint it names must be on the issuer's own origin:
 // a document that points elsewhere is refused. It is fetched once; the keys
-// are fetched again when a token names one not held, at most once a minute,
-// so a flood of forged tokens can't make the API hammer the login service.
+// are fetched again when a token names one not held, at most once a minute
+// after a fetch that worked and once in five seconds after one that failed,
+// so a flood of forged tokens can't make the API hammer the login service,
+// and a failure while it rotates its keys holds sign-ins up only briefly.
 //
 // A failure says which step failed, never a token, code or claim's value.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -93,8 +95,10 @@ const MOST_TOKEN_AGE_SECONDS = 300;
 const CALL_TIMEOUT_MS = 10_000;
 /** The most a login service answer may hold: a discovery document, a key set, a token response. */
 const MOST_ANSWER_BYTES = 64 * 1024;
-/** How often the keys may be fetched again for a token naming one not held. */
+/** How soon after fetching the keys they may be fetched again, for a token naming one not held. */
 const KEYS_REFETCH_MS = 60_000;
+/** How soon after a failed fetch of the keys it may be tried again: an outage mustn't block sign-ins for a minute. */
+const KEYS_RETRY_MS = 5_000;
 /** Each random value: 256 bits. */
 const RANDOM_BYTES = 32;
 /** A value the login service hands back through the browser: visible ASCII, bounded. */
@@ -219,10 +223,14 @@ export function createOidcClient({
   }
 
   let keys: ReturnType<typeof createLocalJWKSet> | undefined;
-  let keysFetchedAt: number | undefined;
+  /** When the keys may next be fetched, in ms since 1970. */
+  let keysFetchableAt = 0;
+  const mayFetchKeys = (): boolean => clock.now().getTime() >= keysFetchableAt;
   async function fetchKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
+    // Set before any wait, so sign-ins arriving together send for the keys once.
+    const began = clock.now().getTime();
+    keysFetchableAt = began + KEYS_RETRY_MS;
     const { jwksUri } = await discover();
-    keysFetchedAt = clock.now().getTime();
     const response = await call(jwksUri, { headers: { accept: 'application/json' } });
     if (!response.ok) {
       await response.body?.cancel();
@@ -231,7 +239,19 @@ export function createOidcClient({
     const document = await jsonObject(response, 'key set');
     if (!Array.isArray(document.keys)) throw new SignInFailed('provider_unavailable', 'the key set holds no keys');
     keys = createLocalJWKSet(document as unknown as JSONWebKeySet);
+    keysFetchableAt = began + KEYS_REFETCH_MS;
     return keys;
+  }
+
+  /** The keys held, or fetched if none are and a fetch may be tried now. */
+  function heldKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
+    if (keys !== undefined) return Promise.resolve(keys);
+    if (!mayFetchKeys()) {
+      return Promise.reject(
+        new SignInFailed('provider_unavailable', 'the key set failed moments ago; not tried again yet'),
+      );
+    }
+    return fetchKeys();
   }
 
   /** The ID token's claims, checked; a key not held sends for the keys again, at most once a minute. */
@@ -250,10 +270,9 @@ export function createOidcClient({
     let result: Awaited<ReturnType<typeof verify>>;
     try {
       try {
-        result = await verify(keys ?? (await fetchKeys()));
+        result = await verify(await heldKeys());
       } catch (error) {
-        const stale = keysFetchedAt === undefined || now.getTime() - keysFetchedAt >= KEYS_REFETCH_MS;
-        if (!(error instanceof joseErrors.JWKSNoMatchingKey) || !stale) throw error;
+        if (!(error instanceof joseErrors.JWKSNoMatchingKey) || !mayFetchKeys()) throw error;
         result = await verify(await fetchKeys());
       }
     } catch (error) {
@@ -278,10 +297,13 @@ export function createOidcClient({
     if ((authTime as number) * 1000 > now.getTime() + CLOCK_TOLERANCE_SECONDS * 1000) {
       invalid('the authentication time is in the future');
     }
+    // jose checks only that `sub` is there, not that it is text.
+    const { sub } = payload;
+    if (typeof sub !== 'string') throw new SignInFailed('token_invalid', 'the subject is not text');
     const { amr, sid } = payload;
     if (sid !== undefined && typeof sid !== 'string') invalid('the login service session is not text');
 
-    const subject: Subject = { issuer, subject: String(payload.sub) };
+    const subject: Subject = { issuer, subject: sub };
     const evidence: SignInEvidence = {
       idpSessionId: sid as string | undefined,
       authTime: new Date((authTime as number) * 1000),
