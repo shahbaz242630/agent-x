@@ -102,6 +102,10 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
     const clock = new FixedClock(new Date(START.getTime() + 86_400_000));
     const store = createLoginFlows({ clock });
     await store.sweep(app, 10_000);
+    // Whatever other tests left behind is gone, so each count below is this test's own.
+    expect(
+      await app.selectFrom('identity.login_flows').select('state').where('ends_at', '<=', clock.now()).execute(),
+    ).toEqual([]);
     const oldest = newFlow();
     const older = newFlow();
     const fresh = newFlow();
