@@ -1021,10 +1021,8 @@ export function keyProblems(before: readonly Listed[], after: readonly Listed[])
   });
 }
 
-async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
-  const commit = sentFrom(steps, 'secrets');
-  const subscription = await confirmSubscription(steps);
-  confirmBicep(steps);
+/** The one key vault the foundation made. */
+function vaultIn(steps: Steps, subscription: string): string {
   const vaults = azJson(steps.az, [
     'keyvault',
     'list',
@@ -1037,6 +1035,25 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   ]);
   const vault = Array.isArray(vaults) && vaults.length === 1 ? text(vaults[0]) : '';
   if (vault === '') throw new Error(`${RESOURCE_GROUP} must hold one key vault: deploy the foundation first.`);
+  return vault;
+}
+
+/**
+ * The issued secrets the vault doesn't hold yet (B2-6). An app reads each by
+ * its URL, so a deployment without one leaves that app unable to start; each
+ * is issued by a service already running, then written by name.
+ */
+export function issuedMissing(held: readonly string[]): string[] {
+  return Object.entries(VAULT_SECRETS)
+    .filter(([name, secret]) => secret.source === 'issued' && !held.includes(name))
+    .map(([name]) => name);
+}
+
+async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
+  const commit = sentFrom(steps, 'secrets');
+  const subscription = await confirmSubscription(steps);
+  confirmBicep(steps);
+  const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
   if (plan.kind === 'all' && existing.length > 0) {
     steps.terminal.say(
@@ -1364,6 +1381,15 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   if (images === undefined) throw new Error('No way to find the image was given.');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
+  // Before anything else is asked: the API reads its client secret from the vault.
+  const missing = issuedMissing(
+    secretsInVault(steps, subscription, vaultIn(steps, subscription)).map((listed) => listed.name),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `The vault doesn't hold ${missing.join(', ')} yet, which the API reads, so the API couldn't start. Register the API with Zitadel, then run secrets --rotate ${missing.join(' ')} (Azure.md, "Sign-in"). A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+    );
+  }
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
   // The apps are stamped with the release, and CI's release job takes the stamp

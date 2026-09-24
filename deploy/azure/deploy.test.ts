@@ -35,6 +35,7 @@ import {
   main,
   type Makers,
   parseArguments,
+  issuedMissing,
   issuedProblems,
   passwordProblems,
   peopleAskedFor,
@@ -672,7 +673,8 @@ class RecordingAz implements Az {
           const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
           return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
         }
-        const names = (this.#deployed ? this.options.after : this.options.before) ?? [];
+        // Unless a test says otherwise, the vault holds the API's client secret, which apps needs (B2-6).
+        const names = (this.#deployed ? this.options.after : this.options.before) ?? ['api-oidc-client-secret'];
         const pages = this.options.pages ?? {};
         const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
         const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
@@ -1204,6 +1206,25 @@ const CLIENT_ID = '338719472394810051';
 describe('deploy apps', () => {
   const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
 
+  it("sends nothing, and asks nothing past the subscription, while the vault lacks the API's client secret (B2-6)", async () => {
+    const images = recordingImages();
+    const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The vault doesn't hold api-oidc-client-secret yet, .*secrets --rotate api-oidc-client-secret .*Nothing was deployed\.$/,
+      ) as unknown,
+    });
+    expect(done.az.deployment).toBeUndefined();
+    expect(images.asked).toEqual([]);
+    // Only which subscription, before the vault is read.
+    expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+  });
+
+  it('names only the issued secrets a vault lacks', () => {
+    expect(issuedMissing([])).toEqual(['api-oidc-client-secret']);
+    expect(issuedMissing(['db-app-password', 'api-oidc-client-secret'])).toEqual([]);
+  });
+
   it("deploys main's newest image only once it is verified, by digest, with the hosts as typed", async () => {
     const images = recordingImages();
     const done = await run(['apps'], { answers, images });
@@ -1217,6 +1238,9 @@ describe('deploy apps', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      // The vault holds the API's client secret, which the API reads (B2-6).
+      'keyvault list --subscription',
+      'rest --method get',
       'deployment group create',
       'deployment group show',
       'containerapp list --subscription',
@@ -1774,7 +1798,9 @@ describe('a deployment the operator declines, or that ends otherwise', () => {
 
   it('says nothing was deployed when the what-if is answered no, though the CLI ends with 0, and reads nothing more', async () => {
     for (const [command, argv, scenario] of commands) {
-      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Declined' }) });
+      // A first secrets run finds the vault empty; apps finds the API's client secret there.
+      const vault = command === 'secrets' ? { before: [] } : {};
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Declined', ...vault }) });
       expect({ command, status: done.status, error: done.error }).toEqual({ command, status: 1, error: undefined });
       expect(done.terminal.said.at(-1)).toBe('You answered no at the what-if: nothing was deployed.');
       const afterShow = done.az.sequence.slice(done.az.sequence.findIndex((call) => call.endsWith(' show')) + 1);
@@ -1784,7 +1810,8 @@ describe('a deployment the operator declines, or that ends otherwise', () => {
 
   it('reports any other end, and reads nothing more', async () => {
     for (const [command, argv, scenario] of commands) {
-      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Canceled' }) });
+      const vault = command === 'secrets' ? { before: [] } : {};
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Canceled', ...vault }) });
       expect({ command, status: done.status }).toEqual({ command, status: 1 });
       expect(done.terminal.said.at(-1)).toMatch(
         /^The deployment agentx-staging-\w+-20260916T164215Z ended Canceled: nothing more was done\.$/,
