@@ -226,6 +226,20 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
     );
   });
 
+  it("refuses to start when a later hook rebuilds a write route's schema, dropping its operationId", async () => {
+    const app = await server();
+    await app.register((child, _options, done) => {
+      child.addHook('onRoute', (route) => {
+        route.schema = { response: { 200: z.object({ ok: z.literal(true) }) } };
+      });
+      child.post('/v1/members', write('members.invite'), () => ({ ok: true }));
+      done();
+    });
+    await expect(app.ready()).rejects.toThrow(
+      'POST /v1/members: the operation its document shows is not its own (operationId)',
+    );
+  });
+
   it("refuses to start when a later hook takes a write route's operation away", async () => {
     const app = await server();
     await app.register((child, _options, done) => {
