@@ -4,6 +4,7 @@
 // end to end (B2-3a). The routes come at B2-3a-2, memberships and roles at
 // B4. Step-up challenges (B3-1), bound to one pending change in a session.
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
+export { type ChallengeFacts, type FreshSignIn, type StepUpRefusal, stepUpRefusal } from './domain/step-up.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
   createSessions,

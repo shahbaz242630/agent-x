@@ -51,7 +51,7 @@ class StandInClient implements OidcClient {
     if (this.failWith !== undefined) return Promise.reject(this.failWith);
     if (returned.state !== flow.state) return Promise.reject(new SignInFailed('state_mismatch', 'test'));
     const subject: Subject = { issuer: ISSUER, subject: this.subject };
-    return Promise.resolve({ subject, evidence });
+    return Promise.resolve({ subject, evidence, idTokenHash: Buffer.alloc(32) });
   }
 }
 

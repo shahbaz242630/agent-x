@@ -66,6 +66,8 @@ export interface SignInStart {
 export interface VerifiedSignIn {
   readonly subject: Subject;
   readonly evidence: SignInEvidence;
+  /** SHA-256 of the ID token, kept as a step-up's evidence (ADR-003 §9); the token itself never is. */
+  readonly idTokenHash: Buffer;
 }
 
 /** Why a sign-in failed, for its answer and its security event (B2-5). */
@@ -91,8 +93,13 @@ export class SignInFailed extends Error {
 }
 
 export interface OidcClient {
-  /** A new flow, and the address to send the browser to. `login` makes the person authenticate again (step-up, B3). */
-  start(options?: { readonly prompt?: 'login' }): Promise<SignInStart>;
+  /**
+   * A new flow, and the address to send the browser to. `login` makes the
+   * person authenticate again, and `nonce` is a step-up challenge's own, which
+   * the ID token must then carry (B3). Throws RangeError for a nonce that
+   * isn't 32 random bytes in base64url.
+   */
+  start(options?: { readonly prompt?: 'login'; readonly nonce?: string }): Promise<SignInStart>;
   /** Trades the returned code for a checked ID token. Throws SignInFailed. */
   finish(flow: LoginFlow, returned: { readonly code: string; readonly state: string }): Promise<VerifiedSignIn>;
 }
@@ -113,6 +120,8 @@ const KEYS_REFETCH_MS = 60_000;
 const KEYS_RETRY_MS = 5_000;
 /** Each random value: 256 bits. */
 const RANDOM_BYTES = 32;
+/** A nonce as this client makes them, and as a step-up challenge does: 32 random bytes in base64url. */
+const NONCE = /^[A-Za-z0-9_-]{43}$/;
 /** A value the login service hands back through the browser: visible ASCII, bounded. */
 const RETURNED = /^[!-~]{1,2048}$/;
 
@@ -361,13 +370,16 @@ export function createOidcClient({
     } catch (error) {
       invalid(error instanceof Error ? error.message : 'its claims could not be stored');
     }
-    return { subject, evidence };
+    return { subject, evidence, idTokenHash: createHash('sha256').update(idToken, 'ascii').digest() };
   }
 
   return {
     async start(options = {}) {
+      if (options.nonce !== undefined && (typeof options.nonce !== 'string' || !NONCE.test(options.nonce))) {
+        throw new RangeError('a nonce is 32 random bytes in base64url');
+      }
       const { authorizationEndpoint } = await discover();
-      const flow: LoginFlow = { state: random(), nonce: random(), verifier: random() };
+      const flow: LoginFlow = { state: random(), nonce: options.nonce ?? random(), verifier: random() };
       const url = new URL(authorizationEndpoint);
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);

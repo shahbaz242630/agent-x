@@ -179,6 +179,24 @@ describe('starting a sign-in', () => {
     expect(new URL(second.url).searchParams.get('prompt')).toBe('login');
   });
 
+  it("B3 carries a step-up challenge's own nonce, which the ID token must then hold", async () => {
+    const nonce = 'c'.repeat(43);
+    const { url, flow } = await client.start({ prompt: 'login', nonce });
+
+    expect(flow.nonce).toBe(nonce);
+    expect(new URL(url).searchParams.get('nonce')).toBe(nonce);
+    service.expect(flow);
+    await expect(client.finish(flow, { code: CODE, state: flow.state })).resolves.toBeDefined();
+  });
+
+  it.each(['', 'short', 'c'.repeat(44), `${'c'.repeat(42)}=`, `${'c'.repeat(42)}+`])(
+    'refuses a nonce that is not 32 random bytes in base64url: %j',
+    async (nonce) => {
+      await expect(client.start({ nonce })).rejects.toThrow(RangeError);
+      expect(service.calls).toEqual([]);
+    },
+  );
+
   it('reads the discovery document once', async () => {
     await client.start();
     await client.start();
@@ -230,6 +248,7 @@ describe('finishing a sign-in', () => {
         authTime: new Date((NOW_S - 20) * 1000),
         amr: ['pwd', 'otp', 'mfa'],
       },
+      idTokenHash: expect.any(Buffer) as Buffer,
     });
     const [exchange] = service.callsTo('/oauth/v2/token');
     const headers = new Headers(exchange?.init.headers);
@@ -244,6 +263,18 @@ describe('finishing a sign-in', () => {
       redirect_uri: REDIRECT,
       code_verifier: flow.verifier,
     });
+  });
+
+  it("gives the ID token's SHA-256 as evidence, never the token", async () => {
+    let issued = '';
+    service.tokenBody = async (nonce) => {
+      issued = await service.idToken({ nonce });
+      return JSON.stringify({ id_token: issued });
+    };
+    const signedIn = await signIn();
+
+    expect(signedIn.idTokenHash).toEqual(createHash('sha256').update(issued, 'ascii').digest());
+    expect(JSON.stringify(signedIn)).not.toContain(issued);
   });
 
   it('takes a token without the login service session', async () => {
