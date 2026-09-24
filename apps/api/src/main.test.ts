@@ -798,7 +798,12 @@ describe('the API stops within its deadline', () => {
 
 describe("every exit writes the log's held-back counts first", () => {
   /** A cap the request lines soon exceed, with the rate limit at half of it, as the config requires. */
-  const CAPPED = { ...ENV, AGENTX_LOG_EVENT_CAP_PER_MINUTE: '20', AGENTX_RATE_LIMIT_PER_MINUTE: '10' };
+  const CAPPED = {
+    ...ENV,
+    AGENTX_LOG_EVENT_CAP_PER_MINUTE: '20',
+    AGENTX_RATE_LIMIT_PER_MINUTE: '10',
+    AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
+  };
 
   /** Starts, then makes more requests than the cap, so lines of one event are being held back. */
   async function startWithHeldBackLines() {

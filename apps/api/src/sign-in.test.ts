@@ -75,9 +75,16 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function server(signIn: SignIn | undefined) {
+async function server(signIn: SignIn | undefined, limits: { perAddress?: number; perUser?: number } = {}) {
   const config = {
-    http: { host: '127.0.0.1', port: 0, publicOrigin: PUBLIC_ORIGIN, trustedProxies: [], rateLimitPerMinute: 100 },
+    http: {
+      host: '127.0.0.1',
+      port: 0,
+      publicOrigin: PUBLIC_ORIGIN,
+      trustedProxies: [],
+      rateLimitPerMinute: limits.perAddress ?? 100,
+      rateLimitPerUserPerMinute: limits.perUser ?? 100,
+    },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
   const capture = new LogCapture();
@@ -439,6 +446,96 @@ describe("B2-4b a signed-in request, and the person's own session", () => {
 
     expect(response.statusCode).toBe(401);
     expect(response.headers['www-authenticate']).toBe(SESSION_CHALLENGE);
+  });
+});
+
+describe("SEC-AV-07 B2-5c each signed-in person's own rate limit, beside their address's", () => {
+  const OTHER_SESSION = 'O'.repeat(43);
+  const OTHER_USER = '0199a0f0-0000-7000-8000-000000000033';
+  const fromAddress = (cookie: string, remoteAddress: string) => ({
+    url: '/v1/auth/session',
+    headers: { cookie: `${SESSION_COOKIE}=${cookie}` },
+    remoteAddress,
+  });
+  /** Two people signed in, with a limit of 10 each and 100 for each address. */
+  async function twoPeople() {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.live.set(OTHER_SESSION, { ...LIVE, sessionId: '0199a0f0-0000-7000-8000-000000000044', userId: OTHER_USER });
+    return { standIn, ...(await server(standIn, { perAddress: 100, perUser: 10 })) };
+  }
+
+  it('refuses a person past their own limit, however many addresses their requests come from', async () => {
+    const { app } = await twoPeople();
+    const statuses = [];
+    for (let i = 0; i < 10; i += 1) {
+      statuses.push((await app.inject(fromAddress(SESSION_ID, `198.51.100.${String(i)}`))).statusCode);
+    }
+    const refused = await app.inject(fromAddress(SESSION_ID, '198.51.100.99'));
+
+    expect(statuses).toEqual(Array.from({ length: 10 }, () => 200));
+    expect(refused.statusCode).toBe(429);
+    expect(refused.json()).toEqual(errorBody('RATE_LIMITED', refused.headers['x-correlation-id'] as string));
+    expect(Number(refused.headers['retry-after'])).toBeGreaterThan(0);
+  });
+
+  it("says the person's limit on the refusal, and the address's on every answer before it", async () => {
+    const { app } = await twoPeople();
+    const first = await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+    for (let i = 0; i < 9; i += 1) await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+    const refused = await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+
+    expect(first.headers).toMatchObject({ 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': '99' });
+    expect(first.headers).not.toHaveProperty('retry-after');
+    expect(refused.headers).toMatchObject({ 'x-ratelimit-limit': '10', 'x-ratelimit-remaining': '0' });
+  });
+
+  it('counts each person on their own', async () => {
+    const { app } = await twoPeople();
+    for (let i = 0; i < 11; i += 1) await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+
+    expect((await app.inject(fromAddress(OTHER_SESSION, '198.51.100.2'))).statusCode).toBe(200);
+  });
+
+  it('notes each refusal as a security event, with the person and the address, and nothing before it', async () => {
+    const { app, noted } = await twoPeople();
+    for (let i = 0; i < 10; i += 1) await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+    expect(noted).toEqual([]);
+
+    await app.inject(fromAddress(SESSION_ID, '203.0.113.9'));
+
+    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_user', ip: '203.0.113.9', userId: USER_ID }]);
+  });
+
+  it('counts no one who is not signed in, whose requests are refused as they were', async () => {
+    const { app, noted } = await twoPeople();
+    for (let i = 0; i < 20; i += 1) {
+      expect((await app.inject({ url: '/v1/auth/session', remoteAddress: '198.51.100.1' })).statusCode).toBe(401);
+    }
+
+    expect((await app.inject(fromAddress(SESSION_ID, '198.51.100.1'))).statusCode).toBe(200);
+    expect(noted).toEqual([]);
+  });
+
+  it('counts no request to a public route, which no one is signed in for', async () => {
+    const { app, noted } = await twoPeople();
+    const statuses = [];
+    for (let i = 0; i < 20; i += 1) {
+      statuses.push((await app.inject({ url: '/health', remoteAddress: `198.51.100.${String(i)}` })).statusCode);
+    }
+
+    expect(statuses).toEqual(Array.from({ length: 20 }, () => 200));
+    expect(noted).toEqual([]);
+  });
+
+  it("leaves the address's own limit first: a refused address asks nothing of the session store", async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app, noted } = await server(standIn, { perAddress: 10, perUser: 100 });
+    for (let i = 0; i < 11; i += 1) await app.inject(fromAddress(SESSION_ID, '198.51.100.1'));
+
+    expect(standIn.looked).toHaveLength(10);
+    expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_address', ip: '198.51.100.1' }]);
   });
 });
 

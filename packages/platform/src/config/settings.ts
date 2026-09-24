@@ -152,6 +152,17 @@ const SETTINGS = {
     // Half the default log cap, so one client's request lines can't fill it (see rateLimitProblems).
     default: '300',
   },
+  // B2-5c: a signed-in person's own limit, from whatever addresses. The
+  // console makes a few requests a page; this leaves room for bursts.
+  AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: {
+    schema: wholeNumber({
+      min: 10,
+      max: 100_000,
+      unit: 'requests',
+      minimumReason: 'fewer would stop ordinary use of the console',
+    }),
+    default: '120',
+  },
   AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
@@ -273,6 +284,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_PUBLIC_ORIGIN',
       'AGENTX_TRUSTED_PROXIES',
       'AGENTX_RATE_LIMIT_PER_MINUTE',
+      'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_OIDC_ISSUER',
       'AGENTX_OIDC_CLIENT_ID',

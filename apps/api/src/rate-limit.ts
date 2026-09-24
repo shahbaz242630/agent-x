@@ -1,5 +1,6 @@
 // ADR-011 §4, SEC-AV-07: the rate limit per client address, counted for every
-// request, including 404s, refusals and malformed addresses.
+// request, including 404s, refusals and malformed addresses; and, beside it,
+// each signed-in person's own (B2-5c).
 //
 // It counts with the plugin's `createRateLimit`, not its `rateLimit` hook. That
 // hook marks each request as counted, which would stop any route's own limit
@@ -78,8 +79,11 @@ export async function registerRateLimit(app: FastifyInstance, perMinute: number,
   });
 }
 
-/** Counts a request against its address's limit: `createCounter`'s hook. */
+/** Counts a request against a limit: `createCounter`'s and `createPersonCounter`'s hooks. */
 export type CountRequest = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+
+/** One limit's counter, from the plugin's `createRateLimit`. */
+type Limiter = ReturnType<FastifyInstance['createRateLimit']>;
 
 /**
  * The hook that counts each request against its address's limit and sets the
@@ -88,19 +92,64 @@ export type CountRequest = (request: FastifyRequest, reply: FastifyReply) => Pro
  */
 export function createCounter(trust: ProxyTrust, limited: (ip: string | undefined) => void): CountRequest {
   return async (request, reply) => {
-    if (await overLimit(request, reply)) {
+    // The address's limit is the plugin's own, set at registration.
+    if (await overLimit(request.server.createRateLimit(), request, reply, 'always')) {
       limited(rawClientIp(request, trust));
       throw new RateLimited('rate limit exceeded');
     }
   };
 }
 
-/** Counts the request, sets the limit headers, and says whether it is over the limit. */
-async function overLimit(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
-  const result = await request.server.createRateLimit()(request);
+/**
+ * The hook that counts each signed-in person's requests against their own
+ * limit (ADR-011 §4, B2-5c), beside their address's: a person's session used
+ * from many addresses is still one person. It runs after the access hook, and
+ * counts only a request it found a person for. Over the limit, it tells
+ * `limited` the client's address and the person, sets the limit headers to
+ * the person's, since theirs is the one refusing, and throws the same 429.
+ *
+ * The counter is made here, once: each `createRateLimit` with options of its
+ * own starts a count of its own.
+ */
+export function createPersonCounter(
+  app: FastifyInstance,
+  perMinute: number,
+  trust: ProxyTrust,
+  limited: (ip: string | undefined, userId: string) => void,
+): CountRequest {
+  const limiter = app.createRateLimit({
+    max: perMinute,
+    timeWindow: WINDOW_MS,
+    // Only called for a request with a person: the hook below looks first.
+    keyGenerator: (request) => request.person?.userId ?? UNREADABLE_ADDRESS,
+  });
+  return async (request, reply) => {
+    const person = request.person;
+    if (person === null) return;
+    if (await overLimit(limiter, request, reply, 'when-refused')) {
+      limited(rawClientIp(request, trust), person.userId);
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
+}
+
+/**
+ * Counts the request and says whether it is over the limit. The limit headers
+ * are set on every counted response (`always`), or only when this limit
+ * refuses the request (`when-refused`), so the address's headers stand
+ * otherwise.
+ */
+async function overLimit(
+  limiter: Limiter,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  headers: 'always' | 'when-refused',
+): Promise<boolean> {
+  const result = await limiter(request);
   // Only an allow list lets a request through uncounted, and none is set. The
   // check is here for TypeScript, which sees the counted fields only after it.
   if (result.isAllowed) return false;
+  if (headers === 'when-refused' && !result.isExceeded) return false;
   void reply.headers({
     'x-ratelimit-limit': result.max,
     'x-ratelimit-remaining': result.remaining,

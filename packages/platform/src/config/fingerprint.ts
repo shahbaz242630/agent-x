@@ -75,6 +75,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       publicOrigin: config.http.publicOrigin,
       trustedProxies: config.http.trustedProxies,
       rateLimitPerMinute: config.http.rateLimitPerMinute,
+      rateLimitPerUserPerMinute: config.http.rateLimitPerUserPerMinute,
     },
     db: {
       host: config.db.host,

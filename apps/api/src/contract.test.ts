@@ -38,7 +38,14 @@ afterEach(async () => {
 async function server(ids: IdGenerator = new SequentialIds()) {
   const capture = new LogCapture();
   const config = {
-    http: { host: '127.0.0.1', port: 0, publicOrigin: PUBLIC_ORIGIN, trustedProxies: [], rateLimitPerMinute: 100 },
+    http: {
+      host: '127.0.0.1',
+      port: 0,
+      publicOrigin: PUBLIC_ORIGIN,
+      trustedProxies: [],
+      rateLimitPerMinute: 100,
+      rateLimitPerUserPerMinute: 100,
+    },
     log: { level: 'debug' as const, eventCapPerMinute: 10_000 },
   };
   const logger = createLogger({

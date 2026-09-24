@@ -20,7 +20,14 @@ afterEach(async () => {
 
 async function server() {
   const config = {
-    http: { host: '127.0.0.1', port: 0, publicOrigin: PUBLIC_ORIGIN, trustedProxies: [], rateLimitPerMinute: 100 },
+    http: {
+      host: '127.0.0.1',
+      port: 0,
+      publicOrigin: PUBLIC_ORIGIN,
+      trustedProxies: [],
+      rateLimitPerMinute: 100,
+      rateLimitPerUserPerMinute: 100,
+    },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
   const logger = createLogger({
