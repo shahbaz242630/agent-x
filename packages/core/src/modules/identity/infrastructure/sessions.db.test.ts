@@ -7,7 +7,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type SignInEvidence, SignInRefused } from '../domain/sign-in.ts';
-import { createSessions, type Sessions } from './sessions.ts';
+import { createSessions, LONGEST_IDLE_SECONDS, type Sessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -338,7 +338,7 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
       .where('id', '=', sessionId)
       .execute();
 
-  it('deletes exactly the sessions a request could no longer use: past either timeout, to the second', async () => {
+  it('deletes only sessions no setting could make live again: past their end, or unused past the longest idle timeout', async () => {
     const { userId } = await setUp();
     const now = LATER;
     await at(now).sweep(app, 1_000_000);
@@ -349,9 +349,12 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
           await lastUsed(opened.sessionId, usedAt);
           return opened;
         });
+    const LONGEST = LONGEST_IDLE_SECONDS * SECOND;
     const cases = {
-      idleJustNow: await open(now - IDLE * SECOND, now - IDLE * SECOND),
-      idleNotYet: await open(now - IDLE * SECOND + SECOND, now - IDLE * SECOND + SECOND),
+      idleLongestJustNow: await open(now - LONGEST, now - LONGEST),
+      idleLongestNotYet: await open(now - LONGEST + SECOND, now - LONGEST + SECOND),
+      // Past this process's own idle timeout only: refused, but another setting could still take it.
+      idleOwnOnly: await open(now - IDLE * SECOND, now - IDLE * SECOND),
       endsJustNow: await open(now - ABSOLUTE * SECOND, now - SECOND),
       endsNotYet: await open(now - ABSOLUTE * SECOND + SECOND, now - SECOND),
     };
@@ -359,11 +362,27 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
     expect(await at(now).sweep(app, 100)).toBe(2);
 
     const left = await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute();
-    expect(left.map((row) => row.id).sort()).toEqual([cases.idleNotYet.sessionId, cases.endsNotYet.sessionId].sort());
-    // What the sweep kept is exactly what a request at that moment still finds.
-    for (const [name, { cookie }] of Object.entries(cases)) {
-      expect(await at(now).use(app, cookie), name).toEqual(name.endsWith('NotYet') ? expect.anything() : undefined);
-    }
+    expect(left.map((row) => row.id).sort()).toEqual(
+      [cases.idleLongestNotYet.sessionId, cases.idleOwnOnly.sessionId, cases.endsNotYet.sessionId].sort(),
+    );
+    // Nothing deleted was still usable; of what was kept, only the one inside every timeout is.
+    const usable = await Promise.all(
+      Object.entries(cases).map(async ([name, { cookie }]) => [name, (await at(now).use(app, cookie)) !== undefined]),
+    );
+    expect(Object.fromEntries(usable)).toEqual({
+      idleLongestJustNow: false,
+      idleLongestNotYet: false,
+      idleOwnOnly: false,
+      endsJustNow: false,
+      endsNotYet: true,
+    });
+  });
+
+  it('refuses an idle timeout longer than the longest the sweep allows for', () => {
+    const make = (idleSeconds: number) =>
+      createSessions({ ids, clock: new FixedClock(START), timeouts: { idleSeconds, absoluteSeconds: 24 * 60 * 60 } });
+    expect(() => make(LONGEST_IDLE_SECONDS)).not.toThrow();
+    expect(() => make(LONGEST_IDLE_SECONDS + 1)).toThrow(RangeError);
   });
 
   it('deletes a batch at a time, and nothing once none is left', async () => {
@@ -381,7 +400,7 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
     const { userId } = await setUp();
     const now = LATER + 2 * 86_400_000;
     await at(now).sweep(app, 1_000_000);
-    const { sessionId } = await at(now - IDLE * SECOND).open(app, userId, evidence);
+    const { sessionId } = await at(now - LONGEST_IDLE_SECONDS * SECOND).open(app, userId, evidence);
     // A request's use, held open until the sweep has found the session and waits on its lock.
     const holder = await database.connect('admin');
     await holder.query('begin');
@@ -404,6 +423,20 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
 
       expect(await sweeping).toBe(0);
       expect(await rowOf(sessionId)).toMatchObject({ last_seen_at: new Date(now) });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('gives up after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table identity.sessions in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, at(LATER).sweep(app, 100), 'the sweep')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');
       await holder.end();

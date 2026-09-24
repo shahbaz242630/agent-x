@@ -328,7 +328,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     );
     const sessions = [
       ['0199a0f0-0000-7000-8000-0000000b24a1', '01', '13 hours', '1 minute'],
-      ['0199a0f0-0000-7000-8000-0000000b24a2', '02', '1 hour', '31 minutes'],
+      ['0199a0f0-0000-7000-8000-0000000b24a2', '02', '10 hours', '9 hours'],
       ['0199a0f0-0000-7000-8000-0000000b24a3', '03', '1 hour', '1 minute'],
     ] as const;
     for (const [id, fill, opened, used] of sessions) {
@@ -346,7 +346,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
         expect.objectContaining({ level: 'info', deleted: 2 }),
       );
     });
-    // Past its twelve hours, and unused for more than the default 30 minutes: both gone; the live one kept.
+    // Past its twelve hours, and unused past the longest idle timeout there can be (8 hours): both gone; the live one kept.
     expect(await admin.query<{ id: string }>('select id from identity.sessions where user_id = $1', [userId])).toEqual([
       { id: sessions[2][0] },
     ]);
