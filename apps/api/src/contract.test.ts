@@ -99,9 +99,14 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'DELETE /test/nested/things/{id}',
       'GET /health',
       'GET /test/items/{ref}',
+      'GET /v1/auth/callback',
+      'GET /v1/auth/sign-in',
       'HEAD /health',
       'HEAD /test/items/{ref}',
+      'HEAD /v1/auth/callback',
+      'HEAD /v1/auth/sign-in',
       'POST /test/both',
+      'POST /v1/auth/sign-out',
       'PUT /test/both',
     ]);
   });
@@ -1068,7 +1073,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     const answers = Object.values(document.paths).flatMap((item) =>
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
-    expect(answers.length).toBe(3);
+    // The test's route, /health and the three sign-in routes, with each GET's HEAD.
+    expect(answers.length).toBe(8);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },

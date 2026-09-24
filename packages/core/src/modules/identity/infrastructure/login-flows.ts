@@ -5,7 +5,7 @@
 // times are the Clock's (ADR-006 §3).
 import { createHash, randomBytes } from 'node:crypto';
 
-import type { Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { isReturnPath } from '../domain/sign-in.ts';
@@ -28,7 +28,9 @@ export interface LoginFlows {
   take(db: Kysely<IdentityTables>, flowId: string): Promise<TakenFlow | undefined>;
   /**
    * Deletes up to `most` flows past their ten minutes, and says how many: a browser that never came back leaves its flow behind, and
-   * anyone can start one (B2-3a-2 sweeps them hourly, a batch at a time).
+   * anyone can start one (B2-3a-2 sweeps them hourly, a batch at a time). In
+   * a transaction of its own, its statement limited to 10 seconds, a wait for
+   * a lock included.
    */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
@@ -75,17 +77,21 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
 
     async sweep(db, most) {
       if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one flow at a time');
-      const ended = db
-        .selectFrom('identity.login_flows')
-        .select('cookie_hash')
-        .where('ends_at', '<=', clock.now())
-        .limit(most);
-      const rows = await db
-        .deleteFrom('identity.login_flows')
-        .where('cookie_hash', 'in', ended)
-        .returning('cookie_hash')
-        .execute();
-      return rows.length;
+      const now = clock.now();
+      return db.transaction().execute(async (tx) => {
+        await sql`set local statement_timeout = '10s'`.execute(tx);
+        const ended = tx
+          .selectFrom('identity.login_flows')
+          .select('cookie_hash')
+          .where('ends_at', '<=', now)
+          .limit(most);
+        const rows = await tx
+          .deleteFrom('identity.login_flows')
+          .where('cookie_hash', 'in', ended)
+          .returning('cookie_hash')
+          .execute();
+        return rows.length;
+      });
     },
   };
 }

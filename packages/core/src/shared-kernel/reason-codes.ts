@@ -30,6 +30,7 @@ export const REASON_CODES = {
   RATE_LIMITED:
     'Too many requests came from this client address in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
+  SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
   UNAUTHENTICATED:

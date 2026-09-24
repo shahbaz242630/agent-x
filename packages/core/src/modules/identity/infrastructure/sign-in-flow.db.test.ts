@@ -187,6 +187,16 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await sessions.use(app, first.cookie)).toBeDefined();
   });
 
+  it('signs out: ends the session its cookie names, and nothing without one', async () => {
+    const done = await roundTrip();
+
+    expect(await signIn.signOut(undefined)).toBe(false);
+    expect(await sessions.use(app, done.cookie)).toBeDefined();
+    expect(await signIn.signOut(done.cookie)).toBe(true);
+    expect(await sessions.use(app, done.cookie)).toBeUndefined();
+    expect(await signIn.signOut(done.cookie)).toBe(false);
+  });
+
   it("gives each browser its own flow: one's callback can't finish another's", async () => {
     const mine = await signIn.begin();
     const theirs = await signIn.begin();
