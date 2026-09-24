@@ -234,6 +234,7 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       expect(await rowOf(sessionId)).toBeUndefined();
       expect(await sessions.end(app, cookie)).toBe(false);
       expect(await sessions.end(app, 'not a cookie')).toBe(false);
+      expect(await sessions.end(app, undefined as unknown as string)).toBe(false);
     });
   });
 
