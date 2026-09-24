@@ -51,8 +51,6 @@ const ERROR_HEADERS: ReadonlySet<string> = new Set([
   ...Object.keys(SECURITY_HEADERS),
   CORRELATION_HEADER,
   ...RATE_LIMIT_HEADERS,
-  // A 401's challenge (access.ts): RFC 9110 has every 401 carry one.
-  'www-authenticate',
   'connection',
 ]);
 

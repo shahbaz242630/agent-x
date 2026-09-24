@@ -392,11 +392,22 @@ describe("B2-4b a signed-in request, and the person's own session", () => {
     const standIn = new StandIn();
     standIn.lookupFails = new Error('the database is away');
     const { app } = await server(standIn);
+    // A route that would answer whoever reached it: only the hook stands in the way.
+    const reached: string[] = [];
+    app.get(
+      '/test/mine',
+      { config: { access: ['person'] }, schema: { response: { 200: z.object({ ok: z.literal(true) }) } } },
+      () => {
+        reached.push('mine');
+        return { ok: true as const };
+      },
+    );
 
-    const response = await app.inject(asking(SESSION_ID));
+    const response = await app.inject({ url: '/test/mine', headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` } });
 
     expect(response.statusCode).toBe(500);
     expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
+    expect(reached).toEqual([]);
   });
 
   it('with sign-in off, refuses it as UNAUTHENTICATED: no one can be signed in', async () => {
