@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { type ChallengeFacts, type FreshSignIn, stepUpRefusal } from './step-up.ts';
+import { AUTH_TIME_TOLERANCE_SECONDS, type ChallengeFacts, type FreshSignIn, stepUpRefusal } from './step-up.ts';
 
 const PERSON = '0199a0f0-0000-7000-8000-000000000011';
 const CHALLENGE: ChallengeFacts = { userId: PERSON, createdAt: new Date('2026-09-24T09:00:00.600Z') };
@@ -34,12 +34,17 @@ describe('ADR-003 §9 a fresh sign-in stands for its challenge', () => {
 
   describe('FX-CLOCK SEC-HA-05 an authentication from before the challenge is refused', () => {
     it.each([
-      ['a second before the challenge', '2026-09-24T08:59:59Z', 'stale_authentication'],
+      ['six seconds before the challenge', '2026-09-24T08:59:54Z', 'stale_authentication'],
       ['the session’s own sign-in, hours before', '2026-09-24T06:00:00Z', 'stale_authentication'],
+      ['five seconds before, a login service clock that far behind ours', '2026-09-24T08:59:55Z', undefined],
       ["the challenge's own second, which auth_time can't tell apart", '2026-09-24T09:00:00Z', undefined],
       ['the second after', '2026-09-24T09:00:01Z', undefined],
     ])('%s', (_what, authTime, refusal) => {
       expect(stepUpRefusal(CHALLENGE, signIn(authTime), NO_PASSKEY)).toBe(refusal);
+    });
+
+    it('allows the login service clock 5 seconds behind ours, no more', () => {
+      expect(AUTH_TIME_TOLERANCE_SECONDS).toBe(5);
     });
 
     it('refuses a time that is not a time', () => {
