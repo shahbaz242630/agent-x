@@ -33,62 +33,65 @@ function setUp(
   return { sweep, asked, lines, capture };
 }
 
-describe.each(['identity.flow', 'identity.session', 'security.event'] as const)('the %s sweep', (rows) => {
-  it('sweeps a batch at a time until one comes back short, then says how many', async () => {
-    const { sweep, asked, lines } = setUp(rows, [10, 10, 3]);
+describe.each(['identity.flow', 'identity.session', 'identity.step_up_challenge', 'security.event'] as const)(
+  'the %s sweep',
+  (rows) => {
+    it('sweeps a batch at a time until one comes back short, then says how many', async () => {
+      const { sweep, asked, lines } = setUp(rows, [10, 10, 3]);
 
-    await sweep.run();
+      await sweep.run();
 
-    expect(asked).toEqual([10, 10, 10]);
-    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 23 }]);
-  });
+      expect(asked).toEqual([10, 10, 10]);
+      expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 23 }]);
+    });
 
-  it('says so when there was nothing to sweep', async () => {
-    const { sweep, lines } = setUp(rows, [0]);
+    it('says so when there was nothing to sweep', async () => {
+      const { sweep, lines } = setUp(rows, [0]);
 
-    await sweep.run();
+      await sweep.run();
 
-    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 0 }]);
-  });
+      expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 0 }]);
+    });
 
-  it('stops at its most batches a run, leaving the rest for the next', async () => {
-    const { sweep, asked, lines } = setUp(rows, [10, 10, 10, 10], { mostBatches: 2 });
+    it('stops at its most batches a run, leaving the rest for the next', async () => {
+      const { sweep, asked, lines } = setUp(rows, [10, 10, 10, 10], { mostBatches: 2 });
 
-    await sweep.run();
+      await sweep.run();
 
-    expect(asked).toHaveLength(2);
-    expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 20 }]);
-  });
+      expect(asked).toHaveLength(2);
+      expect(lines()).toEqual([{ event: `${rows}_sweep_done`, count: 20 }]);
+    });
 
-  it('warns when a batch fails, with what it swept before, and never throws', async () => {
-    const { sweep, lines, capture } = setUp(rows, [10, new Error('the database is away')]);
+    it('warns when a batch fails, with what it swept before, and never throws', async () => {
+      const { sweep, lines, capture } = setUp(rows, [10, new Error('the database is away')]);
 
-    await expect(sweep.run()).resolves.toBeUndefined();
+      await expect(sweep.run()).resolves.toBeUndefined();
 
-    expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 10 }]);
-    expect(capture.lines()[0]).toMatchObject({ level: 'warn' });
-  });
+      expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 10 }]);
+      expect(capture.lines()[0]).toMatchObject({ level: 'warn' });
+    });
 
-  it('warns when a batch outlasts its deadline', async () => {
-    const { sweep, lines } = setUp(rows, ['hang']);
+    it('warns when a batch outlasts its deadline', async () => {
+      const { sweep, lines } = setUp(rows, ['hang']);
 
-    await sweep.run();
+      await sweep.run();
 
-    expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 0 }]);
-  });
+      expect(lines()).toEqual([{ event: `${rows}_sweep_failed`, count: 0 }]);
+    });
 
-  it('ends quietly when stopped, before a batch or during one', async () => {
-    const before = setUp(rows, [10]);
-    const stopped = new AbortController();
-    stopped.abort();
-    await before.sweep.run(stopped.signal);
-    expect(before.asked).toEqual([]);
+    it('ends quietly when stopped, before a batch or during one', async () => {
+      const before = setUp(rows, [10]);
+      const stopped = new AbortController();
+      stopped.abort();
+      await before.sweep.run(stopped.signal);
+      expect(before.asked).toEqual([]);
 
-    const during = setUp(rows, ['hang']);
-    const stopping = new AbortController();
-    const running = during.sweep.run(stopping.signal);
-    stopping.abort();
-    await running;
-    expect(during.lines()).toEqual([]);
-  });
-});
+      const during = setUp(rows, ['hang']);
+      const stopping = new AbortController();
+      const running = during.sweep.run(stopping.signal);
+      stopping.abort();
+      await running;
+      expect(during.lines()).toEqual([]);
+    });
+  },
+);

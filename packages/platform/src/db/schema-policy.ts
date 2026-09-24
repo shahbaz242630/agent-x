@@ -156,6 +156,29 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Added, and taken once (deleted as it is read); never changed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
     },
+    'identity.step_up_challenges': {
+      reason:
+        "Step-up challenges (ADR-003 §8-§9, B3-1): a person's fresh sign-in bound to one pending change in their own session, which belongs to no organisation",
+      columns: [
+        'id',
+        'session_id',
+        'user_id',
+        'action',
+        'change_hash',
+        'nonce',
+        'created_at',
+        'ends_at',
+        'verified_at',
+        'auth_time',
+        'amr',
+        'idp_session_id',
+        'id_token_hash',
+      ],
+      // Added, read and consumed (deleted as it is read); changed only to
+      // record its evidence, never in what it is for or whose it is.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'],
+    },
     'security.events': {
       reason:
         'Failed sign-ins and rate-limit hits with the client IP (ADR-005 §6, ADR-011 §7): they happen before any organisation is known, and the address is kept in-country, here alone',

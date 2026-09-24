@@ -353,6 +353,47 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it('sweeps the step-up challenges past their five minutes once it listens, keeping the rest (B3-1)', async () => {
+    const admin = database.as('admin');
+    const userId = '0199a0f0-0000-7000-8000-0000000b3101';
+    const sessionId = '0199a0f0-0000-7000-8000-0000000b3102';
+    await admin.query(
+      `insert into identity.users (id, issuer, subject, created_at) values ($1, 'https://auth.example.test', 'b3-1', pg_catalog.now())`,
+      [userId],
+    );
+    await admin.query(
+      `insert into identity.sessions (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at)
+       values ($1, $2, pg_catalog.decode(pg_catalog.repeat('31', 32), 'hex'), pg_catalog.now(), '{pwd,otp,mfa}',
+               pg_catalog.now(), pg_catalog.now(), pg_catalog.now() + interval '12 hours')`,
+      [sessionId, userId],
+    );
+    const challenges = [
+      ['0199a0f0-0000-7000-8000-0000000b3111', '6 minutes'],
+      ['0199a0f0-0000-7000-8000-0000000b3112', '1 minute'],
+    ] as const;
+    for (const [id, age] of challenges) {
+      await admin.query(
+        `insert into identity.step_up_challenges (id, session_id, user_id, action, change_hash, nonce, created_at, ends_at)
+         values ($1, $2, $3, 'members.invite', pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex'), 'n',
+                 pg_catalog.now() - $4::interval, pg_catalog.now() - $4::interval + interval '5 minutes')`,
+        [id, sessionId, userId, age],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'identity.step_up_challenge_sweep_done')).toEqual(
+        expect.objectContaining({ level: 'info', deleted: 1 }),
+      );
+    });
+    expect(
+      await admin.query<{ id: string }>('select id from identity.step_up_challenges where session_id = $1', [
+        sessionId,
+      ]),
+    ).toEqual([{ id: challenges[1][0] }]);
+    await stop(run);
+  });
+
   it('sweeps the security events past their retention once it listens, keeping the rest (B2-5a)', async () => {
     const admin = database.as('admin');
     for (const [id, age] of [
