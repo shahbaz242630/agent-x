@@ -15,6 +15,7 @@ export const ALLOWED_DEPENDENCIES: Readonly<Record<string, string>> = {
   fastify: "ADR-001: the API's HTTP server",
   'fastify-type-provider-zod':
     'ADR-001, SEC-WEB-06: every route checks its input and answers through its zod schemas, and they become the OpenAPI document',
+  jose: "ADR-003 §5: checks the login service's ID tokens (JWS signatures against its published keys, and the JWT claims); no dependencies of its own, and used only by the identity module's OIDC client, which fetches the keys itself through the outbound allowlist",
   kysely: 'ADR-001: typed SQL with bound parameters, and the transactions withTenant opens',
   pg: 'ADR-001: the Postgres driver, used only by @agentx/platform/db and the test database harness',
   pino: 'ADR-001, ADR-013: the logger, which writes redacted JSON lines to stdout',

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@agentx/platform": "workspace:*",
+    "jose": "6.2.12",
     "kysely": "0.29.6",
     "uuid": "14.0.2"
   },

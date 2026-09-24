@@ -10,5 +10,15 @@ export {
   type Sessions,
   type SessionTimeouts,
 } from './infrastructure/sessions.ts';
+export {
+  createOidcClient,
+  type LoginFlow,
+  type OidcClient,
+  type OidcClientSettings,
+  SignInFailed,
+  type SignInFailure,
+  type SignInStart,
+  type VerifiedSignIn,
+} from './infrastructure/oidc-client.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
 export { userForSubject } from './infrastructure/users.ts';

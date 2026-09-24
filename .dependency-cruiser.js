@@ -39,6 +39,14 @@ const CONFINED = [
     allowedIn: `(?:${ROOT}packages/platform/src/db/|${ROOT}packages/testing/src/db/)`,
   },
   {
+    // ADR-003 §5: token checks live in one place, the OIDC client, which
+    // fetches the keys itself (jose's own remote key fetch would bypass the
+    // outbound allowlist).
+    name: 'jose-only-in-the-oidc-client',
+    packages: 'jose',
+    allowedIn: `${MODULES}identity/infrastructure/oidc-client(?:\\.test)?\\.ts$`,
+  },
+  {
     name: 'query-builder-only-in-infrastructure',
     packages: 'kysely',
     allowedIn: `(?:${ROOT}packages/platform/src/db/|${MODULES}[^/]+/infrastructure/)`,
