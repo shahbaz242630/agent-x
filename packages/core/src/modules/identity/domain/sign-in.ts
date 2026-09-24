@@ -65,7 +65,8 @@ export function checkEvidence({ idpSessionId, authTime, amr }: SignInEvidence): 
  * only letters, digits and `-._~/%?=&`, and is at most 512 characters, so
  * nothing in it can end the Location header or reach another origin.
  */
-const RETURN_PATH = /^\/(?![/\\])[A-Za-z0-9\-._~/%?=&]{0,511}$/;
+// The class holds no backslash, so a second slash is the only way to another host.
+const RETURN_PATH = /^\/(?!\/)[A-Za-z0-9\-._~/%?=&]{0,511}$/;
 
 /** The path to send the browser to when it asks for none. */
 export const HOME_PATH = '/';

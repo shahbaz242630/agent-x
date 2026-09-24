@@ -105,6 +105,7 @@ describe('a return path (SEC-WEB-04)', () => {
     ['a backslash later on', '/agents\\x'],
     ['too long', `/${'a'.repeat(512)}`],
     ['not text', 7],
+    ['something that only reads as a path', { toString: () => '/agents' }],
   ])('is refused when it is %s', (_, path) => {
     expect(isReturnPath(path)).toBe(false);
   });
