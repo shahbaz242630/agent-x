@@ -1099,6 +1099,15 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'cookie_hash', 'last_seen_at'] }),
       ).toContain(once);
       expect(await problemsWith({ ...SESSIONS, appMayUpdate: [] })).toContain(once);
+      const head = POLICY.globalTables['platform_controls.audit_head'] ?? { reason: '', columns: [] };
+      expect(
+        await problemsAfter([], {
+          ...POLICY,
+          globalTables: { ...POLICY.globalTables, 'platform_controls.audit_head': { ...head, appMayUpdate: ['seq'] } },
+        }),
+      ).toContain(
+        'platform_controls.audit_head: the global-table list names columns the app may change, but its schema is append-only',
+      );
       expect(await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'last_seen_at', 'cookie'] })).toContain(
         "identity.sessions: the app may change column cookie, which the global-table list doesn't name",
       );

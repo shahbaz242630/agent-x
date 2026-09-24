@@ -244,6 +244,51 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
     expect(await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute()).toEqual([]);
   });
 
+  it('refuses a session past its absolute end a new cookie ID, however recently used', async () => {
+    const { userId, clock, sessions } = await setUp();
+    const { sessionId, cookie } = await sessions.open(app, userId, evidence);
+    for (let used = 0; used < ABSOLUTE; used += IDLE / 2) {
+      clock.advanceBy((IDLE / 2) * SECOND);
+      await sessions.use(app, cookie);
+    }
+
+    expect(await sessions.rotate(app, sessionId)).toBeUndefined();
+  });
+
+  it("holds a row the module didn't write to the table's own limits", async () => {
+    const { userId } = await setUp();
+    const row = {
+      user_id: userId,
+      cookie_hash: Buffer.alloc(32, 7),
+      idp_session_id: null as string | null,
+      auth_time: START,
+      amr: ['pwd', 'mfa'],
+      created_at: START,
+      last_seen_at: START,
+      ends_at: new Date(START.getTime() + SECOND),
+    };
+    const insert = (change: Partial<typeof row>) =>
+      app
+        .insertInto('identity.sessions')
+        .values({ ...row, id: ids.next(), ...change })
+        .execute();
+
+    await insert({});
+    await expect(insert({ cookie_hash: Buffer.alloc(32, 8), ends_at: START })).rejects.toMatchObject({
+      constraint: 'ends_after_it_begins',
+    });
+    await expect(insert({})).rejects.toMatchObject({ code: '23505', constraint: 'one_session_per_cookie' });
+    for (const change of [
+      { cookie_hash: Buffer.alloc(31, 9) },
+      { cookie_hash: Buffer.alloc(33, 9) },
+      { amr: [] },
+      { amr: Array.from({ length: 17 }, () => 'otp') },
+      { idp_session_id: '' },
+    ]) {
+      await expect(insert({ cookie_hash: Buffer.alloc(32, 10), ...change })).rejects.toMatchObject({ code: '23514' });
+    }
+  });
+
   it('refuses a session for someone who is not a user', async () => {
     const { sessions } = await setUp();
 
