@@ -17,6 +17,7 @@ export const REASON_CODES = {
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
+  FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
   INTERNAL_ERROR:

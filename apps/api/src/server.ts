@@ -3,7 +3,8 @@
 // 1. gets its correlation ID (from the caller if it's a UUID) and the security headers
 // 2. is counted against its client address's rate limit (ADR-011 §4)
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
-// 4. is refused if its route doesn't name its caller (access.ts, BR-04)
+// 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
+//    signed-in person is found by their session cookie (B2-4b)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
@@ -50,6 +51,8 @@ const ERROR_HEADERS: ReadonlySet<string> = new Set([
   ...Object.keys(SECURITY_HEADERS),
   CORRELATION_HEADER,
   ...RATE_LIMIT_HEADERS,
+  // A 401's challenge (access.ts): RFC 9110 has every 401 carry one.
+  'www-authenticate',
   'connection',
 ]);
 
@@ -141,7 +144,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     done();
   });
 
-  registerAccess(app);
+  const signIn = options.signIn?.service;
+  registerAccess(app, signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie));
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

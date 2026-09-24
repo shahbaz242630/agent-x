@@ -23,9 +23,12 @@
 //   SIGN_IN_FAILED, and no session is opened; the log says which step failed.
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
 //   something, so the Origin rule holds it (SEC-WEB-01).
+// - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
+//   session: when and how they signed in, and when it ends. The access hook
+//   has found it (access.ts); anyone else gets its 401.
 //
-// All three are public: each answers whoever calls it, and each acts only on
-// what the caller's own cookies name. With sign-in off (no login service set,
+// The first three are public: each answers whoever calls it, and each acts
+// only on what the caller's own cookies name. With sign-in off (no login service set,
 // B2-6), all three answer NOT_FOUND, as a feature that is off does. So does a
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
@@ -103,6 +106,25 @@ const CALLBACK_SCHEMA = {
   response: { 302: REDIRECT },
 };
 
+const SESSION_SCHEMA = {
+  summary: 'Your own session',
+  response: {
+    200: z
+      .object({
+        userId: z.uuid().describe("The signed-in person's ID in Agent X."),
+        authenticatedAt: z.iso.datetime().describe('When they last proved who they are at the login service.'),
+        methods: z
+          .array(z.string())
+          .describe('How they proved it, as the login service named it (RFC 8176): pwd, otp, user, mfa.'),
+        idleExpiresAt: z.iso
+          .datetime()
+          .describe('When the session ends if it goes unused from now; each signed-in request moves it on.'),
+        expiresAt: z.iso.datetime().describe('When the session ends however much it is used.'),
+      })
+      .register(API_SCHEMAS, { id: 'Session', description: "The signed-in person's own session." }),
+  },
+};
+
 const SIGN_OUT_SCHEMA = {
   summary: 'Sign out',
   response: {
@@ -160,6 +182,19 @@ export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, l
         cookie(FLOW_COOKIE, '', 'Lax', 0),
       ])
       .send({});
+  });
+
+  routes.get('/v1/auth/session', { schema: SESSION_SCHEMA, config: { access: ['person'] } }, (request) => {
+    const session = request.person;
+    // The access hook lets no one else through; a route that runs without a person is a bug.
+    if (session === null) throw new Error('the session route ran without a signed-in person');
+    return {
+      userId: session.userId,
+      authenticatedAt: session.authTime.toISOString(),
+      methods: [...session.amr],
+      idleExpiresAt: session.idleEndsAt.toISOString(),
+      expiresAt: session.endsAt.toISOString(),
+    };
   });
 
   routes.post(

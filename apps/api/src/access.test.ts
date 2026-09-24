@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifySchema, RouteShorthandOptions } from 'fast
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { accessProblems, type Principal } from './access.ts';
+import { accessProblems, type Principal, SESSION_CHALLENGE } from './access.ts';
 import { ContractBroken } from './contract.ts';
 import { errorBody } from './errors.ts';
 import { buildServer } from './server.ts';
@@ -49,6 +49,8 @@ describe('BR-04 every route names who may call it', () => {
     ['several roles and agents', ['admin', 'approver', 'developer', 'viewer', 'agent'], '/v1/spend-requests'],
     ['a parameter past the first segment', ['admin'], '/v1/members/:id'],
     ['the public alone', ['public'], '/health'],
+    ['any signed-in person, for their own account', ['person'], '/v1/auth/session'],
+    ['any signed-in person and agents', ['person', 'agent'], '/v1/me'],
     ['operators alone, under /operator/', ['operator'], '/operator/hand-off/pause'],
   ])('takes %s', (_what, access, url) => {
     expect(accessProblems(access, url)).toEqual([]);
@@ -62,6 +64,8 @@ describe('BR-04 every route names who may call it', () => {
     ['a name in the wrong case', ['Admin'], '/v1/members', 'its access names someone unknown'],
     ['someone twice', ['admin', 'admin'], '/v1/members', 'its access names someone twice'],
     ['the public beside others', ['public', 'viewer'], '/v1/members', 'the public beside others'],
+    ['any signed-in person beside a role', ['viewer', 'person'], '/v1/members', 'any signed-in person beside roles'],
+    ['operators beside any signed-in person', ['operator', 'person'], '/operator/tools', 'operators beside others'],
     ['operators beside customers (SEC-OPS-01)', ['operator', 'admin'], '/operator/tools', 'operators beside others'],
     ['operators on a tenant address', ['operator'], '/v1/organization/unfreeze', 'operators outside /operator/'],
     [
@@ -167,6 +171,8 @@ describe('BR-04 a route answers only a caller it names, denying by default', () 
     const response = await app.inject(request);
     expect(response.statusCode).toBe(401);
     expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
+    // RFC 9110: every 401 says how to authenticate.
+    expect(response.headers['www-authenticate']).toBe(SESSION_CHALLENGE);
     if (request.method !== 'HEAD') expect(response.json()).toEqual(errorBody('UNAUTHENTICATED', FIRST_ID));
     expect(reached).toEqual([]);
   });

@@ -1,6 +1,6 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -195,6 +195,35 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await signIn.signOut(done.cookie)).toBe(true);
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
     expect(await signIn.signOut(done.cookie)).toBe(false);
+  });
+
+  it('finds the live session a signed-in request names (B2-4b), and none once it is signed out', async () => {
+    const done = await roundTrip();
+
+    expect(await signIn.signedIn(done.cookie)).toMatchObject({
+      sessionId: done.sessionId,
+      userId: done.userId,
+      ...evidence,
+      idleEndsAt: new Date(START.getTime() + 1800 * 1000),
+    });
+    expect(await signIn.signedIn('A'.repeat(43))).toBeUndefined();
+    await signIn.signOut(done.cookie);
+    expect(await signIn.signedIn(done.cookie)).toBeUndefined();
+  });
+
+  it('gives up looking a session up after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const done = await roundTrip();
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table identity.sessions in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, signIn.signedIn(done.cookie), 'the lookup')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it("gives each browser its own flow: one's callback can't finish another's", async () => {

@@ -3,25 +3,52 @@
 // contract refuses a route without a valid one and writes it into the OpenAPI
 // document as `x-access`, which the role matrix tests read (FX-ROLEMATRIX).
 // This hook enforces it, denying by default: a route answers only a caller it
-// names. No request carries a signed-in person or an agent yet, so for now
-// only public routes answer; the rest are refused as UNAUTHENTICATED.
-import type { FastifyInstance } from 'fastify';
+// names.
+//
+// A request to any route that isn't public is asked who it comes from. B2-4b:
+// a signed-in person, by the live session its `__Host-` session cookie names,
+// found with both timeouts applied and its last use moved on, and put on the
+// request as `request.person`. With no live session the answer is 401
+// UNAUTHENTICATED, with a challenge saying how to sign in (the Cookie scheme
+// of draft-broyer-http-cookie-auth); a person the route doesn't name is 403
+// FORBIDDEN. Until memberships and roles come (B4), a person is named only by
+// routes about their own account (`person`); agents come at C2.
+import type { LiveSession } from '@agentx/core/modules/identity';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { sendErrorBody } from './errors.ts';
+import { cookieValue, SESSION_COOKIE } from './sign-in.ts';
 
 /**
- * Who a route can name: an organisation's four roles, an AI agent by its key,
- * the platform's operators, or anyone (BRD §2).
+ * Who a route can name: an organisation's four roles, any signed-in person
+ * (for their own account, whatever their roles), an AI agent by its key, the
+ * platform's operators, or anyone (BRD §2).
  */
-const PRINCIPALS = ['admin', 'approver', 'developer', 'viewer', 'agent', 'operator', 'public'] as const;
+const PRINCIPALS = ['admin', 'approver', 'developer', 'viewer', 'person', 'agent', 'operator', 'public'] as const;
 export type Principal = (typeof PRINCIPALS)[number];
+
+/** An organisation's roles: each is a signed-in person too, so `person` beside one adds nothing. */
+const ROLES: readonly Principal[] = ['admin', 'approver', 'developer', 'viewer'];
 
 declare module 'fastify' {
   interface FastifyContextConfig {
     /** Who may call the route. Required on every route (contract.ts). */
     readonly access?: readonly Principal[];
   }
+  interface FastifyRequest {
+    /** The signed-in person the request comes from, once the access hook has found their session; null before, and for anyone else. */
+    person: LiveSession | null;
+  }
 }
+
+/** Finds the live session a session cookie names, its last use moved on. */
+export type FindSession = (cookie: string) => Promise<LiveSession | undefined>;
+
+/**
+ * The challenge a 401 carries (RFC 9110 §11.6.1): sign in at the form's
+ * address, and the session comes back in this cookie.
+ */
+export const SESSION_CHALLENGE = `Cookie realm="Agent X", form-action="/v1/auth/sign-in", cookie-name="${SESSION_COOKIE}"`;
 
 const isPrincipal = (value: unknown): value is Principal => PRINCIPALS.some((principal) => principal === value);
 
@@ -47,6 +74,9 @@ export function accessProblems(access: unknown, url: string): string[] {
   if (names.includes('public') && names.length > 1) {
     problems.push('its access names the public beside others, who would add nothing');
   }
+  if (names.includes('person') && names.some((name) => ROLES.some((role) => role === name))) {
+    problems.push('its access names any signed-in person beside roles, which would add nothing');
+  }
   // SEC-OPS-01: operators can't create or change any customer's authority, so their routes stand apart.
   if (names.includes('operator') && names.length > 1) {
     problems.push('its access names operators beside others');
@@ -66,20 +96,48 @@ export function accessProblems(access: unknown, url: string): string[] {
   return problems;
 }
 
+/** No one the route names: the challenge says how to sign in. */
+const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
+  sendErrorBody(reply.header('www-authenticate', SESSION_CHALLENGE), 401, 'UNAUTHENTICATED', request.id);
+
 /**
  * Refuses every request to a route that doesn't name its caller, before the
  * body is read. An unknown address is left to the not-found answer.
+ * `findSession` is the console's sign-in; with sign-in off no one is signed in.
  *
  * In callback style, calling done() only to let a request through: an async
  * hook that returned the refusal would be waited on until the answer ended,
- * and a client hanging up before then ends it too, letting the route run.
+ * and a client hanging up before then ends it too, letting the route run. A
+ * failure to look the session up is a failure on our side (done with the error).
  */
-export function registerAccess(app: FastifyInstance): void {
+export function registerAccess(app: FastifyInstance, findSession: FindSession | undefined): void {
+  app.decorateRequest('person', null);
   app.addHook('onRequest', (request, reply, done) => {
-    if (request.is404 || request.routeOptions.config.access?.includes('public') === true) {
+    const access = request.routeOptions.config.access ?? [];
+    if (request.is404 || access.includes('public')) {
       done();
       return;
     }
-    void sendErrorBody(reply, 401, 'UNAUTHENTICATED', request.id);
+    const cookie = cookieValue(request.headers.cookie, SESSION_COOKIE);
+    if (findSession === undefined || cookie === undefined) {
+      void unauthenticated(request, reply);
+      return;
+    }
+    findSession(cookie).then(
+      (session) => {
+        if (session === undefined) {
+          void unauthenticated(request, reply);
+        } else if (!access.includes('person')) {
+          // B4 gives a person roles in an organisation; until then a role's route is none of theirs.
+          void sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
+        } else {
+          request.person = session;
+          done();
+        }
+      },
+      (error: unknown) => {
+        done(error instanceof Error ? error : new Error('the session lookup failed', { cause: error }));
+      },
+    );
   });
 }

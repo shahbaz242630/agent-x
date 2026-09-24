@@ -7,6 +7,8 @@
 //   ID token; then, in one transaction, finds or makes the user, ends the
 //   session the browser brought (if any) and opens a new one. A sign-in never
 //   keeps a session it didn't open (SEC-HA-07: rotated at login).
+// - `signedIn` finds the live session a request's cookie names, its last use
+//   moved on (B2-4b: every signed-in request).
 //
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
@@ -16,7 +18,7 @@ import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type OidcClient, SignInFailed } from './oidc-client.ts';
-import type { Sessions } from './sessions.ts';
+import type { LiveSession, Sessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -52,6 +54,8 @@ export interface SignIn {
   complete(input: CallbackInput): Promise<SignInCompleted>;
   /** Ends the session this cookie belongs to, if any; true if there was one. */
   signOut(cookie: string | undefined): Promise<boolean>;
+  /** The live session this cookie belongs to, its last use moved on; undefined if there is none. */
+  signedIn(cookie: string): Promise<LiveSession | undefined>;
 }
 
 export function createSignIn({
@@ -99,6 +103,10 @@ export function createSignIn({
 
     signOut(cookie) {
       return cookie === undefined ? Promise.resolve(false) : limited((tx) => sessions.end(tx, cookie));
+    },
+
+    signedIn(cookie) {
+      return limited((tx) => sessions.use(tx, cookie));
     },
   };
 }

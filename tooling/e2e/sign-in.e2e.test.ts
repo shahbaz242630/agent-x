@@ -157,12 +157,37 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
     expect((await sessions()).count).toBe(1);
   });
 
+  it('B2-4b answers a signed-in request: the browser reads its own session, which the request kept alive', async () => {
+    const answer = await page.evaluate(async () => {
+      const response = await fetch('/v1/auth/session');
+      return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+    });
+    expect(answer.status).toBe(200);
+    expect(String(answer.body.userId)).toMatch(/^[0-9a-f-]{36}$/);
+    expect([...(answer.body.methods as string[])].sort()).toEqual(['mfa', 'otp', 'pwd']);
+    const idleEnds = Date.parse(String(answer.body.idleExpiresAt));
+    // The stack's idle timeout (30 minutes) from this very request.
+    expect(idleEnds).toBeGreaterThan(Date.now() + 29 * 60 * 1000);
+    expect(idleEnds).toBeLessThanOrEqual(Date.parse(String(answer.body.expiresAt)));
+  });
+
   it('signs out: the session ends and the cookie is cleared', async () => {
     const status = await page.evaluate(async () => (await fetch('/v1/auth/sign-out', { method: 'POST' })).status);
     expect(status).toBe(204);
     expect(cookieNamed(await context.cookies(API_ORIGIN), SESSION_COOKIE)).toBeUndefined();
     expect((await sessions()).count).toBe(0);
     expect(await apiEvents()).toContain('auth.signed_out');
+  });
+
+  it('B2-4b then refuses the same request as UNAUTHENTICATED, with the challenge that says how to sign in', async () => {
+    const answer = await page.evaluate(async () => {
+      const response = await fetch('/v1/auth/session');
+      return { status: response.status, challenge: response.headers.get('www-authenticate') };
+    });
+    expect(answer).toEqual({
+      status: 401,
+      challenge: `Cookie realm="Agent X", form-action="/v1/auth/sign-in", cookie-name="${SESSION_COOKIE}"`,
+    });
   });
 
   it("writes none of it to the API's log: not the client's secret, a cookie, or the code", async () => {
