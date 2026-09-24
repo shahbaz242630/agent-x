@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
@@ -11,6 +15,8 @@ const PROXIES = '10.0.0.0/23';
 const DB_HOST = 'db.internal.example';
 /** Plain words, so secret scanners ignore it. */
 const DB_LOGIN = 'app login for these tests';
+/** Plain words too: the OIDC client's stand-in secret. */
+const CLIENT_PASS = 'client pass words';
 /** Where the platform mounts the keys; loadConfig checks the setting, and loadKeys reads the files. */
 const KEYS_DIR = '/mnt/secrets';
 const MINIMAL: Env = {
@@ -60,6 +66,8 @@ describe('config: a correct config loads', () => {
       },
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
+      signIn: undefined,
+      sessions: { idleSeconds: 1800, absoluteSeconds: 43_200 },
       payees: { coolingOffHours: 24 },
       audit: { anchorSeconds: 300 },
       keys: { directory: KEYS_DIR, current: {} },
@@ -82,7 +90,12 @@ describe('config: a correct config loads', () => {
       AGENTX_TRUSTED_PROXIES: '10.0.0.0/23,100.100.0.1,10.0.0.0/23',
       AGENTX_RATE_LIMIT_PER_MINUTE: '120',
       AGENTX_OUTBOUND_ALLOWED_ORIGINS:
-        'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example',
+        'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example,https://auth.staging.agentx.example',
+      AGENTX_OIDC_ISSUER: 'https://auth.staging.agentx.example',
+      AGENTX_OIDC_CLIENT_ID: '338719472394810051@agentx',
+      AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
+      AGENTX_SESSION_IDLE_MINUTES: '60',
+      AGENTX_SESSION_ABSOLUTE_HOURS: '8',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
       AGENTX_AUDIT_ANCHOR_SECONDS: '600',
       AGENTX_DB_HOST: '10.0.0.5',
@@ -115,7 +128,19 @@ describe('config: a correct config loads', () => {
         tls: 'verify-full',
         poolMax: 25,
       },
-      outbound: { allowedOrigins: ['https://api.partner.example:8443', 'https://telemetry.example'] },
+      outbound: {
+        allowedOrigins: [
+          'https://api.partner.example:8443',
+          'https://auth.staging.agentx.example',
+          'https://telemetry.example',
+        ],
+      },
+      signIn: {
+        issuer: 'https://auth.staging.agentx.example',
+        clientId: '338719472394810051@agentx',
+        clientSecret: CLIENT_PASS,
+      },
+      sessions: { idleSeconds: 3600, absoluteSeconds: 28_800 },
       payees: { coolingOffHours: 48 },
       audit: { anchorSeconds: 600 },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
@@ -789,5 +814,82 @@ describe('SEC-PTR-07 config refuses to turn off TLS certificate checks', () => {
   it('accepts it unset, or set to 1 (checks on)', () => {
     expect(problemsWith(MINIMAL)).toEqual([]);
     expect(problemsWith({ ...MINIMAL, NODE_TLS_REJECT_UNAUTHORIZED: '1' })).toEqual([]);
+  });
+});
+
+describe('config: sign-in (ADR-003 §5, §7)', () => {
+  const ISSUER = 'https://auth.agentx.example';
+  const SIGN_IN: Env = {
+    ...MINIMAL,
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: ISSUER,
+    AGENTX_OIDC_ISSUER: ISSUER,
+    AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+    AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
+  };
+  const ALL_OR_NONE =
+    'AGENTX_OIDC_ISSUER, AGENTX_OIDC_CLIENT_ID and AGENTX_OIDC_CLIENT_SECRET: set all three, or none (sign-in is off without them)';
+
+  it('is on with all three set, and off with none', () => {
+    expect(loadConfig(SIGN_IN).signIn).toEqual({ issuer: ISSUER, clientId: 'agentx-api', clientSecret: CLIENT_PASS });
+    expect(loadConfig(MINIMAL).signIn).toBeUndefined();
+  });
+
+  it.each([
+    ['the issuer', { AGENTX_OIDC_ISSUER: undefined }],
+    ['the client ID', { AGENTX_OIDC_CLIENT_ID: undefined }],
+    ['the secret', { AGENTX_OIDC_CLIENT_SECRET: undefined }],
+    ['all but the issuer', { AGENTX_OIDC_CLIENT_ID: undefined, AGENTX_OIDC_CLIENT_SECRET: undefined }],
+  ])('refuses the login service named in part, without %s', (_, change) => {
+    expect(problemsWith({ ...SIGN_IN, ...change })).toEqual([ALL_OR_NONE]);
+  });
+
+  it('reads the secret from a mounted file, and refuses it set both ways', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'agentx-config-')), 'oidc-client');
+    writeFileSync(
+      file,
+      `${CLIENT_PASS}
+`,
+    );
+    const fromFile = { ...SIGN_IN, AGENTX_OIDC_CLIENT_SECRET: undefined, AGENTX_OIDC_CLIENT_SECRET_FILE: file };
+
+    expect(loadConfig(fromFile).signIn?.clientSecret).toBe(CLIENT_PASS);
+    expect(problemsWith({ ...fromFile, AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS })).toEqual([
+      'set either AGENTX_OIDC_CLIENT_SECRET or AGENTX_OIDC_CLIENT_SECRET_FILE, not both',
+    ]);
+  });
+
+  it('refuses an issuer the API may not call', () => {
+    expect(problemsWith({ ...SIGN_IN, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://other.example' })).toEqual([
+      'AGENTX_OIDC_ISSUER: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API fetches its keys and trades codes there',
+    ]);
+  });
+
+  it('refuses a plain http issuer outside a local run', () => {
+    const plain = { ...SIGN_IN, AGENTX_OIDC_ISSUER: 'http://auth.agentx.example' };
+    expect(problemsWith({ ...plain, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://auth.agentx.example' })).toContain(
+      'AGENTX_OIDC_ISSUER: plain http is allowed only in development and test; production must use https',
+    );
+  });
+
+  it.each([
+    ['an issuer with a path', { AGENTX_OIDC_ISSUER: `${ISSUER}/oauth` }, /^AGENTX_OIDC_ISSUER/],
+    ['a client ID with a space', { AGENTX_OIDC_CLIENT_ID: 'agentx api' }, /^AGENTX_OIDC_CLIENT_ID/],
+  ])('refuses %s', (_, change, problem) => {
+    expect(problemsWith({ ...SIGN_IN, ...change })).toEqual([expect.stringMatching(problem)]);
+  });
+
+  it('reads the sessions’ timeouts, and holds them to their minimums and to each other', () => {
+    expect(
+      loadConfig({ ...MINIMAL, AGENTX_SESSION_IDLE_MINUTES: '5', AGENTX_SESSION_ABSOLUTE_HOURS: '1' }).sessions,
+    ).toEqual({ idleSeconds: 300, absoluteSeconds: 3600 });
+    expect(problemsWith({ ...MINIMAL, AGENTX_SESSION_IDLE_MINUTES: '4' })).toEqual([
+      expect.stringMatching(/^AGENTX_SESSION_IDLE_MINUTES/),
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_SESSION_ABSOLUTE_HOURS: '0' })).toEqual([
+      expect.stringMatching(/^AGENTX_SESSION_ABSOLUTE_HOURS/),
+    ]);
+    expect(problemsWith({ ...MINIMAL, AGENTX_SESSION_IDLE_MINUTES: '61', AGENTX_SESSION_ABSOLUTE_HOURS: '1' })).toEqual(
+      ['AGENTX_SESSION_IDLE_MINUTES: must be no longer than AGENTX_SESSION_ABSOLUTE_HOURS'],
+    );
   });
 });

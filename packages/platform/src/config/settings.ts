@@ -153,6 +153,30 @@ const SETTINGS = {
     default: '300',
   },
   AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
+  // ADR-003 §5: the login service the API is the OIDC client of, all three
+  // or none (sign-in is off without them). The issuer is its origin exactly,
+  // as its tokens name it; the secret is read by secretSetting (database.ts).
+  AGENTX_OIDC_ISSUER: { schema: publicOrigin.optional() },
+  AGENTX_OIDC_CLIENT_ID: {
+    schema: text.regex(/^[!-~]{1,255}$/, { error: 'must be 1 to 255 visible ASCII characters' }).optional(),
+  },
+  AGENTX_OIDC_CLIENT_SECRET: { schema: text },
+  AGENTX_OIDC_CLIENT_SECRET_FILE: { schema: text },
+  // ADR-003 §7: a console session ends after this long unused, and this long
+  // after it opened however much it is used.
+  AGENTX_SESSION_IDLE_MINUTES: {
+    schema: wholeNumber({
+      min: 5,
+      max: 480,
+      unit: 'minutes',
+      minimumReason: 'shorter would sign people out mid-task',
+    }),
+    default: '30',
+  },
+  AGENTX_SESSION_ABSOLUTE_HOURS: {
+    schema: wholeNumber({ min: 1, max: 24, unit: 'hours', minimumReason: 'shorter would sign people out mid-task' }),
+    default: '12',
+  },
   AGENTX_PAYEE_COOLING_OFF_HOURS: {
     schema: wholeNumber({
       min: 24,
@@ -239,6 +263,12 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_TRUSTED_PROXIES',
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
+      'AGENTX_OIDC_ISSUER',
+      'AGENTX_OIDC_CLIENT_ID',
+      'AGENTX_OIDC_CLIENT_SECRET',
+      'AGENTX_OIDC_CLIENT_SECRET_FILE',
+      'AGENTX_SESSION_IDLE_MINUTES',
+      'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_KEYS_DIR',

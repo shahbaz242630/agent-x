@@ -11,9 +11,9 @@
 // fingerprint names the ones set, never their values, and their values count
 // towards the hash.
 //
-// The config holds a secret (the database password), so the fields that count
-// towards the hash are listed one by one below, and the password is not among
-// them: a hash of a weak secret can be guessed offline.
+// The config holds secrets (the database password, the OIDC client secret),
+// so the fields that count towards the hash are listed one by one below, and
+// neither is among them: a hash of a weak secret can be guessed offline.
 //
 // The keys the process loaded count too, by version and check value, never
 // the keys themselves: a key swapped under the same version changes the hash.
@@ -62,7 +62,8 @@ type Env = Readonly<Record<string, string | undefined>>;
  * The settings that count, named one by one, in a fixed order, so the same
  * settings always hash the same however the config was built. The release is
  * left out: it changes with every deploy, and the fingerprint should change
- * only when a setting does. The database password is left out: it's a secret.
+ * only when a setting does. The database password and the OIDC client secret
+ * are left out: they're secrets.
  */
 export function fingerprintedSettings(config: Config): Record<string, unknown> {
   return {
@@ -84,6 +85,9 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
       poolMax: config.db.poolMax,
     },
     outbound: { allowedOrigins: config.outbound.allowedOrigins },
+    // The client secret is left out: it's a secret.
+    signIn: config.signIn === undefined ? null : { issuer: config.signIn.issuer, clientId: config.signIn.clientId },
+    sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     payees: { coolingOffHours: config.payees.coolingOffHours },
     audit: { anchorSeconds: config.audit.anchorSeconds },
     keys: { directory: config.keys.directory, current: config.keys.current },

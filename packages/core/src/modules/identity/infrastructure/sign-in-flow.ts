@@ -50,6 +50,8 @@ export interface SignIn {
   begin(returnTo?: string): Promise<SignInBegun>;
   /** Finishes the sign-in the flow cookie names. Throws SignInFailed. */
   complete(input: CallbackInput): Promise<SignInCompleted>;
+  /** Ends the session this cookie belongs to, if any; true if there was one. */
+  signOut(cookie: string | undefined): Promise<boolean>;
 }
 
 export function createSignIn({
@@ -93,6 +95,10 @@ export function createSignIn({
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
         return { userId, sessionId, cookie, returnTo: taken.returnTo };
       });
+    },
+
+    signOut(cookie) {
+      return cookie === undefined ? Promise.resolve(false) : limited((tx) => sessions.end(tx, cookie));
     },
   };
 }

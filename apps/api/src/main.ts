@@ -7,15 +7,26 @@
 //    could get round the tenant walls (ADR-005 §3, APP-02)
 // 5. writes the fingerprint's hash to the platform audit chain, or refuses to
 //    start (SEC-OPS-05)
-// 6. listens, and starts the audit chains' anchor check (ADR-012 §2): the
+// 6. listens, with the console's sign-in when the config names a login service
+//    (B2-3a-2), and starts the audit chains' anchor check (ADR-012 §2): the
 //    platform's, and each organisation's from the directory's list (B1d-2);
-//    and, on a timer of its own, the idempotency keys' retention sweep (B1e-3)
+//    and, each on a timer of its own, the idempotency keys' retention sweep
+//    (B1e-3) and the sign-in flows' sweep (B2-3a-2)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check and the sweep, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
+import {
+  createLoginFlows,
+  createOidcClient,
+  createSessions,
+  createSignIn,
+  type IdentityTables,
+  type LoginFlows,
+  type SignIn,
+} from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -29,6 +40,7 @@ import {
   UnsafeDatabaseRole,
 } from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
+import { createOutboundFetch } from '@agentx/platform/outbound';
 import {
   createLogger,
   createStartupLogger,
@@ -40,12 +52,13 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { createLoginFlowSweep, scheduleLoginFlowSweep } from './login-flow-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
-type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables;
+type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables & IdentityTables;
 
 const SERVICE = 'api';
 
@@ -74,6 +87,30 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
  */
 const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 const SWEEP_EVERY_MS = 3_600_000;
+
+/** The sign-in flows' sweep (B2-3a-2): a batch of 1,000 flows at a time, at most 100 batches a run. */
+const FLOW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+
+/**
+ * The console's sign-in (ADR-003 §5), when the config names a login service;
+ * off otherwise (B2-6 switches it on for staging).
+ */
+function signInFrom(config: Config, database: Database<ApiTables>, flows: LoginFlows): SignIn | undefined {
+  if (config.signIn === undefined) return undefined;
+  const { issuer, clientId, clientSecret } = config.signIn;
+  return createSignIn({
+    db: database,
+    oidc: createOidcClient({
+      settings: { issuer, clientId, clientSecret, redirectUri: `${config.http.publicOrigin}/v1/auth/callback` },
+      fetch: createOutboundFetch(config.outbound.allowedOrigins),
+      clock: systemClock,
+    }),
+    flows,
+    sessions: createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions }),
+    ids: uuidV7Ids,
+    clock: systemClock,
+  });
+}
 
 /** The parts of `process` the API uses. Tests pass a stand-in. */
 export interface ApiProcess {
@@ -240,7 +277,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   logger.info('api.start_recorded', { seq: recorded });
 
   // A failure to build the server is a bug, so it goes to the crash handler above.
-  const server = await buildServer({ config, logger, ids: uuidV7Ids, healthChecks: [] });
+  const flows = createLoginFlows({ clock: systemClock });
+  const signIn = signInFrom(config, database, flows);
+  const server = await buildServer({
+    config,
+    logger,
+    ids: uuidV7Ids,
+    healthChecks: [],
+    signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: config.sessions.absoluteSeconds },
+  });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
   } catch (error) {
@@ -304,12 +349,22 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // bounded, and a pool at its limit queues rather than refuses. Nothing orders
   // the sweep after a schema check: 0009's `retention` policy is its wall.
   const sweeping = scheduleRetentionSweep(retention, SWEEP_EVERY_MS);
+  // The sign-in flows' own sweep, on its own timer too, whether or not sign-in is on (B2-3a-2).
+  const flowSweeping = scheduleLoginFlowSweep(
+    createLoginFlowSweep({
+      sweep: (most) => flows.sweep(database, most),
+      logger,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+      ...FLOW_SWEEP,
+    }),
+    SWEEP_EVERY_MS,
+  );
   onStopSignals(
     host,
     server,
     {
       stop: async () => {
-        await Promise.all([anchorCheck.stop(), sweeping.stop()]);
+        await Promise.all([anchorCheck.stop(), sweeping.stop(), flowSweeping.stop()]);
       },
     },
     database,

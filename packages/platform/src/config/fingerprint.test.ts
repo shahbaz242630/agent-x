@@ -17,6 +17,10 @@ const SETTINGS: Env = {
   AGENTX_DB_HOST: 'db.internal.example',
   AGENTX_DB_PASSWORD: DB_LOGIN,
   AGENTX_KEYS_DIR: '/mnt/secrets',
+  AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://auth.agentx.example',
+  AGENTX_OIDC_ISSUER: 'https://auth.agentx.example',
+  AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+  AGENTX_OIDC_CLIENT_SECRET: 'client pass words',
 };
 
 /** What a KeyProvider describes: versions and check values, never keys. */
@@ -88,7 +92,24 @@ describe('SEC-OPS-05 the config fingerprint', () => {
   it.each([
     ['a threshold', { AGENTX_PAYEE_COOLING_OFF_HOURS: '49' }],
     ['the log level', { AGENTX_LOG_LEVEL: 'warn' }],
-    ['the outbound allowlist', { AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example' }],
+    [
+      'the outbound allowlist',
+      { AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example,https://auth.agentx.example' },
+    ],
+    [
+      'the login service',
+      {
+        AGENTX_OIDC_ISSUER: 'https://login.agentx.example',
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://login.agentx.example',
+      },
+    ],
+    ['the OIDC client', { AGENTX_OIDC_CLIENT_ID: 'agentx-api-2' }],
+    [
+      'sign-in turned off',
+      { AGENTX_OIDC_ISSUER: undefined, AGENTX_OIDC_CLIENT_ID: undefined, AGENTX_OIDC_CLIENT_SECRET: undefined },
+    ],
+    ['the idle timeout', { AGENTX_SESSION_IDLE_MINUTES: '31' }],
+    ['the absolute timeout', { AGENTX_SESSION_ABSOLUTE_HOURS: '11' }],
     ['the trusted proxies', { AGENTX_TRUSTED_PROXIES: '10.0.0.0/24' }],
     ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
     ['the environment', { AGENTX_ENV: 'staging' }],
@@ -136,14 +157,21 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(hashOf({ ...local, AGENTX_DB_TLS: 'disable' })).not.toBe(hashOf(local));
   });
 
+  it('ignores the OIDC client secret, as it does the password', () => {
+    expect(hashOf({ ...SETTINGS, AGENTX_OIDC_CLIENT_SECRET: 'other pass words' })).toBe(hashOf(SETTINGS));
+  });
+
   it('ignores the database password: a hash of a weak secret could be guessed offline', () => {
     expect(hashOf({ ...SETTINGS, AGENTX_DB_PASSWORD: 'another login for these tests' })).toBe(hashOf(SETTINGS));
     expect(JSON.stringify(fingerprintedSettings(loadConfig(SETTINGS)))).not.toContain(DB_LOGIN);
   });
 
-  it('names every setting one by one: everything in the config but the release and the password', () => {
+  it('names every setting one by one: everything in the config but the release and the secrets', () => {
     const config = loadConfig(SETTINGS);
-    const left = leaves(config).filter((leaf) => !leaf.startsWith('release: ') && !leaf.startsWith('db.password: '));
+    const left = leaves(config).filter(
+      (leaf) =>
+        !leaf.startsWith('release: ') && !leaf.startsWith('db.password: ') && !leaf.startsWith('signIn.clientSecret: '),
+    );
     expect(leaves(fingerprintedSettings(config)).sort()).toEqual(left.sort());
   });
 

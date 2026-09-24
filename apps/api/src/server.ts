@@ -8,6 +8,7 @@
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
 // serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
+import type { SignIn } from '@agentx/core/modules/identity';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
@@ -24,12 +25,15 @@ import { isForeignWrite } from './origin-check.ts';
 import { countRequest, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
 import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
+import { registerSignIn } from './sign-in.ts';
 
 export interface ServerOptions {
   readonly config: Pick<Config, 'http' | 'log'>;
   readonly logger: Logger;
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
+  /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
+  readonly signIn?: { readonly service: SignIn; readonly sessionSeconds: number } | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -143,5 +147,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));
 
   registerHealth(app, options.healthChecks, logger);
+  registerSignIn(app, {
+    signIn: options.signIn?.service,
+    sessionSeconds: options.signIn?.sessionSeconds ?? 0,
+    logger,
+  });
   return app;
 }

@@ -35,7 +35,8 @@ export type SecretName =
   | 'AGENTX_DB_OWNER_PASSWORD'
   | 'AGENTX_DB_APP_PASSWORD'
   | 'AGENTX_DB_BACKUP_PASSWORD'
-  | 'AGENTX_DB_ZITADEL_PASSWORD';
+  | 'AGENTX_DB_ZITADEL_PASSWORD'
+  | 'AGENTX_OIDC_CLIENT_SECRET';
 
 const refused = (problem: string): Checked<never> => ({ ok: false, problem });
 
@@ -65,6 +66,12 @@ export function secretSetting(env: Env, name: SecretName): Checked<string> {
   }
   const value = contents.replace(/\r?\n$/, '');
   return value === '' ? refused(`${fileName} names an empty file`) : { ok: true, value };
+}
+
+/** A secret that may be left out altogether: neither form set is `undefined`, anything else as secretSetting. */
+export function optionalSecretSetting(env: Env, name: SecretName): Checked<string | undefined> {
+  if (env[name] === undefined && env[`${name}_FILE`] === undefined) return { ok: true, value: undefined };
+  return secretSetting(env, name);
 }
 
 /**

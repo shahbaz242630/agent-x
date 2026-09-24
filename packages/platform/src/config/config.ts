@@ -8,7 +8,13 @@
 // into the wrong variable can't leak through the error.
 import type { KeySettings } from '../keys/load.ts';
 import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
-import { checkLocation, pgVariableProblems, secretSetting, tlsModeProblems } from './database.ts';
+import {
+  checkLocation,
+  optionalSecretSetting,
+  pgVariableProblems,
+  secretSetting,
+  tlsModeProblems,
+} from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
 import {
   allOk,
@@ -68,6 +74,20 @@ export interface Config {
   };
   /** SEC-WEB-05: the only origins the app may call, as `scheme://host[:port]`. */
   readonly outbound: { readonly allowedOrigins: readonly string[] };
+  /**
+   * ADR-003 §5: the login service the API is the OIDC client of. Undefined
+   * when none is set, and sign-in is then off (B2-3a: staging until B2-6).
+   */
+  readonly signIn:
+    | {
+        readonly issuer: string;
+        readonly clientId: string;
+        /** Never logged, never in the fingerprint. */
+        readonly clientSecret: string;
+      }
+    | undefined;
+  /** ADR-003 §7: how long a console session lives unused, and at most. */
+  readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
   /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
@@ -122,6 +142,42 @@ function rateLimitProblems(rateLimitPerMinute: number, eventCapPerMinute: number
     : [];
 }
 
+/**
+ * ADR-003 §5: the login service is named in full or not at all, and the API
+ * must be allowed to call it: it fetches the keys and trades codes there.
+ */
+function signInProblems(
+  environment: Environment,
+  issuer: string | undefined,
+  clientId: string | undefined,
+  secretSet: boolean,
+  allowedOrigins: readonly string[],
+): string[] {
+  const set = [issuer !== undefined, clientId !== undefined, secretSet];
+  if (set.every((one) => !one)) return [];
+  if (!set.every(Boolean)) {
+    return [
+      'AGENTX_OIDC_ISSUER, AGENTX_OIDC_CLIENT_ID and AGENTX_OIDC_CLIENT_SECRET: set all three, or none (sign-in is off without them)',
+    ];
+  }
+  if (issuer === undefined) return [];
+  return [
+    ...plainHttpProblems('AGENTX_OIDC_ISSUER', environment, [issuer]),
+    ...(allowedOrigins.includes(issuer)
+      ? []
+      : [
+          'AGENTX_OIDC_ISSUER: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API fetches its keys and trades codes there',
+        ]),
+  ];
+}
+
+/** A session can't be let idle for longer than it may live at all. */
+function sessionProblems(idleMinutes: number, absoluteHours: number): string[] {
+  return idleMinutes > absoluteHours * 60
+    ? ['AGENTX_SESSION_IDLE_MINUTES: must be no longer than AGENTX_SESSION_ABSOLUTE_HOURS']
+    : [];
+}
+
 /** Port 0 takes any free port, which suits a test; a deployed app must be where its ingress sends traffic. */
 function portProblems(environment: Environment, value: number): string[] {
   return value === 0 && !LOCAL_ONLY.includes(environment)
@@ -129,6 +185,17 @@ function portProblems(environment: Environment, value: number): string[] {
         `AGENTX_HTTP_PORT: 0 (any free port) is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} must name its port`,
       ]
     : [];
+}
+
+/** The login service's settings, once signInProblems has found them all set or none. */
+function signInFrom(
+  issuer: string | undefined,
+  clientId: string | undefined,
+  clientSecret: string | undefined,
+): Config['signIn'] {
+  return issuer === undefined || clientId === undefined || clientSecret === undefined
+    ? undefined
+    : Object.freeze({ issuer, clientId, clientSecret });
 }
 
 /**
@@ -148,6 +215,11 @@ export function loadConfig(env: Env = process.env): Config {
     trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
+    oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
+    oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
+    oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
+    sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
+    sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
@@ -179,6 +251,22 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && httpPort.ok ? portProblems(environment.value, httpPort.value) : []),
     ...(environment.ok && trustedProxies.ok ? trustedProxiesProblems(environment.value, trustedProxies.value) : []),
     ...(rateLimit.ok && eventCap.ok ? rateLimitProblems(rateLimit.value, eventCap.value) : []),
+    ...(environment.ok &&
+    checks.oidcIssuer.ok &&
+    checks.oidcClientId.ok &&
+    checks.oidcClientSecret.ok &&
+    allowedOrigins.ok
+      ? signInProblems(
+          environment.value,
+          checks.oidcIssuer.value,
+          checks.oidcClientId.value,
+          checks.oidcClientSecret.value !== undefined,
+          allowedOrigins.value ?? [],
+        )
+      : []),
+    ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
+      ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
+      : []),
     ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
     ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
   ];
@@ -207,6 +295,11 @@ export function loadConfig(env: Env = process.env): Config {
       poolMax: checks.dbPoolMax.value,
     }),
     outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
+    signIn: signInFrom(checks.oidcIssuer.value, checks.oidcClientId.value, checks.oidcClientSecret.value),
+    sessions: Object.freeze({
+      idleSeconds: checks.sessionIdle.value * 60,
+      absoluteSeconds: checks.sessionAbsolute.value * 3600,
+    }),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
     audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
     keys: Object.freeze({
