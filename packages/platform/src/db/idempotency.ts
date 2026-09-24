@@ -160,6 +160,9 @@ const matches = (pattern: RegExp, value: unknown): value is string => typeof val
 export const isOperation = (value: unknown): value is string =>
   matches(OPERATION, value) && value.length <= OPERATION_MAX;
 
+/** Whether the value is an idempotency key: 1 to 255 visible ASCII characters. The API refuses any other before the body is read (B2b-2). */
+export const isIdempotencyKey = (value: unknown): value is string => matches(KEY, value);
+
 /** Why the request can't be taken, or undefined. Never names a value: it may be anything a client sent. */
 function requestProblem({ orgId, client, operation, key, payload }: IdempotentRequest): string | undefined {
   if (!matches(UUID, orgId)) return 'the organisation ID is not a UUID';
@@ -168,7 +171,7 @@ function requestProblem({ orgId, client, operation, key, payload }: IdempotentRe
   if (!isOperation(operation)) {
     return `the operation is not lower-case words joined by . or -, at most ${OPERATION_MAX} characters`;
   }
-  if (!matches(KEY, key)) return 'the key is not 1 to 255 visible ASCII characters';
+  if (!isIdempotencyKey(key)) return 'the key is not 1 to 255 visible ASCII characters';
   // A lone surrogate is written as U+FFFD, so two different payloads could hash alike.
   if (typeof payload !== 'string' || !payload.isWellFormed()) return 'the payload is not well-formed text';
   return undefined;

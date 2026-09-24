@@ -8,6 +8,8 @@
 //    signed-in person is found by their session cookie (B2-4b)
 // 5. a signed-in person's request is counted against their own rate limit
 //    too (B2-5c); a refusal is noted as a security event with the person
+// 6. a write is refused without a well-formed Idempotency-Key header
+//    (write-operations.ts, B2b-2)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
@@ -31,6 +33,7 @@ import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
 import { registerSignIn } from './sign-in.ts';
+import { registerIdempotencyKeys } from './write-operations.ts';
 
 export interface ServerOptions {
   readonly config: Pick<Config, 'http' | 'log'>;
@@ -161,6 +164,8 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
       securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
     }),
   );
+  // After the caller is known and counted, before the body is read.
+  registerIdempotencyKeys(app);
 
   app.setErrorHandler(sendError);
   app.setNotFoundHandler(NOT_FOUND_CHECKS, (request, reply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id));

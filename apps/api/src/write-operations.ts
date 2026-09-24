@@ -10,7 +10,19 @@
 // names none: it has no signed-in caller to namespace a key by, so it must be
 // safe to repeat by itself (sign-out ends a session that may already be gone).
 // A read names none either: it takes no key.
-import { isOperation } from '@agentx/platform/db';
+//
+// B2b-2: a request to a route with an operation must carry an
+// `Idempotency-Key` header, 1 to 255 visible ASCII characters (the
+// idempotency module's own rule). Without one, or with a malformed one, it is
+// refused as 400 IDEMPOTENCY_KEY_INVALID, after the caller is known and before
+// the body is read. The contract shows the header on each such operation in
+// the document, as a required parameter.
+import { isIdempotencyKey, isOperation } from '@agentx/platform/db';
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+
+import { API_SCHEMAS } from './api-schemas.ts';
+import { sendErrorBody } from './errors.ts';
 
 declare module 'fastify' {
   interface FastifyContextConfig {
@@ -46,6 +58,38 @@ export function operationProblems(operation: unknown, methods: readonly string[]
     return ['its operation is not lower-case words joined by . or -, at most 64 characters'];
   }
   return [];
+}
+
+/** The header a write's key comes in, as Node names it. */
+export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
+
+/**
+ * The header as the document shows it on each write. The hook below checks it
+ * before the body is read, so the route's own check of it never refuses.
+ */
+export const IDEMPOTENCY_KEY_SCHEMA = z
+  .string()
+  .regex(/^[!-~]{1,255}$/)
+  .register(API_SCHEMAS, {
+    description:
+      'Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused.',
+  });
+
+/**
+ * Refuses a request to a route with an operation that carries no well-formed
+ * idempotency key. After the access hook, so a caller who isn't allowed learns
+ * nothing of the route; in callback style, calling done() only to let a
+ * request through, as access.ts does.
+ */
+export function registerIdempotencyKeys(app: FastifyInstance): void {
+  app.addHook('onRequest', (request, reply, done) => {
+    const { operation } = request.routeOptions.config;
+    if (operation === undefined || isIdempotencyKey(request.headers[IDEMPOTENCY_KEY_HEADER])) {
+      done();
+    } else {
+      void sendErrorBody(reply, 400, 'IDEMPOTENCY_KEY_INVALID', request.id);
+    }
+  });
 }
 
 /** Operations named by more than one route, each once. */

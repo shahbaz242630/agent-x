@@ -20,6 +20,8 @@ export const REASON_CODES = {
   FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
+  IDEMPOTENCY_KEY_INVALID:
+    'This address changes something, so each request must carry an Idempotency-Key header: 1 to 255 visible ASCII characters, no spaces, new for each change you mean to make. Send the same key again only to retry the same request.',
   INTERNAL_ERROR:
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
