@@ -8,6 +8,7 @@ export {
   type IdempotentResult,
   type IdempotentWrite,
   type IdempotentWrites,
+  isOperation,
   sweepExpiredKeys,
   sweepIdempotencyKeys,
 } from './idempotency.ts';

@@ -152,12 +152,20 @@ const KEY = /^[!-~]{1,255}$/;
 /** Whether the value is text the pattern matches: a caller the compiler can't see could pass anything. */
 const matches = (pattern: RegExp, value: unknown): value is string => typeof value === 'string' && pattern.test(value);
 
+/**
+ * Whether the value names a write as the idempotency keys namespace it: lower-case
+ * words joined by `.` or `-`, at most 64 characters. The API holds each write
+ * route's operation to it as the route is added (B2b).
+ */
+export const isOperation = (value: unknown): value is string =>
+  matches(OPERATION, value) && value.length <= OPERATION_MAX;
+
 /** Why the request can't be taken, or undefined. Never names a value: it may be anything a client sent. */
 function requestProblem({ orgId, client, operation, key, payload }: IdempotentRequest): string | undefined {
   if (!matches(UUID, orgId)) return 'the organisation ID is not a UUID';
   if (!CLIENT_KINDS.includes(client.kind)) return 'the client is neither a user nor an agent';
   if (!matches(UUID, client.id)) return "the client's ID is not a UUID";
-  if (!matches(OPERATION, operation) || operation.length > OPERATION_MAX) {
+  if (!isOperation(operation)) {
     return `the operation is not lower-case words joined by . or -, at most ${OPERATION_MAX} characters`;
   }
   if (!matches(KEY, key)) return 'the key is not 1 to 255 visible ASCII characters';
