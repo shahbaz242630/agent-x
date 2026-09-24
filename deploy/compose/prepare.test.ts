@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 import { PURPOSES } from '../../packages/platform/src/keys/purposes.ts';
 import {
+  API_SIGN_IN,
   APP_KEYS,
   ENV_FILE,
   generate,
@@ -23,6 +24,7 @@ import {
   prepareAppKeys,
   prepareEnv,
   prepareKeys,
+  prepareSignInDir,
   renderEnv,
   SECRETS_DIR,
   VARIABLES,
@@ -200,16 +202,39 @@ describe('the login key pair is two files, the shape Zitadel and the login conta
     expect(readFileSync(path.join(made, LOGIN_CLIENT_KEYS.public), 'utf8')).toBe('public half');
   });
 
-  it('one run does both, and says which of the two was already there', () => {
+  it('one run does all four, and says which were already there', () => {
     const file = path.join(dir, 'both.env');
     const made = keysDir('both');
     expect(prepare(file, made, bytes(0x08), wordsPair)).toEqual({
       env: 'created',
       keys: 'created',
       appKeys: 'created',
+      signInDir: 'created',
     });
-    expect(prepare(file, made, bytes(0x09), wordsPair)).toEqual({ env: 'kept', keys: 'kept', appKeys: 'kept' });
+    expect(prepare(file, made, bytes(0x09), wordsPair)).toEqual({
+      env: 'kept',
+      keys: 'kept',
+      appKeys: 'kept',
+      signInDir: 'kept',
+    });
     expect(readdirSync(path.join(made, APP_KEYS))).toHaveLength(PURPOSES.length);
+    expect(readdirSync(path.join(made, API_SIGN_IN))).toEqual([]);
+  });
+});
+
+describe("the API's sign-in folder: made before the stack starts, so the suite can write the secret into it", () => {
+  it('makes the folder empty, keeps what it holds on later runs, and says which', () => {
+    const made = path.join(keysDir('sign-in'), API_SIGN_IN);
+    expect(prepareSignInDir(made)).toBe('created');
+    writeFileSync(path.join(made, 'kept'), 'kept');
+    expect(prepareSignInDir(made)).toBe('kept');
+    expect(readFileSync(path.join(made, 'kept'), 'utf8')).toBe('kept');
+  });
+
+  it('refuses a file in its place', () => {
+    const made = path.join(keysDir('sign-in-file'), API_SIGN_IN);
+    writeFileSync(made, 'not a folder');
+    expect(() => prepareSignInDir(made)).toThrow(/EEXIST/);
   });
 });
 
