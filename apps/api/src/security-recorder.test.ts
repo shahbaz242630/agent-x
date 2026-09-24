@@ -230,6 +230,20 @@ describe('SEC-AV-07 a failed write loses no count, and a malformed one is never 
     expect(written[1]).toMatchObject([{ reason: 'code_rejected', windowStart: new Date(TEN + MINUTE) }]);
   });
 
+  it('goes on to the next batch in the same run after one the module refuses', async () => {
+    const { recorder, written, at, events } = setUp({ answers: [new RangeError('a security event can’t be written')] });
+    for (let i = 0; i < MOST_EVENTS_A_BATCH + 1; i += 1) {
+      recorder.note(failedSignIn(`10.0.${String(i >> 8)}.${String(i & 255)}`));
+    }
+    at(TEN + MINUTE);
+
+    await recorder.run();
+
+    expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH, 1]);
+    expect(events('security.events_refused')).toMatchObject([{ events: MOST_EVENTS_A_BATCH }]);
+    expect(events('security.events_written')).toMatchObject([{ events: 1 }]);
+  });
+
   it('keeps going when the write throws outright, rather than rejecting', async () => {
     const capture = new LogCapture();
     const logger = createLogger({
