@@ -54,15 +54,15 @@ class StandInClient implements OidcClient {
   }
 
   /** Run as the code is traded: the time the person spends at the login service, say. */
-  whileFinishing: (() => void) | undefined;
+  whileFinishing: (() => unknown) | undefined;
 
-  finish(flow: LoginFlow, returned: { code: string; state: string }) {
+  async finish(flow: LoginFlow, returned: { code: string; state: string }) {
     this.finished.push({ flow, ...returned });
-    this.whileFinishing?.();
-    if (this.failWith !== undefined) return Promise.reject(this.failWith);
-    if (returned.state !== flow.state) return Promise.reject(new SignInFailed('state_mismatch', 'test'));
+    await this.whileFinishing?.();
+    if (this.failWith !== undefined) throw this.failWith;
+    if (returned.state !== flow.state) throw new SignInFailed('state_mismatch', 'test');
     const subject: Subject = { issuer: ISSUER, subject: this.subject };
-    return Promise.resolve({ subject, evidence: this.proves, idTokenHash: Buffer.alloc(32, 7) });
+    return { subject, evidence: this.proves, idTokenHash: Buffer.alloc(32, 7) };
   }
 }
 
@@ -424,6 +424,18 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
         challengeId: challenge.challengeId,
       });
     }
+  });
+
+  it('fails a step-up whose session signs out while the person is at the login service, recording nothing', async () => {
+    const { done, challenge } = await signedInWithChallenge();
+    client.whileFinishing = () => sessions.end(app, done.cookie);
+
+    // The challenge went with its session, so the evidence finds nothing to record on.
+    await expect(stepUp(done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({
+      name: 'StepUpFailed',
+      failure: 'challenge_missing',
+    });
+    expect(await sessionsOf(done.userId)).toEqual([]);
   });
 
   it('keeps a login service that cannot be reached a SignInFailed, as a sign-in does', async () => {

@@ -32,9 +32,12 @@
 //   The callback then checks the fresh sign-in against the challenge,
 //   records its evidence there and gives the session a new cookie ID
 //   (SEC-HA-07), keeping its record, and sends the browser back to confirm
-//   the change. Anything wrong is STEP_UP_FAILED, 403: the person is signed
-//   in, but this change isn't confirmed; noted as a security event with the
-//   person (`sign_in_failed`, reason `step_up_<failure>`).
+//   the change. Anything wrong is STEP_UP_FAILED, 403: this change is not
+//   confirmed, and a live session stays as it was; noted as a security
+//   event with the person (`sign_in_failed`, reason `step_up_<failure>`).
+//   The session cookie is SameSite=Strict, so the login service must be on
+//   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
+//   browser would bring no session back and every step-up would fail.
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
 //   something, so the Origin rule holds it (SEC-WEB-01).
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
