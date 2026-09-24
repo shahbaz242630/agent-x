@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { checkEvidence, checkSubject, type SignInEvidence, SignInRefused, type Subject } from './sign-in.ts';
+import {
+  checkEvidence,
+  checkSubject,
+  isReturnPath,
+  type SignInEvidence,
+  SignInRefused,
+  type Subject,
+} from './sign-in.ts';
 
 const who: Subject = { issuer: 'https://auth.example.test', subject: '338719472394810051' };
 const proof: SignInEvidence = {
@@ -74,5 +81,31 @@ describe("a sign-in's evidence", () => {
     expect(() => {
       checkEvidence(loose(proof, { amr: [] }));
     }).toThrow(SignInRefused);
+  });
+});
+
+describe('a return path (SEC-WEB-04)', () => {
+  it.each(['/', '/agents', '/agents/0199a0f0-0000-7000-8000-000000000001?tab=keys&page=2', `/${'a'.repeat(511)}`])(
+    'is taken when it is a path on our own origin: %s',
+    (path) => {
+      expect(isReturnPath(path)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['another site, protocol-relative', '//evil.example'],
+    ['another site, with a backslash', '/\\evil.example'],
+    ['a full address', 'https://evil.example/'],
+    ['a scheme', 'javascript:alert(1)'],
+    ['no leading slash', 'agents'],
+    ['empty', ''],
+    ['a line break', '/agents\r\nset-cookie: x=1'],
+    ['a space', '/my agents'],
+    ['a fragment', '/agents#keys'],
+    ['a backslash later on', '/agents\\x'],
+    ['too long', `/${'a'.repeat(512)}`],
+    ['not text', 7],
+  ])('is refused when it is %s', (_, path) => {
+    expect(isReturnPath(path)).toBe(false);
   });
 });

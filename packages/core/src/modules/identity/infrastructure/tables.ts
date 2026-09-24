@@ -1,7 +1,8 @@
-/** The identity schema's tables (db/migrations/0010_identity.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
+  'identity.login_flows': LoginFlowsTable;
 }
 
 interface UsersTable {
@@ -23,5 +24,17 @@ interface SessionsTable {
   created_at: Date;
   last_seen_at: Date;
   /** The absolute end, set when it opens; the idle end moves with last_seen_at. */
+  ends_at: Date;
+}
+
+interface LoginFlowsTable {
+  /** SHA-256 of the flow ID the browser holds; never the flow ID itself. */
+  cookie_hash: Buffer;
+  state: string;
+  nonce: string;
+  verifier: string;
+  /** The same-origin path to send the browser back to (SEC-WEB-04). */
+  return_to: string;
+  created_at: Date;
   ends_at: Date;
 }
