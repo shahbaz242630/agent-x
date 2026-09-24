@@ -97,6 +97,50 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
     expect(await store.take(app, flowId)).toMatchObject({ flow });
   });
 
+  it('sweeps flows past their ten minutes, a batch at a time, and leaves the rest', async () => {
+    // Later than every other test's flows, so theirs are swept first and this counts only its own.
+    const clock = new FixedClock(new Date(START.getTime() + 86_400_000));
+    const store = createLoginFlows({ clock });
+    await store.sweep(app, 10_000);
+    const oldest = newFlow();
+    const older = newFlow();
+    const fresh = newFlow();
+    await store.save(app, oldest, '/');
+    clock.advanceBy(1000);
+    await store.save(app, older, '/');
+    clock.advanceBy(LOGIN_FLOW_SECONDS * 1000 - 1000);
+    await store.save(app, fresh, '/');
+    const mine = [oldest.state, older.state, fresh.state];
+    const left = async () =>
+      (
+        await app
+          .selectFrom('identity.login_flows')
+          .select('state')
+          .where('state', 'in', mine)
+          .orderBy('ends_at')
+          .execute()
+      ).map((row) => row.state);
+
+    // Only the oldest is past its ten minutes yet.
+    expect(await store.sweep(app, 10)).toBe(1);
+    expect(await left()).toEqual([older.state, fresh.state]);
+
+    clock.advanceBy(LOGIN_FLOW_SECONDS * 1000);
+    await store.save(app, oldest, '/');
+    expect(await store.sweep(app, 1)).toBe(1);
+    expect(await left()).toHaveLength(2);
+    expect(await store.sweep(app, 10)).toBe(1);
+    expect(await left()).toEqual([oldest.state]);
+  });
+
+  it('refuses a sweep of no flows', async () => {
+    const store = createLoginFlows({ clock: new FixedClock(START) });
+
+    for (const most of [0, -1, 1.5, Number.NaN]) {
+      await expect(store.sweep(app, most)).rejects.toThrow(RangeError);
+    }
+  });
+
   it('refuses to keep a flow that would send the browser elsewhere', async () => {
     const store = createLoginFlows({ clock: new FixedClock(START) });
 

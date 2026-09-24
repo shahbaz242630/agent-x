@@ -1,7 +1,8 @@
 // The sign-in flows under way (0011): kept here, by the hash of a random flow
 // ID the browser holds, from the moment the browser is sent to the login
 // service until it comes back. A flow is taken once (deleted and read in one
-// statement) and lives ten minutes. The times are the Clock's (ADR-006 §3).
+// statement) and lives ten minutes; one left behind is swept after. The
+// times are the Clock's (ADR-006 §3).
 import { createHash, randomBytes } from 'node:crypto';
 
 import type { Kysely } from 'kysely';
@@ -25,6 +26,11 @@ export interface LoginFlows {
   save(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string): Promise<string>;
   /** Takes the flow this ID names, once and within its ten minutes; undefined for any other. */
   take(db: Kysely<IdentityTables>, flowId: string): Promise<TakenFlow | undefined>;
+  /**
+   * Deletes up to `most` flows past their ten minutes, and says how many: a browser that never came back leaves its flow behind, and
+   * anyone can start one (B2-3a-2 sweeps them hourly, a batch at a time).
+   */
+  sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
 
 /** The flow ID: 32 random bytes as base64url, like a session's cookie ID. */
@@ -65,6 +71,21 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
         flow: { state: row.state, nonce: row.nonce, verifier: row.verifier },
         returnTo: row.return_to,
       };
+    },
+
+    async sweep(db, most) {
+      if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one flow at a time');
+      const ended = db
+        .selectFrom('identity.login_flows')
+        .select('cookie_hash')
+        .where('ends_at', '<=', clock.now())
+        .limit(most);
+      const rows = await db
+        .deleteFrom('identity.login_flows')
+        .where('cookie_hash', 'in', ended)
+        .returning('cookie_hash')
+        .execute();
+      return rows.length;
     },
   };
 }
