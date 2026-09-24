@@ -927,6 +927,47 @@ describe('config: sign-in (ADR-003 §5, §7)', () => {
     );
   });
 
+  describe('B2-6 the internal origin, where the API reaches the login service inside the platform', () => {
+    const INTERNAL = 'https://ca-agentx-stg-zitadel.internal.example.uaenorth.azurecontainerapps.io';
+    const ROUTED: Env = {
+      ...SIGN_IN,
+      AGENTX_OIDC_INTERNAL_ORIGIN: INTERNAL,
+      AGENTX_OUTBOUND_ALLOWED_ORIGINS: INTERNAL,
+    };
+
+    it('is read with sign-in, and is none unless set', () => {
+      expect(loadConfig(ROUTED).signIn?.internalOrigin).toBe(INTERNAL);
+      expect(loadConfig(SIGN_IN).signIn?.internalOrigin).toBeUndefined();
+    });
+
+    it('must be on the allowlist, since it is what the API calls; the issuer then need not be', () => {
+      expect(problemsWith({ ...ROUTED, AGENTX_OUTBOUND_ALLOWED_ORIGINS: ISSUER })).toEqual([
+        'AGENTX_OIDC_INTERNAL_ORIGIN: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API fetches its keys and trades codes there',
+      ]);
+    });
+
+    it('is refused without sign-in, where it would say how to reach nothing', () => {
+      expect(problemsWith({ ...MINIMAL, AGENTX_OIDC_INTERNAL_ORIGIN: INTERNAL })).toEqual([
+        'AGENTX_OIDC_INTERNAL_ORIGIN: set only with AGENTX_OIDC_ISSUER, where it says how to reach it',
+      ]);
+    });
+
+    it('is refused in plain http outside a local run, and allowed in one', () => {
+      const plain = { ...ROUTED, AGENTX_OIDC_INTERNAL_ORIGIN: 'http://zitadel:8080' };
+      expect(problemsWith({ ...plain, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://zitadel:8080' })).toContain(
+        'AGENTX_OIDC_INTERNAL_ORIGIN: plain http is allowed only in development and test; production must use https',
+      );
+      const local = { ...plain, AGENTX_ENV: 'development', AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://zitadel:8080' };
+      expect(loadConfig(local).signIn?.internalOrigin).toBe('http://zitadel:8080');
+    });
+
+    it('is refused with a path', () => {
+      expect(problemsWith({ ...ROUTED, AGENTX_OIDC_INTERNAL_ORIGIN: `${INTERNAL}/oauth` })).toEqual([
+        expect.stringMatching(/^AGENTX_OIDC_INTERNAL_ORIGIN/),
+      ]);
+    });
+  });
+
   it.each([
     ['an issuer with a path', { AGENTX_OIDC_ISSUER: `${ISSUER}/oauth` }, /^AGENTX_OIDC_ISSUER/],
     ['a client ID with a space', { AGENTX_OIDC_CLIENT_ID: 'agentx api' }, /^AGENTX_OIDC_CLIENT_ID/],

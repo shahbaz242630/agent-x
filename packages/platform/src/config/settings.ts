@@ -173,6 +173,10 @@ const SETTINGS = {
   },
   AGENTX_OIDC_CLIENT_SECRET: { schema: text },
   AGENTX_OIDC_CLIENT_SECRET_FILE: { schema: text },
+  // B2-6: where the API reaches the login service inside the platform's own
+  // network, when it can't at the issuer's public address (Azure's apps
+  // can't reach their own public door). Unset, it calls the issuer itself.
+  AGENTX_OIDC_INTERNAL_ORIGIN: { schema: publicOrigin.optional() },
   // ADR-003 §7: a console session ends after this long unused, and this long
   // after it opened however much it is used.
   AGENTX_SESSION_IDLE_MINUTES: {
@@ -290,6 +294,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_OIDC_CLIENT_ID',
       'AGENTX_OIDC_CLIENT_SECRET',
       'AGENTX_OIDC_CLIENT_SECRET_FILE',
+      'AGENTX_OIDC_INTERNAL_ORIGIN',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',

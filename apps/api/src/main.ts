@@ -124,11 +124,17 @@ function signInFrom(
   sessions: Sessions,
 ): SignIn | undefined {
   if (config.signIn === undefined) return undefined;
-  const { issuer, clientId, clientSecret } = config.signIn;
+  const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
   return createSignIn({
     db: database,
     oidc: createOidcClient({
-      settings: { issuer, clientId, clientSecret, redirectUri: `${config.http.publicOrigin}/v1/auth/callback` },
+      settings: {
+        issuer,
+        clientId,
+        clientSecret,
+        redirectUri: `${config.http.publicOrigin}/v1/auth/callback`,
+        internalOrigin,
+      },
       fetch: createOutboundFetch(config.outbound.allowedOrigins),
       clock: systemClock,
     }),

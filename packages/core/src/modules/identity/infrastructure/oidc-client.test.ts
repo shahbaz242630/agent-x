@@ -537,12 +537,92 @@ describe('finishing a sign-in', () => {
   });
 });
 
+describe('B2-6 reaching the login service inside the platform', () => {
+  const INTERNAL = 'https://zitadel.internal.example.test';
+  /** What reached the internal origin, which answers as the issuer only when told the issuer's host. */
+  let reached: Call[];
+
+  beforeEach(() => {
+    reached = [];
+    client = createOidcClient({
+      settings: {
+        issuer: ISSUER,
+        clientId: CLIENT,
+        clientSecret: PASS,
+        redirectUri: REDIRECT,
+        internalOrigin: INTERNAL,
+      },
+      fetch: (url, init = {}) => {
+        const target = new URL(String(url));
+        reached.push({ url: target.href, init });
+        const headers = new Headers(init.headers);
+        if (
+          target.origin !== INTERNAL ||
+          headers.get('x-zitadel-instance-host') !== 'auth.example.test' ||
+          headers.get('x-zitadel-public-host') !== 'auth.example.test'
+        ) {
+          return Promise.resolve(new Response('not this instance', { status: 404 }));
+        }
+        return service.fetch(`${ISSUER}${target.pathname}${target.search}`, init);
+      },
+      clock,
+    });
+  });
+
+  it("signs in with every call made there, naming the issuer's host, and none to the issuer's public address", async () => {
+    const signedIn = await signIn();
+
+    expect(signedIn.subject).toEqual({ issuer: ISSUER, subject: '338719472394810051' });
+    expect(reached.map((call) => new URL(call.url).pathname)).toEqual([
+      '/.well-known/openid-configuration',
+      '/oauth/v2/token',
+      '/oauth/v2/keys',
+    ]);
+    expect(reached.every((call) => call.url.startsWith(`${INTERNAL}/`))).toBe(true);
+  });
+
+  it("keeps the token call's own headers and body beside Zitadel's", async () => {
+    await signIn();
+
+    const token = reached.find((call) => call.url === `${INTERNAL}/oauth/v2/token`);
+    const headers = new Headers(token?.init.headers);
+    expect(headers.get('authorization')).toMatch(/^Basic /);
+    expect(new URLSearchParams(token?.init.body as string).get('code')).toBe(CODE);
+  });
+
+  it("keeps an endpoint's query on the way there", async () => {
+    service.discovery = { ...service.discovery, jwks_uri: `${ISSUER}/oauth/v2/keys?format=jwks` };
+
+    await signIn().catch(() => undefined);
+
+    expect(reached.map((call) => call.url)).toContain(`${INTERNAL}/oauth/v2/keys?format=jwks`);
+  });
+
+  it("still refuses a document whose endpoints aren't on the issuer's own origin, the internal one included", async () => {
+    service.discovery = { ...service.discovery, token_endpoint: `${INTERNAL}/oauth/v2/token` };
+
+    await expectFailure(signIn(), 'provider_unavailable', /token_endpoint is not on the issuer's origin/);
+  });
+
+  it('names the internal origin when a call there fails', async () => {
+    service.failNetwork = true;
+
+    await expectFailure(
+      client.start(),
+      'provider_unavailable',
+      /a call to https:\/\/zitadel\.internal\.example\.test failed/,
+    );
+  });
+});
+
 describe('the settings', () => {
   it.each([
     ['an issuer that is not a URL', { issuer: 'auth.example.test' }],
     ['a redirect address that is not a URL', { redirectUri: '/v1/auth/callback' }],
     ['an empty client ID', { clientId: '' }],
     ['a client secret with a space', { clientSecret: 'two words' }],
+    ['an internal origin that is not a URL', { internalOrigin: 'zitadel:8080' }],
+    ['an internal origin with a path', { internalOrigin: 'https://zitadel.internal.example.test/oauth' }],
   ])('are refused with %s', (_, change) => {
     expect(() =>
       createOidcClient({

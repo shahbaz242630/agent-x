@@ -81,8 +81,6 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     const elsewhere = services
       .filter(([name]) => name !== 'edge')
       .filter(([, service]) => service.network_mode !== 'none' || service.networks !== undefined)
-      // The relay shares the API's network, which is the internal one alone (the next test).
-      .filter(([name, service]) => name !== 'api-login-relay' || service.network_mode !== 'service:api')
       .filter(([, service]) => networksOf(service).join(',') !== 'internal')
       .map(([name]) => name);
     expect(elsewhere).toEqual([]);
@@ -90,20 +88,10 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(file.services['zitadel-volume']?.network_mode).toBe('none');
   });
 
-  it("puts the login relay in the API's network alone, listening on its loopback only, with nothing but its config", () => {
-    const relay = file.services['api-login-relay'];
-    expect(relay?.network_mode).toBe('service:api');
-    expect(relay?.networks).toBeUndefined();
-    expect(relay?.ports).toBeUndefined();
+  it("shares no service's network with another: each is on its own, the internal network's", () => {
     expect(
       services.filter(([, service]) => service.network_mode?.startsWith('service:')).map(([name]) => name),
-    ).toEqual(['api-login-relay']);
-    expect(relay?.volumes).toEqual(['./edge/relay.conf:/etc/nginx/nginx.conf:ro']);
-    const conf = readFileSync('deploy/compose/edge/relay.conf', 'utf8');
-    expect([...conf.matchAll(/^\s*listen\s+([^;]+);/gm)].map(([, address]) => address)).toEqual(['127.0.0.1:8081']);
-    expect([...conf.matchAll(/^\s*proxy_pass\s+([^;]+);/gm)].map(([, target]) => target)).toEqual([
-      'http://10.77.0.2:8081',
-    ]);
+    ).toEqual([]);
   });
 
   it('marks the internal network internal, and keeps its dynamic addresses away from the edge', () => {
@@ -164,7 +152,6 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
       db: ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID'],
       // nginx starts as root, hands its cache to its worker user and drops to it.
       edge: ['CHOWN', 'SETGID', 'SETUID'],
-      'api-login-relay': ['CHOWN', 'SETGID', 'SETUID'],
       // The step that gives Zitadel its token folders.
       'zitadel-volume': ['CHOWN'],
     };
