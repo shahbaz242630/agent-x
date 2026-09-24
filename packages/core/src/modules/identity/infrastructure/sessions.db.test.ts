@@ -1,10 +1,10 @@
 // B2-1: the console's sessions (0010), on the real migrated schema, as the app
 // role: opened, used within both timeouts, rotated keeping their record
 // (SEC-HA-07, the store half), and ended.
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type SignInEvidence, SignInRefused } from '../domain/sign-in.ts';
 import { createSessions, type Sessions } from './sessions.ts';
@@ -375,6 +375,39 @@ describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
     expect(await at(now).sweep(app, 2)).toBe(2);
     expect(await at(now).sweep(app, 2)).toBe(1);
     expect(await at(now).sweep(app, 2)).toBe(0);
+  });
+
+  it('leaves a session used while the sweep waited for it: it is live again', async () => {
+    const { userId } = await setUp();
+    const now = LATER + 2 * 86_400_000;
+    await at(now).sweep(app, 1_000_000);
+    const { sessionId } = await at(now - IDLE * SECOND).open(app, userId, evidence);
+    // A request's use, held open until the sweep has found the session and waits on its lock.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select id from identity.sessions where id = $1 for update', [sessionId]);
+    try {
+      const sweeping = within(15_000, at(now).sweep(app, 100), 'the sweep');
+      await vi.waitFor(
+        async () => {
+          const waiting = await database
+            .as('admin')
+            .query<{ count: string }>(
+              `select count(*) from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database() and wait_event_type = 'Lock' and query like 'delete from "identity"."sessions"%'`,
+            );
+          expect(waiting).toEqual([{ count: '1' }]);
+        },
+        { timeout: 10_000 },
+      );
+      await holder.query('update identity.sessions set last_seen_at = $2 where id = $1', [sessionId, new Date(now)]);
+      await holder.query('commit');
+
+      expect(await sweeping).toBe(0);
+      expect(await rowOf(sessionId)).toMatchObject({ last_seen_at: new Date(now) });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('refuses a sweep of no sessions', async () => {

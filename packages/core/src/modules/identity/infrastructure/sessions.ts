@@ -21,7 +21,7 @@
 // own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import { type Kysely, sql } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -185,12 +185,18 @@ export function createSessions({
       return db.transaction().execute(async (tx) => {
         await sql`set local statement_timeout = '10s'`.execute(tx);
         // Exactly the sessions `use` would no longer find: the rest are live.
-        const ended = tx
-          .selectFrom('identity.sessions')
-          .select('id')
-          .where((eb) => eb.or([eb('last_seen_at', '<=', idleSince(now)), eb('ends_at', '<=', now)]))
-          .limit(most);
-        const rows = await tx.deleteFrom('identity.sessions').where('id', 'in', ended).returning('id').execute();
+        const past = (eb: ExpressionBuilder<IdentityTables, 'identity.sessions'>) =>
+          eb.or([eb('last_seen_at', '<=', idleSince(now)), eb('ends_at', '<=', now)]);
+        const ended = tx.selectFrom('identity.sessions').select('id').where(past).limit(most);
+        // Asked again of each row as it is deleted: a session a request used
+        // while the sweep waited for its lock is live again, and the id alone
+        // would be all Postgres checks a second time.
+        const rows = await tx
+          .deleteFrom('identity.sessions')
+          .where('id', 'in', ended)
+          .where(past)
+          .returning('id')
+          .execute();
         return rows.length;
       });
     },
