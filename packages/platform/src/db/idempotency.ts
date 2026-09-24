@@ -127,7 +127,10 @@ export interface IdempotentWrites {
    * request is the first with the key; it does the write in the same
    * transaction and returns its answer, which is recorded against the key
    * before this resolves. If `work` throws, the claim and everything `work`
-   * wrote are rolled back, and its error is thrown on.
+   * wrote are rolled back, and its error is thrown on. From the claim on, the
+   * transaction waits at most 5 seconds for a lock (a shorter limit already
+   * set is kept); a claim still waiting on another request's uncommitted
+   * claim of the key then resolves `busy`, with nothing of it left.
    */
   run<Schema>(
     tx: Transaction<Schema>,
