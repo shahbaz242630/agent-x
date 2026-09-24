@@ -2,7 +2,7 @@
 // console sessions and the sign-in flows under way, in global tables (0010,
 // 0011); the OIDC client that checks a sign-in (B2-2); and the sign-in from
 // end to end (B2-3a). The routes come at B2-3a-2, memberships and roles at
-// B4, step-up challenges at B3.
+// B4. Step-up challenges (B3-1), bound to one pending change in a session.
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
@@ -30,5 +30,14 @@ export {
   type SignInBegun,
   type SignInCompleted,
 } from './infrastructure/sign-in-flow.ts';
+export {
+  type ConsumedStepUp,
+  createStepUpChallenges,
+  type PendingChallenge,
+  STEP_UP_SECONDS,
+  type StepUpBinding,
+  type StepUpChallenges,
+  type StepUpEvidence,
+} from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
 export { userForSubject } from './infrastructure/users.ts';

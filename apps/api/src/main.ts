@@ -26,6 +26,7 @@ import {
   createOidcClient,
   createSessions,
   createSignIn,
+  createStepUpChallenges,
   type IdentityTables,
   type LoginFlows,
   type Sessions,
@@ -316,6 +317,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // A failure to build the server is a bug, so it goes to the crash handler above.
   const flows = createLoginFlows({ clock: systemClock });
   const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
+  const challenges = createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
@@ -421,6 +423,17 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     SWEEP_EVERY_MS,
   );
+  // Step-up challenges past their five minutes (B3-1), on a timer of its own too.
+  const challengeSweeping = scheduleRowSweep(
+    createRowSweep({
+      rows: 'identity.step_up_challenge',
+      sweep: (most) => challenges.sweep(database, most),
+      logger,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+      ...ROW_SWEEP,
+    }),
+    SWEEP_EVERY_MS,
+  );
   // The security events past the retention the config names (B2-5a), on a timer of its own too.
   const eventSweeping = scheduleRowSweep(
     createRowSweep({
@@ -444,6 +457,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           sweeping.stop(),
           flowSweeping.stop(),
           sessionSweeping.stop(),
+          challengeSweeping.stop(),
           eventSweeping.stop(),
           recording.stop(),
         ]);

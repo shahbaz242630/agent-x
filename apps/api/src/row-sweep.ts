@@ -7,6 +7,9 @@
 // - console sessions (B2-4a): a session past its idle or absolute timeout is
 //   never found again, but its row stays until the person signs out, which
 //   most never do;
+// - step-up challenges (B3-1): each lives five minutes, but its row stays
+//   until its change consumes it or its session ends, and most sessions last
+//   hours;
 // - security events (B2-5a): each is kept for the retention period the config
 //   names, with the client's IP address, and no longer.
 //
@@ -25,7 +28,7 @@ import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
  * and so on. The count is `deleted` for all: the logger redacts any field
  * named like `session`.
  */
-export type SweptRows = 'identity.flow' | 'identity.session' | 'security.event';
+export type SweptRows = 'identity.flow' | 'identity.session' | 'identity.step_up_challenge' | 'security.event';
 
 export interface RowSweepOptions {
   readonly rows: SweptRows;

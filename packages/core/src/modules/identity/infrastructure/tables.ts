@@ -1,8 +1,9 @@
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
   'identity.login_flows': LoginFlowsTable;
+  'identity.step_up_challenges': StepUpChallengesTable;
 }
 
 interface UsersTable {
@@ -37,4 +38,25 @@ interface LoginFlowsTable {
   return_to: string;
   created_at: Date;
   ends_at: Date;
+}
+
+interface StepUpChallengesTable {
+  id: string;
+  /** The stable session record the challenge binds to; it goes with the session. */
+  session_id: string;
+  /** Taken from the session as the challenge is made. */
+  user_id: string;
+  /** What the change is, in the same form as a write's operation. */
+  action: string;
+  /** SHA-256 of the pending change, which its own module keeps. */
+  change_hash: Buffer;
+  nonce: string;
+  created_at: Date;
+  ends_at: Date;
+  /** The step-up's evidence: all set together, once, or none. */
+  verified_at: Date | null;
+  auth_time: Date | null;
+  amr: string[] | null;
+  idp_session_id: string | null;
+  id_token_hash: Buffer | null;
 }
