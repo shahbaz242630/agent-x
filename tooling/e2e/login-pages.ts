@@ -120,9 +120,16 @@ export function loginDriver({ password, callback }: { password: string; callback
           await page.fill('input[name=code]', await freshCode(user.totpSecret));
           await submitAndLeave(page, current);
           break;
-        case 'u2f':
-          await submitAndLeave(page, current);
+        case 'u2f': {
+          // The page starts the key's ceremony by itself, its button disabled meanwhile, and moves
+          // on once the browser's authenticator answers; the button is pressed only if it doesn't.
+          const left = await page
+            .waitForURL((url) => pageNameOf(url.href) !== 'u2f', { timeout: 15_000 })
+            .then(() => true)
+            .catch(() => false);
+          if (!left) await submitAndLeave(page, current);
           break;
+        }
         case 'factorSetup':
         case 'u2fSet':
           throw new Error(`the login stopped to set up a factor ${where(page)}`);
