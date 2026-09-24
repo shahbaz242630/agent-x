@@ -63,8 +63,7 @@ const IPV4 = new RegExp(`^${OCTET}(?:[.]${OCTET}){3}$`);
  * (no zone, no port). Checked here rather than with node:net, which the
  * boundary rules keep to the outbound fetch.
  */
-const isIpAddress = (text: string): boolean =>
-  IPV4.test(text) || (text.includes(':') && URL.canParse(`http://[${text}]/`));
+const isIpAddress = (text: string): boolean => IPV4.test(text) || URL.canParse(`http://[${text}]/`);
 
 /** Why an event can't be written, if it can't. */
 function problemWith(event: SecurityEvent, now: Date): string | undefined {
@@ -139,12 +138,8 @@ export function createSecurityEvents({
           .where('created_at', '<=', past)
           .orderBy('created_at')
           .limit(most);
-        const rows = await tx
-          .deleteFrom('security.events')
-          .where('id', 'in', oldest)
-          .where('created_at', '<=', past)
-          .returning('id')
-          .execute();
+        // An event is never changed, so the rows found are still past their retention when deleted.
+        const rows = await tx.deleteFrom('security.events').where('id', 'in', oldest).returning('id').execute();
         return rows.length;
       });
     },

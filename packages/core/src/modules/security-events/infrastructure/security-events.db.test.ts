@@ -187,10 +187,11 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
   it('sweeps the events past the retention period to the millisecond, oldest first, a batch at a time', async () => {
     await empty();
     const oldest = START.getTime();
+    // Written newest first, so the table's own order is the opposite of the sweep's.
     for (const [offset, reason] of [
-      [0, 'oldest'],
-      [DAY, 'older'],
       [2 * DAY, 'old'],
+      [DAY, 'older'],
+      [0, 'oldest'],
     ] as const) {
       await at(oldest + offset).record(app, [event({ reason, windowStart: new Date(oldest + offset) })]);
     }
