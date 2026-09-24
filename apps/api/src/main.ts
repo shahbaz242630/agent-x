@@ -30,6 +30,7 @@ import {
   type IdentityTables,
   type LoginFlows,
   type Sessions,
+  type StepUpChallenges,
   type SignIn,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
@@ -123,6 +124,7 @@ function signInFrom(
   database: Database<ApiTables>,
   flows: LoginFlows,
   sessions: Sessions,
+  challenges: StepUpChallenges,
 ): SignIn | undefined {
   if (config.signIn === undefined) return undefined;
   const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
@@ -141,6 +143,7 @@ function signInFrom(
     }),
     flows,
     sessions,
+    challenges,
     ids: uuidV7Ids,
     clock: systemClock,
   });
@@ -318,7 +321,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const flows = createLoginFlows({ clock: systemClock });
   const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
   const challenges = createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock });
-  const signIn = signInFrom(config, database, flows, sessions);
+  const signIn = signInFrom(config, database, flows, sessions, challenges);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,

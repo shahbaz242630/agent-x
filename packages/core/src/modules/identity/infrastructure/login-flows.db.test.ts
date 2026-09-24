@@ -53,6 +53,28 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
     expect(await store.take(app, flowId)).toBeUndefined();
   });
 
+  it('B3-3a keeps the step-up challenge a flow was started for, and gives it back with the flow', async () => {
+    const store = createLoginFlows({ clock: new FixedClock(START) });
+    const flow = newFlow();
+    const challengeId = '0199a0f0-0000-7000-8000-0000000000c1';
+    const flowId = await store.save(app, flow, '/members/confirm', challengeId);
+
+    expect(await store.take(app, flowId)).toEqual({
+      flow,
+      returnTo: '/members/confirm',
+      stepUpChallengeId: challengeId,
+    });
+  });
+
+  it('B3-3a refuses a step-up flow naming a challenge that is not a UUID, keeping nothing', async () => {
+    const store = createLoginFlows({ clock: new FixedClock(START) });
+    const flow = newFlow();
+    await expect(store.save(app, flow, '/', 'not-a-uuid')).rejects.toThrow(RangeError);
+    expect(
+      await app.selectFrom('identity.login_flows').select('state').where('state', '=', flow.state).execute(),
+    ).toEqual([]);
+  });
+
   it('keeps only the hash of the flow ID', async () => {
     const store = createLoginFlows({ clock: new FixedClock(START) });
     const flow = newFlow();

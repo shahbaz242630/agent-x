@@ -10,15 +10,32 @@
 // - `signedIn` finds the live session a request's cookie names, its last use
 //   moved on (B2-4b: every signed-in request).
 //
+// A step-up (B3-3a, ADR-003 §9):
+// - `beginStepUp` starts one for a challenge of the person's own session: a
+//   flow like a sign-in's, naming the challenge, with `prompt=login` and the
+//   challenge's own nonce, so the login service asks them to sign in again
+//   and its ID token must carry that nonce.
+// - `complete` takes a step-up's flow back the same way. Then, instead of
+//   opening a session: the session the browser brings must still be live and
+//   the challenge still pending for it; the ID token is checked; its person
+//   must be a user already (found, never made); and the fresh sign-in must
+//   stand for the challenge (`stepUpRefusal`). Then, in one transaction, its
+//   evidence is recorded on the challenge and the session given a new cookie
+//   ID, keeping its record (SEC-HA-07: rotated at step-up). Anything wrong is
+//   StepUpFailed, and nothing is recorded; a login service that can't be
+//   reached stays SignInFailed `provider_unavailable`.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
+import { type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
-import { type OidcClient, SignInFailed } from './oidc-client.ts';
+import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import type { LiveSession, Sessions } from './sessions.ts';
+import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -36,6 +53,8 @@ export interface SignInCompleted {
   readonly cookie: string;
   /** Where to send the browser now: the path it asked for at the start. */
   readonly returnTo: string;
+  /** The step-up challenge now verified, when the flow was a step-up; undefined for a sign-in. */
+  readonly stepUpChallengeId: string | undefined;
 }
 
 export interface CallbackInput {
@@ -43,14 +62,42 @@ export interface CallbackInput {
   readonly flowId: string | undefined;
   readonly code: string;
   readonly state: string;
-  /** The session cookie the browser brought, if any: ended, never kept. */
+  /** The session cookie the browser brought, if any: ended at a sign-in, never kept; a step-up's own. */
   readonly previousCookie: string | undefined;
+}
+
+/**
+ * Why a step-up failed: the sign-in's own failures on the way back (but the
+ * login service being unreachable, which stays SignInFailed), no live session
+ * (`session_missing`), the challenge gone, used or out of time
+ * (`challenge_missing`), or the fresh sign-in not standing for it.
+ */
+export type StepUpFailure =
+  Exclude<SignInFailure, 'provider_unavailable'> | 'session_missing' | 'challenge_missing' | StepUpRefusal;
+
+export class StepUpFailed extends Error {
+  override readonly name = 'StepUpFailed';
+  readonly failure: StepUpFailure;
+  /** The session's person, where the failure came after the session was found. */
+  readonly userId: string | undefined;
+  constructor(failure: StepUpFailure, detail: string, userId?: string) {
+    super(`step-up failed (${failure}): ${detail}`);
+    this.failure = failure;
+    this.userId = userId;
+  }
 }
 
 export interface SignIn {
   /** Starts a sign-in that sends the browser back to `returnTo` (our home page if none). Throws RangeError for a path that isn't ours. */
   begin(returnTo?: string): Promise<SignInBegun>;
-  /** Finishes the sign-in the flow cookie names. Throws SignInFailed. */
+  /**
+   * Starts a step-up for the session's own pending challenge, sending the
+   * browser back to `returnTo` after. Throws StepUpFailed `challenge_missing`
+   * for a challenge that isn't the session's or isn't pending, RangeError for
+   * a path that isn't ours.
+   */
+  beginStepUp(sessionId: string, challengeId: string, returnTo?: string): Promise<SignInBegun>;
+  /** Finishes the sign-in or step-up the flow cookie names. Throws SignInFailed, or StepUpFailed for a step-up. */
   complete(input: CallbackInput): Promise<SignInCompleted>;
   /** Ends the session this cookie belongs to, if any; true if there was one. */
   signOut(cookie: string | undefined): Promise<boolean>;
@@ -63,6 +110,7 @@ export function createSignIn({
   oidc,
   flows,
   sessions,
+  challenges,
   ids,
   clock,
 }: {
@@ -70,6 +118,7 @@ export function createSignIn({
   readonly oidc: OidcClient;
   readonly flows: LoginFlows;
   readonly sessions: Sessions;
+  readonly challenges: StepUpChallenges;
   readonly ids: IdGenerator;
   readonly clock: Clock;
 }): SignIn {
@@ -80,6 +129,57 @@ export function createSignIn({
       return work(tx);
     });
 
+  /** A step-up's way back: the session, the challenge, the ID token, the checks; then the evidence and a new cookie ID. */
+  async function completeStepUp(
+    challengeId: string,
+    taken: { readonly flow: LoginFlow; readonly returnTo: string },
+    returned: { readonly code: string; readonly state: string },
+    cookie: string | undefined,
+  ): Promise<SignInCompleted> {
+    const session = cookie === undefined ? undefined : await limited((tx) => sessions.use(tx, cookie));
+    if (session === undefined) throw new StepUpFailed('session_missing', 'the browser brought no live session');
+    const { sessionId, userId } = session;
+    const pending = await limited((tx) => challenges.pending(tx, challengeId, sessionId));
+    if (pending === undefined) {
+      throw new StepUpFailed('challenge_missing', 'the challenge is not pending for this session', userId);
+    }
+    let signedIn;
+    try {
+      signedIn = await oidc.finish(taken.flow, returned);
+    } catch (error) {
+      if (!(error instanceof SignInFailed) || error.failure === 'provider_unavailable') throw error;
+      throw new StepUpFailed(error.failure, error.message, userId);
+    }
+    const { subject, evidence, idTokenHash } = signedIn;
+    const person = await limited((tx) =>
+      tx
+        .selectFrom('identity.users')
+        .select('id')
+        .where('issuer', '=', subject.issuer)
+        .where('subject', '=', subject.subject)
+        .executeTakeFirst(),
+    );
+    const refusal =
+      person === undefined
+        ? 'other_person'
+        : stepUpRefusal(pending, { userId: person.id, evidence }, { passkeyRequired: false });
+    if (refusal !== undefined) {
+      throw new StepUpFailed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
+    }
+    return limited(async (tx) => {
+      const recorded = await challenges.recordEvidence(tx, challengeId, sessionId, {
+        authTime: evidence.authTime,
+        amr: evidence.amr,
+        idpSessionId: evidence.idpSessionId ?? null,
+        idTokenHash,
+      });
+      if (!recorded) throw new StepUpFailed('challenge_missing', 'the challenge ran out of time', userId);
+      const rotated = await sessions.rotate(tx, sessionId);
+      if (rotated === undefined) throw new StepUpFailed('session_missing', 'the session ended', userId);
+      return { userId, sessionId, cookie: rotated, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
+    });
+  }
+
   return {
     async begin(returnTo = HOME_PATH) {
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
@@ -88,16 +188,30 @@ export function createSignIn({
       return { url, flowId };
     },
 
+    async beginStepUp(sessionId, challengeId, returnTo = HOME_PATH) {
+      if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
+      const pending = await limited((tx) => challenges.pending(tx, challengeId, sessionId));
+      if (pending === undefined) {
+        throw new StepUpFailed('challenge_missing', 'no challenge of this session is pending');
+      }
+      const { url, flow } = await oidc.start({ prompt: 'login', nonce: pending.nonce });
+      const flowId = await limited((tx) => flows.save(tx, flow, returnTo, pending.challengeId));
+      return { url, flowId };
+    },
+
     async complete({ flowId, code, state, previousCookie }) {
       // Taken, and committed, before the login service is called: used once, whatever follows.
       const taken = flowId === undefined ? undefined : await limited((tx) => flows.take(tx, flowId));
       if (taken === undefined) throw new SignInFailed('flow_missing', 'no flow of ours is waiting for this browser');
+      if (taken.stepUpChallengeId !== undefined) {
+        return completeStepUp(taken.stepUpChallengeId, taken, { code, state }, previousCookie);
+      }
       const { subject, evidence } = await oidc.finish(taken.flow, { code, state });
       return limited(async (tx) => {
         const userId = await userForSubject(tx, subject, { ids, clock });
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
-        return { userId, sessionId, cookie, returnTo: taken.returnTo };
+        return { userId, sessionId, cookie, returnTo: taken.returnTo, stepUpChallengeId: undefined };
       });
     },
 

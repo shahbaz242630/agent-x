@@ -26,6 +26,18 @@
 // - At either, a login service that can't be reached (on staging, often one
 //   still waking from zero) is SIGN_IN_UNAVAILABLE, 503 with Retry-After: a
 //   failure on our side, so no security event, never the 500 it was (S47).
+// - `GET /v1/auth/step-up?challenge=…&returnTo=…` (B3-3a, ADR-003 §9) starts
+//   a step-up for a challenge of the signed-in person's own session: a flow
+//   cookie, and off to the login service to sign in again (`prompt=login`).
+//   The callback then checks the fresh sign-in against the challenge,
+//   records its evidence there and gives the session a new cookie ID
+//   (SEC-HA-07), keeping its record, and sends the browser back to confirm
+//   the change. Anything wrong is STEP_UP_FAILED, 403: this change is not
+//   confirmed, and a live session stays as it was; noted as a security
+//   event with the person (`sign_in_failed`, reason `step_up_<failure>`).
+//   The session cookie is SameSite=Strict, so the login service must be on
+//   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
+//   browser would bring no session back and every step-up would fail.
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
 //   something, so the Origin rule holds it (SEC-WEB-01).
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
@@ -37,7 +49,13 @@
 // B2-6), all three answer NOT_FOUND, as a feature that is off does. So does a
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
-import { isReturnPath, type SignIn, SignInFailed, type SignInFailure } from '@agentx/core/modules/identity';
+import {
+  isReturnPath,
+  type SignIn,
+  SignInFailed,
+  type SignInFailure,
+  StepUpFailed,
+} from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -114,6 +132,20 @@ const CALLBACK_SCHEMA = {
   response: { 302: REDIRECT },
 };
 
+const STEP_UP_SCHEMA = {
+  summary: 'Sign in again to confirm a change',
+  querystring: z.object({
+    challenge: z.uuid().describe("The step-up challenge the change's own address opened for this session."),
+    returnTo: z
+      .string()
+      .max(512)
+      .refine(isReturnPath, { error: 'must be a path on this origin' })
+      .optional()
+      .describe('Where to go once signed in again, to confirm the change: a path on this origin. Home if none.'),
+  }),
+  response: { 302: REDIRECT },
+};
+
 const SESSION_SCHEMA = {
   summary: 'Your own session',
   response: {
@@ -175,6 +207,20 @@ export function registerSignIn(
       request.id,
     );
   };
+  /** Logs a failed step-up, notes it as a security event with the person, and refuses it: they stay signed in. */
+  const stepUpFailed = (request: FastifyRequest, reply: FastifyReply, failed: StepUpFailed) => {
+    const { failure, userId } = failed;
+    logger
+      .child({ correlationId: request.id })
+      .warn('auth.step_up_failed', userId === undefined ? { failure } : { failure, userId });
+    securityEvents.note({
+      kind: 'sign_in_failed',
+      reason: `step_up_${failure}`,
+      ip: request.ip,
+      ...(userId !== undefined && { userId }),
+    });
+    return sendErrorBody(reply, 403, 'STEP_UP_FAILED', request.id);
+  };
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
@@ -211,11 +257,14 @@ export function registerSignIn(
         previousCookie: cookieValue(request.headers.cookie, SESSION_COOKIE),
       });
     } catch (thrown) {
+      if (thrown instanceof StepUpFailed) return stepUpFailed(request, reply, thrown);
       if (!(thrown instanceof SignInFailed)) throw thrown;
       if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
       return failed(request, reply, thrown.failure, thrown.message);
     }
-    logger.child({ correlationId: request.id }).info('auth.signed_in', { userId: done.userId });
+    logger
+      .child({ correlationId: request.id })
+      .info(done.stepUpChallengeId === undefined ? 'auth.signed_in' : 'auth.stepped_up', { userId: done.userId });
     return reply
       .code(302)
       .header('location', done.returnTo)
@@ -223,6 +272,30 @@ export function registerSignIn(
         cookie(SESSION_COOKIE, done.cookie, 'Strict', sessionSeconds),
         cookie(FLOW_COOKIE, '', 'Lax', 0),
       ])
+      .send({});
+  });
+
+  routes.get('/v1/auth/step-up', { schema: STEP_UP_SCHEMA, config: { access: ['person'] } }, async (request, reply) => {
+    const session = request.person;
+    // The access hook lets no one else through; a route that runs without a person is a bug.
+    if (session === null) throw new Error('the step-up route ran without a signed-in person');
+    if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
+    let begun;
+    try {
+      begun = await signIn.beginStepUp(session.sessionId, request.query.challenge, request.query.returnTo);
+    } catch (thrown) {
+      if (thrown instanceof StepUpFailed) {
+        return stepUpFailed(request, reply, new StepUpFailed(thrown.failure, thrown.message, session.userId));
+      }
+      if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
+        return unavailable(request, reply, thrown.message);
+      }
+      throw thrown;
+    }
+    return reply
+      .code(302)
+      .header('location', begun.url)
+      .header('set-cookie', cookie(FLOW_COOKIE, begun.flowId, 'Lax', FLOW_COOKIE_SECONDS))
       .send({});
   });
 

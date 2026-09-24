@@ -1,7 +1,13 @@
 // B2-3a-2: the sign-in routes over HTTP, with a stand-in sign-in (the real
 // one: the identity module's sign-in-flow.db.test.ts). B2-4b: a signed-in
 // request, found by its session cookie, and the person's own session.
-import { type CallbackInput, type LiveSession, type SignIn, SignInFailed } from '@agentx/core/modules/identity';
+import {
+  type CallbackInput,
+  type LiveSession,
+  type SignIn,
+  SignInFailed,
+  StepUpFailed,
+} from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
@@ -54,10 +60,27 @@ class StandIn implements SignIn {
     return Promise.resolve({ url: LOGIN_URL, flowId: FLOW_ID });
   }
 
+  /** Each step-up begun: the session, the challenge and the return path. */
+  steppedUp: [string, string, string | undefined][] = [];
+  /** When set, the step-up that `complete` finishes: its challenge. */
+  completesStepUp: string | undefined;
+
+  beginStepUp(sessionId: string, challengeId: string, returnTo?: string) {
+    this.steppedUp.push([sessionId, challengeId, returnTo]);
+    if (this.beginFailsWith !== undefined) return Promise.reject(this.beginFailsWith);
+    return Promise.resolve({ url: `${LOGIN_URL}&prompt=login`, flowId: FLOW_ID });
+  }
+
   complete(input: CallbackInput) {
     this.completed.push(input);
     if (this.failWith !== undefined) return Promise.reject(this.failWith);
-    return Promise.resolve({ userId: USER_ID, sessionId: RECORD_ID, cookie: NEW_SESSION, returnTo: '/agents' });
+    return Promise.resolve({
+      userId: USER_ID,
+      sessionId: RECORD_ID,
+      cookie: NEW_SESSION,
+      returnTo: '/agents',
+      stepUpChallengeId: this.completesStepUp,
+    });
   }
 
   signOut(cookie: string | undefined) {
@@ -601,6 +624,155 @@ describe("SEC-AV-07 B2-5c each signed-in person's own rate limit, beside their a
     expect(standIn.looked).toHaveLength(10);
     expect(noted).toEqual([{ kind: 'rate_limited', reason: 'per_address', ip: '198.51.100.1' }]);
   });
+});
+
+describe('B3-3a stepping up: signing in again to confirm a change', () => {
+  const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c1';
+  /** A request to start a step-up, with the session cookie given, or none for null. */
+  const starting = (query: string, cookie: string | null = SESSION_ID, method: 'GET' | 'HEAD' = 'GET') => ({
+    method,
+    url: `/v1/auth/step-up${query}`,
+    headers: cookie === null ? {} : { cookie: `${SESSION_COOKIE}=${cookie}` },
+  });
+
+  it("starts one for the person's own session: a flow cookie, and off to sign in again", async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(starting(`?challenge=${CHALLENGE}&returnTo=/members/confirm`));
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe(`${LOGIN_URL}&prompt=login`);
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${FLOW_COOKIE}=${FLOW_ID}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`,
+    ]);
+    expect(standIn.steppedUp).toEqual([[LIVE.sessionId, CHALLENGE, '/members/confirm']]);
+  });
+
+  it('asks who is calling first: no session is UNAUTHENTICATED, and starts nothing', async () => {
+    const standIn = new StandIn();
+    const { app } = await server(standIn);
+
+    const response = await app.inject(starting(`?challenge=${CHALLENGE}`, null));
+
+    expect(response.statusCode).toBe(401);
+    expect(standIn.steppedUp).toEqual([]);
+  });
+
+  it.each([
+    ['no challenge', ''],
+    ['a challenge that is not a UUID', '?challenge=nope'],
+    ['a return path to another site', `?challenge=${CHALLENGE}&returnTo=//evil.example`],
+  ])('refuses %s as BAD_REQUEST, starting nothing', async (_what, query) => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    const response = await app.inject(starting(query));
+
+    expect(response.statusCode).toBe(400);
+    expect(standIn.steppedUp).toEqual([]);
+  });
+
+  it("refuses a challenge that isn't the session's, or isn't pending, as STEP_UP_FAILED, noting it with the person", async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new StepUpFailed('challenge_missing', 'test');
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject(starting(`?challenge=${CHALLENGE}`));
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(noted).toEqual([
+      { kind: 'sign_in_failed', reason: 'step_up_challenge_missing', ip: '127.0.0.1', userId: USER_ID },
+    ]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.step_up_failed', failure: 'challenge_missing', userId: USER_ID }),
+    );
+  });
+
+  it('answers a login service that cannot be reached as SIGN_IN_UNAVAILABLE, noting nothing', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new SignInFailed('provider_unavailable', 'test');
+    const { app, noted } = await server(standIn);
+
+    const response = await app.inject(starting(`?challenge=${CHALLENGE}`));
+
+    expect(response.statusCode).toBe(503);
+    expect(response.headers['retry-after']).toBe('15');
+    expect(noted).toEqual([]);
+  });
+
+  it('fails on our side for anything else that goes wrong', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    standIn.beginFailsWith = new Error('the database went away');
+    const { app } = await server(standIn);
+
+    expect((await app.inject(starting(`?challenge=${CHALLENGE}`))).statusCode).toBe(500);
+  });
+
+  it('does nothing for a HEAD of it', async () => {
+    const standIn = new StandIn();
+    standIn.live.set(SESSION_ID, LIVE);
+    const { app } = await server(standIn);
+
+    expect((await app.inject(starting(`?challenge=${CHALLENGE}`, SESSION_ID, 'HEAD'))).statusCode).toBe(404);
+    expect(standIn.steppedUp).toEqual([]);
+  });
+
+  it("comes back with the session's new cookie ID, the flow cookie cleared, and on to confirm the change", async () => {
+    const standIn = new StandIn();
+    standIn.completesStepUp = CHALLENGE;
+    const { app, capture } = await server(standIn);
+
+    const response = await app.inject(
+      callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+    );
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe('/agents');
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${SESSION_COOKIE}=${NEW_SESSION}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${String(SESSION_SECONDS)}`,
+      `${FLOW_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`,
+    ]);
+    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'auth.stepped_up', userId: USER_ID }));
+    expect(capture.lines().some((line) => line.event === 'auth.signed_in')).toBe(false);
+  });
+
+  it.each([
+    ['another person signed in', 'other_person', USER_ID],
+    ['an old authentication', 'stale_authentication', USER_ID],
+    ['no second factor', 'no_second_factor', USER_ID],
+    ['no live session', 'session_missing', undefined],
+  ] as const)(
+    'refuses a step-up back with %s as STEP_UP_FAILED, leaving the cookies',
+    async (_what, failure, userId) => {
+      const standIn = new StandIn();
+      standIn.failWith = new StepUpFailed(failure, 'test', userId);
+      const { app, noted } = await server(standIn);
+
+      const response = await app.inject(
+        callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}; ${SESSION_COOKIE}=${SESSION_ID}`),
+      );
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(errorBody('STEP_UP_FAILED', response.headers['x-correlation-id'] as string));
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(noted).toEqual([
+        {
+          kind: 'sign_in_failed',
+          reason: `step_up_${failure}`,
+          ip: '127.0.0.1',
+          ...(userId !== undefined && { userId }),
+        },
+      ]);
+    },
+  );
 });
 
 describe('reading our cookies', () => {

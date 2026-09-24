@@ -36,6 +36,8 @@ export {
   type SignIn,
   type SignInBegun,
   type SignInCompleted,
+  StepUpFailed,
+  type StepUpFailure,
 } from './infrastructure/sign-in-flow.ts';
 export {
   type ConsumedStepUp,

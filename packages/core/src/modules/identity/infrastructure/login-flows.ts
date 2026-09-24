@@ -19,11 +19,16 @@ export const LOGIN_FLOW_SECONDS = 600;
 interface TakenFlow {
   readonly flow: LoginFlow;
   readonly returnTo: string;
+  /** The step-up challenge it was started for (0014), if it is a step-up. */
+  readonly stepUpChallengeId: string | undefined;
 }
 
 export interface LoginFlows {
-  /** Keeps the flow and where to send the browser after; gives the flow ID for its cookie, which is never kept. */
-  save(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string): Promise<string>;
+  /**
+   * Keeps the flow, where to send the browser after and, for a step-up, its
+   * challenge; gives the flow ID for its cookie, which is never kept.
+   */
+  save(db: Kysely<IdentityTables>, flow: LoginFlow, returnTo: string, stepUpChallengeId?: string): Promise<string>;
   /** Takes the flow this ID names, once and within its ten minutes; undefined for any other. */
   take(db: Kysely<IdentityTables>, flowId: string): Promise<TakenFlow | undefined>;
   /**
@@ -37,12 +42,16 @@ export interface LoginFlows {
 
 /** The flow ID: 32 random bytes as base64url, like a session's cookie ID. */
 const FLOW_ID = /^[A-Za-z0-9_-]{43}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const hashOf = (flowId: string): Buffer => createHash('sha256').update(flowId, 'ascii').digest();
 
 export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlows {
   return {
-    async save(db, flow, returnTo) {
+    async save(db, flow, returnTo, stepUpChallengeId) {
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
+      if (stepUpChallengeId !== undefined && !UUID.test(stepUpChallengeId)) {
+        throw new RangeError('the step-up challenge ID is not a UUID');
+      }
       const now = clock.now();
       const flowId = randomBytes(32).toString('base64url');
       await db
@@ -55,6 +64,7 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
           return_to: returnTo,
           created_at: now,
           ends_at: new Date(now.getTime() + LOGIN_FLOW_SECONDS * 1000),
+          step_up_challenge_id: stepUpChallengeId ?? null,
         })
         .execute();
       return flowId;
@@ -66,12 +76,13 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
       const row = await db
         .deleteFrom('identity.login_flows')
         .where('cookie_hash', '=', hashOf(flowId))
-        .returning(['state', 'nonce', 'verifier', 'return_to', 'ends_at'])
+        .returning(['state', 'nonce', 'verifier', 'return_to', 'ends_at', 'step_up_challenge_id'])
         .executeTakeFirst();
       if (row === undefined || row.ends_at <= clock.now()) return undefined;
       return {
         flow: { state: row.state, nonce: row.nonce, verifier: row.verifier },
         returnTo: row.return_to,
+        stepUpChallengeId: row.step_up_challenge_id ?? undefined,
       };
     },
 

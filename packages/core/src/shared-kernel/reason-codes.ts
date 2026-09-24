@@ -40,6 +40,8 @@ export const REASON_CODES = {
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SIGN_IN_UNAVAILABLE:
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
+  STEP_UP_FAILED:
+    "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
   UNAUTHENTICATED:

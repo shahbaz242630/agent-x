@@ -1,4 +1,4 @@
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -38,6 +38,8 @@ interface LoginFlowsTable {
   return_to: string;
   created_at: Date;
   ends_at: Date;
+  /** The step-up challenge the flow was started for (0014); null for an ordinary sign-in. */
+  step_up_challenge_id: string | null;
 }
 
 interface StepUpChallengesTable {
