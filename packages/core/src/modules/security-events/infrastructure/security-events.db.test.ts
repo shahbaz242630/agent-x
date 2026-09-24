@@ -136,6 +136,11 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     ['an IPv6 address with a zone', 'fe80::1%eth0'],
     ['an IPv6 address in brackets', '[2001:db8::1]'],
     ['text with a colon that is no address', 'not:an:address'],
+    // Text the URL parse alone would take: the host ends at the `]`, and the rest is a path, a query or a fragment.
+    ['an IPv6 address closed early, then a path', '::1]/x'],
+    ['an IPv6 address closed early, then a query', '::1]?x'],
+    ['an IPv6 address closed early, then a fragment', '::1]#x'],
+    ['an IPv6 address with a trailing space', '::1 '],
   ])('keeps the event, its address unknown, for %s: it came from outside, and loses nothing else', async (_, ip) => {
     await empty();
     await at(START.getTime()).record(app, [event({ reason: 'first' }), event({ reason: 'odd', ip })]);
