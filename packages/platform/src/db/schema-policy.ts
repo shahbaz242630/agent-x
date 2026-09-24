@@ -113,6 +113,32 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // would be an organisation no anchor check or sweep reaches.
       appMay: ['SELECT', 'INSERT'],
     },
+    'identity.users': {
+      reason:
+        "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
+      columns: ['id', 'issuer', 'subject', 'created_at'],
+      // Made at the first sign-in and read; a user changed or deleted would
+      // move or orphan every membership and event pointing at them.
+      appMay: ['SELECT', 'INSERT'],
+    },
+    'identity.sessions': {
+      reason:
+        "The console's server-side sessions (ADR-003 §5-§7): opened at sign-in, before any organisation is known, and a person's sessions are ended together across all of theirs",
+      columns: [
+        'id',
+        'user_id',
+        'cookie_hash',
+        'idp_session_id',
+        'auth_time',
+        'amr',
+        'created_at',
+        'last_seen_at',
+        'ends_at',
+      ],
+      // Opened, read, ended; and changed only in its cookie ID (rotated) and
+      // its last-seen time, both granted column by column (0010).
+      appMay: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+    },
     'migrations.applied': {
       reason:
         'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
