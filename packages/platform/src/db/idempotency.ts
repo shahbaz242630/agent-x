@@ -10,7 +10,11 @@
 // primary key until the first claim ends. Its insert then finds the row
 // committed (the stored result, or a conflict), or gone with a rollback, and
 // then it goes ahead as the first. So there is no in-progress state: the
-// database's own waiting makes one unnecessary (ADR-007 §4).
+// database's own waiting makes one unnecessary (ADR-007 §4). The wait is
+// bounded (B2b-3a): from the claim on, the transaction waits at most 5 seconds
+// for a lock (a shorter limit the caller set is kept), and a request still
+// waiting on the key then is answered `busy`, with nothing left of its claim,
+// so it can be sent again.
 //
 // "The same thing" is a keyed hash (HMAC, the `request-hash` key) of the
 // request's normalized payload, stored with its key's version (ADR-014 §3): a
@@ -79,12 +83,15 @@ export interface IdempotentResult {
 
 /**
  * What happened: the write done now; an earlier one's result, for a retry of
- * the same request; or a conflict, for a different request with the key.
+ * the same request; a conflict, for a different request with the key; or busy,
+ * when another request's claim of the key was still uncommitted after the
+ * wait (nothing done: send it again).
  */
 export type IdempotentWrite =
   | { readonly outcome: 'done'; readonly result: IdempotentResult }
   | { readonly outcome: 'replayed'; readonly result: IdempotentResult }
-  | { readonly outcome: 'conflict' };
+  | { readonly outcome: 'conflict' }
+  | { readonly outcome: 'busy' };
 
 /**
  * The write couldn't go ahead:
@@ -120,7 +127,10 @@ export interface IdempotentWrites {
    * request is the first with the key; it does the write in the same
    * transaction and returns its answer, which is recorded against the key
    * before this resolves. If `work` throws, the claim and everything `work`
-   * wrote are rolled back, and its error is thrown on.
+   * wrote are rolled back, and its error is thrown on. From the claim on, the
+   * transaction waits at most 5 seconds for a lock (a shorter limit already
+   * set is kept); a claim still waiting on another request's uncommitted
+   * claim of the key then resolves `busy`, with nothing of it left.
    */
   run<Schema>(
     tx: Transaction<Schema>,
@@ -227,6 +237,20 @@ const claimedIn = new WeakSet<object>();
  */
 const CLAIM_SAVEPOINT = 'agentx_idempotency_claim';
 
+/** Postgres's `lock_not_available`: a lock timeout ran out. */
+const LOCK_NOT_AVAILABLE = '55P03';
+
+/** The claim's wait ran out: answered `busy` once the claim is rolled back. */
+class ClaimBusy extends Error {
+  constructor(cause: unknown) {
+    super("Another request's claim of the key was still uncommitted when the wait ran out", { cause });
+    this.name = 'ClaimBusy';
+  }
+}
+
+const isLockTimeout = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === LOCK_NOT_AVAILABLE;
+
 const notFirst = (): IdempotencyFailed =>
   new IdempotencyFailed(
     'not_first',
@@ -288,18 +312,24 @@ export function createIdempotentWrites({
       try {
         // Waits, if another transaction holds the key's row uncommitted, until
         // its claim ends: then nothing is inserted if it committed, and this
-        // row is if it rolled back. Every statement filters by org_id too
+        // row is if it rolled back. A wait past the bound is answered `busy`. Every statement filters by org_id too
         // (ADR-005 §7).
         const { mac, keyVersion } = keys.mac('request-hash', message);
+        await boundClaimWait(tx);
         const claim = async (): Promise<boolean> => {
-          const claimed = await sql<{ claimed: number }>`
-            insert into idempotency.keys
-              (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
-            values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
-              pg_catalog.now())
-            on conflict (org_id, client_kind, client_id, operation, key) do nothing
-            returning 1 as claimed
-          `.execute(tx);
+          let claimed;
+          try {
+            claimed = await sql<{ claimed: number }>`
+              insert into idempotency.keys
+                (org_id, client_kind, client_id, operation, key, request_hash, request_hash_key_version, created_at)
+              values (${row.orgId}, ${row.kind}, ${row.clientId}, ${row.operation}, ${row.key}, ${mac}, ${keyVersion},
+                pg_catalog.now())
+              on conflict (org_id, client_kind, client_id, operation, key) do nothing
+              returning 1 as claimed
+            `.execute(tx);
+          } catch (error) {
+            throw isLockTimeout(error) ? new ClaimBusy(error) : error;
+          }
           return claimed.rows.length === 1;
         };
         const done = async (): Promise<IdempotentWrite> =>
@@ -332,11 +362,30 @@ export function createIdempotentWrites({
           // committed, unless the write itself released or replaced the
           // caller's savepoints, which no step may do.
           log.error('idempotency.rollback_failed', { ...facts, err: rollbackError });
+          throw error;
+        }
+        if (error instanceof ClaimBusy) {
+          log.warn('idempotency.busy', facts);
+          return Object.freeze({ outcome: 'busy' });
         }
         throw error;
       }
     },
   });
+}
+
+/**
+ * Bounds how long the transaction waits for a lock from here on, the claim's
+ * wait for the key among them: 5 seconds, unless the caller has already set a
+ * shorter limit, which is kept (Postgres's `0` is no limit at all). Inside the
+ * claim's savepoint, so a claim that fails leaves the caller's limit as it was.
+ */
+async function boundClaimWait<Schema>(tx: Transaction<Schema>): Promise<void> {
+  const { rows } = await sql<{ longer: boolean | null }>`
+    select (limit_now = interval '0' or limit_now > interval '5 seconds') as longer
+    from (select pg_catalog.current_setting('lock_timeout')::interval as limit_now) as setting
+  `.execute(tx);
+  if (rows[0]?.longer !== false) await sql`set local lock_timeout = '5s'`.execute(tx);
 }
 
 /** One claim's transaction, row and logging. */
