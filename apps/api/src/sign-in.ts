@@ -23,6 +23,9 @@
 //   SIGN_IN_FAILED, and no session is opened; the log says which step failed,
 //   and the failure is noted as a security event with the client's address
 //   (B2-5b).
+// - At either, a login service that can't be reached (on staging, often one
+//   still waking from zero) is SIGN_IN_UNAVAILABLE, 503 with Retry-After: a
+//   failure on our side, so no security event, never the 500 it was (S47).
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
 //   something, so the Origin rule holds it (SEC-WEB-01).
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
@@ -142,6 +145,9 @@ const SIGN_OUT_BODY_LIMIT = 1;
 
 const PUBLIC = { access: ['public'] } as const;
 
+/** How long to wait before starting again when the login service can't be reached: long enough for it to wake from zero. */
+const UNAVAILABLE_RETRY_SECONDS = 15;
+
 /** Why a sign-in failed: the sign-in's own failures, or the login service's answer before them. */
 type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete';
 
@@ -159,10 +165,29 @@ export function registerSignIn(
     return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
   };
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  /** The login service couldn't be reached: logged, and answered 503 to try again; no security event, as the caller did nothing wrong. */
+  const unavailable = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
+    logger.child({ correlationId: request.id }).warn('auth.sign_in_unavailable', { reason });
+    return sendErrorBody(
+      reply.header('retry-after', String(UNAVAILABLE_RETRY_SECONDS)),
+      503,
+      'SIGN_IN_UNAVAILABLE',
+      request.id,
+    );
+  };
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
-    const { url, flowId } = await signIn.begin(request.query.returnTo);
+    let begun;
+    try {
+      begun = await signIn.begin(request.query.returnTo);
+    } catch (thrown) {
+      if (thrown instanceof SignInFailed && thrown.failure === 'provider_unavailable') {
+        return unavailable(request, reply, thrown.message);
+      }
+      throw thrown;
+    }
+    const { url, flowId } = begun;
     return reply
       .code(302)
       .header('location', url)
@@ -187,6 +212,7 @@ export function registerSignIn(
       });
     } catch (thrown) {
       if (!(thrown instanceof SignInFailed)) throw thrown;
+      if (thrown.failure === 'provider_unavailable') return unavailable(request, reply, thrown.message);
       return failed(request, reply, thrown.failure, thrown.message);
     }
     logger.child({ correlationId: request.id }).info('auth.signed_in', { userId: done.userId });

@@ -67,7 +67,7 @@
                   {
                     "type": "string",
                     "const": "RATE_LIMITED",
-                    "description": "Too many requests came from this client address in the last minute. Wait the number of seconds in the Retry-After header, then try again."
+                    "description": "Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again."
                   },
                   {
                     "type": "string",
@@ -78,6 +78,11 @@
                     "type": "string",
                     "const": "SIGN_IN_FAILED",
                     "description": "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SIGN_IN_UNAVAILABLE",
+                    "description": "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page."
                   },
                   {
                     "type": "string",

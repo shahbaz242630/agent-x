@@ -29,9 +29,11 @@ export const REASON_CODES = {
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   RATE_LIMITED:
-    'Too many requests came from this client address in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
+    'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
+  SIGN_IN_UNAVAILABLE:
+    "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
   UNAUTHENTICATED:
