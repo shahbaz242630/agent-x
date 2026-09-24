@@ -5,11 +5,13 @@ import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createSecurityRecorder, FLUSH_BUDGET_MS, type SecurityEventNote } from './security-recorder.ts';
+import { createSecurityRecorder, LONGEST_BATCH_MS, type SecurityEventNote } from './security-recorder.ts';
 
 const MINUTE = 60_000;
 /** 10:00:00 on the test's day. */
 const TEN = Date.UTC(2026, 8, 24, 10, 0, 0);
+/** When each test begins: five seconds into the minute. */
+const START = TEN + 5_000;
 const USER_ID = '0199a0f0-0000-7000-8000-000000000011';
 
 const failedSignIn = (ip: string | undefined, reason = 'code_rejected'): SecurityEventNote => ({
@@ -27,7 +29,7 @@ function setUp(
     config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
     destination: capture,
   });
-  let now = TEN + 5_000;
+  let now = START;
   const written: SecurityEvent[][] = [];
   const answers = options.answers ?? [];
   const recorder = createSecurityRecorder({
@@ -109,8 +111,8 @@ describe('SEC-AV-07 security events are counted in memory and written a minute a
     const { recorder, written } = setUp();
     recorder.note(failedSignIn('203.0.113.9'));
 
-    await recorder.flush();
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
+    await recorder.flush(Number.POSITIVE_INFINITY);
     await recorder.run();
 
     expect(written).toHaveLength(1);
@@ -120,7 +122,7 @@ describe('SEC-AV-07 security events are counted in memory and written a minute a
   it('writes nothing, and asks nothing of the database, when there is nothing to write', async () => {
     const { recorder, written, events } = setUp();
     await recorder.run();
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
     expect(written).toEqual([]);
     expect(events('security.events_written')).toEqual([]);
   });
@@ -151,7 +153,7 @@ describe("SEC-AV-07 the address kept is the client's own, whole", () => {
   ])('keeps %s as %s', async (_what, ip, expected) => {
     const { recorder, written } = setUp();
     recorder.note(failedSignIn(ip));
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
     expect(written.flat().map((row) => row.ip)).toEqual([expected]);
   });
 
@@ -159,7 +161,7 @@ describe("SEC-AV-07 the address kept is the client's own, whole", () => {
     const { recorder, written } = setUp();
     recorder.note(failedSignIn('203.0.113.9:40001'));
     recorder.note(failedSignIn('203.0.113.9:40002'));
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
     expect(written.flat()).toMatchObject([{ ip: '203.0.113.9', count: 2 }]);
   });
 });
@@ -173,7 +175,7 @@ describe('SEC-AV-09 a flood from many addresses cannot fill the memory', () => {
     // An address already held still counts under its own.
     recorder.note(failedSignIn('203.0.113.1'));
 
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
 
     expect(written.flat().map((row) => [row.ip, row.userId, row.count])).toEqual([
       ['203.0.113.1', undefined, 2],
@@ -246,7 +248,7 @@ describe('SEC-AV-07 a failed write loses no count, and a malformed one is never 
     });
     recorder.note(failedSignIn('203.0.113.9'));
     recorder.note(failedSignIn('203.0.113.9'));
-    await expect(recorder.flush()).resolves.toBeUndefined();
+    await expect(recorder.flush(Number.POSITIVE_INFINITY)).resolves.toBeUndefined();
     expect(calls).toBe(1);
     expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'security.events_unwritten', count: 2 }));
   });
@@ -273,39 +275,52 @@ describe('SEC-AV-07 the recorder never holds up the API as it stops', () => {
     await recorder.run(stopping.signal);
     expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH]);
 
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
     expect(written.slice(1).flat()).toHaveLength(MOST_EVENTS_A_BATCH + 1);
   });
 
-  it('begins no batch past its budget as the API stops, and logs how many events it could not write', async () => {
+  it('begins no batch that could end past its deadline, and logs how many events it could not write', async () => {
     const { recorder, written, at, events } = setUp({
-      duringWrite: (batch) => {
-        // The first batch takes the whole budget.
-        if (batch === 1) at(TEN + 5_000 + FLUSH_BUDGET_MS);
+      duringWrite: () => {
+        at(START + 501);
       },
     });
     threeBatches(recorder);
 
-    await recorder.flush();
+    // Room for the first batch at its longest, and not for a second once it has begun.
+    await recorder.flush(START + LONGEST_BATCH_MS + 500);
 
     expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH]);
     expect(events('security.events_unwritten')).toMatchObject([
       { level: 'error', events: MOST_EVENTS_A_BATCH + 1, count: MOST_EVENTS_A_BATCH + 1 },
     ]);
     // Dropped, not kept: nothing is left for a later write.
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
     expect(written).toHaveLength(1);
   });
 
-  it('writes every batch within its budget', async () => {
+  it('begins no batch at all when the deadline leaves no room for one at its longest', async () => {
+    const { recorder, written, events } = setUp();
+    threeBatches(recorder);
+
+    await recorder.flush(START + LONGEST_BATCH_MS - 1);
+
+    expect(written).toEqual([]);
+    expect(events('security.events_unwritten')).toMatchObject([
+      { events: 2 * MOST_EVENTS_A_BATCH + 1, count: 2 * MOST_EVENTS_A_BATCH + 1 },
+    ]);
+  });
+
+  it('writes every batch that can end by its deadline, the last ending right on it', async () => {
     const { recorder, written, at, events } = setUp({
       duringWrite: (batch) => {
-        at(TEN + 5_000 + batch * (FLUSH_BUDGET_MS / 3 - 1));
+        // Each batch at its longest.
+        at(START + batch * LONGEST_BATCH_MS);
       },
     });
     threeBatches(recorder);
 
-    await recorder.flush();
+    await recorder.flush(START + 3 * LONGEST_BATCH_MS);
 
     expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH, MOST_EVENTS_A_BATCH, 1]);
     expect(events('security.events_unwritten')).toEqual([]);
@@ -316,7 +331,7 @@ describe('SEC-AV-07 the recorder never holds up the API as it stops', () => {
     recorder.note(failedSignIn('203.0.113.9'));
     recorder.note(failedSignIn('203.0.113.9'));
 
-    await recorder.flush();
+    await recorder.flush(Number.POSITIVE_INFINITY);
 
     expect(events('security.events_unwritten')).toMatchObject([{ events: 1, count: 2 }]);
   });

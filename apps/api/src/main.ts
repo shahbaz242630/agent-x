@@ -81,6 +81,14 @@ const APPLICATION_NAME = 'agentx-api';
 const STOP_DEADLINE_MS = 25_000;
 
 /**
+ * When, after a stop begins, the security events' last write must have ended
+ * (B2-5b): the minute's run may hold it up by one batch, 10 seconds at most,
+ * and the last write begins no batch that could end later than this, which
+ * leaves the pool time to close within the stop deadline.
+ */
+const RECORDER_DONE_BY_MS = 20_000;
+
+/**
  * How long the anchor check of one chain may take before it counts as not
  * completed (anchor-check.ts). Each of its statements has 10 seconds at most
  * (verifyAlone); this bounds the whole check, whatever the database does.
@@ -165,6 +173,7 @@ function onStopSignals(
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    const stoppingAt = systemClock.now().getTime();
     logger.info('api.stopping', { signal });
     // Cleared below however the stop ends, so it fires only if stopping hangs.
     const deadline = setTimeout(() => {
@@ -178,7 +187,7 @@ function onStopSignals(
       // check and the sweep, have finished with it.
       await Promise.all([server.close(), background.stop()]);
       // After the last request, so none of its events is left behind.
-      await recorder.flush();
+      await recorder.flush(stoppingAt + RECORDER_DONE_BY_MS);
       await database.destroy();
       logger.info('api.stopped');
       logger.flush();

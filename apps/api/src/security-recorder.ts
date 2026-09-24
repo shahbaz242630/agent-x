@@ -13,10 +13,11 @@
 //   addresses still shows, and memory stays bounded.
 // - `run` writes every count whose minute has ended (the API runs it each
 //   minute); `flush` writes them all (the API runs it as it stops, once the
-//   last request has been answered). Neither begins a batch once the API is
-//   stopping past its budget (the review of B2-5b: a flood's backlog to a slow
-//   database would otherwise outlast the stop deadline and be lost unseen);
-//   what the flush leaves is logged with its count.
+//   last request has been answered). The run begins no batch once the API is
+//   stopping, and the flush none that could end past the deadline the API
+//   gives it (the reviews of B2-5b: a flood's backlog to a slow database
+//   would otherwise outlast the stop deadline and be lost unseen); what the
+//   flush leaves is logged with its count.
 // - A write the database couldn't take puts its counts back for the next run.
 //   One the module refuses as malformed is a bug: it is logged and dropped,
 //   never retried for ever.
@@ -29,11 +30,11 @@ import { clientAddress } from './rate-limit.ts';
 const WINDOW_MS = 60_000;
 
 /**
- * How long the last write, as the API stops, may go on beginning batches. With
- * the batch under way (each statement at most 10 seconds) it stays within the
- * API's 25-second stop deadline, after the minute's run has stopped too.
+ * The longest one batch's write may take: the module's 10-second statement
+ * limit. The last write begins a batch only if it would end by its deadline
+ * even taking this long.
  */
-export const FLUSH_BUDGET_MS = 10_000;
+export const LONGEST_BATCH_MS = 10_000;
 
 /** The most counts held at once, unless the API says otherwise. */
 export const MOST_COUNTS = 10_000;
@@ -61,11 +62,11 @@ export interface SecurityRecorder extends SecurityEventSink {
   /** Writes every count whose minute has ended, stopping between batches once `signal` aborts. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
   /**
-   * Writes every count, the current minute's too, beginning no batch after
-   * FLUSH_BUDGET_MS, then logs and drops whatever it couldn't write: the API
-   * calls it last, as it stops. Never throws.
+   * Writes every count, the current minute's too, beginning no batch that
+   * could end after `until` (a time in milliseconds), then logs and drops
+   * whatever it couldn't write: the API calls it last, as it stops. Never throws.
    */
-  flush(): Promise<void>;
+  flush(until: number): Promise<void>;
 }
 
 export interface SecurityRecorderOptions {
@@ -184,11 +185,10 @@ export function createSecurityRecorder({
       );
     },
     run: (signal?: AbortSignal) => queued(thisMinute, () => signal?.aborted === true),
-    async flush(): Promise<void> {
-      const until = now() + FLUSH_BUDGET_MS;
+    async flush(until: number): Promise<void> {
       await queued(
         () => Number.POSITIVE_INFINITY,
-        () => now() >= until,
+        () => now() + LONGEST_BATCH_MS > until,
       );
       // The process is stopping: whatever is still held is lost, so it is counted here.
       if (held.size > 0) {
