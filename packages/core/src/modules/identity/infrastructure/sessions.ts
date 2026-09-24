@@ -14,11 +14,14 @@
 // past either timeout is never found again, however it is asked for. The
 // times are the Clock's (ADR-006 §3), so tests can move them.
 //
-// Every function runs one statement on the handle it is given, so the caller
-// decides the transaction, and its statement timeout.
+// Every function but `sweep` runs one statement on the handle it is given, so
+// the caller decides the transaction, and its statement timeout. A session
+// past either timeout is never found again, but its row stays until it is
+// ended; `sweep` deletes such rows a batch at a time, in a transaction of its
+// own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import type { Kysely } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -61,6 +64,12 @@ export interface Sessions {
   rotate(db: Kysely<IdentityTables>, sessionId: string): Promise<string | undefined>;
   /** Ends the session this cookie ID belongs to, live or not; false if there is none. */
   end(db: Kysely<IdentityTables>, cookie: string): Promise<boolean>;
+  /**
+   * Deletes up to `most` sessions no process could use again: past their
+   * absolute end, or unused past the longest idle timeout there can be
+   * (LONGEST_IDLE_SECONDS). Says how many.
+   */
+  sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
 
 /** The cookie ID's size: 256 bits. */
@@ -70,6 +79,14 @@ const COOKIE = /^[A-Za-z0-9_-]{43}$/;
 
 /** The shortest idle timeout: shorter would sign people out mid-task. The config's own minimums come with it (B2-4). */
 const LEAST_SECONDS = 60;
+
+/**
+ * The longest idle timeout there can be: AGENTX_SESSION_IDLE_MINUTES's
+ * maximum, 480 minutes. The sweep deletes by it rather than by this process's
+ * own setting, so no setting, on this replica or another, or after a release
+ * that lengthens it, could make a deleted session live again.
+ */
+export const LONGEST_IDLE_SECONDS = 8 * 60 * 60;
 
 const newCookie = (): string => randomBytes(COOKIE_BYTES).toString('base64url');
 const hashOf = (cookie: string): Buffer => createHash('sha256').update(cookie, 'ascii').digest();
@@ -91,6 +108,11 @@ export function createSessions({
   const { idleSeconds, absoluteSeconds } = timeouts;
   if (!isWholeSeconds(idleSeconds) || !isWholeSeconds(absoluteSeconds)) {
     throw new RangeError(`session timeouts must be whole numbers of seconds, at least ${LEAST_SECONDS}`);
+  }
+  if (idleSeconds > LONGEST_IDLE_SECONDS) {
+    throw new RangeError(
+      `the idle timeout must not be longer than ${LONGEST_IDLE_SECONDS} seconds, which the sweep relies on`,
+    );
   }
   if (idleSeconds > absoluteSeconds) {
     throw new RangeError('the idle timeout must not be longer than the absolute one');
@@ -170,6 +192,36 @@ export function createSessions({
         .returning('id')
         .executeTakeFirst();
       return row !== undefined;
+    },
+
+    async sweep(db, most) {
+      if (!Number.isSafeInteger(most) || most < 1) {
+        throw new RangeError('a sweep deletes at least one session at a time');
+      }
+      const now = clock.now();
+      return db.transaction().execute(async (tx) => {
+        await sql`set local statement_timeout = '10s'`.execute(tx);
+        // Only sessions no process could find again, whatever its idle
+        // timeout: past their stored end, or unused past the longest idle
+        // timeout there can be. A session between that and this process's own
+        // timeout is refused by `use` already, and goes in a later sweep.
+        const past = (eb: ExpressionBuilder<IdentityTables, 'identity.sessions'>) =>
+          eb.or([
+            eb('last_seen_at', '<=', new Date(now.getTime() - LONGEST_IDLE_SECONDS * 1000)),
+            eb('ends_at', '<=', now),
+          ]);
+        const ended = tx.selectFrom('identity.sessions').select('id').where(past).limit(most);
+        // Asked again of each row as it is deleted: a session a request used
+        // while the sweep waited for its lock is live again, and the id alone
+        // would be all Postgres checks a second time.
+        const rows = await tx
+          .deleteFrom('identity.sessions')
+          .where('id', 'in', ended)
+          .where(past)
+          .returning('id')
+          .execute();
+        return rows.length;
+      });
     },
   };
 }

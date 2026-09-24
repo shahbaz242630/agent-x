@@ -7,6 +7,7 @@ export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subje
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
   createSessions,
+  LONGEST_IDLE_SECONDS,
   type LiveSession,
   type OpenedSession,
   type Sessions,

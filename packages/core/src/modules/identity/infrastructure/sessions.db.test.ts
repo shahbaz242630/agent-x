@@ -1,13 +1,13 @@
 // B2-1: the console's sessions (0010), on the real migrated schema, as the app
 // role: opened, used within both timeouts, rotated keeping their record
 // (SEC-HA-07, the store half), and ended.
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { type SignInEvidence, SignInRefused } from '../domain/sign-in.ts';
-import { createSessions, type Sessions } from './sessions.ts';
+import { createSessions, LONGEST_IDLE_SECONDS, type Sessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -318,5 +318,136 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       ).rejects.toMatchObject({ code: '42501' });
     }
     expect(await rowOf(sessionId)).toMatchObject({ user_id: userId, amr: evidence.amr });
+  });
+});
+
+describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
+  /** Later than every other test's sessions, so a first sweep takes theirs and each count below is this test's own. */
+  const LATER = START.getTime() + 30 * 86_400_000;
+  const at = (ms: number) =>
+    createSessions({
+      ids,
+      clock: new FixedClock(new Date(ms)),
+      timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+    });
+  /** Sets a session's last use, as a use at that moment would have. */
+  const lastUsed = (sessionId: string, when: number) =>
+    app
+      .updateTable('identity.sessions')
+      .set({ last_seen_at: new Date(when) })
+      .where('id', '=', sessionId)
+      .execute();
+
+  it('deletes only sessions no setting could make live again: past their end, or unused past the longest idle timeout', async () => {
+    const { userId } = await setUp();
+    const now = LATER;
+    await at(now).sweep(app, 1_000_000);
+    const open = (openedAt: number, usedAt: number) =>
+      at(openedAt)
+        .open(app, userId, evidence)
+        .then(async (opened) => {
+          await lastUsed(opened.sessionId, usedAt);
+          return opened;
+        });
+    const LONGEST = LONGEST_IDLE_SECONDS * SECOND;
+    const cases = {
+      idleLongestJustNow: await open(now - LONGEST, now - LONGEST),
+      idleLongestNotYet: await open(now - LONGEST + SECOND, now - LONGEST + SECOND),
+      // Past this process's own idle timeout only: refused, but another setting could still take it.
+      idleOwnOnly: await open(now - IDLE * SECOND, now - IDLE * SECOND),
+      endsJustNow: await open(now - ABSOLUTE * SECOND, now - SECOND),
+      endsNotYet: await open(now - ABSOLUTE * SECOND + SECOND, now - SECOND),
+    };
+
+    expect(await at(now).sweep(app, 100)).toBe(2);
+
+    const left = await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute();
+    expect(left.map((row) => row.id).sort()).toEqual(
+      [cases.idleLongestNotYet.sessionId, cases.idleOwnOnly.sessionId, cases.endsNotYet.sessionId].sort(),
+    );
+    // Nothing deleted was still usable; of what was kept, only the one inside every timeout is.
+    const usable = await Promise.all(
+      Object.entries(cases).map(async ([name, { cookie }]) => [name, (await at(now).use(app, cookie)) !== undefined]),
+    );
+    expect(Object.fromEntries(usable)).toEqual({
+      idleLongestJustNow: false,
+      idleLongestNotYet: false,
+      idleOwnOnly: false,
+      endsJustNow: false,
+      endsNotYet: true,
+    });
+  });
+
+  it('refuses an idle timeout longer than the longest the sweep allows for', () => {
+    const make = (idleSeconds: number) =>
+      createSessions({ ids, clock: new FixedClock(START), timeouts: { idleSeconds, absoluteSeconds: 24 * 60 * 60 } });
+    expect(() => make(LONGEST_IDLE_SECONDS)).not.toThrow();
+    expect(() => make(LONGEST_IDLE_SECONDS + 1)).toThrow(RangeError);
+  });
+
+  it('deletes a batch at a time, and nothing once none is left', async () => {
+    const { userId } = await setUp();
+    const now = LATER + 86_400_000;
+    await at(now).sweep(app, 1_000_000);
+    for (let one = 0; one < 3; one += 1) await at(now - ABSOLUTE * SECOND).open(app, userId, evidence);
+
+    expect(await at(now).sweep(app, 2)).toBe(2);
+    expect(await at(now).sweep(app, 2)).toBe(1);
+    expect(await at(now).sweep(app, 2)).toBe(0);
+  });
+
+  it('leaves a session used while the sweep waited for it: it is live again', async () => {
+    const { userId } = await setUp();
+    const now = LATER + 2 * 86_400_000;
+    await at(now).sweep(app, 1_000_000);
+    const { sessionId } = await at(now - LONGEST_IDLE_SECONDS * SECOND).open(app, userId, evidence);
+    // A request's use, held open until the sweep has found the session and waits on its lock.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select id from identity.sessions where id = $1 for update', [sessionId]);
+    try {
+      const sweeping = within(15_000, at(now).sweep(app, 100), 'the sweep');
+      await vi.waitFor(
+        async () => {
+          const waiting = await database
+            .as('admin')
+            .query<{ count: string }>(
+              `select count(*) from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database() and wait_event_type = 'Lock' and query like 'delete from "identity"."sessions"%'`,
+            );
+          expect(waiting).toEqual([{ count: '1' }]);
+        },
+        { timeout: 10_000 },
+      );
+      await holder.query('update identity.sessions set last_seen_at = $2 where id = $1', [sessionId, new Date(now)]);
+      await holder.query('commit');
+
+      expect(await sweeping).toBe(0);
+      expect(await rowOf(sessionId)).toMatchObject({ last_seen_at: new Date(now) });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('gives up after 10 seconds, a wait for a lock included, rather than hang', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table identity.sessions in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, at(LATER).sweep(app, 100), 'the sweep')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('refuses a sweep of no sessions', async () => {
+    const { sessions } = await setUp();
+
+    for (const most of [0, -1, 1.5, Number.NaN]) {
+      await expect(sessions.sweep(app, most)).rejects.toThrow(RangeError);
+    }
   });
 });
