@@ -128,6 +128,23 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it.each([
+    ['text that is no address', '203.0.113'],
+    ['an address with a port', '203.0.113.7:443'],
+    ['an address past 255', '203.0.113.256'],
+    ['an address with a leading zero', '203.0.113.07'],
+    ['an IPv6 address with a zone', 'fe80::1%eth0'],
+    ['an IPv6 address in brackets', '[2001:db8::1]'],
+    ['text with a colon that is no address', 'not:an:address'],
+  ])('keeps the event, its address unknown, for %s: it came from outside, and loses nothing else', async (_, ip) => {
+    await empty();
+    await at(START.getTime()).record(app, [event({ reason: 'first' }), event({ reason: 'odd', ip })]);
+    expect((await all()).map((row) => [row.reason, row.ip])).toEqual([
+      ['first', '203.0.113.7'],
+      ['odd', null],
+    ]);
+  });
+
   it('writes nothing for an empty batch', async () => {
     await empty();
     await at(START.getTime()).record(app, []);
@@ -140,13 +157,6 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     ['a reason with a space', { reason: 'state mismatch' }],
     ['an empty reason', { reason: '' }],
     ['a reason too long', { reason: 'a'.repeat(65) }],
-    ['an address that is none', { ip: '203.0.113' }],
-    ['an address with a port', { ip: '203.0.113.7:443' }],
-    ['an address past 255', { ip: '203.0.113.256' }],
-    ['an address with a leading zero', { ip: '203.0.113.07' }],
-    ['an IPv6 address with a zone', { ip: 'fe80::1%eth0' }],
-    ['an IPv6 address in brackets', { ip: '[2001:db8::1]' }],
-    ['text with a colon that is no address', { ip: 'not:an:address' }],
     ['a person who is no UUID', { userId: 'someone' }],
     ['a window that never began', { windowStart: new Date(Number.NaN) }],
     ['a window in the future', { windowStart: new Date(START.getTime() + 1) }],

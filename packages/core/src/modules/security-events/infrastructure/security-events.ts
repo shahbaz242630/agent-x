@@ -5,8 +5,12 @@
 // - `record` writes a batch of counts, each the events of one kind, reason,
 //   address and person in one window (B2-5b gathers them in memory and writes
 //   them a batch at a time, so a flood is a count, not a row per request).
-//   Anything that isn't a well-formed event is refused before any SQL: a bug,
-//   never a partial write.
+//   What the API decides (the kind, the reason, the person, the window, the
+//   count) must be well formed, or the whole batch is refused before any SQL:
+//   a bug, never a partial write. The address is the one part that comes from
+//   outside: one that isn't a plain IP address is kept as unknown, and the
+//   event with it, so an odd proxy header can't lose a batch (the review of
+//   B2-5a; the API strips a port or brackets first, as the rate limit does).
 // - `sweep` deletes up to a batch of rows past the retention period, oldest
 //   first (hourly, from the API).
 //
@@ -30,7 +34,7 @@ export interface SecurityEvent {
   readonly kind: SecurityEventKind;
   /** Why, in the kind's own words: lowercase letters and underscores, at most 64. */
   readonly reason: string;
-  /** The client's address as the API saw it; undefined if it had none it could read. */
+  /** The client's address as the API saw it; undefined if it had none it could read. Anything but a plain IP address is kept as unknown. */
   readonly ip: string | undefined;
   /** The person, when the event is about a signed-in one. */
   readonly userId: string | undefined;
@@ -66,7 +70,6 @@ const isIpAddress = (text: string): boolean =>
 function problemWith(event: SecurityEvent, now: Date): string | undefined {
   if (!SECURITY_EVENT_KINDS.includes(event.kind)) return 'its kind is not one we record';
   if (typeof event.reason !== 'string' || !REASON.test(event.reason)) return 'its reason is not a short lowercase name';
-  if (event.ip !== undefined && !isIpAddress(event.ip)) return 'its address is not an IP address';
   if (event.userId !== undefined && !UUID.test(event.userId)) return 'its person is not a UUID';
   if (!(event.windowStart instanceof Date) || Number.isNaN(event.windowStart.getTime()))
     return 'its window has no start';
@@ -115,7 +118,7 @@ export function createSecurityEvents({
               id: ids.next(),
               kind: event.kind,
               reason: event.reason,
-              ip: event.ip ?? null,
+              ip: event.ip !== undefined && isIpAddress(event.ip) ? event.ip : null,
               user_id: event.userId ?? null,
               window_start: event.windowStart,
               count: event.count,
