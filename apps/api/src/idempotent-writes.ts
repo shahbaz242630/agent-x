@@ -22,7 +22,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { sendErrorBody } from './errors.ts';
 import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
 
-/** How long a client is told to wait before sending a busy request again: the store's wait, and some. */
+/** How long a client is told to wait before sending a busy request again: as long as the store waited, time for most writes holding the key to end. */
 export const BUSY_RETRY_SECONDS = 5;
 
 /** Text that can't be hashed as it reads: a lone surrogate would be written as U+FFFD, so two requests could hash alike. */
