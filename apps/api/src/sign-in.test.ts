@@ -10,6 +10,7 @@ import { z } from 'zod';
 
 import { SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
+import type { SecurityEventNote } from './security-recorder.ts';
 import { buildServer } from './server.ts';
 import { cookieValue, FLOW_COOKIE, SESSION_COOKIE } from './sign-in.ts';
 
@@ -85,15 +86,17 @@ async function server(signIn: SignIn | undefined) {
     config: { environment: 'test', release: 'r-1', ...config },
     destination: capture,
   });
+  const noted: SecurityEventNote[] = [];
   const app = await buildServer({
     config,
     logger,
     ids: new SequentialIds(),
     healthChecks: [],
     signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: SESSION_SECONDS },
+    securityEvents: { note: (event) => noted.push(event) },
   });
   servers.push(app);
-  return { app, capture };
+  return { app, capture, noted };
 }
 
 const setCookies = (header: string | string[] | number | undefined): string[] =>
@@ -189,22 +192,30 @@ describe('coming back from the login service', () => {
     ['no state', '?code=a-code', 'callback_incomplete'],
   ])('refuses as SIGN_IN_FAILED when %s, asking nothing of the sign-in', async (_, query, failure) => {
     const standIn = new StandIn();
-    const { app, capture } = await server(standIn);
+    const { app, capture, noted } = await server(standIn);
 
-    const response = await app.inject(callback(query, `${FLOW_COOKIE}=${FLOW_ID}`));
+    const response = await app.inject({
+      ...callback(query, `${FLOW_COOKIE}=${FLOW_ID}`),
+      remoteAddress: '203.0.113.9',
+    });
 
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual(errorBody('SIGN_IN_FAILED', response.headers['x-correlation-id'] as string));
     expect(standIn.completed).toEqual([]);
     expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'auth.sign_in_failed', failure }));
+    expect(noted).toEqual([{ kind: 'sign_in_failed', reason: failure, ip: '203.0.113.9' }]);
   });
 
   it('refuses as SIGN_IN_FAILED when the sign-in fails, setting no cookie, and logs which step failed', async () => {
     const standIn = new StandIn();
     standIn.failWith = new SignInFailed('token_invalid', 'the ID token failed its check: ERR_JWT_EXPIRED');
-    const { app, capture } = await server(standIn);
+    const { app, capture, noted } = await server(standIn);
 
-    const response = await app.inject(callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`));
+    const response = await app.inject({
+      ...callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`),
+      remoteAddress: '2001:db8:1:2::7',
+    });
+    expect(noted).toEqual([{ kind: 'sign_in_failed', reason: 'token_invalid', ip: '2001:db8:1:2::7' }]);
 
     expect(response.statusCode).toBe(401);
     expect(response.json()).toMatchObject({ error: { code: 'SIGN_IN_FAILED' } });
@@ -217,12 +228,23 @@ describe('coming back from the login service', () => {
   it('fails on our side, not as a refused sign-in, when something else goes wrong', async () => {
     const standIn = new StandIn();
     standIn.failWith = new Error('the database is away');
-    const { app } = await server(standIn);
+    const { app, noted } = await server(standIn);
 
     const response = await app.inject(callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`));
 
     expect(response.statusCode).toBe(500);
     expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
+    // Our failure, not the caller's: no security event.
+    expect(noted).toEqual([]);
+  });
+
+  it('notes no security event for a sign-in that works', async () => {
+    const { app, noted } = await server(new StandIn());
+
+    const response = await app.inject(callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`));
+
+    expect(response.statusCode).toBe(302);
+    expect(noted).toEqual([]);
   });
 });
 

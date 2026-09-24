@@ -1,7 +1,8 @@
 // The API's HTTP server (ADR-001: Fastify), with the protections every route
 // gets. Each request, in order:
 // 1. gets its correlation ID (from the caller if it's a UUID) and the security headers
-// 2. is counted against its client address's rate limit (ADR-011 §4)
+// 2. is counted against its client address's rate limit (ADR-011 §4); a
+//    refusal is noted as a security event (B2-5b)
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
 // 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
 //    signed-in person is found by their session cookie (B2-4b)
@@ -23,9 +24,10 @@ import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isForeignWrite } from './origin-check.ts';
-import { countRequest, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
+import { createCounter, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
 import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
+import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
 import { registerSignIn } from './sign-in.ts';
 
 export interface ServerOptions {
@@ -35,6 +37,8 @@ export interface ServerOptions {
   readonly healthChecks: readonly HealthCheck[];
   /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
   readonly signIn?: { readonly service: SignIn; readonly sessionSeconds: number } | undefined;
+  /** Where failed sign-ins and rate-limit hits are noted (security-recorder.ts); nowhere when not given. */
+  readonly securityEvents?: SecurityEventSink | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -60,6 +64,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // rate limit alike. Fastify 5.12 turned off hop counts, which a client reaching the server
   // directly could fake.
   const trust = proxyTrust(config.http.trustedProxies);
+  const securityEvents = options.securityEvents ?? NO_SECURITY_EVENTS;
+  const countRequest = createCounter(trust, (ip) => {
+    securityEvents.note({ kind: 'rate_limited', reason: 'per_address', ip });
+  });
 
   /** Sends the error's plain response, then logs a failure on our side with its detail. */
   const sendError = (error: unknown, request: FastifyRequest, reply: FastifyReply): FastifyReply => {
@@ -153,6 +161,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     signIn: options.signIn?.service,
     sessionSeconds: options.signIn?.sessionSeconds ?? 0,
     logger,
+    securityEvents,
   });
   return app;
 }

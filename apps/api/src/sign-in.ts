@@ -20,7 +20,9 @@
 // - `GET /v1/auth/callback` is where the login service sends it back: the flow
 //   is used once, the code traded and the ID token checked, a session opened,
 //   and the browser sent to the path it asked for. Anything wrong is
-//   SIGN_IN_FAILED, and no session is opened; the log says which step failed.
+//   SIGN_IN_FAILED, and no session is opened; the log says which step failed,
+//   and the failure is noted as a security event with the client's address
+//   (B2-5b).
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
 //   something, so the Origin rule holds it (SEC-WEB-01).
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
@@ -32,7 +34,7 @@
 // B2-6), all three answer NOT_FOUND, as a feature that is off does. So does a
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
-import { isReturnPath, type SignIn, SignInFailed } from '@agentx/core/modules/identity';
+import { isReturnPath, type SignIn, SignInFailed, type SignInFailure } from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -40,6 +42,7 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import type { SecurityEventSink } from './security-recorder.ts';
 
 export const FLOW_COOKIE = '__Host-agentx-flow';
 export const SESSION_COOKIE = '__Host-agentx-session';
@@ -56,6 +59,8 @@ export interface SignInRoutesOptions {
   /** How long the session cookie lasts: the session's absolute timeout. */
   readonly sessionSeconds: number;
   readonly logger: Logger;
+  /** Where each failed sign-in is noted. */
+  readonly securityEvents: SecurityEventSink;
 }
 
 /** The attributes both cookies share: a `__Host-` cookie must be Secure, on Path=/, with no Domain. */
@@ -137,8 +142,22 @@ const SIGN_OUT_BODY_LIMIT = 1;
 
 const PUBLIC = { access: ['public'] } as const;
 
-export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, logger }: SignInRoutesOptions): void {
+/** Why a sign-in failed: the sign-in's own failures, or the login service's answer before them. */
+type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete';
+
+export function registerSignIn(
+  app: FastifyInstance,
+  { signIn, sessionSeconds, logger, securityEvents }: SignInRoutesOptions,
+): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+  /** Logs a failed sign-in, notes it as a security event, and refuses it. */
+  const failed = (request: FastifyRequest, reply: FastifyReply, failure: CallbackFailure, reason?: string) => {
+    logger
+      .child({ correlationId: request.id })
+      .warn('auth.sign_in_failed', reason === undefined ? { failure } : { failure, reason });
+    securityEvents.note({ kind: 'sign_in_failed', reason: failure, ip: request.ip });
+    return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
+  };
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
 
   routes.get('/v1/auth/sign-in', { schema: SIGN_IN_SCHEMA, config: PUBLIC }, async (request, reply) => {
@@ -153,12 +172,10 @@ export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, l
 
   routes.get('/v1/auth/callback', { schema: CALLBACK_SCHEMA, config: PUBLIC }, async (request, reply) => {
     if (signIn === undefined || request.method === 'HEAD') return off(request, reply);
-    const log = logger.child({ correlationId: request.id });
     const { code, state, error } = request.query;
     if (error !== undefined || code === undefined || state === undefined) {
       // The login service said no (the person cancelled, say), or the address was cut short.
-      log.warn('auth.sign_in_failed', { failure: error === undefined ? 'callback_incomplete' : 'provider_refused' });
-      return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
+      return failed(request, reply, error === undefined ? 'callback_incomplete' : 'provider_refused');
     }
     let done;
     try {
@@ -168,12 +185,11 @@ export function registerSignIn(app: FastifyInstance, { signIn, sessionSeconds, l
         state,
         previousCookie: cookieValue(request.headers.cookie, SESSION_COOKIE),
       });
-    } catch (failed) {
-      if (!(failed instanceof SignInFailed)) throw failed;
-      log.warn('auth.sign_in_failed', { failure: failed.failure, reason: failed.message });
-      return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
+    } catch (thrown) {
+      if (!(thrown instanceof SignInFailed)) throw thrown;
+      return failed(request, reply, thrown.failure, thrown.message);
     }
-    log.info('auth.signed_in', { userId: done.userId });
+    logger.child({ correlationId: request.id }).info('auth.signed_in', { userId: done.userId });
     return reply
       .code(302)
       .header('location', done.returnTo)

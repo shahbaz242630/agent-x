@@ -36,14 +36,27 @@ const IPV4_WITH_PORT = /^(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/;
 const BRACKETED_IPV6 = /^\[([0-9A-Fa-f:.]{2,45})\](?::\d{1,5})?$/;
 
 /**
- * The key a request is counted under: its client address without a port, per
- * /64 for IPv6. It never throws. The address is undefined when the connection
- * closed before it was read.
+ * The client's address without a port or brackets, or undefined if it isn't a
+ * plain IP address. It never throws. The address is undefined when the
+ * connection closed before it was read. The security events keep this whole
+ * address (B2-5b); the rate limit counts it per /64 (`clientKey`).
  */
-export function clientKey(ip: string | undefined): string {
-  if (ip === undefined) return UNREADABLE_ADDRESS;
+export function clientAddress(ip: string | undefined): string | undefined {
+  if (ip === undefined) return undefined;
   const address = IPV4_WITH_PORT.exec(ip)?.[1] ?? BRACKETED_IPV6.exec(ip)?.[1] ?? ip;
-  return ipAddress.safeParse(address).success ? normalizeIP(address, IPV6_PREFIX) : UNREADABLE_ADDRESS;
+  return ipAddress.safeParse(address).success ? address : undefined;
+}
+
+/** The key a request is counted under: its client address, per /64 for IPv6. It never throws. */
+export function clientKey(ip: string | undefined): string {
+  const address = clientAddress(ip);
+  return address === undefined ? UNREADABLE_ADDRESS : normalizeIP(address, IPV6_PREFIX);
+}
+
+/** The client's address as the trust rule reads it from the connection and its proxies' headers. */
+function rawClientIp(request: FastifyRequest, trust: ProxyTrust): string | undefined {
+  // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to
+  return proxyAddr(request.raw, trust);
 }
 
 class RateLimited extends Error {
@@ -55,34 +68,45 @@ export function proxyTrust(trustedProxies: readonly string[]): ProxyTrust {
   return proxyAddr.compile([...trustedProxies]);
 }
 
-/** Registers the plugin with the limit per client address. `countRequest` then works on the app's requests. */
+/** Registers the plugin with the limit per client address. `createCounter`'s hook then works on the app's requests. */
 export async function registerRateLimit(app: FastifyInstance, perMinute: number, trust: ProxyTrust): Promise<void> {
   await app.register(rateLimit, {
     global: false,
     max: perMinute,
     timeWindow: WINDOW_MS,
-    // eslint-disable-next-line no-restricted-properties -- the connection's address, read and never written to
-    keyGenerator: (request) => clientKey(proxyAddr(request.raw, trust)),
+    keyGenerator: (request) => clientKey(rawClientIp(request, trust)),
   });
 }
 
+/** Counts a request against its address's limit: `createCounter`'s hook. */
+export type CountRequest = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+
 /**
- * Counts the request against its address's limit and sets the limit headers.
- * Over the limit, it throws a 429 error, which the error handler answers with
- * `RATE_LIMITED`.
+ * The hook that counts each request against its address's limit and sets the
+ * limit headers. Over the limit, it tells `limited` the client's address, then
+ * throws a 429 error, which the error handler answers with `RATE_LIMITED`.
  */
-export async function countRequest(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+export function createCounter(trust: ProxyTrust, limited: (ip: string | undefined) => void): CountRequest {
+  return async (request, reply) => {
+    if (await overLimit(request, reply)) {
+      limited(rawClientIp(request, trust));
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
+}
+
+/** Counts the request, sets the limit headers, and says whether it is over the limit. */
+async function overLimit(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
   const result = await request.server.createRateLimit()(request);
   // Only an allow list lets a request through uncounted, and none is set. The
   // check is here for TypeScript, which sees the counted fields only after it.
-  if (result.isAllowed) return;
+  if (result.isAllowed) return false;
   void reply.headers({
     'x-ratelimit-limit': result.max,
     'x-ratelimit-remaining': result.remaining,
     'x-ratelimit-reset': result.ttlInSeconds,
   });
-  if (result.isExceeded) {
-    void reply.header('retry-after', result.ttlInSeconds);
-    throw new RateLimited('rate limit exceeded');
-  }
+  if (!result.isExceeded) return false;
+  void reply.header('retry-after', result.ttlInSeconds);
+  return true;
 }

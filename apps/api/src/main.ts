@@ -12,9 +12,11 @@
 //    platform's, and each organisation's from the directory's list (B1d-2);
 //    and, each on a timer of its own, the idempotency keys' retention sweep
 //    (B1e-3), the sign-in flows' sweep (B2-3a-2), the ended sessions'
-//    sweep (B2-4a) and the security events' retention sweep (B2-5a)
+//    sweep (B2-4a) and the security events' retention sweep (B2-5a); and
+//    the security events' recorder, writing its counts each minute (B2-5b)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
-//    request in flight is answered, then the anchor check and the sweep, then the pool
+//    request in flight is answered, then the anchor check and the sweep, then
+//    the recorder's last counts, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
@@ -55,8 +57,10 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
+import { scheduleRuns } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
+import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
@@ -75,6 +79,14 @@ const APPLICATION_NAME = 'agentx-api';
  * platform kills the process.
  */
 const STOP_DEADLINE_MS = 25_000;
+
+/**
+ * When, after a stop begins, the security events' last write must have ended
+ * (B2-5b): the minute's run may hold it up by one batch, 10 seconds at most,
+ * and the last write begins no batch that could end later than this, which
+ * leaves the pool time to close within the stop deadline.
+ */
+const RECORDER_DONE_BY_MS = 20_000;
 
 /**
  * How long the anchor check of one chain may take before it counts as not
@@ -97,6 +109,9 @@ const SWEEP_EVERY_MS = 3_600_000;
  * each a batch of 1,000 rows at a time, at most 100 batches a run.
  */
 const ROW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+
+/** How often the recorder writes the security events' counts whose minute has ended (B2-5b). */
+const RECORD_EVERY_MS = 60_000;
 
 /**
  * The console's sign-in (ADR-003 §5), when the config names a login service;
@@ -150,6 +165,7 @@ function onStopSignals(
   host: ApiProcess,
   server: FastifyInstance,
   background: { stop(): Promise<void> },
+  recorder: SecurityRecorder,
   database: Database<ApiTables>,
   logger: Logger,
 ): void {
@@ -157,6 +173,7 @@ function onStopSignals(
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    const stoppingAt = systemClock.now().getTime();
     logger.info('api.stopping', { signal });
     // Cleared below however the stop ends, so it fires only if stopping hangs.
     const deadline = setTimeout(() => {
@@ -169,6 +186,8 @@ function onStopSignals(
       // off), so the pool closes only once the last of them, and the anchor
       // check and the sweep, have finished with it.
       await Promise.all([server.close(), background.stop()]);
+      // After the last request, so none of its events is left behind.
+      await recorder.flush(stoppingAt + RECORDER_DONE_BY_MS);
       await database.destroy();
       logger.info('api.stopped');
       logger.flush();
@@ -292,12 +311,23 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const flows = createLoginFlows({ clock: systemClock });
   const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
   const signIn = signInFrom(config, database, flows, sessions);
+  const securityEvents = createSecurityEvents({
+    ids: uuidV7Ids,
+    clock: systemClock,
+    retentionDays: config.securityEvents.retentionDays,
+  });
+  const recorder = createSecurityRecorder({
+    write: (events) => securityEvents.record(database, events),
+    now: () => systemClock.now().getTime(),
+    logger,
+  });
   const server = await buildServer({
     config,
     logger,
     ids: uuidV7Ids,
     healthChecks: [],
     signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: config.sessions.absoluteSeconds },
+    securityEvents: recorder,
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
@@ -386,11 +416,6 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     SWEEP_EVERY_MS,
   );
   // The security events past the retention the config names (B2-5a), on a timer of its own too.
-  const securityEvents = createSecurityEvents({
-    ids: uuidV7Ids,
-    clock: systemClock,
-    retentionDays: config.securityEvents.retentionDays,
-  });
   const eventSweeping = scheduleRowSweep(
     createRowSweep({
       rows: 'security.event',
@@ -401,6 +426,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     SWEEP_EVERY_MS,
   );
+  // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
+  const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
     host,
     server,
@@ -412,9 +439,11 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           flowSweeping.stop(),
           sessionSweeping.stop(),
           eventSweeping.stop(),
+          recording.stop(),
         ]);
       },
     },
+    recorder,
     database,
     logger,
   );

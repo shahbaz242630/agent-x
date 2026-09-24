@@ -11,6 +11,7 @@ import { FRAMEWORK_EVENT } from './framework-logger.ts';
 import { CHECK_FAILED, type HealthCheck } from './health.ts';
 import { REQUEST_COMPLETED, REQUEST_FAILED, REQUEST_RATE_LIMITED } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
+import type { SecurityEventNote } from './security-recorder.ts';
 import { buildServer } from './server.ts';
 
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
@@ -63,11 +64,13 @@ async function setup(options: SetupOptions = {}) {
     // A fixed clock, so the log's per-minute caps never reset in the middle of a test.
     now: () => Date.UTC(2026, 8, 14, 10, 0, 0),
   });
+  const noted: SecurityEventNote[] = [];
   const app = await buildServer({
     config,
     logger: options.wrapLogger?.(logger) ?? logger,
     ids: new SequentialIds(),
     healthChecks: options.healthChecks ?? [],
+    securityEvents: { note: (event) => noted.push(event) },
   });
   const reached: string[] = [];
   app.post('/test/write', OPEN, () => {
@@ -100,7 +103,7 @@ async function setup(options: SetupOptions = {}) {
   });
   servers.push(app);
   await app.ready();
-  return { app, reached, capture, lines: () => capture.lines() };
+  return { app, reached, capture, noted, lines: () => capture.lines() };
 }
 
 const events = (lines: readonly Record<string, unknown>[], event: string) =>
@@ -429,6 +432,34 @@ describe('ADR-011 §4 each client address has a rate limit', () => {
       'x-ratelimit-reset': '60',
     });
     expect(response.headers).not.toHaveProperty('retry-after');
+  });
+});
+
+describe('SEC-AV-07 each rate-limit refusal is noted as a security event, with its client address', () => {
+  const RATE_LIMITED = { kind: 'rate_limited', reason: 'per_address' } as const;
+
+  it('notes each refused request, and none that was let through', async () => {
+    const { app, noted } = await setup({ http: { rateLimitPerMinute: 10 } });
+    for (let i = 0; i < 12; i += 1) await app.inject({ url: '/health', remoteAddress: '192.0.2.10' });
+    await app.inject({ url: '/health', remoteAddress: '192.0.2.11' });
+    expect(noted).toEqual([
+      { ...RATE_LIMITED, ip: '192.0.2.10' },
+      { ...RATE_LIMITED, ip: '192.0.2.10' },
+    ]);
+  });
+
+  it("notes the real client behind a trusted proxy, as the proxy wrote it, never the proxy's", async () => {
+    const { app, noted } = await setup({ http: { rateLimitPerMinute: 1, trustedProxies: ['10.0.0.1'] } });
+    const headers = { 'x-forwarded-for': '203.0.113.9:40001' };
+    for (let i = 0; i < 2; i += 1) await app.inject({ url: '/health', remoteAddress: '10.0.0.1', headers });
+    expect(noted).toEqual([{ ...RATE_LIMITED, ip: '203.0.113.9:40001' }]);
+  });
+
+  it('notes a refused malformed address too, which fails before any hook runs', async () => {
+    const { app, noted } = await setup({ http: { rateLimitPerMinute: 1, trustedProxies: ['10.0.0.1'] } });
+    const headers = { 'x-forwarded-for': '198.51.100.7' };
+    for (let i = 0; i < 2; i += 1) await app.inject({ url: '/%zz', remoteAddress: '10.0.0.1', headers });
+    expect(noted).toEqual([{ ...RATE_LIMITED, ip: '198.51.100.7' }]);
   });
 });
 
