@@ -87,7 +87,14 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     },
     outbound: { allowedOrigins: config.outbound.allowedOrigins },
     // The client secret is left out: it's a secret.
-    signIn: config.signIn === undefined ? null : { issuer: config.signIn.issuer, clientId: config.signIn.clientId },
+    signIn:
+      config.signIn === undefined
+        ? null
+        : {
+            issuer: config.signIn.issuer,
+            clientId: config.signIn.clientId,
+            internalOrigin: config.signIn.internalOrigin,
+          },
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     securityEvents: { retentionDays: config.securityEvents.retentionDays },
     payees: { coolingOffHours: config.payees.coolingOffHours },

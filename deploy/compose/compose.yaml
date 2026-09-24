@@ -134,9 +134,11 @@ services:
       AGENTX_KEYS_DIR: /mnt/secrets
     # Sign-in (ADR-003 §5): off until the end-to-end suite registers the API
     # with the login service as its OIDC client (tooling/e2e/api-sign-in.ts),
-    # which writes this file (the issuer, the client ID, the allowlist and
-    # where the secret is) and the secret into the folder mounted below, and
-    # starts the API again. Staging reads the same settings (B2-6).
+    # which writes this file (the issuer, the client ID, the allowlist, where
+    # the secret is, and Zitadel's own name on this network, which the API
+    # calls naming the issuer's host, as the login pages do) and the secret
+    # into the folder mounted below, and starts the API again. Staging reads
+    # the same settings (B2-6).
     env_file:
       - path: ./secrets/api-sign-in.env
         required: false
@@ -160,29 +162,6 @@ services:
       start_period: 15s
     # Longer than the API's own 25-second stop deadline (API.md).
     stop_grace_period: 30s
-    restart: unless-stopped
-
-  # The API reaches the login service at the address the browser uses
-  # (http://localhost:8081), because the issuer its tokens name must be that
-  # one exactly. Inside the API's container, localhost is the container
-  # itself, so this relay shares the API's network (and nothing else) and
-  # listens on its loopback alone, passing each request to the edge's login
-  # port with its Host kept (edge/relay.conf). It is the stack's stand-in for
-  # a real name, as auth.renttest123.com is on staging. Compose doesn't
-  # recreate it when it recreates the API (a rebuilt image, say), which
-  # leaves it in the old API's network: the suite's setup always starts it
-  # anew, and by hand it's `up --wait --force-recreate api-login-relay`.
-  api-login-relay:
-    image: nginx:1.31.5-alpine-slim@sha256:3b171d7224b669faa3cc2137fea0a65301791df1ec1f271ebd2a2b7461f7fade
-    volumes:
-      - ./edge/relay.conf:/etc/nginx/nginx.conf:ro
-    network_mode: service:api
-    depends_on:
-      api:
-        condition: service_started
-    cap_drop: [ALL]
-    cap_add: [CHOWN, SETGID, SETUID]
-    security_opt: ['no-new-privileges:true']
     restart: unless-stopped
 
   # Makes the folder for Zitadel's automation token writable by Zitadel (uid

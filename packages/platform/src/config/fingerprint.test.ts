@@ -105,6 +105,13 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ],
     ['the OIDC client', { AGENTX_OIDC_CLIENT_ID: 'agentx-api-2' }],
     [
+      "the login service's internal origin",
+      {
+        AGENTX_OIDC_INTERNAL_ORIGIN: 'https://zitadel.internal.agentx.example',
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://zitadel.internal.agentx.example',
+      },
+    ],
+    [
       'sign-in turned off',
       { AGENTX_OIDC_ISSUER: undefined, AGENTX_OIDC_CLIENT_ID: undefined, AGENTX_OIDC_CLIENT_SECRET: undefined },
     ],

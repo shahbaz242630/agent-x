@@ -21,6 +21,14 @@
 // so a flood of forged tokens can't make the API hammer the login service,
 // and a failure while it rotates its keys holds sign-ins up only briefly.
 //
+// Where the issuer's public address can't be reached from inside the
+// platform (Azure's apps can't call their own public door, B2-6), every call
+// to the issuer's origin goes to an internal origin instead, carrying the
+// issuer's host in Zitadel's `x-zitadel-instance-host` and
+// `x-zitadel-public-host` headers, as the login pages do: Zitadel then
+// answers as the issuer, so the document, the endpoints and the tokens name
+// the public address all the same, and are checked against it.
+//
 // A failure says which step failed, never a token, code or claim's value.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
@@ -38,6 +46,8 @@ export interface OidcClientSettings {
   readonly clientSecret: string;
   /** Where the login service sends the browser back: registered with it exactly. */
   readonly redirectUri: string;
+  /** Where to reach the issuer inside the platform (B2-6); undefined to call the issuer itself. */
+  readonly internalOrigin?: string | undefined;
 }
 
 /** What `start` hands back to be kept until the browser returns, and never shown. */
@@ -156,9 +166,15 @@ async function jsonObject(response: Response, what: string): Promise<Record<stri
 }
 
 /** Throws unless the settings can make a client at all; the config checks them in full (B2-3). */
-function checkSettings({ issuer, clientId, clientSecret, redirectUri }: OidcClientSettings): void {
+function checkSettings({ issuer, clientId, clientSecret, redirectUri, internalOrigin }: OidcClientSettings): void {
   if (!URL.canParse(issuer) || !URL.canParse(redirectUri)) {
     throw new RangeError('the issuer and the redirect address must be absolute URLs');
+  }
+  if (
+    internalOrigin !== undefined &&
+    (!URL.canParse(internalOrigin) || new URL(internalOrigin).origin !== internalOrigin)
+  ) {
+    throw new RangeError('the internal origin must be an origin alone');
   }
   if (!RETURNED.test(clientId) || !RETURNED.test(clientSecret)) {
     throw new RangeError('the client ID and secret must be 1 to 2048 visible ASCII characters');
@@ -175,16 +191,32 @@ export function createOidcClient({
   readonly clock: Clock;
 }): OidcClient {
   checkSettings(settings);
-  const { issuer, clientId, clientSecret, redirectUri } = settings;
+  const { issuer, clientId, clientSecret, redirectUri, internalOrigin } = settings;
   const issuerOrigin = new URL(issuer).origin;
+
+  /**
+   * Where a call to the login service goes: the URL itself, or, with an
+   * internal origin, the same path there, naming the issuer's host to
+   * Zitadel. Only the issuer's own origin is ever redirected.
+   */
+  function routed(url: string, init: RequestInit): [string, RequestInit] {
+    const target = new URL(url);
+    if (internalOrigin === undefined || target.origin !== issuerOrigin) return [url, init];
+    const headers = new Headers(init.headers);
+    const { host } = new URL(issuer);
+    headers.set('x-zitadel-instance-host', host);
+    headers.set('x-zitadel-public-host', host);
+    return [`${internalOrigin}${target.pathname}${target.search}`, { ...init, headers }];
+  }
 
   /** A call to the login service, bounded in time; a network failure is the provider's. */
   async function call(url: string, init: RequestInit = {}): Promise<Response> {
+    const [to, sent] = routed(url, init);
     try {
-      return await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+      return await fetch(to, { ...sent, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     } catch (error) {
       if (error instanceof SignInFailed) throw error;
-      throw new SignInFailed('provider_unavailable', `a call to ${new URL(url).origin} failed`);
+      throw new SignInFailed('provider_unavailable', `a call to ${new URL(to).origin} failed`);
     }
   }
 

@@ -3,8 +3,9 @@
 // with Zitadel as a confidential client, in a project of its own, writes its
 // settings where compose reads them (secrets/api-sign-in.env, loaded by the
 // API's `env_file`) and its secret into the folder mounted into the API alone
-// (secrets/api-sign-in), then starts the API again with them, together with
-// the relay that shares its network (compose.yaml, api-login-relay).
+// (secrets/api-sign-in), then starts the API again with them. The API calls
+// Zitadel by its name on the stack's network, naming the issuer's host in
+// Zitadel's own headers (AGENTX_OIDC_INTERNAL_ORIGIN, B2-6), as staging's does.
 //
 // The registration is the stack's, not the run's: a later run finds it (the
 // client ID in the file still one of the project's apps) and keeps it, so it
@@ -20,6 +21,9 @@ const PROJECT = 'Agent X API (local stack)';
 
 /** Where the login service sends the browser back: the API's callback, as the browser reaches it. */
 const API_REDIRECT_URI = `${API_ORIGIN}/v1/auth/callback`;
+
+/** Zitadel as the API reaches it on the stack's network: the login pages' own way there. */
+const LOGIN_SERVICE_INTERNAL = 'http://zitadel:8080';
 
 /** The settings file compose loads into the API, and the secret's file, which the API sees at SECRET_MOUNTED. */
 const SETTINGS_FILE = path.join(SECRETS_DIR, 'api-sign-in.env');
@@ -51,7 +55,8 @@ const settingsFor = (clientId: string): string =>
     `AGENTX_OIDC_ISSUER=${LOGIN_ORIGIN}`,
     `AGENTX_OIDC_CLIENT_ID=${clientId}`,
     `AGENTX_OIDC_CLIENT_SECRET_FILE=${SECRET_MOUNTED}`,
-    `AGENTX_OUTBOUND_ALLOWED_ORIGINS=${LOGIN_ORIGIN}`,
+    `AGENTX_OIDC_INTERNAL_ORIGIN=${LOGIN_SERVICE_INTERNAL}`,
+    `AGENTX_OUTBOUND_ALLOWED_ORIGINS=${LOGIN_SERVICE_INTERNAL}`,
     '',
   ].join(String.fromCharCode(10));
 
@@ -101,9 +106,6 @@ export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
     if ((await clientIdsOf(client, projectId)).includes(current.clientId)) {
       // Started with them already, unless the stack was started afresh since: then compose sees the change.
       await restart(['api'], false);
-      // The relay always anew: compose leaves it in the old API's network when
-      // it makes a new API (a rebuilt image, say), where it reaches nothing.
-      await restart(['api-login-relay'], true);
       await apiAnswers();
       return current;
     }
@@ -116,8 +118,8 @@ export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
   // Readable by the API, which runs as its own user with every capability dropped (as prepare's keys).
   writeFileSync(SECRET_FILE, made.clientSecret, { mode: 0o644 });
   writeFileSync(SETTINGS_FILE, settingsFor(made.clientId), { mode: 0o644 });
-  // New containers: compose can't see a changed secret file, and the relay must join the new API's network.
-  await restart(['api', 'api-login-relay'], true);
+  // A new container: compose can't see a changed secret file.
+  await restart(['api'], true);
   await apiAnswers();
   return { clientId: made.clientId, clientSecret: made.clientSecret };
 }

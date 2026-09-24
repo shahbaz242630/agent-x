@@ -86,6 +86,12 @@ export interface Config {
         readonly clientId: string;
         /** Never logged, never in the fingerprint. */
         readonly clientSecret: string;
+        /**
+         * B2-6: where the API reaches the login service inside the platform's
+         * own network, naming the issuer's host in Zitadel's own headers;
+         * undefined when it calls the issuer itself.
+         */
+        readonly internalOrigin: string | undefined;
       }
     | undefined;
   /** ADR-003 §7: how long a console session lives unused, and at most. */
@@ -153,30 +159,42 @@ function rateLimitProblems(
 
 /**
  * ADR-003 §5: the login service is named in full or not at all, and the API
- * must be allowed to call it: it fetches the keys and trades codes there.
+ * must be allowed to call it where it calls it: it fetches the keys and
+ * trades codes there. That is the issuer, or the internal origin when one is
+ * set (B2-6), which only goes with sign-in.
  */
 function signInProblems(
   environment: Environment,
   issuer: string | undefined,
   clientId: string | undefined,
   secretSet: boolean,
+  internalOrigin: string | undefined,
   allowedOrigins: readonly string[],
 ): string[] {
   const set = [issuer !== undefined, clientId !== undefined, secretSet];
-  if (set.every((one) => !one)) return [];
+  if (set.every((one) => !one)) {
+    return internalOrigin === undefined
+      ? []
+      : ['AGENTX_OIDC_INTERNAL_ORIGIN: set only with AGENTX_OIDC_ISSUER, where it says how to reach it'];
+  }
   if (!set.every(Boolean)) {
     return [
       'AGENTX_OIDC_ISSUER, AGENTX_OIDC_CLIENT_ID and AGENTX_OIDC_CLIENT_SECRET: set all three, or none (sign-in is off without them)',
     ];
   }
   if (issuer === undefined) return [];
+  const [called, name] =
+    internalOrigin === undefined
+      ? [issuer, 'AGENTX_OIDC_ISSUER' as const]
+      : [internalOrigin, 'AGENTX_OIDC_INTERNAL_ORIGIN' as const];
   return [
     ...plainHttpProblems('AGENTX_OIDC_ISSUER', environment, [issuer]),
-    ...(allowedOrigins.includes(issuer)
+    ...(internalOrigin === undefined
       ? []
-      : [
-          'AGENTX_OIDC_ISSUER: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API fetches its keys and trades codes there',
-        ]),
+      : plainHttpProblems('AGENTX_OIDC_INTERNAL_ORIGIN', environment, [internalOrigin])),
+    ...(allowedOrigins.includes(called)
+      ? []
+      : [`${name}: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API fetches its keys and trades codes there`]),
   ];
 }
 
@@ -201,10 +219,11 @@ function signInFrom(
   issuer: string | undefined,
   clientId: string | undefined,
   clientSecret: string | undefined,
+  internalOrigin: string | undefined,
 ): Config['signIn'] {
   return issuer === undefined || clientId === undefined || clientSecret === undefined
     ? undefined
-    : Object.freeze({ issuer, clientId, clientSecret });
+    : Object.freeze({ issuer, clientId, clientSecret, internalOrigin });
 }
 
 /**
@@ -228,6 +247,7 @@ export function loadConfig(env: Env = process.env): Config {
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
     oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
+    oidcInternalOrigin: setting(env, 'AGENTX_OIDC_INTERNAL_ORIGIN'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
@@ -272,12 +292,14 @@ export function loadConfig(env: Env = process.env): Config {
     checks.oidcIssuer.ok &&
     checks.oidcClientId.ok &&
     checks.oidcClientSecret.ok &&
+    checks.oidcInternalOrigin.ok &&
     allowedOrigins.ok
       ? signInProblems(
           environment.value,
           checks.oidcIssuer.value,
           checks.oidcClientId.value,
           checks.oidcClientSecret.value !== undefined,
+          checks.oidcInternalOrigin.value,
           allowedOrigins.value ?? [],
         )
       : []),
@@ -313,7 +335,12 @@ export function loadConfig(env: Env = process.env): Config {
       poolMax: checks.dbPoolMax.value,
     }),
     outbound: Object.freeze({ allowedOrigins: Object.freeze(checks.allowedOrigins.value ?? []) }),
-    signIn: signInFrom(checks.oidcIssuer.value, checks.oidcClientId.value, checks.oidcClientSecret.value),
+    signIn: signInFrom(
+      checks.oidcIssuer.value,
+      checks.oidcClientId.value,
+      checks.oidcClientSecret.value,
+      checks.oidcInternalOrigin.value,
+    ),
     sessions: Object.freeze({
       idleSeconds: checks.sessionIdle.value * 60,
       absoluteSeconds: checks.sessionAbsolute.value * 3600,
