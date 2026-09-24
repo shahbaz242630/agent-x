@@ -50,6 +50,10 @@ export interface E2eFixtures {
     readonly totp: TestUser & { readonly totpSecret: string };
     /** As `totp`, for the sign-in through the API alone, so no code is ever used twice across the two files. */
     readonly signIn: TestUser & { readonly totpSecret: string };
+    /** As `totp`, for the step-up through the API (B3-3b). */
+    readonly stepUpApp: TestUser & { readonly totpSecret: string };
+    /** A password and no second factor yet: the step-up tests register a (virtual) security key at its first sign-in. */
+    readonly stepUpKey: TestUser;
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -85,7 +89,15 @@ export default async function setup(project: TestProject): Promise<() => Promise
     created.push(signIn);
     const signInSecret = await registerTotp(client, signIn.userId);
     await verifyTotp(client, signIn.userId, totp(signInSecret, Date.now()));
+    const stepUpApp = await createHumanUser(client, `${run}-stepup-app`, password);
+    created.push(stepUpApp);
+    const stepUpSecret = await registerTotp(client, stepUpApp.userId);
+    await verifyTotp(client, stepUpApp.userId, totp(stepUpSecret, Date.now()));
+    const stepUpKey = await createHumanUser(client, `${run}-stepup-key`, password);
+    created.push(stepUpKey);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
+    await loginSees(client, stepUpKey, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
+    await loginSees(client, stepUpApp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, withTotp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     const api = await apiSignIn(client);
@@ -95,7 +107,13 @@ export default async function setup(project: TestProject): Promise<() => Promise
       clientId: app.clientId,
       redirectUri: REDIRECT_URI,
       password,
-      users: { noFactor, totp: { ...withTotp, totpSecret }, signIn: { ...signIn, totpSecret: signInSecret } },
+      users: {
+        noFactor,
+        totp: { ...withTotp, totpSecret },
+        signIn: { ...signIn, totpSecret: signInSecret },
+        stepUpApp: { ...stepUpApp, totpSecret: stepUpSecret },
+        stepUpKey,
+      },
       api,
       policy: await loginPolicy(client),
       impersonation: await impersonationEnabled(client),

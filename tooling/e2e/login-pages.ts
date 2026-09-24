@@ -14,6 +14,8 @@ const LOGIN_PAGES = {
   password: /\/ui\/v2\/login\/password/,
   factorSetup: /\/ui\/v2\/login\/mfa\/set/,
   u2fSet: /\/ui\/v2\/login\/u2f\/set/,
+  /** A security key asked for (B3-3b): the browser's own authenticator answers. */
+  u2f: /\/ui\/v2\/login\/u2f(?:\?|$)/,
   otp: /\/ui\/v2\/login\/otp\/time-based(?:\?|$)/,
 } as const;
 
@@ -116,6 +118,9 @@ export function loginDriver({ password, callback }: { password: string; callback
         case 'otp':
           if (user.totpSecret === undefined) throw new Error(`asked for a code the user cannot give ${where(page)}`);
           await page.fill('input[name=code]', await freshCode(user.totpSecret));
+          await submitAndLeave(page, current);
+          break;
+        case 'u2f':
           await submitAndLeave(page, current);
           break;
         case 'factorSetup':
