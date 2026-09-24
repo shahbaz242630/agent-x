@@ -102,6 +102,11 @@ param authHost string
 @minLength(4)
 param appHost string
 
+@description('The API\'s client ID in Zitadel (B2-6), which Zitadel gave when the API was registered with it as a confidential web client; its secret is in the vault (api-oidc-client-secret). Visible ASCII, as the API\'s config takes it.')
+@minLength(1)
+@maxLength(255)
+param apiOidcClientId string
+
 @description('How many replicas of each app keep running with no traffic. Staging scales to zero (ADR-002): nothing is billed while nothing runs, at the cost of a cold start on the first request. The deploy tool sets 1 for `apps --keep-running`.')
 @minValue(0)
 @maxValue(1)
@@ -556,7 +561,10 @@ var apps = [
     args: []
     targetPort: 8080
     transport: 'auto'
-    reachesZitadel: false
+    // Sign-in (B2-6): the API calls Zitadel inside the environment, as the
+    // login pages do, naming the issuer's host in Zitadel's headers; that
+    // internal address is the one origin it may call out to.
+    zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN', 'AGENTX_OUTBOUND_ALLOWED_ORIGINS']
     // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
     // second replica would give every client two allowances. The worker, which
     // holds no such count, is the part that scales in Phase 4.
@@ -571,6 +579,10 @@ var apps = [
         {
           reads: 'db-app-password'
           setting: 'AGENTX_DB_PASSWORD_FILE'
+        }
+        {
+          reads: 'api-oidc-client-secret'
+          setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
         }
       ],
       map(appKeys, key => {
@@ -616,6 +628,16 @@ var apps = [
         name: 'AGENTX_DB_POOL_MAX'
         value: '10'
       }
+      // The login service (ADR-003 §5): its public address, which its tokens
+      // name, and the API's client ID there.
+      {
+        name: 'AGENTX_OIDC_ISSUER'
+        value: 'https://${authHost}'
+      }
+      {
+        name: 'AGENTX_OIDC_CLIENT_ID'
+        value: apiOidcClientId
+      }
     ])
   }
   {
@@ -630,7 +652,7 @@ var apps = [
     // Zitadel serves gRPC beside HTTP on the one port, as it does on the
     // compose stack.
     transport: 'http2'
-    reachesZitadel: false
+    zitadelSettings: []
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
     maxReplicas: 1
@@ -680,7 +702,7 @@ var apps = [
     // ZITADEL_API_URL is added where the app is deployed, not here: the
     // environment's default domain is Azure's to give, and Bicep needs this
     // list settled before the deployment starts.
-    reachesZitadel: true
+    zitadelSettings: ['ZITADEL_API_URL']
     settings: [
       // The host the browser uses, which Zitadel reads before the Host header
       // (ADR-003 Amendment S10), so the pages need no Host override here.
@@ -877,15 +899,12 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
                 name: file.setting
                 value: '${secretsPath}/${file.reads}'
               }),
-              // Zitadel inside the environment, by the name the platform routes.
-              app.reachesZitadel
-                ? [
-                    {
-                      name: 'ZITADEL_API_URL'
-                      value: zitadelInternalUrl
-                    }
-                  ]
-                : []
+              // Zitadel inside the environment, by the name the platform
+              // routes, in each setting that names where it is.
+              map(app.zitadelSettings, setting => {
+                name: setting
+                value: zitadelInternalUrl
+              })
             )
             volumeMounts: empty(app.files)
               ? []

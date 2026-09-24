@@ -77,6 +77,10 @@ param loginClientPrivateKey string
 @secure()
 param loginClientPublicKey string
 
+@description('The API\'s secret as Zitadel\'s OIDC client (B2-6), which Zitadel gave when the API was registered with it, pasted by a person. Empty leaves the vault\'s as it is.')
+@secure()
+param apiOidcClientSecret string
+
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
 @secure()
@@ -126,6 +130,11 @@ var secrets = [
     name: 'login-client-public-key'
     value: loginClientPublicKey
     readers: ['zitadel']
+  }
+  {
+    name: 'api-oidc-client-secret'
+    value: apiOidcClientSecret
+    readers: ['api']
   }
 ]
 

@@ -21,4 +21,5 @@ param zitadelMasterKey = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_MASTERKEY
 param zitadelAdminPassword = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD')
 param loginClientPrivateKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY')
 param loginClientPublicKey = readEnvironmentVariable('AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY')
+param apiOidcClientSecret = readEnvironmentVariable('AGENTX_AZURE_API_OIDC_CLIENT_SECRET')
 param appKeyValues = readEnvironmentVariable('AGENTX_AZURE_APP_KEYS')

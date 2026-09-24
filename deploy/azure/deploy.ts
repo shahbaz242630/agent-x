@@ -66,6 +66,7 @@ export const APP_VARIABLES = {
   authHost: 'AGENTX_AZURE_AUTH_HOST',
   appHost: 'AGENTX_AZURE_APP_HOST',
   adminEmail: 'AGENTX_AZURE_ZITADEL_ADMIN_EMAIL',
+  apiClientId: 'AGENTX_AZURE_API_OIDC_CLIENT_ID',
   minReplicas: 'AGENTX_AZURE_APP_MIN_REPLICAS',
 } as const;
 
@@ -111,9 +112,12 @@ export const CERTIFICATE_VARIABLES = { authHost: APP_VARIABLES.authHost, appHost
  * - machine: a fresh login, made here
  * - pair: the login container's key pair, both halves made together
  * - once: Zitadel's master key; a fresh one goes every run, and Azure keeps only the first
+ * - issued: given by a service we are a client of, pasted by a person, and
+ *   written only by name (`--rotate`): it exists only once that service does,
+ *   so a first `--all` can't have it (B2-6)
  */
 export const VAULT_SECRETS: Readonly<
-  Record<string, { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' }>
+  Record<string, { readonly variable: string; readonly source: 'person' | 'machine' | 'pair' | 'once' | 'issued' }>
 > = {
   'db-admin-password': { variable: 'AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD', source: 'person' },
   'db-owner-password': { variable: 'AGENTX_AZURE_DB_OWNER_PASSWORD', source: 'machine' },
@@ -124,6 +128,7 @@ export const VAULT_SECRETS: Readonly<
   'login-client-private-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY', source: 'pair' },
   'login-client-public-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY', source: 'pair' },
   'zitadel-masterkey': { variable: 'AGENTX_AZURE_ZITADEL_MASTERKEY', source: 'once' },
+  'api-oidc-client-secret': { variable: 'AGENTX_AZURE_API_OIDC_CLIENT_SECRET', source: 'issued' },
 };
 
 /**
@@ -143,6 +148,7 @@ const SECRET_VARIABLES: ReadonlySet<string> = new Set(Object.values(VAULT_SECRET
 const PERSON_LABELS: Readonly<Record<string, string>> = {
   'db-admin-password': "the database admin's password",
   'zitadel-admin-password': "Zitadel's first admin's password",
+  'api-oidc-client-secret': "the API's client secret, as Zitadel showed it",
 };
 
 /** Every secret (`all`), the ones named (`rotate`), or only the app's keys the vault lacks (`keys`). */
@@ -242,13 +248,14 @@ export function parseArguments(argv: readonly string[]): Request {
   return { command, plan: { kind: 'rotate', names: rotated } };
 }
 
+/** Whether a run writes the secret: `--all` writes all but an issued one, which only its name writes. */
 const planIncludes = (plan: SecretPlan, name: string): boolean =>
-  plan.kind === 'all' || (plan.kind === 'rotate' && plan.names.has(name));
+  (plan.kind === 'all' && VAULT_SECRETS[name]?.source !== 'issued') || (plan.kind === 'rotate' && plan.names.has(name));
 
-/** The people's secrets a run must ask for. */
+/** The secrets a person pastes (theirs, and the issued ones) that a run must ask for. */
 export const peopleAskedFor = (plan: SecretPlan): string[] =>
   Object.entries(VAULT_SECRETS)
-    .filter(([name, secret]) => secret.source === 'person' && planIncludes(plan, name))
+    .filter(([name, secret]) => (secret.source === 'person' || secret.source === 'issued') && planIncludes(plan, name))
     .map(([name]) => name);
 
 export interface Makers {
@@ -277,7 +284,8 @@ export function secretValues(
   for (const [name, secret] of Object.entries(VAULT_SECRETS)) {
     const written = planIncludes(plan, name);
     switch (secret.source) {
-      case 'person': {
+      case 'person':
+      case 'issued': {
         const given = people[name];
         if (written && given === undefined) throw new Error(`${name} was to be written but nobody gave it`);
         values[secret.variable] = written ? (given ?? '') : '';
@@ -304,7 +312,7 @@ export function describePlan(plan: SecretPlan): string[] {
   const secrets = Object.entries(VAULT_SECRETS).map(([name, secret]) => {
     if (secret.source === 'once') return `  ${name}: written only if the vault has none yet`;
     if (!planIncludes(plan, name)) return `  ${name}: kept as the vault has it`;
-    return secret.source === 'person'
+    return secret.source === 'person' || secret.source === 'issued'
       ? `  ${name}: written, from what you paste`
       : `  ${name}: written, made fresh by this run`;
   });
@@ -332,12 +340,29 @@ export function passwordProblems(value: string): string[] {
   return problems;
 }
 
+/**
+ * Why a secret a service issued won't do, or nothing: it is taken as the
+ * service showed it, so only what a paste could have got wrong is refused. The
+ * message never repeats the value.
+ */
+export function issuedProblems(value: string): string[] {
+  const problems: string[] = [];
+  if (value.length < 16) problems.push('it is shorter than 16 characters, shorter than any service issues');
+  if (value.length > 2048) problems.push('it is longer than the 2048 characters the API takes');
+  if (value.trim() !== value) problems.push('it starts or ends with a space, which a paste may have added');
+  else if (!/^[!-~]*$/.test(value)) problems.push('it holds a space or a character that is not plain visible ASCII');
+  return problems;
+}
+
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** A host name as DNS writes it: lower case, two labels or more, none starting or ending with a hyphen. */
 const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
 const COMMIT = /^[0-9a-f]{40}$/;
+
+/** A client ID as the API's config takes one (AGENTX_OIDC_CLIENT_ID). */
+const CLIENT_ID = /^[!-~]{1,255}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
 /**
@@ -430,11 +455,19 @@ function realTerminal(): Terminal {
 
 const yes = (answer: string): boolean => /^y(?:es)?$/i.test(answer);
 
-/** A person's password, asked twice so a slip of the paste is caught, and held to `passwordProblems`. */
-export async function askPassword(terminal: Terminal, label: string, tries = 3): Promise<string> {
+/**
+ * A person's password, asked twice so a slip of the paste is caught, and held
+ * to `passwordProblems`, or to `issuedProblems` for a secret a service issued.
+ */
+export async function askPassword(
+  terminal: Terminal,
+  label: string,
+  tries = 3,
+  problemsWith: (value: string) => string[] = passwordProblems,
+): Promise<string> {
   for (let attempt = 1; attempt <= tries; attempt += 1) {
     const first = await terminal.askHidden(`Paste ${label} (nothing will show): `);
-    const problems = passwordProblems(first);
+    const problems = problemsWith(first);
     if (problems.length > 0) {
       terminal.say(`That won't do: ${problems.join('; ')}.`);
       continue;
@@ -1017,7 +1050,13 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   for (const line of describePlan(plan)) steps.terminal.say(line);
   const people: Record<string, string> = {};
   for (const name of peopleAskedFor(plan)) {
-    people[name] = await askPassword(steps.terminal, PERSON_LABELS[name] ?? name);
+    const issued = VAULT_SECRETS[name]?.source === 'issued';
+    people[name] = await askPassword(
+      steps.terminal,
+      PERSON_LABELS[name] ?? name,
+      3,
+      issued ? issuedProblems : passwordProblems,
+    );
   }
   const values = secretValues(plan, people, steps.makers);
   checkPolicy(steps, values);
@@ -1356,12 +1395,17 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   const { authHost, appHost } = await askHosts(steps);
   const adminEmail = await steps.terminal.ask("Zitadel's first admin's address: ");
   if (!EMAIL.test(adminEmail)) throw new Error("That isn't an email address: nothing was deployed.");
+  const apiClientId = (await steps.terminal.ask("The API's client ID in Zitadel (its app's page shows it): ")).trim();
+  if (!CLIENT_ID.test(apiClientId)) {
+    throw new Error("That isn't a client ID (1 to 255 visible characters, no spaces): nothing was deployed.");
+  }
   const values = {
     [APP_VARIABLES.digest]: digest,
     [APP_VARIABLES.release]: release,
     [APP_VARIABLES.authHost]: authHost,
     [APP_VARIABLES.appHost]: appHost,
     [APP_VARIABLES.adminEmail]: adminEmail,
+    [APP_VARIABLES.apiClientId]: apiClientId,
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
   };
   checkPolicy(steps, values);
