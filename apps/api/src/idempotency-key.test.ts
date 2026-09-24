@@ -30,6 +30,7 @@ const LIVE: LiveSession = {
 /** A sign-in that knows one session and does nothing else these tests need. */
 const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in these tests')),
+  beginStepUp: () => Promise.reject(new Error('not in these tests')),
   complete: () => Promise.reject(new Error('not in these tests')),
   signOut: () => Promise.resolve(false),
   signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),

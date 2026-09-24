@@ -152,7 +152,16 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     'identity.login_flows': {
       reason:
         "The sign-in flows under way (ADR-003 §5, B2-3a): each browser's state, nonce and PKCE verifier until it returns from the login service, before anyone is known",
-      columns: ['cookie_hash', 'state', 'nonce', 'verifier', 'return_to', 'created_at', 'ends_at'],
+      columns: [
+        'cookie_hash',
+        'state',
+        'nonce',
+        'verifier',
+        'return_to',
+        'created_at',
+        'ends_at',
+        'step_up_challenge_id',
+      ],
       // Added, and taken once (deleted as it is read); never changed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
     },
