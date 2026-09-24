@@ -7,6 +7,7 @@
 //   `deploy/image/verify.ts` checks a signature for before a deployment (G4)
 // - AGENTX_AZURE_AUTH_HOST: the host name Zitadel is served on
 // - AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: the first admin's address
+// - AGENTX_AZURE_API_OIDC_CLIENT_ID: the API's client ID in Zitadel (B2-6)
 // and, from the tool rather than the operator, AGENTX_AZURE_APP_MIN_REPLICAS
 // (below).
 using 'apps.bicep'
@@ -33,6 +34,10 @@ param zitadelAdminEmail = readEnvironmentVariable('AGENTX_AZURE_ZITADEL_ADMIN_EM
 param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd1aa49dbc015617a0c1bc9e6abd956616856f0bb374269fae7da79059'
 
 param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
+
+// The API as Zitadel's OIDC client (B2-6): the client ID Zitadel gave when the
+// API was registered with it; its secret is in the vault.
+param apiOidcClientId = readEnvironmentVariable('AGENTX_AZURE_API_OIDC_CLIENT_ID')
 
 // ADR-002: "Staging scales to zero when not in use". Nothing is billed while
 // nothing runs; the first request after a quiet spell waits for a cold start,

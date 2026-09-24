@@ -227,6 +227,8 @@ const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.map((key) => `api reads ${key}`),
   ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `operator reads ${key}`),
   'api reads db-app-password',
+  // B2-6: the API's own secret as the login service's client, which Zitadel gave.
+  'api reads api-oidc-client-secret',
   'operator reads db-app-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',

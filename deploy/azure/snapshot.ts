@@ -84,6 +84,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
     AGENTX_AZURE_APP_HOST: 'app.example.invalid',
     AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
+    AGENTX_AZURE_API_OIDC_CLIENT_ID: '338719472394810051',
     AGENTX_AZURE_APP_MIN_REPLICAS: '0',
     AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_DB_OWNER_PASSWORD: standIn(24),
@@ -94,6 +95,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD: standIn(24),
     AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY: standIn(24),
     AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY: standIn(24),
+    AGENTX_AZURE_API_OIDC_CLIENT_SECRET: standIn(24),
     AGENTX_AZURE_APP_KEYS: newAppKeys(),
   };
 }

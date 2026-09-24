@@ -35,6 +35,8 @@ import {
   main,
   type Makers,
   parseArguments,
+  issuedMissing,
+  issuedProblems,
   passwordProblems,
   peopleAskedFor,
   policyCheck,
@@ -260,10 +262,38 @@ describe('the secrets a run writes', () => {
       '  login-client-private-key: kept as the vault has it',
       '  login-client-public-key: kept as the vault has it',
       '  zitadel-masterkey: written only if the vault has none yet',
+      '  api-oidc-client-secret: kept as the vault has it',
       ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
     ]);
     expect(describePlan(all)).toContain('  zitadel-admin-password: written, from what you paste');
+    // Zitadel gives the API's secret once the API is registered with it: a first run can't have it, so only its name writes it (B2-6).
+    expect(describePlan(all)).toContain('  api-oidc-client-secret: kept as the vault has it');
+    expect(describePlan(rotating('api-oidc-client-secret'))).toContain(
+      '  api-oidc-client-secret: written, from what you paste',
+    );
     expect(describePlan(keysOnly).filter((line) => line.includes(': written,'))).toEqual([]);
+  });
+});
+
+describe('issuedProblems', () => {
+  /** What Zitadel shows, in its shape: 64 letters and digits, no symbol. Built here, so no scanner takes it for one. */
+  const zitadels = 'aB3d'.repeat(16);
+
+  it('takes a secret as the service showed it, with no symbol, which a password would need', () => {
+    expect(issuedProblems(zitadels)).toEqual([]);
+    expect(passwordProblems(zitadels)).toContain('it has no a symbol');
+  });
+
+  it.each([
+    ['too short to be one', 'abc123', /shorter than 16/],
+    ['a space a paste added', ` ${zitadels}`, /starts or ends with a space/],
+    ['a space inside', `${zitadels.slice(0, 20)} ${zitadels.slice(20)}`, /not plain visible ASCII/],
+    ['a character outside plain ASCII', `${zitadels}é`, /not plain visible ASCII/],
+    ['more than the API takes', 'a'.repeat(2049), /longer than the 2048/],
+  ])('refuses %s, never repeating the value', (_what, value, problem) => {
+    const problems = issuedProblems(value);
+    expect(problems).toContainEqual(expect.stringMatching(problem));
+    expect(problems.join(' ')).not.toContain(value.trim());
   });
 });
 
@@ -442,12 +472,18 @@ interface Call {
 }
 
 /** A secret in the vault: its name, or its name and current version. */
-type Held = string | { readonly name: string; readonly version: string };
+type Held = string | { readonly name: string; readonly version: string; readonly disabled?: boolean };
 
 /** How the vault lists a secret: its name and its current version's URL, never its value. */
 const listed = (held: Held) => {
-  const { name, version } = typeof held === 'string' ? { name: held, version: '1' } : held;
-  return { name, properties: { secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}` } };
+  const { name, version, disabled } = typeof held === 'string' ? { name: held, version: '1', disabled: false } : held;
+  return {
+    name,
+    properties: {
+      secretUriWithVersion: `https://kv.example.invalid/secrets/${name}/${version}`,
+      attributes: { enabled: disabled !== true },
+    },
+  };
 };
 
 interface AzAnswers {
@@ -643,7 +679,8 @@ class RecordingAz implements Az {
           const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
           return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
         }
-        const names = (this.#deployed ? this.options.after : this.options.before) ?? [];
+        // Unless a test says otherwise, the vault holds the API's client secret, which apps needs (B2-6).
+        const names = (this.#deployed ? this.options.after : this.options.before) ?? ['api-oidc-client-secret'];
         const pages = this.options.pages ?? {};
         const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
         const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
@@ -949,7 +986,8 @@ describe("what a secrets run did to the app's keys", () => {
 });
 
 describe('deploy secrets', () => {
-  const nine = Object.keys(VAULT_SECRETS);
+  /** What a first --all writes: every secret but the one Zitadel issues, which only its name writes (B2-6). */
+  const nine = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source !== 'issued');
   /** Every secret a deployment leaves: the nine and the app's keys. */
   const everything = [...nine, ...APP_KEYS];
 
@@ -979,11 +1017,18 @@ describe('deploy secrets', () => {
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
     expect(deployment?.args).toContain(RESOURCE_GROUP);
     const values = deployment?.values ?? {};
-    expect(Object.values(values).filter((value) => value === '')).toEqual([]);
+    // All but the API's client secret, which Zitadel issues later and only its name writes.
+    expect(
+      Object.entries(values)
+        .filter(([, value]) => value === '')
+        .map(([name]) => name),
+    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET']);
     expect(values.AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD).toBe(admin);
     expect(values.AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD).toBe(zitadel);
     for (const call of done.az.calls) {
-      for (const value of Object.values(values)) expect(call.args.join(' ')).not.toContain(value);
+      for (const value of Object.values(values).filter((given) => given !== '')) {
+        expect(call.args.join(' ')).not.toContain(value);
+      }
     }
     done.terminal.neverSaid(Object.values(values));
     expect(done.terminal.said.slice(-17, -2)).toEqual([...everything].sort().map((name) => `  ${name}`));
@@ -1039,6 +1084,31 @@ describe('deploy secrets', () => {
     expect(endless.error).toMatchObject({ message: expect.stringMatching(/went past 100 pages/) as unknown });
     expect(endless.az.sequence.filter((command) => command === 'rest --method get')).toHaveLength(100);
     expect(endless.az.deployment).toBeUndefined();
+  });
+
+  it("on a rotation of the API's client secret, takes Zitadel's as pasted, twice, and writes it alone (B2-6)", async () => {
+    const issued = 'aB3d'.repeat(16);
+    const done = await run(['secrets', '--rotate', 'api-oidc-client-secret'], {
+      answers: ['y'],
+      hidden: [issued, issued],
+      az: new RecordingAz({ before: everything, after: [...everything, 'api-oidc-client-secret'] }),
+    });
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    expect(done.terminal.hiddenQuestions).toEqual([
+      "Paste the API's client secret, as Zitadel showed it (nothing will show): ",
+      'Paste it again: ',
+    ]);
+    const values = done.az.deployment?.values ?? {};
+    expect(values.AGENTX_AZURE_API_OIDC_CLIENT_SECRET).toBe(issued);
+    expect(
+      Object.entries(values)
+        .filter(([, value]) => value !== '')
+        .map(([variable]) => variable)
+        .sort(),
+    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET', 'AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
+    expect(done.terminal.said.join('\n')).not.toContain(issued);
+    expect(done.terminal.said.join('\n')).not.toMatch(/set-up job/);
   });
 
   it('on a rotation, asks for nothing, writes the named login and the master key, and says to run the set-up job', async () => {
@@ -1136,8 +1206,40 @@ function recordingImages(
   };
 }
 
+/** The API's client ID in Zitadel, as its app's page shows one. */
+const CLIENT_ID = '338719472394810051';
+
 describe('deploy apps', () => {
-  const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid'];
+  const answers = ['y', 'Auth.Example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID];
+
+  it("sends nothing, and asks nothing past the subscription, while the vault lacks the API's client secret (B2-6)", async () => {
+    const images = recordingImages();
+    const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
+    expect(done.error).toMatchObject({
+      message: expect.stringMatching(
+        /^The vault doesn't hold api-oidc-client-secret yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret .*Nothing was deployed\.$/,
+      ) as unknown,
+    });
+    expect(done.az.deployment).toBeUndefined();
+    expect(images.asked).toEqual([]);
+    // Only which subscription, before the vault is read.
+    expect(done.terminal.questions).toEqual(['Deploy staging into it? [y/N] ']);
+  });
+
+  it('counts a disabled client secret as missing: the API could no more read it', async () => {
+    const done = await run(['apps'], {
+      answers,
+      images: recordingImages(),
+      az: new RecordingAz({ before: [{ name: 'api-oidc-client-secret', version: '1', disabled: true }] }),
+    });
+    expect(done.error).toMatchObject({ message: expect.stringMatching(/or holds it disabled/) as unknown });
+    expect(done.az.deployment).toBeUndefined();
+  });
+
+  it('names only the issued secrets a vault lacks', () => {
+    expect(issuedMissing([])).toEqual(['api-oidc-client-secret']);
+    expect(issuedMissing(['db-app-password', 'api-oidc-client-secret'])).toEqual([]);
+  });
 
   it("deploys main's newest image only once it is verified, by digest, with the hosts as typed", async () => {
     const images = recordingImages();
@@ -1152,6 +1254,9 @@ describe('deploy apps', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
+      // The vault holds the API's client secret, which the API reads (B2-6).
+      'keyvault list --subscription',
+      'rest --method get',
       'deployment group create',
       'deployment group show',
       'containerapp list --subscription',
@@ -1166,6 +1271,7 @@ describe('deploy apps', () => {
       AGENTX_AZURE_AUTH_HOST: 'auth.example.invalid',
       AGENTX_AZURE_APP_HOST: 'app.example.invalid',
       AGENTX_AZURE_ZITADEL_ADMIN_EMAIL: 'admin@example.invalid',
+      AGENTX_AZURE_API_OIDC_CLIENT_ID: CLIENT_ID,
       AGENTX_AZURE_APP_MIN_REPLICAS: '0',
     });
     expect(done.checked).toEqual([deployment?.values]);
@@ -1262,12 +1368,20 @@ describe('deploy apps', () => {
 
   it('sends nothing for a host that is no host, the same host twice, or an address that is no address', async () => {
     for (const [typed, reason] of [
-      [['y', 'auth example', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
-      [['y', 'localhost', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
-      [['y', '-auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
-      [['y', 'https://auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'], /isn't a host name/],
-      [['y', 'auth.example.invalid', 'AUTH.example.invalid', 'admin@example.invalid'], /two hosts must differ/],
+      [['y', 'auth example', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID], /isn't a host name/],
+      [['y', 'localhost', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID], /isn't a host name/],
+      [['y', '-auth.example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID], /isn't a host name/],
+      [
+        ['y', 'https://auth.example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID],
+        /isn't a host name/,
+      ],
+      [
+        ['y', 'auth.example.invalid', 'AUTH.example.invalid', 'admin@example.invalid', CLIENT_ID],
+        /two hosts must differ/,
+      ],
       [['y', 'auth.example.invalid', 'app.example.invalid', 'admin'], /isn't an email address/],
+      [['y', 'auth.example.invalid', 'app.example.invalid', 'admin@example.invalid', 'two words'], /isn't a client ID/],
+      [['y', 'auth.example.invalid', 'app.example.invalid', 'admin@example.invalid', ''], /isn't a client ID/],
     ] as const) {
       const done = await run(['apps'], { answers: typed, images: recordingImages() });
       expect(done.error).toMatchObject({ message: expect.stringMatching(reason) as unknown });
@@ -1692,7 +1806,7 @@ describe('a deployment the operator declines, or that ends otherwise', () => {
       'apps',
       ['apps'],
       {
-        answers: ['y', 'auth.example.invalid', 'app.example.invalid', 'admin@example.invalid'],
+        answers: ['y', 'auth.example.invalid', 'app.example.invalid', 'admin@example.invalid', CLIENT_ID],
         images: recordingImages(),
       },
     ],
@@ -1700,7 +1814,9 @@ describe('a deployment the operator declines, or that ends otherwise', () => {
 
   it('says nothing was deployed when the what-if is answered no, though the CLI ends with 0, and reads nothing more', async () => {
     for (const [command, argv, scenario] of commands) {
-      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Declined' }) });
+      // A first secrets run finds the vault empty; apps finds the API's client secret there.
+      const vault = command === 'secrets' ? { before: [] } : {};
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Declined', ...vault }) });
       expect({ command, status: done.status, error: done.error }).toEqual({ command, status: 1, error: undefined });
       expect(done.terminal.said.at(-1)).toBe('You answered no at the what-if: nothing was deployed.');
       const afterShow = done.az.sequence.slice(done.az.sequence.findIndex((call) => call.endsWith(' show')) + 1);
@@ -1710,7 +1826,8 @@ describe('a deployment the operator declines, or that ends otherwise', () => {
 
   it('reports any other end, and reads nothing more', async () => {
     for (const [command, argv, scenario] of commands) {
-      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Canceled' }) });
+      const vault = command === 'secrets' ? { before: [] } : {};
+      const done = await run(argv, { ...scenario, az: new RecordingAz({ ended: 'Canceled', ...vault }) });
       expect({ command, status: done.status }).toEqual({ command, status: 1 });
       expect(done.terminal.said.at(-1)).toMatch(
         /^The deployment agentx-staging-\w+-20260916T164215Z ended Canceled: nothing more was done\.$/,
@@ -1797,7 +1914,10 @@ describe('the tool and the deployment agree', () => {
   it('checks a first run by the same rules CI runs, with stand-ins of the same shape in place of every secret', () => {
     const values = secretValues(all, pasted(aPaste(), aPaste()));
     const shaped = shapedForPolicy({ ...values, AGENTX_AZURE_ALERT_EMAIL: 'ops@example.invalid' }, randomBytes);
-    for (const [variable, value] of Object.entries(values).filter(([name]) => name !== APP_KEYS_VARIABLE)) {
+    // A first run leaves the API's client secret empty (Zitadel issues it later), and an empty value stays empty.
+    for (const [variable, value] of Object.entries(values).filter(
+      ([name, given]) => name !== APP_KEYS_VARIABLE && given !== '',
+    )) {
       expect(shaped[variable]).not.toBe(value);
       expect(shaped[variable]?.length).toBe(variable === 'AGENTX_AZURE_ZITADEL_MASTERKEY' ? 32 : 48);
     }
@@ -1821,6 +1941,7 @@ describe('the tool and the deployment agree', () => {
       [APP_VARIABLES.authHost]: 'auth.example.invalid',
       [APP_VARIABLES.appHost]: 'app.example.invalid',
       [APP_VARIABLES.adminEmail]: 'admin@example.invalid',
+      [APP_VARIABLES.apiClientId]: CLIENT_ID,
       [APP_VARIABLES.minReplicas]: '0',
     };
     expect(shapedForPolicy(appValues, randomBytes)).toEqual(appValues);
