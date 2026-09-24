@@ -20,8 +20,12 @@ export const REASON_CODES = {
   FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
+  IDEMPOTENCY_KEY_BUSY:
+    'An earlier request with this Idempotency-Key is still being done. Wait the number of seconds in the Retry-After header, then send the same request again with the same key.',
   IDEMPOTENCY_KEY_INVALID:
     'This address changes something, so each request must carry an Idempotency-Key header: 1 to 255 visible ASCII characters, no spaces, new for each change you mean to make. Send the same key again only to retry the same request.',
+  IDEMPOTENCY_KEY_REUSED:
+    'This Idempotency-Key was already used for a different request, so this one is refused and nothing was changed. Use a new key for a new change.',
   INTERNAL_ERROR:
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
