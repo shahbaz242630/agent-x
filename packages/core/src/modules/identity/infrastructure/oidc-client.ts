@@ -196,12 +196,13 @@ export function createOidcClient({
 
   /**
    * Where a call to the login service goes: the URL itself, or, with an
-   * internal origin, the same path there, naming the issuer's host to
-   * Zitadel. Only the issuer's own origin is ever redirected.
+   * internal origin, the same path and query there, naming the issuer's host
+   * to Zitadel. Every call is on the issuer's own origin: the discovery
+   * document's, and the endpoints `endpoint` has held to it.
    */
   function routed(url: string, init: RequestInit): [string, RequestInit] {
+    if (internalOrigin === undefined) return [url, init];
     const target = new URL(url);
-    if (internalOrigin === undefined || target.origin !== issuerOrigin) return [url, init];
     const headers = new Headers(init.headers);
     const { host } = new URL(issuer);
     headers.set('x-zitadel-instance-host', host);

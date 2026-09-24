@@ -590,6 +590,14 @@ describe('B2-6 reaching the login service inside the platform', () => {
     expect(new URLSearchParams(token?.init.body as string).get('code')).toBe(CODE);
   });
 
+  it("keeps an endpoint's query on the way there", async () => {
+    service.discovery = { ...service.discovery, jwks_uri: `${ISSUER}/oauth/v2/keys?format=jwks` };
+
+    await signIn().catch(() => undefined);
+
+    expect(reached.map((call) => call.url)).toContain(`${INTERNAL}/oauth/v2/keys?format=jwks`);
+  });
+
   it("still refuses a document whose endpoints aren't on the issuer's own origin, the internal one included", async () => {
     service.discovery = { ...service.discovery, token_endpoint: `${INTERNAL}/oauth/v2/token` };
 
