@@ -1069,6 +1069,42 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     });
   });
 
+  describe('B2-1: a global table the app changes in part only', () => {
+    const partly = 'agentx_app may UPDATE a global table other than in the columns listed (B2-1)';
+    const SESSIONS = SCHEMA_POLICY.globalTables['identity.sessions'] ?? { reason: '', columns: [] };
+
+    it('fails a session given UPDATE on another column, or on the whole table', async () => {
+      expect(await problemsAfter(['grant update (user_id, ends_at) on identity.sessions to agentx_app'])).toEqual([
+        `column identity.sessions.ends_at: ${partly}`,
+        `column identity.sessions.user_id: ${partly}`,
+      ]);
+      expect(await problemsAfter(['grant update on identity.sessions to agentx_app'])).toEqual([
+        `table identity.sessions: ${partly}`,
+      ]);
+    });
+
+    it('fails a list that names the columns badly, or lets the app UPDATE the table whole beside them', async () => {
+      const withSessions = (entry: typeof SESSIONS): SchemaPolicy => ({
+        ...POLICY,
+        globalTables: { ...POLICY.globalTables, 'identity.sessions': entry },
+      });
+      const problemsWith = (entry: typeof SESSIONS) => problemsAfter([], withSessions(entry));
+
+      expect(await problemsWith({ ...SESSIONS, appMay: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] })).toEqual([
+        'identity.sessions: the global-table list lets the app UPDATE it whole and names the columns it may change',
+      ]);
+      const once =
+        'identity.sessions: the global-table list must name each column the app may change once, and at least one';
+      expect(
+        await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'cookie_hash', 'last_seen_at'] }),
+      ).toContain(once);
+      expect(await problemsWith({ ...SESSIONS, appMayUpdate: [] })).toContain(once);
+      expect(await problemsWith({ ...SESSIONS, appMayUpdate: ['cookie_hash', 'last_seen_at', 'cookie'] })).toContain(
+        "identity.sessions: the app may change column cookie, which the global-table list doesn't name",
+      );
+    });
+  });
+
   describe('B1d-1: a global table names the app’s rights, and the keys other checks rest on are made', () => {
     const global = 'on a global table; it may only SELECT, INSERT (B1d-1)';
 

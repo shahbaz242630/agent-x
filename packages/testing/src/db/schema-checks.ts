@@ -57,6 +57,8 @@ interface GlobalTable {
    * them, whose own rule holds them (B1d-1).
    */
   readonly appMay?: readonly string[];
+  /** The only columns the app may UPDATE, each granted on its own; UPDATE is then not in `appMay` (B2-1). */
+  readonly appMayUpdate?: readonly string[];
 }
 
 /** A foreign key that must be there, validated (B1d-1). */
@@ -689,6 +691,22 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     } else if (table.appMay !== undefined && new Set(table.appMay).size !== table.appMay.length) {
       problems.push(`${name}: the global-table list names one of the app's rights twice`);
     }
+    const partly = table.appMayUpdate;
+    if (partly !== undefined) {
+      if (appendOnly)
+        problems.push(`${name}: the global-table list names columns the app may change, but its schema is append-only`);
+      if (table.appMay?.includes('UPDATE') === true) {
+        problems.push(
+          `${name}: the global-table list lets the app UPDATE it whole and names the columns it may change`,
+        );
+      }
+      if (partly.length === 0 || new Set(partly).size !== partly.length) {
+        problems.push(`${name}: the global-table list must name each column the app may change once, and at least one`);
+      }
+      for (const column of partly.filter((column) => !table.columns.includes(column))) {
+        problems.push(`${name}: the app may change column ${column}, which the global-table list doesn't name`);
+      }
+    }
     return problems;
   });
 }
@@ -957,6 +975,13 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
   const listed = Object.hasOwn(policy.globalTables, grant.relation)
     ? policy.globalTables[grant.relation]?.appMay
     : undefined;
+  const partly = Object.hasOwn(policy.globalTables, grant.relation)
+    ? policy.globalTables[grant.relation]?.appMayUpdate
+    : undefined;
+  if (partly !== undefined && grant.grantee === roles.app && grant.privilege === 'UPDATE') {
+    if (grant.kind === 'column' && partly.includes(grant.attribute)) return [];
+    return [`${grant.object}: ${roles.app} may UPDATE a global table other than in the columns listed (B2-1)`];
+  }
   if (listed !== undefined && grant.grantee === roles.app && !listed.includes(grant.privilege)) {
     const may = listed.length === 0 ? 'it may hold nothing on it' : `it may only ${listed.join(', ')}`;
     return [`${grant.object}: ${roles.app} has ${grant.privilege} on a global table; ${may} (B1d-1)`];

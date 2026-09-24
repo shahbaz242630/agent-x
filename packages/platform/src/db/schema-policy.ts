@@ -38,6 +38,14 @@ interface GlobalTable {
    * (CI-06 checks both).
    */
   readonly appMay?: readonly RowRight[];
+  /**
+   * The only columns the app may UPDATE, each granted on its own (B2-1): a
+   * table the app changes in part only, such as a session's cookie hash, and
+   * never in who or what it is about. UPDATE is then left out of `appMay`,
+   * and a grant of UPDATE on the whole table, or on any other column, is a
+   * problem to CI-06 and the live guard alike.
+   */
+  readonly appMayUpdate?: readonly string[];
 }
 
 /**
@@ -135,9 +143,11 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'last_seen_at',
         'ends_at',
       ],
-      // Opened, read, ended; and changed only in its cookie ID (rotated) and
-      // its last-seen time, both granted column by column (0010).
-      appMay: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+      // Opened, read and ended; changed only in its cookie ID (rotated) and
+      // its last-seen time, never moved to another person, nor what it
+      // proved or when it ends.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['cookie_hash', 'last_seen_at'],
     },
     'migrations.applied': {
       reason:
