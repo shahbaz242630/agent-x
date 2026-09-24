@@ -100,7 +100,10 @@ export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
     const [projectId = ''] = projects;
     if ((await clientIdsOf(client, projectId)).includes(current.clientId)) {
       // Started with them already, unless the stack was started afresh since: then compose sees the change.
-      await restart(['api', 'api-login-relay'], false);
+      await restart(['api'], false);
+      // The relay always anew: compose leaves it in the old API's network when
+      // it makes a new API (a rebuilt image, say), where it reaches nothing.
+      await restart(['api-login-relay'], true);
       await apiAnswers();
       return current;
     }

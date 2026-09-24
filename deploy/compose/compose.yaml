@@ -168,7 +168,10 @@ services:
   # itself, so this relay shares the API's network (and nothing else) and
   # listens on its loopback alone, passing each request to the edge's login
   # port with its Host kept (edge/relay.conf). It is the stack's stand-in for
-  # a real name, as auth.renttest123.com is on staging.
+  # a real name, as auth.renttest123.com is on staging. Compose doesn't
+  # recreate it when it recreates the API (a rebuilt image, say), which
+  # leaves it in the old API's network: the suite's setup always starts it
+  # anew, and by hand it's `up --wait --force-recreate api-login-relay`.
   api-login-relay:
     image: nginx:1.31.5-alpine-slim@sha256:3b171d7224b669faa3cc2137fea0a65301791df1ec1f271ebd2a2b7461f7fade
     volumes:
