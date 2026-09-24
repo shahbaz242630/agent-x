@@ -9,6 +9,9 @@
 //   (errors.ts), which the document names once, with every reason code.
 // - Each route names who may call it (access.ts), which the document shows as
 //   x-access on each of its operations.
+// - Each write route but a public one names its operation, one of its own, for
+//   its idempotency keys (write-operations.ts), which the document shows as
+//   its operationId.
 // - Each route declares its answers for success, as zod objects that name all
 //   they carry, at every depth, and each route that takes a body sets its own
 //   limit for it, which the document shows as x-body-limit.
@@ -45,6 +48,7 @@ import { z } from 'zod';
 import { accessProblems } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
+import { operationProblems, sharedOperations } from './write-operations.ts';
 import { aboutToWrite, recordingWrites, writtenText } from './written-answers.ts';
 
 /** The methods an OpenAPI path can hold. A route served with any other can't be documented. */
@@ -54,6 +58,9 @@ const COMPONENT_PREFIX = '#/components/schemas/';
 
 /** Where each operation shows who may call it; the swagger plugin copies `x-` keys of a route's schema into it. */
 const ACCESS_KEY = 'x-access';
+
+/** Where a write's operation shows the name its idempotency keys go by (OpenAPI holds it unique). */
+const OPERATION_ID_KEY = 'operationId';
 
 /** Where each operation that takes a body shows the most it reads. */
 const BODY_LIMIT_KEY = 'x-body-limit';
@@ -424,6 +431,16 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if ((written || keys.has(ACCESS_KEY)) && keys.get(ACCESS_KEY) !== route.config?.access) {
     problems.push('the access its document shows is not its own (x-access)');
   }
+  const operation = route.config?.operation;
+  problems.push(...operationProblems(operation, methodsOf(route), route.config?.access));
+  // One method, so the document shows the name on one operation, as OpenAPI requires.
+  if (operation !== undefined && methodsOf(route).length !== 1) {
+    problems.push('it names an operation but serves more than one method: make a route for each');
+  }
+  // As with its access: the document shows the name the contract wrote from the route's own.
+  if ((written || keys.has(OPERATION_ID_KEY)) && keys.get(OPERATION_ID_KEY) !== operation) {
+    problems.push('the operation its document shows is not its own (operationId)');
+  }
   // A route of its own transform could show the document another schema than the one it runs.
   if (route.config !== undefined && 'swaggerTransform' in route.config) {
     problems.push('it changes how the document shows it (swaggerTransform)');
@@ -523,6 +540,10 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
   const added: { readonly route: AddedRoute; readonly instance: FastifyInstance }[] = [];
   app.addHook('onRoute', function (route) {
     const problems = routeProblems(route, this, false);
+    const operation = route.config?.operation;
+    if (operation !== undefined && added.some((earlier) => earlier.route.config?.operation === operation)) {
+      problems.push(`${methodsOf(route).join(',')} ${route.url}: its operation is another route's too`);
+    }
     if (problems.length > 0) throw new ContractBroken(problems);
     // A frozen copy, which the document and the access hook share: neither a change
     // to the document nor to a list the route was given can change who may call it.
@@ -532,6 +553,7 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
       {
         ...route.schema,
         [ACCESS_KEY]: access,
+        ...(route.config.operation !== undefined && { [OPERATION_ID_KEY]: route.config.operation }),
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
       };
@@ -567,6 +589,9 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     );
     const problems = [
       ...added.flatMap(({ route, instance }) => routeProblems(route, instance, true)),
+      ...sharedOperations(added.map(({ route }) => route.config?.operation)).map(
+        (operation) => `the operation ${operation} is named by more than one route`,
+      ),
       ...routeTableProblems(served, app.swagger()),
     ];
     done(problems.length > 0 ? new ContractBroken(problems) : undefined);

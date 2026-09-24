@@ -160,7 +160,8 @@ describe('BR-04 a route answers only a caller it names, denying by default', () 
       reached.push('members');
       return 'ok';
     });
-    app.post('/test/members', withAccess(['admin']), () => {
+    const invite = withAccess(['admin']);
+    app.post('/test/members', { ...invite, config: { ...invite.config, operation: 'members.invite' } }, () => {
       reached.push('invite');
       return 'ok';
     });
