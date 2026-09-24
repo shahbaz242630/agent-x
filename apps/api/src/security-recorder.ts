@@ -13,7 +13,10 @@
 //   addresses still shows, and memory stays bounded.
 // - `run` writes every count whose minute has ended (the API runs it each
 //   minute); `flush` writes them all (the API runs it as it stops, once the
-//   last request has been answered).
+//   last request has been answered). Neither begins a batch once the API is
+//   stopping past its budget (the review of B2-5b: a flood's backlog to a slow
+//   database would otherwise outlast the stop deadline and be lost unseen);
+//   what the flush leaves is logged with its count.
 // - A write the database couldn't take puts its counts back for the next run.
 //   One the module refuses as malformed is a bug: it is logged and dropped,
 //   never retried for ever.
@@ -24,6 +27,13 @@ import { clientAddress } from './rate-limit.ts';
 
 /** Events are counted per minute. */
 const WINDOW_MS = 60_000;
+
+/**
+ * How long the last write, as the API stops, may go on beginning batches. With
+ * the batch under way (each statement at most 10 seconds) it stays within the
+ * API's 25-second stop deadline, after the minute's run has stopped too.
+ */
+export const FLUSH_BUDGET_MS = 10_000;
 
 /** The most counts held at once, unless the API says otherwise. */
 export const MOST_COUNTS = 10_000;
@@ -48,9 +58,13 @@ export interface SecurityEventSink {
 export const NO_SECURITY_EVENTS: SecurityEventSink = Object.freeze({ note: () => undefined });
 
 export interface SecurityRecorder extends SecurityEventSink {
-  /** Writes every count whose minute has ended. Never throws. */
-  run(): Promise<void>;
-  /** Writes every count, the current minute's too. Never throws. */
+  /** Writes every count whose minute has ended, stopping between batches once `signal` aborts. Never throws. */
+  run(signal?: AbortSignal): Promise<void>;
+  /**
+   * Writes every count, the current minute's too, beginning no batch after
+   * FLUSH_BUDGET_MS, then logs and drops whatever it couldn't write: the API
+   * calls it last, as it stops. Never throws.
+   */
   flush(): Promise<void>;
 }
 
@@ -98,8 +112,12 @@ export function createSecurityRecorder({
     else entry.count += count;
   };
 
-  /** Takes the counts out whose window began before `before`, and writes them a batch at a time. */
-  const writeBefore = async (before: number): Promise<void> => {
+  /**
+   * Takes the counts out whose window began before `before`, and writes them a
+   * batch at a time. Once `stopNow` says so, the batches not yet begun are put
+   * back; the one under way is left to finish, so no count is written twice.
+   */
+  const writeBefore = async (before: number, stopNow: () => boolean): Promise<void> => {
     const taken: SecurityEvent[] = [];
     for (const [key, entry] of held) {
       if (entry.event.windowStart.getTime() >= before) continue;
@@ -111,6 +129,10 @@ export function createSecurityRecorder({
       unaddressed = 0;
     }
     for (let start = 0; start < taken.length; start += MOST_EVENTS_A_BATCH) {
+      if (stopNow()) {
+        for (const event of taken.slice(start)) add(event, event.count);
+        return;
+      }
       const batch = taken.slice(start, start + MOST_EVENTS_A_BATCH);
       try {
         await write(batch);
@@ -132,9 +154,9 @@ export function createSecurityRecorder({
     }
   };
 
-  const queued = (before: () => number): Promise<void> => {
+  const queued = (before: () => number, stopNow: () => boolean): Promise<void> => {
     writing = writing
-      .then(() => writeBefore(before()))
+      .then(() => writeBefore(before(), stopNow))
       .catch((error: unknown) => {
         // Only the logger could get here; the next run must still go ahead.
         logger.error('security.events_write_failed', { err: error });
@@ -161,7 +183,20 @@ export function createSecurityRecorder({
         1,
       );
     },
-    run: () => queued(thisMinute),
-    flush: () => queued(() => Number.POSITIVE_INFINITY),
+    run: (signal?: AbortSignal) => queued(thisMinute, () => signal?.aborted === true),
+    async flush(): Promise<void> {
+      const until = now() + FLUSH_BUDGET_MS;
+      await queued(
+        () => Number.POSITIVE_INFINITY,
+        () => now() >= until,
+      );
+      // The process is stopping: whatever is still held is lost, so it is counted here.
+      if (held.size > 0) {
+        let count = 0;
+        for (const entry of held.values()) count += entry.count;
+        logger.error('security.events_unwritten', { events: held.size, count });
+        held.clear();
+      }
+    },
   });
 }

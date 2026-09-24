@@ -5,7 +5,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createSecurityRecorder, type SecurityEventNote } from './security-recorder.ts';
+import { createSecurityRecorder, FLUSH_BUDGET_MS, type SecurityEventNote } from './security-recorder.ts';
 
 const MINUTE = 60_000;
 /** 10:00:00 on the test's day. */
@@ -18,7 +18,9 @@ const failedSignIn = (ip: string | undefined, reason = 'code_rejected'): Securit
   ip,
 });
 
-function setUp(options: { mostCounts?: number; answers?: (Error | undefined)[] } = {}) {
+function setUp(
+  options: { mostCounts?: number; answers?: (Error | undefined)[]; duringWrite?: (batch: number) => void } = {},
+) {
   const capture = new LogCapture();
   const logger = createLogger({
     service: 'api',
@@ -31,6 +33,7 @@ function setUp(options: { mostCounts?: number; answers?: (Error | undefined)[] }
   const recorder = createSecurityRecorder({
     write: (events) => {
       written.push([...events]);
+      options.duringWrite?.(written.length);
       const answer = answers.shift();
       return answer === undefined ? Promise.resolve() : Promise.reject(answer);
     },
@@ -242,8 +245,79 @@ describe('SEC-AV-07 a failed write loses no count, and a malformed one is never 
       logger,
     });
     recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.9'));
     await expect(recorder.flush()).resolves.toBeUndefined();
-    await expect(recorder.flush()).resolves.toBeUndefined();
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
+    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'security.events_unwritten', count: 2 }));
+  });
+});
+
+describe('SEC-AV-07 the recorder never holds up the API as it stops', () => {
+  /** Enough failed sign-ins, each from its own address, for three batches. */
+  const threeBatches = (recorder: { note(event: SecurityEventNote): void }) => {
+    for (let i = 0; i < 2 * MOST_EVENTS_A_BATCH + 1; i += 1) {
+      recorder.note(failedSignIn(`10.0.${String(i >> 8)}.${String(i & 255)}`));
+    }
+  };
+
+  it("begins no batch once the minute's run is stopped, keeping the rest for the last write", async () => {
+    const stopping = new AbortController();
+    const { recorder, written, at } = setUp({
+      duringWrite: () => {
+        stopping.abort();
+      },
+    });
+    threeBatches(recorder);
+    at(TEN + MINUTE);
+
+    await recorder.run(stopping.signal);
+    expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH]);
+
+    await recorder.flush();
+    expect(written.slice(1).flat()).toHaveLength(MOST_EVENTS_A_BATCH + 1);
+  });
+
+  it('begins no batch past its budget as the API stops, and logs how many events it could not write', async () => {
+    const { recorder, written, at, events } = setUp({
+      duringWrite: (batch) => {
+        // The first batch takes the whole budget.
+        if (batch === 1) at(TEN + 5_000 + FLUSH_BUDGET_MS);
+      },
+    });
+    threeBatches(recorder);
+
+    await recorder.flush();
+
+    expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH]);
+    expect(events('security.events_unwritten')).toMatchObject([
+      { level: 'error', events: MOST_EVENTS_A_BATCH + 1, count: MOST_EVENTS_A_BATCH + 1 },
+    ]);
+    // Dropped, not kept: nothing is left for a later write.
+    await recorder.flush();
+    expect(written).toHaveLength(1);
+  });
+
+  it('writes every batch within its budget', async () => {
+    const { recorder, written, at, events } = setUp({
+      duringWrite: (batch) => {
+        at(TEN + 5_000 + batch * (FLUSH_BUDGET_MS / 3 - 1));
+      },
+    });
+    threeBatches(recorder);
+
+    await recorder.flush();
+
+    expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH, MOST_EVENTS_A_BATCH, 1]);
+    expect(events('security.events_unwritten')).toEqual([]);
+  });
+
+  it('logs what it could not write when the database is away as the API stops', async () => {
+    const { recorder, events } = setUp({ answers: [new Error('the database is away')] });
+    recorder.note(failedSignIn('203.0.113.9'));
+    recorder.note(failedSignIn('203.0.113.9'));
+
+    await recorder.flush();
+
+    expect(events('security.events_unwritten')).toMatchObject([{ events: 1, count: 2 }]);
   });
 });
