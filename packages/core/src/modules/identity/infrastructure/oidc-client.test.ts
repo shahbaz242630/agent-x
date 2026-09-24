@@ -47,6 +47,10 @@ class LoginService {
     JSON.stringify({ access_token: 'unused', token_type: 'Bearer', id_token: await this.idToken({ nonce }) });
   failNetwork = false;
   keysStatus = 200;
+  /** When set, the key set answers only once it settles: sign-ins can be made to meet at the fetch. */
+  keysGate: Promise<void> | undefined;
+  /** When set, the key set's answer in place of the published keys. */
+  keysDocument: unknown;
 
   /** A signed ID token: the usual claims, changed by `claims`, from `key` with `alg`. */
   async idToken(
@@ -76,7 +80,9 @@ class LoginService {
       return Response.json(this.discovery, { status: this.discoveryStatus });
     }
     if (target === `${ISSUER}/oauth/v2/keys`) {
+      if (this.keysGate !== undefined) await this.keysGate;
       if (this.keysStatus !== 200) return new Response('unavailable', { status: this.keysStatus });
+      if (this.keysDocument !== undefined) return Response.json(this.keysDocument);
       const keys = await Promise.all(
         this.published.map(async ({ kid, publicKey }) => ({
           ...(await exportJWK(publicKey)),
@@ -462,35 +468,51 @@ describe('finishing a sign-in', () => {
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });
 
-    it('are sent for once when several sign-ins name a key not held at the same moment', async () => {
+    /**
+     * Starts `count` sign-ins and finishes them together, the key set held
+     * unanswered until every one has traded its code and come to the keys.
+     */
+    async function finishTogether(count: number) {
+      const flows = await Promise.all(Array.from({ length: count }, () => client.start()));
+      let release = (): void => undefined;
+      service.keysGate = new Promise((done) => {
+        release = done;
+      });
+      const traded = service.callsTo('/oauth/v2/token').length + count;
+      const settled = Promise.allSettled(
+        flows.map(({ flow }) => {
+          service.expect(flow);
+          return client.finish(flow, { code: CODE, state: flow.state });
+        }),
+      );
+      while (service.callsTo('/oauth/v2/token').length < traded) await new Promise((done) => setImmediate(done));
+      // Each has its token by now; this lets every one read it and ask for the keys.
+      await new Promise((done) => setTimeout(done, 200));
+      release();
+      service.keysGate = undefined;
+      return (await settled).map((result) => result.status);
+    }
+
+    it('are sent for once, and waited on by all, when several sign-ins arrive before any are held', async () => {
+      expect(await finishTogether(3)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
+    });
+
+    it('are sent for once, and waited on by all, when several sign-ins name a key not held', async () => {
       await signIn();
       clock.advanceBy(60_000);
       service.published = [FIRST, SECOND];
       service.tokenBody = async (nonce) =>
         JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
-      const flows = await Promise.all([client.start(), client.start(), client.start()]);
-      const results = await Promise.allSettled(
-        flows.map(({ flow }) => {
-          service.expect(flow);
-          return client.finish(flow, { code: CODE, state: flow.state });
-        }),
-      );
 
-      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+      expect(await finishTogether(3)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });
 
-    it('are sent for once, and waited on by all, when several sign-ins arrive before any are held', async () => {
-      const flows = await Promise.all([client.start(), client.start(), client.start()]);
-      const results = await Promise.allSettled(
-        flows.map(({ flow }) => {
-          service.expect(flow);
-          return client.finish(flow, { code: CODE, state: flow.state });
-        }),
-      );
+    it('are refused when the key set holds no list of keys', async () => {
+      service.keysDocument = { keys: 'none' };
 
-      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
-      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
+      await expectFailure(signIn(), 'provider_unavailable', /holds no keys/);
     });
 
     it('are fetched again at most once a minute, however many tokens name a key not held', async () => {
@@ -503,7 +525,12 @@ describe('finishing a sign-in', () => {
       }
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
 
-      clock.advanceBy(60_000);
+      // Five seconds is a failed fetch's wait; one that worked waits the minute.
+      clock.advanceBy(5_000);
+      await expectFailure(signIn(), 'token_invalid', /ERR_JWKS_NO_MATCHING_KEY/);
+      expect(service.callsTo('/oauth/v2/keys')).toHaveLength(1);
+
+      clock.advanceBy(55_000);
       await expectFailure(signIn(), 'token_invalid');
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });

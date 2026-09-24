@@ -228,6 +228,7 @@ export function createOidcClient({
   /** The fetch of the keys under way, which every sign-in needing them waits on rather than starting its own. */
   let keysFetch: Promise<ReturnType<typeof createLocalJWKSet>> | undefined;
   const mayFetchKeys = (): boolean => clock.now().getTime() >= keysFetchableAt;
+  /** The fetch under way, or a new one: never two at once. */
   function fetchKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
     keysFetch ??= fetchKeysNow().finally(() => {
       keysFetch = undefined;
@@ -253,8 +254,7 @@ export function createOidcClient({
   /** The keys held; or the fetch under way; or a new fetch, if none failed moments ago. */
   function heldKeys(): Promise<ReturnType<typeof createLocalJWKSet>> {
     if (keys !== undefined) return Promise.resolve(keys);
-    if (keysFetch !== undefined) return keysFetch;
-    if (!mayFetchKeys()) {
+    if (keysFetch === undefined && !mayFetchKeys()) {
       return Promise.reject(
         new SignInFailed('provider_unavailable', 'the key set failed moments ago; not tried again yet'),
       );
@@ -282,7 +282,7 @@ export function createOidcClient({
       } catch (error) {
         if (!(error instanceof joseErrors.JWKSNoMatchingKey)) throw error;
         // A key not held: wait on a fetch under way, or start one if the last was long enough ago.
-        const fresh = keysFetch ?? (mayFetchKeys() ? fetchKeys() : undefined);
+        const fresh = keysFetch !== undefined || mayFetchKeys() ? fetchKeys() : undefined;
         if (fresh === undefined) throw error;
         result = await verify(await fresh);
       }
