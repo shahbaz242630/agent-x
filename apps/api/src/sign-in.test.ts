@@ -517,6 +517,17 @@ describe("SEC-AV-07 B2-5c each signed-in person's own rate limit, beside their a
     expect(noted).toEqual([]);
   });
 
+  it('counts no request to a public route, which no one is signed in for', async () => {
+    const { app, noted } = await twoPeople();
+    const statuses = [];
+    for (let i = 0; i < 20; i += 1) {
+      statuses.push((await app.inject({ url: '/health', remoteAddress: `198.51.100.${String(i)}` })).statusCode);
+    }
+
+    expect(statuses).toEqual(Array.from({ length: 20 }, () => 200));
+    expect(noted).toEqual([]);
+  });
+
   it("leaves the address's own limit first: a refused address asks nothing of the session store", async () => {
     const standIn = new StandIn();
     standIn.live.set(SESSION_ID, LIVE);
