@@ -53,8 +53,12 @@ class StandInClient implements OidcClient {
     return Promise.resolve({ url: `${ISSUER}/oauth/v2/authorize?state=${flow.state}`, flow });
   }
 
+  /** Run as the code is traded: the time the person spends at the login service, say. */
+  whileFinishing: (() => void) | undefined;
+
   finish(flow: LoginFlow, returned: { code: string; state: string }) {
     this.finished.push({ flow, ...returned });
+    this.whileFinishing?.();
     if (this.failWith !== undefined) return Promise.reject(this.failWith);
     if (returned.state !== flow.state) return Promise.reject(new SignInFailed('state_mismatch', 'test'));
     const subject: Subject = { issuer: ISSUER, subject: this.subject };
@@ -376,6 +380,16 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
         return stepUp(done.sessionId, challenge.challengeId, done.cookie);
       },
       'no_second_factor',
+    ],
+    [
+      'a challenge that runs out of time while the person is at the login service',
+      ({ done, challenge }) => {
+        client.whileFinishing = () => {
+          clock.advanceBy(300_000);
+        };
+        return stepUp(done.sessionId, challenge.challengeId, done.cookie);
+      },
+      'challenge_missing',
     ],
     [
       'a challenge out of time',
