@@ -14,11 +14,14 @@
 // past either timeout is never found again, however it is asked for. The
 // times are the Clock's (ADR-006 §3), so tests can move them.
 //
-// Every function runs one statement on the handle it is given, so the caller
-// decides the transaction, and its statement timeout.
+// Every function but `sweep` runs one statement on the handle it is given, so
+// the caller decides the transaction, and its statement timeout. A session
+// past either timeout is never found again, but its row stays until it is
+// ended; `sweep` deletes such rows a batch at a time, in a transaction of its
+// own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import type { Kysely } from 'kysely';
+import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -61,6 +64,8 @@ export interface Sessions {
   rotate(db: Kysely<IdentityTables>, sessionId: string): Promise<string | undefined>;
   /** Ends the session this cookie ID belongs to, live or not; false if there is none. */
   end(db: Kysely<IdentityTables>, cookie: string): Promise<boolean>;
+  /** Deletes up to `most` sessions past either timeout, and says how many. */
+  sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
 
 /** The cookie ID's size: 256 bits. */
@@ -170,6 +175,24 @@ export function createSessions({
         .returning('id')
         .executeTakeFirst();
       return row !== undefined;
+    },
+
+    async sweep(db, most) {
+      if (!Number.isSafeInteger(most) || most < 1) {
+        throw new RangeError('a sweep deletes at least one session at a time');
+      }
+      const now = clock.now();
+      return db.transaction().execute(async (tx) => {
+        await sql`set local statement_timeout = '10s'`.execute(tx);
+        // Exactly the sessions `use` would no longer find: the rest are live.
+        const ended = tx
+          .selectFrom('identity.sessions')
+          .select('id')
+          .where((eb) => eb.or([eb('last_seen_at', '<=', idleSince(now)), eb('ends_at', '<=', now)]))
+          .limit(most);
+        const rows = await tx.deleteFrom('identity.sessions').where('id', 'in', ended).returning('id').execute();
+        return rows.length;
+      });
     },
   };
 }

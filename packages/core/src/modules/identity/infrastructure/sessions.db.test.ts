@@ -320,3 +320,68 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
     expect(await rowOf(sessionId)).toMatchObject({ user_id: userId, amr: evidence.amr });
   });
 });
+
+describe(`the sessions' sweep (B2-4a, Postgres ${server.version})`, () => {
+  /** Later than every other test's sessions, so a first sweep takes theirs and each count below is this test's own. */
+  const LATER = START.getTime() + 30 * 86_400_000;
+  const at = (ms: number) =>
+    createSessions({
+      ids,
+      clock: new FixedClock(new Date(ms)),
+      timeouts: { idleSeconds: IDLE, absoluteSeconds: ABSOLUTE },
+    });
+  /** Sets a session's last use, as a use at that moment would have. */
+  const lastUsed = (sessionId: string, when: number) =>
+    app
+      .updateTable('identity.sessions')
+      .set({ last_seen_at: new Date(when) })
+      .where('id', '=', sessionId)
+      .execute();
+
+  it('deletes exactly the sessions a request could no longer use: past either timeout, to the second', async () => {
+    const { userId } = await setUp();
+    const now = LATER;
+    await at(now).sweep(app, 1_000_000);
+    const open = (openedAt: number, usedAt: number) =>
+      at(openedAt)
+        .open(app, userId, evidence)
+        .then(async (opened) => {
+          await lastUsed(opened.sessionId, usedAt);
+          return opened;
+        });
+    const cases = {
+      idleJustNow: await open(now - IDLE * SECOND, now - IDLE * SECOND),
+      idleNotYet: await open(now - IDLE * SECOND + SECOND, now - IDLE * SECOND + SECOND),
+      endsJustNow: await open(now - ABSOLUTE * SECOND, now - SECOND),
+      endsNotYet: await open(now - ABSOLUTE * SECOND + SECOND, now - SECOND),
+    };
+
+    expect(await at(now).sweep(app, 100)).toBe(2);
+
+    const left = await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute();
+    expect(left.map((row) => row.id).sort()).toEqual([cases.idleNotYet.sessionId, cases.endsNotYet.sessionId].sort());
+    // What the sweep kept is exactly what a request at that moment still finds.
+    for (const [name, { cookie }] of Object.entries(cases)) {
+      expect(await at(now).use(app, cookie), name).toEqual(name.endsWith('NotYet') ? expect.anything() : undefined);
+    }
+  });
+
+  it('deletes a batch at a time, and nothing once none is left', async () => {
+    const { userId } = await setUp();
+    const now = LATER + 86_400_000;
+    await at(now).sweep(app, 1_000_000);
+    for (let one = 0; one < 3; one += 1) await at(now - ABSOLUTE * SECOND).open(app, userId, evidence);
+
+    expect(await at(now).sweep(app, 2)).toBe(2);
+    expect(await at(now).sweep(app, 2)).toBe(1);
+    expect(await at(now).sweep(app, 2)).toBe(0);
+  });
+
+  it('refuses a sweep of no sessions', async () => {
+    const { sessions } = await setUp();
+
+    for (const most of [0, -1, 1.5, Number.NaN]) {
+      await expect(sessions.sweep(app, most)).rejects.toThrow(RangeError);
+    }
+  });
+});

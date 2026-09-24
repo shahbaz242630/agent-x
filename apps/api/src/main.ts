@@ -11,7 +11,8 @@
 //    (B2-3a-2), and starts the audit chains' anchor check (ADR-012 §2): the
 //    platform's, and each organisation's from the directory's list (B1d-2);
 //    and, each on a timer of its own, the idempotency keys' retention sweep
-//    (B1e-3) and the sign-in flows' sweep (B2-3a-2)
+//    (B1e-3), the sign-in flows' sweep (B2-3a-2) and the ended sessions'
+//    sweep (B2-4a)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check and the sweep, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
@@ -25,6 +26,7 @@ import {
   createSignIn,
   type IdentityTables,
   type LoginFlows,
+  type Sessions,
   type SignIn,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
@@ -52,7 +54,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { createLoginFlowSweep, scheduleLoginFlowSweep } from './login-flow-sweep.ts';
+import { createIdentitySweep, scheduleIdentitySweep } from './identity-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
@@ -88,14 +90,23 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
 const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 const SWEEP_EVERY_MS = 3_600_000;
 
-/** The sign-in flows' sweep (B2-3a-2): a batch of 1,000 flows at a time, at most 100 batches a run. */
-const FLOW_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
+/**
+ * The identity tables' sweeps: the sign-in flows' (B2-3a-2) and the ended
+ * sessions' (B2-4a), each a batch of 1,000 rows at a time, at most 100
+ * batches a run.
+ */
+const IDENTITY_SWEEP = { batch: 1_000, mostBatches: 100 } as const;
 
 /**
  * The console's sign-in (ADR-003 §5), when the config names a login service;
  * off otherwise (B2-6 switches it on for staging).
  */
-function signInFrom(config: Config, database: Database<ApiTables>, flows: LoginFlows): SignIn | undefined {
+function signInFrom(
+  config: Config,
+  database: Database<ApiTables>,
+  flows: LoginFlows,
+  sessions: Sessions,
+): SignIn | undefined {
   if (config.signIn === undefined) return undefined;
   const { issuer, clientId, clientSecret } = config.signIn;
   return createSignIn({
@@ -106,7 +117,7 @@ function signInFrom(config: Config, database: Database<ApiTables>, flows: LoginF
       clock: systemClock,
     }),
     flows,
-    sessions: createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions }),
+    sessions,
     ids: uuidV7Ids,
     clock: systemClock,
   });
@@ -278,7 +289,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
 
   // A failure to build the server is a bug, so it goes to the crash handler above.
   const flows = createLoginFlows({ clock: systemClock });
-  const signIn = signInFrom(config, database, flows);
+  const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
+  const signIn = signInFrom(config, database, flows, sessions);
   const server = await buildServer({
     config,
     logger,
@@ -349,13 +361,26 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // bounded, and a pool at its limit queues rather than refuses. Nothing orders
   // the sweep after a schema check: 0009's `retention` policy is its wall.
   const sweeping = scheduleRetentionSweep(retention, SWEEP_EVERY_MS);
-  // The sign-in flows' own sweep, on its own timer too, whether or not sign-in is on (B2-3a-2).
-  const flowSweeping = scheduleLoginFlowSweep(
-    createLoginFlowSweep({
+  // The sign-in flows' and the ended sessions' own sweeps, each on its own
+  // timer too, whether or not sign-in is on: rows left from when it was on
+  // still go (B2-3a-2, B2-4a).
+  const flowSweeping = scheduleIdentitySweep(
+    createIdentitySweep({
+      kind: 'flow',
       sweep: (most) => flows.sweep(database, most),
       logger,
       deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...FLOW_SWEEP,
+      ...IDENTITY_SWEEP,
+    }),
+    SWEEP_EVERY_MS,
+  );
+  const sessionSweeping = scheduleIdentitySweep(
+    createIdentitySweep({
+      kind: 'session',
+      sweep: (most) => sessions.sweep(database, most),
+      logger,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+      ...IDENTITY_SWEEP,
     }),
     SWEEP_EVERY_MS,
   );
@@ -364,7 +389,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     server,
     {
       stop: async () => {
-        await Promise.all([anchorCheck.stop(), sweeping.stop(), flowSweeping.stop()]);
+        await Promise.all([anchorCheck.stop(), sweeping.stop(), flowSweeping.stop(), sessionSweeping.stop()]);
       },
     },
     database,

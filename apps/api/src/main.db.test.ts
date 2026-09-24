@@ -319,6 +319,40 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it('sweeps the sessions past their timeouts once it listens, keeping the live ones (B2-4a)', async () => {
+    const admin = database.as('admin');
+    const userId = '0199a0f0-0000-7000-8000-0000000b24a0';
+    await admin.query(
+      `insert into identity.users (id, issuer, subject, created_at) values ($1, 'https://auth.example.test', 'b2-4a', pg_catalog.now())`,
+      [userId],
+    );
+    const sessions = [
+      ['0199a0f0-0000-7000-8000-0000000b24a1', '01', '13 hours', '1 minute'],
+      ['0199a0f0-0000-7000-8000-0000000b24a2', '02', '1 hour', '31 minutes'],
+      ['0199a0f0-0000-7000-8000-0000000b24a3', '03', '1 hour', '1 minute'],
+    ] as const;
+    for (const [id, fill, opened, used] of sessions) {
+      await admin.query(
+        `insert into identity.sessions (id, user_id, cookie_hash, auth_time, amr, created_at, last_seen_at, ends_at)
+         values ($1, $2, pg_catalog.decode(pg_catalog.repeat($3, 32), 'hex'), pg_catalog.now() - $4::interval, '{pwd,otp,mfa}',
+                 pg_catalog.now() - $4::interval, pg_catalog.now() - $5::interval, pg_catalog.now() - $4::interval + interval '12 hours')`,
+        [id, userId, fill, opened, used],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'identity.session_sweep_done')).toEqual(
+        expect.objectContaining({ level: 'info', deleted: 2 }),
+      );
+    });
+    // Past its twelve hours, and unused for more than the default 30 minutes: both gone; the live one kept.
+    expect(await admin.query<{ id: string }>('select id from identity.sessions where user_id = $1', [userId])).toEqual([
+      { id: sessions[2][0] },
+    ]);
+    await stop(run);
+  });
+
   it('refuses to start when the platform chain has been tampered with, and closes its connections', async () => {
     // A start of its own to give the chain a head, then stopped, so every connection left is the next one's.
     await stop(await start(envFor('app')));
