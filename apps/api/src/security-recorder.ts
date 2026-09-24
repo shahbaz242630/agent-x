@@ -37,7 +37,7 @@ const WINDOW_MS = 60_000;
 export const LONGEST_BATCH_MS = 10_000;
 
 /** The most counts held at once, unless the API says otherwise. */
-export const MOST_COUNTS = 10_000;
+const MOST_COUNTS = 10_000;
 
 export interface SecurityEventNote {
   readonly kind: SecurityEventKind;
