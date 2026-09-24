@@ -88,6 +88,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     // The client secret is left out: it's a secret.
     signIn: config.signIn === undefined ? null : { issuer: config.signIn.issuer, clientId: config.signIn.clientId },
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
+    securityEvents: { retentionDays: config.securityEvents.retentionDays },
     payees: { coolingOffHours: config.payees.coolingOffHours },
     audit: { anchorSeconds: config.audit.anchorSeconds },
     keys: { directory: config.keys.directory, current: config.keys.current },

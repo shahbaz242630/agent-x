@@ -88,6 +88,8 @@ export interface Config {
     | undefined;
   /** ADR-003 §7: how long a console session lives unused, and at most. */
   readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
+  /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
+  readonly securityEvents: { readonly retentionDays: number };
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
   /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
@@ -220,6 +222,7 @@ export function loadConfig(env: Env = process.env): Config {
     oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
+    securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
@@ -300,6 +303,7 @@ export function loadConfig(env: Env = process.env): Config {
       idleSeconds: checks.sessionIdle.value * 60,
       absoluteSeconds: checks.sessionAbsolute.value * 3600,
     }),
+    securityEvents: Object.freeze({ retentionDays: checks.securityEventRetention.value }),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
     audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
     keys: Object.freeze({

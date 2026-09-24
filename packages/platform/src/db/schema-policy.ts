@@ -156,6 +156,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // Added, and taken once (deleted as it is read); never changed.
       appMay: ['SELECT', 'INSERT', 'DELETE'],
     },
+    'security.events': {
+      reason:
+        'Failed sign-ins and rate-limit hits with the client IP (ADR-005 §6, ADR-011 §7): they happen before any organisation is known, and the address is kept in-country, here alone',
+      columns: ['id', 'kind', 'reason', 'ip', 'user_id', 'window_start', 'count', 'created_at'],
+      // Added, read, and deleted once past the retention the config names;
+      // never changed, so a count once written stands.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+    },
     'migrations.applied': {
       reason:
         'The migration ledger (runMigrations): one row per applied file, written only by the migration role at deploy time, never by the app',
