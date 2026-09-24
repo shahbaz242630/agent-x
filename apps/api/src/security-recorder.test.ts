@@ -5,7 +5,12 @@ import { createLogger } from '@agentx/platform/observability';
 import { LogCapture } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createSecurityRecorder, LONGEST_BATCH_MS, type SecurityEventNote } from './security-recorder.ts';
+import {
+  createSecurityRecorder,
+  LONGEST_BATCH_MS,
+  NO_SECURITY_EVENTS,
+  type SecurityEventNote,
+} from './security-recorder.ts';
 
 const MINUTE = 60_000;
 /** 10:00:00 on the test's day. */
@@ -143,6 +148,14 @@ describe('SEC-AV-07 security events are counted in memory and written a minute a
   });
 });
 
+describe('a server built without a recorder', () => {
+  it('counts nothing, and never throws', () => {
+    expect(() => {
+      NO_SECURITY_EVENTS.note(failedSignIn('203.0.113.9'));
+    }).not.toThrow();
+  });
+});
+
 describe("SEC-AV-07 the address kept is the client's own, whole", () => {
   it.each([
     ['an IPv4 address with a port, as some proxies write it', '203.0.113.9:40001', '203.0.113.9'],
@@ -242,6 +255,42 @@ describe('SEC-AV-07 a failed write loses no count, and a malformed one is never 
     expect(written.map((batch) => batch.length)).toEqual([MOST_EVENTS_A_BATCH, 1]);
     expect(events('security.events_refused')).toMatchObject([{ events: MOST_EVENTS_A_BATCH }]);
     expect(events('security.events_written')).toMatchObject([{ events: 1 }]);
+  });
+
+  it('keeps going when its own log line fails, and writes again at the next run', async () => {
+    const capture = new LogCapture();
+    const logger = createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+      destination: capture,
+    });
+    let failing = true;
+    const written: SecurityEvent[][] = [];
+    let now = START;
+    const recorder = createSecurityRecorder({
+      write: (events) => {
+        written.push([...events]);
+        return Promise.resolve();
+      },
+      now: () => now,
+      logger: {
+        ...logger,
+        info: (event, fields) => {
+          if (failing) throw new Error('log write failed');
+          logger.info(event, fields);
+        },
+      },
+    });
+    recorder.note(failedSignIn('203.0.113.9'));
+    now = TEN + MINUTE;
+    await expect(recorder.run()).resolves.toBeUndefined();
+    expect(capture.lines()).toContainEqual(expect.objectContaining({ event: 'security.events_write_failed' }));
+
+    failing = false;
+    recorder.note(failedSignIn('203.0.113.9'));
+    now = TEN + 2 * MINUTE;
+    await recorder.run();
+    expect(written).toHaveLength(2);
   });
 
   it('keeps going when the write throws outright, rather than rejecting', async () => {
