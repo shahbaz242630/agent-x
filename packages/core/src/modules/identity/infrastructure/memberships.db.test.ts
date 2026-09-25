@@ -20,6 +20,7 @@ import {
   type MembershipsTransaction,
   membersOf,
   MOST_MEMBERS,
+  reactivateMembership,
   TooManyMembers,
 } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
@@ -218,6 +219,23 @@ describe('a person’s membership, read for a decision', () => {
 
     expect(await check(mine, user)).toEqual({ outcome: 'none' });
     expect(await check(mine, await person())).toEqual({ outcome: 'none' });
+  });
+
+  it('brings a deactivated membership back only: one active is never reactivated, and nothing is written (B4-5c)', async () => {
+    const org = await organization();
+    const user = await person();
+    const { id } = await add(org, user, 'viewer');
+    const reactivate = () =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        reactivateMembership(tx, states, { orgId: org, id, role: 'admin', joinedAt: clock.now(), actor: OPERATOR }),
+      );
+
+    await expect(reactivate()).rejects.toThrow('a membership read as deactivated is not');
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'viewer' });
+
+    await deactivate(org, id);
+    await reactivate();
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin' });
   });
 
   it('is deactivated once deactivated, whatever its role, and deactivating again is refused', async () => {

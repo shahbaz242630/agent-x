@@ -497,6 +497,27 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     expect(entries).toHaveLength(1);
   });
 
+  it('brings a person deactivated there back once when two of their invitations are accepted at the same moment (B4-5c)', async () => {
+    const who = await organization();
+    const member = await person();
+    const membershipId = await deactivatedIn(who.org, member);
+    const first = await invitation(who, 'viewer');
+    const second = await invitation(who, 'developer');
+
+    const answers = await Promise.all([
+      accept(member, first.token, 'accept-a'),
+      accept(member, second.token, 'accept-b'),
+    ]);
+
+    expect(answers.map((answer) => answer.outcome).sort()).toEqual(['accepted', 'refused']);
+    expect(answers).toContainEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+    expect(await membershipOfPerson(who.org, member.userId)).toMatchObject({ outcome: 'active', id: membershipId });
+    const reactivations = await database
+      .as('backup')
+      .query("select 1 from audit.events where subject_id = $1 and action = 'membership.reactivated'", [membershipId]);
+    expect(reactivations).toHaveLength(1);
+  });
+
   it('keeps a person deactivated there waiting, invited as an admin, until an admin confirms them (B4-5c)', async () => {
     const who = await organization();
     const member = await person();

@@ -120,12 +120,12 @@ export async function reactivateMembership(
     { role, joined_at: joinedAt },
     { actor, action: 'membership.renewed', details: { roleFrom: current.fields.get('role') ?? null, roleTo: role } },
   );
-  const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'reactivate', {
+  // Verified deactivated and locked just above, in this transaction: it moves.
+  await states.changeStatus(tx, MEMBERSHIPS, key, 'reactivate', {
     actor,
     action: 'membership.reactivated',
     details: { role },
   });
-  if (moved.outcome !== 'changed') throw new Error(`a deactivated membership did not move back: ${moved.outcome}`);
 }
 
 /**

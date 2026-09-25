@@ -15,6 +15,8 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -579,5 +581,43 @@ describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, ()
       .as('backup')
       .query('select 1 from directory.members where user_id = $1', [first.invitee]);
     expect(entries).toHaveLength(1);
+  });
+
+  it('takes the two memberships in order of ID, so a change holding the lower one never deadlocks with it (B4-5c)', async () => {
+    const who = await organization();
+    // Theirs is made before the confirming admin's, so its ID is the lower of the two.
+    const returning = await member(who.org, 'viewer');
+    const admin = await member(who.org, 'admin');
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    const { id } = await accepted(who, 'approver', returning.userId);
+    const challengeId = await asked(admin, id);
+    await stepUp(admin, challengeId);
+    // Another transaction reads the returning person's membership, and will then change the admin's.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for share', [
+        who.org,
+        returning.membershipId,
+      ]);
+      const confirming = within(20_000, confirm(admin, id, challengeId), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'written', invitation: { status: 'ACCEPTED' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
