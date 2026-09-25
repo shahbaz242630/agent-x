@@ -229,12 +229,21 @@ describe('SEC-HA-01 a forced re-login asks for the second factor again', () => {
     expect(isBreakGlassLogin(info.preferred_username, issuer)).toBe(false);
     // And Zitadel's first admin, set up with the stack, has the login name the API refuses.
     const zitadel = zitadelClient(LOGIN_ORIGIN, await readAutomationToken());
-    const { result = [] } = await zitadel.post<{ result?: { username: string; preferredLoginName: string }[] }>(
-      '/v2/users',
-      { queries: [{ userNameQuery: { userName: 'admin', method: 'TEXT_QUERY_METHOD_EQUALS' } }] },
-    );
-    expect(result.map(({ username }) => username)).toEqual(['admin']);
-    expect(isBreakGlassLogin(result[0]?.preferredLoginName, issuer)).toBe(true);
+    interface Listed {
+      result?: { username?: string; preferredLoginName?: string; loginNames?: string[] }[];
+    }
+    const refused = `admin@agent-x.${new URL(issuer).hostname}`;
+    const { result = [] } = await zitadel.post<Listed>('/v2/users', {
+      queries: [{ loginNameQuery: { loginName: refused, method: 'TEXT_QUERY_METHOD_EQUALS' } }],
+    });
+    // Said in full if it fails: every user Zitadel lists, by username and login name, none of them secret.
+    const everyone = (await zitadel.post<Listed>('/v2/users', {})).result ?? [];
+    const seen = JSON.stringify(everyone.map(({ username, preferredLoginName }) => [username, preferredLoginName]));
+    expect(
+      result.map(({ username }) => username),
+      seen,
+    ).toEqual(['admin']);
+    expect(isBreakGlassLogin(result[0]?.preferredLoginName, issuer), seen).toBe(true);
   });
 });
 
