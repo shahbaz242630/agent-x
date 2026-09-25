@@ -171,7 +171,12 @@ const allowed = (operation: Operation, caller: Caller): boolean =>
 describe('FX-ROLEMATRIX every operation × every caller', () => {
   it('reads the operations from the document, the sign-in and the session among them', () => {
     expect(operations.map(({ method, path }) => `${method} ${path}`)).toEqual(
-      expect.arrayContaining(['GET /v1/auth/session', 'GET /v1/auth/step-up', 'GET /v1/auth/sign-in']),
+      expect.arrayContaining([
+        'GET /v1/auth/session',
+        'GET /v1/auth/step-up',
+        'GET /v1/auth/sign-in',
+        'GET /v1/members',
+      ]),
     );
   });
 
@@ -215,6 +220,8 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
 
   it('refuses a person in a role everywhere their role is not named, in an organisation they do belong to', async () => {
     const roleRoutes = operations.filter(({ access }) => ROLES.some((role) => access.includes(role)));
+    // Never vacuous: the members list is the first route naming roles (B4-2b).
+    expect(roleRoutes.map(({ method, path }) => `${method} ${path}`)).toContain('GET /v1/members');
     for (const operation of roleRoutes) {
       for (const caller of CALLERS.filter((one) => one.is.length === 2 && !allowed(operation, one))) {
         const response = await app.inject(requestFor(operation, caller));

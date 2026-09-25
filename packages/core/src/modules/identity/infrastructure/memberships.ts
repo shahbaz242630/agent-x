@@ -28,7 +28,7 @@ import {
   type TamperSign,
   withSignedStates,
 } from '../../audit/index.ts';
-import { type DirectoryTables, listedMembership, registerMember } from '../../directory/index.ts';
+import { type DirectoryTables, listedMembers, listedMembership, registerMember } from '../../directory/index.ts';
 import { isRole, MEMBERSHIP, type Role } from '../domain/membership.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -137,4 +137,76 @@ export function membershipFor(
     await sql`set local statement_timeout = '10s'`.execute(tx);
     return membershipOf(tx, states, orgId, userId);
   });
+}
+
+/**
+ * The organisation's members, read and verified in a transaction of their
+ * own, withSignedStates' for the organisation: what the members route
+ * reads (B4-2b). Each statement is limited to 10 seconds.
+ */
+export function membersFor(
+  db: Kysely<IdentityTables & DirectoryTables & AuditTables>,
+  services: SignedStatesServices,
+  orgId: string,
+): Promise<MembersList> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    return membersOf(tx, states, orgId);
+  });
+}
+
+/** The most members an organisation's list gives: more is refused, never cut short unseen. */
+export const MOST_MEMBERS = 500;
+
+/** A member, as their verified membership says. */
+export interface MemberRecord {
+  readonly id: string;
+  readonly userId: string;
+  readonly role: Role;
+  readonly status: 'ACTIVE' | 'DEACTIVATED';
+  readonly joinedAt: Date;
+}
+
+/**
+ * The organisation's members, each verified, in order of membership ID; or
+ * tampered with, at the first membership that is (the alarm is raised, and
+ * the organisation held), so no list is given that holds one that can't be
+ * believed.
+ */
+export type MembersList =
+  | { readonly outcome: 'listed'; readonly members: readonly MemberRecord[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** More members than a list gives (MOST_MEMBERS): a page of them is for later. */
+export class TooManyMembers extends Error {
+  constructor() {
+    super(`The organisation has more than ${String(MOST_MEMBERS)} members, more than a list gives`);
+    this.name = 'TooManyMembers';
+  }
+}
+
+/**
+ * The organisation's members, each read for a decision (`share`) and
+ * verified, in the caller's transaction, which must be withSignedStates' for
+ * it. Each membership is found by the ID an entry names; an entry naming
+ * someone else's membership, or none, finds nothing, and each membership is
+ * given once, as its own signed state says whose it is.
+ */
+export async function membersOf(tx: MembershipsTransaction, states: SignedStates, orgId: string): Promise<MembersList> {
+  const entries = await listedMembers(tx, orgId, MOST_MEMBERS + 1);
+  if (entries.length > MOST_MEMBERS) throw new TooManyMembers();
+  const members: MemberRecord[] = [];
+  for (const { userId, membershipId: id } of entries) {
+    const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId, id }, 'share');
+    if (state.outcome === 'tampered') return state;
+    if (state.outcome === 'missing' || state.fields.get('user_id') !== userId) continue;
+    const role = state.fields.get('role');
+    const status = state.fields.get('status');
+    const joinedAt = state.fields.get('joined_at');
+    if (!isRole(role) || (status !== 'ACTIVE' && status !== 'DEACTIVATED') || typeof joinedAt !== 'string') {
+      throw new Error(`A verified membership holds a field that isn't one of its own: ${id}`);
+    }
+    members.push({ id, userId, role, status, joinedAt: new Date(joinedAt) });
+  }
+  return { outcome: 'listed', members };
 }

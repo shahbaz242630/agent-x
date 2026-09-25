@@ -76,3 +76,26 @@ export function organizationsOf(db: Kysely<DirectoryTables>, userId: string): Pr
       return rows.map((row) => row.org_id);
     });
 }
+
+/**
+ * The organisation's entries, by person, at most `most` of them in order of
+ * membership ID, in the caller's transaction, which must be withTenant's for
+ * that organisation. Where to look: each membership is then read by its ID
+ * and verified.
+ */
+export async function listedMembers(
+  tx: Transaction<DirectoryTables>,
+  orgId: string,
+  most: number,
+): Promise<MemberEntry[]> {
+  await assertTenant(tx, orgId);
+  const entries = await tx
+    .selectFrom('directory.members')
+    .select(['user_id', 'membership_id'])
+    .where('org_id', '=', orgId)
+    .orderBy('membership_id')
+    .orderBy('user_id')
+    .limit(most)
+    .execute();
+  return entries.map((entry) => ({ orgId, userId: entry.user_id, membershipId: entry.membership_id }));
+}

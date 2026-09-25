@@ -26,6 +26,8 @@ export const REASON_CODES = {
     'This address changes something, so each request must carry an Idempotency-Key header: 1 to 255 visible ASCII characters, no spaces, new for each change you mean to make. Send the same key again only to retry the same request.',
   IDEMPOTENCY_KEY_REUSED:
     'This Idempotency-Key was already used for a different request, so this one is refused and nothing was changed. Use a new key for a new change.',
+  INTEGRITY_FAILED:
+    "Some of the organisation's records couldn't be verified, so this answer is withheld and the organisation is on hold while it is looked into. The Agent X team has been alerted.",
   INTERNAL_ERROR:
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
