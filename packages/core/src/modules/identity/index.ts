@@ -4,6 +4,9 @@
 // end to end (B2-3a). The routes come at B2-3a-2. Step-up challenges (B3-1),
 // bound to one pending change in a session. Memberships and roles (B4-1): a
 // person in an organisation, an authority table read through its signed state.
+// Invitations (B4-3a): the pending change an admin's step-up binds to, then
+// opened with a token shown once.
+export { EMAIL_MAX, INVITATION, INVITATION_HOURS, invitationEmail } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
@@ -22,6 +25,20 @@ export {
   type Sessions,
   type SessionTimeouts,
 } from './infrastructure/sessions.ts';
+export {
+  draftInvitation,
+  type InvitationChange,
+  invitationChange,
+  type InvitationRecord,
+  invitationRecord,
+  type InvitationRequest,
+  INVITATIONS,
+  type InvitationsTransaction,
+  invitationToOpen,
+  InvitationNotOpened,
+  InvitationUnreadable,
+  openInvitation,
+} from './infrastructure/invitations.ts';
 export {
   addMembership,
   type MemberRecord,

@@ -130,6 +130,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would hide an organisation from its own member.
       appMay: ['SELECT', 'INSERT'],
     },
+    'directory.invites': {
+      reason:
+        "The directory's list of invitation tokens (ADR-005 §6, B4-3): a token's SHA-256, never the token, with its organisation and invitation, found on accepting before any organisation is known; the invitation itself is read and verified inside that organisation's withTenant",
+      columns: ['token_hash', 'org_id', 'invitation_id'],
+      // Added as its invitation opens, and read; an entry changed could point
+      // a token at another invitation (which its email check then refuses),
+      // and one deleted would leave an open invitation no one can accept.
+      appMay: ['SELECT', 'INSERT'],
+    },
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
