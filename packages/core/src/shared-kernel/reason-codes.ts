@@ -30,6 +30,8 @@ export const REASON_CODES = {
     "Some of the organisation's records couldn't be verified, so this answer is withheld and the organisation is on hold while it is looked into. The Agent X team has been alerted.",
   INTERNAL_ERROR:
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
+  INVITATION_CLOSED:
+    "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed.",
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
