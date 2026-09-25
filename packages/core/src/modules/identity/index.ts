@@ -24,12 +24,18 @@ export {
 } from './infrastructure/sessions.ts';
 export {
   addMembership,
+  type MemberRecord,
+  membersFor,
+  membersOf,
+  type MembersList,
   type MembershipCheck,
   membershipFor,
   membershipOf,
   MEMBERSHIPS,
   type MembershipsTransaction,
+  MOST_MEMBERS,
   type NewMembership,
+  TooManyMembers,
 } from './infrastructure/memberships.ts';
 export {
   createOidcClient,

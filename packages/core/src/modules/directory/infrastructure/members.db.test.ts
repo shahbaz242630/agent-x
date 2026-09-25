@@ -6,7 +6,7 @@ import { createDatabase, type Database, TenantContextError, withTenant } from '@
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { listedMembership, registerMember } from './members.ts';
+import { listedMembers, listedMembership, registerMember } from './members.ts';
 import { registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
 
@@ -80,5 +80,47 @@ describe(`the directory's list of who belongs where (Postgres ${server.version})
     await expect(withTenant(app, other, (tx) => listedMembership(tx, org, user))).rejects.toBeInstanceOf(
       TenantContextError,
     );
+  });
+
+  it("gives an organisation's entries alone, in order of membership ID, at most as many as asked", async () => {
+    const [org, other] = [await organization(), await organization()];
+    const entries = [];
+    for (let at = 0; at < 3; at += 1) {
+      const entry = { orgId: org, userId: await person(), membershipId: ids.next() };
+      entries.push(entry);
+    }
+    for (const entry of [...entries].reverse()) await withTenant(app, org, (tx) => registerMember(tx, entry));
+    await withTenant(app, other, async (tx) =>
+      registerMember(tx, { orgId: other, userId: await person(), membershipId: ids.next() }),
+    );
+
+    expect(await withTenant(app, org, (tx) => listedMembers(tx, org, 10))).toEqual(entries);
+    expect(await withTenant(app, org, (tx) => listedMembers(tx, org, 2))).toEqual(entries.slice(0, 2));
+    await expect(withTenant(app, other, (tx) => listedMembers(tx, org, 10))).rejects.toBeInstanceOf(TenantContextError);
+  });
+
+  it('orders by membership ID first, whatever order the people come in', async () => {
+    const org = await organization();
+    const [first, second] = [await person(), await person()];
+    const [lower, higher] = [ids.next(), ids.next()];
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: first, membershipId: higher }));
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: second, membershipId: lower }));
+
+    expect(
+      (await withTenant(app, org, (tx) => listedMembers(tx, org, 10))).map(({ membershipId }) => membershipId),
+    ).toEqual([lower, higher]);
+  });
+
+  it('orders two entries naming the same membership by person, so the order never depends on the table', async () => {
+    const org = await organization();
+    const membershipId = ids.next();
+    const [first, second] = [await person(), await person()];
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: second, membershipId }));
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: first, membershipId }));
+
+    expect((await withTenant(app, org, (tx) => listedMembers(tx, org, 10))).map(({ userId }) => userId)).toEqual([
+      first,
+      second,
+    ]);
   });
 });

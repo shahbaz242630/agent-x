@@ -35,6 +35,7 @@ import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
 import { registerSignIn } from './sign-in.ts';
+import { type ListMembers, registerMembers } from './members.ts';
 import { registerIdempotencyKeys } from './write-operations.ts';
 
 export interface ServerOptions {
@@ -48,6 +49,8 @@ export interface ServerOptions {
   readonly securityEvents?: SecurityEventSink | undefined;
   /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
   readonly findMembership?: FindMembership | undefined;
+  /** Reads an organisation's members (members.ts); without it, no one reaches the list, as no one holds a role. */
+  readonly listMembers?: ListMembers | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -181,5 +184,6 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     logger,
     securityEvents,
   });
+  registerMembers(app, options.listMembers);
   return app;
 }

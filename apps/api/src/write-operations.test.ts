@@ -134,15 +134,17 @@ describe('SEC-DP-07 each write names what it does, so its idempotency keys are i
 describe('SEC-DP-07 the contract holds every write route to its operation', () => {
   it('writes the operation into the document as the operationId of its one operation, and none for the rest', async () => {
     const app = await server();
-    app.post('/v1/members', write('members.invite'), () => ({ ok: true }));
-    app.delete('/v1/members/:id', write('members.remove'), () => ({ ok: true }));
-    app.get('/v1/members', write(undefined), () => ({ ok: true }));
+    app.post('/v1/team', write('team.invite'), () => ({ ok: true }));
+    app.delete('/v1/team/:id', write('team.remove'), () => ({ ok: true }));
+    app.get('/v1/team', write(undefined), () => ({ ok: true }));
     await app.ready();
     const ids = operationIds(app);
-    expect(ids['POST /v1/members']).toBe('members.invite');
-    expect(ids['DELETE /v1/members/{id}']).toBe('members.remove');
+    expect(ids['POST /v1/team']).toBe('team.invite');
+    expect(ids['DELETE /v1/team/{id}']).toBe('team.remove');
+    expect(ids['GET /v1/team']).toBeUndefined();
+    expect(ids['HEAD /v1/team']).toBeUndefined();
+    // Nor the members list, a read.
     expect(ids['GET /v1/members']).toBeUndefined();
-    expect(ids['HEAD /v1/members']).toBeUndefined();
     // The one public write, sign-out, names none.
     expect(ids['POST /v1/auth/sign-out']).toBeUndefined();
   });

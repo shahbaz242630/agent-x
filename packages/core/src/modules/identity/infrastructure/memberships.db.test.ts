@@ -11,7 +11,17 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, organizationsOf } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
-import { addMembership, membershipFor, membershipOf, MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
+import {
+  addMembership,
+  membersFor,
+  membershipFor,
+  membershipOf,
+  MEMBERSHIPS,
+  type MembershipsTransaction,
+  membersOf,
+  MOST_MEMBERS,
+  TooManyMembers,
+} from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -373,6 +383,176 @@ describe("a request's lookup of a membership, in a transaction of its own (B4-2a
       await expect(within(20_000, membershipFor(app, services(), org, user), 'the lookup')).rejects.toThrow(
         /statement timeout/,
       );
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
+describe("an organisation's members, each verified (B4-2b)", () => {
+  const list = (orgId: string) =>
+    withSignedStates(app, orgId, services(), (tx, states) => membersOf(tx, states, orgId));
+
+  it('lists every member in order of membership ID, deactivated ones included, as their signed states say', async () => {
+    const org = await organization();
+    const [first, second, third] = [await person(), await person(), await person()];
+    const a = await add(org, first, 'admin');
+    const b = await add(org, second, 'viewer');
+    const c = await add(org, third, 'approver');
+    await deactivate(org, b.id);
+    await add(await organization(), await person(), 'admin');
+
+    expect(await list(org)).toEqual({
+      outcome: 'listed',
+      members: [
+        { id: a.id, userId: first, role: 'admin', status: 'ACTIVE', joinedAt: clock.now() },
+        { id: b.id, userId: second, role: 'viewer', status: 'DEACTIVATED', joinedAt: clock.now() },
+        { id: c.id, userId: third, role: 'approver', status: 'ACTIVE', joinedAt: clock.now() },
+      ],
+    });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('lists none for an organisation with no members', async () => {
+    expect(await list(await organization())).toEqual({ outcome: 'listed', members: [] });
+  });
+
+  it('gives each membership once, under the person its signed state names, whatever other entries point at it', async () => {
+    const org = await organization();
+    const admin = await person();
+    const stranger = await person();
+    const { id } = await add(org, admin, 'admin');
+    await withTenant(app, org, async (tx) => {
+      await tx.insertInto('directory.members').values({ user_id: stranger, org_id: org, membership_id: id }).execute();
+      await tx
+        .insertInto('directory.members')
+        .values({ user_id: await person(), org_id: org, membership_id: ids.next() })
+        .execute();
+    });
+
+    expect(await list(org)).toEqual({
+      outcome: 'listed',
+      members: [{ id, userId: admin, role: 'admin', status: 'ACTIVE', joinedAt: clock.now() }],
+    });
+  });
+
+  it('gives no list at all when a membership in it was tampered with: tampered, with the alarm', async () => {
+    const org = await organization();
+    await add(org, await person(), 'viewer');
+    const { id } = await add(org, await person(), 'viewer');
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'admin' }).where('id', '=', id).execute(),
+    );
+
+    expect(await list(org)).toEqual({ outcome: 'tampered', sign: 'seal' });
+    expect(alarms()).toEqual([expect.objectContaining({ subjectType: 'membership', objectId: id, reason: 'seal' })]);
+  });
+
+  it(`refuses an organisation listing more than ${String(MOST_MEMBERS)}, rather than cut the list short`, async () => {
+    const org = await organization();
+    const people = Array.from({ length: MOST_MEMBERS + 1 }, (_, index) => ({
+      id: ids.next(),
+      issuer: 'https://auth.example.test',
+      subject: `many-${String(index)}`,
+      created_at: clock.now(),
+    }));
+    await app.insertInto('identity.users').values(people).execute();
+    await withTenant(app, org, (tx) =>
+      tx
+        .insertInto('directory.members')
+        .values(people.map(({ id }) => ({ user_id: id, org_id: org, membership_id: ids.next() })))
+        .execute(),
+    );
+
+    await expect(list(org)).rejects.toBeInstanceOf(TooManyMembers);
+  });
+
+  it(`lists an organisation with exactly ${String(MOST_MEMBERS)} entries, the most it gives`, async () => {
+    const org = await organization();
+    const people = Array.from({ length: MOST_MEMBERS }, (_, index) => ({
+      id: ids.next(),
+      issuer: 'https://auth.example.test',
+      subject: `most-${String(index)}`,
+      created_at: clock.now(),
+    }));
+    await app.insertInto('identity.users').values(people).execute();
+    // Entries naming no membership: the list reads each, finds nothing, and gives none.
+    await withTenant(app, org, (tx) =>
+      tx
+        .insertInto('directory.members')
+        .values(people.map(({ id }) => ({ user_id: id, org_id: org, membership_id: ids.next() })))
+        .execute(),
+    );
+
+    expect(await list(org)).toEqual({ outcome: 'listed', members: [] });
+  });
+
+  it('is read for a decision, share locks: two lists of the same organisation at once never wait on each other', async () => {
+    const org = await organization();
+    await add(org, await person(), 'admin');
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let read = (): void => undefined;
+    const first = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+
+    const holder = withSignedStates(app, org, services(), async (tx, states) => {
+      const found = await membersOf(tx, states, org);
+      read();
+      await held;
+      return found;
+    });
+    await first;
+    try {
+      expect(await within(5_000, list(org), 'the second list')).toMatchObject({ outcome: 'listed' });
+    } finally {
+      release();
+    }
+    expect(await holder).toMatchObject({ outcome: 'listed' });
+  });
+
+  it.each([
+    ['a role', 'role', 'owner'],
+    ['a status', 'status', 'SUSPENDED'],
+    ['when it began', 'joined_at', null],
+  ])('throws on a verified state holding %s that is none of its own, rather than list it', async (_, column, value) => {
+    const org = await organization();
+    const { id } = await add(org, await person(), 'admin');
+
+    await expect(
+      withSignedStates(app, org, services(), (tx, states) => {
+        // A seal can only hold what record wrote, which the table holds to its own values: this stands in for a bug there.
+        const verifiedState: typeof states.verifiedState = async (...args) => {
+          const state = await states.verifiedState(...args);
+          return state.outcome === 'verified'
+            ? { ...state, fields: new Map([...state.fields, [column, value]]) }
+            : state;
+        };
+        return membersOf(tx, { ...states, verifiedState }, org);
+      }),
+    ).rejects.toThrow(`A verified membership holds a field that isn't one of its own: ${id}`);
+  });
+
+  it('is read in a transaction of its own by a request, which gives up after 10 seconds rather than hang', async () => {
+    const org = await organization();
+    const user = await person();
+    const { id } = await add(org, user, 'developer');
+    expect(await membersFor(app, services(), org)).toEqual({
+      outcome: 'listed',
+      members: [{ id, userId: user, role: 'developer', status: 'ACTIVE', joinedAt: clock.now() }],
+    });
+
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table directory.members in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, membersFor(app, services(), org), 'the list')).rejects.toThrow(/statement timeout/);
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');
