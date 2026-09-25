@@ -26,6 +26,7 @@ import {
   type SignedStates,
   type SignedStatesServices,
   type TamperSign,
+  type VerifiedState,
   withSignedStates,
 } from '../../audit/index.ts';
 import { type DirectoryTables, listedMembers, listedMembership, registerMember } from '../../directory/index.ts';
@@ -208,16 +209,50 @@ export async function membersOf(tx: MembershipsTransaction, states: SignedStates
   if (entries.length > MOST_MEMBERS) throw new TooManyMembers();
   const members: MemberRecord[] = [];
   for (const { userId, membershipId: id } of entries) {
-    const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId, id }, 'share');
-    if (state.outcome === 'tampered') return state;
-    if (state.outcome === 'missing' || state.fields.get('user_id') !== userId) continue;
-    const role = state.fields.get('role');
-    const status = state.fields.get('status');
-    const joinedAt = state.fields.get('joined_at');
-    if (!isRole(role) || (status !== 'ACTIVE' && status !== 'DEACTIVATED') || typeof joinedAt !== 'string') {
-      throw new Error(`A verified membership holds a field that isn't one of its own: ${id}`);
-    }
-    members.push({ id, userId, role, status, joinedAt: new Date(joinedAt) });
+    const read = await memberOf(tx, states, { orgId, id }, 'share');
+    if (read.outcome === 'tampered') return read;
+    if (read.outcome === 'missing' || read.member.userId !== userId) continue;
+    members.push(read.member);
   }
   return { outcome: 'listed', members };
+}
+
+/** A membership read by its ID and verified, with the state a change records from; missing; or tampered with. */
+export type MemberCheck =
+  | { readonly outcome: 'found'; readonly member: MemberRecord; readonly state: VerifiedState }
+  | { readonly outcome: 'missing' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/**
+ * The membership, by its ID, read and verified in the caller's transaction,
+ * which must be withSignedStates' for its organisation: `share` for a
+ * decision, `change` for a change (its state then what `record` takes). Whose
+ * it is comes from its signed state; the caller compares it with the person
+ * the directory named.
+ */
+export async function memberOf(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  lock: 'share' | 'change',
+): Promise<MemberCheck> {
+  const state = await states.verifiedState(tx, MEMBERSHIPS, key, lock);
+  if (state.outcome !== 'verified') return state;
+  const userId = state.fields.get('user_id');
+  const role = state.fields.get('role');
+  const status = state.fields.get('status');
+  const joinedAt = state.fields.get('joined_at');
+  if (
+    typeof userId !== 'string' ||
+    !isRole(role) ||
+    (status !== 'ACTIVE' && status !== 'DEACTIVATED') ||
+    typeof joinedAt !== 'string'
+  ) {
+    throw new Error(`A verified membership holds a field that isn't one of its own: ${key.id}`);
+  }
+  return {
+    outcome: 'found',
+    member: { id: key.id.toLowerCase(), userId, role, status, joinedAt: new Date(joinedAt) },
+    state,
+  };
 }

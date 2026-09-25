@@ -36,6 +36,8 @@ export const REASON_CODES = {
     "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed.",
   INVITATION_INVALID:
     "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation.",
+  MEMBER_DEACTIVATED:
+    "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
@@ -43,10 +45,13 @@ export const REASON_CODES = {
     'The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
   ORIGIN_REFUSED:
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
+  OWN_MEMBERSHIP:
+    "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
+  ROLE_UNCHANGED: 'The member already has this role, so nothing was changed.',
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SIGN_IN_UNAVAILABLE:
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",

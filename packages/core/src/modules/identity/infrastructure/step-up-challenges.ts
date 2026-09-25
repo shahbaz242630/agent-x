@@ -20,7 +20,7 @@
 // time, in a transaction of its own with a statement timeout (hourly, from the
 // API). A challenge goes with its session. The times are the Clock's
 // (ADR-006 §3), so tests can move them.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import { type Kysely, sql, type Transaction } from 'kysely';
 
@@ -85,6 +85,50 @@ export interface StepUpChallenges {
   consume(db: Handle, challengeId: string, binding: StepUpBinding): Promise<ConsumedStepUp | undefined>;
   /** Deletes up to `most` challenges past their time, and says how many. */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
+}
+
+/**
+ * A pending change's SHA-256, as a challenge binds it: each fact in a fixed
+ * order, as its length then its bytes, so no two lists of facts hash alike.
+ * No label of its own: the challenge binds the action beside it.
+ */
+export function changeHashOf(parts: readonly string[]): Buffer {
+  const hash = createHash('sha256');
+  for (const part of parts) {
+    const bytes = Buffer.from(part, 'utf8');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length).update(bytes);
+  }
+  return hash.digest();
+}
+
+/** A consumed step-up's evidence, as the change's audit event keeps it (ADR-003 §9 step 6): IDs, times and hashes only. */
+export const stepUpDetails = (consumed: ConsumedStepUp) => ({
+  stepUpChallengeId: consumed.challengeId,
+  changeHash: consumed.changeHash.toString('hex'),
+  signedInAt: consumed.evidence.authTime.toISOString(),
+  methods: consumed.evidence.amr.join(' '),
+  proofHash: consumed.evidence.idTokenHash.toString('hex'),
+  verifiedAt: consumed.verifiedAt.toISOString(),
+});
+
+/**
+ * Locks the people's challenges, in order of ID, in the caller's transaction:
+ * a demotion's or deactivation's level 0b (ADR-006 §6), after their sessions,
+ * so the challenges their sessions' end deletes are held before any
+ * membership is, and a challenge being used at the same moment is waited
+ * for, never waited on backwards. Found through their sessions, by the
+ * session's index: a challenge is its session's person's (0013).
+ */
+export async function lockChallengesOf(tx: Transaction<IdentityTables>, userIds: readonly string[]): Promise<void> {
+  await tx
+    .selectFrom('identity.step_up_challenges')
+    .select('id')
+    .where('session_id', 'in', (eb) => eb.selectFrom('identity.sessions').select('id').where('user_id', 'in', userIds))
+    .orderBy('id')
+    .forUpdate()
+    .execute();
 }
 
 /** A handle a challenge is opened or consumed on: the pool, or a change's own transaction, whatever else it can reach. */

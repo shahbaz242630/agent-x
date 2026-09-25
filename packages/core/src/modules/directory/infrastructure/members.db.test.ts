@@ -6,7 +6,7 @@ import { createDatabase, type Database, TenantContextError, withTenant } from '@
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { listedMembers, listedMembership, registerMember } from './members.ts';
+import { listedMember, listedMembers, listedMembership, registerMember } from './members.ts';
 import { registerOrganization } from './organizations.ts';
 import type { DirectoryTables } from './tables.ts';
 
@@ -64,6 +64,21 @@ describe(`the directory's list of who belongs where (Postgres ${server.version})
     expect(await withTenant(app, org, (tx) => listedMembership(tx, org, user))).toBe(membershipId);
     expect(await withTenant(app, other, (tx) => listedMembership(tx, other, user))).toBeUndefined();
     expect(await withTenant(app, org, (tx) => listedMembership(tx, org, ids.next()))).toBeUndefined();
+  });
+
+  it('names the person listed with a membership, found only in that organisation (B4-5a)', async () => {
+    const [org, other] = [await organization(), await organization()];
+    const [user, someone] = [await person(), await person()];
+    const membershipId = ids.next();
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: user, membershipId }));
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: someone, membershipId: ids.next() }));
+
+    expect(await withTenant(app, org, (tx) => listedMember(tx, org, membershipId))).toBe(user);
+    expect(await withTenant(app, other, (tx) => listedMember(tx, other, membershipId))).toBeUndefined();
+    expect(await withTenant(app, org, (tx) => listedMember(tx, org, ids.next()))).toBeUndefined();
+    await expect(withTenant(app, other, (tx) => listedMember(tx, org, membershipId))).rejects.toBeInstanceOf(
+      TenantContextError,
+    );
   });
 
   it("refuses to list or look up one from another organisation's transaction, or from none", async () => {

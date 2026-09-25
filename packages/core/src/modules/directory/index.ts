@@ -4,6 +4,7 @@
 // the same transaction as the tenant row an entry points to.
 export { type InviteEntry, listedInvite, registerInvite } from './infrastructure/invites.ts';
 export {
+  listedMember,
   listedMembers,
   listedMembership,
   type MemberEntry,
