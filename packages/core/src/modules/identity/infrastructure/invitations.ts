@@ -41,6 +41,7 @@ import type {
 import { type DirectoryTables, registerInvite } from '../../directory/index.ts';
 import { INVITATION, invitationEmail, invitationEnds, needsConfirmation } from '../domain/invitation.ts';
 import { isRole, type Role } from '../domain/membership.ts';
+import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** An invitation's row, as the signed state reads, records and moves it. */
@@ -85,24 +86,9 @@ export interface InvitationRequest {
   readonly createdAt: Date;
 }
 
-/** Each part's length, then its bytes, so no two lists of parts hash alike. */
-function hashOf(parts: readonly string[]): Buffer {
-  const hash = createHash('sha256');
-  for (const part of parts) {
-    const bytes = Buffer.from(part, 'utf8');
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(bytes.length);
-    hash.update(length).update(bytes);
-  }
-  return hash.digest();
-}
-
-/**
- * The change's SHA-256: every fact it is made of, in a fixed order, IDs in
- * lower case. No label of its own: the challenge binds the action beside it.
- */
-const changeHashOf = (change: InvitationChange): Buffer =>
-  hashOf([
+/** The change's SHA-256: every fact it is made of, in a fixed order, IDs in lower case. */
+const invitationHash = (change: InvitationChange): Buffer =>
+  changeHashOf([
     change.orgId.toLowerCase(),
     change.id.toLowerCase(),
     change.email,
@@ -128,7 +114,7 @@ export function invitationChange(request: InvitationRequest): { change: Invitati
     invitedBy: request.invitedBy,
     expiresAt: invitationEnds(request.createdAt),
   };
-  return { change, changeHash: changeHashOf(change) };
+  return { change, changeHash: invitationHash(change) };
 }
 
 /** The address's associated data: the row it belongs to, so it opens nowhere else. */
@@ -305,7 +291,7 @@ export async function invitationToOpen(
     invitedBy,
     expiresAt: invitation.expiresAt,
   };
-  return { outcome: 'draft', invitation, change, changeHash: changeHashOf(change) };
+  return { outcome: 'draft', invitation, change, changeHash: invitationHash(change) };
 }
 
 /** A token's SHA-256, as the directory lists it and as accepting looks it up (B4-4c). */

@@ -21,7 +21,7 @@
 // own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import { type ExpressionBuilder, type Kysely, sql } from 'kysely';
+import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -97,6 +97,35 @@ const isCookie = (value: unknown): value is string => typeof value === 'string' 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const isWholeSeconds = (value: number): boolean => Number.isSafeInteger(value) && value >= LEAST_SECONDS;
+
+/**
+ * Locks the people's sessions, in order of ID, in the caller's transaction:
+ * a demotion's or deactivation's level 0b (ADR-006 §6), before any
+ * membership. `FOR NO KEY UPDATE`, not `FOR UPDATE`: a challenge opened for
+ * one of them meanwhile (its key check takes a key-share lock on the session)
+ * goes ahead rather than waiting while it holds a membership's lock this
+ * transaction waits for. A sign-out, or a step-up's new cookie ID, waits.
+ */
+export async function lockSessionsOf(tx: Transaction<IdentityTables>, userIds: readonly string[]): Promise<void> {
+  await tx
+    .selectFrom('identity.sessions')
+    .select('id')
+    .where('user_id', 'in', userIds)
+    .orderBy('id')
+    .forNoKeyUpdate()
+    .execute();
+}
+
+/**
+ * Ends every session the person has, live or not, in the caller's
+ * transaction, which locked them first (lockSessionsOf): a role change or
+ * deactivation ends them in its own transaction (ADR-003 §7, SEC-HA-10). Their
+ * challenges and verified addresses go with them. Says how many.
+ */
+export async function endSessionsOf(tx: Transaction<IdentityTables>, userId: string): Promise<number> {
+  const rows = await tx.deleteFrom('identity.sessions').where('user_id', '=', userId).returning('id').execute();
+  return rows.length;
+}
 
 export function createSessions({
   ids,

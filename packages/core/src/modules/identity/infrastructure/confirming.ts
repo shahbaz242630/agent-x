@@ -21,8 +21,6 @@
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back. Each statement is limited to 10 seconds.
-import { createHash } from 'node:crypto';
-
 import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -40,7 +38,7 @@ import {
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, isMembershipTaken, membershipOf } from './memberships.ts';
-import type { ConsumedStepUp, StepUpChallenges } from './step-up-challenges.ts';
+import { changeHashOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** Asking to confirm: its operation, which the step-up challenge names as its action too. */
@@ -93,33 +91,9 @@ class ConfirmationRefused extends Error {
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 
-/** The pending change's SHA-256: each fact in a fixed order, as its length then its bytes, IDs in lower case. */
-export function confirmationHash(orgId: string, invitation: InvitationRecord, version: number): Buffer {
-  const hash = createHash('sha256');
-  for (const part of [
-    orgId.toLowerCase(),
-    invitation.id,
-    invitation.acceptedBy ?? '',
-    invitation.role,
-    String(version),
-  ]) {
-    const bytes = Buffer.from(part, 'utf8');
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(bytes.length);
-    hash.update(length).update(bytes);
-  }
-  return hash.digest();
-}
-
-/** The step-up's evidence, as the invitation's event keeps it (ADR-003 §9 step 6). */
-const evidenceOf = (consumed: ConsumedStepUp) => ({
-  stepUpChallengeId: consumed.challengeId,
-  changeHash: consumed.changeHash.toString('hex'),
-  signedInAt: consumed.evidence.authTime.toISOString(),
-  methods: consumed.evidence.amr.join(' '),
-  proofHash: consumed.evidence.idTokenHash.toString('hex'),
-  verifiedAt: consumed.verifiedAt.toISOString(),
-});
+/** The pending change's SHA-256: each fact in a fixed order, IDs in lower case. */
+export const confirmationHash = (orgId: string, invitation: InvitationRecord, version: number): Buffer =>
+  changeHashOf([orgId.toLowerCase(), invitation.id, invitation.acceptedBy ?? '', invitation.role, String(version)]);
 
 export function createAcceptanceConfirmations({
   database,
@@ -238,7 +212,7 @@ export function createAcceptanceConfirmations({
             {
               actor,
               action: 'invitation.confirmed',
-              details: { role, ...evidenceOf(consumed) },
+              details: { role, ...stepUpDetails(consumed) },
             },
           );
           if (moved.outcome !== 'changed')

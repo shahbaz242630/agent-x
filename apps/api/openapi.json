@@ -81,6 +81,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "MEMBER_DEACTIVATED",
+                    "description": "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back."
+                  },
+                  {
+                    "type": "string",
                     "const": "NOT_FOUND",
                     "description": "There is nothing at this address, or the feature is not available."
                   },
@@ -101,6 +106,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "OWN_MEMBERSHIP",
+                    "description": "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change."
+                  },
+                  {
+                    "type": "string",
                     "const": "PAYLOAD_TOO_LARGE",
                     "description": "The request body is larger than this address accepts, so it is refused."
                   },
@@ -113,6 +123,11 @@
                     "type": "string",
                     "const": "REQUEST_TIMEOUT",
                     "description": "The request took too long to arrive, so it is refused. Send it again."
+                  },
+                  {
+                    "type": "string",
+                    "const": "ROLE_UNCHANGED",
+                    "description": "The member already has this role, so nothing was changed."
                   },
                   {
                     "type": "string",

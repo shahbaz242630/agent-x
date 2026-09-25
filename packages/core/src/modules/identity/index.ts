@@ -72,7 +72,19 @@ export {
   openInvitation,
 } from './infrastructure/invitations.ts';
 export {
+  createMembershipChanges,
+  DEACTIVATE_CONFIRM_OPERATION,
+  DEACTIVATE_OPERATION,
+  type MembershipChange,
+  type MembershipChanges,
+  type MembershipChangeWrite,
+  ROLE_CONFIRM_OPERATION,
+  ROLE_OPERATION,
+} from './infrastructure/membership-changes.ts';
+export {
   addMembership,
+  type MemberCheck,
+  memberOf,
   type MemberRecord,
   membersFor,
   membersOf,

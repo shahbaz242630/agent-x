@@ -55,6 +55,28 @@ export async function listedMembership(
 }
 
 /**
+ * The person the directory lists with this membership in this organisation,
+ * or undefined, in the caller's transaction, which must be withTenant's for
+ * that organisation. Whose sessions to lock before the membership is (a role
+ * change or deactivation, ADR-006 §6 level 0b), never whose it is: the
+ * membership's signed state must then name the same person.
+ */
+export async function listedMember(
+  tx: Transaction<DirectoryTables>,
+  orgId: string,
+  membershipId: string,
+): Promise<string | undefined> {
+  await assertTenant(tx, orgId);
+  const entry = await tx
+    .selectFrom('directory.members')
+    .select('user_id')
+    .where('org_id', '=', orgId)
+    .where('membership_id', '=', membershipId)
+    .executeTakeFirst();
+  return entry?.user_id;
+}
+
+/**
  * The organisations the directory lists the person in, by ID in lower case as
  * Postgres prints a uuid, in order. A place to look, never an answer: each is
  * then checked inside its own withTenant, where a membership deactivated

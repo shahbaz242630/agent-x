@@ -40,7 +40,7 @@ import {
   openInvitation,
 } from './invitations.ts';
 import { membershipOf, type MembershipsTransaction } from './memberships.ts';
-import type { ConsumedStepUp, StepUpChallenges } from './step-up-challenges.ts';
+import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** The asking route's operation, which its step-up challenge names as its action too. */
@@ -97,16 +97,6 @@ class WriteRefused extends Error {
 }
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
-
-/** The step-up's evidence, as the invitation's event keeps it (ADR-003 §9 step 6): IDs, times and hashes only. */
-const evidenceOf = (consumed: ConsumedStepUp) => ({
-  stepUpChallengeId: consumed.challengeId,
-  changeHash: consumed.changeHash.toString('hex'),
-  signedInAt: consumed.evidence.authTime.toISOString(),
-  methods: consumed.evidence.amr.join(' '),
-  proofHash: consumed.evidence.idTokenHash.toString('hex'),
-  verifiedAt: consumed.verifiedAt.toISOString(),
-});
 
 export function createInvitationWrites({
   database,
@@ -219,7 +209,7 @@ export function createInvitationWrites({
           orgId: admin.orgId,
           id: read.invitation.id,
           actor: { type: 'user', id: admin.userId },
-          details: evidenceOf(consumed),
+          details: stepUpDetails(consumed),
         });
         return { status: 200, resourceId: read.invitation.id };
       });

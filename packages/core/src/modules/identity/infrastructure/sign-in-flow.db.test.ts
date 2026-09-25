@@ -442,10 +442,10 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     const { done, challenge } = await signedInWithChallenge();
     client.whileFinishing = () => sessions.end(app, done.cookie);
 
-    // The challenge went with its session, so the evidence finds nothing to record on.
+    // The session is given its new cookie ID first (its lock before the challenge's), and is gone.
     await expect(stepUp(done.sessionId, challenge.challengeId, done.cookie)).rejects.toMatchObject({
       name: 'StepUpFailed',
-      failure: 'challenge_missing',
+      failure: 'session_missing',
     });
     expect(await sessionsOf(done.userId)).toEqual([]);
   });

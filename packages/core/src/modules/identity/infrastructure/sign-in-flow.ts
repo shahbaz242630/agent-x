@@ -19,9 +19,11 @@
 //   opening a session: the session the browser brings must still be live and
 //   the challenge still pending for it; the ID token is checked; its person
 //   must be a user already (found, never made); and the fresh sign-in must
-//   stand for the challenge (`stepUpRefusal`). Then, in one transaction, its
-//   evidence is recorded on the challenge and the session given a new cookie
-//   ID, keeping its record (SEC-HA-07: rotated at step-up). Anything wrong is
+//   stand for the challenge (`stepUpRefusal`). Then, in one transaction, the
+//   session is given a new cookie ID, keeping its record (SEC-HA-07: rotated
+//   at step-up), and the evidence recorded on the challenge: the session's
+//   lock before the challenge's, as a sign-out's and a deactivation's are
+//   (ADR-006 §6 level 0b), so none of them waits on another backwards. Anything wrong is
 //   StepUpFailed, and nothing is recorded; a login service that can't be
 //   reached stays SignInFailed `provider_unavailable`.
 //
@@ -177,6 +179,8 @@ export function createSignIn({
       throw new StepUpFailed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
     }
     return limited(async (tx) => {
+      const rotated = await sessions.rotate(tx, sessionId);
+      if (rotated === undefined) throw new StepUpFailed('session_missing', 'the session ended', userId);
       const recorded = await challenges.recordEvidence(tx, challengeId, sessionId, {
         authTime: evidence.authTime,
         amr: evidence.amr,
@@ -184,8 +188,6 @@ export function createSignIn({
         idTokenHash,
       });
       if (!recorded) throw new StepUpFailed('challenge_missing', 'the challenge ran out of time', userId);
-      const rotated = await sessions.rotate(tx, sessionId);
-      if (rotated === undefined) throw new StepUpFailed('session_missing', 'the session ended', userId);
       return { userId, sessionId, cookie: rotated, returnTo: taken.returnTo, stepUpChallengeId: challengeId };
     });
   }
