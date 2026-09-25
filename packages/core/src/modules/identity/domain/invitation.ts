@@ -5,19 +5,31 @@
 // It starts as a DRAFT, the pending change the admin's step-up binds to
 // (ADR-003 §9), and opens (DRAFT>OPEN) once the step-up is consumed, when its
 // token is made and shown to the admin once. It ends a fixed time after it was
-// asked for, whatever its status. Accepting comes at B4-4. The machine is
-// written now because the database's status guard holds it from the first
-// row (0016).
+// asked for, whatever its status. Accepted (B4-4b, 0018) by the person whose
+// verified email it names: a developer or viewer joins at once (OPEN>ACCEPTED);
+// an admin or finance approver waits for an existing admin to confirm who
+// accepted (OPEN>AWAITING_CONFIRMATION, then ACCEPTED or DECLINED; ADR-005 §6).
+// The database's status guard holds the same moves (0018).
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 
 export const INVITATION = defineStateMachine({
   name: 'invitation',
-  states: ['DRAFT', 'OPEN'],
+  states: ['DRAFT', 'OPEN', 'AWAITING_CONFIRMATION', 'ACCEPTED', 'DECLINED'],
   initial: 'DRAFT',
   events: {
     open: { from: ['DRAFT'], to: 'OPEN' },
+    accept: { from: ['OPEN'], to: 'ACCEPTED' },
+    await: { from: ['OPEN'], to: 'AWAITING_CONFIRMATION' },
+    confirm: { from: ['AWAITING_CONFIRMATION'], to: 'ACCEPTED' },
+    decline: { from: ['AWAITING_CONFIRMATION'], to: 'DECLINED' },
   },
 });
+
+/** The roles an existing admin must confirm, with step-up, before anyone holds them (ADR-005 §6). */
+export const CONFIRMED_ROLES = ['admin', 'approver'] as const;
+
+/** Whether a role waits for an admin's confirmation when its invitation is accepted. */
+export const needsConfirmation = (role: string): boolean => CONFIRMED_ROLES.some((each) => each === role);
 
 /** How long an invitation lasts from when it was asked for: short (ADR-005 §6), and long enough to reach someone over a weekend. */
 export const INVITATION_HOURS = 72;

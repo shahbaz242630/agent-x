@@ -10,15 +10,18 @@ import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
-import { type DirectoryTables, registerInvite } from '../../directory/index.ts';
+import { type DirectoryTables, listedInvite, registerInvite } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { INVITATION_HOURS } from '../domain/invitation.ts';
 import type { Role } from '../domain/membership.ts';
 import {
+  acceptInvitation,
   draftInvitation,
   invitationChange,
   invitationRecord,
+  invitationToAccept,
   invitationToOpen,
+  inviteTokenHash,
   openInvitation,
 } from './invitations.ts';
 import { addMembership } from './memberships.ts';
@@ -174,6 +177,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
         status: 'DRAFT',
         expiresAt: new Date(clock.now().getTime() + INVITATION_HOURS * HOUR),
         stepUpChallengeId,
+        acceptedBy: null,
       },
     });
     const { row, event } = await withTenant(app, who.org, async (tx) => ({
@@ -498,5 +502,156 @@ describe(`opening an invitation (B4-3a, Postgres ${server.version})`, () => {
         openInvitation(tx, states, { orgId: who.org, id, actor: OPERATOR, details: {} }),
       ),
     ).rejects.toBeInstanceOf(TenantContextError);
+  });
+});
+
+describe(`accepting an invitation (B4-4b, Postgres ${server.version})`, () => {
+  let invitees = 0;
+  /** A person who has signed in, to accept. */
+  const invitee = (): Promise<string> => {
+    invitees += 1;
+    return userForSubject(
+      app,
+      { issuer: 'https://auth.example.test', subject: `invitee-${String(invitees)}` },
+      { ids, clock },
+    );
+  };
+
+  /** An open invitation for this role, and its token. */
+  async function opened(who: Awaited<ReturnType<typeof organization>>, role: Role = 'developer') {
+    const { id } = await draft(who, { role });
+    const result = await open(who.org, id, who.adminUser);
+    if (result.outcome !== 'opened') throw new Error('not opened');
+    return { id, token: result.token };
+  }
+
+  const toAccept = (org: string, id: string, now = clock.now()) =>
+    withSignedStates(app, org, services(), (tx, states) =>
+      invitationToAccept(tx, states, keys, { orgId: org, id, now }),
+    );
+
+  const accept = (org: string, id: string, userId: string) =>
+    withSignedStates(app, org, services(), (tx, states) =>
+      acceptInvitation(tx, states, { orgId: org, id, userId, actor: { type: 'user', id: userId } }),
+    );
+
+  it('finds an open invitation by its token, through the directory', async () => {
+    const who = await organization();
+    const { id, token } = await opened(who);
+
+    expect(await listedInvite(app, inviteTokenHash(token))).toEqual({ orgId: who.org, invitationId: id });
+    expect(await listedInvite(app, inviteTokenHash(`${token}x`))).toBeUndefined();
+    expect(inviteTokenHash(token)).toEqual(sha256(token));
+  });
+
+  it('reads an open invitation for its acceptance, with the invited address decrypted', async () => {
+    const who = await organization();
+    const { id } = await opened(who, 'viewer');
+
+    expect(await toAccept(who.org, id.toUpperCase())).toMatchObject({
+      outcome: 'open',
+      invitation: { id, role: 'viewer', status: 'OPEN', acceptedBy: null },
+      email: 'sara.khan@example.test',
+    });
+  });
+
+  it('reads a draft, one past its end, and one accepted already as closed, and another organisation’s as missing', async () => {
+    const who = await organization();
+    const other = await organization();
+    const { id: drafted } = await draft(who);
+    const { id } = await opened(who);
+    const ends = clock.now().getTime() + INVITATION_HOURS * HOUR;
+
+    expect(await toAccept(who.org, drafted)).toEqual({ outcome: 'closed' });
+    expect(await toAccept(who.org, id, new Date(ends - 1))).toMatchObject({ outcome: 'open' });
+    expect(await toAccept(who.org, id, new Date(ends))).toEqual({ outcome: 'closed' });
+    expect(await toAccept(other.org, id)).toEqual({ outcome: 'missing' });
+    await accept(who.org, id, await invitee());
+    expect(await toAccept(who.org, id)).toEqual({ outcome: 'closed' });
+  });
+
+  it.each([
+    ['developer', 'ACCEPTED', 'accepted', 'invitation.accepted'],
+    ['viewer', 'ACCEPTED', 'accepted', 'invitation.accepted'],
+    ['admin', 'AWAITING_CONFIRMATION', 'awaiting_confirmation', 'invitation.awaiting_confirmation'],
+    ['approver', 'AWAITING_CONFIRMATION', 'awaiting_confirmation', 'invitation.awaiting_confirmation'],
+  ] as const)(
+    'accepts a %s’s invitation: %s, who accepted sealed, on two events',
+    async (role, status, outcome, action) => {
+      const who = await organization();
+      const { id } = await opened(who, role);
+      const person = await invitee();
+
+      expect(await accept(who.org, id, person)).toEqual({ outcome, role });
+
+      expect(await record(who.org, id)).toMatchObject({ outcome: 'found', invitation: { status, acceptedBy: person } });
+      const events = await withTenant(app, who.org, (tx) =>
+        tx
+          .selectFrom('audit.events')
+          .select(['action', 'actor_id', 'subject_version', 'details'])
+          .where('subject_id', '=', id)
+          .orderBy('seq')
+          .execute(),
+      );
+      expect(
+        events.slice(2).map(({ action, actor_id, subject_version }) => [action, actor_id, subject_version]),
+      ).toEqual([
+        ['invitation.acceptance_recorded', person, 3],
+        [action, person, 4],
+      ]);
+      expect(JSON.parse(events[3]?.details ?? '{}')).toMatchObject({ role, statusFrom: 'OPEN', statusTo: status });
+      expect(alarms()).toEqual([]);
+    },
+  );
+
+  it('refuses to accept a draft, or one missing, keeping nothing', async () => {
+    const who = await organization();
+    const { id } = await draft(who);
+    const person = await invitee();
+
+    await expect(accept(who.org, id, person)).rejects.toMatchObject({
+      name: 'InvitationNotAccepted',
+      outcome: 'DRAFT',
+    });
+    await expect(accept(who.org, ids.next(), person)).rejects.toMatchObject({
+      name: 'InvitationNotAccepted',
+      outcome: 'missing',
+    });
+    expect(await record(who.org, id)).toMatchObject({ invitation: { status: 'DRAFT', acceptedBy: null } });
+  });
+
+  it('refuses to accept one accepted already, keeping who accepted first', async () => {
+    const who = await organization();
+    const { id } = await opened(who);
+    const first = await invitee();
+    await accept(who.org, id, first);
+
+    await expect(accept(who.org, id, await invitee())).rejects.toMatchObject({ outcome: 'ACCEPTED' });
+    expect(await record(who.org, id)).toMatchObject({ invitation: { acceptedBy: first } });
+  });
+
+  it('holds who accepted to a person who has signed in, by the key to the people', async () => {
+    const who = await organization();
+    const { id } = await opened(who);
+
+    await expect(accept(who.org, id, ids.next())).rejects.toMatchObject({ code: '23503' });
+  });
+
+  it('holds every move to the machine’s, past the module too', async () => {
+    const who = await organization();
+    const { id } = await opened(who, 'admin');
+    const moved = (status: string) =>
+      withTenant(app, who.org, (tx) =>
+        tx.updateTable('identity.invitations').set({ status }).where('id', '=', id).execute(),
+      );
+
+    for (const status of ['DECLINED', 'DRAFT']) {
+      await expect(moved(status)).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
+    }
+    await expect(moved('WITHDRAWN')).rejects.toMatchObject({ code: '23514' });
+    await accept(who.org, id, await invitee());
+    for (const status of ['OPEN', 'DRAFT']) {
+      await expect(moved(status)).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
+    }
   });
 });

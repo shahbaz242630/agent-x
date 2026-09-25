@@ -39,7 +39,7 @@ import type {
   TamperSign,
 } from '../../audit/index.ts';
 import { type DirectoryTables, registerInvite } from '../../directory/index.ts';
-import { INVITATION, invitationEmail, invitationEnds } from '../domain/invitation.ts';
+import { INVITATION, invitationEmail, invitationEnds, needsConfirmation } from '../domain/invitation.ts';
 import { isRole, type Role } from '../domain/membership.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -53,6 +53,7 @@ export const INVITATIONS = {
     { column: 'invited_by', type: 'uuid' },
     { column: 'expires_at', type: 'timestamptz' },
     { column: 'step_up_challenge_id', type: 'uuid' },
+    { column: 'accepted_by', type: 'uuid' },
   ],
   rules: INVITATION,
 } as const satisfies SignedStateTable & { readonly rules: typeof INVITATION };
@@ -155,6 +156,7 @@ export async function draftInvitation(
     invited_by: invitedBy,
     expires_at: expiresAt,
     step_up_challenge_id: stepUpChallengeId,
+    accepted_by: null,
   };
   await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') just below (see the top of this file)
@@ -182,6 +184,8 @@ export interface InvitationRecord {
   readonly status: (typeof INVITATION.states)[number];
   readonly expiresAt: Date;
   readonly stepUpChallengeId: string;
+  /** The person who accepted it (B4-4b), once one has. */
+  readonly acceptedBy: string | null;
 }
 
 type Found<T> = T | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -191,12 +195,14 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Invit
   const status = fields.get('status');
   const expiresAt = fields.get('expires_at');
   const stepUpChallengeId = fields.get('step_up_challenge_id');
+  const acceptedBy = fields.get('accepted_by');
   // The table's checks hold each field to its kind, and the seal to what was written.
   if (
     !isRole(role) ||
     !INVITATION.states.some((state) => state === status) ||
     typeof expiresAt !== 'string' ||
-    typeof stepUpChallengeId !== 'string'
+    typeof stepUpChallengeId !== 'string' ||
+    acceptedBy === undefined
   ) {
     throw new Error(`A verified invitation holds a field that isn't one of its own: ${id}`);
   }
@@ -206,6 +212,7 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Invit
     status: status as InvitationRecord['status'],
     expiresAt: new Date(expiresAt),
     stepUpChallengeId,
+    acceptedBy,
   };
 };
 
@@ -229,6 +236,32 @@ export class InvitationUnreadable extends Error {
   constructor(id: string, options: ErrorOptions) {
     super(`An invitation's address can't be opened: ${id}`, options);
     this.name = 'InvitationUnreadable';
+  }
+}
+
+/**
+ * The invited address, decrypted, from a row the caller has read through its
+ * signed state in this transaction. An address that won't open throws
+ * InvitationUnreadable.
+ */
+async function invitedEmail(tx: InvitationsTransaction, keys: KeyProvider, orgId: string, id: string): Promise<string> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the encrypted address, no authority field: it opens only with its own row's IDs, and the caller read the row through its signed state first
+    .selectFrom(INVITATIONS.table)
+    .select(['email_ciphertext', 'email_key_version'])
+    .where('org_id', '=', orgId)
+    .where('id', '=', id)
+    .executeTakeFirstOrThrow();
+  try {
+    return keys
+      .decrypt(
+        'field-encryption',
+        { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
+        emailAssociatedData(orgId, id),
+      )
+      .toString('utf8');
+  } catch (error) {
+    throw new InvitationUnreadable(id, { cause: error });
   }
 }
 
@@ -263,25 +296,7 @@ export async function invitationToOpen(
   if (invitation.expiresAt.getTime() <= now.getTime()) return { outcome: 'ended' };
   const invitedBy = state.fields.get('invited_by');
   if (typeof invitedBy !== 'string') throw new Error(`A verified invitation names no admin who asked: ${id}`);
-  const row = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the encrypted address, no authority field: it opens only with its own row's IDs, and the row is locked by the verified read above
-    .selectFrom(INVITATIONS.table)
-    .select(['email_ciphertext', 'email_key_version'])
-    .where('org_id', '=', orgId)
-    .where('id', '=', id)
-    .executeTakeFirstOrThrow();
-  let email: string;
-  try {
-    email = keys
-      .decrypt(
-        'field-encryption',
-        { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
-        emailAssociatedData(orgId, id),
-      )
-      .toString('utf8');
-  } catch (error) {
-    throw new InvitationUnreadable(id, { cause: error });
-  }
+  const email = await invitedEmail(tx, keys, orgId, id);
   const change: InvitationChange = {
     orgId,
     id,
@@ -293,8 +308,8 @@ export async function invitationToOpen(
   return { outcome: 'draft', invitation, change, changeHash: changeHashOf(change) };
 }
 
-/** The token's SHA-256, as the directory lists it. */
-const tokenHashOf = (token: string): Buffer => createHash('sha256').update(token, 'ascii').digest();
+/** A token's SHA-256, as the directory lists it and as accepting looks it up (B4-4c). */
+export const inviteTokenHash = (token: string): Buffer => createHash('sha256').update(token, 'ascii').digest();
 
 /** An invitation that didn't open: the caller read it as a DRAFT first, so this is a failure on our side. */
 export class InvitationNotOpened extends Error {
@@ -323,7 +338,7 @@ export async function openInvitation(
 ): Promise<string> {
   const token = randomBytes(32).toString('base64url');
   // Before the move, whose event takes the chain's head, the last lock of all (ADR-006 §6).
-  await registerInvite(tx, { orgId, invitationId: id, tokenHash: tokenHashOf(token) });
+  await registerInvite(tx, { orgId, invitationId: id, tokenHash: inviteTokenHash(token) });
   const moved = await states.changeStatus(tx, INVITATIONS, { orgId, id }, 'open', {
     actor,
     action: 'invitation.opened',
@@ -331,4 +346,81 @@ export async function openInvitation(
   });
   if (moved.outcome !== 'changed') throw new InvitationNotOpened(id, moved.outcome);
   return token;
+}
+
+/**
+ * The open invitation, read for the change that accepts it (`change`, so it
+ * is locked until the transaction ends) and verified, in the caller's
+ * transaction, which must be withSignedStates' for its organisation: with the
+ * invited address decrypted, for the caller to match against the accepting
+ * person's verified one; or why it can't be accepted: missing, tampered
+ * with, or closed (not OPEN, or past its end at `now`).
+ */
+export async function invitationToAccept(
+  tx: InvitationsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  { orgId, id, now }: { orgId: string; id: string; now: Date },
+): Promise<
+  Found<
+    | { readonly outcome: 'open'; readonly invitation: InvitationRecord; readonly email: string }
+    | { readonly outcome: 'closed' }
+  >
+> {
+  const state = await states.verifiedState(tx, INVITATIONS, { orgId, id }, 'change');
+  if (state.outcome !== 'verified') return state;
+  const invitation = recordOf(id.toLowerCase(), state.fields);
+  if (invitation.status !== 'OPEN' || invitation.expiresAt.getTime() <= now.getTime()) return { outcome: 'closed' };
+  return { outcome: 'open', invitation, email: await invitedEmail(tx, keys, orgId, id) };
+}
+
+/** An invitation that didn't take its acceptance: the caller read it as OPEN first, so this is a failure on our side. */
+export class InvitationNotAccepted extends Error {
+  readonly outcome: string;
+
+  constructor(id: string, outcome: string) {
+    super(`An invitation didn't take its acceptance (${outcome}): ${id}`);
+    this.name = 'InvitationNotAccepted';
+    this.outcome = outcome;
+  }
+}
+
+/**
+ * Accepts the open invitation `invitationToAccept` read in this same
+ * transaction for `userId`, who the caller has matched to it: who accepted is
+ * recorded and sealed, then it moves to ACCEPTED, or, for a role an admin
+ * must confirm (admin, approver), to AWAITING_CONFIRMATION. The membership of
+ * a role that joins at once is the caller's to add, in the same transaction.
+ * Anything but those moves throws InvitationNotAccepted, so nothing is kept.
+ */
+export async function acceptInvitation(
+  tx: InvitationsTransaction,
+  states: SignedStates,
+  { orgId, id, userId, actor }: { orgId: string; id: string; userId: string; actor: AuditActor },
+): Promise<{ readonly outcome: 'accepted' | 'awaiting_confirmation'; readonly role: Role }> {
+  const key = { orgId, id };
+  const state = await states.verifiedState(tx, INVITATIONS, key, 'change');
+  if (state.outcome !== 'verified') throw new InvitationNotAccepted(id, state.outcome);
+  const { role, status } = recordOf(id.toLowerCase(), state.fields);
+  if (status !== 'OPEN') throw new InvitationNotAccepted(id, status);
+  await states.record(
+    tx,
+    INVITATIONS,
+    key,
+    state,
+    { accepted_by: userId },
+    {
+      actor,
+      action: 'invitation.acceptance_recorded',
+      details: { role },
+    },
+  );
+  const waits = needsConfirmation(role);
+  const moved = await states.changeStatus(tx, INVITATIONS, key, waits ? 'await' : 'accept', {
+    actor,
+    action: waits ? 'invitation.awaiting_confirmation' : 'invitation.accepted',
+    details: { role },
+  });
+  if (moved.outcome !== 'changed') throw new InvitationNotAccepted(id, moved.outcome);
+  return { outcome: waits ? 'awaiting_confirmation' : 'accepted', role };
 }

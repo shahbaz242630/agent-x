@@ -45,8 +45,10 @@ const INVITATION = z
     id: z.uuid().describe('The invitation, by its ID.'),
     role: ROLE.describe('The role the invited person joins with.'),
     status: z
-      .enum(['DRAFT', 'OPEN'])
-      .describe('DRAFT until the admin who asked signs in again and confirms it; OPEN once confirmed.'),
+      .enum(['DRAFT', 'OPEN', 'AWAITING_CONFIRMATION', 'ACCEPTED', 'DECLINED'])
+      .describe(
+        'DRAFT until the admin who asked signs in again and confirms it; OPEN once confirmed; ACCEPTED once the invited person has joined; AWAITING_CONFIRMATION while an accepted admin or approver waits for an admin to confirm them, then ACCEPTED or DECLINED.',
+      ),
     expiresAt: z.iso.datetime().describe('When it ends, 72 hours after it was asked for, whatever its status.'),
   })
   .register(API_SCHEMAS, { id: 'Invitation', description: 'An invitation to join the organisation.' });
