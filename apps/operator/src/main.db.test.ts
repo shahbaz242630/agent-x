@@ -3,6 +3,7 @@
 // platform's, in one transaction; it refuses the owner's role and rewritten
 // walls, and a failure anywhere leaves nothing behind. What it refuses before
 // it connects is main.test.ts.
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -26,6 +27,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
+import { firstAdminRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ create: undefined as Error | undefined }));
@@ -47,9 +49,9 @@ afterEach(() => {
 
 const server = inject('postgres');
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption']);
 /** The same key the command holds, to check what it wrote. */
-const auditKeys = loadKeys({ directory: keys.directory, current: {} }, ['audit-mac']);
+const auditKeys = loadKeys({ directory: keys.directory, current: {} }, ['audit-mac', 'field-encryption']);
 let database: TestDatabase;
 let app: Database<OperatorTables>;
 
@@ -160,7 +162,10 @@ describe(`B1c the operator creates an organisation (Postgres ${server.version})`
     expect(line('operator.starting')).toMatchObject({
       command: 'create-organization',
       role: 'agentx_app',
-      keys: [expect.objectContaining({ purpose: 'audit-mac', current: 1 })],
+      keys: [
+        expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
+        expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
+      ],
     });
     const created = line('operator.organization_created');
     const orgId = String(created?.orgId);
@@ -415,5 +420,121 @@ describe("B1c what the operator's command refuses, with nothing changed", () => 
       await owner.query('update platform_controls.audit_head set mac = $1', [kept?.mac]);
     }
     expect((await run(['create-organization', '--name', NAME])).code).toBe(0);
+  });
+});
+
+describe(`B4-6b the operator invites an organisation's first admin (Postgres ${server.version})`, () => {
+  /** An address a test can look for in every log line. */
+  const ADDRESS = 'quartzine.first@example.test';
+
+  /** Runs one request file, as the job does. */
+  async function runRequest(contents: string) {
+    const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-request-'));
+    try {
+      const file = path.join(folder, 'operator-request');
+      writeFileSync(file, contents);
+      return await run(['--request', file]);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }
+
+  /** A new organisation, made by the command itself. */
+  async function organization(): Promise<string> {
+    const id = uuidV7Ids.next();
+    const made = await runRequest(JSON.stringify(['create-organization', '--name', NAME, '--id', id]));
+    expect(made.code).toBe(0);
+    return id;
+  }
+
+  /** The request deploy/azure/operator.ts writes: the token made there, only its hash sent. */
+  const invitation = (orgId: string, id = uuidV7Ids.next()) => {
+    const token = randomBytes(32).toString('base64url');
+    const hash = createHash('sha256').update(token, 'ascii').digest('hex');
+    return { id, hash, request: firstAdminRequest(orgId, ADDRESS, id, hash) };
+  };
+
+  it('opens an admin’s invitation listed by the hash, on both chains, never logging the address', async () => {
+    const orgId = await organization();
+    const before = await counts();
+    const asked = invitation(orgId);
+
+    const done = await runRequest(asked.request);
+
+    expect(done.code).toBe(0);
+    expect(done.events).toEqual([
+      'operator.starting',
+      'db.schema_checked',
+      'status.changed',
+      'operator.first_admin_invited',
+    ]);
+    expect(done.line('operator.first_admin_invited')).toMatchObject({ orgId, invitationId: asked.id });
+    expect(done.text).not.toContain(ADDRESS);
+    expect(done.text).not.toContain(asked.hash);
+    const [row] = await database
+      .as('backup')
+      .query<{ role: string; status: string; invited_by: string | null }>(
+        'select role, status, invited_by from identity.invitations where id = $1',
+        [asked.id],
+      );
+    expect(row).toEqual({ role: 'admin', status: 'OPEN', invited_by: null });
+    const listed = await database
+      .as('backup')
+      .query('select 1 from directory.invites where token_hash = $1', [Buffer.from(asked.hash, 'hex')]);
+    expect(listed).toHaveLength(1);
+    expect(await counts()).toEqual({ orgs: before.orgs, platform: before.platform + 1 });
+    const [event] = await database
+      .as('backup')
+      .query<{ action: string; details: string }>(
+        'select action, details from platform_controls.audit_events order by seq desc limit 1',
+      );
+    expect(event?.action).toBe('invitation.first_admin');
+    expect(JSON.parse(event?.details ?? '{}')).toMatchObject({ orgId, invitationId: asked.id, release: 'r-operator' });
+  });
+
+  it('changes nothing when the same request runs again', async () => {
+    const orgId = await organization();
+    const asked = invitation(orgId);
+    expect((await runRequest(asked.request)).code).toBe(0);
+    const after = await counts();
+
+    const again = await runRequest(asked.request);
+
+    expect(again.code).toBe(1);
+    expect(again.line('operator.done_before')).toMatchObject({ command: 'invite-first-admin', invitationId: asked.id });
+    expect(await counts()).toEqual(after);
+  });
+
+  it('refuses an organisation that isn’t there, or one someone belongs to already, changing nothing', async () => {
+    const orgId = await organization();
+    const member = await runRequest(invitation(orgId).request);
+    expect(member.code).toBe(0);
+    // Someone listed there: the organisation is in use, and its admins invite.
+    const userId = uuidV7Ids.next();
+    await database
+      .as('admin')
+      .query(
+        "insert into identity.users (id, issuer, subject, created_at) values ($1, 'https://auth.example.test', $2, now())",
+        [userId, userId],
+      );
+    await database
+      .as('admin')
+      .query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        userId,
+        orgId,
+        uuidV7Ids.next(),
+      ]);
+    const before = await counts();
+
+    const inUse = await runRequest(invitation(orgId).request);
+    const missing = await runRequest(invitation(uuidV7Ids.next()).request);
+
+    expect(inUse.code).toBe(1);
+    expect(inUse.line('operator.refused')).toMatchObject({
+      problems: ['the organisation has members: its admins invite, not the operator'],
+    });
+    expect(missing.line('operator.refused')).toMatchObject({ problems: ['no organisation has this ID'] });
+    expect(await counts()).toEqual(before);
+    expect(`${inUse.text}${missing.text}`).not.toContain(ADDRESS);
   });
 });

@@ -51,7 +51,7 @@ import {
   jobName
   jobWorkloads
   networkAddressSpace
-  operatorKeys
+  operatorHolds
   releaseRoleName
   resourceNames
   resourceTags
@@ -394,7 +394,7 @@ var zitadelPolicy = [
 // command's own arguments in JSON. A run started with arguments of its own
 // loses every mounted file (the start API takes no mounts), its login and key
 // among them, and keeps those arguments in the run's record. So the person
-// starting a run writes this secret first (jobs.ts), the run reads it as a
+// starting a run writes this secret first (deploy/azure/operator.ts), the run reads it as a
 // file, and a read of the job never shows its value. Deployed as no request,
 // which the command refuses, so a deployment of the apps clears any request
 // left behind; one run again meanwhile changes nothing, since it names the
@@ -525,7 +525,7 @@ var jobs = [
         }
       ],
       // Found by name in the folder AGENTX_KEYS_DIR names, as the API finds its keys.
-      map(filter(appKeys, key => startsWith(key, operatorKeys)), key => {
+      map(filter(appKeys, key => operatorHolds(key)), key => {
         reads: key
         setting: ''
       })

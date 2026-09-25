@@ -220,12 +220,14 @@ const TELEMETRY_SETTINGS = [
  * whichever held which (PRs #27 and #28). The set-up job reads every database
  * login, since each of its runs sets them all. The API reads each of the app's
  * keys (ADR-011 §2), from the one list of them (app-keys.json); the operator's
- * command, the app's login and every version of the audit chains' MAC alone
- * (ADR-011 §3, B1c).
+ * command, the app's login and every version of the audit chains' MAC and of
+ * the field encryption alone (ADR-011 §3, B1c, B4-6b).
  */
 const GRANTS: ReadonlySet<string> = new Set([
   ...APP_KEYS.map((key) => `api reads ${key}`),
-  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v')).map((key) => `operator reads ${key}`),
+  ...APP_KEYS.filter((key) => key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')).map(
+    (key) => `operator reads ${key}`,
+  ),
   'api reads db-app-password',
   // B2-6: the API's own secret as the login service's client, which Zitadel gave.
   'api reads api-oidc-client-secret',
