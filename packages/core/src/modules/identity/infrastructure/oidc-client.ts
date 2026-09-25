@@ -15,9 +15,15 @@
 //   address out of the ID token unless the app is set to, which staging's
 //   isn't). The answer must name the ID token's person; its address comes out
 //   only when the login service says it is verified, in lower case, for an
-//   invitation to be matched against (B4-4c). An endpoint that fails gives no
-//   address and fails nothing. The access and refresh tokens are then
-//   dropped.
+//   invitation to be matched against (B4-4c). The access and refresh tokens
+//   are then dropped.
+// - B4-6c: the flow asks for the `profile` scope too, for the login name
+//   (`preferred_username`) alone: a sign-in whose userinfo answer names the
+//   login service's break-glass admin fails (`break_glass`), so that login
+//   never holds a session here, nor anything a session leads to. So an
+//   endpoint that fails fails the sign-in too, as the login service
+//   unavailable (503, to try again): no sign-in stands unchecked. The rest of
+//   the profile is never kept.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -44,6 +50,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, jwtVerify } from 'jose';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
+import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
 
@@ -92,7 +99,9 @@ export type SignInFailure =
   /** The login service refused the code: used already, expired, or not ours. */
   | 'code_rejected'
   /** The ID token failed a check. */
-  | 'token_invalid';
+  | 'token_invalid'
+  /** The login service's break-glass admin, who never signs in here (B4-6c). */
+  | 'break_glass';
 
 export class SignInFailed extends Error {
   override readonly name = 'SignInFailed';
@@ -392,28 +401,27 @@ export function createOidcClient({
    * The person's verified address, from the userinfo endpoint with the
    * access token: the answer must name the same person; an address comes out
    * only with `email_verified` true, and only as one address (the invitation's
-   * own rule), in lower case. An endpoint that can't be reached, or answers
-   * with anything but a JSON object, gives no address and fails nothing: a
-   * sign-in stands on its ID token, and only accepting an invitation needs an
-   * address (B4-4b review). An answer about another person fails the sign-in.
+   * own rule), in lower case. An answer about another person fails the
+   * sign-in, and so does one naming the break-glass admin's login (B4-6c).
+   * Since that check rests on the answer, an endpoint that can't be reached,
+   * or answers with anything but a JSON object, fails the sign-in as the
+   * login service unavailable, to be tried again (B4-6c review): never a
+   * sign-in let through unchecked. (B4-4a let one stand without an address.)
    */
   async function verifiedEmailOf(accessToken: string, subject: string): Promise<string | undefined> {
-    let info: Record<string, unknown>;
-    try {
-      const { userinfoEndpoint } = await discover();
-      const response = await call(userinfoEndpoint, {
-        headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
-      });
-      if (!response.ok) {
-        await response.body?.cancel();
-        return undefined;
-      }
-      info = await jsonObject(response, 'userinfo answer');
-    } catch (error) {
-      if (error instanceof SignInFailed && error.failure === 'provider_unavailable') return undefined;
-      throw error;
+    const { userinfoEndpoint } = await discover();
+    const response = await call(userinfoEndpoint, {
+      headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new SignInFailed('provider_unavailable', `the userinfo endpoint answered ${String(response.status)}`);
     }
+    const info = await jsonObject(response, 'userinfo answer');
     if (info.sub !== subject) throw new SignInFailed('token_invalid', 'the userinfo answer names another person');
+    if (isBreakGlassLogin(info.preferred_username, issuer)) {
+      throw new SignInFailed('break_glass', "the login is the login service's break-glass admin");
+    }
     if (info.email_verified !== true) return undefined;
     return invitationEmail(info.email);
   }
@@ -429,7 +437,7 @@ export function createOidcClient({
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('scope', 'openid email');
+      url.searchParams.set('scope', 'openid email profile');
       url.searchParams.set('state', flow.state);
       url.searchParams.set('nonce', flow.nonce);
       url.searchParams.set('code_challenge', createHash('sha256').update(flow.verifier).digest('base64url'));

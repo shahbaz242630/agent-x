@@ -257,6 +257,25 @@ describe('coming back from the login service', () => {
     );
   });
 
+  it('B4-6c refuses the login service’s break-glass admin as SIGN_IN_FAILED, with no cookie, noted as break_glass', async () => {
+    const standIn = new StandIn();
+    standIn.failWith = new SignInFailed('break_glass', "the login is the login service's break-glass admin");
+    const { app, capture, noted } = await server(standIn);
+
+    const response = await app.inject({
+      ...callback('?code=a-code&state=a-state', `${FLOW_COOKIE}=${FLOW_ID}`),
+      remoteAddress: '203.0.113.9',
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: { code: 'SIGN_IN_FAILED' } });
+    expect(response.headers['set-cookie']).toBeUndefined();
+    expect(noted).toEqual([{ kind: 'sign_in_failed', reason: 'break_glass', ip: '203.0.113.9' }]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.sign_in_failed', failure: 'break_glass' }),
+    );
+  });
+
   it('fails on our side, not as a refused sign-in, when something else goes wrong', async () => {
     const standIn = new StandIn();
     standIn.failWith = new Error('the database is away');

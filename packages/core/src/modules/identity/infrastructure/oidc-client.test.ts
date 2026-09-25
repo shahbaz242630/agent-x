@@ -173,7 +173,7 @@ describe('starting a sign-in', () => {
       response_type: 'code',
       client_id: CLIENT,
       redirect_uri: REDIRECT,
-      scope: 'openid email',
+      scope: 'openid email profile',
       state: flow.state,
       nonce: flow.nonce,
       code_challenge: createHash('sha256').update(flow.verifier).digest('base64url'),
@@ -721,15 +721,15 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
   });
 
   it.each([401, 500, 503])(
-    'gives no address, and the sign-in still stands, when the endpoint answers %i',
+    'fails as the login service unavailable when the endpoint answers %i (B4-6c: nothing stands unchecked)',
     async (status) => {
       service.userinfoStatus = status;
 
-      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+      await expectFailure(signIn(), 'provider_unavailable', new RegExp(`userinfo endpoint answered ${String(status)}`));
     },
   );
 
-  it('gives no address when the endpoint can’t be reached, answers an error in JSON, or answers what isn’t a JSON object', async () => {
+  it('fails as the login service unavailable when the endpoint can’t be reached, answers an error in JSON, or answers what isn’t a JSON object', async () => {
     const fetch = service.fetch;
     for (const answer of [
       // An error answer in JSON, as OAuth's bearer errors are, is still an error: never read as a person.
@@ -744,7 +744,7 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
         clock,
       });
 
-      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+      await expectFailure(signIn(), 'provider_unavailable');
     }
   });
 
@@ -783,5 +783,54 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
     service.discovery = { ...service.discovery, userinfo_endpoint: 'https://elsewhere.example.test/userinfo' };
 
     await expectFailure(signIn(), 'provider_unavailable', /userinfo_endpoint/);
+  });
+});
+
+describe('B4-6c the login service’s break-glass admin never signs in', () => {
+  const admin = { sub: SUBJECT, email: 'sara.khan@example.test', email_verified: true };
+
+  it.each(['admin@agent-x.auth.example.test', 'Admin@Agent-X.auth.example.test'])(
+    'fails when the userinfo answer names the login %s, whatever its address',
+    async (loginName) => {
+      service.userinfo = { ...admin, preferred_username: loginName };
+
+      await expectFailure(signIn(), 'break_glass', /break-glass/);
+    },
+  );
+
+  it('fails when it names the break-glass login with no verified address at all', async () => {
+    service.userinfo = { sub: SUBJECT, preferred_username: 'admin@agent-x.auth.example.test' };
+
+    await expectFailure(signIn(), 'break_glass');
+  });
+
+  it.each([500, 503])(
+    'lets no sign-in through unchecked when the endpoint answers %i: it fails, to be tried again (review)',
+    async (status) => {
+      service.userinfo = { ...admin, preferred_username: 'admin@agent-x.auth.example.test' };
+      service.userinfoStatus = status;
+
+      await expectFailure(signIn(), 'provider_unavailable');
+    },
+  );
+
+  it('never says the login name when it fails', async () => {
+    service.userinfo = { ...admin, preferred_username: 'Admin@Agent-X.auth.example.test' };
+
+    const failed = await signIn().catch((error: unknown) => error);
+
+    expect(failed).toBeInstanceOf(SignInFailed);
+    expect((failed as Error).message).not.toMatch(/agent-x|sara/i);
+  });
+
+  it.each([
+    ['another person in the same organisation', 'shahbaz@agent-x.auth.example.test'],
+    ['an admin of another organisation', 'admin@acme.auth.example.test'],
+    ['a person whose username is admin alone', 'admin'],
+    ['no login name', undefined],
+  ])('lets %s sign in, with their verified address', async (_what, loginName) => {
+    service.userinfo = { ...admin, ...(loginName !== undefined && { preferred_username: loginName }) };
+
+    await expect(signIn()).resolves.toMatchObject({ verifiedEmail: 'sara.khan@example.test' });
   });
 });

@@ -9,6 +9,8 @@
 import { type Browser, type BrowserContext, chromium, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { isBreakGlassLogin } from '../../packages/core/src/modules/identity/domain/break-glass.ts';
+import { LOGIN_ORIGIN, readAutomationToken } from './compose.ts';
 import { CALLBACK_PORT } from './global-setup.ts';
 import {
   authorizationRequest,
@@ -20,6 +22,7 @@ import {
   verifyIdToken,
 } from './oidc.ts';
 import { loginDriver, where } from './login-pages.ts';
+import { zitadelClient } from './zitadel.ts';
 
 const fixtures = inject('e2e');
 const { issuer, clientId, redirectUri, password, users } = fixtures;
@@ -206,6 +209,40 @@ describe('SEC-HA-01 a forced re-login asks for the second factor again', () => {
     const claims = await finish(request);
     expect(claims.amr).toEqual(expect.arrayContaining(['pwd', 'otp', 'mfa']));
     expect(claims.auth_time).toBe(latest.auth_time);
+  });
+
+  it('B4-6c names the login at userinfo as its login name, which is how the API knows the break-glass admin', async () => {
+    const request = await begin(page);
+    expect((await drive(page, users.totp, [])).shown).toEqual(['callback']);
+    const query = await callbackWithin(30_000);
+    const code = query?.get('code');
+    if (code === null || code === undefined) throw new Error('the callback carried no code');
+    const tokens = await exchangeCode(issuer, clientId, redirectUri, code, request.verifier);
+    const response = await fetch(`${issuer}/oidc/v1/userinfo`, {
+      headers: { authorization: `Bearer ${tokens.access_token}`, accept: 'application/json' },
+    });
+    expect(response.status).toBe(200);
+    const info = (await response.json()) as { preferred_username?: unknown };
+
+    // The API's check reads this claim: a person's is their login name, as Zitadel's own API gives it.
+    expect(info.preferred_username).toBe(users.totp.loginName);
+    expect(isBreakGlassLogin(info.preferred_username, issuer)).toBe(false);
+    // And Zitadel's first admin, set up with the stack, has the login name the API refuses.
+    const zitadel = zitadelClient(LOGIN_ORIGIN, await readAutomationToken());
+    interface Listed {
+      result?: { username?: string; preferredLoginName?: string; human?: { email?: { email?: string } } }[];
+    }
+    // Found by the address compose.yaml sets it up with. Zitadel's first set-up
+    // gives it the username with the organisation's domain (seen on #144's run:
+    // `admin@agent-x.localhost`), while every other login name here is the bare username.
+    const everyone = (await zitadel.post<Listed>('/v2/users', {})).result ?? [];
+    const seen = JSON.stringify(everyone.map(({ username, preferredLoginName }) => [username, preferredLoginName]));
+    const admins = everyone.filter(({ human }) => human?.email?.email === 'admin@agentx.localhost');
+    expect(admins.length, seen).toBe(1);
+    expect(admins[0]?.preferredLoginName, seen).toBe(`admin@agent-x.${new URL(issuer).hostname}`);
+    expect(isBreakGlassLogin(admins[0]?.preferredLoginName, issuer), seen).toBe(true);
+    // No one else's login name is refused.
+    expect(everyone.filter(({ preferredLoginName }) => isBreakGlassLogin(preferredLoginName, issuer)).length).toBe(1);
   });
 });
 
