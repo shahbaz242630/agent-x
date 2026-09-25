@@ -139,7 +139,7 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
 
   it('B4-4a keeps the address the login service verified, sealed with the session: its text is nowhere in the table', async () => {
     const row = await sql(
-      "SELECT pg_catalog.octet_length(e.email_ciphertext) || ',' || pg_catalog.position(pg_catalog.convert_to('agentx.localhost', 'UTF8') IN e.email_ciphertext) " +
+      "SELECT pg_catalog.octet_length(e.email_ciphertext) || ',' || position(pg_catalog.convert_to('agentx.localhost', 'UTF8') IN e.email_ciphertext) " +
         'FROM identity.session_emails e JOIN identity.sessions s ON s.id = e.session_id ' +
         `JOIN identity.users u ON u.id = s.user_id WHERE u.subject = '${subject()}'`,
     );
