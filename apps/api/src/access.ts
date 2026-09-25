@@ -45,8 +45,8 @@ export type Principal = (typeof PRINCIPALS)[number];
 const ROLES: readonly Principal[] = ['admin', 'approver', 'developer', 'viewer'];
 
 /** Whether a route's access names any of an organisation's roles: it then takes the organisation's header. */
-export const namesRole = (access: readonly unknown[] | undefined): boolean =>
-  access?.some((name) => ROLES.some((role) => role === name)) ?? false;
+export const namesRole = (access: readonly unknown[]): boolean =>
+  access.some((name) => ROLES.some((role) => role === name));
 
 /** A person acting in an organisation, as the access hook found their membership there. */
 export interface Member {

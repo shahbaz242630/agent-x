@@ -110,6 +110,10 @@ async function withRoutes(check: MembershipCheck | Error | undefined, options: {
     return { ok: true };
   });
   app.get('/v1/test-agents', { ...answer, config: { access: ['agent'] } }, () => ({ ok: true }));
+  app.get('/v1/test-shared', { ...answer, config: { access: ['admin', 'agent'] } }, (request) => {
+    reached.push({ member: request.member, person: request.person });
+    return { ok: true };
+  });
   await app.ready();
   return { app, reached, lookup, capture };
 }
@@ -250,6 +254,15 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
     expect(lookup.asked).toEqual([]);
   });
 
+  it('lets an admin through on a route that names agents beside roles, and refuses another role there', async () => {
+    const admin = await withRoutes(ACTIVE('admin'));
+    const viewer = await withRoutes(ACTIVE('viewer'));
+
+    expect((await admin.app.inject(signedIn({ url: '/v1/test-shared' }))).statusCode).toBe(200);
+    expect(admin.reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'admin' }, person: LIVE }]);
+    expect((await viewer.app.inject(signedIn({ url: '/v1/test-shared' }))).statusCode).toBe(403);
+  });
+
   it("refuses a person on an agent's route as FORBIDDEN, whatever organisation they name", async () => {
     const { app, lookup } = await withRoutes(ACTIVE('admin'));
 
@@ -270,7 +283,70 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
     for (const method of ['get', 'head', 'post'] as const) {
       expect(headerOf('/v1/test-members', method)).toMatchObject({ in: 'header', required: true });
     }
+    expect(headerOf('/v1/test-shared', 'get')).toMatchObject({ in: 'header', required: true });
     expect(headerOf('/v1/test-own', 'get')).toBeUndefined();
     expect(headerOf('/v1/test-agents', 'get')).toBeUndefined();
+  });
+});
+
+describe("the contract holds a route naming roles to the organisation's header", () => {
+  const ROLE_ROUTE = {
+    bodyLimit: 1024,
+    config: { access: ['admin'] },
+    schema: { response: { 200: z.object({ ok: z.literal(true) }) } },
+  } as const satisfies RouteShorthandOptions;
+
+  /** A server with no routes of these tests' own yet, not ready. */
+  async function bareServer() {
+    const app = await buildServer({
+      config: {
+        http: {
+          host: '127.0.0.1',
+          port: 0,
+          publicOrigin: PUBLIC_ORIGIN,
+          trustedProxies: [],
+          rateLimitPerMinute: 1000,
+          rateLimitPerUserPerMinute: 1000,
+        },
+        log: { level: 'info', eventCapPerMinute: 10_000 },
+      },
+      logger: createLogger({
+        service: 'api',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 10_000 } },
+        destination: new LogCapture(),
+      }),
+      ids: new SequentialIds(),
+      healthChecks: [],
+    });
+    servers.push(app);
+    return app;
+  }
+
+  it("refuses a route whose own headers schema isn't an object, which couldn't carry the header", async () => {
+    const app = await bareServer();
+    const options = { ...ROLE_ROUTE, schema: { ...ROLE_ROUTE.schema, headers: z.string() } };
+
+    expect(() => app.get('/v1/test-roles', options, () => ({ ok: true }))).toThrow(
+      "GET /v1/test-roles: it names roles, but its headers schema is not an object to carry the organisation's header",
+    );
+  });
+
+  it.each([
+    ['drops its headers', () => undefined],
+    ['swaps the header for a looser one', () => z.object({ [ORGANIZATION_HEADER]: z.string() })],
+    ['keeps its own headers without it', () => z.object({ 'x-agentx-test': z.string() })],
+  ])("refuses to start when a later hook %s, so the document wouldn't show it", async (_what, headers) => {
+    const app = await bareServer();
+    await app.register((child, _options, done) => {
+      child.addHook('onRoute', (route) => {
+        route.schema = { ...route.schema, headers: headers() };
+      });
+      child.get('/v1/test-roles', ROLE_ROUTE, () => ({ ok: true }));
+      done();
+    });
+
+    await expect(app.ready()).rejects.toThrow(
+      "GET /v1/test-roles: its document doesn't show the organisation's header it requires (headers)",
+    );
   });
 });

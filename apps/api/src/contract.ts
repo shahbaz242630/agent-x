@@ -446,7 +446,7 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (operation !== undefined && headers !== undefined && !(headers instanceof z.ZodObject)) {
     problems.push('it names an operation, but its headers schema is not an object to carry the idempotency key');
   }
-  const roles = namesRole(route.config?.access);
+  const roles = namesRole(route.config?.access ?? []);
   if (roles && headers !== undefined && !(headers instanceof z.ZodObject)) {
     problems.push("it names roles, but its headers schema is not an object to carry the organisation's header");
   }
