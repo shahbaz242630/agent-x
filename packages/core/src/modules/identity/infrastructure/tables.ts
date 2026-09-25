@@ -1,9 +1,12 @@
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql), as Kysely sees them. */
+import type { Generated } from 'kysely';
+
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
   'identity.login_flows': LoginFlowsTable;
   'identity.step_up_challenges': StepUpChallengesTable;
+  'identity.memberships': MembershipsTable;
 }
 
 interface UsersTable {
@@ -61,4 +64,16 @@ interface StepUpChallengesTable {
   amr: string[] | null;
   idp_session_id: string | null;
   id_token_hash: Buffer | null;
+}
+
+interface MembershipsTable {
+  org_id: string;
+  id: string;
+  user_id: string;
+  role: string;
+  status: string;
+  joined_at: Date;
+  /** These two are written by the signed state's steps alone (the audit module's record). */
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
 }

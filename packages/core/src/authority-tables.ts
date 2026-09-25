@@ -13,6 +13,7 @@
 // its migration.
 import type { SignedStateTable } from '@agentx/platform/db';
 
+import { MEMBERSHIPS } from './modules/identity/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 
 /**
@@ -32,4 +33,4 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
 }
 
-export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS];
+export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS, MEMBERSHIPS];

@@ -121,6 +121,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // would be an organisation no anchor check or sweep reaches.
       appMay: ['SELECT', 'INSERT'],
     },
+    'directory.members': {
+      reason:
+        "The directory's list of who belongs where (ADR-005 §6, B4-1): IDs only, a person's organisations and their membership in each, found at sign-in before any organisation is known; the membership itself is read and verified inside that organisation's withTenant",
+      columns: ['user_id', 'org_id', 'membership_id'],
+      // Added with its membership and read; an entry changed could point a
+      // person at another's membership (which its signed state then refuses),
+      // and one deleted would hide an organisation from its own member.
+      appMay: ['SELECT', 'INSERT'],
+    },
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
