@@ -26,6 +26,7 @@ import {
   createOidcClient,
   createSessions,
   createSignIn,
+  createInvitationAcceptance,
   createInvitationWrites,
   createStepUpChallenges,
   type IdentityTables,
@@ -348,6 +349,13 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId),
+    invitationAcceptance: createInvitationAcceptance({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
     invitationWrites: createInvitationWrites({
       database,
       keys,

@@ -14,6 +14,8 @@
 export const REASON_CODES = {
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
+  ALREADY_A_MEMBER:
+    "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
@@ -32,6 +34,8 @@ export const REASON_CODES = {
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
   INVITATION_CLOSED:
     "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed.",
+  INVITATION_INVALID:
+    "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation.",
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',

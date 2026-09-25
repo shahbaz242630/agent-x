@@ -33,6 +33,13 @@ export {
   type SessionTimeouts,
 } from './infrastructure/sessions.ts';
 export {
+  ACCEPT_OPERATION,
+  type Acceptance,
+  type AcceptingPerson,
+  createInvitationAcceptance,
+  type InvitationAcceptance,
+} from './infrastructure/accepting.ts';
+export {
   CONFIRM_OPERATION,
   createInvitationWrites,
   INVITE_OPERATION,

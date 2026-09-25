@@ -21,6 +21,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "ALREADY_A_MEMBER",
+                    "description": "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change."
+                  },
+                  {
+                    "type": "string",
                     "const": "BAD_REQUEST",
                     "description": "The request is malformed, so it can't be read."
                   },
@@ -68,6 +73,11 @@
                     "type": "string",
                     "const": "INVITATION_CLOSED",
                     "description": "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "INVITATION_INVALID",
+                    "description": "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation."
                   },
                   {
                     "type": "string",
@@ -275,6 +285,25 @@
         ],
         "additionalProperties": false,
         "description": "The invitation, open for the invited person."
+      },
+      "InvitationAccepted": {
+        "type": "object",
+        "properties": {
+          "organizationId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "invitation": {
+            "$ref": "#/components/schemas/Invitation"
+          }
+        },
+        "required": [
+          "organizationId",
+          "invitation"
+        ],
+        "additionalProperties": false,
+        "description": "The invitation accepted: ACCEPTED when the person has joined, AWAITING_CONFIRMATION while an admin or approver waits for an admin to confirm them."
       },
       "Member": {
         "type": "object",
@@ -1260,6 +1289,80 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/InvitationConfirmed"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/invitations/accept": {
+      "post": {
+        "operationId": "invitations.accept",
+        "summary": "Accept an invitation, signed in with the invited email address",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          }
+        ],
+        "x-access": [
+          "person"
+        ],
+        "x-body-limit": 256,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationAccepted"
                 }
               }
             }
