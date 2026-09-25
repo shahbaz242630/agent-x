@@ -11,10 +11,11 @@
 // 2. `confirm` (`members.approve.confirm`): the key claimed first; the admin
 //    read again; the invitation read for the change, still waiting, its hash
 //    worked out again; the challenge consumed only for this session, action
-//    and hash, verified and in time; who accepted must not be in the
-//    organisation yet; then the invitation moves to ACCEPTED with the
-//    step-up's evidence on its event, and the membership is added with the
-//    invitation's role, in the same transaction.
+//    and hash, verified and in time; who accepted must not be an active
+//    member there (a deactivated one may come back); then the invitation moves to
+//    ACCEPTED with the step-up's evidence on its event, and the membership
+//    is added with the invitation's role, or a deactivated one brought back
+//    with it (B4-5c), in the same transaction.
 // 3. `decline` (`members.decline`): the key claimed first; the admin read
 //    again; the invitation, waiting, moves to DECLINED. No step-up: declining
 //    grants nothing (ADR-003 §8's list is of changes that grant or restore).
@@ -37,7 +38,7 @@ import {
   invitationToConfirm,
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
-import { addMembership, isMembershipTaken, membershipOf } from './memberships.ts';
+import { addMembership, isMembershipTaken, membershipOf, reactivateMembership } from './memberships.ts';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -199,9 +200,9 @@ export function createAcceptanceConfirmations({
         if (consumed === undefined) throw new ConfirmationRefused(403, 'STEP_UP_FAILED');
         const { acceptedBy, role } = invitation;
         if (acceptedBy === null) throw new Error('an invitation waiting for confirmation names no one who accepted it');
-        const already = await membershipOf(tx, states, admin.orgId, acceptedBy);
+        const already = await membershipOf(tx, states, admin.orgId, acceptedBy, 'change');
         if (already.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
-        if (already.outcome !== 'none') throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
+        if (already.outcome === 'active') throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
         const actor = { type: 'user' as const, id: admin.userId };
         try {
           const moved = await states.changeStatus(
@@ -217,14 +218,25 @@ export function createAcceptanceConfirmations({
           );
           if (moved.outcome !== 'changed')
             throw new Error(`an invitation read as waiting did not move: ${moved.outcome}`);
-          await addMembership(tx, states, {
-            orgId: admin.orgId,
-            id: ids.next(),
-            userId: acceptedBy,
-            role,
-            joinedAt: clock.now(),
-            actor,
-          });
+          if (already.outcome === 'deactivated') {
+            // Deactivated there before: their membership comes back (B4-5c).
+            await reactivateMembership(tx, states, {
+              orgId: admin.orgId,
+              id: already.id,
+              role,
+              joinedAt: clock.now(),
+              actor,
+            });
+          } else {
+            await addMembership(tx, states, {
+              orgId: admin.orgId,
+              id: ids.next(),
+              userId: acceptedBy,
+              role,
+              joinedAt: clock.now(),
+              actor,
+            });
+          }
         } catch (error) {
           // Another of the person's invitations there, confirmed at the same moment, added them first.
           if (isMembershipTaken(error)) throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');

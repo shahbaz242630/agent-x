@@ -676,19 +676,18 @@ describe('the walls round a membership', () => {
     await expect(written('admin', 'ACTIVE')).rejects.toThrow('rolled back');
   });
 
-  it('a deactivated membership is never made active again past the module: the status guard refuses the move', async () => {
+  it('a deactivated membership made active again past the module grants nothing: its seal no longer holds (B4-5c)', async () => {
     const org = await organization();
     const user = await person();
     const { id } = await add(org, user, 'admin');
     await deactivate(org, id);
 
-    await expect(
-      withTenant(app, org, (tx) =>
-        tx.updateTable('identity.memberships').set({ status: 'ACTIVE' }).where('id', '=', id).execute(),
-      ),
-    ).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
+    // The status guard allows the move since 0019, as rejoining makes it; only the module's step signs it.
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ status: 'ACTIVE' }).where('id', '=', id).execute(),
+    );
 
-    expect(await check(org, user)).toEqual({ outcome: 'deactivated', id });
+    expect(await check(org, user)).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 
   it('the backup role reads both tables, every organisation’s rows, as a logical backup must', async () => {

@@ -260,6 +260,49 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
     },
   );
 
+  it('brings back a person deactivated there, as the approver they were invited as, only once confirmed (B4-5c)', async () => {
+    const who = await organization();
+    const returning = await member(who.org, 'viewer');
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    const { id } = await accepted(who, 'approver', returning.userId);
+    expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
+      outcome: 'deactivated',
+      id: returning.membershipId,
+    });
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+
+    expect(await confirm(who.admin, id, challengeId)).toMatchObject({
+      outcome: 'written',
+      invitation: { status: 'ACCEPTED' },
+    });
+    expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
+      outcome: 'active',
+      id: returning.membershipId,
+      role: 'approver',
+    });
+  });
+
+  it('refuses a person active there already as ALREADY_A_MEMBER', async () => {
+    const who = await organization();
+    const already = await member(who.org, 'viewer');
+    const { id } = await accepted(who, 'approver', already.userId);
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+
+    expect(await confirm(who.admin, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'ALREADY_A_MEMBER',
+    });
+  });
+
   it('refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {
     const who = await organization();
     const { id, invitee } = await accepted(who);

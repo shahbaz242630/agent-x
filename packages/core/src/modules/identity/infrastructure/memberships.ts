@@ -85,6 +85,49 @@ export async function addMembership(
   });
 }
 
+/** A deactivated membership brought back: which, with what role, from when, and by whom. */
+export interface Reactivation {
+  readonly orgId: string;
+  readonly id: string;
+  readonly role: Role;
+  /** When it came back: its new start, as a member returning isn't an established one (ADR-012 §1). */
+  readonly joinedAt: Date;
+  readonly actor: AuditActor;
+}
+
+/**
+ * Brings a deactivated membership back, in the caller's transaction, which
+ * must be withSignedStates' for its organisation and read it for change
+ * (membershipOf's `change`): its role and start set first, then
+ * DEACTIVATED>ACTIVE (0019). Throws if it isn't there, verified, and
+ * deactivated: the caller read it so just now, in this transaction.
+ */
+export async function reactivateMembership(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  { orgId, id, role, joinedAt, actor }: Reactivation,
+): Promise<void> {
+  const key = { orgId, id };
+  const current = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
+  if (current.outcome !== 'verified' || current.fields.get('status') !== 'DEACTIVATED') {
+    throw new Error(`a membership read as deactivated is not: ${current.outcome}`);
+  }
+  await states.record(
+    tx,
+    MEMBERSHIPS,
+    key,
+    current,
+    { role, joined_at: joinedAt },
+    { actor, action: 'membership.renewed', details: { roleFrom: current.fields.get('role') ?? null, roleTo: role } },
+  );
+  const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'reactivate', {
+    actor,
+    action: 'membership.reactivated',
+    details: { role },
+  });
+  if (moved.outcome !== 'changed') throw new Error(`a deactivated membership did not move back: ${moved.outcome}`);
+}
+
 /**
  * Whether an error is the directory's key refusing a second entry for the
  * person in the organisation (0015): a membership added since the caller
@@ -108,18 +151,21 @@ export type MembershipCheck =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * The person's membership of the organisation, read for a decision (`share`)
- * in the caller's transaction, which must be withSignedStates' for it.
+ * The person's membership of the organisation, read for a decision (`share`),
+ * or for a change the caller may make to it (`change`: a deactivated one
+ * brought back, B4-5c), in the caller's transaction, which must be
+ * withSignedStates' for it.
  */
 export async function membershipOf(
   tx: MembershipsTransaction,
   states: SignedStates,
   orgId: string,
   userId: string,
+  lock: 'share' | 'change' = 'share',
 ): Promise<MembershipCheck> {
   const id = await listedMembership(tx, orgId, userId);
   if (id === undefined) return { outcome: 'none' };
-  const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId, id }, 'share');
+  const state = await states.verifiedState(tx, MEMBERSHIPS, { orgId, id }, lock);
   if (state.outcome === 'missing') return { outcome: 'none' };
   if (state.outcome === 'tampered') return state;
   // The entry named another person's membership: not this person's, whatever it grants.

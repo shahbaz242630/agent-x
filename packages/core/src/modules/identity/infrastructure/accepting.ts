@@ -13,13 +13,15 @@
 //    (otherwise 409 INVITATION_CLOSED), with the invited address decrypted.
 // 3. The person's session must hold a verified address (B4-4a) equal to the
 //    invited one; a session with none, or another, is INVITATION_INVALID.
-// 4. The person must not be in the organisation already (409 ALREADY_A_MEMBER,
-//    a deactivated membership included: rejoining is B4-5's). Two of their
-//    invitations there accepted at the same moment: the second finds the
-//    directory's key taken, and is refused the same way.
+// 4. The person must not be an active member already (409 ALREADY_A_MEMBER).
+//    Two of their invitations there accepted at the same moment: the second
+//    finds the directory's key taken, and is refused the same way.
 // 5. The invitation is accepted: a developer or viewer joins now, the
-//    membership added in the same transaction; an admin or finance approver
-//    waits for an existing admin to confirm who accepted (B4-4d).
+//    membership added in the same transaction, or, for a person deactivated
+//    there, their membership brought back with the invitation's role and
+//    today's start (B4-5c); an admin or finance approver waits for an
+//    existing admin to confirm who accepted (B4-4d), who brings them back
+//    the same way.
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
@@ -39,7 +41,7 @@ import {
   invitationToAccept,
   inviteTokenHash,
 } from './invitations.ts';
-import { addMembership, isMembershipTaken, membershipOf } from './memberships.ts';
+import { addMembership, isMembershipTaken, membershipOf, reactivateMembership } from './memberships.ts';
 import { sessionEmailOf } from './session-emails.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -121,9 +123,9 @@ export function createInvitationAcceptance({
             if (read.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
             if (read.outcome === 'closed') throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
             if (address === undefined || address !== read.email) throw new AcceptanceRefused(403, 'INVITATION_INVALID');
-            const membership = await membershipOf(tx, states, orgId, person.userId);
+            const membership = await membershipOf(tx, states, orgId, person.userId, 'change');
             if (membership.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
-            if (membership.outcome !== 'none') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
+            if (membership.outcome === 'active') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
             const actor = { type: 'user' as const, id: person.userId };
             try {
               const accepted = await acceptInvitation(tx, states, {
@@ -132,7 +134,15 @@ export function createInvitationAcceptance({
                 userId: person.userId,
                 actor,
               });
-              if (accepted.outcome === 'accepted') {
+              if (accepted.outcome === 'accepted' && membership.outcome === 'deactivated') {
+                await reactivateMembership(tx, states, {
+                  orgId,
+                  id: membership.id,
+                  role: accepted.role,
+                  joinedAt: now,
+                  actor,
+                });
+              } else if (accepted.outcome === 'accepted') {
                 await addMembership(tx, states, {
                   orgId,
                   id: ids.next(),
