@@ -20,6 +20,7 @@ import {
   type MembershipsTransaction,
   membersOf,
   MOST_MEMBERS,
+  reactivateMembership,
   TooManyMembers,
 } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
@@ -218,6 +219,23 @@ describe('a person’s membership, read for a decision', () => {
 
     expect(await check(mine, user)).toEqual({ outcome: 'none' });
     expect(await check(mine, await person())).toEqual({ outcome: 'none' });
+  });
+
+  it('brings a deactivated membership back only: one active is never reactivated, and nothing is written (B4-5c)', async () => {
+    const org = await organization();
+    const user = await person();
+    const { id } = await add(org, user, 'viewer');
+    const reactivate = () =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        reactivateMembership(tx, states, { orgId: org, id, role: 'admin', joinedAt: clock.now(), actor: OPERATOR }),
+      );
+
+    await expect(reactivate()).rejects.toThrow('a membership read as deactivated is not');
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'viewer' });
+
+    await deactivate(org, id);
+    await reactivate();
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin' });
   });
 
   it('is deactivated once deactivated, whatever its role, and deactivating again is refused', async () => {
@@ -676,19 +694,18 @@ describe('the walls round a membership', () => {
     await expect(written('admin', 'ACTIVE')).rejects.toThrow('rolled back');
   });
 
-  it('a deactivated membership is never made active again past the module: the status guard refuses the move', async () => {
+  it('a deactivated membership made active again past the module grants nothing: its seal no longer holds (B4-5c)', async () => {
     const org = await organization();
     const user = await person();
     const { id } = await add(org, user, 'admin');
     await deactivate(org, id);
 
-    await expect(
-      withTenant(app, org, (tx) =>
-        tx.updateTable('identity.memberships').set({ status: 'ACTIVE' }).where('id', '=', id).execute(),
-      ),
-    ).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
+    // The status guard allows the move since 0019, as rejoining makes it; only the module's step signs it.
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ status: 'ACTIVE' }).where('id', '=', id).execute(),
+    );
 
-    expect(await check(org, user)).toEqual({ outcome: 'deactivated', id });
+    expect(await check(org, user)).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 
   it('the backup role reads both tables, every organisation’s rows, as a logical backup must', async () => {

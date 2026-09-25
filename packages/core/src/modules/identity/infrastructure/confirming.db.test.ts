@@ -15,6 +15,8 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -259,6 +261,63 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
       expect(await confirm(who.admin, id, challengeId)).toEqual(confirmed);
     },
   );
+
+  it('brings back a person deactivated there, as the approver they were invited as, only once confirmed (B4-5c)', async () => {
+    const who = await organization();
+    const returning = await member(who.org, 'viewer');
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    const { id } = await accepted(who, 'approver', returning.userId);
+    expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
+      outcome: 'deactivated',
+      id: returning.membershipId,
+    });
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+
+    expect(await confirm(who.admin, id, challengeId)).toMatchObject({
+      outcome: 'written',
+      invitation: { status: 'ACCEPTED' },
+    });
+    expect(await membershipFor(app, services(), who.org, returning.userId)).toEqual({
+      outcome: 'active',
+      id: returning.membershipId,
+      role: 'approver',
+    });
+  });
+
+  it('refuses an admin confirming an invitation they accepted themselves as ALREADY_A_MEMBER', async () => {
+    const who = await organization();
+    const other = await member(who.org, 'admin');
+    const { id } = await accepted(who, 'approver', other.userId);
+    const challengeId = await asked(other, id);
+    await stepUp(other, challengeId);
+
+    expect(await confirm(other, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'ALREADY_A_MEMBER',
+    });
+  });
+
+  it('refuses a person active there already as ALREADY_A_MEMBER', async () => {
+    const who = await organization();
+    const already = await member(who.org, 'viewer');
+    const { id } = await accepted(who, 'approver', already.userId);
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+
+    expect(await confirm(who.admin, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'ALREADY_A_MEMBER',
+    });
+  });
 
   it('refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {
     const who = await organization();
@@ -536,5 +595,69 @@ describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, ()
       .as('backup')
       .query('select 1 from directory.members where user_id = $1', [first.invitee]);
     expect(entries).toHaveLength(1);
+  });
+
+  it('takes the two memberships in order of ID, so a change holding the lower one never deadlocks with it (B4-5c)', async () => {
+    const who = await organization();
+    // Theirs is made before the confirming admin's, so its ID is the lower of the two.
+    const returning = await member(who.org, 'viewer');
+    const admin = await member(who.org, 'admin');
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: returning.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    const { id } = await accepted(who, 'approver', returning.userId);
+    const challengeId = await asked(admin, id);
+    await stepUp(admin, challengeId);
+    // Another transaction reads the returning person's membership, and will then change the admin's.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for share', [
+        who.org,
+        returning.membershipId,
+      ]);
+      const confirming = within(20_000, confirm(admin, id, challengeId), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'written', invitation: { status: 'ACCEPTED' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('asks after an invitation being confirmed, never holding the admin’s membership while it waits (B4-5c)', async () => {
+    const who = await organization();
+    const { id } = await accepted(who);
+    // Another transaction confirming it: the invitation first, then the admin's membership.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.invitations where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        id,
+      ]);
+      const asking = within(20_000, ask(who.admin, id), 'the ask');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        who.admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(await asking).toMatchObject({ outcome: 'asked' });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });

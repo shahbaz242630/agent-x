@@ -429,34 +429,107 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 403, code: 'INVITATION_INVALID' });
   });
 
-  it.each(['viewer', 'admin'] as const)(
-    'refuses someone whose membership there was deactivated, invited as %s, as ALREADY_A_MEMBER: rejoining is B4-5’s',
-    async (role) => {
-      const who = await organization();
-      const { token } = await invitation(who, role);
-      const member = await person();
-      const membershipId = ids.next();
-      await withSignedStates(app, who.org, services(), async (tx, states) => {
-        await addMembership(tx, states, {
-          orgId: who.org,
-          id: membershipId,
-          userId: member.userId,
-          role: 'viewer',
-          joinedAt: clock.now(),
-          actor: OPERATOR,
-        });
+  /** The person, a viewer there once, deactivated since; their membership's ID. */
+  async function deactivatedIn(org: string, member: AcceptingPerson): Promise<string> {
+    const membershipId = ids.next();
+    await withSignedStates(app, org, services(), async (tx, states) => {
+      await addMembership(tx, states, {
+        orgId: org,
+        id: membershipId,
+        userId: member.userId,
+        role: 'viewer',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
       });
-      await withSignedStates(app, who.org, services(), (tx, states) =>
-        states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: membershipId }, 'deactivate', {
-          actor: OPERATOR,
-          action: 'membership.deactivated',
-          details: {},
-        }),
-      );
+    });
+    await withSignedStates(app, org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    return membershipId;
+  }
 
-      expect(await accept(member, token)).toEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
-    },
-  );
+  it('brings a person deactivated there back as a developer: the same membership, the invitation’s role, a new start (B4-5c)', async () => {
+    const who = await organization();
+    const member = await person();
+    const membershipId = await deactivatedIn(who.org, member);
+    const { id, token } = await invitation(who, 'developer');
+    clock.advanceBy(86_400_000);
+
+    expect(await accept(member, token)).toMatchObject({ outcome: 'accepted', invitation: { id, status: 'ACCEPTED' } });
+    expect(await membershipOfPerson(who.org, member.userId)).toEqual({
+      outcome: 'active',
+      id: membershipId,
+      role: 'developer',
+    });
+    const list = await membersFor(app, services(), who.org);
+    expect(list).toMatchObject({
+      outcome: 'listed',
+      members: expect.arrayContaining([
+        expect.objectContaining({ id: membershipId, joinedAt: clock.now() }),
+      ]) as unknown,
+    });
+    const events = await database
+      .as('backup')
+      .query<{ action: string; details: string }>(
+        'select action, details from audit.events where subject_id = $1 order by seq',
+        [membershipId],
+      );
+    expect(events.map(({ action }) => action)).toEqual([
+      'membership.created',
+      'membership.deactivated',
+      'membership.renewed',
+      'membership.reactivated',
+    ]);
+    expect(JSON.parse(events[2]?.details ?? '{}')).toMatchObject({ roleFrom: 'viewer', roleTo: 'developer' });
+    expect(JSON.parse(events[3]?.details ?? '{}')).toMatchObject({
+      role: 'developer',
+      statusFrom: 'DEACTIVATED',
+      statusTo: 'ACTIVE',
+    });
+    // Still one entry, one membership.
+    const entries = await database
+      .as('backup')
+      .query('select 1 from directory.members where user_id = $1', [member.userId]);
+    expect(entries).toHaveLength(1);
+  });
+
+  it('brings a person deactivated there back once when two of their invitations are accepted at the same moment (B4-5c)', async () => {
+    const who = await organization();
+    const member = await person();
+    const membershipId = await deactivatedIn(who.org, member);
+    const first = await invitation(who, 'viewer');
+    const second = await invitation(who, 'developer');
+
+    const answers = await Promise.all([
+      accept(member, first.token, 'accept-a'),
+      accept(member, second.token, 'accept-b'),
+    ]);
+
+    expect(answers.map((answer) => answer.outcome).sort()).toEqual(['accepted', 'refused']);
+    expect(answers).toContainEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+    expect(await membershipOfPerson(who.org, member.userId)).toMatchObject({ outcome: 'active', id: membershipId });
+    const reactivations = await database
+      .as('backup')
+      .query("select 1 from audit.events where subject_id = $1 and action = 'membership.reactivated'", [membershipId]);
+    expect(reactivations).toHaveLength(1);
+  });
+
+  it('keeps a person deactivated there waiting, invited as an admin, until an admin confirms them (B4-5c)', async () => {
+    const who = await organization();
+    const member = await person();
+    const membershipId = await deactivatedIn(who.org, member);
+    const { token } = await invitation(who, 'admin');
+
+    expect(await accept(member, token)).toMatchObject({
+      outcome: 'accepted',
+      invitation: { status: 'AWAITING_CONFIRMATION' },
+    });
+    expect(await membershipOfPerson(who.org, member.userId)).toEqual({ outcome: 'deactivated', id: membershipId });
+  });
 
   it('joins once when two of a person’s invitations there are accepted at the same moment', async () => {
     const who = await organization();
