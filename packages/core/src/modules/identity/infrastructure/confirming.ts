@@ -39,7 +39,7 @@ import {
   invitationToConfirm,
 } from './invitations.ts';
 import type { InvitingAdmin } from './inviting.ts';
-import { addMembership, membershipOf } from './memberships.ts';
+import { addMembership, isMembershipTaken, membershipOf } from './memberships.ts';
 import type { ConsumedStepUp, StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -229,21 +229,33 @@ export function createAcceptanceConfirmations({
         if (already.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
         if (already.outcome !== 'none') throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
         const actor = { type: 'user' as const, id: admin.userId };
-        const moved = await states.changeStatus(tx, INVITATIONS, { orgId: admin.orgId, id: invitationId }, 'confirm', {
-          actor,
-          action: 'invitation.confirmed',
-          details: { role, ...evidenceOf(consumed) },
-        });
-        if (moved.outcome !== 'changed')
-          throw new Error(`an invitation read as waiting did not move: ${moved.outcome}`);
-        await addMembership(tx, states, {
-          orgId: admin.orgId,
-          id: ids.next(),
-          userId: acceptedBy,
-          role,
-          joinedAt: clock.now(),
-          actor,
-        });
+        try {
+          const moved = await states.changeStatus(
+            tx,
+            INVITATIONS,
+            { orgId: admin.orgId, id: invitationId },
+            'confirm',
+            {
+              actor,
+              action: 'invitation.confirmed',
+              details: { role, ...evidenceOf(consumed) },
+            },
+          );
+          if (moved.outcome !== 'changed')
+            throw new Error(`an invitation read as waiting did not move: ${moved.outcome}`);
+          await addMembership(tx, states, {
+            orgId: admin.orgId,
+            id: ids.next(),
+            userId: acceptedBy,
+            role,
+            joinedAt: clock.now(),
+            actor,
+          });
+        } catch (error) {
+          // Another of the person's invitations there, confirmed at the same moment, added them first.
+          if (isMembershipTaken(error)) throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
+          throw error;
+        }
         return { status: 200, resourceId: invitation.id };
       });
       if ('refused' in ran) return ran.refused;

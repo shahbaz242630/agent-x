@@ -85,6 +85,17 @@ export async function addMembership(
 }
 
 /**
+ * Whether an error is the directory's key refusing a second entry for the
+ * person in the organisation (0015): a membership added since the caller
+ * checked there was none, by a write at the same moment (B4-4c, B4-4d).
+ */
+export const isMembershipTaken = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  (error as { code?: unknown }).code === '23505' &&
+  (error as { constraint?: unknown }).constraint === 'members_pkey';
+
+/**
  * The person's membership of the organisation, verified: active with its
  * role, deactivated, none, or tampered with (the alarm is raised, and the
  * organisation held). Anything but `active` grants nothing.

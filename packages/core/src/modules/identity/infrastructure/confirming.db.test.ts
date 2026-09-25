@@ -120,6 +120,7 @@ async function organization(): Promise<{ org: string; admin: InvitingAdmin & { m
 async function accepted(
   { org, admin }: { org: string; admin: InvitingAdmin & { membershipId: string } },
   role: Role = 'approver',
+  by: string | null = null,
 ): Promise<{ id: string; invitee: string }> {
   const id = ids.next();
   const actor = { type: 'user' as const, id: admin.userId };
@@ -131,7 +132,7 @@ async function accepted(
     invitedBy: admin.membershipId,
     createdAt: clock.now(),
   });
-  const invitee = (await signedIn()).userId;
+  const invitee = by ?? (await signedIn()).userId;
   await withSignedStates(app, org, services(), (tx, states) =>
     draftInvitation(tx, states, keys, change, { stepUpChallengeId: ids.next(), createdAt: clock.now(), actor }),
   );
@@ -510,5 +511,30 @@ describe(`confirming, the harder cases (B4-4d, Postgres ${server.version})`, () 
         CORRELATION,
       ),
     ).rejects.toBeInstanceOf(TenantContextError);
+  });
+});
+
+describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, () => {
+  it('adds a person once when their two waiting invitations are confirmed at the same moment', async () => {
+    const who = await organization();
+    const other = await member(who.org, 'admin');
+    const first = await accepted(who, 'approver');
+    const second = await accepted(who, 'admin', first.invitee);
+    const firstChallenge = await asked(who.admin, first.id);
+    const secondChallenge = await asked(other, second.id);
+    await stepUp(who.admin, firstChallenge);
+    await stepUp(other, secondChallenge);
+
+    const answers = await Promise.all([
+      confirm(who.admin, first.id, firstChallenge),
+      confirm(other, second.id, secondChallenge),
+    ]);
+
+    expect(answers.map((answer) => answer.outcome).sort()).toEqual(['refused', 'written']);
+    expect(answers).toContainEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+    const entries = await database
+      .as('backup')
+      .query('select 1 from directory.members where user_id = $1', [first.invitee]);
+    expect(entries).toHaveLength(1);
   });
 });
