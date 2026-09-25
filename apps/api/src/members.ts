@@ -8,7 +8,7 @@
 // the alarm is raised and the organisation held, and no list is given that
 // holds a role or a status someone may have forged. People are shown by
 // their Agent X IDs: names and email addresses stay with the login service.
-import type { MembersList } from '@agentx/core/modules/identity';
+import type { MemberRecord, MembersList } from '@agentx/core/modules/identity';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -19,24 +19,32 @@ import { sendErrorBody } from './errors.ts';
 /** The organisation's members, verified, for the request with this correlation ID. */
 export type ListMembers = (orgId: string, correlationId: string) => Promise<MembersList>;
 
+/** A member, as the list and a change to one answer it. */
+export const MEMBER = z
+  .object({
+    id: z.uuid().describe('The membership, by its ID.'),
+    userId: z.uuid().describe("The person's ID in Agent X."),
+    role: z.enum(['admin', 'approver', 'developer', 'viewer']).describe('Their role in the organisation.'),
+    status: z.enum(['ACTIVE', 'DEACTIVATED']).describe('ACTIVE, or DEACTIVATED once removed from the organisation.'),
+    joinedAt: z.iso.datetime().describe('When they joined the organisation.'),
+  })
+  .register(API_SCHEMAS, { id: 'Member', description: 'A person in the organisation, and their role.' });
+
+/** A member as the API answers it. */
+export const memberOf = ({ id, userId, role, status, joinedAt }: MemberRecord) => ({
+  id,
+  userId,
+  role,
+  status,
+  joinedAt: joinedAt.toISOString(),
+});
+
 const MEMBERS_SCHEMA = {
   summary: "Your organisation's members",
   response: {
     200: z
       .object({
-        members: z.array(
-          z
-            .object({
-              id: z.uuid().describe('The membership, by its ID.'),
-              userId: z.uuid().describe("The person's ID in Agent X."),
-              role: z.enum(['admin', 'approver', 'developer', 'viewer']).describe('Their role in the organisation.'),
-              status: z
-                .enum(['ACTIVE', 'DEACTIVATED'])
-                .describe('ACTIVE, or DEACTIVATED once removed from the organisation.'),
-              joinedAt: z.iso.datetime().describe('When they joined the organisation.'),
-            })
-            .register(API_SCHEMAS, { id: 'Member', description: 'A person in the organisation, and their role.' }),
-        ),
+        members: z.array(MEMBER),
       })
       .register(API_SCHEMAS, {
         id: 'Members',
@@ -60,15 +68,7 @@ export function registerMembers(app: FastifyInstance, listMembers: ListMembers |
       if (member === null || listMembers === undefined) throw new Error('the members route ran without a member');
       const list = await listMembers(member.orgId, request.id);
       if (list.outcome === 'tampered') return sendErrorBody(reply, 503, 'INTEGRITY_FAILED', request.id);
-      return {
-        members: list.members.map(({ id, userId, role, status, joinedAt }) => ({
-          id,
-          userId,
-          role,
-          status,
-          joinedAt: joinedAt.toISOString(),
-        })),
-      };
+      return { members: list.members.map(memberOf) };
     },
   );
 }
