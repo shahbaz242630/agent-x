@@ -3,6 +3,7 @@
 // from them and recording each call. A PATCH is read from the file it is sent
 // in, as it is sent, and taken only after a few readings, as Azure settles a
 // change in the background; time moves only when the runner sleeps.
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
@@ -18,10 +19,12 @@ import type { Az, AzResult } from './deploy.ts';
 import { jobName, JOBS_API, UsageError } from './jobs.ts';
 import {
   createOrganization,
+  inviteFirstAdmin,
   main,
   NO_REQUEST,
   OPERATOR_JOB,
   parseArguments,
+  parseFirstAdmin,
   REQUEST_SECRET,
   USAGE,
 } from './operator.ts';
@@ -99,8 +102,11 @@ const operatorContainer = (on: string, build: string) => ({
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
 });
 
+/** The address a first admin's link starts with: never a real domain in the repository. */
+const ORIGIN = 'https://app.example.test';
+
 /** The API's container, as a release reads it. */
-const apiContainer = (on: string, build: string) => ({
+const apiContainer = (on: string, build: string, origin: string | null = ORIGIN) => ({
   name: 'api',
   image: on,
   command: ['node', 'apps/api/src/main.ts'],
@@ -108,6 +114,7 @@ const apiContainer = (on: string, build: string) => ({
   env: [
     { name: 'AGENTX_ENV', value: 'staging' },
     { name: 'AGENTX_RELEASE', value: build },
+    ...(origin === null ? [] : [{ name: 'AGENTX_PUBLIC_ORIGIN', value: origin }]),
   ],
   resources: { cpu: 0.5, memory: '1Gi', ephemeralStorage: '2Gi' },
   volumeMounts: [{ mountPath: '/mnt/secrets', volumeName: 'secrets' }],
@@ -139,7 +146,11 @@ type Ending =
   | 'created-other'
   | 'done-before-other'
   | 'created-then-failed'
-  | 'silent';
+  | 'silent'
+  | 'invited'
+  | 'invited-done-before'
+  | 'invited-other'
+  | 'invite-refused';
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
@@ -173,10 +184,25 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   'created-then-failed': (id) => [said({ event: 'operator.organization_created', orgId: id }), TERMINATED],
   // Azure delivered none of the command's own lines.
   silent: () => [TERMINATED],
+  invited: (id) => [
+    said({ event: 'operator.starting' }),
+    said({ event: 'operator.first_admin_invited', invitationId: id }),
+    TERMINATED,
+  ],
+  'invited-done-before': (id) => [said({ event: 'operator.done_before', invitationId: id }), TERMINATED],
+  'invited-other': () => [said({ event: 'operator.first_admin_invited', invitationId: OTHER_ID }), TERMINATED],
+  'invite-refused': (id) => [
+    said({
+      event: 'operator.refused',
+      invitationId: id,
+      problems: ['the organisation has members: its admins invite, not the operator'],
+    }),
+    TERMINATED,
+  ],
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
-const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent']);
+const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent', 'invited', 'invited-other']);
 
 /** How Azure settles a change: the state it ends in, or never. */
 type Settles = 'Succeeded' | 'Failed' | 'Canceled' | 'never';
@@ -202,6 +228,9 @@ interface Script {
   readonly busy?: number;
   /** The workspace refusing the log query. */
   readonly logRefused?: boolean;
+  /** The API holding no public origin (B4-6b), or this one. */
+  readonly noOrigin?: boolean;
+  readonly origin?: string;
   /** Each PATCH's CLI status, in order: 0 sends it. */
   readonly patchStatus?: readonly number[];
   readonly startStatus?: number;
@@ -262,7 +291,15 @@ class FakeAzure implements Az {
         return json({
           properties: {
             provisioningState: 'Succeeded',
-            template: { containers: [apiContainer(script.apiImage ?? image('b'), script.apiBuild ?? commit('b'))] },
+            template: {
+              containers: [
+                apiContainer(
+                  script.apiImage ?? image('b'),
+                  script.apiBuild ?? commit('b'),
+                  script.noOrigin === true ? null : (script.origin ?? ORIGIN),
+                ),
+              ],
+            },
           },
           tags: {},
         });
@@ -392,7 +429,9 @@ class FakeAzure implements Az {
 
   /** The run's lines, for the ID its request named when it started. */
   #log(): unknown {
-    const id = String((JSON.parse(this.heldAtStart ?? '[]') as string[])[4]);
+    const words = JSON.parse(this.heldAtStart ?? '[]') as string[];
+    // The ID a request names: an organisation's fifth word, an invitation's seventh.
+    const id = String(words[0] === 'invite-first-admin' ? words[6] : words[4]);
     const rows = RUN_LINES[this.#script.ending ?? 'created'](id);
     return {
       tables: [
@@ -963,6 +1002,21 @@ describe('main', () => {
     ]);
   });
 
+  it('reads invite-first-admin as its own command, saying how to use it, and ends 2, when asked it wrongly (B4-6b)', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['invite-first-admin', '--org'],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([
+      `say invite-first-admin --org <organisation ID> --email <address> [--id <ID>], and nothing else
+${USAGE}`,
+    ]);
+  });
+
   it('says what stopped it, and ends 1', async () => {
     const lines: string[] = [];
     await expect(
@@ -1012,3 +1066,137 @@ function firstContainer(properties: unknown): Record<string, unknown> | undefine
 /** What a failure said, or that there was none. */
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : `no error but ${String(error)}`;
+
+describe('parseFirstAdmin (B4-6b)', () => {
+  const ORG_ID = '0199a1b2-c3d4-7e5f-8a6b-00000000000a';
+  const invite = ['invite-first-admin', '--org', ORG_ID, '--email', 'Sara.Khan@Example.test'];
+
+  it('reads the organisation and the address, in lower case, and an earlier ID when given', () => {
+    expect(parseFirstAdmin(invite)).toEqual({ orgId: ORG_ID, email: 'sara.khan@example.test', id: undefined });
+    expect(parseFirstAdmin([...invite, '--id', EARLIER_ID])).toMatchObject({ id: EARLIER_ID });
+  });
+
+  it('refuses anything else, never repeating the address', () => {
+    const shape = 'say invite-first-admin --org <organisation ID> --email <address> [--id <ID>], and nothing else';
+    for (const [argv, message] of [
+      [['invite-first-admin', '--org', ORG_ID], shape],
+      [['invite-first-admin', '--email', 'a@b.test', '--org', ORG_ID], shape],
+      [[...invite, '--id'], shape],
+      [[...invite, '--id', EARLIER_ID, 'more'], shape],
+      [
+        ['invite-first-admin', '--org', ORG_ID.toUpperCase(), '--email', 'a@b.test'],
+        "--org takes the organisation's ID: a UUIDv7, in lower case",
+      ],
+      [[...invite, '--id', 'not-an-id'], '--id takes the ID an earlier run gave: a UUIDv7, in lower case'],
+      [
+        ['invite-first-admin', '--org', ORG_ID, '--email', 'not an address'],
+        "--email takes the address to invite, and this isn't one",
+      ],
+    ] as const) {
+      expect(() => parseFirstAdmin(argv)).toThrow(new UsageError(message));
+    }
+  });
+});
+
+describe('inviting a first admin (B4-6b)', () => {
+  const ORG_ID = '0199a1b2-c3d4-7e5f-8a6b-00000000000a';
+  const ADDRESS = 'sara.khan@example.test';
+
+  async function invite(script: Script = {}, id?: string) {
+    const az = new FakeAzure({ ending: 'invited', ...script });
+    const lines: string[] = [];
+    let now = START.getTime();
+    const status = await inviteFirstAdmin(
+      { orgId: ORG_ID, email: ADDRESS, id },
+      {
+        az,
+        say: (line) => lines.push(line),
+        now: () => new Date(now),
+        sleep: (ms) => {
+          now += ms;
+          return Promise.resolve();
+        },
+      },
+    ).then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    const words = JSON.parse(az.heldAtStart ?? '[]') as string[];
+    return { status: status.value, error: status.error, az, said: lines, words };
+  }
+
+  it('sends only the token’s hash, then shows the link once the run says the invitation exists', async () => {
+    const done = await invite();
+
+    expect(done.error).toBeUndefined();
+    expect(done.status).toBe(0);
+    const [command, , orgId, , email, , id, , hash] = done.words;
+    expect([command, orgId, email]).toEqual(['invite-first-admin', ORG_ID, ADDRESS]);
+    expect(id).toMatch(UUID_V7);
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(done.az.request).toBe(NO_REQUEST);
+    const last = done.said.at(-1) ?? '';
+    const token = /#token=([A-Za-z0-9_-]{43})$/.exec(last)?.[1] ?? '';
+    expect(last).toContain(`Invited the first admin of ${ORG_ID} (invitation ${id}).`);
+    expect(last).toContain(`${ORIGIN}/invitations/accept#token=`);
+    // The token the link carries is the one whose hash was sent, and it was said nowhere else, nor sent.
+    expect(createHash('sha256').update(token, 'ascii').digest('hex')).toBe(hash);
+    expect(done.said.slice(0, -1).join('\n')).not.toContain(token);
+    expect(JSON.stringify(done.az.sent)).not.toContain(token);
+  });
+
+  it('shows no link for a request done before, saying how to get a new one', async () => {
+    const done = await invite({ ending: 'invited-done-before' }, EARLIER_ID);
+
+    expect(done.status).toBe(0);
+    expect(done.words[6]).toBe(EARLIER_ID);
+    expect(done.said.at(-1)).toBe(
+      `Already done: the invitation ${EARLIER_ID} exists from an earlier run of this request, and nothing changed. Its link was shown by that run alone. If it was lost, run the command again without --id: a new invitation, with a new link.`,
+    );
+    expect(done.said.join('\n')).not.toContain('#token=');
+  });
+
+  it('says what the operator’s command refused, showing no link', async () => {
+    const done = await invite({ ending: 'invite-refused' });
+
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      "The operator's command refused it, and nothing changed: the organisation has members: its admins invite, not the operator.",
+    );
+    expect(done.said.join('\n')).not.toContain('#token=');
+  });
+
+  it.each(['invited-other', 'silent'] as const)(
+    'shows no link for a run whose lines don’t say this invitation was made (%s)',
+    async (ending) => {
+      const done = await invite({ ending });
+
+      expect(done.status).toBe(1);
+      expect(done.said.join('\n')).not.toContain('#token=');
+      expect(done.said.at(-1)).toContain(`don't show the invitation ${String(done.words[6])} made`);
+    },
+  );
+
+  it.each([
+    'https://app.example.test:8443',
+    'https://App.example.test',
+    'https://app.example.test/',
+    'http://app.example.test',
+  ])('writes nothing for an origin it can’t make a link with: %s', async (origin) => {
+    const done = await invite({ origin });
+
+    expect(done.error).toEqual(
+      new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.'),
+    );
+    expect(done.az.sent).toEqual([]);
+  });
+
+  it('writes nothing when the API holds no public origin to make the link with', async () => {
+    const done = await invite({ noOrigin: true });
+
+    expect(done.error).toEqual(
+      new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.'),
+    );
+    expect(done.az.sent).toEqual([]);
+  });
+});

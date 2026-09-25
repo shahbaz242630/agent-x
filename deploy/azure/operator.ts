@@ -1,6 +1,13 @@
 // Runs the operator's command on its job (B1c-2b; ADR-011 §3, ADR-005 §6):
 //
 //   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
+//   node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
+//
+// The second (B4-6b) invites a new organisation's first admin. Its link's
+// token is made here, on the partner's own machine: the job is sent only the
+// token's SHA-256, and the link is shown here once, after the run says the
+// invitation exists, and kept nowhere. The link's address is the API's own
+// public origin, read from Azure, so no domain is written in the repository.
 //
 // The job holds its request as a secret of its own (B1c-2a), since a run
 // started with containers of its own loses every mounted file, its login and
@@ -30,6 +37,7 @@
 // read of the job never shows it back. Starting the job is the partner's
 // (ADR-005 §6: the right to start it is the API's own authority), so this runs
 // from their `!`.
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -37,10 +45,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
   createOrganizationRequest,
+  firstAdminRequest,
   NO_REQUEST_PROBLEM,
   REQUEST_LIMIT_BYTES,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
+import { invitationEmail } from '../../packages/core/src/modules/identity/domain/invitation.ts';
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/ids.ts';
 import { realAz, signedIn, text } from './deploy.ts';
 import {
@@ -93,20 +103,21 @@ const SOME_ID = '00000000-0000-7000-8000-000000000000';
 const reason = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** What may now hold the request when [] couldn't be put back, and what takes it off. */
-const mayStillHold = (id: string): string =>
-  `The request may still be on ${jobName('operator')}. It names ${id}, so it can't make a second organisation. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
+const mayStillHold = (id: string, noun: string): string =>
+  `The request may still be on ${jobName('operator')}. It names ${id}, so it can't make a second ${noun}. Take it off by running the same command again with --id ${id}, or by deploying the apps (deploy.ts apps).`;
 
 /**
  * The last word on any failure once the ID is made: what the run did may be
  * unknown, and the same command with the same ID both finds out and finishes
  * it, making none twice.
  */
-const tryAgain = (id: string): string =>
-  `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the organisation exists, that run ends "Already done"; none is made twice.`;
+const tryAgain = (id: string, noun: string): string =>
+  `To find out what happened, and finish it if it didn't: run the same command again with --id ${id}. If the ${noun} exists, that run ends "Already done"; none is made twice.`;
 
 export const USAGE = `Usage:
   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
-The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation.`;
+  node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
+The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, or invitation.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
 export interface Request {
@@ -133,6 +144,45 @@ export function parseArguments(argv: readonly string[]): Request {
     );
   }
   return { name, id };
+}
+
+/** The first admin's invitation the partner asked for (B4-6b). */
+export interface FirstAdminArguments {
+  readonly orgId: string;
+  /** In lower case, as the invitation keeps it. */
+  readonly email: string;
+  /** The ID of an earlier try, if this is one. */
+  readonly id: string | undefined;
+}
+
+/** What was asked for, or a UsageError saying why it can't be done. The address is never repeated in one. */
+export function parseFirstAdmin(argv: readonly string[]): FirstAdminArguments {
+  const [command, orgFlag, orgId, emailFlag, email, ...rest] = argv;
+  const [idFlag, id, ...more] = rest;
+  const ided = rest.length === 0 || (idFlag === '--id' && id !== undefined && more.length === 0);
+  if (
+    command !== 'invite-first-admin' ||
+    orgFlag !== '--org' ||
+    emailFlag !== '--email' ||
+    email === undefined ||
+    !ided
+  ) {
+    throw new UsageError(
+      'say invite-first-admin --org <organisation ID> --email <address> [--id <ID>], and nothing else',
+    );
+  }
+  if (!UUID_V7.test(String(orgId))) throw new UsageError("--org takes the organisation's ID: a UUIDv7, in lower case");
+  if (id !== undefined && !UUID_V7.test(id)) {
+    throw new UsageError('--id takes the ID an earlier run gave: a UUIDv7, in lower case');
+  }
+  const address = invitationEmail(email);
+  if (address === undefined) throw new UsageError("--email takes the address to invite, and this isn't one");
+  if (Buffer.byteLength(firstAdminRequest(String(orgId), address, SOME_ID, '0'.repeat(64))) > REQUEST_LIMIT_BYTES) {
+    throw new UsageError(
+      `the address makes the request longer than the ${String(REQUEST_LIMIT_BYTES)} bytes the operator reads`,
+    );
+  }
+  return { orgId: String(orgId), email: address, id };
 }
 
 /** One of the job's secrets that the vault holds, as Azure gives it back: sent back just so. */
@@ -327,22 +377,42 @@ function commandLines(lines: readonly LogLine[]): Readonly<Record<string, unknow
   });
 }
 
+/** A request for the job: what it makes, the ID that names it, and how the run's lines say so. */
+interface JobRequest {
+  readonly id: string;
+  /** The request file's text. */
+  readonly text: string;
+  /** What it makes, as said: `organisation` or `invitation`. */
+  readonly noun: string;
+  /** The field the command's lines name it by. */
+  readonly field: 'orgId' | 'invitationId';
+  /** The command's line once it is made. */
+  readonly made: string;
+  /** Says it was made. */
+  readonly sayMade: () => void;
+  /** Said after "Already done", if anything. */
+  readonly doneBeforeNote: string;
+}
+
 /**
  * What the run did, from the command's own lines about this request's ID and
- * Azure's end of the run: 0 once the organisation with this ID exists, made
- * now or by an earlier run of the same request, and 1 otherwise, saying what to
- * do next. A line about another ID (another request run in this one's place)
- * is never taken for this one's.
+ * Azure's end of the run: 0 once what it makes exists, made now or by an
+ * earlier run of the same request, and 1 otherwise, saying what to do next. A
+ * line about another ID (another request run in this one's place) is never
+ * taken for this one's.
  */
-function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: string): number {
+function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: JobRequest): number {
+  const { id, noun, field } = asked;
   const said = commandLines(lines);
-  const about = (event: string): boolean => said.some((line) => line.event === event && line.orgId === id);
-  if (about('operator.organization_created')) {
-    steps.say(`Created the organisation ${id}.`);
+  const about = (event: string): boolean => said.some((line) => line.event === event && line[field] === id);
+  if (about(asked.made)) {
+    asked.sayMade();
     return 0;
   }
   if (about('operator.done_before')) {
-    steps.say(`Already done: the organisation ${id} exists from an earlier run of this request, and nothing changed.`);
+    steps.say(
+      `Already done: the ${noun} ${id} exists from an earlier run of this request, and nothing changed.${asked.doneBeforeNote}`,
+    );
     return 0;
   }
   const refused = said.find((line) => line.event === 'operator.refused');
@@ -352,16 +422,68 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], id: str
     );
     return 1;
   }
+  if (Array.isArray(refused?.problems) && refused[field] === id) {
+    steps.say(`The operator's command refused it, and nothing changed: ${refused.problems.map(String).join('; ')}.`);
+    return 1;
+  }
   steps.say(
     run.status === 'Succeeded'
-      ? `The run succeeded, but its lines don't show the organisation ${id} made: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${id}, which can't make a second one.`
-      : `The organisation may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which can't make a second one.`,
+      ? `The run succeeded, but its lines don't show the ${noun} ${id} made: they may not all have arrived, or another request ran in this one's place. Run the same command again with --id ${id}, which can't make a second one.`
+      : `The ${noun} may not have been created: read the lines above. If they leave it unclear, run the same command again with --id ${id}, which can't make a second one.`,
   );
   return 1;
 }
 
 /** Writes the request, runs it, puts [] back, and says what the run did: 0 once the organisation exists. */
-export async function createOrganization(request: Request, steps: JobSteps): Promise<number> {
+export function createOrganization(request: Request, steps: JobSteps): Promise<number> {
+  const id = request.id ?? uuidV7Ids.next();
+  return runRequest(steps, () => ({
+    id,
+    text: createOrganizationRequest(request.name, id),
+    noun: 'organisation',
+    field: 'orgId',
+    made: 'operator.organization_created',
+    sayMade: () => {
+      steps.say(`Created the organisation ${id}.`);
+    },
+    doneBeforeNote: '',
+  }));
+}
+
+/**
+ * Invites a new organisation's first admin (B4-6b): the token made here, only
+ * its SHA-256 sent, and the link shown here once the run says the invitation
+ * exists. 0 once it does.
+ */
+export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps): Promise<number> {
+  const token = randomBytes(32).toString('base64url');
+  const hash = createHash('sha256').update(token, 'ascii').digest('hex');
+  const id = request.id ?? uuidV7Ids.next();
+  return runRequest(steps, (api) => {
+    const origin = api.container.env.find((setting) => setting.name === 'AGENTX_PUBLIC_ORIGIN');
+    const value = origin !== undefined && 'value' in origin ? origin.value : '';
+    if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
+      throw new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.');
+    }
+    return {
+      id,
+      text: firstAdminRequest(request.orgId, request.email, id, hash),
+      noun: 'invitation',
+      field: 'invitationId',
+      made: 'operator.first_admin_invited',
+      sayMade: () => {
+        steps.say(
+          `Invited the first admin of ${request.orgId} (invitation ${id}). Send them this link, shown this once and kept nowhere. It works for 72 hours, signed in with the invited address:\n${value}/invitations/accept#token=${token}`,
+        );
+      },
+      doneBeforeNote:
+        ' Its link was shown by that run alone. If it was lost, run the command again without --id: a new invitation, with a new link.',
+    };
+  });
+}
+
+/** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
+async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest): Promise<number> {
   const subscription = signedIn(steps.az, steps.say);
   const target: Target = { subscription, job: 'operator' };
   const job = readOperatorJob(steps, target);
@@ -376,16 +498,17 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   }
   const synced = released(job.running, api.image, api.release);
   const moved = !same(job.running.container, synced);
-  const id = request.id ?? uuidV7Ids.next();
+  const asked = prepare(api);
+  const { id, noun } = asked;
   steps.say(
-    `The new organisation's ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second organisation, and it takes the request off the job at its end.`,
+    `The new ${noun}'s ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second ${noun}, and it takes the request off the job at its end.`,
   );
   let execution: string;
   let run: Ended | undefined;
   try {
     const what = moved ? "writing the request and bringing the job to the API's build" : 'writing the request';
     if (moved) steps.say(`Bringing ${name} to the API's build: ${changes(job.running.container, synced).join('; ')}.`);
-    patch(steps, target, patchBody(job, createOrganizationRequest(request.name, id), moved ? synced : undefined), what);
+    patch(steps, target, patchBody(job, asked.text, moved ? synced : undefined), what);
     await settled(steps, target, job.modified, synced, what);
     steps.say(`Wrote the request onto ${name}.`);
     execution = start(steps, target);
@@ -393,9 +516,9 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   } catch (error) {
     // Whatever stopped it, the request comes off the job; a failure to take it off is said, and the first error stands.
     await clearRequest(steps, target).catch((failure: unknown) => {
-      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${mayStillHold(id)}`);
+      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${mayStillHold(id, noun)}`);
     });
-    steps.say(tryAgain(id));
+    steps.say(tryAgain(id, noun));
     throw error;
   }
   // The request comes off before the log is read; a failure to take it off still lets the run's outcome be said first.
@@ -405,14 +528,14 @@ export async function createOrganization(request: Request, steps: JobSteps): Pro
   );
   try {
     if (run === undefined) return 1;
-    const said = outcome(steps, run, await readLog(steps, target, execution, run), id);
+    const said = outcome(steps, run, await readLog(steps, target, execution, run), asked);
     return left === undefined ? said : 1;
   } catch (error) {
     // The run ended, but what it did couldn't be read.
-    steps.say(tryAgain(id));
+    steps.say(tryAgain(id, noun));
     throw error;
   } finally {
-    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${mayStillHold(id)}`);
+    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${mayStillHold(id, noun)}`);
   }
 }
 
@@ -421,16 +544,22 @@ export async function main(
   say: (line: string) => void = console.log,
   az: () => ReturnType<typeof realAz> = realAz,
 ): Promise<number> {
-  let request: Request;
+  let work: (steps: JobSteps) => Promise<number>;
   try {
-    request = parseArguments(argv);
+    if (argv[0] === 'invite-first-admin') {
+      const request = parseFirstAdmin(argv);
+      work = (steps) => inviteFirstAdmin(request, steps);
+    } else {
+      const request = parseArguments(argv);
+      work = (steps) => createOrganization(request, steps);
+    }
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;
     say(`${error.message}\n${USAGE}`);
     return 2;
   }
   try {
-    return await createOrganization(request, { az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) });
+    return await work({ az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     say(error.message);
