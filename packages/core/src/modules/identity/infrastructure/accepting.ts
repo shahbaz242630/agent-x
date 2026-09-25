@@ -39,7 +39,7 @@ import {
   invitationToAccept,
   inviteTokenHash,
 } from './invitations.ts';
-import { addMembership, membershipOf } from './memberships.ts';
+import { addMembership, isMembershipTaken, membershipOf } from './memberships.ts';
 import { sessionEmailOf } from './session-emails.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -85,13 +85,6 @@ class AcceptanceRefused extends Error {
 }
 
 const refused = (status: number, code: ReasonCode): Acceptance => ({ outcome: 'refused', status, code });
-
-/** The directory's key refusing a second entry for the person there (0015): a membership added since the check. */
-const isMembershipTaken = (error: unknown): boolean =>
-  typeof error === 'object' &&
-  error !== null &&
-  (error as { code?: unknown }).code === '23505' &&
-  (error as { constraint?: unknown }).constraint === 'members_pkey';
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 

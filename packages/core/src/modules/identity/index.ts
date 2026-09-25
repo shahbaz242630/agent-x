@@ -40,6 +40,14 @@ export {
   type InvitationAcceptance,
 } from './infrastructure/accepting.ts';
 export {
+  type AcceptanceConfirmations,
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  type ConfirmationWrite,
+  createAcceptanceConfirmations,
+  DECLINE_OPERATION,
+} from './infrastructure/confirming.ts';
+export {
   CONFIRM_OPERATION,
   createInvitationWrites,
   INVITE_OPERATION,
