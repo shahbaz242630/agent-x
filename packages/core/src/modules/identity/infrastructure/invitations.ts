@@ -70,8 +70,8 @@ export interface InvitationChange {
   /** The invited address, in lower case. */
   readonly email: string;
   readonly role: Role;
-  /** The membership of the admin who asked. */
-  readonly invitedBy: string;
+  /** The membership of the admin who asked; null for the first admin's, which the operator's command asks for (B4-6a). */
+  readonly invitedBy: string | null;
   readonly expiresAt: Date;
 }
 
@@ -93,7 +93,7 @@ const invitationHash = (change: InvitationChange): Buffer =>
     change.id.toLowerCase(),
     change.email,
     change.role,
-    change.invitedBy.toLowerCase(),
+    change.invitedBy?.toLowerCase() ?? '',
     change.expiresAt.toISOString(),
   ]);
 
@@ -132,7 +132,16 @@ export async function draftInvitation(
   states: SignedStates,
   keys: KeyProvider,
   change: InvitationChange,
-  { stepUpChallengeId, createdAt, actor }: { stepUpChallengeId: string; createdAt: Date; actor: AuditActor },
+  {
+    stepUpChallengeId,
+    createdAt,
+    actor,
+  }: {
+    /** The step-up the admin signs in again for; null only for the operator's first admin (0020). */
+    stepUpChallengeId: string | null;
+    createdAt: Date;
+    actor: AuditActor;
+  },
 ): Promise<RecordedState> {
   const { orgId, id, email, role, invitedBy, expiresAt } = change;
   const sealed = keys.encrypt('field-encryption', Buffer.from(email, 'utf8'), emailAssociatedData(orgId, id));
@@ -169,7 +178,10 @@ export interface InvitationRecord {
   readonly role: Role;
   readonly status: (typeof INVITATION.states)[number];
   readonly expiresAt: Date;
-  readonly stepUpChallengeId: string;
+  /** The step-up the admin who asked signed in again for; null for the operator's first admin (B4-6a). */
+  readonly stepUpChallengeId: string | null;
+  /** Whether a member asked for it, or the operator's command, for an organisation's first admin (B4-6a). */
+  readonly byOperator: boolean;
   /** The person who accepted it (B4-4b), once one has. */
   readonly acceptedBy: string | null;
 }
@@ -181,13 +193,15 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Invit
   const status = fields.get('status');
   const expiresAt = fields.get('expires_at');
   const stepUpChallengeId = fields.get('step_up_challenge_id');
+  const invitedBy = fields.get('invited_by');
   const acceptedBy = fields.get('accepted_by');
   // The table's checks hold each field to its kind, and the seal to what was written.
   if (
     !isRole(role) ||
     !INVITATION.states.some((state) => state === status) ||
     typeof expiresAt !== 'string' ||
-    typeof stepUpChallengeId !== 'string' ||
+    stepUpChallengeId === undefined ||
+    invitedBy === undefined ||
     acceptedBy === undefined
   ) {
     throw new Error(`A verified invitation holds a field that isn't one of its own: ${id}`);
@@ -198,6 +212,7 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Invit
     status: status as InvitationRecord['status'],
     expiresAt: new Date(expiresAt),
     stepUpChallengeId,
+    byOperator: invitedBy === null,
     acceptedBy,
   };
 };
@@ -269,6 +284,8 @@ export async function invitationToOpen(
     | {
         readonly outcome: 'draft';
         readonly invitation: InvitationRecord;
+        /** The step-up the admin who asked signs in again for: a member's draft names one (0020). */
+        readonly stepUpChallengeId: string;
         readonly change: InvitationChange;
         readonly changeHash: Buffer;
       }
@@ -281,7 +298,11 @@ export async function invitationToOpen(
   if (invitation.status !== 'DRAFT') return { outcome: 'not_draft' };
   if (invitation.expiresAt.getTime() <= now.getTime()) return { outcome: 'ended' };
   const invitedBy = state.fields.get('invited_by');
-  if (typeof invitedBy !== 'string') throw new Error(`A verified invitation names no admin who asked: ${id}`);
+  const { stepUpChallengeId } = invitation;
+  // The operator's first admin opens as it is made, so a draft is always a member's (0020's check holds both).
+  if (typeof invitedBy !== 'string' || stepUpChallengeId === null) {
+    throw new Error(`A verified invitation names no admin who asked: ${id}`);
+  }
   const email = await invitedEmail(tx, keys, orgId, id);
   const change: InvitationChange = {
     orgId,
@@ -291,7 +312,7 @@ export async function invitationToOpen(
     invitedBy,
     expiresAt: invitation.expiresAt,
   };
-  return { outcome: 'draft', invitation, change, changeHash: invitationHash(change) };
+  return { outcome: 'draft', invitation, stepUpChallengeId, change, changeHash: invitationHash(change) };
 }
 
 /** A token's SHA-256, as the directory lists it and as accepting looks it up (B4-4c). */
@@ -323,15 +344,76 @@ export async function openInvitation(
   { orgId, id, actor, details }: { orgId: string; id: string; actor: AuditActor; details: AuditDetails },
 ): Promise<string> {
   const token = randomBytes(32).toString('base64url');
+  await openListed(tx, states, { orgId, id, actor, details, tokenHash: inviteTokenHash(token) });
+  return token;
+}
+
+/** Lists the token's SHA-256 for the invitation, then moves it to OPEN; InvitationNotOpened otherwise. */
+async function openListed(
+  tx: InvitationsTransaction,
+  states: SignedStates,
+  {
+    orgId,
+    id,
+    actor,
+    details,
+    tokenHash,
+  }: { orgId: string; id: string; actor: AuditActor; details: AuditDetails; tokenHash: Buffer },
+): Promise<void> {
   // Before the move, whose event takes the chain's head, the last lock of all (ADR-006 §6).
-  await registerInvite(tx, { orgId, invitationId: id, tokenHash: inviteTokenHash(token) });
+  await registerInvite(tx, { orgId, invitationId: id, tokenHash });
   const moved = await states.changeStatus(tx, INVITATIONS, { orgId, id }, 'open', {
     actor,
     action: 'invitation.opened',
     details,
   });
   if (moved.outcome !== 'changed') throw new InvitationNotOpened(id, moved.outcome);
-  return token;
+}
+
+/** The operator's invitation of an organisation's first admin (B4-6a). */
+export interface FirstAdminInvitation {
+  readonly orgId: string;
+  /** Its ID, made by the command. */
+  readonly id: string;
+  /** The invited address, as given: checked and put in lower case here. */
+  readonly email: string;
+  /** The SHA-256 of the token in the link, made where the link is shown, never here: the token never reaches the job. */
+  readonly tokenHash: Buffer;
+  readonly createdAt: Date;
+  /** The operator's command. */
+  readonly actor: AuditActor;
+}
+
+/**
+ * The operator's invitation of an organisation's first admin (0020, B4-6a),
+ * in the caller's transaction, which must be withSignedStates' for the
+ * organisation: an admin's invitation naming no member who asked and no
+ * step-up, kept as a DRAFT and opened at once with the token's SHA-256 the
+ * caller was given. Accepted while the organisation has no members, it makes
+ * the first admin at once; otherwise an admin confirms who accepted. Throws a
+ * RangeError for an address that isn't one, or a hash that isn't 32 bytes.
+ */
+export async function inviteFirstAdmin(
+  tx: InvitationsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  { orgId, id, email, tokenHash, createdAt, actor }: FirstAdminInvitation,
+): Promise<void> {
+  const address = invitationEmail(email);
+  if (address === undefined) throw new RangeError('A first admin refused: the address is not one');
+  if (!Buffer.isBuffer(tokenHash) || tokenHash.length !== 32) {
+    throw new RangeError("A first admin refused: the token's hash is not 32 bytes");
+  }
+  const change: InvitationChange = {
+    orgId,
+    id,
+    email: address,
+    role: 'admin',
+    invitedBy: null,
+    expiresAt: invitationEnds(createdAt),
+  };
+  await draftInvitation(tx, states, keys, change, { stepUpChallengeId: null, createdAt, actor });
+  await openListed(tx, states, { orgId, id, actor, details: { role: 'admin', byOperator: true }, tokenHash });
 }
 
 /**
@@ -382,12 +464,25 @@ export class InvitationNotAccepted extends Error {
 export async function acceptInvitation(
   tx: InvitationsTransaction,
   states: SignedStates,
-  { orgId, id, userId, actor }: { orgId: string; id: string; userId: string; actor: AuditActor },
+  {
+    orgId,
+    id,
+    userId,
+    actor,
+    noMembers = false,
+  }: {
+    orgId: string;
+    id: string;
+    userId: string;
+    actor: AuditActor;
+    /** The organisation has no members at all: the operator's first admin then joins at once (B4-6a). */
+    noMembers?: boolean;
+  },
 ): Promise<{ readonly outcome: 'accepted' | 'awaiting_confirmation'; readonly role: Role }> {
   const key = { orgId, id };
   const state = await states.verifiedState(tx, INVITATIONS, key, 'change');
   if (state.outcome !== 'verified') throw new InvitationNotAccepted(id, state.outcome);
-  const { role, status } = recordOf(id.toLowerCase(), state.fields);
+  const { role, status, byOperator } = recordOf(id.toLowerCase(), state.fields);
   if (status !== 'OPEN') throw new InvitationNotAccepted(id, status);
   await states.record(
     tx,
@@ -401,7 +496,8 @@ export async function acceptInvitation(
       details: { role },
     },
   );
-  const waits = needsConfirmation(role);
+  // The first admin has no one to confirm them: the operator's command asked, for an organisation no one belongs to.
+  const waits = needsConfirmation(role) && !(byOperator && noMembers);
   const moved = await states.changeStatus(tx, INVITATIONS, key, waits ? 'await' : 'accept', {
     actor,
     action: waits ? 'invitation.awaiting_confirmation' : 'invitation.accepted',

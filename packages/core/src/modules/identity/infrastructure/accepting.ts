@@ -21,7 +21,9 @@
 //    there, their membership brought back with the invitation's role and
 //    today's start (B4-5c); an admin or finance approver waits for an
 //    existing admin to confirm who accepted (B4-4d), who brings them back
-//    the same way.
+//    the same way. The operator's invitation of an organisation's first
+//    admin, accepted while no one is listed there, joins at once: there is
+//    no admin to confirm them (B4-6a).
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
@@ -33,7 +35,7 @@ import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
-import { type DirectoryTables, listedInvite } from '../../directory/index.ts';
+import { type DirectoryTables, listedInvite, listedMembers } from '../../directory/index.ts';
 import {
   acceptInvitation,
   type InvitationRecord,
@@ -128,11 +130,14 @@ export function createInvitationAcceptance({
             if (membership.outcome === 'active') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
             const actor = { type: 'user' as const, id: person.userId };
             try {
+              // No one listed there at all, deactivated or not: the operator's first admin joins at once (B4-6a).
+              const noMembers = (await listedMembers(tx, orgId, 1)).length === 0;
               const accepted = await acceptInvitation(tx, states, {
                 orgId,
                 id: invitationId,
                 userId: person.userId,
                 actor,
+                noMembers,
               });
               if (accepted.outcome === 'accepted' && membership.outcome === 'deactivated') {
                 await reactivateMembership(tx, states, {

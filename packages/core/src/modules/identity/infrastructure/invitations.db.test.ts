@@ -177,6 +177,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
         status: 'DRAFT',
         expiresAt: new Date(clock.now().getTime() + INVITATION_HOURS * HOUR),
         stepUpChallengeId,
+        byOperator: false,
         acceptedBy: null,
       },
     });
