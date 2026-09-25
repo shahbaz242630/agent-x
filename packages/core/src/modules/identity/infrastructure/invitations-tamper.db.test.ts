@@ -29,6 +29,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
 import {
+  acceptInvitation,
   draftInvitation,
   invitationChange,
   invitationRecord,
@@ -236,6 +237,43 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
     await expect(open(id)).rejects.toMatchObject({ name: 'InvitationNotOpened', outcome: 'tampered' });
     expect(await owner.query('select token_hash from directory.invites where invitation_id = $1', [id])).toEqual([]);
     expect(await hold()).toMatchObject({ outcome: 'held' });
+  });
+
+  it('B4-4b an accepted admin put down to another person, as the one an admin is asked to confirm', async () => {
+    const id = await invitation('admin');
+    await open(id);
+    const person = await userForSubject(
+      app,
+      { issuer: 'https://auth.example.test', subject: `tamper-accepter-${String(subjects)}` },
+      { ids, clock },
+    );
+    const other = await userForSubject(
+      app,
+      { issuer: 'https://auth.example.test', subject: `tamper-other-accepter-${String(subjects)}` },
+      { ids, clock },
+    );
+    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+      acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),
+    );
+    await owner.setColumn(id, 'accepted_by', other);
+
+    await deniedAndHeld(id, 'seal');
+  });
+
+  it('B4-4b an admin waiting for confirmation moved to ACCEPTED with no event', async () => {
+    const id = await invitation('admin');
+    await open(id);
+    const person = await userForSubject(
+      app,
+      { issuer: 'https://auth.example.test', subject: `tamper-waiting-${String(subjects)}` },
+      { ids, clock },
+    );
+    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+      acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),
+    );
+    await owner.setColumn(id, 'status', 'ACCEPTED');
+
+    await deniedAndHeld(id, 'seal');
   });
 
   it('planted with no event: an admin’s invitation the app never made', async () => {

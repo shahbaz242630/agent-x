@@ -1,12 +1,32 @@
 // B4-3a: an invitation's machine, its end, and the address it keeps.
 import { describe, expect, it } from 'vitest';
 
-import { EMAIL_MAX, INVITATION, INVITATION_HOURS, invitationEmail, invitationEnds } from './invitation.ts';
+import {
+  EMAIL_MAX,
+  INVITATION,
+  INVITATION_HOURS,
+  invitationEmail,
+  invitationEnds,
+  needsConfirmation,
+} from './invitation.ts';
 
 describe('an invitation (B4-3a)', () => {
-  it('starts as a DRAFT and moves only to OPEN', () => {
+  it('starts as a DRAFT, opens, and is accepted: at once, or once an admin confirms who accepted', () => {
     expect(INVITATION.initial).toBe('DRAFT');
-    expect(INVITATION.moves).toEqual([{ from: 'DRAFT', to: 'OPEN' }]);
+    expect(INVITATION.moves).toEqual([
+      { from: 'DRAFT', to: 'OPEN' },
+      { from: 'OPEN', to: 'ACCEPTED' },
+      { from: 'OPEN', to: 'AWAITING_CONFIRMATION' },
+      { from: 'AWAITING_CONFIRMATION', to: 'ACCEPTED' },
+      { from: 'AWAITING_CONFIRMATION', to: 'DECLINED' },
+    ]);
+  });
+
+  it('asks an admin to confirm an admin or a finance approver, and no other role (ADR-005 §6)', () => {
+    expect(['admin', 'approver', 'developer', 'viewer', 'owner'].filter(needsConfirmation)).toEqual([
+      'admin',
+      'approver',
+    ]);
   });
 
   it('ends 72 hours after it was asked for', () => {

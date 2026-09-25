@@ -220,7 +220,10 @@
             "type": "string",
             "enum": [
               "DRAFT",
-              "OPEN"
+              "OPEN",
+              "AWAITING_CONFIRMATION",
+              "ACCEPTED",
+              "DECLINED"
             ]
           },
           "expiresAt": {

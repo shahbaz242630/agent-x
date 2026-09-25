@@ -6,7 +6,14 @@
 // person in an organisation, an authority table read through its signed state.
 // Invitations (B4-3a): the pending change an admin's step-up binds to, then
 // opened with a token shown once.
-export { EMAIL_MAX, INVITATION, INVITATION_HOURS, invitationEmail } from './domain/invitation.ts';
+export {
+  CONFIRMED_ROLES,
+  EMAIL_MAX,
+  INVITATION,
+  INVITATION_HOURS,
+  invitationEmail,
+  needsConfirmation,
+} from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
@@ -34,6 +41,7 @@ export {
   type InvitingAdmin,
 } from './infrastructure/inviting.ts';
 export {
+  acceptInvitation,
   draftInvitation,
   type InvitationChange,
   invitationChange,
@@ -43,6 +51,7 @@ export {
   INVITATIONS,
   type InvitationsTransaction,
   invitationToOpen,
+  InvitationNotAccepted,
   InvitationNotOpened,
   InvitationUnreadable,
   openInvitation,
