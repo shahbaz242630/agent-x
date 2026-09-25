@@ -429,31 +429,34 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 403, code: 'INVITATION_INVALID' });
   });
 
-  it('refuses someone whose membership there was deactivated as ALREADY_A_MEMBER: rejoining is B4-5’s', async () => {
-    const who = await organization();
-    const { token } = await invitation(who, 'viewer');
-    const member = await person();
-    const membershipId = ids.next();
-    await withSignedStates(app, who.org, services(), async (tx, states) => {
-      await addMembership(tx, states, {
-        orgId: who.org,
-        id: membershipId,
-        userId: member.userId,
-        role: 'viewer',
-        joinedAt: clock.now(),
-        actor: OPERATOR,
+  it.each(['viewer', 'admin'] as const)(
+    'refuses someone whose membership there was deactivated, invited as %s, as ALREADY_A_MEMBER: rejoining is B4-5’s',
+    async (role) => {
+      const who = await organization();
+      const { token } = await invitation(who, role);
+      const member = await person();
+      const membershipId = ids.next();
+      await withSignedStates(app, who.org, services(), async (tx, states) => {
+        await addMembership(tx, states, {
+          orgId: who.org,
+          id: membershipId,
+          userId: member.userId,
+          role: 'viewer',
+          joinedAt: clock.now(),
+          actor: OPERATOR,
+        });
       });
-    });
-    await withSignedStates(app, who.org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+      await withSignedStates(app, who.org, services(), (tx, states) =>
+        states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: membershipId }, 'deactivate', {
+          actor: OPERATOR,
+          action: 'membership.deactivated',
+          details: {},
+        }),
+      );
 
-    expect(await accept(member, token)).toEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
-  });
+      expect(await accept(member, token)).toEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+    },
+  );
 
   it('joins once when two of a person’s invitations there are accepted at the same moment', async () => {
     const who = await organization();
