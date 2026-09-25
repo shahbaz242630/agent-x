@@ -6,6 +6,12 @@
 // their password and code, and accepts with the token: they join at once as
 // its admin, since no one else is there, and a second first-admin invitation
 // is then refused. Neither run writes the address, the token or its hash.
+//
+// B4-6d-2 goes on from there, the journey an organisation's people take: the
+// admin invites a second person as a developer, signing in again (step-up)
+// before the link is made; that person, in their own browser, accepts and
+// joins; the admin then changes their role and deactivates them, each change
+// with a step-up, and each ends every session the person held (SEC-HA-10).
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -79,9 +85,9 @@ afterAll(async () => {
 async function call(
   method: 'GET' | 'POST',
   route: string,
-  { organization, body }: { organization?: string; body?: unknown } = {},
+  { organization, body, on = page }: { organization?: string; body?: unknown; on?: Page } = {},
 ): Promise<{ status: number; json: unknown }> {
-  return page.evaluate(
+  return on.evaluate(
     async ({ method, route, organization, body, key }) => {
       const headers: Record<string, string> = { accept: 'application/json' };
       if (organization !== undefined) headers['agentx-organization'] = organization;
@@ -188,5 +194,149 @@ describe('B4-6d-1 the operator invites a new organisation’s first admin, who a
 
     expect(runs).toHaveLength(3);
     for (const secret of [email, first.token, first.hash]) expect(written).not.toContain(secret);
+  });
+});
+
+describe('B4-6d-2 the admin invites a second person, then changes their role and deactivates them', () => {
+  const member = users.member;
+  const memberEmail = `${member.loginName}@agentx.localhost`;
+  let memberContext: BrowserContext;
+  let memberPage: Page;
+  /** The second person's membership, once they have joined. */
+  let membershipId: string;
+
+  beforeAll(async () => {
+    memberContext = await browser.newContext();
+    memberPage = await memberContext.newPage();
+  });
+
+  afterAll(async () => {
+    await memberContext.close();
+  });
+
+  // The person's own driver: each driver waits for a code its last one hasn't
+  // used, so the admin's driver never gives the admin a code twice.
+  const memberLogin = loginDriver({
+    password,
+    callback: new RegExp(`^${`${API_ORIGIN}${RETURN_TO}`.replaceAll('.', '[.]')}$`),
+  });
+
+  /** Signs the second person in through the API, however much the login still knows of them. */
+  async function signIn(): Promise<void> {
+    await memberPage.goto(`${API_ORIGIN}/v1/auth/sign-in?returnTo=${encodeURIComponent(RETURN_TO)}`);
+    const { stoppedAt } = await memberLogin.drive(memberPage, member, []);
+    expect(stoppedAt, where(memberPage)).toBe('callback');
+  }
+
+  /** The admin signs in again for a challenge (ADR-003 §9): the password and code are asked again. */
+  async function stepUp(challengeId: string): Promise<void> {
+    await page.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${challengeId}&returnTo=${encodeURIComponent(RETURN_TO)}`);
+    const { stoppedAt, shown } = await drive(page, user, []);
+    expect(stoppedAt, where(page)).toBe('callback');
+    expect(shown).toEqual(expect.arrayContaining(['password', 'otp', 'callback']));
+  }
+
+  /** The organisation's members, as the admin sees them, by membership. */
+  async function members(): Promise<Map<string, { role: string; status: string }>> {
+    const listed = await call('GET', '/v1/members', { organization: orgId });
+    expect(listed.status).toBe(200);
+    const { members: found } = listed.json as { members: { id: string; role: string; status: string }[] };
+    return new Map(found.map(({ id, role, status }) => [id, { role, status }]));
+  }
+
+  /** Whether the person's page still holds a live session. */
+  const signedIn = async (on: Page): Promise<number> =>
+    on.evaluate(async () => (await fetch('/v1/auth/session')).status);
+
+  it('asks to invite them as a developer: a draft, and a step-up to sign in again for', async () => {
+    const asked = await call('POST', '/v1/members/invitations', {
+      organization: orgId,
+      body: { email: memberEmail, role: 'developer' },
+    });
+    expect(asked.status).toBe(202);
+    const { invitation, stepUpChallengeId } = asked.json as {
+      invitation: { id: string; status: string };
+      stepUpChallengeId: string;
+    };
+    expect(invitation.status).toBe('DRAFT');
+
+    // Not before the admin has signed in again for it.
+    const early = await call('POST', `/v1/members/invitations/${invitation.id}/confirm`, {
+      organization: orgId,
+      body: {},
+    });
+    expect(early.status).toBe(403);
+    expect(early.json).toMatchObject({ error: { code: 'STEP_UP_FAILED' } });
+
+    await stepUp(stepUpChallengeId);
+    const confirmed = await call('POST', `/v1/members/invitations/${invitation.id}/confirm`, {
+      organization: orgId,
+      body: {},
+    });
+    expect(confirmed.status).toBe(200);
+    const { link } = confirmed.json as { link: string };
+    expect(link.startsWith(`${API_ORIGIN}/invitations/accept#token=`)).toBe(true);
+
+    await signIn();
+    const token = link.slice(link.indexOf('#token=') + '#token='.length);
+    const accepted = await call('POST', '/v1/invitations/accept', { on: memberPage, body: { token } });
+    expect(accepted.status).toBe(200);
+    expect(accepted.json).toMatchObject({
+      organizationId: orgId,
+      invitation: { role: 'developer', status: 'ACCEPTED' },
+    });
+  });
+
+  it('lists them beside the admin, and lets them read the list as a developer', async () => {
+    const listed = await members();
+    const joined = [...listed].filter(([, { role }]) => role === 'developer');
+    expect(joined).toHaveLength(1);
+    membershipId = joined[0]?.[0] ?? '';
+    expect(listed.size).toBe(2);
+
+    expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(200);
+  });
+
+  it('SEC-HA-10 changes their role with a step-up, and ends every session they held', async () => {
+    expect(await signedIn(memberPage)).toBe(200);
+    const asked = await call('POST', `/v1/members/${membershipId}/role`, {
+      organization: orgId,
+      body: { role: 'viewer' },
+    });
+    expect(asked.status).toBe(202);
+    const { stepUpChallengeId } = asked.json as { stepUpChallengeId: string };
+    await stepUp(stepUpChallengeId);
+
+    const changed = await call('POST', `/v1/members/${membershipId}/role/confirm`, {
+      organization: orgId,
+      body: { role: 'viewer', stepUpChallengeId },
+    });
+    expect(changed.status).toBe(200);
+    expect(changed.json).toMatchObject({ member: { id: membershipId, role: 'viewer', status: 'ACTIVE' } });
+    expect(await signedIn(memberPage)).toBe(401);
+
+    // Signed in again, they hold the new role.
+    await signIn();
+    expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(200);
+  });
+
+  it('SEC-HA-10 deactivates them with a step-up: every session ends, and they reach the organisation no more', async () => {
+    const asked = await call('POST', `/v1/members/${membershipId}/deactivate`, { organization: orgId, body: {} });
+    expect(asked.status).toBe(202);
+    const { stepUpChallengeId } = asked.json as { stepUpChallengeId: string };
+    await stepUp(stepUpChallengeId);
+
+    const changed = await call('POST', `/v1/members/${membershipId}/deactivate/confirm`, {
+      organization: orgId,
+      body: { stepUpChallengeId },
+    });
+    expect(changed.status).toBe(200);
+    expect(changed.json).toMatchObject({ member: { id: membershipId, status: 'DEACTIVATED' } });
+    expect(await signedIn(memberPage)).toBe(401);
+    expect((await members()).get(membershipId)).toMatchObject({ status: 'DEACTIVATED' });
+
+    // They can still sign in to Agent X, and are refused the organisation.
+    await signIn();
+    expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(403);
   });
 });
