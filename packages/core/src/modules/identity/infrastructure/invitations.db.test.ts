@@ -620,6 +620,33 @@ describe(`accepting an invitation (B4-4b, Postgres ${server.version})`, () => {
     expect(await record(who.org, id)).toMatchObject({ invitation: { status: 'DRAFT', acceptedBy: null } });
   });
 
+  it('reads and accepts in one transaction, as accepting does: the row locked once, for the change', async () => {
+    const who = await organization();
+    const { id } = await opened(who, 'viewer');
+    const person = await invitee();
+
+    const accepted = await withSignedStates(app, who.org, services(), async (tx, states) => {
+      const read = await invitationToAccept(tx, states, keys, { orgId: who.org, id, now: clock.now() });
+      if (read.outcome !== 'open') throw new Error('not open');
+      return acceptInvitation(tx, states, { orgId: who.org, id, userId: person, actor: { type: 'user', id: person } });
+    });
+
+    expect(accepted).toEqual({ outcome: 'accepted', role: 'viewer' });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('refuses to accept one waiting for an admin’s confirmation, keeping who accepted first', async () => {
+    const who = await organization();
+    const { id } = await opened(who, 'approver');
+    const first = await invitee();
+    await accept(who.org, id, first);
+
+    await expect(accept(who.org, id, await invitee())).rejects.toMatchObject({ outcome: 'AWAITING_CONFIRMATION' });
+    expect(await record(who.org, id)).toMatchObject({
+      invitation: { status: 'AWAITING_CONFIRMATION', acceptedBy: first },
+    });
+  });
+
   it('refuses to accept one accepted already, keeping who accepted first', async () => {
     const who = await organization();
     const { id } = await opened(who);
