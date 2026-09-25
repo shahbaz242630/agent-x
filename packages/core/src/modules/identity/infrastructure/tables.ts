@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -8,6 +8,7 @@ export interface IdentityTables {
   'identity.step_up_challenges': StepUpChallengesTable;
   'identity.memberships': MembershipsTable;
   'identity.invitations': InvitationsTable;
+  'identity.session_emails': SessionEmailsTable;
 }
 
 interface UsersTable {
@@ -93,4 +94,10 @@ interface InvitationsTable {
   /** These two are written by the signed state's steps alone (the audit module's record). */
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;
+}
+
+interface SessionEmailsTable {
+  session_id: string;
+  email_ciphertext: Buffer;
+  email_key_version: number;
 }

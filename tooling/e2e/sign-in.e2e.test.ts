@@ -5,7 +5,8 @@
 // service, trades the code with its own secret, checks the ID token, and opens
 // a session held in the database and named by a `__Host-` cookie. The tests
 // look at the browser's cookies, at the API's log, and at the sessions table
-// itself, as the database's admin.
+// itself, as the database's admin. B4-4a: the login service's verified
+// address comes back through its userinfo endpoint and is kept, sealed.
 import { type Browser, type BrowserContext, chromium, type Cookie, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -134,6 +135,18 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
     expect(await apiEvents()).toContain('auth.signed_in');
     seen.callbackUrl = callbackUrl;
     first = session;
+  });
+
+  it('B4-4a keeps the address the login service verified, sealed with the session: its text is nowhere in the table', async () => {
+    const row = await sql(
+      "SELECT pg_catalog.octet_length(e.email_ciphertext) || ',' || pg_catalog.position(pg_catalog.convert_to('agentx.localhost', 'UTF8') IN e.email_ciphertext) " +
+        'FROM identity.session_emails e JOIN identity.sessions s ON s.id = e.session_id ' +
+        `JOIN identity.users u ON u.id = s.user_id WHERE u.subject = '${subject()}'`,
+    );
+    const [length, found] = row.split(',').map(Number);
+    // The nonce and the tag, then at least the domain's own length.
+    expect(length).toBeGreaterThan(12 + 16 + 'agentx.localhost'.length);
+    expect(found).toBe(0);
   });
 
   it('keeps only a hash of the cookie: its value is nowhere in the sessions table', async () => {

@@ -16,6 +16,8 @@ const REDIRECT = 'https://app.example.test/v1/auth/callback';
 const NOW = new Date('2026-09-24T09:00:00Z');
 const NOW_S = NOW.getTime() / 1000;
 const CODE = 'a-code-from-the-login-service';
+const ACCESS = 'an-access-token-from-the-login-service';
+const SUBJECT = '338719472394810051';
 
 interface Signer {
   readonly kid: string;
@@ -40,11 +42,15 @@ class LoginService {
     authorization_endpoint: `${ISSUER}/oauth/v2/authorize`,
     token_endpoint: `${ISSUER}/oauth/v2/token`,
     jwks_uri: `${ISSUER}/oauth/v2/keys`,
+    userinfo_endpoint: `${ISSUER}/oidc/v1/userinfo`,
   };
+  /** What the userinfo endpoint answers, for the access token only. */
+  userinfo: Record<string, unknown> = { sub: SUBJECT, email: 'Sara.Khan@Example.test', email_verified: true };
+  userinfoStatus = 200;
   discoveryStatus = 200;
   tokenStatus = 200;
   tokenBody: (nonce: string) => Promise<string> = async (nonce) =>
-    JSON.stringify({ access_token: 'unused', token_type: 'Bearer', id_token: await this.idToken({ nonce }) });
+    JSON.stringify({ access_token: ACCESS, token_type: 'Bearer', id_token: await this.idToken({ nonce }) });
   failNetwork = false;
   keysStatus = 200;
   /** When set, the key set answers only once it settles: sign-ins can be made to meet at the fetch. */
@@ -99,6 +105,13 @@ class LoginService {
         status: this.tokenStatus,
         headers: { 'content-type': 'application/json' },
       });
+    }
+    if (target === `${ISSUER}/oidc/v1/userinfo`) {
+      if (new Headers(init.headers).get('authorization') !== `Bearer ${ACCESS}`) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      if (this.userinfoStatus !== 200) return new Response('unavailable', { status: this.userinfoStatus });
+      return Response.json(this.userinfo);
     }
     return new Response('not found', { status: 404 });
   };
@@ -160,7 +173,7 @@ describe('starting a sign-in', () => {
       response_type: 'code',
       client_id: CLIENT,
       redirect_uri: REDIRECT,
-      scope: 'openid',
+      scope: 'openid email',
       state: flow.state,
       nonce: flow.nonce,
       code_challenge: createHash('sha256').update(flow.verifier).digest('base64url'),
@@ -229,7 +242,7 @@ describe('starting a sign-in', () => {
   it('calls only through the fetch it was given, each call bounded in time', async () => {
     await signIn();
 
-    expect(service.calls.map((call) => new URL(call.url).origin)).toEqual([ISSUER, ISSUER, ISSUER]);
+    expect(service.calls.map((call) => new URL(call.url).origin)).toEqual([ISSUER, ISSUER, ISSUER, ISSUER]);
     for (const call of service.calls) expect(call.init.signal).toBeInstanceOf(AbortSignal);
   });
 });
@@ -249,6 +262,7 @@ describe('finishing a sign-in', () => {
         amr: ['pwd', 'otp', 'mfa'],
       },
       idTokenHash: expect.any(Buffer) as Buffer,
+      verifiedEmail: 'sara.khan@example.test',
     });
     const [exchange] = service.callsTo('/oauth/v2/token');
     const headers = new Headers(exchange?.init.headers);
@@ -269,7 +283,7 @@ describe('finishing a sign-in', () => {
     let issued = '';
     service.tokenBody = async (nonce) => {
       issued = await service.idToken({ nonce });
-      return JSON.stringify({ id_token: issued });
+      return JSON.stringify({ access_token: ACCESS, id_token: issued });
     };
     const signedIn = await signIn();
 
@@ -279,7 +293,7 @@ describe('finishing a sign-in', () => {
 
   it('takes a token without the login service session', async () => {
     service.tokenBody = async (nonce) =>
-      JSON.stringify({ id_token: await service.idToken({ nonce }, { drop: ['sid'] }) });
+      JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce }, { drop: ['sid'] }) });
 
     await expect(signIn()).resolves.toMatchObject({ evidence: { idpSessionId: undefined } });
   });
@@ -333,7 +347,11 @@ describe('finishing a sign-in', () => {
       ['no JSON', () => Promise.resolve('<html>'), /not JSON/],
       ['a JSON list', () => Promise.resolve('[]'), /not a JSON object/],
       ['no ID token', () => Promise.resolve(JSON.stringify({ access_token: 'only' })), /no ID token/],
-      ['too much', () => Promise.resolve(JSON.stringify({ id_token: 'x'.repeat(70_000) })), /larger than 65536 bytes/],
+      [
+        'too much',
+        () => Promise.resolve(JSON.stringify({ access_token: ACCESS, id_token: 'x'.repeat(70_000) })),
+        /larger than 65536 bytes/,
+      ],
     ])('refuses an answer with %s', async (_, body, message) => {
       service.tokenBody = body;
 
@@ -343,7 +361,7 @@ describe('finishing a sign-in', () => {
 
   describe('the ID token', () => {
     const withToken = (make: (nonce: string) => Promise<string>) => {
-      service.tokenBody = async (nonce) => JSON.stringify({ id_token: await make(nonce) });
+      service.tokenBody = async (nonce) => JSON.stringify({ access_token: ACCESS, id_token: await make(nonce) });
     };
 
     it.each<[string, (nonce: string) => Promise<string>, RegExp]>([
@@ -463,7 +481,7 @@ describe('finishing a sign-in', () => {
       clock.advanceBy(60_000);
       service.published = [FIRST, SECOND];
       service.tokenBody = async (nonce) =>
-        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+        JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce }, { key: SECOND }) });
       await expect(signIn()).resolves.toBeDefined();
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
     });
@@ -474,7 +492,7 @@ describe('finishing a sign-in', () => {
       service.published = [FIRST, SECOND];
       service.keysStatus = 503;
       service.tokenBody = async (nonce) =>
-        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+        JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce }, { key: SECOND }) });
       await expectFailure(signIn(), 'provider_unavailable', /key set answered 503/);
 
       service.keysStatus = 200;
@@ -534,7 +552,7 @@ describe('finishing a sign-in', () => {
       clock.advanceBy(60_000);
       service.published = [FIRST, SECOND];
       service.tokenBody = async (nonce) =>
-        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+        JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce }, { key: SECOND }) });
 
       expect(await finishTogether(3)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
       expect(service.callsTo('/oauth/v2/keys')).toHaveLength(2);
@@ -549,7 +567,7 @@ describe('finishing a sign-in', () => {
     it('are fetched again at most once a minute, however many tokens name a key not held', async () => {
       await signIn();
       service.tokenBody = async (nonce) =>
-        JSON.stringify({ id_token: await service.idToken({ nonce }, { key: SECOND }) });
+        JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce }, { key: SECOND }) });
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await expectFailure(signIn(), 'token_invalid', /ERR_JWKS_NO_MATCHING_KEY/);
@@ -608,6 +626,7 @@ describe('B2-6 reaching the login service inside the platform', () => {
       '/.well-known/openid-configuration',
       '/oauth/v2/token',
       '/oauth/v2/keys',
+      '/oidc/v1/userinfo',
     ]);
     expect(reached.every((call) => call.url.startsWith(`${INTERNAL}/`))).toBe(true);
   });
@@ -662,5 +681,85 @@ describe('the settings', () => {
         clock,
       }),
     ).toThrow(RangeError);
+  });
+});
+
+describe('B4-4a the verified email address, from the userinfo endpoint', () => {
+  it('asks with the access token, once the ID token stands, and gives the address in lower case', async () => {
+    const signedIn = await signIn();
+
+    expect(signedIn.verifiedEmail).toBe('sara.khan@example.test');
+    const [asked] = service.callsTo('/oidc/v1/userinfo');
+    expect(new Headers(asked?.init.headers).get('authorization')).toBe(`Bearer ${ACCESS}`);
+    expect(JSON.stringify(signedIn)).not.toContain(ACCESS);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['not verified', { sub: SUBJECT, email: 'sara@example.test', email_verified: false }],
+    ['verified as text, not true', { sub: SUBJECT, email: 'sara@example.test', email_verified: 'true' }],
+    ['no word on verification', { sub: SUBJECT, email: 'sara@example.test' }],
+    ['no address', { sub: SUBJECT, email_verified: true }],
+    ['an address that isn’t one', { sub: SUBJECT, email: 'sara at example', email_verified: true }],
+  ])('gives no address when it is %s, and the sign-in still stands', async (_what, userinfo) => {
+    service.userinfo = userinfo;
+
+    await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+  });
+
+  it('refuses an answer about another person', async () => {
+    service.userinfo = { sub: 'someone-else', email: 'mallory@example.test', email_verified: true };
+
+    await expectFailure(signIn(), 'token_invalid', /another person/);
+  });
+
+  it('never asks when the ID token fails its check', async () => {
+    service.tokenBody = async (nonce) =>
+      JSON.stringify({ access_token: ACCESS, id_token: await service.idToken({ nonce: `${nonce}x` }) });
+
+    await expectFailure(signIn(), 'token_invalid');
+    expect(service.callsTo('/oidc/v1/userinfo')).toEqual([]);
+  });
+
+  it.each([401, 500, 503])('fails as the login service unavailable when the endpoint answers %i', async (status) => {
+    service.userinfoStatus = status;
+
+    await expectFailure(signIn(), 'provider_unavailable', new RegExp(String(status)));
+  });
+
+  it.each<[string, unknown]>([
+    ['none', undefined],
+    ['not text', 42],
+    ['empty', ''],
+    ['with a space', 'an access token'],
+    ['longer than 4,096 characters', 'a'.repeat(4097)],
+  ])('fails as the login service unavailable when the access token is %s', async (_what, accessToken) => {
+    service.tokenBody = async (nonce) =>
+      JSON.stringify({ access_token: accessToken, id_token: await service.idToken({ nonce }) });
+
+    await expectFailure(signIn(), 'provider_unavailable', /access token/);
+    expect(service.callsTo('/oidc/v1/userinfo')).toEqual([]);
+  });
+
+  it('takes an access token of 4,096 characters', async () => {
+    const long = 'a'.repeat(4096);
+    service.tokenBody = async (nonce) =>
+      JSON.stringify({ access_token: long, id_token: await service.idToken({ nonce }) });
+    const fetch = service.fetch;
+    client = createOidcClient({
+      settings: { issuer: ISSUER, clientId: CLIENT, clientSecret: PASS, redirectUri: REDIRECT },
+      fetch: (url, init = {}) =>
+        String(url) === `${ISSUER}/oidc/v1/userinfo`
+          ? Promise.resolve(Response.json(service.userinfo))
+          : fetch(url, init),
+      clock,
+    });
+
+    await expect(signIn()).resolves.toMatchObject({ verifiedEmail: 'sara.khan@example.test' });
+  });
+
+  it('refuses a discovery document whose userinfo endpoint is on another origin', async () => {
+    service.discovery = { ...service.discovery, userinfo_endpoint: 'https://elsewhere.example.test/userinfo' };
+
+    await expectFailure(signIn(), 'provider_unavailable', /userinfo_endpoint/);
   });
 });

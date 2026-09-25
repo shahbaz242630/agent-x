@@ -25,8 +25,14 @@
 //   StepUpFailed, and nothing is recorded; a login service that can't be
 //   reached stays SignInFailed `provider_unavailable`.
 //
+// B4-4a: a sign-in's verified email address, if the login service gave one,
+// is kept encrypted with the session it opens, in the same transaction
+// (session-emails.ts); a step-up's is never taken, as the session keeps its
+// own.
+//
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
+import type { KeyProvider } from '@agentx/platform/keys';
 import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
@@ -34,6 +40,7 @@ import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
 import { type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
+import { recordSessionEmail } from './session-emails.ts';
 import type { LiveSession, Sessions } from './sessions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -113,6 +120,7 @@ export function createSignIn({
   challenges,
   ids,
   clock,
+  keys,
 }: {
   readonly db: Kysely<IdentityTables>;
   readonly oidc: OidcClient;
@@ -121,6 +129,8 @@ export function createSignIn({
   readonly challenges: StepUpChallenges;
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  /** For the session's verified address (`field-encryption`). */
+  readonly keys: KeyProvider;
 }): SignIn {
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
@@ -206,11 +216,12 @@ export function createSignIn({
       if (taken.stepUpChallengeId !== undefined) {
         return completeStepUp(taken.stepUpChallengeId, taken, { code, state }, previousCookie);
       }
-      const { subject, evidence } = await oidc.finish(taken.flow, { code, state });
+      const { subject, evidence, verifiedEmail } = await oidc.finish(taken.flow, { code, state });
       return limited(async (tx) => {
         const userId = await userForSubject(tx, subject, { ids, clock });
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);
         const { sessionId, cookie } = await sessions.open(tx, userId, evidence);
+        if (verifiedEmail !== undefined) await recordSessionEmail(tx, keys, sessionId, verifiedEmail);
         return { userId, sessionId, cookie, returnTo: taken.returnTo, stepUpChallengeId: undefined };
       });
     },

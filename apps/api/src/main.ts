@@ -128,6 +128,7 @@ function signInFrom(
   flows: LoginFlows,
   sessions: Sessions,
   challenges: StepUpChallenges,
+  keys: KeyProvider,
 ): SignIn | undefined {
   if (config.signIn === undefined) return undefined;
   const { issuer, clientId, clientSecret, internalOrigin } = config.signIn;
@@ -149,6 +150,7 @@ function signInFrom(
     challenges,
     ids: uuidV7Ids,
     clock: systemClock,
+    keys,
   });
 }
 
@@ -324,7 +326,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const flows = createLoginFlows({ clock: systemClock });
   const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
   const challenges = createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock });
-  const signIn = signInFrom(config, database, flows, sessions, challenges);
+  const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
     clock: systemClock,
