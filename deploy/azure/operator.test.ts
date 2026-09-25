@@ -149,6 +149,7 @@ type Ending =
   | 'silent'
   | 'invited'
   | 'invited-done-before'
+  | 'invited-other'
   | 'invite-refused';
 
 /** Another request's ID, as if that request had run in this one's place. */
@@ -189,6 +190,7 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     TERMINATED,
   ],
   'invited-done-before': (id) => [said({ event: 'operator.done_before', invitationId: id }), TERMINATED],
+  'invited-other': () => [said({ event: 'operator.first_admin_invited', invitationId: OTHER_ID }), TERMINATED],
   'invite-refused': (id) => [
     said({
       event: 'operator.refused',
@@ -200,7 +202,7 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
-const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent', 'invited']);
+const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent', 'invited', 'invited-other']);
 
 /** How Azure settles a change: the state it ends in, or never. */
 type Settles = 'Succeeded' | 'Failed' | 'Canceled' | 'never';
@@ -226,8 +228,9 @@ interface Script {
   readonly busy?: number;
   /** The workspace refusing the log query. */
   readonly logRefused?: boolean;
-  /** The API holding no public origin (B4-6b). */
+  /** The API holding no public origin (B4-6b), or this one. */
   readonly noOrigin?: boolean;
+  readonly origin?: string;
   /** Each PATCH's CLI status, in order: 0 sends it. */
   readonly patchStatus?: readonly number[];
   readonly startStatus?: number;
@@ -293,7 +296,7 @@ class FakeAzure implements Az {
                 apiContainer(
                   script.apiImage ?? image('b'),
                   script.apiBuild ?? commit('b'),
-                  script.noOrigin === true ? null : ORIGIN,
+                  script.noOrigin === true ? null : (script.origin ?? ORIGIN),
                 ),
               ],
             },
@@ -1146,6 +1149,31 @@ describe('inviting a first admin (B4-6b)', () => {
       "The operator's command refused it, and nothing changed: the organisation has members: its admins invite, not the operator.",
     );
     expect(done.said.join('\n')).not.toContain('#token=');
+  });
+
+  it.each(['invited-other', 'silent'] as const)(
+    'shows no link for a run whose lines don’t say this invitation was made (%s)',
+    async (ending) => {
+      const done = await invite({ ending });
+
+      expect(done.status).toBe(1);
+      expect(done.said.join('\n')).not.toContain('#token=');
+      expect(done.said.at(-1)).toContain(`don't show the invitation ${String(done.words[6])} made`);
+    },
+  );
+
+  it.each([
+    'https://app.example.test:8443',
+    'https://App.example.test',
+    'https://app.example.test/',
+    'http://app.example.test',
+  ])('writes nothing for an origin it can’t make a link with: %s', async (origin) => {
+    const done = await invite({ origin });
+
+    expect(done.error).toEqual(
+      new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.'),
+    );
+    expect(done.az.sent).toEqual([]);
   });
 
   it('writes nothing when the API holds no public origin to make the link with', async () => {

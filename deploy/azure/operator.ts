@@ -177,6 +177,11 @@ export function parseFirstAdmin(argv: readonly string[]): FirstAdminArguments {
   }
   const address = invitationEmail(email);
   if (address === undefined) throw new UsageError("--email takes the address to invite, and this isn't one");
+  if (Buffer.byteLength(firstAdminRequest(String(orgId), address, SOME_ID, '0'.repeat(64))) > REQUEST_LIMIT_BYTES) {
+    throw new UsageError(
+      `the address makes the request longer than the ${String(REQUEST_LIMIT_BYTES)} bytes the operator reads`,
+    );
+  }
   return { orgId: String(orgId), email: address, id };
 }
 
@@ -460,15 +465,9 @@ export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps):
     if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
       throw new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.');
     }
-    const text = firstAdminRequest(request.orgId, request.email, id, hash);
-    if (Buffer.byteLength(text) > REQUEST_LIMIT_BYTES) {
-      throw new UsageError(
-        `the address makes the request longer than the ${String(REQUEST_LIMIT_BYTES)} bytes the operator reads`,
-      );
-    }
     return {
       id,
-      text,
+      text: firstAdminRequest(request.orgId, request.email, id, hash),
       noun: 'invitation',
       field: 'invitationId',
       made: 'operator.first_admin_invited',
