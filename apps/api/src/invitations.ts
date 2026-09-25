@@ -21,7 +21,6 @@ import {
   CONFIRM_OPERATION,
   EMAIL_MAX,
   INVITE_OPERATION,
-  invitationEmail,
   type InvitationWrite,
   type InvitationWrites,
 } from '@agentx/core/modules/identity';
@@ -59,7 +58,6 @@ const ASK_SCHEMA = {
       email: z
         .email()
         .max(EMAIL_MAX)
-        .refine((value) => invitationEmail(value) !== undefined)
         .describe("The invited person's email address: they accept with a login whose verified address is this one."),
       role: ROLE.describe('The role they join with.'),
     })

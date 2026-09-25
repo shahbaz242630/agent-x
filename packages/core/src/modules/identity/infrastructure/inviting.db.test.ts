@@ -20,6 +20,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -255,6 +256,14 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
       signedInAt: START.toISOString(),
       methods: 'pwd otp mfa',
       proofHash: createHash('sha256').update('an ID token').digest('hex'),
+      changeHash: invitationChange({
+        orgId: org,
+        id,
+        ...INVITED,
+        invitedBy: admin.membershipId,
+        createdAt: START,
+      }).changeHash.toString('hex'),
+      verifiedAt: START.toISOString(),
       statusFrom: 'DRAFT',
       statusTo: 'OPEN',
     });
@@ -388,5 +397,24 @@ describe(`records that can't be believed (B4-3b, Postgres ${server.version})`, (
     await expect(
       writes.ask(admin, { ...keyed(admin, 'members.invite', 'ask-1'), orgId: elsewhere.org }, INVITED, CORRELATION),
     ).rejects.toBeInstanceOf(TenantContextError);
+  });
+});
+
+describe(`a write's answer gives up after 10 seconds rather than hold the request (B4-3b, Postgres ${server.version})`, () => {
+  it('the answer’s read of the invitation, on a retry', async () => {
+    const { admin } = await organization();
+    await ask(admin);
+
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table identity.invitations in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, ask(admin), 'the retry')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });

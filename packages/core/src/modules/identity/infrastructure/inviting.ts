@@ -140,7 +140,7 @@ export function createInvitationWrites({
     idempotent: IdempotentRequest,
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-  ): Promise<{ written: InvitationWrite; fresh: boolean }> => {
+  ): Promise<InvitationWrite> => {
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     let done;
@@ -151,28 +151,25 @@ export function createInvitationWrites({
       });
     } catch (error) {
       if (error instanceof WriteRefused) {
-        return { written: { outcome: 'refused', status: error.status, code: error.code }, fresh: false };
+        return { outcome: 'refused', status: error.status, code: error.code };
       }
       throw error;
     }
-    if (done.outcome === 'conflict' || done.outcome === 'busy') return { written: done, fresh: false };
+    if (done.outcome === 'conflict' || done.outcome === 'busy') return done;
     const read = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
       await sql`set local statement_timeout = '10s'`.execute(tx);
       return invitationRecord(tx, states, admin.orgId, done.result.resourceId);
     });
     if (read.outcome === 'tampered') {
-      return { written: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' }, fresh: false };
+      return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
     }
     if (read.outcome === 'missing') throw new Error('an invitation written, or written before, is not there');
-    return {
-      written: { outcome: 'written', status: done.result.status, invitation: read.invitation },
-      fresh: done.outcome === 'done',
-    };
+    return { outcome: 'written', status: done.result.status, invitation: read.invitation };
   };
 
   return {
     async ask(admin, idempotent, { email, role }, correlationId) {
-      const { written } = await write(admin, idempotent, correlationId, async (tx, states) => {
+      return write(admin, idempotent, correlationId, async (tx, states) => {
         const invitedBy = await adminOf(tx, states, admin);
         const id = ids.next();
         const createdAt = clock.now();
@@ -198,12 +195,11 @@ export function createInvitationWrites({
         });
         return { status: 202, resourceId: id };
       });
-      return written;
     },
 
     async confirm(admin, idempotent, invitationId, correlationId) {
       let token: string | undefined;
-      const { written, fresh } = await write(admin, idempotent, correlationId, async (tx, states) => {
+      const written = await write(admin, idempotent, correlationId, async (tx, states) => {
         await adminOf(tx, states, admin);
         const read = await invitationToOpen(tx, states, keys, {
           orgId: admin.orgId,
@@ -227,7 +223,8 @@ export function createInvitationWrites({
         });
         return { status: 200, resourceId: read.invitation.id };
       });
-      if (written.outcome === 'written' && fresh && token !== undefined) return { ...written, token };
+      // Set only by a write that ran now: a replay never runs it, so never has a token.
+      if (written.outcome === 'written' && token !== undefined) return { ...written, token };
       return written;
     },
   };

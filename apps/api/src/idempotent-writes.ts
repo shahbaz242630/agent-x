@@ -45,6 +45,7 @@ const isPlainObject = (value: object): boolean => {
   const prototype: unknown = Object.getPrototypeOf(value);
   if (prototype === Object.prototype || prototype === null) return true;
   return (
+    // Always an object past the null above; the compiler needs telling.
     typeof prototype === 'object' &&
     Object.getPrototypeOf(prototype) === null &&
     Reflect.ownKeys(prototype).length === 0

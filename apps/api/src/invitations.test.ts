@@ -8,6 +8,7 @@ import type {
   InvitingAdmin,
   LiveSession,
   MembershipCheck,
+  Role,
   SignIn,
 } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -28,6 +29,8 @@ const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const INVITATION_ID = '0199a0f0-0000-7000-8000-0000000000e1';
 const CHALLENGE_ID = '0199a0f0-0000-7000-8000-0000000000c1';
 const TOKEN = 'T'.repeat(43);
+/** A well-formed address of 254 characters, the longest there is. */
+const ADDRESS_254 = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(57)}.tes`;
 
 const LIVE: LiveSession = {
   sessionId: '0199a0f0-0000-7000-8000-000000000022',
@@ -80,7 +83,7 @@ type Asked =
       readonly id: string;
     };
 
-async function withWrites(answer: InvitationWrite | Error | undefined) {
+async function withWrites(answer: InvitationWrite | Error | undefined, role: Role = 'admin') {
   const asked: Asked[] = [];
   // Without an answer, no writes are given the server, so none is asked for.
   const answered = (): Promise<InvitationWrite> =>
@@ -118,7 +121,8 @@ async function withWrites(answer: InvitationWrite | Error | undefined) {
     ids: new SequentialIds(),
     healthChecks: [],
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? ADMIN : ({ outcome: 'none' } as const)),
+    findMembership: (orgId) =>
+      Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...(answer !== undefined && { invitationWrites: writes }),
   });
   servers.push(app);
@@ -186,7 +190,7 @@ describe('POST /v1/members/invitations keeps an admin’s invitation as a draft,
     ['no role', { email: 'sara@example.test' }],
     ['a role that isn’t one', { email: 'sara@example.test', role: 'owner' }],
     ['an address that isn’t one', { email: 'sara', role: 'viewer' }],
-    ['an address too long', { email: `${'a'.repeat(243)}@example.test`, role: 'viewer' }],
+    ['an address of 255 characters', { email: `${ADDRESS_254}t`, role: 'viewer' }],
     ['a field it doesn’t take', { email: 'sara@example.test', role: 'viewer', orgId: ORG }],
   ])('refuses %s as BAD_REQUEST, asking nothing of the writes', async (_what, body) => {
     const { app, asked } = await withWrites({ outcome: 'written', status: 202, invitation: DRAFT });
@@ -196,6 +200,16 @@ describe('POST /v1/members/invitations keeps an admin’s invitation as a draft,
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual(errorBody('BAD_REQUEST', FIRST_ID));
     expect(asked).toEqual([]);
+  });
+
+  it('takes an address of 254 characters', async () => {
+    const { app, asked } = await withWrites({ outcome: 'written', status: 202, invitation: DRAFT });
+
+    const response = await app.inject(ask({ email: ADDRESS_254, role: 'viewer' }));
+
+    expect(ADDRESS_254).toHaveLength(254);
+    expect(response.statusCode).toBe(202);
+    expect(asked).toHaveLength(1);
   });
 
   it('refuses a body over 1 KiB', async () => {
@@ -278,6 +292,23 @@ describe('POST /v1/members/invitations/{id}/confirm opens the invitation, once t
     expect(response.statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
+});
+
+describe('only an admin reaches either route', () => {
+  it.each(['approver', 'developer', 'viewer'] as const)(
+    'refuses a %s as FORBIDDEN, asking nothing of the writes',
+    async (role) => {
+      for (const request of [ask(), confirm()]) {
+        const { app, asked } = await withWrites({ outcome: 'written', status: 202, invitation: DRAFT }, role);
+
+        const response = await app.inject(request);
+
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toEqual(errorBody('FORBIDDEN', FIRST_ID));
+        expect(asked).toEqual([]);
+      }
+    },
+  );
 });
 
 describe('both routes answer the writes’ refusals', () => {
