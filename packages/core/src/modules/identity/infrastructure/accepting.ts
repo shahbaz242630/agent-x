@@ -50,6 +50,22 @@ import type { IdentityTables } from './tables.ts';
 /** The route's operation. */
 export const ACCEPT_OPERATION = 'invitations.accept';
 
+/**
+ * Whether no one is listed in the organisation, deactivated or not, asked by
+ * an acceptance of the operator's first-admin invitation (B4-6a), which then
+ * joins at once. Two of those accepted at the same moment would each find it
+ * empty, and both join unconfirmed; so each first takes a lock for the
+ * organisation's first admin, held to the end of its transaction, and the
+ * second, waiting, reads the list once the first has committed (B4-6a
+ * review). Only those acceptances take it, after the invitation and before
+ * any membership.
+ */
+async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: string): Promise<boolean> {
+  const key = `agentx.first-admin:${orgId.toLowerCase()}`;
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  return (await listedMembers(tx, orgId, 1)).length === 0;
+}
+
 /** Who is accepting: a signed-in person, by their session. */
 export interface AcceptingPerson {
   readonly userId: string;
@@ -131,7 +147,7 @@ export function createInvitationAcceptance({
             const actor = { type: 'user' as const, id: person.userId };
             try {
               // No one listed there at all, deactivated or not: the operator's first admin joins at once (B4-6a).
-              const noMembers = (await listedMembers(tx, orgId, 1)).length === 0;
+              const noMembers = read.invitation.byOperator && (await firstToJoin(tx, orgId));
               const accepted = await acceptInvitation(tx, states, {
                 orgId,
                 id: invitationId,

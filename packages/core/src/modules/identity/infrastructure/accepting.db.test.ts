@@ -21,6 +21,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  waitUntilQueued,
   within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -643,6 +644,49 @@ describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${
       invitation: { id, status: 'ACCEPTED', acceptedBy: invitee.userId },
     });
     expect(await membershipOfPerson(org, invitee.userId)).toMatchObject({ outcome: 'active', role: 'admin' });
+  });
+
+  it('makes one first admin when two of the operator’s invitations are accepted at the same moment (B4-6a review)', async () => {
+    const org = await emptyOrganization();
+    const first = await firstAdmin(org, 'first@example.test');
+    const second = await firstAdmin(org, 'second@example.test');
+
+    const answers = await Promise.all([
+      accept(await person('first@example.test'), first.token, 'accept-a'),
+      accept(await person('second@example.test'), second.token, 'accept-b'),
+    ]);
+
+    expect(
+      answers.map((answer) => (answer.outcome === 'accepted' ? answer.invitation.status : answer.outcome)).sort(),
+    ).toEqual(['ACCEPTED', 'AWAITING_CONFIRMATION']);
+  });
+
+  it('reads whether the organisation is empty only once it holds the first admin’s lock', async () => {
+    const org = await emptyOrganization();
+    const { token } = await firstAdmin(org);
+    const invitee = await person();
+    const someone = await person(null);
+    // Another first admin's acceptance, part-way: the lock taken, their directory entry written, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.first-admin:${org}`,
+      ]);
+      await holder.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        someone.userId,
+        org,
+        ids.next(),
+      ]);
+      const accepting = within(20_000, accept(invitee, token), 'the acceptance');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await accepting).toMatchObject({ outcome: 'accepted', invitation: { status: 'AWAITING_CONFIRMATION' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('keeps them waiting for an admin once someone belongs to the organisation', async () => {
