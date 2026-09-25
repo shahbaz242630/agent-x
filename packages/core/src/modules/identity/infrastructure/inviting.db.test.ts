@@ -124,7 +124,9 @@ const stepUp = (admin: InvitingAdmin, challengeId: string) =>
 async function drafted(admin: InvitingAdmin, key = 'ask-1') {
   const asked = await ask(admin, key);
   if (asked.outcome !== 'written') throw new Error(`not asked: ${asked.outcome}`);
-  return { id: asked.invitation.id, challengeId: asked.invitation.stepUpChallengeId };
+  const challengeId = asked.invitation.stepUpChallengeId;
+  if (challengeId === null) throw new Error('a member’s invitation names no step-up');
+  return { id: asked.invitation.id, challengeId };
 }
 
 const statusOf = async (org: string, id: string) =>
@@ -173,7 +175,7 @@ describe(`asking for an invitation (B4-3b, Postgres ${server.version})`, () => {
 
     if (asked.outcome !== 'written') throw new Error(`not asked: ${asked.outcome}`);
     expect(asked).toMatchObject({ status: 202, invitation: { role: 'developer', status: 'DRAFT' } });
-    const pending = await challenges().pending(app, asked.invitation.stepUpChallengeId, admin.sessionId);
+    const pending = await challenges().pending(app, asked.invitation.stepUpChallengeId ?? '', admin.sessionId);
     const { changeHash } = invitationChange({
       orgId: org,
       id: asked.invitation.id,

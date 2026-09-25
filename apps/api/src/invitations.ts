@@ -258,7 +258,8 @@ export function registerInvitations(
       if (refused !== undefined || written.outcome !== 'written') return refused;
       return reply.code(202).send({
         invitation: invitationOf(written),
-        ...(written.invitation.status === 'DRAFT' && { stepUpChallengeId: written.invitation.stepUpChallengeId }),
+        ...(written.invitation.status === 'DRAFT' &&
+          written.invitation.stepUpChallengeId !== null && { stepUpChallengeId: written.invitation.stepUpChallengeId }),
       });
     },
   );

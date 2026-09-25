@@ -3,7 +3,7 @@
 // idempotency store, the invitation and the membership, in the invitation's
 // own organisation (SEC-HA-08, SEC-TEN-04). The route's answers are
 // apps/api's invitations.test.ts.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   createDatabase,
@@ -21,6 +21,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  waitUntilQueued,
   within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -36,7 +37,16 @@ import {
   createInvitationAcceptance,
   type InvitationAcceptance,
 } from './accepting.ts';
-import { draftInvitation, invitationChange, INVITATIONS, invitationToOpen, openInvitation } from './invitations.ts';
+import {
+  draftInvitation,
+  invitationChange,
+  invitationRecord,
+  INVITATIONS,
+  invitationToOpen,
+  inviteFirstAdmin,
+  inviteTokenHash,
+  openInvitation,
+} from './invitations.ts';
 import { addMembership, membersFor, membershipFor, MEMBERSHIPS } from './memberships.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { createSessions } from './sessions.ts';
@@ -566,5 +576,232 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${server.version})`, () => {
+  /** An organisation no one belongs to, as the operator's command creates one. */
+  async function emptyOrganization(): Promise<string> {
+    const org = ids.next();
+    await withSignedStates(app, org, services(), (tx, states) =>
+      createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
+    );
+    return org;
+  }
+
+  /** The operator's invitation of the first admin: its ID, and the token its link carries, made outside the job. */
+  async function firstAdmin(org: string, email = 'Sara.Khan@Example.test'): Promise<{ id: string; token: string }> {
+    const id = ids.next();
+    const token = randomBytes(32).toString('base64url');
+    await withSignedStates(app, org, services(), (tx, states) =>
+      inviteFirstAdmin(tx, states, keys, {
+        orgId: org,
+        id,
+        email,
+        tokenHash: inviteTokenHash(token),
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    return { id, token };
+  }
+
+  const recordOfInvitation = (org: string, id: string) =>
+    withSignedStates(app, org, services(), (tx, states) => invitationRecord(tx, states, org, id));
+
+  it('opens an admin’s invitation at once, naming no member who asked and no step-up, listed by the token’s hash', async () => {
+    const org = await emptyOrganization();
+    const { id, token } = await firstAdmin(org);
+
+    expect(await recordOfInvitation(org, id)).toMatchObject({
+      outcome: 'found',
+      invitation: { id, role: 'admin', status: 'OPEN', stepUpChallengeId: null, byOperator: true, acceptedBy: null },
+    });
+    const listed = await database
+      .as('backup')
+      .query<{ invitation_id: string }>('select invitation_id from directory.invites where token_hash = $1', [
+        inviteTokenHash(token),
+      ]);
+    expect(listed).toEqual([{ invitation_id: id }]);
+    const events = await database
+      .as('backup')
+      .query<{ action: string; details: string }>(
+        'select action, details from audit.events where subject_id = $1 order by seq',
+        [id],
+      );
+    expect(events.map(({ action }) => action)).toEqual(['invitation.drafted', 'invitation.opened']);
+    expect(JSON.parse(events[1]?.details ?? '{}')).toMatchObject({ role: 'admin', byOperator: true });
+  });
+
+  it('makes the person who accepts it the first admin at once, while no one belongs to the organisation', async () => {
+    const org = await emptyOrganization();
+    const { id, token } = await firstAdmin(org);
+    const invitee = await person();
+
+    expect(await accept(invitee, token)).toMatchObject({
+      outcome: 'accepted',
+      orgId: org,
+      invitation: { id, status: 'ACCEPTED', acceptedBy: invitee.userId },
+    });
+    expect(await membershipOfPerson(org, invitee.userId)).toMatchObject({ outcome: 'active', role: 'admin' });
+  });
+
+  it('makes one first admin when two of the operator’s invitations are accepted at the same moment (B4-6a review)', async () => {
+    const org = await emptyOrganization();
+    const first = await firstAdmin(org, 'first@example.test');
+    const second = await firstAdmin(org, 'second@example.test');
+
+    const answers = await Promise.all([
+      accept(await person('first@example.test'), first.token, 'accept-a'),
+      accept(await person('second@example.test'), second.token, 'accept-b'),
+    ]);
+
+    expect(
+      answers.map((answer) => (answer.outcome === 'accepted' ? answer.invitation.status : answer.outcome)).sort(),
+    ).toEqual(['ACCEPTED', 'AWAITING_CONFIRMATION']);
+  });
+
+  it('reads whether the organisation is empty only once it holds the first admin’s lock', async () => {
+    const org = await emptyOrganization();
+    const { token } = await firstAdmin(org);
+    const invitee = await person();
+    const someone = await person(null);
+    // Another first admin's acceptance, part-way: the lock taken, their directory entry written, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.first-admin:${org}`,
+      ]);
+      await holder.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        someone.userId,
+        org,
+        ids.next(),
+      ]);
+      const accepting = within(20_000, accept(invitee, token), 'the acceptance');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await accepting).toMatchObject({ outcome: 'accepted', invitation: { status: 'AWAITING_CONFIRMATION' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('keeps them waiting for an admin once someone belongs to the organisation', async () => {
+    const who = await organization();
+    const { token } = await firstAdmin(who.org);
+    const invitee = await person();
+
+    expect(await accept(invitee, token)).toMatchObject({
+      outcome: 'accepted',
+      invitation: { status: 'AWAITING_CONFIRMATION' },
+    });
+    expect(await membershipOfPerson(who.org, invitee.userId)).toEqual({ outcome: 'none' });
+  });
+
+  it('keeps them waiting too when the only member there was deactivated: the organisation isn’t new', async () => {
+    const org = await emptyOrganization();
+    const earlier = await person(null);
+    const membershipId = ids.next();
+    await withSignedStates(app, org, services(), async (tx, states) => {
+      await addMembership(tx, states, {
+        orgId: org,
+        id: membershipId,
+        userId: earlier.userId,
+        role: 'admin',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    await withSignedStates(app, org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+    const { token } = await firstAdmin(org);
+
+    expect(await accept(await person(), token)).toMatchObject({ invitation: { status: 'AWAITING_CONFIRMATION' } });
+  });
+
+  it('refuses another address, as any invitation does', async () => {
+    const org = await emptyOrganization();
+    const { token } = await firstAdmin(org);
+
+    expect(await accept(await person('someone.else@example.test'), token)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'INVITATION_INVALID',
+    });
+  });
+
+  it('refuses an address that isn’t one, and a hash that isn’t 32 bytes, before writing anything', async () => {
+    const org = await emptyOrganization();
+    const invite = (email: string, tokenHash: Buffer) =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        inviteFirstAdmin(tx, states, keys, {
+          orgId: org,
+          id: ids.next(),
+          email,
+          tokenHash,
+          createdAt: clock.now(),
+          actor: OPERATOR,
+        }),
+      );
+
+    await expect(invite('not an address', inviteTokenHash('t'))).rejects.toThrow('the address is not one');
+    await expect(invite('sara@example.test', Buffer.alloc(31))).rejects.toThrow('is not 32 bytes');
+    const rows = await database.as('backup').query('select 1 from identity.invitations where org_id = $1', [org]);
+    expect(rows).toEqual([]);
+  });
+
+  it.each([
+    ['a viewer’s invitation naming no member who asked', 'viewer', null, null],
+    ['an admin’s naming no member but a step-up', 'admin', null, 'step-up'],
+    ['an admin’s naming a member but no step-up', 'admin', 'member', null],
+  ] as const)('the table refuses %s (0020)', async (_what, role, invitedBy, challenge) => {
+    const who = await organization();
+    const owner = await tamperAsOwner(database, INVITATIONS, who.org);
+    try {
+      const insert = owner.query(
+        `insert into identity.invitations (org_id, id, role, status, invited_by, expires_at, created_at,
+           email_ciphertext, email_key_version, step_up_challenge_id)
+         values ($1, $2, $3, 'DRAFT', $4, $5, $6, $7, 1, $8)`,
+        [
+          who.org,
+          ids.next(),
+          role,
+          invitedBy === null ? null : who.admin,
+          new Date(START.getTime() + 3_600_000),
+          START,
+          Buffer.alloc(40),
+          challenge === null ? null : ids.next(),
+        ],
+      );
+
+      await expect(insert).rejects.toMatchObject({ code: '23514', constraint: 'asked_by_a_member_or_the_operator' });
+    } finally {
+      await owner.end();
+    }
+  });
+
+  it('refuses the operator’s invitation put down to a member since, as INTEGRITY_FAILED: who asked is sealed', async () => {
+    const who = await organization();
+    const { id, token } = await firstAdmin(who.org);
+    const owner = await tamperAsOwner(database, INVITATIONS, who.org);
+    try {
+      // Both at once, as the table's check holds them together (0020).
+      await owner.query(
+        'update identity.invitations set invited_by = $3, step_up_challenge_id = $4 where org_id = $1 and id = $2',
+        [who.org, id, who.admin, ids.next()],
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await accept(await person(), token)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
   });
 });

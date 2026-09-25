@@ -57,6 +57,8 @@ export {
 } from './infrastructure/inviting.ts';
 export {
   acceptInvitation,
+  type FirstAdminInvitation,
+  inviteFirstAdmin,
   draftInvitation,
   type InvitationChange,
   invitationChange,

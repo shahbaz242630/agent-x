@@ -21,7 +21,9 @@
 //    there, their membership brought back with the invitation's role and
 //    today's start (B4-5c); an admin or finance approver waits for an
 //    existing admin to confirm who accepted (B4-4d), who brings them back
-//    the same way.
+//    the same way. The operator's invitation of an organisation's first
+//    admin, accepted while no one is listed there, joins at once: there is
+//    no admin to confirm them (B4-6a).
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
@@ -33,7 +35,7 @@ import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
-import { type DirectoryTables, listedInvite } from '../../directory/index.ts';
+import { type DirectoryTables, listedInvite, listedMembers } from '../../directory/index.ts';
 import {
   acceptInvitation,
   type InvitationRecord,
@@ -47,6 +49,22 @@ import type { IdentityTables } from './tables.ts';
 
 /** The route's operation. */
 export const ACCEPT_OPERATION = 'invitations.accept';
+
+/**
+ * Whether no one is listed in the organisation, deactivated or not, asked by
+ * an acceptance of the operator's first-admin invitation (B4-6a), which then
+ * joins at once. Two of those accepted at the same moment would each find it
+ * empty, and both join unconfirmed; so each first takes a lock for the
+ * organisation's first admin, held to the end of its transaction, and the
+ * second, waiting, reads the list once the first has committed (B4-6a
+ * review). Only those acceptances take it, after the invitation and before
+ * any membership.
+ */
+async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: string): Promise<boolean> {
+  const key = `agentx.first-admin:${orgId.toLowerCase()}`;
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  return (await listedMembers(tx, orgId, 1)).length === 0;
+}
 
 /** Who is accepting: a signed-in person, by their session. */
 export interface AcceptingPerson {
@@ -128,11 +146,14 @@ export function createInvitationAcceptance({
             if (membership.outcome === 'active') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
             const actor = { type: 'user' as const, id: person.userId };
             try {
+              // No one listed there at all, deactivated or not: the operator's first admin joins at once (B4-6a).
+              const noMembers = read.invitation.byOperator && (await firstToJoin(tx, orgId));
               const accepted = await acceptInvitation(tx, states, {
                 orgId,
                 id: invitationId,
                 userId: person.userId,
                 actor,
+                noMembers,
               });
               if (accepted.outcome === 'accepted' && membership.outcome === 'deactivated') {
                 await reactivateMembership(tx, states, {

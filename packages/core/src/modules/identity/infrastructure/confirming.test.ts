@@ -12,6 +12,7 @@ const WAITING: InvitationRecord = {
   status: 'AWAITING_CONFIRMATION',
   expiresAt: new Date('2026-09-28T09:00:00Z'),
   stepUpChallengeId: '0199a0f0-0000-7000-8000-0000000000cc',
+  byOperator: false,
   acceptedBy: '0199a0f0-0000-7000-8000-0000000000dd',
 };
 const hash = (changes: Partial<InvitationRecord> = {}, org = ORG, version = 4) =>
