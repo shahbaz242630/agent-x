@@ -126,6 +126,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/members/invitations/{id}/approve/confirm',
       'POST /v1/members/invitations/{id}/confirm',
       'POST /v1/members/invitations/{id}/decline',
+      'POST /v1/members/{id}/deactivate',
+      'POST /v1/members/{id}/deactivate/confirm',
+      'POST /v1/members/{id}/role',
+      'POST /v1/members/{id}/role/confirm',
       'PUT /test/both',
     ]);
   });
@@ -1092,8 +1096,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     const answers = Object.values(document.paths).flatMap((item) =>
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
-    // The test's route, /health, the five sign-in routes, the members list and the six invitation routes, with each GET's HEAD.
-    expect(answers.length).toBe(20);
+    // The test's route, /health, the five sign-in routes, the members list, the six invitation routes and the four
+    // member change routes, with each GET's HEAD.
+    expect(answers.length).toBe(24);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1109,6 +1114,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'InvitationDecided',
       'InvitationDrafted',
       'Member',
+      'MemberChangeAsked',
+      'MemberChanged',
       'Members',
       'Session',
     ]);

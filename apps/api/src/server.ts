@@ -20,6 +20,7 @@ import type {
   AcceptanceConfirmations,
   InvitationAcceptance,
   InvitationWrites,
+  MembershipChanges,
   SignIn,
 } from '@agentx/core/modules/identity';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -41,6 +42,7 @@ import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
 import { registerSignIn } from './sign-in.ts';
 import { registerInvitations } from './invitations.ts';
+import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
 import { registerIdempotencyKeys } from './write-operations.ts';
 
@@ -63,6 +65,8 @@ export interface ServerOptions {
   readonly invitationAcceptance?: InvitationAcceptance | undefined;
   /** Confirming or declining who accepted (the identity module's confirming.ts); without it, no one reaches those routes. */
   readonly acceptanceConfirmations?: AcceptanceConfirmations | undefined;
+  /** Changing a member's role or deactivating them (the identity module's membership-changes.ts); without it, no one reaches those routes. */
+  readonly membershipChanges?: MembershipChanges | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -197,6 +201,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     securityEvents,
   });
   registerMembers(app, options.listMembers);
+  registerMemberChanges(app, options.membershipChanges);
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,
