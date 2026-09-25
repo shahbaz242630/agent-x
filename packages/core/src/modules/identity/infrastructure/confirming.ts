@@ -94,7 +94,7 @@ class ConfirmationRefused extends Error {
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 
 /** The pending change's SHA-256: each fact in a fixed order, as its length then its bytes, IDs in lower case. */
-function confirmationHash(orgId: string, invitation: InvitationRecord, version: number): Buffer {
+export function confirmationHash(orgId: string, invitation: InvitationRecord, version: number): Buffer {
   const hash = createHash('sha256');
   for (const part of [
     orgId.toLowerCase(),
