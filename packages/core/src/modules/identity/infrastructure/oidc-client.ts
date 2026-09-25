@@ -9,7 +9,15 @@
 //   and the ID token is checked here, against the issuer's published keys
 //   (RS256 only), for its issuer, audience, authorized party, expiry, age,
 //   nonce and authentication time. Only who the person is and what the login
-//   proved come out; Zitadel's access and refresh tokens are dropped unread.
+//   proved come out.
+// - B4-4a: the flow asks for the `email` scope too, and the access token is
+//   used once, straight after, at the userinfo endpoint (Zitadel keeps the
+//   address out of the ID token unless the app is set to, which staging's
+//   isn't). The answer must name the ID token's person; its address comes out
+//   only when the login service says it is verified, in lower case, for an
+//   invitation to be matched against (B4-4c). An endpoint that fails gives no
+//   address and fails nothing. The access and refresh tokens are then
+//   dropped.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -36,6 +44,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, jwtVerify } from 'jose';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
+import { invitationEmail } from '../domain/invitation.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
 
 export interface OidcClientSettings {
@@ -68,6 +77,8 @@ export interface VerifiedSignIn {
   readonly evidence: SignInEvidence;
   /** SHA-256 of the ID token, kept as a step-up's evidence (ADR-003 §9); the token itself never is. */
   readonly idTokenHash: Buffer;
+  /** The person's email address, in lower case, only when the login service says it is verified. */
+  readonly verifiedEmail: string | undefined;
 }
 
 /** Why a sign-in failed, for its answer and its security event (B2-5). */
@@ -122,6 +133,8 @@ const KEYS_RETRY_MS = 5_000;
 const RANDOM_BYTES = 32;
 /** A nonce as this client makes them, and as a step-up challenge does: 32 random bytes in base64url. */
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
+/** An access token: visible ASCII, bounded (Zitadel's opaque tokens are about 100 characters, its JWTs about 1,000). */
+const ACCESS_TOKEN = /^[!-~]{1,4096}$/;
 /** A value the login service hands back through the browser: visible ASCII, bounded. */
 const RETURNED = /^[!-~]{1,2048}$/;
 
@@ -129,6 +142,7 @@ interface Discovery {
   readonly authorizationEndpoint: string;
   readonly tokenEndpoint: string;
   readonly jwksUri: string;
+  readonly userinfoEndpoint: string;
 }
 
 const random = (): string => randomBytes(RANDOM_BYTES).toString('base64url');
@@ -257,6 +271,7 @@ export function createOidcClient({
         authorizationEndpoint: endpoint(document, 'authorization_endpoint'),
         tokenEndpoint: endpoint(document, 'token_endpoint'),
         jwksUri: endpoint(document, 'jwks_uri'),
+        userinfoEndpoint: endpoint(document, 'userinfo_endpoint'),
       };
     })();
     // A failed discovery is tried again next time, not held for the life of the process.
@@ -307,7 +322,7 @@ export function createOidcClient({
   }
 
   /** The ID token's claims, checked; a key not held sends for the keys again, at most once a minute. */
-  async function verified(idToken: string, nonce: string): Promise<VerifiedSignIn> {
+  async function verified(idToken: string, nonce: string): Promise<Omit<VerifiedSignIn, 'verifiedEmail'>> {
     const now = clock.now();
     const verify = (set: ReturnType<typeof createLocalJWKSet>) =>
       jwtVerify(idToken, set, {
@@ -373,6 +388,36 @@ export function createOidcClient({
     return { subject, evidence, idTokenHash: createHash('sha256').update(idToken, 'ascii').digest() };
   }
 
+  /**
+   * The person's verified address, from the userinfo endpoint with the
+   * access token: the answer must name the same person; an address comes out
+   * only with `email_verified` true, and only as one address (the invitation's
+   * own rule), in lower case. An endpoint that can't be reached, or answers
+   * with anything but a JSON object, gives no address and fails nothing: a
+   * sign-in stands on its ID token, and only accepting an invitation needs an
+   * address (B4-4b review). An answer about another person fails the sign-in.
+   */
+  async function verifiedEmailOf(accessToken: string, subject: string): Promise<string | undefined> {
+    let info: Record<string, unknown>;
+    try {
+      const { userinfoEndpoint } = await discover();
+      const response = await call(userinfoEndpoint, {
+        headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return undefined;
+      }
+      info = await jsonObject(response, 'userinfo answer');
+    } catch (error) {
+      if (error instanceof SignInFailed && error.failure === 'provider_unavailable') return undefined;
+      throw error;
+    }
+    if (info.sub !== subject) throw new SignInFailed('token_invalid', 'the userinfo answer names another person');
+    if (info.email_verified !== true) return undefined;
+    return invitationEmail(info.email);
+  }
+
   return {
     async start(options = {}) {
       if (options.nonce !== undefined && (typeof options.nonce !== 'string' || !NONCE.test(options.nonce))) {
@@ -384,7 +429,7 @@ export function createOidcClient({
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('scope', 'openid');
+      url.searchParams.set('scope', 'openid email');
       url.searchParams.set('state', flow.state);
       url.searchParams.set('nonce', flow.nonce);
       url.searchParams.set('code_challenge', createHash('sha256').update(flow.verifier).digest('base64url'));
@@ -431,7 +476,13 @@ export function createOidcClient({
       if (typeof tokens.id_token !== 'string') {
         throw new SignInFailed('provider_unavailable', 'the token response holds no ID token');
       }
-      return verified(tokens.id_token, flow.nonce);
+      if (typeof tokens.access_token !== 'string' || !ACCESS_TOKEN.test(tokens.access_token)) {
+        throw new SignInFailed('provider_unavailable', 'the token response holds no access token');
+      }
+      // The ID token first: nothing is asked of the userinfo endpoint for a sign-in that doesn't stand.
+      const signedIn = await verified(tokens.id_token, flow.nonce);
+      const verifiedEmail = await verifiedEmailOf(tokens.access_token, signedIn.subject.subject);
+      return { ...signedIn, verifiedEmail };
     },
   };
 }

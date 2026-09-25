@@ -2,12 +2,14 @@
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
 import { createLoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts';
+import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
 import { createSessions, type Sessions } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
 import { createStepUpChallenges, type StepUpChallenges } from './step-up-challenges.ts';
@@ -28,6 +30,13 @@ const evidence: SignInEvidence = {
 /** Every flow any stand-in made, so each has its own values. */
 let flowsMade = 0;
 
+/** Stand-in keys, one per purpose. */
+const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
+
 /** The stand-in client: flows it started, and what `finish` does with each. */
 class StandInClient implements OidcClient {
   started = 0;
@@ -39,6 +48,8 @@ class StandInClient implements OidcClient {
   startedWith: ({ prompt?: 'login'; nonce?: string } | undefined)[] = [];
   /** What the next sign-in proves: the usual evidence unless a test says otherwise. */
   proves: SignInEvidence = evidence;
+  /** The verified address the next sign-in gives, if any. */
+  verifiedEmail: string | undefined = undefined;
 
   start(options?: { prompt?: 'login'; nonce?: string }) {
     this.started += 1;
@@ -62,7 +73,7 @@ class StandInClient implements OidcClient {
     if (this.failWith !== undefined) throw this.failWith;
     if (returned.state !== flow.state) throw new SignInFailed('state_mismatch', 'test');
     const subject: Subject = { issuer: ISSUER, subject: this.subject };
-    return { subject, evidence: this.proves, idTokenHash: Buffer.alloc(32, 7) };
+    return { subject, evidence: this.proves, idTokenHash: Buffer.alloc(32, 7), verifiedEmail: this.verifiedEmail };
   }
 }
 
@@ -106,6 +117,7 @@ beforeEach(() => {
     challenges,
     ids,
     clock,
+    keys,
   });
 });
 
@@ -458,5 +470,136 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     await expect(signIn.complete({ ...back, previousCookie: stepped.cookie })).rejects.toMatchObject({
       failure: 'flow_missing',
     });
+  });
+});
+
+describe(`a sign-in's verified address (B4-4a, Postgres ${server.version})`, () => {
+  const emailRow = (sessionId: string) =>
+    app.selectFrom('identity.session_emails').selectAll().where('session_id', '=', sessionId).executeTakeFirst();
+
+  it('keeps the address the login service verified, encrypted with the session, in lower case', async () => {
+    client.verifiedEmail = 'Sara.Khan@Example.test';
+
+    const done = await roundTrip();
+
+    expect(await sessionEmailOf(app, keys, done.sessionId)).toBe('sara.khan@example.test');
+    const row = await emailRow(done.sessionId);
+    expect(row?.email_key_version).toBe(1);
+    expect(row?.email_ciphertext.toString('latin1').toLowerCase()).not.toContain('sara');
+    expect(await sessionEmailOf(app, keys, done.sessionId.toUpperCase())).toBe('sara.khan@example.test');
+  });
+
+  it('keeps none when the login service verified none', async () => {
+    const done = await roundTrip();
+
+    expect(await emailRow(done.sessionId)).toBeUndefined();
+    expect(await sessionEmailOf(app, keys, done.sessionId)).toBeUndefined();
+  });
+
+  it('refuses an address that isn’t one, opening no session', async () => {
+    client.verifiedEmail = 'not an address';
+    const before = await app.selectFrom('identity.sessions').select('id').execute();
+
+    await expect(roundTrip()).rejects.toThrow(RangeError);
+    // The session and the address go in one transaction: neither is left.
+    expect(await app.selectFrom('identity.sessions').select('id').execute()).toEqual(before);
+  });
+
+  it('goes with its session when the person signs out', async () => {
+    client.verifiedEmail = 'sara@example.test';
+    const done = await roundTrip();
+
+    await signIn.signOut(done.cookie);
+
+    expect(await emailRow(done.sessionId)).toBeUndefined();
+  });
+
+  it('keeps the session’s own address through a step-up, whatever the fresh sign-in says', async () => {
+    client.verifiedEmail = 'sara@example.test';
+    const done = await roundTrip();
+    const challenge = await challenges.open(app, {
+      sessionId: done.sessionId,
+      action: 'members.invite',
+      changeHash: Buffer.alloc(32, 1),
+    });
+    if (challenge === undefined) throw new Error('no challenge');
+    const { url, flowId } = await signIn.beginStepUp(done.sessionId, challenge.challengeId);
+    client.verifiedEmail = 'mallory@example.test';
+    client.proves = { ...evidence, authTime: clock.now() };
+    await signIn.complete({
+      flowId,
+      code: 'a-code',
+      state: new URL(url).searchParams.get('state') ?? '',
+      previousCookie: done.cookie,
+    });
+
+    expect(await sessionEmailOf(app, keys, done.sessionId)).toBe('sara@example.test');
+  });
+
+  it('won’t open in another session: the address is bound to its own', async () => {
+    client.verifiedEmail = 'sara@example.test';
+    const first = await roundTrip();
+    client.verifiedEmail = undefined;
+    const second = await roundTrip();
+    const copied = await emailRow(first.sessionId);
+    if (copied === undefined) throw new Error('no address');
+    const owner = await database.connect('admin');
+    try {
+      await owner.query('insert into identity.session_emails values ($1, $2, $3)', [
+        second.sessionId,
+        copied.email_ciphertext,
+        copied.email_key_version,
+      ]);
+    } finally {
+      await owner.end();
+    }
+
+    await expect(sessionEmailOf(app, keys, second.sessionId)).rejects.toBeInstanceOf(SessionEmailUnreadable);
+  });
+
+  it('takes a sealed address of 29 to 1,024 bytes and key version 1 or later, and nothing else', async () => {
+    const done = await roundTrip();
+    /** Writes a row past the module, in a transaction rolled back if nothing refuses it. */
+    const written = (ciphertext: Buffer, version: number) =>
+      app.transaction().execute(async (tx) => {
+        await tx
+          .insertInto('identity.session_emails')
+          .values({ session_id: done.sessionId, email_ciphertext: ciphertext, email_key_version: version })
+          .execute();
+        throw new Error('rolled back');
+      });
+
+    for (const [ciphertext, version] of [
+      [Buffer.alloc(29), 1],
+      [Buffer.alloc(1024), 1],
+    ] as const) {
+      await expect(written(ciphertext, version)).rejects.toThrow('rolled back');
+    }
+    for (const length of [28, 1025]) {
+      await expect(written(Buffer.alloc(length), 1)).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'session_emails_email_ciphertext_check',
+      });
+    }
+    await expect(written(Buffer.alloc(40), 0)).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'session_emails_email_key_version_check',
+    });
+  });
+
+  it('can’t be changed or deleted by the app, only added', async () => {
+    client.verifiedEmail = 'sara@example.test';
+    const done = await roundTrip();
+
+    await expect(
+      app
+        .updateTable('identity.session_emails')
+        .set({ email_key_version: 2 })
+        .where('session_id', '=', done.sessionId)
+        .execute(),
+    ).rejects.toMatchObject({ code: '42501' });
+    await expect(
+      app.deleteFrom('identity.session_emails').where('session_id', '=', done.sessionId).execute(),
+    ).rejects.toMatchObject({ code: '42501' });
   });
 });

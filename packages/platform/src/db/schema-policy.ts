@@ -139,6 +139,14 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would leave an open invitation no one can accept.
       appMay: ['SELECT', 'INSERT'],
     },
+    'identity.session_emails': {
+      reason:
+        "A session's verified email address (ADR-003 §5, B4-4a), encrypted, for an invitation to be matched against; it belongs to the person's session, which belongs to no organisation, and goes with it",
+      columns: ['session_id', 'email_ciphertext', 'email_key_version'],
+      // Added as the session opens, and read; it goes with its session (the
+      // key's cascade). A changed address could accept another's invitation.
+      appMay: ['SELECT', 'INSERT'],
+    },
     'identity.users': {
       reason:
         "The people who sign in (ADR-003 §5, ADR-005 §6), by the login service's issuer and subject: a person can belong to several organisations, and is found at sign-in before any is known",
