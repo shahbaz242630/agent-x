@@ -729,9 +729,11 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
     },
   );
 
-  it('gives no address when the endpoint can’t be reached, or answers what isn’t a JSON object', async () => {
+  it('gives no address when the endpoint can’t be reached, answers an error in JSON, or answers what isn’t a JSON object', async () => {
     const fetch = service.fetch;
     for (const answer of [
+      // An error answer in JSON, as OAuth's bearer errors are, is still an error: never read as a person.
+      () => Promise.resolve(Response.json({ error: 'invalid_token' }, { status: 401 })),
       () => Promise.reject(new TypeError('fetch failed')),
       () => Promise.resolve(new Response('not json', { status: 200 })),
       () => Promise.resolve(Response.json(['a list'])),
