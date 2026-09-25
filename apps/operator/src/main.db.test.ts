@@ -20,6 +20,7 @@ import {
   LogCapture,
   type TestDatabase,
   type TestRole,
+  tamperAsOwner,
   within,
   writeTestKeys,
 } from '@agentx/testing';
@@ -536,5 +537,39 @@ describe(`B4-6b the operator invites an organisation's first admin (Postgres ${s
     expect(missing.line('operator.refused')).toMatchObject({ problems: ['no organisation has this ID'] });
     expect(await counts()).toEqual(before);
     expect(`${inUse.text}${missing.text}`).not.toContain(ADDRESS);
+  });
+
+  it('refuses an address that isn’t one, never repeating it, changing nothing', async () => {
+    const orgId = await organization();
+    const before = await counts();
+    const id = uuidV7Ids.next();
+
+    const done = await runRequest(firstAdminRequest(orgId, 'not an address', id, 'ab'.repeat(32)));
+
+    expect(done.code).toBe(1);
+    expect(done.line('operator.refused')).toMatchObject({
+      invitationId: id,
+      problems: ["the invited address, or the token's hash, isn't one"],
+    });
+    expect(done.text).not.toContain('not an address');
+    expect(await counts()).toEqual(before);
+  });
+
+  it('refuses an organisation whose records can’t be verified, changing nothing', async () => {
+    const orgId = await organization();
+    const owner = await tamperAsOwner(database, ORGANIZATIONS, orgId);
+    try {
+      await owner.setColumn(orgId, 'status', 'FROZEN');
+    } finally {
+      await owner.end();
+    }
+    const asked = invitation(orgId);
+
+    const done = await runRequest(asked.request);
+
+    expect(done.code).toBe(1);
+    expect(done.line('operator.refused')).toMatchObject({ problems: ["the organisation's records can't be verified"] });
+    const rows = await database.as('backup').query('select 1 from identity.invitations where id = $1', [asked.id]);
+    expect(rows).toEqual([]);
   });
 });
