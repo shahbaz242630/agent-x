@@ -29,6 +29,7 @@ import {
   createStepUpChallenges,
   type IdentityTables,
   type LoginFlows,
+  membershipFor,
   type Sessions,
   type StepUpChallenges,
   type SignIn,
@@ -339,6 +340,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     healthChecks: [],
     signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: config.sessions.absoluteSeconds },
     securityEvents: recorder,
+    findMembership: (orgId, userId, correlationId) =>
+      membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

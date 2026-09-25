@@ -17,9 +17,17 @@
 // state), and then verified: the signed state must name the same person, so
 // an entry pointed at someone else's membership finds nothing.
 import type { SignedStateTable } from '@agentx/platform/db';
-import type { Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { AuditActor, AuditTables, RecordedState, SignedStates, TamperSign } from '../../audit/index.ts';
+import {
+  type AuditActor,
+  type AuditTables,
+  type RecordedState,
+  type SignedStates,
+  type SignedStatesServices,
+  type TamperSign,
+  withSignedStates,
+} from '../../audit/index.ts';
 import { type DirectoryTables, listedMembership, registerMember } from '../../directory/index.ts';
 import { isRole, MEMBERSHIP, type Role } from '../domain/membership.ts';
 import type { IdentityTables } from './tables.ts';
@@ -109,4 +117,24 @@ export async function membershipOf(
   // The table's check holds the role to the four, and the seal to what was written.
   if (!isRole(role)) throw new Error(`A verified membership holds a role that isn't one: ${id}`);
   return { outcome: 'active', id, role };
+}
+
+/**
+ * The person's membership of the organisation, read for a decision in a
+ * transaction of its own, withSignedStates' for the organisation: what a
+ * request's access check reads (B4-2a). A membership found tampered with
+ * raises the alarm and holds the organisation, logged through `services`'
+ * logger. Each statement is limited to 10 seconds, so a hung read gives its
+ * connection back and the request fails rather than hangs.
+ */
+export function membershipFor(
+  db: Kysely<IdentityTables & DirectoryTables & AuditTables>,
+  services: SignedStatesServices,
+  orgId: string,
+  userId: string,
+): Promise<MembershipCheck> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    return membershipOf(tx, states, orgId, userId);
+  });
 }

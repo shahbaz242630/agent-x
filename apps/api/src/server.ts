@@ -5,7 +5,9 @@
 //    refusal is noted as a security event (B2-5b)
 // 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
 // 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
-//    signed-in person is found by their session cookie (B2-4b)
+//    signed-in person is found by their session cookie (B2-4b), and on a
+//    route naming roles, their membership in the organisation the request
+//    names (B4-2a)
 // 5. a signed-in person's request is counted against their own rate limit
 //    too (B2-5c); a refusal is noted as a security event with the person
 // 6. a write is refused without a well-formed Idempotency-Key header
@@ -20,7 +22,7 @@ import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
-import { registerAccess } from './access.ts';
+import { type FindMembership, registerAccess } from './access.ts';
 import { answerClientError } from './client-errors.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
@@ -44,6 +46,8 @@ export interface ServerOptions {
   readonly signIn?: { readonly service: SignIn; readonly sessionSeconds: number } | undefined;
   /** Where failed sign-ins and rate-limit hits are noted (security-recorder.ts); nowhere when not given. */
   readonly securityEvents?: SecurityEventSink | undefined;
+  /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
+  readonly findMembership?: FindMembership | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -156,7 +160,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
-  registerAccess(app, signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie));
+  registerAccess(app, signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie), options.findMembership);
   // After the access hook, which finds the person.
   app.addHook(
     'onRequest',

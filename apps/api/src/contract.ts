@@ -45,7 +45,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { accessProblems } from './access.ts';
+import { accessProblems, namesRole, ORGANIZATION_HEADER, ORGANIZATION_SCHEMA } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
 import {
@@ -446,6 +446,17 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (operation !== undefined && headers !== undefined && !(headers instanceof z.ZodObject)) {
     problems.push('it names an operation, but its headers schema is not an object to carry the idempotency key');
   }
+  const roles = namesRole(route.config?.access);
+  if (roles && headers !== undefined && !(headers instanceof z.ZodObject)) {
+    problems.push("it names roles, but its headers schema is not an object to carry the organisation's header");
+  }
+  if (
+    written &&
+    roles &&
+    !(headers instanceof z.ZodObject && headers.shape[ORGANIZATION_HEADER] === ORGANIZATION_SCHEMA)
+  ) {
+    problems.push("its document doesn't show the organisation's header it requires (headers)");
+  }
   if (
     written &&
     operation !== undefined &&
@@ -573,10 +584,13 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
       };
-    if (route.config.operation !== undefined) {
+    if (route.config.operation !== undefined || namesRole(access)) {
       // Fastify lays the checked headers over those sent, so every other header stays.
       const own = route.schema?.headers instanceof z.ZodObject ? route.schema.headers : z.object({});
-      schema.headers = own.extend({ [IDEMPOTENCY_KEY_HEADER]: IDEMPOTENCY_KEY_SCHEMA });
+      schema.headers = own.extend({
+        ...(route.config.operation !== undefined && { [IDEMPOTENCY_KEY_HEADER]: IDEMPOTENCY_KEY_SCHEMA }),
+        ...(namesRole(access) && { [ORGANIZATION_HEADER]: ORGANIZATION_SCHEMA }),
+      });
     }
     route.schema = schema;
     route.preSerialization = [...hooksOf(route.preSerialization), answerGuard];
