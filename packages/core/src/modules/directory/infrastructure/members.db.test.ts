@@ -99,6 +99,18 @@ describe(`the directory's list of who belongs where (Postgres ${server.version})
     await expect(withTenant(app, other, (tx) => listedMembers(tx, org, 10))).rejects.toBeInstanceOf(TenantContextError);
   });
 
+  it('orders by membership ID first, whatever order the people come in', async () => {
+    const org = await organization();
+    const [first, second] = [await person(), await person()];
+    const [lower, higher] = [ids.next(), ids.next()];
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: first, membershipId: higher }));
+    await withTenant(app, org, (tx) => registerMember(tx, { orgId: org, userId: second, membershipId: lower }));
+
+    expect(
+      (await withTenant(app, org, (tx) => listedMembers(tx, org, 10))).map(({ membershipId }) => membershipId),
+    ).toEqual([lower, higher]);
+  });
+
   it('orders two entries naming the same membership by person, so the order never depends on the table', async () => {
     const org = await organization();
     const membershipId = ids.next();
