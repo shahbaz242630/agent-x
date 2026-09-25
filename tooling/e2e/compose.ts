@@ -96,6 +96,14 @@ export const execIn = (service: string, command: readonly string[], env: Record<
   compose(['exec', '-T', ...Object.keys(env).flatMap((name) => ['-e', name]), service, ...command], undefined, env);
 
 /**
+ * Runs the operator's command once (compose.yaml's `operator`, B4-6d), alone
+ * (`--no-deps`: the stack is up), in a container removed after, as a person
+ * starts its job on Azure; what it wrote, and how it ended.
+ */
+export const runOperator = (args: readonly string[]): Promise<Run> =>
+  compose(['run', '--rm', '--no-deps', '-T', 'operator', ...args], 180_000);
+
+/**
  * Starts these services again, alone (`--no-deps`), and waits until they are
  * up; `recreate` makes new containers even if compose sees no change, as it
  * doesn't for a changed file they mount.

@@ -54,6 +54,8 @@ export interface E2eFixtures {
     readonly stepUpApp: TestUser & { readonly totpSecret: string };
     /** A password and no second factor yet: the step-up tests register a (virtual) security key at its first sign-in. */
     readonly stepUpKey: TestUser;
+    /** As `totp`, invited by the operator as a new organisation's first admin (B4-6d); the address is Zitadel's verified `<username>@agentx.localhost`. */
+    readonly firstAdmin: TestUser & { readonly totpSecret: string };
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -95,11 +97,16 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await verifyTotp(client, stepUpApp.userId, totp(stepUpSecret, Date.now()));
     const stepUpKey = await createHumanUser(client, `${run}-stepup-key`, password);
     created.push(stepUpKey);
+    const firstAdmin = await createHumanUser(client, `${run}-first-admin`, password);
+    created.push(firstAdmin);
+    const firstAdminSecret = await registerTotp(client, firstAdmin.userId);
+    await verifyTotp(client, firstAdmin.userId, totp(firstAdminSecret, Date.now()));
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpKey, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpApp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, withTotp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, firstAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     const api = await apiSignIn(client);
 
     project.provide('e2e', {
@@ -113,6 +120,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         signIn: { ...signIn, totpSecret: signInSecret },
         stepUpApp: { ...stepUpApp, totpSecret: stepUpSecret },
         stepUpKey,
+        firstAdmin: { ...firstAdmin, totpSecret: firstAdminSecret },
       },
       api,
       policy: await loginPolicy(client),
