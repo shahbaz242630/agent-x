@@ -1,8 +1,10 @@
 // The identity module (ADR-003, ADR-004): the people who sign in, their
 // console sessions and the sign-in flows under way, in global tables (0010,
 // 0011); the OIDC client that checks a sign-in (B2-2); and the sign-in from
-// end to end (B2-3a). The routes come at B2-3a-2, memberships and roles at
-// B4. Step-up challenges (B3-1), bound to one pending change in a session.
+// end to end (B2-3a). The routes come at B2-3a-2. Step-up challenges (B3-1),
+// bound to one pending change in a session. Memberships and roles (B4-1): a
+// person in an organisation, an authority table read through its signed state.
+export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
   AUTH_TIME_TOLERANCE_SECONDS,
@@ -20,6 +22,14 @@ export {
   type Sessions,
   type SessionTimeouts,
 } from './infrastructure/sessions.ts';
+export {
+  addMembership,
+  type MembershipCheck,
+  membershipOf,
+  MEMBERSHIPS,
+  type MembershipsTransaction,
+  type NewMembership,
+} from './infrastructure/memberships.ts';
 export {
   createOidcClient,
   type LoginFlow,
