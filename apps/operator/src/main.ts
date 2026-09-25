@@ -245,13 +245,12 @@ const listedAlready = (error: unknown): boolean =>
   error instanceof Error && 'constraint' in error && error.constraint === 'orgs_pkey';
 
 /**
- * Whether an error is an invitation's key, or its token's, refusing one made
- * already: a first admin's request run again (B4-6b).
+ * Whether an error is an invitation's key refusing one made already: a first
+ * admin's request run again (B4-6b). Its token's key can't refuse first: the
+ * invitation is written before its token is listed, and each run's token is new.
  */
 const invitedAlready = (error: unknown): boolean =>
-  error instanceof Error &&
-  'constraint' in error &&
-  (error.constraint === 'invitations_pkey' || error.constraint === 'invites_pkey');
+  error instanceof Error && 'constraint' in error && error.constraint === 'invitations_pkey';
 
 /**
  * Opens a pool of one connection, one job's share of the server's (the schema
