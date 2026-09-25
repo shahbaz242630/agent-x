@@ -12,12 +12,22 @@
 //    person (B5 sends it by email). A replay of the same request answers the
 //    invitation without the link, which is kept nowhere: a lost link is a new
 //    invitation.
+// 3. `POST /v1/invitations/accept` (B4-4c), for any signed-in person, takes
+//    the token from the link: the directory names the organisation, the
+//    invitation must still be open, and the person's verified email (B4-4a)
+//    must be the invited one. A developer or viewer joins now; an admin or
+//    approver waits for an existing admin's confirmation (B4-4d). 200 with the
+//    organisation and the invitation; 403 INVITATION_INVALID for a token not
+//    known or another address alike, 409 INVITATION_CLOSED, 409
+//    ALREADY_A_MEMBER.
 // Refusals: 403 STEP_UP_FAILED when the admin hasn't signed in again for this
 // invitation in this session; 409 INVITATION_CLOSED for one confirmed already
 // or past its end; 404 for one not in the organisation; 503 INTEGRITY_FAILED
 // when a record it rests on can't be verified. The use case itself is
 // the identity module's inviting.ts.
 import {
+  ACCEPT_OPERATION,
+  type InvitationAcceptance,
   CONFIRM_OPERATION,
   EMAIL_MAX,
   INVITE_OPERATION,
@@ -108,6 +118,32 @@ const CONFIRM_SCHEMA = {
   },
 };
 
+/** An invitation's token, as its link carries it: 32 random bytes in base64url. */
+const TOKEN = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{43}$/)
+  .describe('The token from the invitation link, after `#token=`.');
+
+/** The most an acceptance's body may be: a token, with room to spare. */
+const ACCEPT_BODY_LIMIT = 256;
+
+const ACCEPT_SCHEMA = {
+  summary: 'Accept an invitation, signed in with the invited email address',
+  body: z.strictObject({ token: TOKEN }).describe('The invitation to accept, by its token.'),
+  response: {
+    200: z
+      .object({
+        organizationId: z.uuid().describe('The organisation the invitation is to.'),
+        invitation: INVITATION,
+      })
+      .register(API_SCHEMAS, {
+        id: 'InvitationAccepted',
+        description:
+          'The invitation accepted: ACCEPTED when the person has joined, AWAITING_CONFIRMATION while an admin or approver waits for an admin to confirm them.',
+      }),
+  },
+};
+
 /** Where an invitation is accepted: the token in the fragment, which browsers never send to a server or in a Referer. */
 const linkFor = (publicOrigin: string, token: string): string => `${publicOrigin}/invitations/accept#token=${token}`;
 
@@ -137,7 +173,11 @@ const invitationOf = (written: Extract<InvitationWrite, { outcome: 'written' }>)
  */
 export function registerInvitations(
   app: FastifyInstance,
-  { writes, publicOrigin }: { writes: InvitationWrites | undefined; publicOrigin: string },
+  {
+    writes,
+    acceptance,
+    publicOrigin,
+  }: { writes: InvitationWrites | undefined; acceptance: InvitationAcceptance | undefined; publicOrigin: string },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
@@ -183,6 +223,36 @@ export function registerInvitations(
         invitation: invitationOf(written),
         ...(written.token !== undefined && { link: linkFor(publicOrigin, written.token) }),
       });
+    },
+  );
+  routes.post(
+    '/v1/invitations/accept',
+    {
+      schema: ACCEPT_SCHEMA,
+      bodyLimit: ACCEPT_BODY_LIMIT,
+      config: { access: ['person'], operation: ACCEPT_OPERATION },
+    },
+    async (request, reply) => {
+      const { person } = request;
+      // The access hook lets no one else through; a route that runs without a person is a bug.
+      if (person === null || acceptance === undefined) throw new Error('the acceptance route ran without a person');
+      const accepted = await acceptance.accept(
+        { userId: person.userId, sessionId: person.sessionId },
+        request.body.token,
+        (orgId) => idempotentRequest(request, orgId),
+        request.id,
+      );
+      if (accepted.outcome === 'refused') return sendErrorBody(reply, accepted.status, accepted.code, request.id);
+      if (accepted.outcome !== 'accepted') return answerRefusedWrite(accepted, request, reply);
+      return {
+        organizationId: accepted.orgId,
+        invitation: {
+          id: accepted.invitation.id,
+          role: accepted.invitation.role,
+          status: accepted.invitation.status,
+          expiresAt: accepted.invitation.expiresAt.toISOString(),
+        },
+      };
     },
   );
 }

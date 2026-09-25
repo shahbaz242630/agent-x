@@ -2,6 +2,9 @@
 // writes. Who reaches them is the access hook's (role-matrix.test.ts); what
 // the writes do in the database is the identity module's inviting.db.test.ts.
 import type {
+  Acceptance,
+  AcceptingPerson,
+  InvitationAcceptance,
   InvitationRecord,
   InvitationWrite,
   InvitationWrites,
@@ -84,7 +87,11 @@ type Asked =
       readonly id: string;
     };
 
-async function withWrites(answer: InvitationWrite | Error | undefined, role: Role = 'admin') {
+async function withWrites(
+  answer: InvitationWrite | Error | undefined,
+  role: Role = 'admin',
+  acceptance?: InvitationAcceptance,
+) {
   const asked: Asked[] = [];
   // Without an answer, no writes are given the server, so none is asked for.
   const answered = (): Promise<InvitationWrite> =>
@@ -125,6 +132,7 @@ async function withWrites(answer: InvitationWrite | Error | undefined, role: Rol
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...(answer !== undefined && { invitationWrites: writes }),
+    ...(acceptance !== undefined && { invitationAcceptance: acceptance }),
   });
   servers.push(app);
   await app.ready();
@@ -355,6 +363,146 @@ describe('both routes answer the writes’ refusals', () => {
         expect(response.statusCode).toBe(500);
         expect(response.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
       }
+    }
+  });
+});
+
+describe('POST /v1/invitations/accept takes a signed-in person’s token (B4-4c)', () => {
+  const TOKEN_SENT = 'A'.repeat(43);
+  const ACCEPTED_BY = LIVE.userId;
+
+  /** A server whose acceptance answers `answer`, recording what it was asked and the key's request for an organisation. */
+  async function withAcceptance(answer: Acceptance | Error) {
+    const asked: { person: AcceptingPerson; token: string; keyed: IdempotentRequest }[] = [];
+    const acceptance: InvitationAcceptance = {
+      accept: (person, token, idempotent) => {
+        asked.push({ person, token, keyed: idempotent(ORG) });
+        return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+      },
+    };
+    // No membership anywhere: accepting needs none, only a signed-in person.
+    const { app } = await withWrites(undefined, 'viewer', acceptance);
+    return { app, asked };
+  }
+
+  const acceptRequest = (body: unknown = { token: TOKEN_SENT }, extra: Record<string, string> = {}): InjectOptions => ({
+    method: 'POST',
+    url: '/v1/invitations/accept',
+    headers: { cookie: `${SESSION_COOKIE}=${COOKIE}`, origin: PUBLIC_ORIGIN, 'idempotency-key': 'accept-1', ...extra },
+    payload: body as Record<string, unknown>,
+  });
+
+  it('answers 200 with the organisation and the invitation, keyed to the organisation the directory named', async () => {
+    const { app, asked } = await withAcceptance({
+      outcome: 'accepted',
+      orgId: ORG,
+      invitation: { ...OPEN, status: 'ACCEPTED', acceptedBy: ACCEPTED_BY },
+    });
+
+    const response = await app.inject(acceptRequest());
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      organizationId: ORG,
+      invitation: { id: INVITATION_ID, role: 'developer', status: 'ACCEPTED', expiresAt: '2026-09-28T09:00:00.123Z' },
+    });
+    expect(asked).toEqual([
+      {
+        person: { userId: LIVE.userId, sessionId: LIVE.sessionId },
+        token: TOKEN_SENT,
+        keyed: {
+          orgId: ORG,
+          client: { kind: 'user', id: LIVE.userId },
+          operation: 'invitations.accept',
+          key: 'accept-1',
+          payload: `{"body":{"token":"${TOKEN_SENT}"},"params":{},"query":{}}`,
+        },
+      },
+    ]);
+  });
+
+  it('takes no organisation header: the directory names it', async () => {
+    const { app, asked } = await withAcceptance({ outcome: 'accepted', orgId: ORG, invitation: OPEN });
+
+    const response = await app.inject(acceptRequest(undefined, { [ORGANIZATION_HEADER]: 'not-an-id' }));
+
+    expect(response.statusCode).toBe(200);
+    expect(asked).toHaveLength(1);
+  });
+
+  it.each([
+    [403, 'INVITATION_INVALID'],
+    [409, 'INVITATION_CLOSED'],
+    [409, 'ALREADY_A_MEMBER'],
+    [503, 'INTEGRITY_FAILED'],
+  ] as const)('answers the refusal %i %s', async (status, code) => {
+    const { app } = await withAcceptance({ outcome: 'refused', status, code });
+
+    const response = await app.inject(acceptRequest());
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toEqual(errorBody(code, FIRST_ID));
+  });
+
+  it('answers a key used for another request, or one still being done', async () => {
+    for (const [outcome, code] of [
+      ['conflict', 'IDEMPOTENCY_KEY_REUSED'],
+      ['busy', 'IDEMPOTENCY_KEY_BUSY'],
+    ] as const) {
+      const { app } = await withAcceptance({ outcome });
+
+      const response = await app.inject(acceptRequest());
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual(errorBody(code, FIRST_ID));
+    }
+  });
+
+  it.each([
+    ['no token', {}],
+    ['a token too short', { token: 'A'.repeat(42) }],
+    ['a token too long', { token: 'A'.repeat(44) }],
+    ['a token with a character base64url has not', { token: `${'A'.repeat(42)}+` }],
+    ['a field it doesn’t take', { token: TOKEN_SENT, orgId: ORG }],
+  ])('refuses %s as BAD_REQUEST, asking nothing of the acceptance', async (_what, body) => {
+    const { app, asked } = await withAcceptance({ outcome: 'accepted', orgId: ORG, invitation: OPEN });
+
+    const response = await app.inject(acceptRequest(body));
+
+    expect(response.statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a body over 256 bytes', async () => {
+    const { app, asked } = await withAcceptance({ outcome: 'accepted', orgId: ORG, invitation: OPEN });
+
+    const response = await app.inject(acceptRequest({ token: TOKEN_SENT, pad: 'x'.repeat(256) }));
+
+    expect(response.statusCode).toBe(413);
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses anyone not signed in as UNAUTHENTICATED', async () => {
+    const { app, asked } = await withAcceptance({ outcome: 'accepted', orgId: ORG, invitation: OPEN });
+
+    const response = await app.inject({
+      ...acceptRequest(),
+      headers: { origin: PUBLIC_ORIGIN, 'idempotency-key': 'k' },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(asked).toEqual([]);
+  });
+
+  it('fails as INTERNAL_ERROR when the acceptance fails, or when none was given', async () => {
+    const failing = await withAcceptance(new Error('the database is away'));
+    const none = (await withWrites(undefined, 'viewer')).app;
+
+    for (const app of [failing.app, none]) {
+      const response = await app.inject(acceptRequest());
+
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
     }
   });
 });
