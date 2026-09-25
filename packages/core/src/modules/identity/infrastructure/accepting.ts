@@ -14,7 +14,9 @@
 // 3. The person's session must hold a verified address (B4-4a) equal to the
 //    invited one; a session with none, or another, is INVITATION_INVALID.
 // 4. The person must not be in the organisation already (409 ALREADY_A_MEMBER,
-//    a deactivated membership included: rejoining is B4-5's).
+//    a deactivated membership included: rejoining is B4-5's). Two of their
+//    invitations there accepted at the same moment: the second finds the
+//    directory's key taken, and is refused the same way.
 // 5. The invitation is accepted: a developer or viewer joins now, the
 //    membership added in the same transaction; an admin or finance approver
 //    waits for an existing admin to confirm who accepted (B4-4d).
@@ -84,6 +86,13 @@ class AcceptanceRefused extends Error {
 
 const refused = (status: number, code: ReasonCode): Acceptance => ({ outcome: 'refused', status, code });
 
+/** The directory's key refusing a second entry for the person there (0015): a membership added since the check. */
+const isMembershipTaken = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  (error as { code?: unknown }).code === '23505' &&
+  (error as { constraint?: unknown }).constraint === 'members_pkey';
+
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 
 export function createInvitationAcceptance({
@@ -123,21 +132,27 @@ export function createInvitationAcceptance({
             if (membership.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
             if (membership.outcome !== 'none') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
             const actor = { type: 'user' as const, id: person.userId };
-            const accepted = await acceptInvitation(tx, states, {
-              orgId,
-              id: invitationId,
-              userId: person.userId,
-              actor,
-            });
-            if (accepted.outcome === 'accepted') {
-              await addMembership(tx, states, {
+            try {
+              const accepted = await acceptInvitation(tx, states, {
                 orgId,
-                id: ids.next(),
+                id: invitationId,
                 userId: person.userId,
-                role: accepted.role,
-                joinedAt: now,
                 actor,
               });
+              if (accepted.outcome === 'accepted') {
+                await addMembership(tx, states, {
+                  orgId,
+                  id: ids.next(),
+                  userId: person.userId,
+                  role: accepted.role,
+                  joinedAt: now,
+                  actor,
+                });
+              }
+            } catch (error) {
+              // Another of the person's invitations there, accepted at the same moment, joined them first.
+              if (isMembershipTaken(error)) throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
+              throw error;
             }
             return { status: 200, resourceId: invitationId };
           });
@@ -153,7 +168,7 @@ export function createInvitationAcceptance({
       });
       if (answered.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
       if (answered.outcome === 'missing') throw new Error('an invitation accepted, or accepted before, is not there');
-      return { outcome: 'accepted', orgId: orgId.toLowerCase(), invitation: answered.invitation };
+      return { outcome: 'accepted', orgId, invitation: answered.invitation };
     },
   };
 }

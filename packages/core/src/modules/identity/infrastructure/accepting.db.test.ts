@@ -5,7 +5,13 @@
 // apps/api's invitations.test.ts.
 import { createHash } from 'node:crypto';
 
-import { createDatabase, type Database, type IdempotentRequest, TenantContextError } from '@agentx/platform/db';
+import {
+  createDatabase,
+  type Database,
+  type IdempotentRequest,
+  TenantContextError,
+  withTenant,
+} from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
@@ -15,6 +21,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -30,7 +37,7 @@ import {
   type InvitationAcceptance,
 } from './accepting.ts';
 import { draftInvitation, invitationChange, INVITATIONS, invitationToOpen, openInvitation } from './invitations.ts';
-import { addMembership, membershipFor, MEMBERSHIPS } from './memberships.ts';
+import { addMembership, membersFor, membershipFor, MEMBERSHIPS } from './memberships.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import { createSessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
@@ -387,5 +394,101 @@ describe(`accepting an invitation (B4-4c, SEC-HA-08, Postgres ${server.version})
       .as('backup')
       .query('select token_hash from directory.invites where org_id = $1', [who.org]);
     expect(rows).toEqual([{ token_hash: createHash('sha256').update(token, 'ascii').digest() }]);
+  });
+});
+
+describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () => {
+  it('gives the new member the moment they accepted as when they joined', async () => {
+    const who = await organization();
+    const { token } = await invitation(who, 'viewer');
+    const invitee = await person();
+    clock.advanceBy(60_000);
+
+    await accept(invitee, token);
+
+    const list = await membersFor(app, services(), who.org);
+    if (list.outcome !== 'listed') throw new Error('not listed');
+    expect(list.members.find((member) => member.userId === invitee.userId)?.joinedAt).toEqual(clock.now());
+  });
+
+  it('refuses a token listed for an invitation that isn’t there as INVITATION_INVALID', async () => {
+    const who = await organization();
+    const invitee = await person();
+    const token = 'P'.repeat(43);
+    await withTenant(app, who.org, (tx) =>
+      tx
+        .insertInto('directory.invites')
+        .values({
+          token_hash: createHash('sha256').update(token, 'ascii').digest(),
+          org_id: who.org,
+          invitation_id: ids.next(),
+        })
+        .execute(),
+    );
+
+    expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 403, code: 'INVITATION_INVALID' });
+  });
+
+  it('refuses someone whose membership there was deactivated as ALREADY_A_MEMBER: rejoining is B4-5’s', async () => {
+    const who = await organization();
+    const { token } = await invitation(who, 'viewer');
+    const member = await person();
+    const membershipId = ids.next();
+    await withSignedStates(app, who.org, services(), async (tx, states) => {
+      await addMembership(tx, states, {
+        orgId: who.org,
+        id: membershipId,
+        userId: member.userId,
+        role: 'viewer',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+
+    expect(await accept(member, token)).toEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+  });
+
+  it('joins once when two of a person’s invitations there are accepted at the same moment', async () => {
+    const who = await organization();
+    const first = await invitation(who, 'viewer');
+    const second = await invitation(who, 'developer');
+    const invitee = await person();
+
+    const answers = await Promise.all([
+      accept(invitee, first.token, 'accept-a'),
+      accept(invitee, second.token, 'accept-b'),
+    ]);
+
+    expect(answers.map((answer) => answer.outcome).sort()).toEqual(['accepted', 'refused']);
+    expect(answers).toContainEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
+    const entries = await database
+      .as('backup')
+      .query('select 1 from directory.members where user_id = $1', [invitee.userId]);
+    expect(entries).toHaveLength(1);
+  });
+
+  it('gives up on the answer’s read after 10 seconds rather than hold the request', async () => {
+    const who = await organization();
+    const { token } = await invitation(who, 'viewer');
+    const invitee = await person();
+    await accept(invitee, token);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table identity.invitations in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, accept(invitee, token), 'the retry')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
