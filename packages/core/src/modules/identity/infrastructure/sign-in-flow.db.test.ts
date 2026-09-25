@@ -557,6 +557,36 @@ describe(`a sign-in's verified address (B4-4a, Postgres ${server.version})`, () 
     await expect(sessionEmailOf(app, keys, second.sessionId)).rejects.toBeInstanceOf(SessionEmailUnreadable);
   });
 
+  it('takes a sealed address of 29 to 1,024 bytes and key version 1 or later, and nothing else', async () => {
+    const done = await roundTrip();
+    /** Writes a row past the module, in a transaction rolled back if nothing refuses it. */
+    const written = (ciphertext: Buffer, version: number) =>
+      app.transaction().execute(async (tx) => {
+        await tx
+          .insertInto('identity.session_emails')
+          .values({ session_id: done.sessionId, email_ciphertext: ciphertext, email_key_version: version })
+          .execute();
+        throw new Error('rolled back');
+      });
+
+    for (const [ciphertext, version] of [
+      [Buffer.alloc(29), 1],
+      [Buffer.alloc(1024), 1],
+    ] as const) {
+      await expect(written(ciphertext, version)).rejects.toThrow('rolled back');
+    }
+    for (const length of [28, 1025]) {
+      await expect(written(Buffer.alloc(length), 1)).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'session_emails_email_ciphertext_check',
+      });
+    }
+    await expect(written(Buffer.alloc(40), 0)).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'session_emails_email_key_version_check',
+    });
+  });
+
   it('can’t be changed or deleted by the app, only added', async () => {
     client.verifiedEmail = 'sara@example.test';
     const done = await roundTrip();

@@ -720,10 +720,30 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
     expect(service.callsTo('/oidc/v1/userinfo')).toEqual([]);
   });
 
-  it.each([401, 500, 503])('fails as the login service unavailable when the endpoint answers %i', async (status) => {
-    service.userinfoStatus = status;
+  it.each([401, 500, 503])(
+    'gives no address, and the sign-in still stands, when the endpoint answers %i',
+    async (status) => {
+      service.userinfoStatus = status;
 
-    await expectFailure(signIn(), 'provider_unavailable', new RegExp(String(status)));
+      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+    },
+  );
+
+  it('gives no address when the endpoint can’t be reached, or answers what isn’t a JSON object', async () => {
+    const fetch = service.fetch;
+    for (const answer of [
+      () => Promise.reject(new TypeError('fetch failed')),
+      () => Promise.resolve(new Response('not json', { status: 200 })),
+      () => Promise.resolve(Response.json(['a list'])),
+    ]) {
+      client = createOidcClient({
+        settings: { issuer: ISSUER, clientId: CLIENT, clientSecret: PASS, redirectUri: REDIRECT },
+        fetch: (url, init = {}) => (String(url) === `${ISSUER}/oidc/v1/userinfo` ? answer() : fetch(url, init)),
+        clock,
+      });
+
+      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+    }
   });
 
   it.each<[string, unknown]>([
