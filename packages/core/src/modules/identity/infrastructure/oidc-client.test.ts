@@ -173,7 +173,7 @@ describe('starting a sign-in', () => {
       response_type: 'code',
       client_id: CLIENT,
       redirect_uri: REDIRECT,
-      scope: 'openid email',
+      scope: 'openid email profile',
       state: flow.state,
       nonce: flow.nonce,
       code_challenge: createHash('sha256').update(flow.verifier).digest('base64url'),
@@ -783,5 +783,43 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
     service.discovery = { ...service.discovery, userinfo_endpoint: 'https://elsewhere.example.test/userinfo' };
 
     await expectFailure(signIn(), 'provider_unavailable', /userinfo_endpoint/);
+  });
+});
+
+describe('B4-6c the login service’s break-glass admin never signs in', () => {
+  const admin = { sub: SUBJECT, email: 'sara.khan@example.test', email_verified: true };
+
+  it.each(['admin@agent-x.auth.example.test', 'admin'])(
+    'fails when the userinfo answer names the login %s, whatever its address',
+    async (loginName) => {
+      service.userinfo = { ...admin, preferred_username: loginName };
+
+      await expectFailure(signIn(), 'break_glass', /break-glass/);
+    },
+  );
+
+  it('fails when it names the break-glass login with no verified address at all', async () => {
+    service.userinfo = { sub: SUBJECT, preferred_username: 'admin@agent-x.auth.example.test' };
+
+    await expectFailure(signIn(), 'break_glass');
+  });
+
+  it('never says the login name when it fails', async () => {
+    service.userinfo = { ...admin, preferred_username: 'Admin@Agent-X.auth.example.test' };
+
+    const failed = await signIn().catch((error: unknown) => error);
+
+    expect(failed).toBeInstanceOf(SignInFailed);
+    expect((failed as Error).message).not.toMatch(/agent-x|sara/i);
+  });
+
+  it.each([
+    ['another person in the same organisation', 'shahbaz@agent-x.auth.example.test'],
+    ['an admin of another organisation', 'admin@acme.auth.example.test'],
+    ['no login name', undefined],
+  ])('lets %s sign in, with their verified address', async (_what, loginName) => {
+    service.userinfo = { ...admin, ...(loginName !== undefined && { preferred_username: loginName }) };
+
+    await expect(signIn()).resolves.toMatchObject({ verifiedEmail: 'sara.khan@example.test' });
   });
 });

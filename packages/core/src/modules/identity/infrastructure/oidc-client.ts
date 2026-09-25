@@ -18,6 +18,12 @@
 //   invitation to be matched against (B4-4c). An endpoint that fails gives no
 //   address and fails nothing. The access and refresh tokens are then
 //   dropped.
+// - B4-6c: the flow asks for the `profile` scope too, for the login name
+//   (`preferred_username`) alone: a sign-in whose userinfo answer names the
+//   login service's break-glass admin fails (`break_glass`), so that login
+//   never holds a session here, nor anything a session leads to. An endpoint
+//   that fails can't name it; that sign-in holds no address, so it can accept
+//   no invitation (B4-4c). The rest of the profile is never kept.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -44,6 +50,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, jwtVerify } from 'jose';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
+import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
 
@@ -92,7 +99,9 @@ export type SignInFailure =
   /** The login service refused the code: used already, expired, or not ours. */
   | 'code_rejected'
   /** The ID token failed a check. */
-  | 'token_invalid';
+  | 'token_invalid'
+  /** The login service's break-glass admin, who never signs in here (B4-6c). */
+  | 'break_glass';
 
 export class SignInFailed extends Error {
   override readonly name = 'SignInFailed';
@@ -395,7 +404,8 @@ export function createOidcClient({
    * own rule), in lower case. An endpoint that can't be reached, or answers
    * with anything but a JSON object, gives no address and fails nothing: a
    * sign-in stands on its ID token, and only accepting an invitation needs an
-   * address (B4-4b review). An answer about another person fails the sign-in.
+   * address (B4-4b review). An answer about another person fails the sign-in,
+   * and so does one naming the break-glass admin's login (B4-6c).
    */
   async function verifiedEmailOf(accessToken: string, subject: string): Promise<string | undefined> {
     let info: Record<string, unknown>;
@@ -414,6 +424,9 @@ export function createOidcClient({
       throw error;
     }
     if (info.sub !== subject) throw new SignInFailed('token_invalid', 'the userinfo answer names another person');
+    if (isBreakGlassLogin(info.preferred_username, issuer)) {
+      throw new SignInFailed('break_glass', "the login is the login service's break-glass admin");
+    }
     if (info.email_verified !== true) return undefined;
     return invitationEmail(info.email);
   }
@@ -429,7 +442,7 @@ export function createOidcClient({
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('scope', 'openid email');
+      url.searchParams.set('scope', 'openid email profile');
       url.searchParams.set('state', flow.state);
       url.searchParams.set('nonce', flow.nonce);
       url.searchParams.set('code_challenge', createHash('sha256').update(flow.verifier).digest('base64url'));
