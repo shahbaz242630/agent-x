@@ -14,9 +14,10 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  within,
 } from '@agentx/testing';
 import type { Kysely } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
@@ -370,7 +371,11 @@ describe(`deactivating a member (B4-5a, SEC-HA-10, Postgres ${server.version})`,
   it('deactivates once the admin has signed in again, ending every session the member has in the same change', async () => {
     const who = await organization();
     const viewer = await member(who.org, 'viewer');
-    const challengeId = await steppedUp(who.admin, viewer.membershipId, DEACTIVATE);
+    const challengeId = await asked(who.admin, viewer.membershipId, DEACTIVATE);
+    expect(await challenges().pending(app, challengeId, who.admin.sessionId)).toMatchObject({
+      action: 'members.deactivate',
+    });
+    await stepUp(who.admin, challengeId);
 
     const done = await confirm(who.admin, viewer.membershipId, DEACTIVATE, challengeId);
 
@@ -566,6 +571,46 @@ describe(`changing a membership tampered with (B4-5a, Postgres ${server.version}
     expect(await sessionsOf(someone.userId)).toBe(1);
   });
 
+  it('refuses a membership the directory lists but that isn’t there as NOT_FOUND', async () => {
+    const who = await organization();
+    const someone = await signedIn();
+    const made = ids.next();
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        someone.userId,
+        who.org,
+        made,
+      ]);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await ask(who.admin, made, DEACTIVATE)).toEqual({ outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+  });
+
+  it('refuses a person the directory points at an admin’s membership as FORBIDDEN: the membership isn’t theirs', async () => {
+    const who = await organization();
+    const viewer = await member(who.org, 'viewer');
+    const stranger = { orgId: who.org, ...(await signedIn()) };
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        stranger.userId,
+        who.org,
+        who.admin.membershipId,
+      ]);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await ask(stranger, viewer.membershipId, DEACTIVATE)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
   it('withholds a retry’s answer when the membership was tampered with since', async () => {
     const who = await organization();
     const viewer = await member(who.org, 'viewer');
@@ -629,5 +674,90 @@ describe(`changing memberships at the same moment (B4-5a, ADR-006 §6, Postgres 
     // First or second, it either finished or found the session gone; never a deadlock.
     expect(typeof returned).toBe('boolean');
     expect(await sessionsOf(other.userId)).toBe(0);
+  });
+
+  /**
+   * Holds a transaction open as another request would, with `first` done in
+   * it; starts the deactivation of `other`; waits until it waits on a lock;
+   * then does `then` in the held transaction and lets it go. Taken in the
+   * order ADR-006 §6 sets, the deactivation waited before taking anything the
+   * held transaction needs, so both finish; taken out of order, Postgres
+   * finds a deadlock and fails one of them.
+   */
+  async function heldWhileDeactivating(
+    first: (holder: Awaited<ReturnType<TestDatabase['connect']>>, other: Member, theirs: string) => Promise<unknown>,
+    then: (holder: Awaited<ReturnType<TestDatabase['connect']>>, other: Member, theirs: string) => Promise<unknown>,
+  ) {
+    const who = await organization();
+    const other = await member(who.org, 'admin');
+    const viewer = await member(who.org, 'viewer');
+    const mine = await steppedUp(who.admin, other.membershipId, DEACTIVATE);
+    const theirs = await asked(other, viewer.membershipId, DEACTIVATE);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await first(holder, other, theirs);
+      const deactivating = within(20_000, confirm(who.admin, other.membershipId, DEACTIVATE, mine), 'the deactivation');
+      await vi.waitFor(
+        async () => {
+          const waiting = await database
+            .as('admin')
+            .query<{ count: string }>(
+              `select count(*) from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database() and wait_event_type = 'Lock'`,
+            );
+          expect(waiting).toEqual([{ count: '1' }]);
+        },
+        { timeout: 10_000 },
+      );
+      await then(holder, other, theirs);
+      await holder.query('commit');
+
+      expect(await deactivating).toMatchObject({ outcome: 'written', member: { status: 'DEACTIVATED' } });
+      expect(await sessionsOf(other.userId)).toBe(0);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  }
+
+  it('waits for a step-up’s return under way, at the member’s sessions, before anything it needs', async () => {
+    await heldWhileDeactivating(
+      // The return gives the session a new cookie ID first...
+      (holder, other) =>
+        holder.query('update identity.sessions set cookie_hash = $2 where id = $1', [
+          other.sessionId,
+          createHash('sha256').update('a new cookie').digest(),
+        ]),
+      // ...then records the evidence on its challenge.
+      (holder, _other, theirs) =>
+        holder.query('update identity.step_up_challenges set verified_at = verified_at where id = $1', [theirs]),
+    );
+  });
+
+  it('lets a challenge be opened on the member’s session while it waits for their membership', async () => {
+    await heldWhileDeactivating(
+      // An ask of the member's own reads their membership for the decision...
+      (holder, other) =>
+        holder.query('select id from identity.memberships where org_id = $1 and id = $2 for share', [
+          other.orgId,
+          other.membershipId,
+        ]),
+      // ...then opens a challenge, whose key check takes a key-share lock on the session.
+      (holder, other) =>
+        holder.query('select id from identity.sessions where id = $1 for key share', [other.sessionId]),
+    );
+  });
+
+  it('waits for a challenge being used, at the member’s challenges, before their membership', async () => {
+    await heldWhileDeactivating(
+      // A change of the member's own uses its challenge first...
+      (holder, _other, theirs) => holder.query('delete from identity.step_up_challenges where id = $1', [theirs]),
+      // ...then reads their membership for the decision.
+      (holder, other) =>
+        holder.query('select id from identity.memberships where org_id = $1 and id = $2 for share', [
+          other.orgId,
+          other.membershipId,
+        ]),
+    );
   });
 });

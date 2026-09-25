@@ -118,13 +118,14 @@ export const stepUpDetails = (consumed: ConsumedStepUp) => ({
  * a demotion's or deactivation's level 0b (ADR-006 §6), after their sessions,
  * so the challenges their sessions' end deletes are held before any
  * membership is, and a challenge being used at the same moment is waited
- * for, never waited on backwards.
+ * for, never waited on backwards. Found through their sessions, by the
+ * session's index: a challenge is its session's person's (0013).
  */
 export async function lockChallengesOf(tx: Transaction<IdentityTables>, userIds: readonly string[]): Promise<void> {
   await tx
     .selectFrom('identity.step_up_challenges')
     .select('id')
-    .where('user_id', 'in', userIds)
+    .where('session_id', 'in', (eb) => eb.selectFrom('identity.sessions').select('id').where('user_id', 'in', userIds))
     .orderBy('id')
     .forUpdate()
     .execute();
