@@ -14,7 +14,13 @@ import { LogCapture, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type OperatorProcess, runOperator, USAGE } from './main.ts';
-import { createOrganizationRequest, REQUEST_LIMIT_BYTES, REQUEST_USAGE } from './request.ts';
+import {
+  createOrganizationRequest,
+  FIRST_ADMIN_USAGE,
+  firstAdminRequest,
+  REQUEST_LIMIT_BYTES,
+  REQUEST_USAGE,
+} from './request.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({
@@ -63,7 +69,7 @@ afterEach(() => {
 });
 
 /** The command's one key, as the platform mounts it. */
-const keys = writeTestKeys(['audit-mac']);
+const keys = writeTestKeys(['audit-mac', 'field-encryption']);
 /** Every key, mounted where the command holds only one. */
 const everyKey = writeTestKeys(PURPOSES);
 
@@ -167,9 +173,12 @@ describe("B1c what the operator's command refuses before it connects", () => {
     expect(events).toEqual(['operator.start_refused']);
     expect(line('operator.start_refused')).toMatchObject({ service: 'operator', env: 'unconfigured' });
     expect(line('operator.start_refused')?.problems).toEqual(
-      PURPOSES.filter((purpose) => purpose !== 'audit-mac')
+      PURPOSES.filter((purpose) => purpose !== 'audit-mac' && purpose !== 'field-encryption')
         .toSorted()
-        .map((purpose) => `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac may be mounted for it`),
+        .map(
+          (purpose) =>
+            `key-${purpose}-v1 is a key this process doesn't hold: only audit-mac, field-encryption may be mounted for it`,
+        ),
     );
   });
 
@@ -229,7 +238,10 @@ describe("B1c what the operator's command refuses before it connects", () => {
     expect(line('operator.starting')).toMatchObject({
       command: 'create-organization',
       role: 'agentx_app',
-      keys: [expect.objectContaining({ purpose: 'audit-mac', current: 1 })],
+      keys: [
+        expect.objectContaining({ purpose: 'audit-mac', current: 1 }),
+        expect.objectContaining({ purpose: 'field-encryption', current: 1 }),
+      ],
     });
     expect(text).not.toContain(NAME);
     expect(text).not.toContain(APP_LOGIN);
@@ -370,4 +382,105 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
     expect(notAFile.line('operator.refused')?.problems).toEqual(["the request file isn't a plain file"]);
   });
   // A pipe with no writer is refused at once too: tooling/checks/operator-request.test.ts, as a process of its own.
+});
+
+describe("B4-6b the first admin's request, only ever from a file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-first-admin-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  let written = 0;
+  const requestFile = (contents: string): string => {
+    written += 1;
+    const file = path.join(folder, `request-${String(written)}`);
+    writeFileSync(file, contents);
+    return file;
+  };
+  const ADDRESS = 'quartzine.first@example.test';
+  const HASH = 'ab'.repeat(32);
+  const shape = `the request file holds ${FIRST_ADMIN_USAGE} as a JSON list, and nothing else`;
+
+  it('reads a well-formed request, then connects, repeating neither the address nor the hash', async () => {
+    const { events, line, text } = await run([
+      '--request',
+      requestFile(firstAdminRequest(NEW_ID, ADDRESS, NEW_ID, HASH)),
+    ]);
+
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: 'invite-first-admin' });
+    expect(text).not.toContain(ADDRESS);
+    expect(text).not.toContain(HASH);
+  });
+
+  it('refuses it typed, as the token’s hash is made where the link is shown', async () => {
+    const { events, line, text } = await run([
+      'invite-first-admin',
+      '--org',
+      NEW_ID,
+      '--email',
+      ADDRESS,
+      '--id',
+      NEW_ID,
+      '--token-hash',
+      HASH,
+    ]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([
+      `invite-first-admin runs only from a request file: ${FIRST_ADMIN_USAGE}`,
+    ]);
+    expect(text).not.toContain(ADDRESS);
+  });
+
+  it.each([
+    ['a word missing', JSON.stringify(['invite-first-admin', '--org', NEW_ID, '--email', ADDRESS, '--id', NEW_ID])],
+    [
+      'a word more',
+      JSON.stringify([
+        'invite-first-admin',
+        '--org',
+        NEW_ID,
+        '--email',
+        ADDRESS,
+        '--id',
+        NEW_ID,
+        '--token-hash',
+        HASH,
+        'x',
+      ]),
+    ],
+    [
+      'a flag misnamed',
+      JSON.stringify([
+        'invite-first-admin',
+        '--orgs',
+        NEW_ID,
+        '--email',
+        ADDRESS,
+        '--id',
+        NEW_ID,
+        '--token-hash',
+        HASH,
+      ]),
+    ],
+  ])('refuses %s, naming the shape', async (_what, contents) => {
+    const { events, line, text } = await run(['--request', requestFile(contents)]);
+
+    expect(events).toEqual(['operator.refused']);
+    expect(line('operator.refused')?.problems).toEqual([shape]);
+    expect(text).not.toContain(ADDRESS);
+  });
+
+  it('names each ID and the hash that isn’t one', async () => {
+    const { line } = await run([
+      '--request',
+      requestFile(firstAdminRequest('not-an-id', ADDRESS, NEW_ID.toUpperCase(), 'AB'.repeat(32))),
+    ]);
+
+    expect(line('operator.refused')?.problems).toEqual([
+      "the organisation's ID must be a UUIDv7, in lower case",
+      "the invitation's ID must be a UUIDv7, in lower case",
+      "the token's hash must be 64 lower-case hex digits",
+    ]);
+  });
 });

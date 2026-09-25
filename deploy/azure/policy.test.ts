@@ -438,9 +438,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'api reads api-oidc-client-secret',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
-        // The operator's command reads the audit chains' MAC too, each version (B1c).
+        // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each version.
         ...APP_KEYS.flatMap((key) =>
-          key.startsWith('key-audit-mac-v') ? [`api reads ${key}`, `operator reads ${key}`] : [`api reads ${key}`],
+          key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
+            ? [`api reads ${key}`, `operator reads ${key}`]
+            : [`api reads ${key}`],
         ),
       ].map((grant) => `${grant} (deploy/azure/secrets.bicep)`),
     ]);
@@ -2618,7 +2620,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
         }),
       ),
     ).toEqual([
-      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[2].value must come from a @secure() parameter, never a value in the code',
+      'job-agentx-stg-operator [no-secret-literals] configuration.secrets[3].value must come from a @secure() parameter, never a value in the code',
       holdOnce,
     ]);
     // Held twice, held as a vault secret too, or not held at all (with its file gone, so nothing else objects).

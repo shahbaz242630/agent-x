@@ -40,9 +40,15 @@ var workloads = concat(appWorkloads, jobWorkloads)
 var appKeys = loadJsonContent('app-keys.json')
 
 // The keys the operator's command holds, by how their names start: every
-// version of the audit chains' MAC, and no other (ADR-011 §3, B1c).
+// version of the audit chains' MAC (ADR-011 §3, B1c) and of the field
+// encryption a first admin's invited address is kept with (B4-6b), and no
+// other.
 @export()
-var operatorKeys = 'key-audit-mac-v'
+var operatorKeys = ['key-audit-mac-v', 'key-field-encryption-v']
+
+// Whether the operator's command holds this key.
+@export()
+func operatorHolds(key string) bool => length(filter(operatorKeys, prefix => startsWith(key, prefix))) > 0
 
 @export()
 @description('The environment\'s three letters, for the names Azure keeps short.')

@@ -1,9 +1,13 @@
 // The operator's command (B1c; ADR-011 §3): operator actions, run as a job
 // started by a person, as the app's own role, never the owner, so the same
-// tenant walls hold it as hold the API. Its one command, for now:
+// tenant walls hold it as hold the API. Its commands:
 //
 //   node apps/operator/src/main.ts create-organization --name <name>
 //   node apps/operator/src/main.ts --request <file>
+//
+// A request file may also invite an organisation's first admin (B4-6b,
+// invite-first-admin.ts), only ever from a file: the token's hash is made
+// where the link is shown, and the address is never typed on a command line.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -43,16 +47,24 @@ import {
   type Output,
 } from '@agentx/platform/observability';
 
-import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
-import { NO_REQUEST_PROBLEM, REQUEST_LIMIT_BYTES, REQUEST_USAGE, UUID_V7 } from './request.ts';
+import { createOrganizationAsOperator } from './create-organization.ts';
+import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
+import {
+  FIRST_ADMIN_USAGE,
+  NO_REQUEST_PROBLEM,
+  REQUEST_LIMIT_BYTES,
+  REQUEST_USAGE,
+  TOKEN_HASH_HEX,
+  UUID_V7,
+} from './request.ts';
 
 const SERVICE = 'operator';
 
 /** How the command's connection is named in Postgres's own views. */
 const APPLICATION_NAME = 'agentx-operator';
 
-/** The one key the command holds: the audit chains' MAC. Any other mounted with it is refused. */
-const HELD_KEYS = ['audit-mac'] as const;
+/** The keys the command holds: the audit chains' MAC, and the field encryption an invited address is kept with (B4-6b). Any other mounted with them is refused. */
+const HELD_KEYS = ['audit-mac', 'field-encryption'] as const;
 
 /** What the operator types after the command's path, the name as one argument. */
 export const USAGE = 'create-organization --name <name>';
@@ -77,13 +89,23 @@ export interface OperatorOptions {
 }
 
 /** What the operator asked for, once read and checked. */
-interface Request {
-  readonly command: 'create-organization';
-  /** As it will be kept (NFC). */
-  readonly name: string;
-  /** The new organisation's ID, which a request file names; typed, the command makes one. */
-  readonly id: string | undefined;
-}
+type Request =
+  | {
+      readonly command: 'create-organization';
+      /** As it will be kept (NFC). */
+      readonly name: string;
+      /** The new organisation's ID, which a request file names; typed, the command makes one. */
+      readonly id: string | undefined;
+    }
+  | {
+      readonly command: 'invite-first-admin';
+      readonly orgId: string;
+      /** Checked by the invitation itself; never logged. */
+      readonly email: string;
+      /** The invitation's ID. */
+      readonly id: string;
+      readonly tokenHash: Buffer;
+    };
 
 /** Why a request can't be done, each rule broken. */
 interface Problems {
@@ -165,6 +187,7 @@ function readRequest(argv: readonly string[]): Request | Problems {
   const fromFile = argv[0] === REQUEST_FLAG;
   const asked = fromFile ? requestWords(argv) : { words: argv };
   if ('problems' in asked) return asked;
+  if (asked.words[0] === 'invite-first-admin') return firstAdminRequest(asked.words, fromFile);
   const [command, flag, name, ...rest] = asked.words;
   const [idFlag, id, ...more] = rest;
   const shaped = command === 'create-organization' && flag === '--name' && name !== undefined;
@@ -184,6 +207,37 @@ function readRequest(argv: readonly string[]): Request | Problems {
 }
 
 /**
+ * The first admin's invitation a request file asks for, or the problems;
+ * never typed. The address is checked by the invitation itself, and repeated
+ * in no problem.
+ */
+function firstAdminRequest(words: readonly string[], fromFile: boolean): Request | Problems {
+  const [, orgFlag, orgId, emailFlag, email, idFlag, id, hashFlag, hash, ...more] = words;
+  if (!fromFile) return problem(`invite-first-admin runs only from a request file: ${FIRST_ADMIN_USAGE}`);
+  const shaped =
+    orgFlag === '--org' &&
+    emailFlag === '--email' &&
+    idFlag === '--id' &&
+    hashFlag === '--token-hash' &&
+    hash !== undefined &&
+    more.length === 0;
+  if (!shaped) return problem(`the request file holds ${FIRST_ADMIN_USAGE} as a JSON list, and nothing else`);
+  const problems = [
+    ...(UUID_V7.test(String(orgId)) ? [] : ["the organisation's ID must be a UUIDv7, in lower case"]),
+    ...(UUID_V7.test(String(id)) ? [] : ["the invitation's ID must be a UUIDv7, in lower case"]),
+    ...(TOKEN_HASH_HEX.test(hash) ? [] : ["the token's hash must be 64 lower-case hex digits"]),
+  ];
+  if (problems.length > 0) return { problems };
+  return {
+    command: 'invite-first-admin',
+    orgId: String(orgId),
+    email: String(email),
+    id: String(id),
+    tokenHash: Buffer.from(hash, 'hex'),
+  };
+}
+
+/**
  * Whether an error is the directory refusing an organisation it lists already:
  * its key, orgs_pkey, which Postgres names only when a row breaks it.
  */
@@ -191,13 +245,21 @@ const listedAlready = (error: unknown): boolean =>
   error instanceof Error && 'constraint' in error && error.constraint === 'orgs_pkey';
 
 /**
+ * Whether an error is an invitation's key refusing one made already: a first
+ * admin's request run again (B4-6b). Its token's key can't refuse first: the
+ * invitation is written before its token is listed, and each run's token is new.
+ */
+const invitedAlready = (error: unknown): boolean =>
+  error instanceof Error && 'constraint' in error && error.constraint === 'invitations_pkey';
+
+/**
  * Opens a pool of one connection, one job's share of the server's (the schema
  * check's reads queue on it; every other step runs one after another), and
  * checks the role it logged in as, or closes it and returns nothing, having
  * said why.
  */
-async function connect(config: OperatorConfig, logger: Logger): Promise<Database<OperatorTables> | undefined> {
-  const database = createDatabase<OperatorTables>(
+async function connect(config: OperatorConfig, logger: Logger): Promise<Database<FirstAdminTables> | undefined> {
+  const database = createDatabase<FirstAdminTables>(
     { ...config.db, maxConnections: 1, applicationName: APPLICATION_NAME },
     logger,
   );
@@ -232,6 +294,7 @@ async function run(
 
   const database = await connect(config, logger);
   if (database === undefined) return 1;
+  if (request.command === 'invite-first-admin') return inviteFirst(config, keys, request, database, logger);
   // The request file's, or made here, by the server: known before the work, so a failure can name it.
   const orgId = request.id ?? uuidV7Ids.next();
   const log = logger.child({ orgId });
@@ -259,6 +322,49 @@ async function run(
     // or the run makes a second organisation. A chain that refused the event
     // has raised the integrity alarm already (withSignedStates).
     log.error('operator.failed', { command: request.command, err: error });
+    return 1;
+  } finally {
+    await database.destroy();
+  }
+}
+
+/** Invites the organisation's first admin (B4-6b): the exit code. The address is never logged. */
+async function inviteFirst(
+  config: OperatorConfig,
+  keys: KeyProvider,
+  request: Extract<Request, { command: 'invite-first-admin' }>,
+  database: Database<FirstAdminTables>,
+  logger: Logger,
+): Promise<number> {
+  const log = logger.child({ orgId: request.orgId });
+  const invitationId = request.id;
+  try {
+    if (!(await schemaSoundAtStart({ database, appRole: config.db.user, logger }))) return 1;
+    const invited = await inviteFirstAdminAsOperator(
+      database,
+      { keys, ids: uuidV7Ids, logger },
+      {
+        orgId: request.orgId,
+        invitationId: request.id,
+        email: request.email,
+        tokenHash: request.tokenHash,
+        release: config.release,
+        run: config.run,
+      },
+    );
+    log.info('operator.first_admin_invited', { invitationId, platformSeq: invited.platformSeq });
+    return 0;
+  } catch (error) {
+    if (error instanceof FirstAdminRefused) {
+      log.error('operator.refused', { invitationId, problems: error.problems });
+      return 1;
+    }
+    // A request run again: its invitation exists, and its key refused the second, changing nothing.
+    if (invitedAlready(error)) {
+      log.error('operator.done_before', { command: request.command, invitationId });
+      return 1;
+    }
+    log.error('operator.failed', { command: request.command, invitationId, err: error });
     return 1;
   } finally {
     await database.destroy();
