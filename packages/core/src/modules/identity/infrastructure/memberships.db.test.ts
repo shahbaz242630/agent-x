@@ -11,7 +11,7 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, organizationsOf } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
-import { addMembership, membershipOf, MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
+import { addMembership, membershipFor, membershipOf, MEMBERSHIPS, type MembershipsTransaction } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -341,6 +341,38 @@ describe('a person’s membership, read for a decision', () => {
     try {
       const began = performance.now();
       await expect(within(20_000, organizationsOf(app, ids.next()), 'the read')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
+describe("a request's lookup of a membership, in a transaction of its own (B4-2a)", () => {
+  it('reads it verified, as membershipOf does, in the organisation it names', async () => {
+    const org = await organization();
+    const other = await organization();
+    const user = await person();
+    const { id } = await add(org, user, 'approver');
+
+    expect(await membershipFor(app, services(), org, user)).toEqual({ outcome: 'active', id, role: 'approver' });
+    expect(await membershipFor(app, services(), other, user)).toEqual({ outcome: 'none' });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('gives up after 10 seconds, a wait for a lock included, rather than hold the request', async () => {
+    const org = await organization();
+    const user = await person();
+    await add(org, user, 'admin');
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table directory.members in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, membershipFor(app, services(), org, user), 'the lookup')).rejects.toThrow(
+        /statement timeout/,
+      );
       expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
     } finally {
       await holder.query('rollback');

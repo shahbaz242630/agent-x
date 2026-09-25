@@ -66,6 +66,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "ORGANIZATION_INVALID",
+                    "description": "This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused."
+                  },
+                  {
+                    "type": "string",
                     "const": "ORG_FROZEN",
                     "description": "The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted."
                   },

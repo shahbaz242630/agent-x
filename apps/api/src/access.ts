@@ -11,11 +11,25 @@
 // request as `request.person`. With no live session the answer is 401
 // UNAUTHENTICATED, with a challenge saying how to sign in (the Cookie scheme
 // of draft-broyer-http-cookie-auth); a person the route doesn't name is 403
-// FORBIDDEN. Until memberships and roles come (B4), a person is named only by
-// routes about their own account (`person`); agents come at C2.
-import type { LiveSession } from '@agentx/core/modules/identity';
+// FORBIDDEN. A route about a person's own account names `person`; agents
+// come at C2.
+//
+// B4-2a: a route naming roles answers a person acting in one organisation,
+// which the request names in its `AgentX-Organization` header, a UUID (400
+// ORGANIZATION_INVALID without one). The header only says which: the person's
+// membership there is read and verified against its signed state
+// (membershipOf), and the request goes on only if it is active and its role
+// is one the route names, with the organisation, the membership and the role
+// put on the request as `request.member`. Anything else, an organisation the
+// person isn't in, a membership deactivated or tampered with, is 403
+// FORBIDDEN, which says nothing of whether the organisation exists. The
+// organisation is named on each request, never kept on the session, so two
+// tabs open on two organisations can't act in each other's.
+import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { z } from 'zod';
 
+import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { cookieValue, SESSION_COOKIE } from './sign-in.ts';
 
@@ -30,6 +44,18 @@ export type Principal = (typeof PRINCIPALS)[number];
 /** An organisation's roles: each is a signed-in person too, so `person` beside one adds nothing. */
 const ROLES: readonly Principal[] = ['admin', 'approver', 'developer', 'viewer'];
 
+/** Whether a route's access names any of an organisation's roles: it then takes the organisation's header. */
+export const namesRole = (access: readonly unknown[]): boolean =>
+  access.some((name) => ROLES.some((role) => role === name));
+
+/** A person acting in an organisation, as the access hook found their membership there. */
+export interface Member {
+  /** The organisation, in lower case as Postgres prints a uuid. */
+  readonly orgId: string;
+  readonly membershipId: string;
+  readonly role: Role;
+}
+
 declare module 'fastify' {
   interface FastifyContextConfig {
     /** Who may call the route. Required on every route (contract.ts). */
@@ -38,11 +64,32 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** The signed-in person the request comes from, once the access hook has found their session; null before, and for anyone else. */
     person: LiveSession | null;
+    /** On a route naming roles, the person's verified membership in the organisation the request names; null otherwise. */
+    member: Member | null;
   }
 }
 
 /** Finds the live session a session cookie names, its last use moved on. */
 export type FindSession = (cookie: string) => Promise<LiveSession | undefined>;
+
+/** The person's membership of the organisation, verified, for the request with this correlation ID. */
+export type FindMembership = (orgId: string, userId: string, correlationId: string) => Promise<MembershipCheck>;
+
+/** The header naming the organisation a request acts in, as Node names it. */
+export const ORGANIZATION_HEADER = 'agentx-organization';
+
+/**
+ * The header as the document shows it on each route naming roles. The hook
+ * below checks it before the body is read, so the route's own check of it
+ * never refuses.
+ */
+export const ORGANIZATION_SCHEMA = z.uuid().register(API_SCHEMAS, {
+  description:
+    'The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers.',
+});
+
+const isOrganizationId = (value: unknown): value is string =>
+  typeof value === 'string' && ORGANIZATION_SCHEMA.safeParse(value).success;
 
 /**
  * The challenge a 401 carries (RFC 9110 §11.6.1): sign in at the form's
@@ -96,6 +143,9 @@ export function accessProblems(access: unknown, url: string): string[] {
   return problems;
 }
 
+/** A signed-in person the route doesn't answer. */
+const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
+
 /** No one the route names: the challenge says how to sign in. */
 const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
   sendErrorBody(reply.header('www-authenticate', SESSION_CHALLENGE), 401, 'UNAUTHENTICATED', request.id);
@@ -104,14 +154,20 @@ const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
  * Refuses every request to a route that doesn't name its caller, before the
  * body is read. An unknown address is left to the not-found answer.
  * `findSession` is the console's sign-in; with sign-in off no one is signed in.
+ * `findMembership` reads a person's membership; without it no one holds a role.
  *
  * In callback style, calling done() only to let a request through: an async
  * hook that returned the refusal would be waited on until the answer ended,
  * and a client hanging up before then ends it too, letting the route run. A
  * failure to look the session up is a failure on our side (done with the error).
  */
-export function registerAccess(app: FastifyInstance, findSession: FindSession | undefined): void {
+export function registerAccess(
+  app: FastifyInstance,
+  findSession: FindSession | undefined,
+  findMembership: FindMembership | undefined,
+): void {
   app.decorateRequest('person', null);
+  app.decorateRequest('member', null);
   app.addHook('onRequest', (request, reply, done) => {
     const access = request.routeOptions.config.access ?? [];
     if (request.is404 || access.includes('public')) {
@@ -123,21 +179,36 @@ export function registerAccess(app: FastifyInstance, findSession: FindSession | 
       void unauthenticated(request, reply);
       return;
     }
-    findSession(cookie).then(
-      (session) => {
-        if (session === undefined) {
-          void unauthenticated(request, reply);
-        } else if (!access.includes('person')) {
-          // B4 gives a person roles in an organisation; until then a role's route is none of theirs.
-          void sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
+    const failed = (error: unknown) => {
+      done(error instanceof Error ? error : new Error('the access lookup failed', { cause: error }));
+    };
+    findSession(cookie).then((session) => {
+      if (session === undefined) {
+        void unauthenticated(request, reply);
+      } else if (access.includes('person')) {
+        request.person = session;
+        done();
+      } else if (!namesRole(access)) {
+        // Agents' and operators' routes: a person is neither.
+        void forbidden(request, reply);
+      } else {
+        const orgId = request.headers[ORGANIZATION_HEADER];
+        if (!isOrganizationId(orgId)) {
+          void sendErrorBody(reply, 400, 'ORGANIZATION_INVALID', request.id);
+        } else if (findMembership === undefined) {
+          void forbidden(request, reply);
         } else {
-          request.person = session;
-          done();
+          findMembership(orgId, session.userId, request.id).then((membership) => {
+            if (membership.outcome === 'active' && access.includes(membership.role)) {
+              request.person = session;
+              request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
+              done();
+            } else {
+              void forbidden(request, reply);
+            }
+          }, failed);
         }
-      },
-      (error: unknown) => {
-        done(error instanceof Error ? error : new Error('the session lookup failed', { cause: error }));
-      },
-    );
+      }
+    }, failed);
   });
 }

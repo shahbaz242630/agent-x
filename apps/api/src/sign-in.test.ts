@@ -473,7 +473,7 @@ describe("B2-4b a signed-in request, and the person's own session", () => {
     expect(standIn.looked).toEqual(looked);
   });
 
-  it('refuses a signed-in person on a route for roles only as FORBIDDEN, never running it', async () => {
+  it('refuses a signed-in person on a route for roles only as FORBIDDEN, with no membership lookup, never running it', async () => {
     const standIn = new StandIn();
     standIn.live.set(SESSION_ID, LIVE);
     const { app } = await server(standIn);
@@ -487,7 +487,13 @@ describe("B2-4b a signed-in request, and the person's own session", () => {
       },
     );
 
-    const response = await app.inject({ url: '/test/members', headers: { cookie: `${SESSION_COOKIE}=${SESSION_ID}` } });
+    const response = await app.inject({
+      url: '/test/members',
+      headers: {
+        cookie: `${SESSION_COOKIE}=${SESSION_ID}`,
+        'agentx-organization': '0199a0f0-0000-7000-8000-00000000abcd',
+      },
+    });
 
     expect(response.statusCode).toBe(403);
     expect(response.json()).toEqual(errorBody('FORBIDDEN', response.headers['x-correlation-id'] as string));

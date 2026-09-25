@@ -29,6 +29,8 @@ export const REASON_CODES = {
   INTERNAL_ERROR:
     'Something went wrong on our side, so the request failed. Quote the correlation ID if you contact support.',
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
+  ORGANIZATION_INVALID:
+    'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
     'The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
   ORIGIN_REFUSED:

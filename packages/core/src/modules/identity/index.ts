@@ -25,6 +25,7 @@ export {
 export {
   addMembership,
   type MembershipCheck,
+  membershipFor,
   membershipOf,
   MEMBERSHIPS,
   type MembershipsTransaction,
