@@ -424,3 +424,27 @@ export async function acceptInvitation(
   if (moved.outcome !== 'changed') throw new InvitationNotAccepted(id, moved.outcome);
   return { outcome: waits ? 'awaiting_confirmation' : 'accepted', role };
 }
+
+/**
+ * The invitation, read for the change that confirms or declines who accepted
+ * it (`change`, so it is locked until the transaction ends) and verified, in
+ * the caller's transaction, which must be withSignedStates' for its
+ * organisation: waiting for confirmation, with the version its signed state
+ * has reached (a confirmation's step-up binds to it, B4-4d); or why not.
+ */
+export async function invitationToConfirm(
+  tx: InvitationsTransaction,
+  states: SignedStates,
+  { orgId, id }: { orgId: string; id: string },
+): Promise<
+  Found<
+    | { readonly outcome: 'waiting'; readonly invitation: InvitationRecord; readonly version: number }
+    | { readonly outcome: 'not_waiting' }
+  >
+> {
+  const state = await states.verifiedState(tx, INVITATIONS, { orgId, id }, 'change');
+  if (state.outcome !== 'verified') return state;
+  const invitation = recordOf(id.toLowerCase(), state.fields);
+  if (invitation.status !== 'AWAITING_CONFIRMATION') return { outcome: 'not_waiting' };
+  return { outcome: 'waiting', invitation, version: state.version };
+}

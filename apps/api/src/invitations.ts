@@ -20,6 +20,12 @@
 //    organisation and the invitation; 403 INVITATION_INVALID for a token not
 //    known or another address alike, 409 INVITATION_CLOSED, 409
 //    ALREADY_A_MEMBER.
+// 4. B4-4d: an admin or approver who accepted waits for an existing admin
+//    (ADR-005 §6). `POST /v1/members/invitations/{id}/approve` opens a
+//    step-up bound to who accepted and the role (202 with its ID);
+//    `.../approve/confirm` with that ID, once signed in again, adds the
+//    membership (200); `.../decline` refuses them (200, no step-up: it grants
+//    nothing). Admins only.
 // Refusals: 403 STEP_UP_FAILED when the admin hasn't signed in again for this
 // invitation in this session; 409 INVITATION_CLOSED for one confirmed already
 // or past its end; 404 for one not in the organisation; 503 INTEGRITY_FAILED
@@ -27,6 +33,11 @@
 // the identity module's inviting.ts.
 import {
   ACCEPT_OPERATION,
+  type AcceptanceConfirmations,
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  type ConfirmationWrite,
+  DECLINE_OPERATION,
   type InvitationAcceptance,
   CONFIRM_OPERATION,
   EMAIL_MAX,
@@ -47,6 +58,9 @@ const INVITATION_BODY_LIMIT = 1024;
 
 /** The most a confirmation's body may be: it takes none, or an empty object. */
 const CONFIRM_BODY_LIMIT = 64;
+
+/** The most a confirmation's body may be: a challenge's ID, with room to spare. */
+const APPROVE_CONFIRM_BODY_LIMIT = 128;
 
 const ROLE = z.enum(['admin', 'approver', 'developer', 'viewer']);
 
@@ -144,6 +158,48 @@ const ACCEPT_SCHEMA = {
   },
 };
 
+const DECIDED = z
+  .object({ invitation: INVITATION })
+  .register(API_SCHEMAS, { id: 'InvitationDecided', description: 'The invitation, confirmed or declined.' });
+
+const APPROVE_SCHEMA = {
+  summary: "Ask to confirm who accepted an admin's or approver's invitation",
+  params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
+  body: z
+    .strictObject({})
+    // Fastify gives a request sent with no body a null one.
+    .nullish()
+    .describe('Nothing. An empty object, or no body at all.'),
+  response: {
+    202: z
+      .object({
+        stepUpChallengeId: z
+          .uuid()
+          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=..., before confirming.'),
+      })
+      .register(API_SCHEMAS, {
+        id: 'ConfirmationAsked',
+        description: 'A confirmation of who accepted, waiting for the admin to sign in again.',
+      }),
+  },
+};
+
+const APPROVE_CONFIRM_SCHEMA = {
+  summary: "Confirm who accepted an admin's or approver's invitation, once signed in again for it",
+  params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
+  body: z
+    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with.') })
+    .describe('The step-up signed in again for.'),
+  response: { 200: DECIDED },
+};
+
+const DECLINE_SCHEMA = {
+  summary: "Decline who accepted an admin's or approver's invitation",
+  params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
+  body: z.strictObject({}).nullish().describe('Nothing. An empty object, or no body at all.'),
+  response: { 200: DECIDED },
+};
+
 /** Where an invitation is accepted: the token in the fragment, which browsers never send to a server or in a Referer. */
 const linkFor = (publicOrigin: string, token: string): string => `${publicOrigin}/invitations/accept#token=${token}`;
 
@@ -177,7 +233,13 @@ export function registerInvitations(
     writes,
     acceptance,
     publicOrigin,
-  }: { writes: InvitationWrites | undefined; acceptance: InvitationAcceptance | undefined; publicOrigin: string },
+    confirmations,
+  }: {
+    writes: InvitationWrites | undefined;
+    acceptance: InvitationAcceptance | undefined;
+    confirmations: AcceptanceConfirmations | undefined;
+    publicOrigin: string;
+  },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
@@ -253,6 +315,89 @@ export function registerInvitations(
           expiresAt: accepted.invitation.expiresAt.toISOString(),
         },
       };
+    },
+  );
+  /** Answers a confirmation's refusal; undefined for the route to answer. */
+  const refusalOf = (written: ConfirmationWrite, request: FastifyRequest, reply: FastifyReply) => {
+    if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
+    if (written.outcome === 'conflict' || written.outcome === 'busy')
+      return answerRefusedWrite(written, request, reply);
+    return undefined;
+  };
+  const confirmationsOf = (): AcceptanceConfirmations => {
+    if (confirmations === undefined) throw new Error('the confirmation routes ran without their writes');
+    return confirmations;
+  };
+  const decided = (written: ConfirmationWrite) => {
+    if (written.outcome !== 'written') throw new Error('a confirmation answered without its invitation');
+    return {
+      invitation: {
+        id: written.invitation.id,
+        role: written.invitation.role,
+        status: written.invitation.status,
+        expiresAt: written.invitation.expiresAt.toISOString(),
+      },
+    };
+  };
+
+  routes.post(
+    '/v1/members/invitations/:id/approve',
+    {
+      schema: APPROVE_SCHEMA,
+      bodyLimit: CONFIRM_BODY_LIMIT,
+      config: { access: ['admin'], operation: APPROVE_OPERATION },
+    },
+    async (request, reply) => {
+      const admin = adminOf(request);
+      const written = await confirmationsOf().ask(
+        admin,
+        idempotentRequest(request, admin.orgId),
+        request.params.id,
+        request.id,
+      );
+      const refused = refusalOf(written, request, reply);
+      if (refused !== undefined) return refused;
+      if (written.outcome !== 'asked') throw new Error('an ask answered without its challenge');
+      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+    },
+  );
+
+  routes.post(
+    '/v1/members/invitations/:id/approve/confirm',
+    {
+      schema: APPROVE_CONFIRM_SCHEMA,
+      bodyLimit: APPROVE_CONFIRM_BODY_LIMIT,
+      config: { access: ['admin'], operation: APPROVE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const admin = adminOf(request);
+      const written = await confirmationsOf().confirm(
+        admin,
+        idempotentRequest(request, admin.orgId),
+        request.params.id,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return refusalOf(written, request, reply) ?? decided(written);
+    },
+  );
+
+  routes.post(
+    '/v1/members/invitations/:id/decline',
+    {
+      schema: DECLINE_SCHEMA,
+      bodyLimit: CONFIRM_BODY_LIMIT,
+      config: { access: ['admin'], operation: DECLINE_OPERATION },
+    },
+    async (request, reply) => {
+      const admin = adminOf(request);
+      const written = await confirmationsOf().decline(
+        admin,
+        idempotentRequest(request, admin.orgId),
+        request.params.id,
+        request.id,
+      );
+      return refusalOf(written, request, reply) ?? decided(written);
     },
   );
 }

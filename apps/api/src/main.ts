@@ -26,6 +26,7 @@ import {
   createOidcClient,
   createSessions,
   createSignIn,
+  createAcceptanceConfirmations,
   createInvitationAcceptance,
   createInvitationWrites,
   createStepUpChallenges,
@@ -349,6 +350,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId),
+    acceptanceConfirmations: createAcceptanceConfirmations({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      logger,
+    }),
     invitationAcceptance: createInvitationAcceptance({
       database,
       keys,

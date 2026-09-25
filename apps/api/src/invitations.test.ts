@@ -3,6 +3,8 @@
 // the writes do in the database is the identity module's inviting.db.test.ts.
 import type {
   Acceptance,
+  AcceptanceConfirmations,
+  ConfirmationWrite,
   AcceptingPerson,
   InvitationAcceptance,
   InvitationRecord,
@@ -91,6 +93,7 @@ async function withWrites(
   answer: InvitationWrite | Error | undefined,
   role: Role = 'admin',
   acceptance?: InvitationAcceptance,
+  confirmations?: AcceptanceConfirmations,
 ) {
   const asked: Asked[] = [];
   // Without an answer, no writes are given the server, so none is asked for.
@@ -133,6 +136,7 @@ async function withWrites(
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...(answer !== undefined && { invitationWrites: writes }),
     ...(acceptance !== undefined && { invitationAcceptance: acceptance }),
+    ...(confirmations !== undefined && { acceptanceConfirmations: confirmations }),
   });
   servers.push(app);
   await app.ready();
@@ -503,6 +507,197 @@ describe('POST /v1/invitations/accept takes a signed-in person’s token (B4-4c)
 
       expect(response.statusCode).toBe(500);
       expect(response.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    }
+  });
+});
+
+describe('an admin confirms or declines who accepted an admin’s or approver’s invitation (B4-4d)', () => {
+  const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c9';
+  interface Call {
+    kind: string;
+    admin: InvitingAdmin;
+    keyed: IdempotentRequest;
+    id: string;
+    challengeId?: string;
+  }
+
+  async function withConfirmations(answer: ConfirmationWrite | Error, role: Role = 'admin') {
+    const asked: Call[] = [];
+    const answered = () => (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer));
+    const confirmations: AcceptanceConfirmations = {
+      ask: (admin, keyed, id) => {
+        asked.push({ kind: 'ask', admin, keyed, id });
+        return answered();
+      },
+      confirm: (admin, keyed, id, challengeId) => {
+        asked.push({ kind: 'confirm', admin, keyed, id, challengeId });
+        return answered();
+      },
+      decline: (admin, keyed, id) => {
+        asked.push({ kind: 'decline', admin, keyed, id });
+        return answered();
+      },
+    };
+    const { app } = await withWrites(undefined, role, undefined, confirmations);
+    return { app, asked };
+  }
+
+  const post = (path: string, payload?: Record<string, unknown>, key = 'k-1'): InjectOptions => ({
+    method: 'POST',
+    url: `/v1/members/invitations/${INVITATION_ID}${path}`,
+    headers: { ...headers, 'idempotency-key': key },
+    ...(payload !== undefined && { payload }),
+  });
+
+  const DECIDED: ConfirmationWrite = {
+    outcome: 'written',
+    invitation: { ...OPEN, status: 'ACCEPTED', acceptedBy: LIVE.userId },
+  };
+
+  it('asks: 202 with the step-up, for the admin’s own session', async () => {
+    const { app, asked } = await withConfirmations({ outcome: 'asked', stepUpChallengeId: CHALLENGE });
+
+    const response = await app.inject(post('/approve'));
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked).toEqual([
+      {
+        kind: 'ask',
+        admin: ADMIN_WRITING,
+        keyed: expect.objectContaining({ operation: 'members.approve', key: 'k-1' }) as unknown,
+        id: INVITATION_ID,
+      },
+    ]);
+  });
+
+  it('confirms with the step-up it names: 200 with the invitation', async () => {
+    const { app, asked } = await withConfirmations(DECIDED);
+
+    const response = await app.inject(post('/approve/confirm', { stepUpChallengeId: CHALLENGE }));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      invitation: { id: INVITATION_ID, role: 'developer', status: 'ACCEPTED', expiresAt: '2026-09-28T09:00:00.123Z' },
+    });
+    expect(asked).toEqual([
+      {
+        kind: 'confirm',
+        admin: ADMIN_WRITING,
+        keyed: expect.objectContaining({ operation: 'members.approve.confirm' }) as unknown,
+        id: INVITATION_ID,
+        challengeId: CHALLENGE,
+      },
+    ]);
+  });
+
+  it('declines: 200 with the invitation', async () => {
+    const { app, asked } = await withConfirmations({ ...DECIDED, invitation: { ...OPEN, status: 'DECLINED' } });
+
+    const response = await app.inject(post('/decline'));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ invitation: { status: 'DECLINED' } });
+    expect(asked).toMatchObject([{ kind: 'decline', keyed: { operation: 'members.decline' } }]);
+  });
+
+  it.each([
+    ['no step-up', {}],
+    ['a step-up that isn’t an ID', { stepUpChallengeId: 'not-an-id' }],
+    ['a field it doesn’t take', { stepUpChallengeId: CHALLENGE, role: 'admin' }],
+  ])('refuses a confirmation with %s as BAD_REQUEST', async (_what, body) => {
+    const { app, asked } = await withConfirmations(DECIDED);
+
+    const response = await app.inject(post('/approve/confirm', body));
+
+    expect(response.statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a confirmation’s body over 128 bytes, and an ask’s or decline’s with anything in it', async () => {
+    const { app, asked } = await withConfirmations(DECIDED);
+
+    expect(
+      (await app.inject(post('/approve/confirm', { stepUpChallengeId: CHALLENGE, pad: 'x'.repeat(128) }))).statusCode,
+    ).toBe(413);
+    expect((await app.inject(post('/approve', { role: 'admin' }))).statusCode).toBe(400);
+    expect((await app.inject(post('/decline', { role: 'admin' }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it.each(['approver', 'developer', 'viewer'] as const)('refuses a %s at all three', async (role) => {
+    const { app, asked } = await withConfirmations(DECIDED, role);
+
+    for (const request of [
+      post('/approve'),
+      post('/approve/confirm', { stepUpChallengeId: CHALLENGE }),
+      post('/decline'),
+    ]) {
+      expect((await app.inject(request)).statusCode).toBe(403);
+    }
+    expect(asked).toEqual([]);
+  });
+
+  it.each([
+    [403, 'STEP_UP_FAILED'],
+    [409, 'INVITATION_CLOSED'],
+    [409, 'ALREADY_A_MEMBER'],
+    [404, 'NOT_FOUND'],
+    [503, 'INTEGRITY_FAILED'],
+    [403, 'FORBIDDEN'],
+    [401, 'UNAUTHENTICATED'],
+  ] as const)('answers the refusal %i %s at all three', async (status, code) => {
+    const { app } = await withConfirmations({ outcome: 'refused', status, code });
+
+    for (const request of [
+      post('/approve'),
+      post('/approve/confirm', { stepUpChallengeId: CHALLENGE }),
+      post('/decline'),
+    ]) {
+      const response = await app.inject(request);
+
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ error: { code } });
+    }
+  });
+
+  it('answers a key used for another request, or still being done, at all three', async () => {
+    for (const [outcome, code] of [
+      ['conflict', 'IDEMPOTENCY_KEY_REUSED'],
+      ['busy', 'IDEMPOTENCY_KEY_BUSY'],
+    ] as const) {
+      const { app } = await withConfirmations({ outcome });
+
+      for (const request of [
+        post('/approve'),
+        post('/approve/confirm', { stepUpChallengeId: CHALLENGE }),
+        post('/decline'),
+      ]) {
+        const response = await app.inject(request);
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toMatchObject({ error: { code } });
+      }
+    }
+  });
+
+  it('fails as INTERNAL_ERROR when the writes fail, when none were given, or when one answers out of turn', async () => {
+    const failing = await withConfirmations(new Error('the database is away'));
+    const none = (await withWrites(undefined, 'admin')).app;
+    const outOfTurn = await withConfirmations({ outcome: 'asked', stepUpChallengeId: CHALLENGE });
+    const decidedAsked = await withConfirmations(DECIDED);
+
+    for (const [app, request] of [
+      [failing.app, post('/approve')],
+      [none, post('/approve')],
+      [none, post('/approve/confirm', { stepUpChallengeId: CHALLENGE })],
+      [none, post('/decline')],
+      [outOfTurn.app, post('/decline')],
+      [decidedAsked.app, post('/approve')],
+    ] as const) {
+      const response = await app.inject(request);
+
+      expect(response.statusCode).toBe(500);
     }
   });
 });

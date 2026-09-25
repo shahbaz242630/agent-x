@@ -16,7 +16,12 @@
 // and each request is logged by its route pattern only (ADR-011 §7). Every route
 // is checked, answered and documented through its zod schemas, and the API
 // serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
-import type { InvitationAcceptance, InvitationWrites, SignIn } from '@agentx/core/modules/identity';
+import type {
+  AcceptanceConfirmations,
+  InvitationAcceptance,
+  InvitationWrites,
+  SignIn,
+} from '@agentx/core/modules/identity';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
@@ -56,6 +61,8 @@ export interface ServerOptions {
   readonly invitationWrites?: InvitationWrites | undefined;
   /** Accepting invitations (the identity module's accepting.ts); without it, the route answers no one. */
   readonly invitationAcceptance?: InvitationAcceptance | undefined;
+  /** Confirming or declining who accepted (the identity module's confirming.ts); without it, no one reaches those routes. */
+  readonly acceptanceConfirmations?: AcceptanceConfirmations | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -193,6 +200,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,
+    confirmations: options.acceptanceConfirmations,
     publicOrigin: config.http.publicOrigin,
   });
   return app;
