@@ -721,15 +721,15 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
   });
 
   it.each([401, 500, 503])(
-    'gives no address, and the sign-in still stands, when the endpoint answers %i',
+    'fails as the login service unavailable when the endpoint answers %i (B4-6c: nothing stands unchecked)',
     async (status) => {
       service.userinfoStatus = status;
 
-      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+      await expectFailure(signIn(), 'provider_unavailable', new RegExp(`userinfo endpoint answered ${String(status)}`));
     },
   );
 
-  it('gives no address when the endpoint can’t be reached, answers an error in JSON, or answers what isn’t a JSON object', async () => {
+  it('fails as the login service unavailable when the endpoint can’t be reached, answers an error in JSON, or answers what isn’t a JSON object', async () => {
     const fetch = service.fetch;
     for (const answer of [
       // An error answer in JSON, as OAuth's bearer errors are, is still an error: never read as a person.
@@ -744,7 +744,7 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
         clock,
       });
 
-      await expect(signIn()).resolves.toMatchObject({ subject: { subject: SUBJECT }, verifiedEmail: undefined });
+      await expectFailure(signIn(), 'provider_unavailable');
     }
   });
 
@@ -803,6 +803,16 @@ describe('B4-6c the login service’s break-glass admin never signs in', () => {
 
     await expectFailure(signIn(), 'break_glass');
   });
+
+  it.each([500, 503])(
+    'lets no sign-in through unchecked when the endpoint answers %i: it fails, to be tried again (review)',
+    async (status) => {
+      service.userinfo = { ...admin, preferred_username: 'admin@agent-x.auth.example.test' };
+      service.userinfoStatus = status;
+
+      await expectFailure(signIn(), 'provider_unavailable');
+    },
+  );
 
   it('never says the login name when it fails', async () => {
     service.userinfo = { ...admin, preferred_username: 'Admin@Agent-X.auth.example.test' };

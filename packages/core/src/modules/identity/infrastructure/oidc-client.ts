@@ -15,15 +15,15 @@
 //   address out of the ID token unless the app is set to, which staging's
 //   isn't). The answer must name the ID token's person; its address comes out
 //   only when the login service says it is verified, in lower case, for an
-//   invitation to be matched against (B4-4c). An endpoint that fails gives no
-//   address and fails nothing. The access and refresh tokens are then
-//   dropped.
+//   invitation to be matched against (B4-4c). The access and refresh tokens
+//   are then dropped.
 // - B4-6c: the flow asks for the `profile` scope too, for the login name
 //   (`preferred_username`) alone: a sign-in whose userinfo answer names the
 //   login service's break-glass admin fails (`break_glass`), so that login
-//   never holds a session here, nor anything a session leads to. An endpoint
-//   that fails can't name it; that sign-in holds no address, so it can accept
-//   no invitation (B4-4c). The rest of the profile is never kept.
+//   never holds a session here, nor anything a session leads to. So an
+//   endpoint that fails fails the sign-in too, as the login service
+//   unavailable (503, to try again): no sign-in stands unchecked. The rest of
+//   the profile is never kept.
 //
 // Every call to the login service goes through the outbound fetch, so only
 // the allowlist's origins are reached and no redirect is followed
@@ -401,28 +401,23 @@ export function createOidcClient({
    * The person's verified address, from the userinfo endpoint with the
    * access token: the answer must name the same person; an address comes out
    * only with `email_verified` true, and only as one address (the invitation's
-   * own rule), in lower case. An endpoint that can't be reached, or answers
-   * with anything but a JSON object, gives no address and fails nothing: a
-   * sign-in stands on its ID token, and only accepting an invitation needs an
-   * address (B4-4b review). An answer about another person fails the sign-in,
-   * and so does one naming the break-glass admin's login (B4-6c).
+   * own rule), in lower case. An answer about another person fails the
+   * sign-in, and so does one naming the break-glass admin's login (B4-6c).
+   * Since that check rests on the answer, an endpoint that can't be reached,
+   * or answers with anything but a JSON object, fails the sign-in as the
+   * login service unavailable, to be tried again (B4-6c review): never a
+   * sign-in let through unchecked. (B4-4a let one stand without an address.)
    */
   async function verifiedEmailOf(accessToken: string, subject: string): Promise<string | undefined> {
-    let info: Record<string, unknown>;
-    try {
-      const { userinfoEndpoint } = await discover();
-      const response = await call(userinfoEndpoint, {
-        headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
-      });
-      if (!response.ok) {
-        await response.body?.cancel();
-        return undefined;
-      }
-      info = await jsonObject(response, 'userinfo answer');
-    } catch (error) {
-      if (error instanceof SignInFailed && error.failure === 'provider_unavailable') return undefined;
-      throw error;
+    const { userinfoEndpoint } = await discover();
+    const response = await call(userinfoEndpoint, {
+      headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new SignInFailed('provider_unavailable', `the userinfo endpoint answered ${String(response.status)}`);
     }
+    const info = await jsonObject(response, 'userinfo answer');
     if (info.sub !== subject) throw new SignInFailed('token_invalid', 'the userinfo answer names another person');
     if (isBreakGlassLogin(info.preferred_username, issuer)) {
       throw new SignInFailed('break_glass', "the login is the login service's break-glass admin");
