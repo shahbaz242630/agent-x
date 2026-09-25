@@ -25,7 +25,8 @@ const FIRST_ORGANIZATION_LABEL = FIRST_ORGANIZATION.toLowerCase().replaceAll(' '
  */
 export function isBreakGlassLogin(loginName: unknown, issuer: string): boolean {
   if (typeof loginName !== 'string') return false;
-  const host = new URL(issuer).hostname.toLowerCase();
+  // A URL's host comes out in lower case.
+  const host = new URL(issuer).hostname;
   const name = loginName.toLowerCase();
   return name === BREAK_GLASS_USERNAME || name === `${BREAK_GLASS_USERNAME}@${FIRST_ORGANIZATION_LABEL}.${host}`;
 }

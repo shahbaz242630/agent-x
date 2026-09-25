@@ -15,6 +15,10 @@ describe('B4-6c the break-glass admin, by its login name', () => {
     expect(isBreakGlassLogin(loginName, ISSUER)).toBe(true);
   });
 
+  it('reads the host of an issuer written in capitals in lower case', () => {
+    expect(isBreakGlassLogin('admin@agent-x.auth.example.test', 'https://Auth.Example.TEST')).toBe(true);
+  });
+
   it('reads the host from an issuer with a port and a path, as the compose stack’s', () => {
     expect(isBreakGlassLogin('admin@agent-x.localhost', 'http://localhost:8081/oauth')).toBe(true);
   });
