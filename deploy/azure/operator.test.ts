@@ -1002,6 +1002,21 @@ describe('main', () => {
     ]);
   });
 
+  it('reads invite-first-admin as its own command, saying how to use it, and ends 2, when asked it wrongly (B4-6b)', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['invite-first-admin', '--org'],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([
+      `say invite-first-admin --org <organisation ID> --email <address> [--id <ID>], and nothing else
+${USAGE}`,
+    ]);
+  });
+
   it('says what stopped it, and ends 1', async () => {
     const lines: string[] = [];
     await expect(
