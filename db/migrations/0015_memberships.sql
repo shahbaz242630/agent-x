@@ -26,10 +26,12 @@
 -- (packages/core/src/authority-tables.ts), which CI, the lint rules and the
 -- live schema guard all read.
 --
--- One membership per person in an organisation. It points at its directory
--- entry, made in the same transaction, by person, organisation and its own
--- ID, so a membership can't exist that the person's list of organisations
--- leaves out or names by another ID; and at the person.
+-- It points at its directory entry, made in the same transaction, by
+-- person, organisation and its own ID, so a membership can't exist that the
+-- person's list of organisations leaves out or names by another ID. The
+-- entry's own keys then hold the rest: one entry per person in an
+-- organisation, so one membership; and only for a person who has signed in,
+-- in an organisation that is listed.
 --
 -- The roles are the organisation's four (PRD §7.1, access.ts): admin,
 -- approver (the finance approver), developer, viewer. A person invited as an
@@ -60,14 +62,13 @@ GRANT SELECT ON directory.members TO agentx_backup;
 CREATE TABLE identity.memberships (
   org_id uuid NOT NULL,
   id uuid NOT NULL,
-  user_id uuid NOT NULL REFERENCES identity.users (id),
+  user_id uuid NOT NULL,
   role text NOT NULL CHECK (role IN ('admin', 'approver', 'developer', 'viewer')),
   status text NOT NULL CHECK (status IN ('ACTIVE', 'DEACTIVATED')),
   joined_at timestamptz NOT NULL,
   state_version integer NOT NULL DEFAULT 1,
   state_event_id uuid,
   PRIMARY KEY (org_id, id),
-  CONSTRAINT one_membership_per_person UNIQUE (org_id, user_id),
   CONSTRAINT listed_in_the_directory FOREIGN KEY (user_id, org_id, id)
     REFERENCES directory.members (user_id, org_id, membership_id)
 );

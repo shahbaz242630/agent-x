@@ -82,7 +82,7 @@ export async function addMembership(
  * organisation held). Anything but `active` grants nothing.
  */
 export type MembershipCheck =
-  | { readonly outcome: 'active'; readonly id: string; readonly role: Role; readonly version: number }
+  | { readonly outcome: 'active'; readonly id: string; readonly role: Role }
   | { readonly outcome: 'deactivated'; readonly id: string }
   | { readonly outcome: 'none' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -108,5 +108,5 @@ export async function membershipOf(
   const role = state.fields.get('role');
   // The table's check holds the role to the four, and the seal to what was written.
   if (!isRole(role)) throw new Error(`A verified membership holds a role that isn't one: ${id}`);
-  return { outcome: 'active', id, role, version: state.version };
+  return { outcome: 'active', id, role };
 }

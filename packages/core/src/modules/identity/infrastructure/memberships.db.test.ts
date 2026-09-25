@@ -27,7 +27,8 @@ const keys = createKeyProvider(
     PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
   ),
 );
-const ids = new SequentialIds(0x600);
+// Each ID has a hex letter in it, so looking one up in upper case is another string.
+const ids = new SequentialIds(0xa000_0000_0000);
 const clock = new FixedClock(new Date('2026-09-25T09:00:00Z'));
 
 let capture: LogCapture;
@@ -119,7 +120,7 @@ describe(`adding a membership (B4-1, Postgres ${server.version})`, () => {
     const { id, recorded } = await add(org, user, 'admin');
 
     expect(recorded).toMatchObject({ version: 1, seq: 3n });
-    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin', version: 1 });
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin' });
     const { row, entry, event } = await withTenant(app, org, async (tx) => ({
       row: await tx.selectFrom('identity.memberships').selectAll().executeTakeFirstOrThrow(),
       entry: await tx.selectFrom('directory.members').selectAll().where('org_id', '=', org).execute(),
@@ -168,7 +169,7 @@ describe(`adding a membership (B4-1, Postgres ${server.version})`, () => {
 
     await expect(add(org, user, 'admin')).rejects.toMatchObject({ code: '23505', constraint: 'members_pkey' });
 
-    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'viewer', version: 1 });
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'viewer' });
   });
 
   it("refuses a transaction that isn't withTenant's for the organisation, writing nothing", async () => {
@@ -180,6 +181,15 @@ describe(`adding a membership (B4-1, Postgres ${server.version})`, () => {
 
     expect(await check(org, user)).toEqual({ outcome: 'none' });
     expect(await organizationsOf(app, user)).toEqual([]);
+  });
+
+  it('refuses one in an organisation the directory doesn’t list, by the key to its list', async () => {
+    const unlisted = ids.next();
+
+    await expect(add(unlisted, await person())).rejects.toMatchObject({
+      code: '23503',
+      constraint: 'members_org_id_fkey',
+    });
   });
 
   it('refuses one for someone who has never signed in, by the key to the people', async () => {
@@ -271,8 +281,37 @@ describe('a person’s membership, read for a decision', () => {
     const org = await organization();
     const user = await person();
     const { id } = await add(org, user, 'developer');
+    expect(user.toUpperCase()).not.toBe(user);
 
     expect(await check(org, user.toUpperCase())).toMatchObject({ outcome: 'active', id });
+  });
+
+  it('is read for a decision, a share lock: two readers of the same membership at once never wait on each other', async () => {
+    const org = await organization();
+    const user = await person();
+    await add(org, user, 'admin');
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let read = (): void => undefined;
+    const first = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+
+    const holder = withSignedStates(app, org, services(), async (tx, states) => {
+      const found = await membershipOf(tx, states, org, user);
+      read();
+      await held;
+      return found;
+    });
+    await first;
+    try {
+      expect(await within(5_000, check(org, user), 'the second read')).toMatchObject({ outcome: 'active' });
+    } finally {
+      release();
+    }
+    expect(await holder).toMatchObject({ outcome: 'active' });
   });
 
   it("gives a person's organisations from the directory, in order, and none of anyone else's", async () => {
@@ -358,7 +397,7 @@ describe('the walls round a membership', () => {
       await expect(withTenant(app, org, attempt)).rejects.toMatchObject({ code: '42501' });
     }
 
-    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin', version: 1 });
+    expect(await check(org, user)).toEqual({ outcome: 'active', id, role: 'admin' });
   });
 
   it('a membership moved to another person past record is unsigned, and denied at the next read with the alarm', async () => {
@@ -423,6 +462,21 @@ describe('the walls round a membership', () => {
     }
     await expect(written('admin', 'DEACTIVATED')).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
     await expect(written('admin', 'ACTIVE')).rejects.toThrow('rolled back');
+  });
+
+  it('a deactivated membership is never made active again past the module: the status guard refuses the move', async () => {
+    const org = await organization();
+    const user = await person();
+    const { id } = await add(org, user, 'admin');
+    await deactivate(org, id);
+
+    await expect(
+      withTenant(app, org, (tx) =>
+        tx.updateTable('identity.memberships').set({ status: 'ACTIVE' }).where('id', '=', id).execute(),
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
+
+    expect(await check(org, user)).toEqual({ outcome: 'deactivated', id });
   });
 
   it('the backup role reads both tables, every organisation’s rows, as a logical backup must', async () => {
