@@ -35,9 +35,20 @@ class IllFormedText extends Error {
   }
 }
 
+/**
+ * An object JSON could have made: its prototype Object's, none, or an empty
+ * one of its own with none behind it, as Fastify makes a request's params
+ * and query (found at B4-3b, the first route to hash them). A class
+ * instance's prototype holds at least its constructor, so it is none of these.
+ */
 const isPlainObject = (value: object): boolean => {
   const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  if (prototype === Object.prototype || prototype === null) return true;
+  return (
+    typeof prototype === 'object' &&
+    Object.getPrototypeOf(prototype) === null &&
+    Reflect.ownKeys(prototype).length === 0
+  );
 };
 
 /**

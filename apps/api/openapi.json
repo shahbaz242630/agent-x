@@ -66,6 +66,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "INVITATION_CLOSED",
+                    "description": "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed."
+                  },
+                  {
+                    "type": "string",
                     "const": "NOT_FOUND",
                     "description": "There is nothing at this address, or the feature is not available."
                   },
@@ -193,6 +198,80 @@
         ],
         "additionalProperties": false,
         "description": "The signed-in person's own session."
+      },
+      "Invitation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "approver",
+              "developer",
+              "viewer"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "OPEN"
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "status",
+          "expiresAt"
+        ],
+        "additionalProperties": false,
+        "description": "An invitation to join the organisation."
+      },
+      "InvitationDrafted": {
+        "type": "object",
+        "properties": {
+          "invitation": {
+            "$ref": "#/components/schemas/Invitation"
+          },
+          "stepUpChallengeId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "invitation"
+        ],
+        "additionalProperties": false,
+        "description": "The invitation kept as a draft, waiting for the admin who asked to sign in again and confirm it."
+      },
+      "InvitationConfirmed": {
+        "type": "object",
+        "properties": {
+          "invitation": {
+            "$ref": "#/components/schemas/Invitation"
+          },
+          "link": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "invitation"
+        ],
+        "additionalProperties": false,
+        "description": "The invitation, open for the invited person."
       },
       "Member": {
         "type": "object",
@@ -987,6 +1066,197 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Members"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/members/invitations": {
+      "post": {
+        "operationId": "members.invite",
+        "summary": "Invite a person to the organisation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "maxLength": 254,
+                    "format": "email",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "admin",
+                      "approver",
+                      "developer",
+                      "viewer"
+                    ]
+                  }
+                },
+                "required": [
+                  "email",
+                  "role"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 1024,
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationDrafted"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/members/invitations/{id}/confirm": {
+      "post": {
+        "operationId": "members.invite.confirm",
+        "summary": "Confirm an invitation, once signed in again for it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 64,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationConfirmed"
                 }
               }
             }

@@ -240,6 +240,11 @@ describe('the canonical JSON of a request', () => {
     ['a list in its own order', [3, 1, 2], '[3,1,2]'],
     ['an object with no prototype', Object.assign(Object.create(null) as object, { a: 1 }), '{"a":1}'],
     [
+      'an object whose prototype is empty with none behind it, as Fastify makes params and query',
+      Object.assign(Object.create(Object.create(null) as object) as object, { a: 1 }),
+      '{"a":1}',
+    ],
+    [
       'a key named __proto__, as JSON.parse makes one',
       JSON.parse('{"__proto__":1,"a":2}') as unknown,
       '{"__proto__":1,"a":2}',
@@ -257,6 +262,14 @@ describe('the canonical JSON of a request', () => {
     ['a big integer', 1n],
     ['a function', () => 1],
     ['a map', new Map()],
+    [
+      'an instance of a class of our own',
+      new (class Point {
+        x = 1;
+      })(),
+    ],
+    ['an object whose prototype holds a field', Object.create(Object.assign(Object.create(null) as object, { a: 1 }))],
+    ['an object whose prototype is a plain object', Object.create({})],
     ['undefined inside an object', { a: undefined }],
   ])('refuses %s as a failure on our side', (_what, value) => {
     expect(() => canonicalJson(value)).toThrow(TypeError);

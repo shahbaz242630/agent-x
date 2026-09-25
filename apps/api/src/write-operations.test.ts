@@ -159,7 +159,7 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
     ],
     [
       'an operationId of its own in its document',
-      { ...write('members.invite'), schema: { ...write('x').schema, operationId: 'other' } },
+      { ...write('test.invite'), schema: { ...write('x').schema, operationId: 'other' } },
       'the operation its document shows is not its own (operationId)',
     ],
     [
@@ -185,7 +185,7 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
     ['two writes', ['POST', 'PUT']],
   ])('refuses one operation for a route of %s, which the document would show twice', async (_what, method) => {
     const app = await server();
-    const route = { method, url: '/v1/test', ...write('members.invite'), handler: () => ({ ok: true }) };
+    const route = { method, url: '/v1/test', ...write('test.invite'), handler: () => ({ ok: true }) };
     expect(() => app.route(route as RouteOptions)).toThrow(
       `${method.join(',')} /v1/test: it names an operation but serves more than one method`,
     );
@@ -193,25 +193,25 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
 
   it("refuses a second route naming another's operation as it is added, whatever its address", async () => {
     const app = await server();
-    app.post('/v1/members', write('members.invite'), () => ({ ok: true }));
-    expect(() => app.put('/v1/invitations', write('members.invite'), () => ({ ok: true }))).toThrow(
+    app.post('/v1/members', write('test.invite'), () => ({ ok: true }));
+    expect(() => app.put('/v1/invitations', write('test.invite'), () => ({ ok: true }))).toThrow(
       "PUT /v1/invitations: its operation is another route's too",
     );
   });
 
   it("refuses to start when a later hook gives a route another's operation", async () => {
     const app = await server();
-    app.post('/v1/members', write('members.invite'), () => ({ ok: true }));
+    app.post('/v1/members', write('test.invite'), () => ({ ok: true }));
     await app.register((child, _options, done) => {
       child.addHook('onRoute', (route) => {
-        route.config = { ...route.config, operation: 'members.invite' };
+        route.config = { ...route.config, operation: 'test.invite' };
       });
       child.post('/v1/invitations', write('invitations.send'), () => ({ ok: true }));
       done();
     });
     const ready = app.ready();
     await expect(ready).rejects.toThrow(ContractBroken);
-    await expect(ready).rejects.toThrow('the operation members.invite is named by more than one route');
+    await expect(ready).rejects.toThrow('the operation test.invite is named by more than one route');
   });
 
   it("refuses to start when a later hook changes a route's operation, parting it from its document", async () => {
@@ -220,7 +220,7 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
       child.addHook('onRoute', (route) => {
         route.config = { ...route.config, operation: 'members.other' };
       });
-      child.post('/v1/members', write('members.invite'), () => ({ ok: true }));
+      child.post('/v1/members', write('test.invite'), () => ({ ok: true }));
       done();
     });
     await expect(app.ready()).rejects.toThrow(
@@ -234,7 +234,7 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
       child.addHook('onRoute', (route) => {
         route.schema = { response: { 200: z.object({ ok: z.literal(true) }) } };
       });
-      child.post('/v1/members', write('members.invite'), () => ({ ok: true }));
+      child.post('/v1/members', write('test.invite'), () => ({ ok: true }));
       done();
     });
     await expect(app.ready()).rejects.toThrow(
@@ -249,7 +249,7 @@ describe('SEC-DP-07 the contract holds every write route to its operation', () =
         const { operation: _taken, ...rest } = route.config ?? {};
         route.config = rest;
       });
-      child.post('/v1/members', write('members.invite'), () => ({ ok: true }));
+      child.post('/v1/members', write('test.invite'), () => ({ ok: true }));
       done();
     });
     await expect(app.ready()).rejects.toThrow('POST /v1/members: it writes but names no operation');

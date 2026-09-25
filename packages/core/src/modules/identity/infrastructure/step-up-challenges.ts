@@ -22,7 +22,7 @@
 // (ADR-006 §3), so tests can move them.
 import { randomBytes } from 'node:crypto';
 
-import { type Kysely, sql } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import type { IdentityTables } from './tables.ts';
@@ -66,7 +66,7 @@ export interface ConsumedStepUp extends PendingChallenge {
 
 export interface StepUpChallenges {
   /** Opens a challenge for a change in the session; undefined if the session is gone or past its absolute end. */
-  open(db: Kysely<IdentityTables>, binding: StepUpBinding): Promise<PendingChallenge | undefined>;
+  open(db: Handle, binding: StepUpBinding): Promise<PendingChallenge | undefined>;
   /** The session's challenge, not yet verified and still in time; undefined for any other. */
   pending(db: Kysely<IdentityTables>, challengeId: string, sessionId: string): Promise<PendingChallenge | undefined>;
   /** Records what the fresh sign-in proved on the session's challenge, once and in time; false if it can't. */
@@ -82,10 +82,13 @@ export interface StepUpChallenges {
    * session, action and change hash, is verified and still in time. Undefined
    * otherwise, and the challenge is left as it was.
    */
-  consume(db: Kysely<IdentityTables>, challengeId: string, binding: StepUpBinding): Promise<ConsumedStepUp | undefined>;
+  consume(db: Handle, challengeId: string, binding: StepUpBinding): Promise<ConsumedStepUp | undefined>;
   /** Deletes up to `most` challenges past their time, and says how many. */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
+
+/** A handle a challenge is opened or consumed on: the pool, or a change's own transaction, whatever else it can reach. */
+type Handle = Kysely<IdentityTables> | Transaction<IdentityTables>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTION = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;

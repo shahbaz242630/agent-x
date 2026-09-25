@@ -120,6 +120,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/members',
       'POST /test/both',
       'POST /v1/auth/sign-out',
+      'POST /v1/members/invitations',
+      'POST /v1/members/invitations/{id}/confirm',
       'PUT /test/both',
     ]);
   });
@@ -1086,15 +1088,23 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     const answers = Object.values(document.paths).flatMap((item) =>
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
-    // The test's route, /health, the five sign-in routes and the members list, with each GET's HEAD.
-    expect(answers.length).toBe(14);
+    // The test's route, /health, the five sign-in routes, the members list and the two invitation routes, with each GET's HEAD.
+    expect(answers.length).toBe(16);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
       });
     }
-    // The one error body, and the answers that are named objects of their own: the session (B2-4b), the members (B4-2b).
-    expect(Object.keys(document.components.schemas).sort()).toEqual(['Error', 'Member', 'Members', 'Session']);
+    // The one error body, and the answers that are named objects of their own: the session (B2-4b), the members (B4-2b), the invitations (B4-3b).
+    expect(Object.keys(document.components.schemas).sort()).toEqual([
+      'Error',
+      'Invitation',
+      'InvitationConfirmed',
+      'InvitationDrafted',
+      'Member',
+      'Members',
+      'Session',
+    ]);
   });
 
   it('documents every registered reason code with its public description, and nothing else', async () => {
