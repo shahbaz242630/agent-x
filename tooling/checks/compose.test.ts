@@ -26,6 +26,8 @@ interface Service {
   stop_grace_period?: string;
   volumes?: string[];
   env_file?: { path: string; required?: boolean }[];
+  profiles?: string[];
+  entrypoint?: string[];
   command?: string[];
   depends_on?: Record<string, { condition: string }>;
 }
@@ -142,7 +144,7 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(socket.map(([name]) => name)).toEqual([]);
   });
 
-  it.each(['api', 'migrate', 'db-setup'])('runs %s read-only', (name) => {
+  it.each(['api', 'migrate', 'db-setup', 'operator'])('runs %s read-only', (name) => {
     expect(file.services[name]?.read_only).toBe(true);
   });
 
@@ -240,6 +242,27 @@ describe("ADR-011 §2: the app's keys, as Azure mounts them", () => {
       `./secrets/${API_SIGN_IN}:/mnt/sign-in:ro`,
     ]);
     expect(mountersOf(API_SIGN_IN)).toEqual(['api']);
+  });
+
+  it("B4-6d gives the operator's command the two keys it holds, file by file, and its requests, none of it writable", () => {
+    expect(file.services.operator?.volumes).toEqual([
+      `./secrets/${APP_KEYS}/key-audit-mac-v1:${SECRETS_PATH}/key-audit-mac-v1:ro`,
+      `./secrets/${APP_KEYS}/key-field-encryption-v1:${SECRETS_PATH}/key-field-encryption-v1:ro`,
+      './secrets/operator-requests:/mnt/requests:ro',
+    ]);
+    expect(file.services.operator?.environment).toMatchObject({
+      AGENTX_ENV: 'development',
+      AGENTX_DB_USER: 'agentx_app',
+      AGENTX_DB_TLS: 'disable',
+      AGENTX_KEYS_DIR: SECRETS_PATH,
+    });
+  });
+
+  it('B4-6d starts the operator only when a person runs it, never with the stack', () => {
+    const started = services.filter(([, service]) => service.profiles !== undefined).map(([name]) => name);
+    expect(started).toEqual(['operator']);
+    expect(file.services.operator?.profiles).toEqual(['operator']);
+    expect(file.services.operator?.entrypoint).toEqual(['node', 'apps/operator/src/main.ts']);
   });
 
   it('starts the API with sign-in off until the suite registers it: its settings file is optional', () => {
