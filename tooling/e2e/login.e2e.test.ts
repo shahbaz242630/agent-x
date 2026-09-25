@@ -230,20 +230,19 @@ describe('SEC-HA-01 a forced re-login asks for the second factor again', () => {
     // And Zitadel's first admin, set up with the stack, has the login name the API refuses.
     const zitadel = zitadelClient(LOGIN_ORIGIN, await readAutomationToken());
     interface Listed {
-      result?: { username?: string; preferredLoginName?: string; loginNames?: string[] }[];
+      result?: { username?: string; preferredLoginName?: string; human?: { email?: { email?: string } } }[];
     }
-    const refused = `admin@agent-x.${new URL(issuer).hostname}`;
-    const { result = [] } = await zitadel.post<Listed>('/v2/users', {
-      queries: [{ loginNameQuery: { loginName: refused, method: 'TEXT_QUERY_METHOD_EQUALS' } }],
-    });
-    // Said in full if it fails: every user Zitadel lists, by username and login name, none of them secret.
+    // Found by the address compose.yaml sets it up with. Zitadel's first set-up
+    // gives it the username with the organisation's domain (seen on #144's run:
+    // `admin@agent-x.localhost`), while every other login name here is the bare username.
     const everyone = (await zitadel.post<Listed>('/v2/users', {})).result ?? [];
     const seen = JSON.stringify(everyone.map(({ username, preferredLoginName }) => [username, preferredLoginName]));
-    expect(
-      result.map(({ username }) => username),
-      seen,
-    ).toEqual(['admin']);
-    expect(isBreakGlassLogin(result[0]?.preferredLoginName, issuer), seen).toBe(true);
+    const admins = everyone.filter(({ human }) => human?.email?.email === 'admin@agentx.localhost');
+    expect(admins.length, seen).toBe(1);
+    expect(admins[0]?.preferredLoginName, seen).toBe(`admin@agent-x.${new URL(issuer).hostname}`);
+    expect(isBreakGlassLogin(admins[0]?.preferredLoginName, issuer), seen).toBe(true);
+    // No one else's login name is refused.
+    expect(everyone.filter(({ preferredLoginName }) => isBreakGlassLogin(preferredLoginName, issuer)).length).toBe(1);
   });
 });
 

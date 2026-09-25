@@ -789,7 +789,7 @@ describe('B4-4a the verified email address, from the userinfo endpoint', () => {
 describe('B4-6c the login service’s break-glass admin never signs in', () => {
   const admin = { sub: SUBJECT, email: 'sara.khan@example.test', email_verified: true };
 
-  it.each(['admin@agent-x.auth.example.test', 'admin'])(
+  it.each(['admin@agent-x.auth.example.test', 'Admin@Agent-X.auth.example.test'])(
     'fails when the userinfo answer names the login %s, whatever its address',
     async (loginName) => {
       service.userinfo = { ...admin, preferred_username: loginName };
@@ -826,6 +826,7 @@ describe('B4-6c the login service’s break-glass admin never signs in', () => {
   it.each([
     ['another person in the same organisation', 'shahbaz@agent-x.auth.example.test'],
     ['an admin of another organisation', 'admin@acme.auth.example.test'],
+    ['a person whose username is admin alone', 'admin'],
     ['no login name', undefined],
   ])('lets %s sign in, with their verified address', async (_what, loginName) => {
     service.userinfo = { ...admin, ...(loginName !== undefined && { preferred_username: loginName }) };

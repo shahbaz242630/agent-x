@@ -9,8 +9,6 @@ describe('B4-6c the break-glass admin, by its login name', () => {
   it.each([
     ['with the first organisation’s domain', 'admin@agent-x.auth.example.test'],
     ['in another case', 'Admin@Agent-X.Auth.Example.Test'],
-    ['as the username alone', 'admin'],
-    ['as the username alone, in capitals', 'ADMIN'],
   ])('is the break-glass admin %s', (_what, loginName) => {
     expect(isBreakGlassLogin(loginName, ISSUER)).toBe(true);
   });
@@ -28,7 +26,10 @@ describe('B4-6c the break-glass admin, by its login name', () => {
     ['an admin in another organisation', 'admin@acme.auth.example.test'],
     ['the first organisation at another host', 'admin@agent-x.auth.elsewhere.test'],
     ['the first organisation’s domain one level down', 'admin@x.agent-x.auth.example.test'],
+    ['a person whose username is the username alone', 'admin'],
+    ['the same, in capitals', 'ADMIN'],
     ['the username with a suffix', 'admin2'],
+    ['the login name with more after it', 'admin@agent-x.auth.example.test.evil.test'],
     ['the username as an email address elsewhere', 'admin@example.test'],
     ['empty', ''],
   ])('is not %s', (_what, loginName) => {
