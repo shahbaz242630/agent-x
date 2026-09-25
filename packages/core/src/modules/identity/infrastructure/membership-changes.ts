@@ -7,7 +7,7 @@
 //    admin read again, active and still an admin; the member read, active,
 //    and not the admin (OWN_MEMBERSHIP: so the organisation always keeps an
 //    admin, the admin changing being one); for a role, a new one
-//    (ROLE_UNCHANGED); then the change's SHA-256 (the membership, the new
+//    (ROLE_UNCHANGED); then the change's SHA-256 (the organisation, the membership, the new
 //    role, the version its signed state has reached) bound into a step-up
 //    challenge for the admin's own session, the action naming the change.
 //    The challenge is the write's resource, so a retry answers with it. The
@@ -108,13 +108,14 @@ type Tables = IdentityTables & DirectoryTables & AuditTables;
 const actionOf = (change: MembershipChange): string => (change.kind === 'role' ? ROLE_OPERATION : DEACTIVATE_OPERATION);
 
 /**
- * The pending change's SHA-256: the membership (its ID, unique across every
- * organisation, and one per person in one), the new role or none, and the
- * version its signed state has reached, so any change to it since the ask
- * hashes otherwise. Which change it is, the challenge's action binds.
+ * The pending change's SHA-256: the membership, by its organisation and ID
+ * (the table's key: an ID alone is unique only as the ID generator makes
+ * it), the new role or none, and the version its signed state has reached, so
+ * any change to it since the ask hashes otherwise. Whose it is follows from
+ * the membership; which change it is, the challenge's action binds.
  */
-const membershipChangeHash = (member: MemberRecord, change: MembershipChange, version: number) =>
-  changeHashOf([member.id, change.kind === 'role' ? change.role : '', String(version)]);
+const membershipChangeHash = (orgId: string, member: MemberRecord, change: MembershipChange, version: number) =>
+  changeHashOf([orgId.toLowerCase(), member.id, change.kind === 'role' ? change.role : '', String(version)]);
 
 /** Throws the refusal a read that found no member, or one tampered with, gives. */
 function found(read: MemberCheck): Extract<MemberCheck, { outcome: 'found' }> {
@@ -232,7 +233,7 @@ export function createMembershipChanges({
         const challenge = await challenges.open(tx, {
           sessionId: admin.sessionId,
           action: actionOf(change),
-          changeHash: membershipChangeHash(member, change, state.version),
+          changeHash: membershipChangeHash(admin.orgId, member, change, state.version),
         });
         if (challenge === undefined) throw new ChangeRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
@@ -254,7 +255,7 @@ export function createMembershipChanges({
         const consumed = await challenges.consume(tx, stepUpChallengeId, {
           sessionId: admin.sessionId,
           action: actionOf(change),
-          changeHash: membershipChangeHash(member, change, state.version),
+          changeHash: membershipChangeHash(admin.orgId, member, change, state.version),
         });
         if (consumed === undefined) throw new ChangeRefused(403, 'STEP_UP_FAILED');
         const signInsEnded = await endSessionsOf(tx, member.userId);

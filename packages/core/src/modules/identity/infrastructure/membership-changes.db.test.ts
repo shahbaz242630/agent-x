@@ -14,10 +14,11 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  waitUntilQueued,
   within,
 } from '@agentx/testing';
 import type { Kysely } from 'kysely';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
@@ -340,6 +341,30 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
       code: 'STEP_UP_FAILED',
     });
     expect(await membershipFor(app, services(), who.org, approver.userId)).toMatchObject({ role: 'viewer' });
+  });
+
+  it('refuses a challenge from another organisation, the same admin and session, on a membership of the same ID', async () => {
+    const first = await organization();
+    const second = ids.next();
+    await withSignedStates(app, second, services(), (tx, states) =>
+      createOrganization(tx, states, { id: second, name: 'Beta Trading LLC', actor: OPERATOR }),
+    );
+    const add = (org: string, userId: string, id: string, role: Role) =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        addMembership(tx, states, { orgId: org, id, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
+      );
+    await add(second, first.admin.userId, ids.next(), 'admin');
+    // Nothing but the ID generator keeps a membership's ID to one organisation.
+    const shared = ids.next();
+    await add(first.org, (await signedIn()).userId, shared, 'viewer');
+    await add(second, (await signedIn()).userId, shared, 'viewer');
+    const challengeId = await steppedUp(first.admin, shared, DEACTIVATE);
+
+    expect(await confirm({ ...first.admin, orgId: second }, shared, DEACTIVATE, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
   });
 
   it('refuses another admin with the first one’s challenge', async () => {
@@ -698,17 +723,7 @@ describe(`changing memberships at the same moment (B4-5a, ADR-006 §6, Postgres 
     try {
       await first(holder, other, theirs);
       const deactivating = within(20_000, confirm(who.admin, other.membershipId, DEACTIVATE, mine), 'the deactivation');
-      await vi.waitFor(
-        async () => {
-          const waiting = await database
-            .as('admin')
-            .query<{ count: string }>(
-              `select count(*) from pg_catalog.pg_stat_activity where datname = pg_catalog.current_database() and wait_event_type = 'Lock'`,
-            );
-          expect(waiting).toEqual([{ count: '1' }]);
-        },
-        { timeout: 10_000 },
-      );
+      await waitUntilQueued(database.as('admin'), 1);
       await then(holder, other, theirs);
       await holder.query('commit');
 
