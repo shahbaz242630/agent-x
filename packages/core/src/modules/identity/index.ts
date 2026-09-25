@@ -35,6 +35,7 @@ export {
   INVITATIONS,
   type InvitationsTransaction,
   invitationToOpen,
+  InvitationNotOpened,
   InvitationUnreadable,
   openInvitation,
 } from './infrastructure/invitations.ts';

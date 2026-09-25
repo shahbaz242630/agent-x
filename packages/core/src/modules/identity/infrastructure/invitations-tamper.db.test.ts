@@ -229,6 +229,15 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
     await deniedAndHeld(id, 'pointer');
   });
 
+  it('a viewer’s invitation raised to admin as it is opened: it doesn’t open, and lists no token', async () => {
+    const id = await invitation('viewer');
+    await owner.setColumn(id, 'role', 'admin');
+
+    await expect(open(id)).rejects.toMatchObject({ name: 'InvitationNotOpened', outcome: 'tampered' });
+    expect(await owner.query('select token_hash from directory.invites where invitation_id = $1', [id])).toEqual([]);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+  });
+
   it('planted with no event: an admin’s invitation the app never made', async () => {
     const id = ids.next();
     await owner.query(
@@ -265,6 +274,47 @@ describe(`FX-TAMPER as the owner on an invitation's address: it won't open (Post
 
     await expect(toOpen(id)).rejects.toBeInstanceOf(InvitationUnreadable);
     expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it('another organisation’s address copied into an invitation of the same ID', async () => {
+    const id = await invitation('viewer', 'sara@example.test');
+    const elsewhere = ids.next();
+    const elsewhereAdmin = ids.next();
+    const services = { keys, ids, logger: loggerFor(new LogCapture()) };
+    await withSignedStates(app, elsewhere, services, async (tx, states) => {
+      await createOrganization(tx, states, { id: elsewhere, name: 'Other Trading LLC', actor: OPERATOR });
+      await addMembership(tx, states, {
+        orgId: elsewhere,
+        id: elsewhereAdmin,
+        userId: adminUser,
+        role: 'admin',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      });
+      const { change } = invitationChange({
+        orgId: elsewhere,
+        id,
+        email: 'mallory@example.test',
+        role: 'viewer',
+        invitedBy: elsewhereAdmin,
+        createdAt: clock.now(),
+      });
+      await draftInvitation(tx, states, keys, change, {
+        stepUpChallengeId: ids.next(),
+        createdAt: clock.now(),
+        actor: { type: 'user', id: adminUser },
+      });
+    });
+    // The owner works inside this test's organisation, so the other's value is read as the backup role reads it.
+    const [copied] = await database
+      .as('backup')
+      .query('select email_ciphertext from identity.invitations where org_id = $1 and id = $2', [elsewhere, id]);
+    await owner.query('update identity.invitations set email_ciphertext = $1 where id = $2', [
+      (copied as { email_ciphertext: Buffer }).email_ciphertext,
+      id,
+    ]);
+
+    await expect(toOpen(id)).rejects.toBeInstanceOf(InvitationUnreadable);
   });
 
   it('a byte of it changed', async () => {

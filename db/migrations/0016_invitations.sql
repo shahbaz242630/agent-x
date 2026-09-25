@@ -43,7 +43,8 @@ CREATE TABLE identity.invitations (
   org_id uuid NOT NULL,
   id uuid NOT NULL,
   role text NOT NULL CHECK (role IN ('admin', 'approver', 'developer', 'viewer')),
-  status text NOT NULL CHECK (status IN ('DRAFT', 'OPEN')),
+  -- Held to the machine's states and moves by its status guard, below.
+  status text NOT NULL,
   invited_by uuid NOT NULL,
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL,

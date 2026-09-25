@@ -84,9 +84,6 @@ export interface InvitationRequest {
   readonly createdAt: Date;
 }
 
-/** The label the change's hash starts with, so it is never another change's. */
-const CHANGE_LABEL = 'agentx.invitation.v1';
-
 /** Each part's length, then its bytes, so no two lists of parts hash alike. */
 function hashOf(parts: readonly string[]): Buffer {
   const hash = createHash('sha256');
@@ -99,10 +96,12 @@ function hashOf(parts: readonly string[]): Buffer {
   return hash.digest();
 }
 
-/** The change's SHA-256: every fact it is made of, in a fixed order, IDs in lower case. */
+/**
+ * The change's SHA-256: every fact it is made of, in a fixed order, IDs in
+ * lower case. No label of its own: the challenge binds the action beside it.
+ */
 const changeHashOf = (change: InvitationChange): Buffer =>
   hashOf([
-    CHANGE_LABEL,
     change.orgId.toLowerCase(),
     change.id.toLowerCase(),
     change.email,
@@ -297,26 +296,39 @@ export async function invitationToOpen(
 /** The token's SHA-256, as the directory lists it. */
 const tokenHashOf = (token: string): Buffer => createHash('sha256').update(token, 'ascii').digest();
 
+/** An invitation that didn't open: the caller read it as a DRAFT first, so this is a failure on our side. */
+export class InvitationNotOpened extends Error {
+  readonly outcome: string;
+
+  constructor(id: string, outcome: string) {
+    super(`An invitation didn't open (${outcome}): ${id}`);
+    this.name = 'InvitationNotOpened';
+    this.outcome = outcome;
+  }
+}
+
 /**
  * Opens the draft `invitationToOpen` read in this same transaction: its
  * token made, its SHA-256 listed in the directory, and the invitation moved
  * to OPEN, with `details` (the step-up's evidence) on the event. The token
- * is given back to be shown once; nothing keeps it.
+ * is given back to be shown once; nothing keeps it. Anything but the move
+ * (the invitation missing, no longer a DRAFT, or tampered with) throws
+ * InvitationNotOpened, so the directory's entry rolls back with the rest and
+ * no token is ever listed for an invitation that didn't open.
  */
 export async function openInvitation(
   tx: InvitationsTransaction,
   states: SignedStates,
   { orgId, id, actor, details }: { orgId: string; id: string; actor: AuditActor; details: AuditDetails },
-): Promise<
-  Found<{ readonly outcome: 'opened'; readonly token: string } | { readonly outcome: 'refused'; readonly from: string }>
-> {
+): Promise<string> {
   const token = randomBytes(32).toString('base64url');
+  // Before the move, whose event takes the chain's head, the last lock of all (ADR-006 §6).
   await registerInvite(tx, { orgId, invitationId: id, tokenHash: tokenHashOf(token) });
   const moved = await states.changeStatus(tx, INVITATIONS, { orgId, id }, 'open', {
     actor,
     action: 'invitation.opened',
     details,
   });
-  if (moved.outcome !== 'changed') return moved;
-  return { outcome: 'opened', token };
+  if (moved.outcome !== 'changed') throw new InvitationNotOpened(id, moved.outcome);
+  return token;
 }
