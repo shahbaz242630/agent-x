@@ -543,6 +543,29 @@ describe(`changing a membership tampered with (B4-5a, Postgres ${server.version}
     });
   });
 
+  it('refuses a membership the directory lists for someone else too as NOT_FOUND, ending no session', async () => {
+    const who = await organization();
+    // Signed in first, so their ID comes first, and theirs is the entry found.
+    const someone = await signedIn();
+    const developer = await member(who.org, 'developer');
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        someone.userId,
+        who.org,
+        developer.membershipId,
+      ]);
+    } finally {
+      await owner.end();
+    }
+    const missing = { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
+
+    expect(await ask(who.admin, developer.membershipId, DEACTIVATE)).toEqual(missing);
+    expect(await confirm(who.admin, developer.membershipId, DEACTIVATE, ids.next())).toEqual(missing);
+    expect(await sessionsOf(developer.userId)).toBe(1);
+    expect(await sessionsOf(someone.userId)).toBe(1);
+  });
+
   it('withholds a retry’s answer when the membership was tampered with since', async () => {
     const who = await organization();
     const viewer = await member(who.org, 'viewer');

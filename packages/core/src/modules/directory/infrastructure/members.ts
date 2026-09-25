@@ -72,6 +72,8 @@ export async function listedMember(
     .select('user_id')
     .where('org_id', '=', orgId)
     .where('membership_id', '=', membershipId)
+    // Two entries naming one membership are tampering; the same one is found each time, never the table's order.
+    .orderBy('user_id')
     .executeTakeFirst();
   return entry?.user_id;
 }
