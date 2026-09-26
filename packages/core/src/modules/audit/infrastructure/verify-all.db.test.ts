@@ -22,6 +22,7 @@ import {
   readSignedRow,
   type SignedStateTable,
   signedRowIds,
+  TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -35,16 +36,16 @@ import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
 import { createSignedStates, type SignedStates, type TamperFinding, type TamperSign } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
-/** Two stand-in authority tables: an agent's status, and its key's. */
+/** Two stand-in authority tables, each sealing a label: not a status, so a test can record a change to it. */
 const AGENTS = {
   table: 'probe.agents',
   subject: 'agent',
-  fields: [{ column: 'status', type: 'text' }],
+  fields: [{ column: 'label', type: 'text' }],
 } as const satisfies SignedStateTable;
 const KEYS = {
   table: 'probe.keys',
   subject: 'agent_key',
-  fields: [{ column: 'status', type: 'text' }],
+  fields: [{ column: 'label', type: 'text' }],
 } as const satisfies SignedStateTable;
 
 const TENANT_POLICY =
@@ -52,18 +53,18 @@ const TENANT_POLICY =
 
 /** Made by the owner, as a migration would make them, so the schema guard starts with nothing to report. */
 const FIXTURE = ['agents', 'keys'].flatMap((name) => [
-  `create table probe.${name} (org_id uuid not null, id uuid not null, status text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))`,
+  `create table probe.${name} (org_id uuid not null, id uuid not null, label text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))`,
   `alter table probe.${name} enable row level security`,
   `alter table probe.${name} force row level security`,
   `create policy tenant_isolation on probe.${name} ${TENANT_POLICY}`,
   `grant select, insert on probe.${name} to agentx_app`,
-  `grant update (status, state_version, state_event_id) on probe.${name} to agentx_app`,
+  `grant update (label, state_version, state_event_id) on probe.${name} to agentx_app`,
 ]);
 
 interface ProbeRow {
   org_id: string;
   id: string;
-  status: string;
+  label: string;
   state_version?: number;
   state_event_id?: string | null;
 }
@@ -112,11 +113,26 @@ const change = (action: string) => ({ actor: { type: 'user' as const, id: USER }
 async function newRow(table: typeof AGENTS | typeof KEYS, orgId = org): Promise<string> {
   const id = newId();
   await withTenant(app, orgId, async (tx) => {
-    await tx.insertInto(table.table).values({ org_id: orgId, id, status: 'ACTIVE' }).execute();
-    await states.record(tx, table, { orgId, id }, 'new', { status: 'ACTIVE' }, change(`${table.subject}.created`));
+    await tx.insertInto(table.table).values({ org_id: orgId, id, label: 'ACTIVE' }).execute();
+    await states.record(tx, table, { orgId, id }, 'new', { label: 'ACTIVE' }, change(`${table.subject}.created`));
   });
   return id;
 }
+
+/** Records a new label for the row: a second signed event about it. */
+const relabel = (table: typeof AGENTS | typeof KEYS, id: string) =>
+  withTenant(app, org, async (tx) => {
+    const current = await states.verifiedState(tx, table, { orgId: org, id }, 'change');
+    if (current.outcome !== 'verified') throw new Error('the row should verify');
+    await states.record(
+      tx,
+      table,
+      { orgId: org, id },
+      current,
+      { label: 'RENAMED' },
+      change(`${table.subject}.renamed`),
+    );
+  });
 
 const verifyAll = (tables: readonly SignedStateTable[] = [AGENTS, KEYS], limit = 100) =>
   withTenant(app, org, (tx) => states.verifyAll(tx, org, tables, limit));
@@ -196,7 +212,7 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
   });
 
   it.each<[string, (tamper: OwnerTamper, id: string) => Promise<void>, TamperSign]>([
-    ['its status changed', (tamper, id) => tamper.setColumn(id, 'status', 'REVOKED'), 'seal'],
+    ['its label changed', (tamper, id) => tamper.setColumn(id, 'label', 'REVOKED'), 'seal'],
     ['its events stripped of their seals', (tamper, id) => tamper.stripSeals(id), 'unsigned'],
     ['the row deleted', (tamper, id) => tamper.deleteRow(id), 'deleted'],
     [
@@ -228,14 +244,14 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
 
   it('names a row planted with no event about it', async () => {
     const id = newId();
-    await agentKeys.query("insert into probe.keys (org_id, id, status) values ($1, $2, 'ACTIVE')", [org, id]);
+    await agentKeys.query("insert into probe.keys (org_id, id, label) values ($1, $2, 'ACTIVE')", [org, id]);
 
     expect(await verifyAll()).toEqual({ outcome: 'tampered', findings: [finding('agent_key', id, 'unsigned')] });
   });
 
   it('counts nothing for a row planted and deleted again, of which nothing is left', async () => {
     const id = newId();
-    await agents.query("insert into probe.agents (org_id, id, status) values ($1, $2, 'ACTIVE')", [org, id]);
+    await agents.query("insert into probe.agents (org_id, id, label) values ($1, $2, 'ACTIVE')", [org, id]);
     await agents.deleteRow(id);
 
     expect(await verifyAll()).toEqual({ outcome: 'verified', objects: 0 });
@@ -243,16 +259,17 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
 
   it('names every finding, table by table in the order given and by ID within each', async () => {
     const [agentA, agentB, keyA] = [await newRow(AGENTS), await newRow(AGENTS), await newRow(KEYS)];
-    await agentKeys.setColumn(keyA, 'status', 'REVOKED');
-    await agents.deleteRow(agentB);
-    await agents.setColumn(agentA, 'status', 'REVOKED');
+    await agentKeys.setColumn(keyA, 'label', 'REVOKED');
+    // The first by ID is deleted, so it is listed from the log alone, after the rows.
+    await agents.deleteRow(agentA);
+    await agents.setColumn(agentB, 'label', 'REVOKED');
 
     expect(await verifyAll([KEYS, AGENTS])).toEqual({
       outcome: 'tampered',
       findings: [
         finding('agent_key', keyA, 'seal'),
-        finding('agent', agentA, 'seal'),
-        finding('agent', agentB, 'deleted'),
+        finding('agent', agentA, 'deleted'),
+        finding('agent', agentB, 'seal'),
       ],
     });
   });
@@ -272,7 +289,7 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
       async () => {
         const made = [await newRow(KEYS), await newRow(KEYS)];
         const planted = newId();
-        await agentKeys.query("insert into probe.keys (org_id, id, status) values ($1, $2, 'ACTIVE')", [org, planted]);
+        await agentKeys.query("insert into probe.keys (org_id, id, label) values ($1, $2, 'ACTIVE')", [org, planted]);
         await agentKeys.deleteRow(made[0] ?? '');
         return [...made, planted];
       },
@@ -326,7 +343,7 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     const hold = {
       table: 'probe.agents',
       subject: HOLD_SUBJECT,
-      fields: [{ column: 'status', type: 'text' }],
+      fields: [{ column: 'label', type: 'text' }],
     } as const;
 
     await expect(verifyAll([hold])).rejects.toThrow(`The subject type ${HOLD_SUBJECT} is the integrity hold's own`);
@@ -343,8 +360,10 @@ describe('the lists verifyAll is built on', () => {
     );
   });
 
-  it('lists IDs in lower case and in order, one more than the limit at most', async () => {
+  it('lists IDs in lower case and in order, each once and only of the table or type asked, one more than the limit at most', async () => {
     const made = [await newRow(AGENTS), await newRow(AGENTS), await newRow(AGENTS)];
+    await newRow(KEYS);
+    await relabel(AGENTS, made[0] ?? '');
 
     expect(await withTenant(app, org, (tx) => signedRowIds(tx, AGENTS, org, 2))).toEqual(made);
     expect(await withTenant(app, org, (tx) => trail.subjectIds(tx, org.toUpperCase(), 'agent', 2))).toEqual(made);
@@ -362,7 +381,9 @@ describe('the lists verifyAll is built on', () => {
 
   it("refuses to list outside withTenant's transaction for the organisation", async () => {
     const other = newId();
-    await expect(withTenant(app, other, (tx) => signedRowIds(tx, AGENTS, org, 5))).rejects.toThrow();
-    await expect(withTenant(app, other, (tx) => trail.subjectIds(tx, org, 'agent', 5))).rejects.toThrow();
+    await expect(withTenant(app, other, (tx) => signedRowIds(tx, AGENTS, org, 5))).rejects.toThrow(TenantContextError);
+    await expect(withTenant(app, other, (tx) => trail.subjectIds(tx, org, 'agent', 5))).rejects.toThrow(
+      TenantContextError,
+    );
   });
 });

@@ -166,7 +166,7 @@ export interface AuditTrail {
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
   /**
    * The IDs of every object of this type the organisation's log holds any
-   * event about, sealed or not, in lower case and in order: at most `limit`
+   * event about, sealed or not, in order (a uuid, so lower case): at most `limit`
    * and one more, so the caller can tell a list cut short. For finding an
    * object whose row is gone. Only in withTenant's transaction for that
    * organisation, like `verify`.
@@ -518,7 +518,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         .orderBy('subject_id')
         .limit(limit + 1)
         .execute();
-      return rows.map(({ subject_id: id }) => id.toLowerCase());
+      return rows.map(({ subject_id: id }) => id);
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));

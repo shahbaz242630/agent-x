@@ -257,8 +257,8 @@ export async function readSignedRow<Schema>(
 }
 
 /**
- * The IDs of the table's rows in the organisation, in lower case and in order,
- * at most `limit` and one more, so the caller can tell a list cut short. Locks
+ * The IDs of the table's rows in the organisation, in order (Postgres gives a
+ * uuid as text in lower case), at most `limit` and one more, so the caller can tell a list cut short. Locks
  * nothing: each row is read again through readSignedRow. Only in withTenant's
  * transaction for the organisation, like readSignedRow.
  */
@@ -278,7 +278,7 @@ export async function signedRowIds<Schema>(
     order by target.id
     limit ${limit + 1}
   `.execute(tx);
-  return rows.map(({ id }) => id.toLowerCase());
+  return rows.map(({ id }) => id);
 }
 
 /**

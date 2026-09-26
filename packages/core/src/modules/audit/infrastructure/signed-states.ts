@@ -196,8 +196,8 @@ export interface SignedStates {
    * nothing of the organisation's being tampered with (clearing its integrity
    * hold, B3+). The objects are the table's rows and every object the log
    * holds an event about, so a row deleted is found as well as one changed or
-   * planted: one with events in the log but neither a row nor a signed state
-   * is `deleted` too (its seals stripped as well), with its alarm. Table by
+   * planted: one listed but with neither a row nor a signed state when read is
+   * `deleted` too (its seals stripped as well), with its alarm. Table by
    * table in the order given, which must be the lock order's (ADR-006 §6),
    * and by ID within each. Past `limit` rows, or objects in the log, in one
    * table: `too_many`, with nothing more judged.
@@ -592,12 +592,11 @@ export function createSignedStates({
         const loggedIds = await trail.subjectIds(tx, orgId, table.subject, limit);
         const every = [...new Set([...rowIds, ...loggedIds])].sort();
         if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
-        const logged = new Set(loggedIds);
         for (const id of every) {
           const key = { orgId, id };
           const check = await verifiedState(tx, table, key, 'share');
-          // No row and no signed state, yet events about it: its row and its seals both gone.
-          const found = check.outcome === 'missing' && logged.has(id) ? alarm(table.subject, key, 'deleted') : check;
+          // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
+          const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
           if (found.outcome === 'tampered') {
             findings.push(
               Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: found.sign }),
