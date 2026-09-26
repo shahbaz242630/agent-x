@@ -60,8 +60,18 @@ describe('FX-LOGSCAN: redacted forms and ordinary log text are not leaks', () =>
     ['a UUID', '01920000-0000-7000-8000-000000000001'],
     ['a lowercase hex value', 'ab12cd34ef56ab78cd90ef12ab34cd56'],
     ['a sixteen-digit number that fails the Luhn check', '4111 1111 1111 1112'],
+    // A random ID ending in digits that read as a phone number (main's end-to-end run, S55), as the logger writes it.
+    ['a whole ID whose last group reads as a phone number', '{"noticeId":"01a0f000-0000-7000-8000-009114682700"}'],
   ])('%s', (_what, text) => {
     expect(findLeaks(text)).toEqual([]);
+  });
+
+  it('skips only a whole ID: the same digits in other text, or a real leak beside one, are still found', () => {
+    const id = '01a0f000-0000-7000-8000-009114682700';
+    expect(findLeaks(`{"note":"ref ${id}"}`)).toEqual([{ detector: 'phone', found: '009114682700' }]);
+    expect(findLeaks(`{"id":"${id}-x"}`)).toEqual([{ detector: 'phone', found: '009114682700' }]);
+    expect(findLeaks(`{"id":"${id}","to":"${SAMPLES.phone}"}`)).toEqual([{ detector: 'phone', found: SAMPLES.phone }]);
+    expect(findLeaks(`{"id":"${id}"}`, [id])).toEqual([{ detector: 'planted', found: id }]);
   });
 });
 

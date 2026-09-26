@@ -114,6 +114,16 @@ const DETECTORS: readonly Detector[] = [
   { name: 'jwt', pattern: /eyJ[A-Za-z0-9_-]{8,}/g },
 ];
 
+/**
+ * A JSON value that is a whole UUID, quotes and all, as the app logs every
+ * ID and the logger lets through (scrub.ts, `WHOLE_UUID`, #154): it holds no
+ * personal detail, yet a random one can end `…-009114682700`, which reads as
+ * an international phone number (main's end-to-end run, S55). Only a whole
+ * value is skipped, as the logger skips it: an ID inside other text is
+ * scanned as usual, and so is anything beside one.
+ */
+const WHOLE_UUID_VALUE = /"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"/g;
+
 /** Built from parts when the tests run, so secret scanners reading the source don't mistake them for real secrets. */
 const join = (...parts: string[]): string => parts.join('');
 
@@ -160,8 +170,9 @@ export const SENSITIVE_SAMPLES = {
  * must never reach the log, such as a secret setting or a password field.
  */
 export function findLeaks(text: string, planted: readonly string[] = []): Leak[] {
+  const scanned = text.replace(WHOLE_UUID_VALUE, '"id"');
   const found = DETECTORS.flatMap(({ name, pattern, isLeak }) =>
-    [...text.matchAll(pattern)]
+    [...scanned.matchAll(pattern)]
       .map((match) => match[0])
       .filter((value) => isLeak?.(value) ?? true)
       .map((value) => ({ detector: name, found: value })),
