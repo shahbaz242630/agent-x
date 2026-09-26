@@ -214,6 +214,28 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       appMay: ['SELECT', 'INSERT', 'DELETE'],
       appMayUpdate: ['verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'],
     },
+    'notifications.outbox': {
+      reason:
+        "Notices waiting to be sent (ADR-003 §10, ADR-005 §8's job queue; B5-1a): the sender takes the due ones across every organisation, each row naming its own",
+      columns: [
+        'id',
+        'org_id',
+        'recipient_user_id',
+        'kind',
+        'membership_id',
+        'role',
+        'created_at',
+        'attempts',
+        'next_attempt_at',
+        'sent_at',
+        'given_up_at',
+        'last_failure',
+      ],
+      // Added, read, and deleted once done and past its retention; changed
+      // only in its tries and outcome, never in whom or what it tells of.
+      appMay: ['SELECT', 'INSERT', 'DELETE'],
+      appMayUpdate: ['attempts', 'next_attempt_at', 'sent_at', 'given_up_at', 'last_failure'],
+    },
     'security.events': {
       reason:
         'Failed sign-ins and rate-limit hits with the client IP (ADR-005 §6, ADR-011 §7): they happen before any organisation is known, and the address is kept in-country, here alone',
