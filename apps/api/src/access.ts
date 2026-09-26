@@ -25,7 +25,13 @@
 // FORBIDDEN, which says nothing of whether the organisation exists. The
 // organisation is named on each request, never kept on the session, so two
 // tabs open on two organisations can't act in each other's.
-import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
+//
+// B3+-1 (SEC-HA-12, ADR-012 §7): an admin's or a finance approver's powers
+// need a session signed in with a passkey (`user` in its `amr`); a code from
+// an authenticator app alone won't do. Without one, such a person keeps only
+// what a developer or a viewer may do there: a route naming neither is 403
+// PASSKEY_REQUIRED, which tells them to sign in again with their passkey.
+import { type LiveSession, type MembershipCheck, PASSKEY_METHOD, type Role } from '@agentx/core/modules/identity';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -143,6 +149,22 @@ export function accessProblems(access: unknown, url: string): string[] {
   return problems;
 }
 
+/** The roles whose powers need a passkey (ADR-012 §7); developers and viewers may use an authenticator app. */
+const PASSKEY_ROLES: readonly Role[] = ['admin', 'approver'];
+
+/** The roles a privileged person without a passkey still acts in: what these may do, anyone in the organisation may. */
+const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
+
+/**
+ * Why a session can't use its membership's role on a route naming that role,
+ * if it can't: a privileged role without a passkey, on a route only privileged
+ * roles may call.
+ */
+const passkeyMissing = (role: Role, amr: readonly string[], access: readonly Principal[]): boolean =>
+  PASSKEY_ROLES.includes(role) &&
+  !amr.includes(PASSKEY_METHOD) &&
+  !access.some((name) => WITHOUT_PASSKEY.includes(name));
+
 /** A signed-in person the route doesn't answer. */
 const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
 
@@ -199,12 +221,14 @@ export function registerAccess(
           void forbidden(request, reply);
         } else {
           findMembership(orgId, session.userId, request.id).then((membership) => {
-            if (membership.outcome === 'active' && access.includes(membership.role)) {
+            if (membership.outcome !== 'active' || !access.includes(membership.role)) {
+              void forbidden(request, reply);
+            } else if (passkeyMissing(membership.role, session.amr, access)) {
+              void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id);
+            } else {
               request.person = session;
               request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
               done();
-            } else {
-              void forbidden(request, reply);
             }
           }, failed);
         }

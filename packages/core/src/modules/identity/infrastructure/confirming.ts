@@ -238,11 +238,17 @@ export function createAcceptanceConfirmations({
         const { acceptedBy, role } = invitation;
         if (acceptedBy === null) throw new Error('an invitation waiting for confirmation names no one who accepted it');
         const already = await bothMemberships(tx, states, admin, acceptedBy);
-        const consumed = await challenges.consume(tx, stepUpChallengeId, {
-          sessionId: admin.sessionId,
-          action: APPROVE_OPERATION,
-          changeHash: confirmationHash(admin.orgId, invitation, version),
-        });
+        const consumed = await challenges.consume(
+          tx,
+          stepUpChallengeId,
+          {
+            sessionId: admin.sessionId,
+            action: APPROVE_OPERATION,
+            changeHash: confirmationHash(admin.orgId, invitation, version),
+          },
+          // An admin's change: proved with a passkey (SEC-HA-12).
+          { passkeyRequired: true },
+        );
         if (consumed === undefined) throw new ConfirmationRefused(403, 'STEP_UP_FAILED');
         if (already.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
         if (already.outcome === 'active') throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');

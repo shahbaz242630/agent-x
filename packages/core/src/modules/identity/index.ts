@@ -20,6 +20,7 @@ export {
   AUTH_TIME_TOLERANCE_SECONDS,
   type ChallengeFacts,
   type FreshSignIn,
+  PASSKEY_METHOD,
   type StepUpRefusal,
   stepUpRefusal,
 } from './domain/step-up.ts';

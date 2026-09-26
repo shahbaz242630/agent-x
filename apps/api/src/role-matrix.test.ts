@@ -9,6 +9,10 @@
 // route may still refuse what it was sent, which is its own business. An agent's key and an operator's credentials
 // aren't read by the API yet (C2; operators have no API routes), so each is
 // anyone else to it: refused everywhere but the public routes.
+//
+// SEC-HA-12 (B3+-1): an admin and an approver signed in with an authenticator
+// app, not a passkey, are allowed only where a developer or a viewer is too,
+// and refused everywhere else their role is named as PASSKEY_REQUIRED.
 import type { LiveSession, MembershipCheck, Role, SignIn } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -23,11 +27,16 @@ const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const ROLES: readonly Role[] = ['admin', 'approver', 'developer', 'viewer'];
 
-/** Each signed-in caller: a cookie of their own, a person, and their role in the organisation, if any. */
-const PEOPLE: readonly { readonly name: string; readonly role: Role | null }[] = [
-  { name: 'person', role: null },
-  ...ROLES.map((role) => ({ name: role, role })),
+/** Each signed-in caller: a cookie of their own, a person, their role in the organisation, if any, and how they signed in. */
+const PEOPLE: readonly { readonly name: string; readonly role: Role | null; readonly passkey: boolean }[] = [
+  { name: 'person', role: null, passkey: false },
+  ...ROLES.map((role) => ({ name: role, role, passkey: true })),
+  { name: 'admin with an app code', role: 'admin', passkey: false },
+  { name: 'approver with an app code', role: 'approver', passkey: false },
 ];
+
+/** The roles a privileged person signed in without a passkey still acts in (access.ts). */
+const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
 
 const cookieOf = (index: number): string => String.fromCharCode(0x41 + index).repeat(43);
 const userOf = (index: number): string => `0199a0f0-0000-7000-8000-${(0x100 + index).toString(16).padStart(12, '0')}`;
@@ -37,7 +46,7 @@ const session = (index: number): LiveSession => ({
   userId: userOf(index),
   idpSessionId: 'V1_1',
   authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
+  amr: PEOPLE[index]?.passkey === true ? ['pwd', 'user', 'mfa'] : ['pwd', 'otp', 'mfa'],
   createdAt: new Date('2026-09-24T09:00:05.000Z'),
   lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
   endsAt: new Date('2026-09-24T21:00:05.000Z'),
@@ -72,6 +81,8 @@ interface Caller {
   /** Who they are to a route's access list. */
   readonly is: readonly Principal[];
   readonly headers: Readonly<Record<string, string>>;
+  /** Signed in without a passkey in a role that needs one: allowed only where a developer or a viewer is too. */
+  readonly withoutPasskey?: Role;
 }
 
 const CALLERS: readonly Caller[] = [
@@ -79,10 +90,11 @@ const CALLERS: readonly Caller[] = [
   // No agent key or operator credential is read yet: each is anyone else to the API.
   { name: 'an agent', is: [], headers: { authorization: `Bearer axk_${'k'.repeat(40)}` } },
   { name: 'an operator', is: [], headers: {} },
-  ...PEOPLE.map(({ name, role }, index) => ({
+  ...PEOPLE.map(({ name, role, passkey }, index) => ({
     name,
     is: role === null ? (['person'] as const) : (['person', role] as const),
     headers: { cookie: `${SESSION_COOKIE}=${cookieOf(index)}`, [ORGANIZATION_HEADER]: ORG },
+    ...(role !== null && !passkey && { withoutPasskey: role }),
   })),
 ];
 
@@ -162,11 +174,22 @@ const requestFor = (operation: Operation, caller: Caller): InjectOptions => ({
 const accessRefusal = (status: number, body: string): boolean => {
   if (status !== 400 && status !== 401 && status !== 403) return false;
   const { error } = JSON.parse(body) as { error?: { code?: string } };
-  return ['UNAUTHENTICATED', 'FORBIDDEN', 'ORGANIZATION_INVALID'].includes(error?.code ?? '');
+  return ['UNAUTHENTICATED', 'FORBIDDEN', 'ORGANIZATION_INVALID', 'PASSKEY_REQUIRED'].includes(error?.code ?? '');
 };
 
+/** Whether the refusal is for want of a passkey. */
+const passkeyRefusal = (body: string): boolean =>
+  (JSON.parse(body) as { error?: { code?: string } }).error?.code === 'PASSKEY_REQUIRED';
+
+/** Whether the caller's role is named, yet needs a passkey they signed in without. */
+const wantsPasskey = (operation: Operation, caller: Caller): boolean =>
+  caller.withoutPasskey !== undefined &&
+  operation.access.includes(caller.withoutPasskey) &&
+  !operation.access.some((principal) => WITHOUT_PASSKEY.includes(principal));
+
 const allowed = (operation: Operation, caller: Caller): boolean =>
-  operation.access.includes('public') || caller.is.some((principal) => operation.access.includes(principal));
+  operation.access.includes('public') ||
+  (caller.is.some((principal) => operation.access.includes(principal)) && !wantsPasskey(operation, caller));
 
 describe('FX-ROLEMATRIX every operation × every caller', () => {
   it('reads the operations from the document, the sign-in and the session among them', () => {
@@ -188,6 +211,8 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
         const refused = accessRefusal(response.statusCode, response.body);
         if (refused === allowed(operation, caller)) {
           wrong.push(`${operation.method} ${operation.path} by ${caller.name}: ${String(response.statusCode)}`);
+        } else if (refused && passkeyRefusal(response.body) !== wantsPasskey(operation, caller)) {
+          wrong.push(`${operation.method} ${operation.path} by ${caller.name}: ${response.body}`);
         }
       }
     }
@@ -216,6 +241,17 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
       ({ path, access }) => access.includes('operator') && !path.startsWith('/operator/'),
     );
     expect(named).toEqual([]);
+  });
+
+  it('SEC-HA-12 refuses an admin with an app code on the admin routes, never vacuously, and still lets them read the members', async () => {
+    const admin = CALLERS.find(({ name }) => name === 'admin with an app code');
+    if (admin === undefined) throw new Error('no admin with an app code');
+    const refused = operations.filter((operation) => wantsPasskey(operation, admin));
+    expect(refused.map(({ method, path }) => `${method} ${path}`)).toContain('POST /v1/members/invitations');
+    const members = operations.find(({ method, path }) => method === 'GET' && path === '/v1/members');
+    if (members === undefined) throw new Error('no members list');
+    const listed = await app.inject(requestFor(members, admin));
+    expect(accessRefusal(listed.statusCode, listed.body), listed.body).toBe(false);
   });
 
   it('refuses a person in a role everywhere their role is not named, in an organisation they do belong to', async () => {

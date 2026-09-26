@@ -164,10 +164,10 @@ const decline = (admin: InvitingAdmin, id: string, key = 'decline-1') =>
   confirmations.decline(admin, keyed(admin, DECLINE_OPERATION, key, id), id, CORRELATION);
 
 /** The admin signs in again for the challenge, as the step-up's return records it. */
-const stepUp = (admin: InvitingAdmin, challengeId: string) =>
+const stepUp = (admin: InvitingAdmin, challengeId: string, amr: readonly string[] = ['pwd', 'user', 'mfa']) =>
   challenges().recordEvidence(app, challengeId, admin.sessionId, {
     authTime: clock.now(),
-    amr: ['pwd', 'user', 'mfa'],
+    amr,
     idpSessionId: 'V1_2',
     idTokenHash: createHash('sha256').update('an ID token').digest(),
   });
@@ -317,6 +317,21 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
       status: 409,
       code: 'ALREADY_A_MEMBER',
     });
+  });
+
+  it('SEC-HA-12 refuses a step-up proved with an app code, not a passkey, leaving the person waiting', async () => {
+    const who = await organization();
+    const { id, invitee } = await accepted(who);
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId, ['pwd', 'otp', 'mfa']);
+
+    expect(await confirm(who.admin, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await statusOf(who.org, id)).toBe('AWAITING_CONFIRMATION');
+    expect(await membershipFor(app, services(), who.org, invitee)).toEqual({ outcome: 'none' });
   });
 
   it('refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {

@@ -171,6 +171,7 @@ export function createSignIn({
         .where('subject', '=', subject.subject)
         .executeTakeFirst(),
     );
+    // A passkey is asked for as the change consumes the challenge, where its role is known (B3+-1).
     const refusal =
       person === undefined
         ? 'other_person'

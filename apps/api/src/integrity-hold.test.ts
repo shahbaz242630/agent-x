@@ -35,7 +35,7 @@ const LIVE: LiveSession = {
   userId: '0199a0f0-0000-7000-8000-000000000011',
   idpSessionId: 'V1_1',
   authTime: new Date('2026-09-26T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
+  amr: ['pwd', 'user', 'mfa'],
   createdAt: new Date('2026-09-26T09:00:05.000Z'),
   lastSeenAt: new Date('2026-09-26T09:10:00.000Z'),
   endsAt: new Date('2026-09-26T21:00:05.000Z'),

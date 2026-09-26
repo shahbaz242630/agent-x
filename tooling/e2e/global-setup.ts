@@ -54,9 +54,13 @@ export interface E2eFixtures {
     readonly stepUpApp: TestUser & { readonly totpSecret: string };
     /** A password and no second factor yet: the step-up tests register a (virtual) security key at its first sign-in. */
     readonly stepUpKey: TestUser;
-    /** As `totp`, invited by the operator as a new organisation's first admin (B4-6d); the address is Zitadel's verified `<username>@agentx.localhost`. */
-    readonly firstAdmin: TestUser & { readonly totpSecret: string };
-    /** As `totp`, invited by the first admin, then given another role and deactivated (B4-6d-2). */
+    /**
+     * As `stepUpKey`, invited by the operator as a new organisation's first admin (B4-6d); registers a
+     * (virtual) security key at its first sign-in, as an admin needs a passkey (B3+-1, SEC-HA-12). The
+     * address is Zitadel's verified `<username>@agentx.localhost`.
+     */
+    readonly firstAdmin: TestUser;
+    /** As `totp`, invited by the first admin, then made an admin, which their app code can't use, and deactivated (B4-6d-2). */
     readonly member: TestUser & { readonly totpSecret: string };
   };
   /** The API as the login service's client. */
@@ -101,8 +105,6 @@ export default async function setup(project: TestProject): Promise<() => Promise
     created.push(stepUpKey);
     const firstAdmin = await createHumanUser(client, `${run}-first-admin`, password);
     created.push(firstAdmin);
-    const firstAdminSecret = await registerTotp(client, firstAdmin.userId);
-    await verifyTotp(client, firstAdmin.userId, totp(firstAdminSecret, Date.now()));
     const member = await createHumanUser(client, `${run}-member`, password);
     created.push(member);
     const memberSecret = await registerTotp(client, member.userId);
@@ -112,7 +114,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await loginSees(client, stepUpApp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, withTotp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
-    await loginSees(client, firstAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, firstAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, member, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     const api = await apiSignIn(client);
 
@@ -127,7 +129,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         signIn: { ...signIn, totpSecret: signInSecret },
         stepUpApp: { ...stepUpApp, totpSecret: stepUpSecret },
         stepUpKey,
-        firstAdmin: { ...firstAdmin, totpSecret: firstAdminSecret },
+        firstAdmin,
         member: { ...member, totpSecret: memberSecret },
       },
       api,

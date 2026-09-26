@@ -252,11 +252,17 @@ export function createMembershipChanges({
         await lockSessionsOf(tx, people);
         await lockChallengesOf(tx, people);
         const { member, state } = await bothRead(tx, states, admin, membershipId, memberUserId, change, 'change');
-        const consumed = await challenges.consume(tx, stepUpChallengeId, {
-          sessionId: admin.sessionId,
-          action: actionOf(change),
-          changeHash: membershipChangeHash(admin.orgId, member, change, state.version),
-        });
+        const consumed = await challenges.consume(
+          tx,
+          stepUpChallengeId,
+          {
+            sessionId: admin.sessionId,
+            action: actionOf(change),
+            changeHash: membershipChangeHash(admin.orgId, member, change, state.version),
+          },
+          // An admin's change: proved with a passkey (SEC-HA-12).
+          { passkeyRequired: true },
+        );
         if (consumed === undefined) throw new ChangeRefused(403, 'STEP_UP_FAILED');
         const signInsEnded = await endSessionsOf(tx, member.userId);
         const actor = { type: 'user' as const, id: admin.userId };

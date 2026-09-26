@@ -15,8 +15,11 @@
 // - with a passkey (a security key, `user` in `amr`) where the change asks
 //   for one: admins and finance approvers (ADR-012 §7, SEC-HA-12). A code
 //   from an authenticator app (`otp`) alone won't do there. Who needs one is
-//   decided by roles, from B4. A passwordless sign-in's `amr` is unproven: it
-//   is refused unless it carries `mfa`.
+//   decided by the role the change is made in, so the change's own
+//   transaction asks for it as it consumes the challenge (B3+-1,
+//   step-up-challenges.ts); the way back from the login service doesn't know
+//   the organisation yet. A passwordless sign-in's `amr` is unproven: it is
+//   refused unless it carries `mfa`.
 // Each refusal names the check, never a value.
 import type { SignInEvidence } from './sign-in.ts';
 
@@ -41,7 +44,7 @@ export const AUTH_TIME_TOLERANCE_SECONDS = 5;
 /** The `amr` value every second factor carries at Zitadel (S10: security key and authenticator app alike). */
 const SECOND_FACTOR = 'mfa';
 /** The `amr` value a security key (WebAuthn) carries at Zitadel, and an authenticator app doesn't (S10). */
-const PASSKEY = 'user';
+export const PASSKEY_METHOD = 'user';
 
 /** The first reason the fresh sign-in doesn't stand for the challenge, or undefined when it does. */
 export function stepUpRefusal(
@@ -55,6 +58,6 @@ export function stepUpRefusal(
   if (Number.isNaN(authTime) || authTime < earliest) return 'stale_authentication';
   const { amr } = signIn.evidence;
   if (!amr.includes(SECOND_FACTOR)) return 'no_second_factor';
-  if (passkeyRequired && !amr.includes(PASSKEY)) return 'no_passkey';
+  if (passkeyRequired && !amr.includes(PASSKEY_METHOD)) return 'no_passkey';
   return undefined;
 }

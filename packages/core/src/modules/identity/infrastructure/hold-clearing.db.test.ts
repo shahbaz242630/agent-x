@@ -169,10 +169,10 @@ const confirm = (investigationId: string, challengeId: string, who: ClearingAdmi
   );
 
 /** The admin signs in again for the challenge, as the step-up's return records it. */
-const stepUp = (who: ClearingAdmin, challengeId: string) =>
+const stepUp = (who: ClearingAdmin, challengeId: string, amr: readonly string[] = ['pwd', 'user', 'mfa']) =>
   challenges().recordEvidence(app, challengeId, who.sessionId, {
     authTime: clock.now(),
-    amr: ['pwd', 'user', 'mfa'],
+    amr,
     idpSessionId: 'V1_2',
     idTokenHash: createHash('sha256').update('an ID token').digest(),
   });
@@ -272,6 +272,21 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
 
     expect(await ask(first, admin, 'ask-2')).toEqual({ outcome: 'refused', status: 409, code: 'NO_INVESTIGATION' });
+  });
+
+  it('SEC-HA-12 refuses a step-up proved with an app code, not a passkey, as STEP_UP_FAILED, leaving it HELD', async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const answer = await ask(investigationId);
+    if (answer.outcome !== 'asked') throw new Error(`not asked: ${answer.outcome}`);
+    await stepUp(admin, answer.stepUpChallengeId, ['pwd', 'otp', 'mfa']);
+
+    expect(await confirm(investigationId, answer.stepUpChallengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 
   it('refuses to confirm before the admin has signed in again, as STEP_UP_FAILED, leaving it HELD', async () => {

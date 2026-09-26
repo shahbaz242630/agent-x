@@ -2,7 +2,8 @@
 // request names, in a role the route names, as their verified membership
 // there says (access.ts). The membership's own reading and verifying is the
 // identity module's (memberships.db.test.ts); here, what the hook does with
-// each answer.
+// each answer. B3+-1: an admin's and an approver's powers need a session
+// signed in with a passkey.
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -18,6 +19,8 @@ import { SESSION_COOKIE } from './sign-in.ts';
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const FIRST_ID = '00000000-0000-7000-8000-000000000001';
 const COOKIE = 'S'.repeat(43);
+/** A session of the same person signed in with an authenticator app, not a passkey. */
+const APP_COOKIE = 'A'.repeat(43);
 const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-000000000033';
 
@@ -26,7 +29,7 @@ const LIVE: LiveSession = {
   userId: '0199a0f0-0000-7000-8000-000000000011',
   idpSessionId: 'V1_1',
   authTime: new Date('2026-09-24T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
+  amr: ['pwd', 'user', 'mfa'],
   createdAt: new Date('2026-09-24T09:00:05.000Z'),
   lastSeenAt: new Date('2026-09-24T09:10:00.000Z'),
   endsAt: new Date('2026-09-24T21:00:05.000Z'),
@@ -38,7 +41,10 @@ const SIGN_IN: SignIn = {
   beginStepUp: () => Promise.reject(new Error('not in these tests')),
   complete: () => Promise.reject(new Error('not in these tests')),
   signOut: () => Promise.resolve(false),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
+  signedIn: (cookie) =>
+    Promise.resolve(
+      cookie === COOKIE ? LIVE : cookie === APP_COOKIE ? { ...LIVE, amr: ['pwd', 'otp', 'mfa'] } : undefined,
+    ),
 };
 
 const servers: FastifyInstance[] = [];
@@ -109,6 +115,22 @@ async function withRoutes(check: MembershipCheck | Error | undefined, options: {
     reached.push({ member: request.member, person: request.person });
     return { ok: true };
   });
+  app.get('/v1/test-approvals', { ...answer, config: { access: ['approver'] } }, (request) => {
+    reached.push({ member: request.member, person: request.person });
+    return { ok: true };
+  });
+  app.get('/v1/test-builds', { ...answer, config: { access: ['admin', 'developer'] } }, (request) => {
+    reached.push({ member: request.member, person: request.person });
+    return { ok: true };
+  });
+  app.get(
+    '/v1/test-reads',
+    { ...answer, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
+    (request) => {
+      reached.push({ member: request.member, person: request.person });
+      return { ok: true };
+    },
+  );
   app.get('/v1/test-agents', { ...answer, config: { access: ['agent'] } }, () => ({ ok: true }));
   app.get('/v1/test-shared', { ...answer, config: { access: ['admin', 'agent'] } }, (request) => {
     reached.push({ member: request.member, person: request.person });
@@ -262,6 +284,61 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
     expect(admin.reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'admin' }, person: LIVE }]);
     expect((await viewer.app.inject(signedIn({ url: '/v1/test-shared' }))).statusCode).toBe(403);
   });
+
+  it.each([
+    ['admin', 'POST', '/v1/test-members'],
+    ['admin', 'GET', '/v1/test-shared'],
+    ['approver', 'GET', '/v1/test-approvals'],
+  ] as const)(
+    'SEC-HA-12 refuses an active %s signed in with an app code, not a passkey, on %s %s as PASSKEY_REQUIRED',
+    async (role, method, url) => {
+      const { app, reached } = await withRoutes(ACTIVE(role));
+      const withApp = { cookie: `${SESSION_COOKIE}=${APP_COOKIE}`, origin: PUBLIC_ORIGIN, 'idempotency-key': 'k-1' };
+
+      const response = await app.inject(signedIn({ method, url, headers: withApp }));
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(errorBody('PASSKEY_REQUIRED', FIRST_ID));
+      expect(reached).toEqual([]);
+      expect(
+        (await app.inject(signedIn({ method, url, headers: { ...withApp, cookie: `${SESSION_COOKIE}=${COOKIE}` } })))
+          .statusCode,
+      ).toBe(200);
+    },
+  );
+
+  it.each([
+    ['admin', '/v1/test-members'],
+    ['admin', '/v1/test-builds'],
+    ['approver', '/v1/test-reads'],
+  ] as const)(
+    'SEC-HA-12 keeps what a developer or a viewer may do for an active %s with an app code: %s',
+    async (role, url) => {
+      const { app, reached } = await withRoutes(ACTIVE(role));
+
+      const response = await app.inject(signedIn({ url, headers: { cookie: `${SESSION_COOKIE}=${APP_COOKIE}` } }));
+
+      expect(response.statusCode).toBe(200);
+      expect(reached).toMatchObject([{ member: { role } }]);
+    },
+  );
+
+  it.each(['developer', 'viewer'] as const)(
+    'lets an active %s with an app code through where their role is named, and refuses them elsewhere as FORBIDDEN, not for a passkey',
+    async (role) => {
+      const { app } = await withRoutes(ACTIVE(role));
+      const headers = { cookie: `${SESSION_COOKIE}=${APP_COOKIE}` };
+
+      expect(
+        (await app.inject(signedIn({ url: role === 'viewer' ? '/v1/test-members' : '/v1/test-builds', headers })))
+          .statusCode,
+      ).toBe(200);
+      const refused = await app.inject(signedIn({ url: '/v1/test-approvals', headers }));
+      expect(refused.json()).toEqual(
+        errorBody('FORBIDDEN', refused.json<{ error: { correlationId: string } }>().error.correlationId),
+      );
+    },
+  );
 
   it("refuses a person on an agent's route as FORBIDDEN, whatever organisation they name", async () => {
     const { app, lookup } = await withRoutes(ACTIVE('admin'));
