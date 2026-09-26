@@ -110,13 +110,10 @@ const IBAN = /(?<![0-9])[A-Z]{2}\d{2}(?:(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,4})?
 /**
  * An IBAN in any case, grouped with spaces, non-breaking spaces or dashes. Hex
  * hashes look like this in lower case, so it's hidden only when its check
- * digits are right (ISO 13616: the number mod 97 is 1). It never starts right
- * after four hex digits and a dash, the inside of an ID such as a UUID: about
- * one UUID in a few hundred has a group like `aa97-74f9-a825` whose check
- * digits happen to be right (S54, a random ID in a test's log line).
+ * digits are right (ISO 13616: the number mod 97 is 1).
  */
 const IBAN_ANY_CASE =
-  /(?<![A-Za-z0-9])(?<![0-9A-Fa-f]{4}-)[A-Za-z]{2}\d{2}(?:(?:[ \u00A0-][A-Za-z0-9]{4}){2,7}(?:[ \u00A0-][A-Za-z0-9]{1,4})?|[A-Za-z0-9]{11,30})(?![A-Za-z0-9])/g;
+  /(?<![A-Za-z0-9])[A-Za-z]{2}\d{2}(?:(?:[ \u00A0-][A-Za-z0-9]{4}){2,7}(?:[ \u00A0-][A-Za-z0-9]{1,4})?|[A-Za-z0-9]{11,30})(?![A-Za-z0-9])/g;
 
 /** An Emirates ID: 784, then the birth year, seven digits and a check digit, dashed or not. */
 const EMIRATES_ID = /(?<![0-9])784[- ]?\d{4}[- ]?\d{7}[- ]?\d(?![0-9])/g;
@@ -164,8 +161,12 @@ const WHOLE_HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
 
 /**
  * A UUID on its own, as the app logs every ID, in either case: it holds no
- * personal detail, and one starting `00` looks like an international phone
- * number in part (S54). Only a whole value is let through, as a hash is.
+ * personal detail, yet about one in a few hundred has a group like
+ * `aa97-74f9-a825` whose IBAN check digits happen to be right (S54, a random
+ * ID in a test's log line), and one starting `00` looks like an international
+ * phone number in part. Only a whole value is let through, as a hash is: an ID
+ * inside other text may be hidden in part, the safe way to be wrong, since an
+ * IBAN right after one must still be found.
  */
 const WHOLE_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
