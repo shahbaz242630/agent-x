@@ -24,7 +24,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
-import { type AuditTables, withSignedStates } from '../../audit/index.ts';
+import { type AuditTables, createAuditTrail, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
@@ -223,6 +223,20 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
 
     expect(cleared).toMatchObject({ outcome: 'cleared', hold: { outcome: 'clear', version: 3 } });
     expect(await hold()).toMatchObject({ outcome: 'clear', version: 3 });
+    // Cleared by the admin, after the investigation, with the step-up they signed in again for.
+    const now = await hold();
+    const eventId = now.outcome === 'clear' ? now.eventId : ids.next();
+    const trail = createAuditTrail({ keys, ids });
+    expect(
+      await withSignedStates(app, org, services(), (tx) => trail.recordedEvent(tx, org, { eventId })),
+    ).toMatchObject({
+      kind: 'recorded',
+      event: {
+        actor: { type: 'user', id: admin.userId },
+        action: 'integrity_hold.cleared',
+        details: { investigationId, stepUpChallengeId: challengeId },
+      },
+    });
     // A replay answers the hold as it now stands, clearing nothing more.
     expect(await confirm(investigationId, challengeId)).toEqual(cleared);
     expect(await hold()).toMatchObject({ outcome: 'clear', version: 3 });
@@ -462,5 +476,51 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
 
     expect(await clearing).toEqual({ outcome: 'refused', status: 409, code: 'HOLD_CHANGED' });
     expect(await hold()).toMatchObject({ outcome: 'clear', version: 3 });
+  });
+
+  it("refuses to ask when the admin's own membership can't be believed, as INTEGRITY_FAILED", async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    await asOwner((owner) => owner.setColumn(admin.membershipId, 'role', 'viewer'));
+
+    expect(await ask(investigationId)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  });
+
+  it('refuses a step-up begun for a HELD state the hold has since left, as STEP_UP_FAILED: the step-up names the state', async () => {
+    const row = await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    // Another admin clears it, and it is held again: a new HELD state.
+    const other = await member(org, 'admin');
+    await confirm(investigationId, await steppedUp(investigationId, other), other);
+    await row.tamper();
+    await read(row.id);
+    await row.restore();
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+
+    expect(await confirm(investigationId, challengeId, admin, 'confirm-2')).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+  });
+
+  it("answers a replay as INTEGRITY_FAILED once the hold it would show can't be believed", async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    await confirm(investigationId, challengeId);
+    await asOwner((owner) =>
+      owner.query("update audit.events set details = '{}' where org_id = $1 and subject_type = 'integrity_hold'", [
+        org,
+      ]),
+    );
+
+    expect(await confirm(investigationId, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
   });
 });

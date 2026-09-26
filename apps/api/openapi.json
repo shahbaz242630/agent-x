@@ -47,7 +47,7 @@
                   {
                     "type": "string",
                     "const": "HOLD_CHANGED",
-                    "description": "The integrity hold changed after this was asked for: it was set again, or cleared. Nothing was changed. Look at the hold again and, if it is still to be cleared, ask again."
+                    "description": "The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again."
                   },
                   {
                     "type": "string",

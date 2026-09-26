@@ -23,7 +23,7 @@ export const REASON_CODES = {
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
   HOLD_CHANGED:
-    'The integrity hold changed after this was asked for: it was set again, or cleared. Nothing was changed. Look at the hold again and, if it is still to be cleared, ask again.',
+    'The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again.',
   IDEMPOTENCY_KEY_BUSY:
     'An earlier request with this Idempotency-Key is still being done. Wait the number of seconds in the Retry-After header, then send the same request again with the same key.',
   IDEMPOTENCY_KEY_INVALID:

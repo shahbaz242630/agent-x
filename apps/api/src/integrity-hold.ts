@@ -18,8 +18,9 @@
 //   verified first, then the hold cleared: 200 with the hold as it now is.
 // Admins only, in the organisation the request names. Refusals: 409
 // NOT_ON_HOLD while the hold is CLEAR; 409 NO_INVESTIGATION without an
-// investigation of the hold as it stands; 409 HOLD_CHANGED when it was set or
-// cleared since the step-up began; 403 STEP_UP_FAILED for another step-up;
+// investigation of the hold as it stands; 403 STEP_UP_FAILED for another
+// step-up, or one begun for a HELD state the hold has since left (cleared and
+// set again); 409 HOLD_CHANGED when it is cleared while this clearing is made;
 // 503 INTEGRITY_FAILED when the hold, or any record, can't be verified (the
 // hold stays). The use cases are the identity module's hold-investigations.ts
 // and hold-clearing.ts; the hold is the audit module's.
