@@ -667,6 +667,13 @@ describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${
       invitation: { id, status: 'ACCEPTED', acceptedBy: invitee.userId },
     });
     expect(await membershipOfPerson(org, invitee.userId)).toMatchObject({ outcome: 'active', role: 'admin' });
+    // B5-1b: an admin joining is told to the admins; the sender finds none but them, and tells no one.
+    const joined = await membershipOfPerson(org, invitee.userId);
+    if (joined.outcome !== 'active') throw new Error(`not joined: ${joined.outcome}`);
+    expect(await noticesIn(org)).toEqual([{ to: null, kind: 'role_granted', membershipId: joined.id, role: 'admin' }]);
+    // A retry with the same key answers as the first, writing no notice twice.
+    await accept(invitee, token);
+    expect(await noticesIn(org)).toHaveLength(1);
   });
 
   it('makes one first admin when two of the operator’s invitations are accepted at the same moment (B4-6a review)', async () => {

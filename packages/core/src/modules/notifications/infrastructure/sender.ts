@@ -17,6 +17,10 @@
 //   is still sent (review).
 // - A run stops between notices once its signal is aborted; a notice it had
 //   claimed and not reached is taken again once its lease runs out.
+// - A run never throws (review): the outbox away, or a statement past its
+//   limit, is logged (`notification.run_failed`) and the run ends, so the
+//   API's timer takes the next one as usual; the notices it held wait for
+//   their lease.
 //
 // Its log lines name the notice, its kind and how it went: never the
 // address, and never the provider's own words.
@@ -63,7 +67,7 @@ export const NOTICES_A_RUN = 20;
 const FAILURE = /^[a-z][a-z_]{0,63}$/;
 
 export interface NoticeSender {
-  /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. */
+  /** Sends the due notices, a batch at a time, until none is due or the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
@@ -145,23 +149,32 @@ export function createNoticeSender({
 
   return {
     async run(signal) {
-      const stopped = (): boolean => signal?.aborted === true;
-      for (;;) {
-        if (stopped()) return;
-        const due = await outbox.claimDue(db, NOTICES_A_RUN);
-        let fannedOut = false;
-        for (const notice of due) {
-          if (stopped()) return;
-          if (notice.recipientUserId === null) {
-            await fanOut(notice);
-            fannedOut = true;
-          } else {
-            await sendOne(notice, notice.recipientUserId);
-          }
-        }
-        // A full batch may have left more due, and a fan-out has just made some.
-        if (due.length < NOTICES_A_RUN && !fannedOut) return;
+      try {
+        await runBatches(signal);
+      } catch (error) {
+        logger.warn('notification.run_failed', { err: error });
       }
     },
   };
+
+  /** Claims and sends batches until none is due or the signal is aborted. */
+  async function runBatches(signal: AbortSignal | undefined): Promise<void> {
+    const stopped = (): boolean => signal?.aborted === true;
+    for (;;) {
+      if (stopped()) return;
+      const due = await outbox.claimDue(db, NOTICES_A_RUN);
+      let fannedOut = false;
+      for (const notice of due) {
+        if (stopped()) return;
+        if (notice.recipientUserId === null) {
+          await fanOut(notice);
+          fannedOut = true;
+        } else {
+          await sendOne(notice, notice.recipientUserId);
+        }
+      }
+      // A full batch may have left more due, and a fan-out has just made some.
+      if (due.length < NOTICES_A_RUN && !fannedOut) return;
+    }
+  }
 }

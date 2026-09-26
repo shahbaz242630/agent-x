@@ -250,6 +250,39 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it('never throws when the outbox fails under it: it logs, and the next run goes on (review)', async () => {
+    const { service } = notifier();
+    const broken = createNoticeSender({
+      db: app,
+      outbox: { ...outbox, claimDue: () => Promise.reject(new Error('canceling statement due to statement timeout')) },
+      notifier: service,
+      addresses: addressBook(),
+      audience: audience(),
+      logger: createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+        destination: new LogCapture(),
+      }),
+    });
+    const capture = new LogCapture();
+    const logged = createNoticeSender({
+      db: app,
+      outbox: { ...outbox, sent: () => Promise.reject(new Error('connection terminated')) },
+      notifier: service,
+      addresses: addressBook(),
+      audience: audience(),
+      logger: createLogger({
+        service: 'test',
+        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
+        destination: capture,
+      }),
+    });
+
+    await expect(broken.run()).resolves.toBeUndefined();
+    await expect(logged.run()).resolves.toBeUndefined();
+    expect(capture.lines().map(({ event }) => event)).toContain('notification.run_failed');
+  });
+
   it('stops between notices once its signal is aborted, leaving the rest to their lease', async () => {
     const stopping = new AbortController();
     const { sent, service } = notifier(() => {
