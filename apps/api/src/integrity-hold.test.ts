@@ -1,9 +1,12 @@
-// B3+-2b-2: the integrity hold's routes, answering an admin with each outcome
+// B3+-2b-2 and B3+-2c-2: the integrity hold's routes, answering an admin with each outcome
 // of the use case. Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is the
-// identity module's hold-investigations.db.test.ts.
+// identity module's hold-investigations.db.test.ts and hold-clearing.db.test.ts.
 import type {
+  ClearingAdmin,
+  ClearingWrite,
   HoldAdmin,
+  HoldClearings,
   HoldInvestigations,
   HoldShown,
   InvestigationWrite,
@@ -49,6 +52,8 @@ const SIGN_IN: SignIn = {
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
 const THE_ADMIN: HoldAdmin = { orgId: ORG, userId: LIVE.userId };
+const CLEARING_ADMIN: ClearingAdmin = { ...THE_ADMIN, sessionId: LIVE.sessionId };
+const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c5';
 
 const HELD: HoldShown = {
   outcome: 'shown',
@@ -89,11 +94,26 @@ type Call =
       readonly admin: HoldAdmin;
       readonly keyed: IdempotentRequest;
       readonly investigation: unknown;
+    }
+  | {
+      readonly kind: 'ask' | 'confirm';
+      readonly admin: ClearingAdmin;
+      readonly keyed: IdempotentRequest;
+      readonly investigationId: string;
+      readonly challengeId?: string;
     };
 
-/** A server whose use case answers `shown` and `written` (none given the server when both are undefined), the caller holding `role`. */
+/**
+ * A server whose use cases answer `shown`, `written` and `clearing` (none
+ * given the server for either use case whose answers are all undefined), the
+ * caller holding `role`.
+ */
 async function withHold(
-  { shown, written }: { shown?: HoldShown | Error; written?: InvestigationWrite | Error },
+  {
+    shown,
+    written,
+    clearing,
+  }: { shown?: HoldShown | Error; written?: InvestigationWrite | Error; clearing?: ClearingWrite | Error },
   role: Role = 'admin',
 ) {
   const asked: Call[] = [];
@@ -111,6 +131,16 @@ async function withHold(
     record: (admin, keyed, investigation) => {
       asked.push({ kind: 'record', admin, keyed, investigation });
       return answer(written);
+    },
+  };
+  const clearings: HoldClearings = {
+    ask: (admin, keyed, investigationId) => {
+      asked.push({ kind: 'ask', admin, keyed, investigationId });
+      return answer(clearing);
+    },
+    confirm: (admin, keyed, investigationId, challengeId) => {
+      asked.push({ kind: 'confirm', admin, keyed, investigationId, challengeId });
+      return answer(clearing);
     },
   };
   const config = {
@@ -137,6 +167,7 @@ async function withHold(
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...((shown !== undefined || written !== undefined) && { holdInvestigations: investigations }),
+    ...(clearing !== undefined && { holdClearings: clearings }),
   });
   servers.push(app);
   await app.ready();
@@ -305,5 +336,166 @@ describe('both integrity hold routes (B3+-2b-2)', () => {
         expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
       }
     }
+  });
+});
+
+const clear = (path: '' | '/confirm', payload: Record<string, unknown>, key = 'k-1') =>
+  ({
+    method: 'POST',
+    url: `/v1/integrity-hold/clear${path}`,
+    headers: { ...headers, 'idempotency-key': key },
+    payload,
+  }) satisfies InjectOptions;
+
+const ASK = clear('', { investigationId: INVESTIGATION });
+const CONFIRM = clear('/confirm', { investigationId: INVESTIGATION, stepUpChallengeId: CHALLENGE });
+
+describe('POST /v1/integrity-hold/clear clears the hold, once the admin has signed in again (B3+-2c-2)', () => {
+  it('asks: 202 with the step-up, for the admin’s own session and exactly this investigation', async () => {
+    const { app, asked } = await withHold({ clearing: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+    const response = await app.inject(ASK);
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked).toEqual([
+      {
+        kind: 'ask',
+        admin: CLEARING_ADMIN,
+        keyed: expect.objectContaining({ orgId: ORG, operation: 'integrity-hold.clear', key: 'k-1' }) as unknown,
+        investigationId: INVESTIGATION,
+      },
+    ]);
+  });
+
+  it('confirms with the investigation and the step-up: 200 with the hold, CLEAR', async () => {
+    const { app, asked } = await withHold({
+      clearing: {
+        outcome: 'cleared',
+        hold: { outcome: 'clear', version: 3, since: new Date('2026-09-26T11:00:00.000Z') },
+      },
+    });
+
+    const response = await app.inject(CONFIRM);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      hold: { status: 'CLEAR', version: 3, since: '2026-09-26T11:00:00.000Z', reason: null, foundOn: null },
+    });
+    expect(asked).toEqual([
+      {
+        kind: 'confirm',
+        admin: CLEARING_ADMIN,
+        keyed: expect.objectContaining({ operation: 'integrity-hold.clear.confirm' }) as unknown,
+        investigationId: INVESTIGATION,
+        challengeId: CHALLENGE,
+      },
+    ]);
+  });
+
+  it.each([
+    ['an ask with no investigation', clear('', {})],
+    ['an ask with an investigation that isn’t an ID', clear('', { investigationId: 'INC-7' })],
+    [
+      'an ask with a field it doesn’t take',
+      clear('', { investigationId: INVESTIGATION, stepUpChallengeId: CHALLENGE }),
+    ],
+    ['a confirmation with no step-up', clear('/confirm', { investigationId: INVESTIGATION })],
+    ['a confirmation with no investigation', clear('/confirm', { stepUpChallengeId: CHALLENGE })],
+    [
+      'a confirmation with a step-up that isn’t an ID',
+      clear('/confirm', { investigationId: INVESTIGATION, stepUpChallengeId: 'not-an-id' }),
+    ],
+    [
+      'a confirmation with a field it doesn’t take',
+      clear('/confirm', { investigationId: INVESTIGATION, stepUpChallengeId: CHALLENGE, note: 'x' }),
+    ],
+  ])('refuses %s as BAD_REQUEST', async (_what, request) => {
+    const { app, asked } = await withHold({ clearing: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+    const response = await app.inject(request);
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a body over 192 bytes', async () => {
+    const { app, asked } = await withHold({ clearing: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+    expect((await app.inject(clear('', { investigationId: INVESTIGATION, pad: 'x'.repeat(192) }))).statusCode).toBe(
+      413,
+    );
+    // Just under: read, and refused only for the field it doesn't take.
+    expect((await app.inject(clear('', { investigationId: INVESTIGATION, pad: 'x'.repeat(100) }))).statusCode).toBe(
+      400,
+    );
+    expect(asked).toEqual([]);
+  });
+
+  it.each([
+    [409, 'NOT_ON_HOLD'],
+    [409, 'NO_INVESTIGATION'],
+    [409, 'HOLD_CHANGED'],
+    [403, 'STEP_UP_FAILED'],
+    [503, 'INTEGRITY_FAILED'],
+    [403, 'FORBIDDEN'],
+    [401, 'UNAUTHENTICATED'],
+  ] as const)('answers the refusal %i %s at both', async (status, code) => {
+    const { app } = await withHold({ clearing: { outcome: 'refused', status, code } });
+
+    for (const request of [ASK, CONFIRM]) {
+      const response = await app.inject(request);
+
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ error: { code } });
+    }
+  });
+
+  it('answers a key used for another request, or still being done, at both', async () => {
+    for (const [outcome, code] of [
+      ['conflict', 'IDEMPOTENCY_KEY_REUSED'],
+      ['busy', 'IDEMPOTENCY_KEY_BUSY'],
+    ] as const) {
+      const { app } = await withHold({ clearing: { outcome } });
+
+      for (const request of [ASK, CONFIRM]) {
+        const response = await app.inject(request);
+
+        expect(response.statusCode).toBe(409);
+        expect(response.json()).toMatchObject({ error: { code } });
+      }
+    }
+  });
+
+  it.each(['approver', 'developer', 'viewer'] as const)('refuses a %s at both', async (role) => {
+    const { app, asked } = await withHold({ clearing: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, role);
+
+    expect((await app.inject(ASK)).statusCode).toBe(403);
+    expect((await app.inject(CONFIRM)).statusCode).toBe(403);
+    expect(asked).toEqual([]);
+  });
+
+  it('fails as INTERNAL_ERROR when the use case fails, when none was given, or when one answers out of turn', async () => {
+    for (const hold of [
+      { clearing: new Error('down') },
+      { shown: HELD },
+      {
+        clearing: {
+          outcome: 'cleared',
+          hold: { outcome: 'clear', version: 3, since: new Date('2026-09-26T11:00:00.000Z') },
+        } as const,
+      },
+    ]) {
+      const { app } = await withHold(hold);
+
+      const response = await app.inject(ASK);
+
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
+    }
+    const { app } = await withHold({ clearing: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+    expect((await app.inject(CONFIRM)).statusCode).toBe(500);
   });
 });

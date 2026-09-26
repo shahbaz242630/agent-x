@@ -20,6 +20,7 @@ import type {
   AcceptanceConfirmations,
   InvitationAcceptance,
   InvitationWrites,
+  HoldClearings,
   HoldInvestigations,
   MembershipChanges,
   SignIn,
@@ -71,6 +72,8 @@ export interface ServerOptions {
   readonly membershipChanges?: MembershipChanges | undefined;
   /** Showing and investigating the integrity hold (the identity module's hold-investigations.ts); without it, no one reaches those routes. */
   readonly holdInvestigations?: HoldInvestigations | undefined;
+  /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
+  readonly holdClearings?: HoldClearings | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -206,7 +209,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
-  registerIntegrityHold(app, options.holdInvestigations);
+  registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

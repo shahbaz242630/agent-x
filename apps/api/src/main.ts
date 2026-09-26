@@ -19,6 +19,7 @@
 //    the recorder's last counts, then the pool
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
+import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import {
@@ -29,6 +30,7 @@ import {
   createAcceptanceConfirmations,
   createInvitationAcceptance,
   createInvitationWrites,
+  createHoldClearings,
   createHoldInvestigations,
   createMembershipChanges,
   createStepUpChallenges,
@@ -377,6 +379,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
+    holdClearings: createHoldClearings({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      challenges,
+      logger,
+      authorityTables: AUTHORITY_TABLES,
+    }),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

@@ -22,6 +22,8 @@ export const REASON_CODES = {
   FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
+  HOLD_CHANGED:
+    'The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again.',
   IDEMPOTENCY_KEY_BUSY:
     'An earlier request with this Idempotency-Key is still being done. Wait the number of seconds in the Retry-After header, then send the same request again with the same key.',
   IDEMPOTENCY_KEY_INVALID:
@@ -41,6 +43,8 @@ export const REASON_CODES = {
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   NOT_ON_HOLD:
     "The organisation isn't on its integrity hold, so there is no hold to investigate or clear. Nothing was changed.",
+  NO_INVESTIGATION:
+    'The integrity hold can only be cleared after its investigation is recorded, and there is no investigation by this ID of the hold as it now stands. Record the investigation first.',
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:

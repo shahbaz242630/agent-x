@@ -1,7 +1,7 @@
 // The organisation's integrity hold, for its admin (ADR-012 §2, SEC-DB-10's
 // clearing; B3+-2b-2): once anything of the organisation's is found tampered
 // with, its hand-offs stop until its admin clears the hold, with step-up,
-// after the investigation is recorded (clearing is B3+-2c).
+// after the investigation is recorded (B3+-2b-2; clearing B3+-2c-2).
 //
 // - `GET /v1/integrity-hold`: the hold, CLEAR or HELD, since when, and for a
 //   HELD one the tamper sign and the kind of record it was found on.
@@ -9,11 +9,26 @@
 //   concluded (CAUSE_REMOVED or NO_TAMPERING) and the incident's reference,
 //   where the account is kept, outside Agent X: an audit row holds short
 //   facts, never prose. 201 with the investigation.
+// - `POST /v1/integrity-hold/clear`, naming the investigation: opens a step-up
+//   bound to clearing exactly this HELD state after exactly that
+//   investigation: 202 with its ID, for the console to send the admin to
+//   `GET /v1/auth/step-up?challenge=…`.
+// - `…/clear/confirm` with the same investigation and the step-up's ID, once
+//   the admin has signed in again: every record of the organisation is
+//   verified first, then the hold cleared: 200 with the hold as it now is.
 // Admins only, in the organisation the request names. Refusals: 409
-// NOT_ON_HOLD while the hold is CLEAR; 503 INTEGRITY_FAILED when the hold, or
-// a record it rests on, can't be verified. The use case is the identity
-// module's hold-investigations.ts; the hold is the audit module's.
+// NOT_ON_HOLD while the hold is CLEAR; 409 NO_INVESTIGATION without an
+// investigation of the hold as it stands; 403 STEP_UP_FAILED for another
+// step-up, or one begun for a HELD state the hold has since left (cleared and
+// set again); 409 HOLD_CHANGED when it is cleared while this clearing is made;
+// 503 INTEGRITY_FAILED when the hold, or any record, can't be verified (the
+// hold stays). The use cases are the identity module's hold-investigations.ts
+// and hold-clearing.ts; the hold is the audit module's.
 import {
+  CLEAR_CONFIRM_OPERATION,
+  CLEAR_OPERATION,
+  type ClearingWrite,
+  type HoldClearings,
   type HoldInvestigations,
   type HoldShown,
   INVESTIGATE_OPERATION,
@@ -90,15 +105,61 @@ const RECORD_SCHEMA = {
   response: { 201: z.object({ investigation: INVESTIGATION }).describe('The investigation, as recorded.') },
 };
 
-/** The route's own caller: an admin the access hook found. The hooks let no one else through. */
+/** The most a clearing's body may be: an investigation and a step-up's ID, with room to spare. */
+const CLEARING_BODY_LIMIT = 192;
+
+const INVESTIGATION_ID = z.uuid().describe('The investigation of the hold as it now stands, by its ID.');
+
+const ASKED = z
+  .object({
+    stepUpChallengeId: z
+      .uuid()
+      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'HoldClearingAsked',
+    description: 'Clearing the integrity hold, waiting for the admin to sign in again.',
+  });
+
+const CLEAR_SCHEMA = {
+  summary: 'Ask to clear the integrity hold',
+  body: z.strictObject({ investigationId: INVESTIGATION_ID }).describe('The investigation the clearing rests on.'),
+  response: { 202: ASKED },
+};
+
+const CLEAR_CONFIRM_SCHEMA = {
+  summary: 'Clear the integrity hold, once signed in again for it',
+  body: z
+    .strictObject({
+      investigationId: INVESTIGATION_ID,
+      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+    })
+    .describe('The same investigation as asked with, and the step-up signed in again for.'),
+  response: { 200: z.object({ hold: HOLD }).describe('The hold, as the clearing left it.') },
+};
+
+/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
 function adminOf(request: FastifyRequest) {
   const { member, person } = request;
   if (member === null || person === null) throw new Error('an integrity hold route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId };
+  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
 }
 
+/** The hold as the API answers it. */
+const holdOf = (hold: Extract<HoldShown, { outcome: 'shown' }>['hold']) => ({
+  status: hold.outcome === 'held' ? ('HELD' as const) : ('CLEAR' as const),
+  version: hold.version,
+  since: hold.since.toISOString(),
+  reason: hold.outcome === 'held' ? hold.reason : null,
+  foundOn: hold.outcome === 'held' ? hold.foundOn : null,
+});
+
 /** Answers a refusal; undefined for the route to answer. */
-const refusalOf = (answer: HoldShown | InvestigationWrite, request: FastifyRequest, reply: FastifyReply) => {
+const refusalOf = (
+  answer: HoldShown | InvestigationWrite | ClearingWrite,
+  request: FastifyRequest,
+  reply: FastifyReply,
+) => {
   if (answer.outcome === 'refused') return sendErrorBody(reply, answer.status, answer.code, request.id);
   if (answer.outcome === 'conflict' || answer.outcome === 'busy') return answerRefusedWrite(answer, request, reply);
   return undefined;
@@ -109,27 +170,29 @@ const refusalOf = (answer: HoldShown | InvestigationWrite, request: FastifyReque
  * routes are still documented, and no one reaches them, as no one holds a
  * role.
  */
-export function registerIntegrityHold(app: FastifyInstance, investigations: HoldInvestigations | undefined): void {
+export function registerIntegrityHold(
+  app: FastifyInstance,
+  {
+    investigations,
+    clearings,
+  }: { investigations: HoldInvestigations | undefined; clearings: HoldClearings | undefined },
+): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   const investigationsOf = (): HoldInvestigations => {
     if (investigations === undefined) throw new Error('the integrity hold routes ran without their use case');
     return investigations;
   };
+  const clearingsOf = (): HoldClearings => {
+    if (clearings === undefined) throw new Error('the integrity hold clearing routes ran without their use case');
+    return clearings;
+  };
 
   routes.get('/v1/integrity-hold', { schema: SHOW_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
-    const shown = await investigationsOf().show(adminOf(request), request.id);
+    const { orgId, userId } = adminOf(request);
+    const shown = await investigationsOf().show({ orgId, userId }, request.id);
     const refused = refusalOf(shown, request, reply);
     if (refused !== undefined || shown.outcome !== 'shown') return refused;
-    const { hold } = shown;
-    return {
-      hold: {
-        status: hold.outcome === 'held' ? ('HELD' as const) : ('CLEAR' as const),
-        version: hold.version,
-        since: hold.since.toISOString(),
-        reason: hold.outcome === 'held' ? hold.reason : null,
-        foundOn: hold.outcome === 'held' ? hold.foundOn : null,
-      },
-    };
+    return { hold: holdOf(shown.hold) };
   });
 
   routes.post(
@@ -140,10 +203,10 @@ export function registerIntegrityHold(app: FastifyInstance, investigations: Hold
       config: { access: ['admin'], operation: INVESTIGATE_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
+      const { orgId, userId } = adminOf(request);
       const written = await investigationsOf().record(
-        admin,
-        idempotentRequest(request, admin.orgId),
+        { orgId, userId },
+        idempotentRequest(request, orgId),
         request.body,
         request.id,
       );
@@ -160,6 +223,51 @@ export function registerIntegrityHold(app: FastifyInstance, investigations: Hold
           recordedAt: investigation.recordedAt.toISOString(),
         },
       });
+    },
+  );
+
+  routes.post(
+    '/v1/integrity-hold/clear',
+    {
+      schema: CLEAR_SCHEMA,
+      bodyLimit: CLEARING_BODY_LIMIT,
+      config: { access: ['admin'], operation: CLEAR_OPERATION },
+    },
+    async (request, reply) => {
+      const admin = adminOf(request);
+      const written = await clearingsOf().ask(
+        admin,
+        idempotentRequest(request, admin.orgId),
+        request.body.investigationId,
+        request.id,
+      );
+      const refused = refusalOf(written, request, reply);
+      if (refused !== undefined) return refused;
+      if (written.outcome !== 'asked') throw new Error('an ask answered without its step-up');
+      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+    },
+  );
+
+  routes.post(
+    '/v1/integrity-hold/clear/confirm',
+    {
+      schema: CLEAR_CONFIRM_SCHEMA,
+      bodyLimit: CLEARING_BODY_LIMIT,
+      config: { access: ['admin'], operation: CLEAR_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const admin = adminOf(request);
+      const written = await clearingsOf().confirm(
+        admin,
+        idempotentRequest(request, admin.orgId),
+        request.body.investigationId,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      const refused = refusalOf(written, request, reply);
+      if (refused !== undefined) return refused;
+      if (written.outcome !== 'cleared') throw new Error('a clearing answered without the hold');
+      return { hold: holdOf(written.hold) };
     },
   );
 }

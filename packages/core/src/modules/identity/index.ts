@@ -109,6 +109,14 @@ export {
   type InvestigationWrite,
 } from './infrastructure/hold-investigations.ts';
 export {
+  CLEAR_CONFIRM_OPERATION,
+  CLEAR_OPERATION,
+  type ClearingAdmin,
+  type ClearingWrite,
+  createHoldClearings,
+  type HoldClearings,
+} from './infrastructure/hold-clearing.ts';
+export {
   createOidcClient,
   type LoginFlow,
   type OidcClient,
