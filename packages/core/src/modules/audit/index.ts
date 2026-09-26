@@ -24,6 +24,7 @@ export {
   TooManyEventsAboutObject,
 } from './infrastructure/audit-trail.ts';
 export {
+  type OrganisationCheck,
   type RecordedState,
   type SignedChange,
   SignedStateFailed,

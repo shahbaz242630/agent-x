@@ -42,6 +42,7 @@ export {
   type SignedRow,
   type SignedRowKey,
   type SignedStateTable,
+  signedRowIds,
   type WrittenRow,
   writeSignedRow,
 } from './signed-rows.ts';
