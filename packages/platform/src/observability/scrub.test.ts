@@ -112,6 +112,37 @@ describe('SEC-DATA-01 scrub: personal and payment details', () => {
     ['a dashed card number', join('4111-', '1111-', '1111-', '1111'), '[card]'],
     ['a card number run together', join('4111', '1111', '1111', '1111'), '[card]'],
     ['a card number right after another number', `call 050 123 4567 ${SAMPLES.card} now`, 'call [phone] [card] now'],
+    ['a card number joined to a word after it by a dash', `${SAMPLES.card}-paid`, '[card]-paid'],
+    ['a card number joined to a word before it by a dash', `ref-${SAMPLES.card}`, 'ref-[card]'],
+    [
+      'a card number run together, between dashes and words',
+      `ref-${join('4111', '1111', '1111', '1111')}-paid`,
+      'ref-[card]-paid',
+    ],
+    ['a local mobile joined to words by dashes', `call-${SAMPLES.localMobile}-now`, 'call-[phone]-now'],
+    [
+      'a card number run together, right after a digit and a dash',
+      `id 7-${join('4111', '1111', '1111', '1111')} charged`,
+      'id 7-[card] charged',
+    ],
+    ['a grouped card number right after a digit and a dash', `id 0-${SAMPLES.card}`, 'id 0-[card]'],
+    ['a local mobile right after a digit and a dash', 'caller 5-0501234567 phoned', 'caller 5-[phone] phoned'],
+    [
+      'a card number run together, right before a dash and a digit',
+      `${join('4111', '1111', '1111', '1111')}-5 paid`,
+      '[card]-5 paid',
+    ],
+    ['a local mobile right before a dash and a digit', 'caller 0501234567-8 phoned', 'caller [phone]-8 phoned'],
+    [
+      'a spaced local mobile right after a digit and a dash',
+      `caller 5-${SAMPLES.localMobile} phoned`,
+      'caller 5-[phone] phoned',
+    ],
+    [
+      'an international number from 00, right after a digit and a dash',
+      'dial 9-00971501234567 now',
+      'dial 9-[phone] now',
+    ],
     ['an American Express layout', join('3782 ', '822463 ', '10005'), '[card]'],
     ['a Diners layout', join('3056 ', '930902 ', '5904'), '[card]'],
     ['a phone number', `call ${SAMPLES.phone}`, 'call [phone]'],
@@ -226,6 +257,7 @@ describe('scrub: ordinary log text is left alone', () => {
     ['a sixteen-digit number that fails the Luhn check', '4111111111111112'],
     ['a long run of number groups with no card in it', '2026 09 14 1015 3000 1200 4500 7800 9900'],
     ['digits that pass the Luhn check, grouped unlike a card', '4111 11 1111 1111 11'],
+
     ['a status and a duration', 'status 404 after 1200 ms'],
   ])('%s', (_what, text) => {
     expect(scrub(text)).toBe(text);
@@ -286,7 +318,7 @@ describe('scrub: check-digit helpers', () => {
 
 describe('scrub: properties that hold for any text', () => {
   const filler = fc.string({ unit: fc.constantFrom(...Array.from('abcdefghij klmnop,;()')), maxLength: 30 });
-  const separator = fc.constantFrom(' ', '.', ',', ';', '(', ')', '"', '\t', '\n');
+  const separator = fc.constantFrom(' ', '.', ',', ';', '(', ')', '"', '\t', '\n', '-');
   const sample = fc.constantFrom(...Object.values(SAMPLES));
 
   it('hides each sensitive sample, whatever punctuation and text surround it', () => {
@@ -307,6 +339,24 @@ describe('scrub: properties that hold for any text', () => {
         expect(scrub(id.toUpperCase())).toBe(id.toUpperCase());
       }),
       { ...RUNS, numRuns: 5000 },
+    );
+  });
+
+  it.each([
+    [
+      'right after a digit and a dash, as an order number joined to it',
+      (secret: string, number: string) => `${number}-${secret}`,
+    ],
+    ['right before a dash and a digit', (secret: string, number: string) => `${secret}-${number}`],
+  ])('hides each sensitive sample %s', (_where, joined) => {
+    const digit = fc.constantFrom(...Array.from('0123456789'));
+    fc.assert(
+      fc.property(filler, digit, sample, (before, number, secret) => {
+        const cleaned = scrub(`${before} ${joined(secret, number)} seen`);
+        expect(cleaned).not.toContain(secret);
+        expect(findLeaks(cleaned)).toEqual([]);
+      }),
+      RUNS,
     );
   });
 
