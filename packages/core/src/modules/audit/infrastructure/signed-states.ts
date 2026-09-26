@@ -179,6 +179,20 @@ export type InvestigationRecording =
   | { readonly outcome: 'not_held' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+/**
+ * What clearing the hold did: cleared, as its newest signed state; refused,
+ * the hold not HELD, HELD at another version than the one asked about (set
+ * again, or cleared and set again, since), or with no investigation of that
+ * HELD state by that ID; or the hold, or the investigation, tampered with.
+ */
+export type HoldClearing =
+  | { readonly outcome: 'cleared'; readonly version: number; readonly eventId: string }
+  | { readonly outcome: 'not_held' | 'moved_on' | 'no_investigation' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** The step-up a clearing was confirmed with, as its event records it (identity's stepUpDetails). */
+export type ClearingStepUp = Readonly<Record<string, string>> & { readonly stepUpChallengeId: string };
+
 /** An investigation read by its ID: found; no investigation of this organisation's has it; or its event tampered with. */
 export type InvestigationCheck =
   | { readonly outcome: 'found'; readonly investigation: HoldInvestigation }
@@ -334,6 +348,26 @@ export interface SignedStates {
   ): Promise<InvestigationRecording>;
   /** An investigation of the organisation's hold by its ID, from its event in the log, believed only whole. */
   holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck>;
+  /**
+   * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
+   * app or an operator alone (invariant 13), with the step-up they confirmed
+   * it with, from the HELD state at `holdVersion` and its event, after that
+   * state's investigation, and only once verifyAll has verified every
+   * authority object of the organisation in this same transaction (otherwise
+   * `basis`): a hold is never cleared over a record still tampered with. The
+   * hold is read with the chain head's lock, which comes last (ADR-006 §6).
+   */
+  clearIntegrityHold(
+    tx: AuditTransaction,
+    orgId: string,
+    clearing: {
+      readonly actor: AuditActor;
+      readonly holdVersion: number;
+      readonly holdEventId: string;
+      readonly investigationId: string;
+      readonly stepUp: ClearingStepUp;
+    },
+  ): Promise<HoldClearing>;
 }
 
 /**
@@ -364,6 +398,10 @@ interface Held {
 
 const MISSING = Object.freeze({ outcome: 'missing' as const });
 const MISSING_HOLD = Object.freeze({ outcome: 'not_held' as const });
+const MOVED_ON = Object.freeze({ outcome: 'moved_on' as const });
+const NO_INVESTIGATION = Object.freeze({ outcome: 'no_investigation' as const });
+/** A UUID, as an ID the app made. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The investigation an event about one records, or nothing if its facts don't
@@ -444,6 +482,8 @@ export function createSignedStates({
   const created = new WeakMap<AuditTransaction, Set<string>>();
   /** Transactions holding their chain head's lock, after which no row is locked (ADR-006 §6). */
   const headLocked = new WeakSet<AuditTransaction>();
+  /** Organisations verifyAll found whole in each transaction, whose hold it may clear. */
+  const verifiedWhole = new WeakMap<AuditTransaction, Set<string>>();
 
   const heldIn = (tx: AuditTransaction): Map<string, Held> => {
     const known = rowsHeld.get(tx) ?? new Map<string, Held>();
@@ -694,6 +734,14 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'tampered', sign: waiting.sign });
   };
 
+  const holdInvestigation = async (tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> => {
+    const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: INVESTIGATION_SUBJECT, id } });
+    if (found.kind === 'none') return MISSING;
+    if (found.kind === 'broken') return alarm(INVESTIGATION_SUBJECT, { orgId, id }, 'log', found.seq);
+    const investigation = investigationIn(found);
+    return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
+  };
+
   return Object.freeze({
     verifiedState,
 
@@ -725,6 +773,7 @@ export function createSignedStates({
         }
       }
       if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
+      verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
       return Object.freeze({ outcome: 'verified', objects });
     },
 
@@ -852,12 +901,45 @@ export function createSignedStates({
       });
     },
 
-    async holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> {
-      const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: INVESTIGATION_SUBJECT, id } });
-      if (found.kind === 'none') return MISSING;
-      if (found.kind === 'broken') return alarm(INVESTIGATION_SUBJECT, { orgId, id }, 'log', found.seq);
-      const investigation = investigationIn(found);
-      return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
+    holdInvestigation,
+
+    async clearIntegrityHold(
+      tx: AuditTransaction,
+      orgId: string,
+      { actor, holdVersion, holdEventId, investigationId, stepUp }: Parameters<SignedStates['clearIntegrityHold']>[2],
+    ): Promise<HoldClearing> {
+      if (actor.type !== 'user') throw new RangeError('A hold is cleared by a person');
+      if (!UUID.test(stepUp.stepUpChallengeId)) throw new RangeError('A hold is cleared with the step-up it names');
+      if (verifiedWhole.get(tx)?.has(orgId.toLowerCase()) !== true) {
+        throw new SignedStateFailed(
+          'basis',
+          "A hold is cleared only once verifyAll has found every one of the organisation's records whole, in the same transaction",
+        );
+      }
+      const hold = await integrityHold(tx, orgId, 'head');
+      if (hold.outcome === 'tampered') return hold;
+      if (hold.outcome === 'clear') return MISSING_HOLD;
+      if (hold.version !== holdVersion || hold.eventId !== holdEventId.toLowerCase()) return MOVED_ON;
+      const investigation = await holdInvestigation(tx, orgId, investigationId);
+      if (investigation.outcome === 'tampered') return investigation;
+      if (
+        investigation.outcome === 'missing' ||
+        investigation.investigation.holdVersion !== hold.version ||
+        investigation.investigation.holdEventId !== hold.eventId
+      ) {
+        return NO_INVESTIGATION;
+      }
+      const recorded = await recordHold(tx, orgId, hold.version + 1, 'CLEAR', {
+        actor,
+        action: 'integrity_hold.cleared',
+        details: {
+          statusFrom: 'HELD',
+          statusTo: 'CLEAR',
+          investigationId: investigation.investigation.id,
+          ...stepUp,
+        },
+      });
+      return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId.toLowerCase() });
     },
 
     async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {

@@ -33,4 +33,11 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
 }
 
-export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS, MEMBERSHIPS, INVITATIONS];
+/**
+ * In the global lock order (ADR-006 §6): the organisation (2), then its
+ * invitations and memberships (2a, an invitation before a membership, as
+ * accepting and confirming take them). Clearing the integrity hold checks
+ * every row of each in this order (verifyAll, B3+-2c), so a new table goes in
+ * at its level.
+ */
+export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS, INVITATIONS, MEMBERSHIPS];
