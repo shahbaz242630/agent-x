@@ -94,6 +94,22 @@ export interface Config {
         readonly internalOrigin: string | undefined;
       }
     | undefined;
+  /**
+   * B5-3: the admins' notices by email. Undefined when none is set, and no
+   * notice is sent then: they wait in the outbox.
+   */
+  readonly email:
+    | {
+        /** Azure Communication Services' endpoint, as an origin. */
+        readonly endpoint: string;
+        /** The address every notice is sent from. */
+        readonly sender: string;
+        /** The service's access key, base64, which signs each send. Never logged, never in the fingerprint. */
+        readonly accessKey: string;
+        /** The login service's token for reading a person's verified address. Never logged, never in the fingerprint. */
+        readonly directoryToken: string;
+      }
+    | undefined;
   /** ADR-003 §7: how long a console session lives unused, and at most. */
   readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
   /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
@@ -198,6 +214,63 @@ function signInProblems(
   ];
 }
 
+/**
+ * B5-3: email is set in full or not at all; it reads addresses from the login
+ * service, so it goes only with sign-in; and the API must be allowed to call
+ * the email endpoint, over https outside a local run.
+ */
+function emailProblems(
+  environment: Environment,
+  endpoint: string | undefined,
+  sender: string | undefined,
+  accessKey: string | undefined,
+  directoryToken: string | undefined,
+  signInSet: boolean,
+  allowedOrigins: readonly string[],
+): string[] {
+  const set = [endpoint !== undefined, sender !== undefined, accessKey !== undefined, directoryToken !== undefined];
+  if (set.every((one) => !one)) return [];
+  if (!set.every(Boolean)) {
+    return [
+      'AGENTX_EMAIL_ENDPOINT, AGENTX_EMAIL_SENDER, AGENTX_EMAIL_ACCESS_KEY and AGENTX_DIRECTORY_TOKEN: set all four, or none (no notice is sent without them)',
+    ];
+  }
+  if (endpoint === undefined) return [];
+  return [
+    ...(signInSet
+      ? []
+      : ['AGENTX_EMAIL_ENDPOINT: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service gives the addresses']),
+    ...plainHttpProblems('AGENTX_EMAIL_ENDPOINT', environment, [endpoint]),
+    ...(accessKey !== undefined && BASE64_KEY.test(accessKey)
+      ? []
+      : ['AGENTX_EMAIL_ACCESS_KEY: must be the key as Azure gives it, in base64']),
+    ...(directoryToken !== undefined && VISIBLE_TOKEN.test(directoryToken)
+      ? []
+      : ['AGENTX_DIRECTORY_TOKEN: must be 1 to 4096 visible ASCII characters, as the login service gives it']),
+    ...(allowedOrigins.includes(endpoint)
+      ? []
+      : ['AGENTX_EMAIL_ENDPOINT: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API sends every notice there']),
+  ];
+}
+
+/** An access key as Azure gives them (the ACS notifier holds the same shape). */
+const BASE64_KEY = /^(?:[A-Za-z0-9+/]{4}){1,256}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/** A token as the login service gives them (the address book holds the same shape). */
+const VISIBLE_TOKEN = /^[!-~]{1,4096}$/;
+
+/** The email settings, once emailProblems has found them all set or none. */
+function emailFrom(
+  endpoint: string | undefined,
+  sender: string | undefined,
+  accessKey: string | undefined,
+  directoryToken: string | undefined,
+): Config['email'] {
+  return endpoint === undefined || sender === undefined || accessKey === undefined || directoryToken === undefined
+    ? undefined
+    : Object.freeze({ endpoint, sender, accessKey, directoryToken });
+}
+
 /** A session can't be let idle for longer than it may live at all. */
 function sessionProblems(idleMinutes: number, absoluteHours: number): string[] {
   return idleMinutes > absoluteHours * 60
@@ -248,6 +321,10 @@ export function loadConfig(env: Env = process.env): Config {
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
     oidcClientSecret: optionalSecretSetting(env, 'AGENTX_OIDC_CLIENT_SECRET'),
     oidcInternalOrigin: setting(env, 'AGENTX_OIDC_INTERNAL_ORIGIN'),
+    emailEndpoint: setting(env, 'AGENTX_EMAIL_ENDPOINT'),
+    emailSender: setting(env, 'AGENTX_EMAIL_SENDER'),
+    emailAccessKey: optionalSecretSetting(env, 'AGENTX_EMAIL_ACCESS_KEY'),
+    directoryToken: optionalSecretSetting(env, 'AGENTX_DIRECTORY_TOKEN'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
@@ -303,6 +380,23 @@ export function loadConfig(env: Env = process.env): Config {
           allowedOrigins.value ?? [],
         )
       : []),
+    ...(environment.ok &&
+    checks.emailEndpoint.ok &&
+    checks.emailSender.ok &&
+    checks.emailAccessKey.ok &&
+    checks.directoryToken.ok &&
+    checks.oidcIssuer.ok &&
+    allowedOrigins.ok
+      ? emailProblems(
+          environment.value,
+          checks.emailEndpoint.value,
+          checks.emailSender.value,
+          checks.emailAccessKey.value,
+          checks.directoryToken.value,
+          checks.oidcIssuer.value !== undefined,
+          allowedOrigins.value ?? [],
+        )
+      : []),
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
@@ -340,6 +434,12 @@ export function loadConfig(env: Env = process.env): Config {
       checks.oidcClientId.value,
       checks.oidcClientSecret.value,
       checks.oidcInternalOrigin.value,
+    ),
+    email: emailFrom(
+      checks.emailEndpoint.value,
+      checks.emailSender.value,
+      checks.emailAccessKey.value,
+      checks.directoryToken.value,
     ),
     sessions: Object.freeze({
       idleSeconds: checks.sessionIdle.value * 60,

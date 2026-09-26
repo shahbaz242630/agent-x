@@ -36,3 +36,11 @@ export async function userForSubject(
     .executeTakeFirstOrThrow();
   return found.id;
 }
+
+/**
+ * The issuer and subject a user signs in as, by their ID (B5-3: the address
+ * book asks the login service by the subject); undefined for no such user.
+ */
+export async function subjectOfUser(db: Kysely<IdentityTables>, userId: string): Promise<Subject | undefined> {
+  return db.selectFrom('identity.users').select(['issuer', 'subject']).where('id', '=', userId).executeTakeFirst();
+}

@@ -177,6 +177,23 @@ const SETTINGS = {
   // network, when it can't at the issuer's public address (Azure's apps
   // can't reach their own public door). Unset, it calls the issuer itself.
   AGENTX_OIDC_INTERNAL_ORIGIN: { schema: publicOrigin.optional() },
+  // B5-3: the admins' notices by email, all four or none (no notice is sent
+  // without them): Azure Communication Services' endpoint, the address it
+  // sends from, and its access key, which signs each send; and the login
+  // service's token for reading a person's verified address at send time.
+  // The key and the token are read by secretSetting (database.ts).
+  AGENTX_EMAIL_ENDPOINT: { schema: publicOrigin.optional() },
+  AGENTX_EMAIL_SENDER: {
+    schema: text
+      .regex(/^[A-Za-z0-9._-]{1,64}@[a-z0-9.-]{1,253}$/, {
+        error: 'must be an address such as DoNotReply@example.azurecomm.net',
+      })
+      .optional(),
+  },
+  AGENTX_EMAIL_ACCESS_KEY: { schema: text },
+  AGENTX_EMAIL_ACCESS_KEY_FILE: { schema: text },
+  AGENTX_DIRECTORY_TOKEN: { schema: text },
+  AGENTX_DIRECTORY_TOKEN_FILE: { schema: text },
   // ADR-003 §7: a console session ends after this long unused, and this long
   // after it opened however much it is used.
   AGENTX_SESSION_IDLE_MINUTES: {
@@ -295,6 +312,12 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_OIDC_CLIENT_SECRET',
       'AGENTX_OIDC_CLIENT_SECRET_FILE',
       'AGENTX_OIDC_INTERNAL_ORIGIN',
+      'AGENTX_EMAIL_ENDPOINT',
+      'AGENTX_EMAIL_SENDER',
+      'AGENTX_EMAIL_ACCESS_KEY',
+      'AGENTX_EMAIL_ACCESS_KEY_FILE',
+      'AGENTX_DIRECTORY_TOKEN',
+      'AGENTX_DIRECTORY_TOKEN_FILE',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',

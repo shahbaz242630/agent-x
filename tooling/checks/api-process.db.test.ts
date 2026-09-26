@@ -98,7 +98,13 @@ describe(`the API process (Postgres ${server.version})`, () => {
     const events = lines()
       .map((line) => String(line.event))
       .filter((event) => event.startsWith('api.'));
-    expect(events).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
+    expect(events).toEqual([
+      'api.starting',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+      'api.notices',
+    ]);
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 

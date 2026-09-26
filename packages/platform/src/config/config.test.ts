@@ -873,6 +873,97 @@ describe('SEC-PTR-07 config refuses to turn off TLS certificate checks', () => {
   });
 });
 
+describe('config: email for the admins’ notices (B5-3)', () => {
+  const ISSUER = 'https://auth.agentx.example';
+  const ENDPOINT = 'https://acs-agentx-stg.uae.communication.azure.com';
+  const SENDER = 'DoNotReply@3d41a667.azurecomm.net';
+  /** Plain words, as every stand-in for a secret here. */
+  const EMAIL_WORDS = Buffer.from('stand in email words').toString('base64');
+  const READER_WORDS = ['stand', 'in', 'reader', 'words'].join('-');
+  const EMAIL: Env = {
+    ...MINIMAL,
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: `${ISSUER},${ENDPOINT}`,
+    AGENTX_OIDC_ISSUER: ISSUER,
+    AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+    AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
+    AGENTX_EMAIL_ENDPOINT: ENDPOINT,
+    AGENTX_EMAIL_SENDER: SENDER,
+    AGENTX_EMAIL_ACCESS_KEY: EMAIL_WORDS,
+    AGENTX_DIRECTORY_TOKEN: READER_WORDS,
+  };
+  const ALL_OR_NONE =
+    'AGENTX_EMAIL_ENDPOINT, AGENTX_EMAIL_SENDER, AGENTX_EMAIL_ACCESS_KEY and AGENTX_DIRECTORY_TOKEN: set all four, or none (no notice is sent without them)';
+
+  it('is on with all four set, and off with none', () => {
+    expect(loadConfig(EMAIL).email).toEqual({
+      endpoint: ENDPOINT,
+      sender: SENDER,
+      accessKey: EMAIL_WORDS,
+      directoryToken: READER_WORDS,
+    });
+    expect(loadConfig(MINIMAL).email).toBeUndefined();
+  });
+
+  it.each([
+    ['the endpoint', { AGENTX_EMAIL_ENDPOINT: undefined }],
+    ['the sender', { AGENTX_EMAIL_SENDER: undefined }],
+    ['the access key', { AGENTX_EMAIL_ACCESS_KEY: undefined }],
+    ["the directory's token", { AGENTX_DIRECTORY_TOKEN: undefined }],
+    [
+      'all but the endpoint',
+      { AGENTX_EMAIL_SENDER: undefined, AGENTX_EMAIL_ACCESS_KEY: undefined, AGENTX_DIRECTORY_TOKEN: undefined },
+    ],
+  ])('refuses email named in part, without %s', (_, change) => {
+    expect(problemsWith({ ...EMAIL, ...change })).toEqual([ALL_OR_NONE]);
+  });
+
+  it('reads the key and the token from mounted files', () => {
+    const folder = mkdtempSync(join(tmpdir(), 'agentx-config-'));
+    writeFileSync(join(folder, 'email-key'), `${EMAIL_WORDS}\n`);
+    writeFileSync(join(folder, 'directory'), `${READER_WORDS}\n`);
+    const fromFiles = {
+      ...EMAIL,
+      AGENTX_EMAIL_ACCESS_KEY: undefined,
+      AGENTX_EMAIL_ACCESS_KEY_FILE: join(folder, 'email-key'),
+      AGENTX_DIRECTORY_TOKEN: undefined,
+      AGENTX_DIRECTORY_TOKEN_FILE: join(folder, 'directory'),
+    };
+    expect(loadConfig(fromFiles).email).toMatchObject({ accessKey: EMAIL_WORDS, directoryToken: READER_WORDS });
+  });
+
+  it('is refused without sign-in, whose login service gives the addresses', () => {
+    const alone = {
+      ...EMAIL,
+      AGENTX_OIDC_ISSUER: undefined,
+      AGENTX_OIDC_CLIENT_ID: undefined,
+      AGENTX_OIDC_CLIENT_SECRET: undefined,
+    };
+    expect(problemsWith(alone)).toEqual([
+      'AGENTX_EMAIL_ENDPOINT: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service gives the addresses',
+    ]);
+  });
+
+  it('refuses an endpoint the API may not call, or in plain http outside a local run', () => {
+    expect(problemsWith({ ...EMAIL, AGENTX_OUTBOUND_ALLOWED_ORIGINS: ISSUER })).toEqual([
+      'AGENTX_EMAIL_ENDPOINT: must be on AGENTX_OUTBOUND_ALLOWED_ORIGINS; the API sends every notice there',
+    ]);
+    const plain = 'http://acs.agentx.example';
+    expect(
+      problemsWith({ ...EMAIL, AGENTX_EMAIL_ENDPOINT: plain, AGENTX_OUTBOUND_ALLOWED_ORIGINS: `${ISSUER},${plain}` }),
+    ).toContain('AGENTX_EMAIL_ENDPOINT: plain http is allowed only in development and test; production must use https');
+  });
+
+  it.each([
+    ['an endpoint with a path', { AGENTX_EMAIL_ENDPOINT: `${ENDPOINT}/emails` }, /^AGENTX_EMAIL_ENDPOINT/],
+    ['a sender that is no address', { AGENTX_EMAIL_SENDER: 'DoNotReply' }, /^AGENTX_EMAIL_SENDER/],
+    ['a sender with a display name', { AGENTX_EMAIL_SENDER: `Agent X <${SENDER}>` }, /^AGENTX_EMAIL_SENDER/],
+    ['an access key not in base64', { AGENTX_EMAIL_ACCESS_KEY: 'not base64!' }, /^AGENTX_EMAIL_ACCESS_KEY/],
+    ["a directory's token with a space", { AGENTX_DIRECTORY_TOKEN: 'with space' }, /^AGENTX_DIRECTORY_TOKEN/],
+  ])('refuses %s', (_, change, problem) => {
+    expect(problemsWith({ ...EMAIL, ...change })).toEqual([expect.stringMatching(problem)]);
+  });
+});
+
 describe('config: sign-in (ADR-003 §5, §7)', () => {
   const ISSUER = 'https://auth.agentx.example';
   const SIGN_IN: Env = {

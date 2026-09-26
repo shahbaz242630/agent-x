@@ -4,6 +4,7 @@
 // service gives at send time. It depends on no other module: a module whose
 // change tells people (identity) calls it.
 export { messageFor, type NoticeMessage } from './domain/messages.ts';
+export { type AcsSettings, createAcsNotifier, EMAIL_API_VERSION } from './infrastructure/acs-notifier.ts';
 export {
   type ClaimedNotice,
   isNoticeKind,
