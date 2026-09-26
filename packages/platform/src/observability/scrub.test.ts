@@ -128,6 +128,12 @@ describe('SEC-DATA-01 scrub: personal and payment details', () => {
     ['a grouped card number right after a digit and a dash', `id 0-${SAMPLES.card}`, 'id 0-[card]'],
     ['a local mobile right after a digit and a dash', 'caller 5-0501234567 phoned', 'caller 5-[phone] phoned'],
     [
+      'a card number run together, right before a dash and a digit',
+      `${join('4111', '1111', '1111', '1111')}-5 paid`,
+      '[card]-5 paid',
+    ],
+    ['a local mobile right before a dash and a digit', 'caller 0501234567-8 phoned', 'caller [phone]-8 phoned'],
+    [
       'a spaced local mobile right after a digit and a dash',
       `caller 5-${SAMPLES.localMobile} phoned`,
       'caller 5-[phone] phoned',
@@ -336,11 +342,17 @@ describe('scrub: properties that hold for any text', () => {
     );
   });
 
-  it('hides each sensitive sample right after a digit and a dash, as an order number joined to it', () => {
+  it.each([
+    [
+      'right after a digit and a dash, as an order number joined to it',
+      (secret: string, number: string) => `${number}-${secret}`,
+    ],
+    ['right before a dash and a digit', (secret: string, number: string) => `${secret}-${number}`],
+  ])('hides each sensitive sample %s', (_where, joined) => {
     const digit = fc.constantFrom(...Array.from('0123456789'));
     fc.assert(
       fc.property(filler, digit, sample, (before, number, secret) => {
-        const cleaned = scrub(`${before} ${number}-${secret} seen`);
+        const cleaned = scrub(`${before} ${joined(secret, number)} seen`);
         expect(cleaned).not.toContain(secret);
         expect(findLeaks(cleaned)).toEqual([]);
       }),
