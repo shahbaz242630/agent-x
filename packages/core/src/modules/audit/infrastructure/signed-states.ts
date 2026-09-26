@@ -181,7 +181,7 @@ export type InvestigationRecording =
 
 /**
  * What clearing the hold did: cleared, as its newest signed state; refused,
- * the hold not HELD, HELD at another version than the one asked about (set
+ * the hold not HELD, HELD in another state than the one asked about (set
  * again, or cleared and set again, since), or with no investigation of that
  * HELD state by that ID; or the hold, or the investigation, tampered with.
  */
@@ -351,7 +351,7 @@ export interface SignedStates {
   /**
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
-   * it with, from the HELD state at `holdVersion` and its event, after that
+   * it with, from the HELD state recorded by `holdEventId`, after that
    * state's investigation, and only once verifyAll has verified every
    * authority object of the organisation in this same transaction (otherwise
    * `basis`): a hold is never cleared over a record still tampered with. The
@@ -362,7 +362,7 @@ export interface SignedStates {
     orgId: string,
     clearing: {
       readonly actor: AuditActor;
-      readonly holdVersion: number;
+      /** The HELD state asked about, by its event: the event names its version too. */
       readonly holdEventId: string;
       readonly investigationId: string;
       readonly stepUp: ClearingStepUp;
@@ -906,7 +906,7 @@ export function createSignedStates({
     async clearIntegrityHold(
       tx: AuditTransaction,
       orgId: string,
-      { actor, holdVersion, holdEventId, investigationId, stepUp }: Parameters<SignedStates['clearIntegrityHold']>[2],
+      { actor, holdEventId, investigationId, stepUp }: Parameters<SignedStates['clearIntegrityHold']>[2],
     ): Promise<HoldClearing> {
       if (actor.type !== 'user') throw new RangeError('A hold is cleared by a person');
       if (!UUID.test(stepUp.stepUpChallengeId)) throw new RangeError('A hold is cleared with the step-up it names');
@@ -919,14 +919,10 @@ export function createSignedStates({
       const hold = await integrityHold(tx, orgId, 'head');
       if (hold.outcome === 'tampered') return hold;
       if (hold.outcome === 'clear') return MISSING_HOLD;
-      if (hold.version !== holdVersion || hold.eventId !== holdEventId.toLowerCase()) return MOVED_ON;
+      if (hold.eventId !== holdEventId.toLowerCase()) return MOVED_ON;
       const investigation = await holdInvestigation(tx, orgId, investigationId);
       if (investigation.outcome === 'tampered') return investigation;
-      if (
-        investigation.outcome === 'missing' ||
-        investigation.investigation.holdVersion !== hold.version ||
-        investigation.investigation.holdEventId !== hold.eventId
-      ) {
+      if (investigation.outcome === 'missing' || investigation.investigation.holdEventId !== hold.eventId) {
         return NO_INVESTIGATION;
       }
       const recorded = await recordHold(tx, orgId, hold.version + 1, 'CLEAR', {

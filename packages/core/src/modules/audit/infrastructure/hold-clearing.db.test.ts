@@ -128,7 +128,7 @@ async function holdThenRepair(): Promise<{ id: string; saved: SavedRow }> {
 }
 
 /** The hold as it now stands, HELD, with an investigation of it recorded. */
-async function investigated(): Promise<{ holdVersion: number; holdEventId: string; investigationId: string }> {
+async function investigated(): Promise<{ holdEventId: string; investigationId: string }> {
   const investigationId = newId();
   const recorded = await inOrg((tx, states) =>
     states.recordInvestigation(tx, org, {
@@ -139,8 +139,7 @@ async function investigated(): Promise<{ holdVersion: number; holdEventId: strin
     }),
   );
   if (recorded.outcome !== 'recorded') throw new Error('the hold should be HELD');
-  const { holdVersion, holdEventId } = recorded.investigation;
-  return { holdVersion, holdEventId, investigationId };
+  return { holdEventId: recorded.investigation.holdEventId, investigationId };
 }
 
 type Clearing = Parameters<SignedStates['clearIntegrityHold']>[2];
@@ -220,7 +219,7 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
     await owner.restoreRow(saved);
     const again = await hold();
     expect(again).toMatchObject({ outcome: 'held', version: 4 });
-    const current = again.outcome === 'held' ? { holdVersion: again.version, holdEventId: again.eventId } : first;
+    const current = again.outcome === 'held' ? { holdEventId: again.eventId } : first;
 
     // The first investigation answers the first HELD state only.
     expect(await clear({ ...current, investigationId: first.investigationId })).toEqual({
@@ -230,20 +229,17 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
   });
 
   it('refuses a hold that is CLEAR', async () => {
-    const asked = { holdVersion: 1, holdEventId: newId(), investigationId: newId() };
+    const asked = { holdEventId: newId(), investigationId: newId() };
 
     expect(await clear(asked)).toEqual({ outcome: 'not_held' });
     expect(await hold()).toMatchObject({ outcome: 'clear', version: 1 });
   });
 
-  it.each([
-    ['another version', (asked: Awaited<ReturnType<typeof investigated>>) => ({ ...asked, holdVersion: 1 })],
-    ['another event', (asked: Awaited<ReturnType<typeof investigated>>) => ({ ...asked, holdEventId: newId() })],
-  ])('refuses a HELD state asked about at %s, leaving it HELD', async (_name, change) => {
+  it('refuses a HELD state asked about by another event, leaving it HELD', async () => {
     await holdThenRepair();
     const asked = await investigated();
 
-    expect(await clear(change(asked))).toEqual({ outcome: 'moved_on' });
+    expect(await clear({ ...asked, holdEventId: newId() })).toEqual({ outcome: 'moved_on' });
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 
