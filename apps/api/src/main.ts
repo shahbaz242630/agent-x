@@ -12,8 +12,11 @@
 //    platform's, and each organisation's from the directory's list (B1d-2);
 //    and, each on a timer of its own, the idempotency keys' retention sweep
 //    (B1e-3), the sign-in flows' sweep (B2-3a-2), the ended sessions'
-//    sweep (B2-4a) and the security events' retention sweep (B2-5a); and
-//    the security events' recorder, writing its counts each minute (B2-5b)
+//    sweep (B2-4a), the security events' retention sweep (B2-5a) and the
+//    notices' sweep (B5-1b); and the security events' recorder, writing its
+//    counts each minute (B2-5b). Role grants write their notices to the
+//    outbox (B5-1b); the sender that sends them starts once a notifier is
+//    configured (B5-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check and the sweep, then
 //    the recorder's last counts, then the pool
@@ -43,6 +46,7 @@ import {
   type SignIn,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -76,7 +80,12 @@ import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
-type ApiTables = PlatformControlsTables & DirectoryTables & AuditTables & IdentityTables & SecurityEventsTables;
+type ApiTables = PlatformControlsTables &
+  DirectoryTables &
+  AuditTables &
+  IdentityTables &
+  NotificationsTables &
+  SecurityEventsTables;
 
 const SERVICE = 'api';
 
@@ -332,6 +341,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   const flows = createLoginFlows({ clock: systemClock });
   const sessions = createSessions({ ids: uuidV7Ids, clock: systemClock, timeouts: config.sessions });
   const challenges = createStepUpChallenges({ ids: uuidV7Ids, clock: systemClock });
+  // Where role grants write their notices (B5-1b), and the notices' sweep reads.
+  const outbox = createOutbox({ ids: uuidV7Ids, clock: systemClock });
   const signIn = signInFrom(config, database, flows, sessions, challenges, keys);
   const securityEvents = createSecurityEvents({
     ids: uuidV7Ids,
@@ -360,6 +371,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       challenges,
+      outbox,
       logger,
     }),
     invitationAcceptance: createInvitationAcceptance({
@@ -367,6 +379,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       keys,
       ids: uuidV7Ids,
       clock: systemClock,
+      outbox,
       logger,
     }),
     invitationWrites: createInvitationWrites({
@@ -377,7 +390,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
     }),
-    membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
+    membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
     holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
     holdClearings: createHoldClearings({
       database,
@@ -496,6 +509,17 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     SWEEP_EVERY_MS,
   );
+  // Notices sent or given up, past their retention (B5-1b), on a timer of their own too.
+  const noticeSweeping = scheduleRowSweep(
+    createRowSweep({
+      rows: 'notifications.notice',
+      sweep: (most) => outbox.sweep(database, most),
+      logger,
+      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
+      ...ROW_SWEEP,
+    }),
+    SWEEP_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -510,6 +534,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           sessionSweeping.stop(),
           challengeSweeping.stop(),
           eventSweeping.stop(),
+          noticeSweeping.stop(),
           recording.stop(),
         ]);
       },

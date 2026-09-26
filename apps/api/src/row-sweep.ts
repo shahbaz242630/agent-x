@@ -28,7 +28,8 @@ import { scheduleRuns, Stopped, withinDeadline } from './background.ts';
  * and so on. The count is `deleted` for all: the logger redacts any field
  * named like `session`.
  */
-export type SweptRows = 'identity.flow' | 'identity.session' | 'identity.step_up_challenge' | 'security.event';
+export type SweptRows =
+  'identity.flow' | 'identity.session' | 'identity.step_up_challenge' | 'notifications.notice' | 'security.event';
 
 export interface RowSweepOptions {
   readonly rows: SweptRows;

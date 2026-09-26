@@ -28,6 +28,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
+import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { INVITATION_HOURS } from '../domain/invitation.ts';
 import type { Role } from '../domain/membership.ts';
@@ -53,7 +54,7 @@ import { createSessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
-type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -174,8 +175,24 @@ beforeEach(() => {
   capture = new LogCapture();
   clock = new FixedClock(START);
   keyedFor = [];
-  acceptance = createInvitationAcceptance({ database: app, keys, ids, clock, logger: loggerFor(capture) });
+  acceptance = createInvitationAcceptance({
+    database: app,
+    keys,
+    ids,
+    clock,
+    outbox: createOutbox({ ids, clock }),
+    logger: loggerFor(capture),
+  });
 });
+
+/** The organisation's notices in the outbox (B5-1b): to whom (null: its admins), of what, about which membership and role. */
+const noticesIn = async (org: string) =>
+  app
+    .selectFrom('notifications.outbox')
+    .select(['recipient_user_id as to', 'kind', 'membership_id as membershipId', 'role'])
+    .where('org_id', '=', org)
+    .orderBy('id')
+    .execute();
 
 describe(`accepting an invitation (B4-4c, SEC-HA-08, Postgres ${server.version})`, () => {
   it.each(['developer', 'viewer'] as const)(
@@ -194,6 +211,8 @@ describe(`accepting an invitation (B4-4c, SEC-HA-08, Postgres ${server.version})
       });
       expect(keyedFor).toEqual([who.org]);
       expect(await membershipOfPerson(who.org, invitee.userId)).toMatchObject({ outcome: 'active', role });
+      // B5-1b: a developer or viewer joining is told to no one.
+      expect(await noticesIn(who.org)).toEqual([]);
     },
   );
 
@@ -505,6 +524,8 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
       .as('backup')
       .query('select 1 from directory.members where user_id = $1', [member.userId]);
     expect(entries).toHaveLength(1);
+    // B5-1b: the admins are told of the rejoin, in the same transaction.
+    expect(await noticesIn(who.org)).toEqual([{ to: null, kind: 'member_rejoined', membershipId, role: 'developer' }]);
   });
 
   it('brings a person deactivated there back once when two of their invitations are accepted at the same moment (B4-5c)', async () => {
@@ -539,6 +560,8 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
       invitation: { status: 'AWAITING_CONFIRMATION' },
     });
     expect(await membershipOfPerson(who.org, member.userId)).toEqual({ outcome: 'deactivated', id: membershipId });
+    // Nothing is told until an admin confirms them (confirming.ts tells it then).
+    expect(await noticesIn(who.org)).toEqual([]);
   });
 
   it('joins once when two of a person’s invitations there are accepted at the same moment', async () => {
@@ -644,6 +667,13 @@ describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${
       invitation: { id, status: 'ACCEPTED', acceptedBy: invitee.userId },
     });
     expect(await membershipOfPerson(org, invitee.userId)).toMatchObject({ outcome: 'active', role: 'admin' });
+    // B5-1b: an admin joining is told to the admins; the sender finds none but them, and tells no one.
+    const joined = await membershipOfPerson(org, invitee.userId);
+    if (joined.outcome !== 'active') throw new Error(`not joined: ${joined.outcome}`);
+    expect(await noticesIn(org)).toEqual([{ to: null, kind: 'role_granted', membershipId: joined.id, role: 'admin' }]);
+    // A retry with the same key answers as the first, writing no notice twice.
+    await accept(invitee, token);
+    expect(await noticesIn(org)).toHaveLength(1);
   });
 
   it('makes one first admin when two of the operator’s invitations are accepted at the same moment (B4-6a review)', async () => {

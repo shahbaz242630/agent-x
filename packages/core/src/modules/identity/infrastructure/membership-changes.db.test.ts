@@ -22,6 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
+import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
@@ -40,7 +41,7 @@ import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
-type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -62,6 +63,8 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 const TO_DEVELOPER: MembershipChange = { kind: 'role', role: 'developer' };
 const DEACTIVATE: MembershipChange = { kind: 'deactivate' };
+const TO_APPROVER = { kind: 'role', role: 'approver' } as const satisfies MembershipChange;
+const TO_ADMIN = { kind: 'role', role: 'admin' } as const satisfies MembershipChange;
 
 const loggerFor = (destination: LogCapture) =>
   createLogger({
@@ -169,6 +172,15 @@ async function steppedUp(admin: InvitingAdmin, id: string, change: MembershipCha
   return challengeId;
 }
 
+/** The organisation's notices in the outbox (B5-1b): to whom (null: its admins), of what, about which membership and role. */
+const noticesIn = async (org: string) =>
+  app
+    .selectFrom('notifications.outbox')
+    .select(['recipient_user_id as to', 'kind', 'membership_id as membershipId', 'role'])
+    .where('org_id', '=', org)
+    .orderBy('id')
+    .execute();
+
 const sessionsOf = async (userId: string) =>
   (await database.as('backup').query('select id from identity.sessions where user_id = $1', [userId])).length;
 
@@ -199,6 +211,7 @@ beforeEach(() => {
     keys,
     ids,
     challenges: challenges(),
+    outbox: createOutbox({ ids, clock }),
     logger: loggerFor(new LogCapture()),
   });
 });
@@ -404,6 +417,63 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
       status: 409,
       code: 'ROLE_UNCHANGED',
     });
+  });
+});
+
+describe(`telling the admins of a role granted (B5-1b, ADR-003 §10, Postgres ${server.version})`, () => {
+  it.each([
+    ['a finance approver', TO_APPROVER],
+    ['an admin', TO_ADMIN],
+  ] as const)('writes one notice to the admins of a member made %s, in the same transaction', async (_what, change) => {
+    const who = await organization();
+    const developer = await member(who.org, 'developer');
+    const challengeId = await steppedUp(who.admin, developer.membershipId, change);
+
+    await confirm(who.admin, developer.membershipId, change, challengeId);
+
+    expect(await noticesIn(who.org)).toEqual([
+      { to: null, kind: 'role_granted', membershipId: developer.membershipId, role: change.role },
+    ]);
+    // A retry with the same key answers as the first, writing no notice twice.
+    await confirm(who.admin, developer.membershipId, change, challengeId);
+    expect(await noticesIn(who.org)).toHaveLength(1);
+  });
+
+  it('tells no one of a member made a developer or a viewer, or deactivated', async () => {
+    const who = await organization();
+    await member(who.org, 'admin');
+    const approver = await member(who.org, 'approver');
+    const viewer = await member(who.org, 'viewer');
+
+    await confirm(
+      who.admin,
+      approver.membershipId,
+      TO_DEVELOPER,
+      await steppedUp(who.admin, approver.membershipId, TO_DEVELOPER),
+    );
+    await confirm(
+      who.admin,
+      viewer.membershipId,
+      DEACTIVATE,
+      await steppedUp(who.admin, viewer.membershipId, DEACTIVATE, 'ask-2'),
+      'confirm-2',
+    );
+
+    expect(await membershipFor(app, services(), who.org, approver.userId)).toMatchObject({ role: 'developer' });
+    expect(await noticesIn(who.org)).toEqual([]);
+  });
+
+  it('writes no notice for a change refused, rolled back with it', async () => {
+    const who = await organization();
+    const developer = await member(who.org, 'developer');
+    const challengeId = await asked(who.admin, developer.membershipId, TO_APPROVER);
+    await stepUp(who.admin, challengeId, ['pwd', 'otp', 'mfa']);
+
+    expect(await confirm(who.admin, developer.membershipId, TO_APPROVER, challengeId)).toMatchObject({
+      outcome: 'refused',
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await noticesIn(who.org)).toEqual([]);
   });
 });
 
