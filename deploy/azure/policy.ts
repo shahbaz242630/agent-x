@@ -39,6 +39,7 @@ export type RuleId =
   | 'log-destinations'
   | 'activity-log'
   | 'budget'
+  | 'email'
   | 'apps-environment'
   | 'apps-network'
   | 'apps-egress'
@@ -75,6 +76,9 @@ const TYPES = {
   actionGroup: 'Microsoft.Insights/actionGroups',
   alert: 'Microsoft.Insights/scheduledQueryRules',
   budget: 'Microsoft.Consumption/budgets',
+  communication: 'Microsoft.Communication/communicationServices',
+  emailService: 'Microsoft.Communication/emailServices',
+  emailDomain: 'Microsoft.Communication/emailServices/domains',
   diagnostics: 'Microsoft.Insights/diagnosticSettings',
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
@@ -98,8 +102,22 @@ const TYPES = {
   workspace: 'Microsoft.OperationalInsights/workspaces',
 } as const;
 
-/** Types Azure offers only as global resources. None holds customer data or logs. */
-const GLOBAL_TYPES: ReadonlySet<string> = new Set([TYPES.actionGroup, TYPES.dnsZone, TYPES.dnsLink]);
+/**
+ * Types Azure offers only as global resources. The first three hold no
+ * customer data or logs; email's three keep what they hold at rest in the data
+ * location they are given, which rule `email` holds to the UAE.
+ */
+const GLOBAL_TYPES: ReadonlySet<string> = new Set([
+  TYPES.actionGroup,
+  TYPES.dnsZone,
+  TYPES.dnsLink,
+  TYPES.communication,
+  TYPES.emailService,
+  TYPES.emailDomain,
+]);
+
+/** Communication Services' name for the United Arab Emirates as a data location (ADR-009). */
+const EMAIL_DATA_LOCATION = 'UAE';
 
 /** Types whose newest API version is a preview, with why the preview is used. */
 export const PREVIEW_API_EXCEPTIONS: Readonly<Record<string, string>> = {
@@ -1147,12 +1165,12 @@ const doorOf = (rule: unknown): string =>
 /**
  * Every door the apps subnet may have out, and why it is there. The first three
  * are this deployment's own addresses, the next five Azure's service tags,
- * which Azure keeps current; the last two are GitHub's published addresses,
- * which nothing keeps current but the refresher (github-ranges.ts).
+ * which Azure keeps current; then GitHub's published addresses, two sets,
+ * which nothing keeps current but the refresher (github-ranges.ts); and one
+ * more service tag for the apps' own outbound calls: email (B5).
  *
  * What is deliberately absent: `Storage.<region>`, which Microsoft's list needs
- * only for images hosted in Azure Container Registry, and any door for the
- * apps' own outbound calls, which they make none of before Phase 1.
+ * only for images hosted in Azure Container Registry.
  */
 const egressDoors = (region: string, apps: string, database: string): readonly (readonly [string, string])[] => [
   [`* to ${apps} on *`, "the environment's own traffic between its nodes (Microsoft)"],
@@ -1171,6 +1189,8 @@ const egressDoors = (region: string, apps: string, database: string): readonly (
     `Tcp to ${[...GITHUB_RANGES.downloads.prefixes].sort().join(' ')} on 443`,
     'where ghcr.io redirects every layer download',
   ],
+  // Broad, every Front Door site: the API's list of exact origins is the real limit.
+  ['Tcp to AzureFrontDoor.Frontend on 443', "Communication Services' email endpoint, which answers behind Front Door"],
 ];
 
 /**
@@ -1450,6 +1470,46 @@ const budget: Check = (snapshot, _expected, add) => {
       message:
         "needs a budget, starting on the first of a month, that emails at 80% of it and when the month's forecast passes it",
     });
+  }
+};
+
+/**
+ * Email (B5-2): Communication Services and the email service are global
+ * resources that keep what they hold at rest (the sender's name, each message
+ * while it is sent) in the data location they are given, which can never be
+ * changed after (Microsoft), so each is given the UAE (ADR-009). A domain
+ * tracks no opens or clicks, which would rewrite the links in a notice and
+ * tell Azure when its recipient reads it. The service sends only from domains
+ * of this deployment.
+ */
+const email: Check = (snapshot, _expected, add) => {
+  const domains: ReadonlySet<unknown> = new Set(ofType(snapshot, TYPES.emailDomain).map((domain) => domain.id));
+  for (const resource of [...ofType(snapshot, TYPES.communication), ...ofType(snapshot, TYPES.emailService)]) {
+    if (at(resource.properties, 'dataLocation') !== EMAIL_DATA_LOCATION) {
+      add({
+        rule: 'email',
+        resource: resource.name,
+        message: `must keep its data in the ${EMAIL_DATA_LOCATION} (dataLocation), which can't be changed once it exists (ADR-009)`,
+      });
+    }
+  }
+  for (const domain of ofType(snapshot, TYPES.emailDomain)) {
+    if (at(domain.properties, 'userEngagementTracking') !== 'Disabled') {
+      add({
+        rule: 'email',
+        resource: domain.name,
+        message: 'must track no opens or clicks (userEngagementTracking Disabled)',
+      });
+    }
+  }
+  for (const service of ofType(snapshot, TYPES.communication)) {
+    if (!list(at(service.properties, 'linkedDomains')).every((linked) => domains.has(linked))) {
+      add({
+        rule: 'email',
+        resource: service.name,
+        message: "must send only from this deployment's email domains (linkedDomains)",
+      });
+    }
   }
 };
 
@@ -2453,6 +2513,7 @@ const CHECKS: readonly Check[] = [
   logDestinations,
   activityLog,
   budget,
+  email,
   appsEnvironment,
   appsLogs,
   appErrorsAlert,

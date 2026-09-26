@@ -3,7 +3,7 @@
 // This is the foundation: the private network, the database server, the key
 // vault, the log workspace with its cap and alerts, the Container Apps
 // environment with one identity per app and job, CI's identity and role (G4),
-// the activity log and the budget. The secrets (secrets.bicep), the apps and
+// the email service (B5-2), the activity log and the budget. The secrets (secrets.bicep), the apps and
 // jobs (apps.bicep) and the doors' certificates are deployments of their own,
 // into the resource group this one creates.
 //
@@ -195,6 +195,16 @@ module appsEnvironment 'modules/environment.bicep' = {
     network
     monitoring
   ]
+}
+
+// Email for the admins' notices, its data kept in the UAE (B5-2).
+module communication 'modules/communication.bicep' = {
+  scope: group
+  params: {
+    emailServiceName: names.emailService
+    communicationName: names.communication
+    tags: tags
+  }
 }
 
 // CI's identity, its trust in GitHub and the one role it may be given (G4).

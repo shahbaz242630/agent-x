@@ -125,6 +125,10 @@ func resourceNames(environment string, nameSuffix string) object => {
   // the apps' and jobs' loops need it before the deployment starts.
   databaseHost: '${serverName(environment, nameSuffix)}.postgres.database.azure.com'
   appsEnvironment: 'cae-agentx-${environment}'
+  // Email (communication.bicep). The service's name is its host,
+  // `<name>.communication.azure.com`, which must be unique across Azure.
+  emailService: 'ecs-agentx-${shortName(environment)}-${nameSuffix}'
+  communication: 'acs-agentx-${shortName(environment)}-${nameSuffix}'
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
   auditIntegrity: 'alert-agentx-${shortName(environment)}-audit-integrity'
   identities: map(workloads, workload => identityName(environment, workload))
