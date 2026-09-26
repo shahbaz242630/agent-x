@@ -22,6 +22,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
+import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
 import {
@@ -47,7 +48,7 @@ import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
-type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -148,6 +149,15 @@ async function accepted(
   return { id, invitee };
 }
 
+/** The organisation's notices in the outbox (B5-1b): to whom (null: its admins), of what, about which membership and role. */
+const noticesIn = async (org: string) =>
+  app
+    .selectFrom('notifications.outbox')
+    .select(['recipient_user_id as to', 'kind', 'membership_id as membershipId', 'role'])
+    .where('org_id', '=', org)
+    .orderBy('id')
+    .execute();
+
 const keyed = (admin: InvitingAdmin, operation: string, key: string, payload = '{}'): IdempotentRequest => ({
   orgId: admin.orgId,
   client: { kind: 'user', id: admin.userId },
@@ -202,6 +212,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
+    outbox: createOutbox({ ids, clock }),
     logger: loggerFor(new LogCapture()),
   });
 });
@@ -289,7 +300,30 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
       id: returning.membershipId,
       role: 'approver',
     });
+    // B5-1b: the admin is told of the rejoin.
+    expect(await noticesIn(who.org)).toEqual([
+      { to: null, kind: 'member_rejoined', membershipId: returning.membershipId, role: 'approver' },
+    ]);
   });
+
+  it.each(['approver', 'admin'] as const)(
+    'B5-1b writes one notice to the admins of an %s joining, in the same transaction',
+    async (role) => {
+      const who = await organization();
+      const { id, invitee } = await accepted(who, role);
+      const challengeId = await asked(who.admin, id);
+      await stepUp(who.admin, challengeId);
+
+      await confirm(who.admin, id, challengeId);
+
+      const joined = await membershipFor(app, services(), who.org, invitee);
+      if (joined.outcome !== 'active') throw new Error(`not joined: ${joined.outcome}`);
+      expect(await noticesIn(who.org)).toEqual([{ to: null, kind: 'role_granted', membershipId: joined.id, role }]);
+      // A retry with the same key answers as the first, writing no notice twice.
+      await confirm(who.admin, id, challengeId);
+      expect(await noticesIn(who.org)).toHaveLength(1);
+    },
+  );
 
   it('refuses an admin confirming an invitation they accepted themselves as ALREADY_A_MEMBER', async () => {
     const who = await organization();
@@ -332,6 +366,7 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
     });
     expect(await statusOf(who.org, id)).toBe('AWAITING_CONFIRMATION');
     expect(await membershipFor(app, services(), who.org, invitee)).toEqual({ outcome: 'none' });
+    expect(await noticesIn(who.org)).toEqual([]);
   });
 
   it('refuses before the admin signs in again, leaving the person waiting; the same key confirms after', async () => {

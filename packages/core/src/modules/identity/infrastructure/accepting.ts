@@ -23,7 +23,9 @@
 //    existing admin to confirm who accepted (B4-4d), who brings them back
 //    the same way. The operator's invitation of an organisation's first
 //    admin, accepted while no one is listed there, joins at once: there is
-//    no admin to confirm them (B4-6a).
+//    no admin to confirm them (B4-6a). A person rejoining this way, or
+//    anyone joining as an admin, is told to the organisation's admins
+//    through the outbox, in the same transaction (B5-1b).
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
@@ -36,6 +38,7 @@ import { type Kysely, sql } from 'kysely';
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedInvite, listedMembers } from '../../directory/index.ts';
+import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import {
   acceptInvitation,
   type InvitationRecord,
@@ -43,6 +46,7 @@ import {
   invitationToAccept,
   inviteTokenHash,
 } from './invitations.ts';
+import { tellAdminsOfGrant } from './grant-notices.ts';
 import { addMembership, isMembershipTaken, membershipOf, reactivateMembership } from './memberships.ts';
 import { sessionEmailOf } from './session-emails.ts';
 import type { IdentityTables } from './tables.ts';
@@ -106,19 +110,22 @@ class AcceptanceRefused extends Error {
 
 const refused = (status: number, code: ReasonCode): Acceptance => ({ outcome: 'refused', status, code });
 
-type Tables = IdentityTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables;
 
 export function createInvitationAcceptance({
   database,
   keys,
   ids,
   clock,
+  outbox,
   logger,
 }: {
   readonly database: Kysely<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
+  /** Where the admins' notices of a rejoin or an admin joining are written (B5-1b). */
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): InvitationAcceptance {
   return {
@@ -163,14 +170,27 @@ export function createInvitationAcceptance({
                   joinedAt: now,
                   actor,
                 });
+                await tellAdminsOfGrant(tx, outbox, {
+                  orgId,
+                  membershipId: membership.id,
+                  role: accepted.role,
+                  rejoined: true,
+                });
               } else if (accepted.outcome === 'accepted') {
+                const joined = ids.next();
                 await addMembership(tx, states, {
                   orgId,
-                  id: ids.next(),
+                  id: joined,
                   userId: person.userId,
                   role: accepted.role,
                   joinedAt: now,
                   actor,
+                });
+                await tellAdminsOfGrant(tx, outbox, {
+                  orgId,
+                  membershipId: joined,
+                  role: accepted.role,
+                  rejoined: false,
                 });
               }
             } catch (error) {

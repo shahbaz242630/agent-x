@@ -31,11 +31,13 @@
 import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedMembership } from '../../directory/index.ts';
+import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
+import { tellAdminsOfGrant } from './grant-notices.ts';
 import {
   type InvitationRecord,
   invitationRecord,
@@ -102,7 +104,7 @@ class ConfirmationRefused extends Error {
   }
 }
 
-type Tables = IdentityTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables;
 
 /** The pending change's SHA-256: each fact in a fixed order, IDs in lower case. */
 export const confirmationHash = (orgId: string, invitation: InvitationRecord, version: number): Buffer =>
@@ -114,6 +116,7 @@ export function createAcceptanceConfirmations({
   ids,
   clock,
   challenges,
+  outbox,
   logger,
 }: {
   readonly database: Kysely<Tables>;
@@ -121,6 +124,8 @@ export function createAcceptanceConfirmations({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly challenges: StepUpChallenges;
+  /** Where the admins' notices of a grant or a rejoin are written (B5-1b). */
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): AcceptanceConfirmations {
   const adminOf = async (tx: InvitationsTransaction, states: SignedStates, admin: InvitingAdmin): Promise<void> => {
@@ -179,7 +184,7 @@ export function createAcceptanceConfirmations({
     admin: InvitingAdmin,
     idempotent: IdempotentRequest,
     correlationId: string,
-    work: (tx: InvitationsTransaction, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+    work: (tx: Transaction<Tables>, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
@@ -253,6 +258,8 @@ export function createAcceptanceConfirmations({
         if (already.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
         if (already.outcome === 'active') throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
         const actor = { type: 'user' as const, id: admin.userId };
+        // The new membership's ID, if they join afresh: the notices name it.
+        const joined = ids.next();
         try {
           const moved = await states.changeStatus(
             tx,
@@ -279,7 +286,7 @@ export function createAcceptanceConfirmations({
           } else {
             await addMembership(tx, states, {
               orgId: admin.orgId,
-              id: ids.next(),
+              id: joined,
               userId: acceptedBy,
               role,
               joinedAt: clock.now(),
@@ -291,6 +298,12 @@ export function createAcceptanceConfirmations({
           if (isMembershipTaken(error)) throw new ConfirmationRefused(409, 'ALREADY_A_MEMBER');
           throw error;
         }
+        await tellAdminsOfGrant(tx, outbox, {
+          orgId: admin.orgId,
+          membershipId: already.outcome === 'deactivated' ? already.id : joined,
+          role,
+          rejoined: already.outcome === 'deactivated',
+        });
         return { status: 200, resourceId: invitation.id };
       });
       if ('refused' in ran) return ran.refused;

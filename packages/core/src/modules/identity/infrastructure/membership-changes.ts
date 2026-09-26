@@ -35,11 +35,12 @@
 import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedMember, listedMembership } from '../../directory/index.ts';
+import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import {
@@ -49,6 +50,7 @@ import {
   MEMBERSHIPS,
   type MembershipsTransaction,
 } from './memberships.ts';
+import { tellAdminsOfGrant } from './grant-notices.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { changeHashOf, lockChallengesOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -102,7 +104,7 @@ class ChangeRefused extends Error {
   }
 }
 
-type Tables = IdentityTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables;
 
 /** The step-up's action for a change: its ask's operation. */
 const actionOf = (change: MembershipChange): string => (change.kind === 'role' ? ROLE_OPERATION : DEACTIVATE_OPERATION);
@@ -129,12 +131,15 @@ export function createMembershipChanges({
   keys,
   ids,
   challenges,
+  outbox,
   logger,
 }: {
   readonly database: Kysely<Tables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly challenges: StepUpChallenges;
+  /** Where the admins' notices of a role granted are written (B5-1b). */
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): MembershipChanges {
   /**
@@ -192,7 +197,7 @@ export function createMembershipChanges({
     admin: InvitingAdmin,
     idempotent: IdempotentRequest,
     correlationId: string,
-    work: (tx: MembershipsTransaction, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+    work: (tx: Transaction<Tables>, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
@@ -280,6 +285,12 @@ export function createMembershipChanges({
               details: { roleFrom: member.role, roleTo: change.role, signInsEnded, ...stepUpDetails(consumed) },
             },
           );
+          await tellAdminsOfGrant(tx, outbox, {
+            orgId: admin.orgId,
+            membershipId: member.id,
+            role: change.role,
+            rejoined: false,
+          });
         } else {
           const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
             actor,

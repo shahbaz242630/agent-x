@@ -7,7 +7,7 @@
 const DEPENDENCIES = {
   directory: [],
   organizations: ['directory'],
-  identity: ['organizations', 'directory'],
+  identity: ['organizations', 'directory', 'notifications'],
   agents: ['organizations', 'directory'],
   suppliers: ['organizations'],
   providers: [],
@@ -16,7 +16,7 @@ const DEPENDENCIES = {
   policies: [],
   'limit-reservations': ['mandates'],
   approvals: ['identity'],
-  notifications: ['identity'],
+  notifications: [],
   'spend-requests': [
     'organizations',
     'agents',
