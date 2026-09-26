@@ -56,12 +56,20 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
-import { HOLD_SUBJECT, INTEGRITY_HOLD } from '../domain/integrity-hold.ts';
+import {
+  HOLD_SUBJECT,
+  INTEGRITY_HOLD,
+  INVESTIGATION_SUBJECT,
+  type InvestigationConclusion,
+  isIncidentReference,
+  isInvestigationConclusion,
+} from '../domain/integrity-hold.ts';
 import {
   type AuditTrail,
   type AuditTransaction,
   type LatestSignedState,
   lockChainHead,
+  type RecordedEventCheck,
   recordHoldEvent,
   TooManyEventsAboutObject,
 } from './audit-trail.ts';
@@ -133,6 +141,49 @@ export type OrganisationCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
   | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
   | { readonly outcome: 'too_many'; readonly subjectType: string };
+
+/**
+ * The hold as its newest signed event holds it, for showing (holdRecord):
+ * CLEAR or HELD since that event, with what a HELD one names as found, or
+ * tampered with (the alarm is raised).
+ */
+export type HoldRecord =
+  | { readonly outcome: 'clear'; readonly version: number; readonly since: Date }
+  | {
+      readonly outcome: 'held';
+      readonly version: number;
+      readonly eventId: string;
+      readonly since: Date;
+      /** The tamper sign that set it, and the object type it was found on; null where the event names none. */
+      readonly reason: string | null;
+      readonly foundOn: string | null;
+    }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** An investigation of a hold, as its event records it (domain/integrity-hold.ts). */
+export interface HoldInvestigation {
+  readonly id: string;
+  /** The HELD state it investigated: the hold's version and that state's event. */
+  readonly holdVersion: number;
+  readonly holdEventId: string;
+  readonly conclusion: InvestigationConclusion;
+  readonly reference: string;
+  /** The person who recorded it, by their user ID. */
+  readonly recordedBy: string;
+  readonly recordedAt: Date;
+}
+
+/** What recording an investigation did: recorded; refused, the hold not HELD; or the hold tampered with. */
+export type InvestigationRecording =
+  | { readonly outcome: 'recorded'; readonly investigation: HoldInvestigation }
+  | { readonly outcome: 'not_held' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/** An investigation read by its ID: found; no investigation of this organisation's has it; or its event tampered with. */
+export type InvestigationCheck =
+  | { readonly outcome: 'found'; readonly investigation: HoldInvestigation }
+  | { readonly outcome: 'missing' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /** Who made a change, and the facts about it; the subject and the seal are added. */
 export interface SignedChange {
@@ -259,6 +310,30 @@ export interface SignedStates {
    * deleted can't be started again as CLEAR.
    */
   startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState>;
+  /**
+   * The hold for showing, from its newest signed event and that event itself,
+   * read as integrityHold reads it with no lock: nothing is decided on it.
+   */
+  holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord>;
+  /**
+   * Records an investigation of the organisation's hold (B3+-2b), by a person
+   * (a user, never the app or an agent), only while the hold is a verified
+   * HELD: read with the chain head's lock, which comes last (ADR-006 §6), so
+   * no hold set or cleared meanwhile is missed. `id` is the investigation's
+   * own, new. The conclusion and reference are checked first (RangeError).
+   */
+  recordInvestigation(
+    tx: AuditTransaction,
+    orgId: string,
+    investigation: {
+      readonly id: string;
+      readonly actor: AuditActor;
+      readonly conclusion: InvestigationConclusion;
+      readonly reference: string;
+    },
+  ): Promise<InvestigationRecording>;
+  /** An investigation of the organisation's hold by its ID, from its event in the log, believed only whole. */
+  holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck>;
 }
 
 /**
@@ -288,6 +363,35 @@ interface Held {
 }
 
 const MISSING = Object.freeze({ outcome: 'missing' as const });
+const MISSING_HOLD = Object.freeze({ outcome: 'not_held' as const });
+
+/**
+ * The investigation an event about one records, or nothing if its facts don't
+ * read as one. Only the hold's own steps write its subject type, always as
+ * recordInvestigation does (audit-trail.ts), and the event is believed only
+ * whole: the checks here narrow the facts' types.
+ */
+function investigationIn(found: Extract<RecordedEventCheck, { kind: 'recorded' }>): HoldInvestigation | undefined {
+  const { event } = found;
+  const { holdVersion, holdEventId, conclusion, reference } = event.details;
+  if (
+    typeof holdVersion !== 'number' ||
+    typeof holdEventId !== 'string' ||
+    !isInvestigationConclusion(conclusion) ||
+    !isIncidentReference(reference)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    id: event.subject.id.toLowerCase(),
+    holdVersion,
+    holdEventId,
+    conclusion,
+    reference,
+    recordedBy: event.actor.id.toLowerCase(),
+    recordedAt: found.recordedAt,
+  });
+}
 /** The status column, which only changeStatus writes on a row that exists. */
 const STATUS = 'status';
 /** Who sets a hold: the app itself, on a tamper sign. */
@@ -304,10 +408,13 @@ const lockOrder = (): SignedStateFailed =>
 const sameFields = (row: readonly FieldText[], expected: (column: string) => string | null | undefined): boolean =>
   row.every(([column, value]) => value === expected(column));
 
-/** The hold's subject type is its own: a row recorded under it would be read as the organisation's hold. */
+/**
+ * The hold's subject types are its own: a row recorded under one would be read
+ * as the organisation's hold, or as an investigation of it.
+ */
 const notTheHold = (table: SignedStateTable): void => {
-  if (table.subject === HOLD_SUBJECT)
-    throw new RangeError(`The subject type ${HOLD_SUBJECT} is the integrity hold's own`);
+  if (table.subject === HOLD_SUBJECT || table.subject === INVESTIGATION_SUBJECT)
+    throw new RangeError(`The subject type ${table.subject} is the integrity hold's own`);
 };
 
 /**
@@ -575,6 +682,18 @@ export function createSignedStates({
     return Object.freeze({ version, eventId: recorded.id, seq: recorded.seq });
   };
 
+  const integrityHold = async (tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> => {
+    if (lock === 'head') {
+      await lockChainHead(tx, orgId);
+      headLocked.add(tx);
+    }
+    const { check } = await readHold(tx, orgId);
+    const waiting = unrecorded(orgId);
+    if (check.outcome !== 'clear' || waiting === undefined) return check;
+    // Found, but not recorded yet (withSignedStates tries again once this transaction ends): denied meanwhile.
+    return Object.freeze({ outcome: 'tampered', sign: waiting.sign });
+  };
+
   return Object.freeze({
     verifiedState,
 
@@ -664,17 +783,7 @@ export function createSignedStates({
       });
     },
 
-    async integrityHold(tx: AuditTransaction, orgId: string, lock: 'none' | 'head'): Promise<HoldCheck> {
-      if (lock === 'head') {
-        await lockChainHead(tx, orgId);
-        headLocked.add(tx);
-      }
-      const { check } = await readHold(tx, orgId);
-      const waiting = unrecorded(orgId);
-      if (check.outcome !== 'clear' || waiting === undefined) return check;
-      // Found, but not recorded yet (withSignedStates tries again once this transaction ends): denied meanwhile.
-      return Object.freeze({ outcome: 'tampered', sign: waiting.sign });
-    },
+    integrityHold,
 
     async startIntegrityHold(tx: AuditTransaction, orgId: string, actor: AuditActor): Promise<RecordedState> {
       if (created.get(tx)?.delete(orgId.toLowerCase()) !== true) {
@@ -688,6 +797,67 @@ export function createSignedStates({
         action: 'integrity_hold.created',
         details: {},
       });
+    },
+
+    async holdRecord(tx: AuditTransaction, orgId: string): Promise<HoldRecord> {
+      const check = await integrityHold(tx, orgId, 'none');
+      if (check.outcome === 'tampered') return check;
+      const found = await trail.recordedEvent(tx, orgId, { eventId: check.eventId });
+      // The newest signed event was just read whole: gone or broken now is tampering in between.
+      if (found.kind !== 'recorded') {
+        return alarm(HOLD_SUBJECT, { orgId, id: orgId }, 'log', found.kind === 'broken' ? found.seq : undefined);
+      }
+      if (check.outcome === 'clear') {
+        return Object.freeze({ outcome: 'clear', version: check.version, since: found.recordedAt });
+      }
+      const { reason, foundOn } = found.event.details;
+      return Object.freeze({
+        outcome: 'held',
+        version: check.version,
+        eventId: check.eventId,
+        since: found.recordedAt,
+        reason: typeof reason === 'string' ? reason : null,
+        foundOn: typeof foundOn === 'string' ? foundOn : null,
+      });
+    },
+
+    async recordInvestigation(
+      tx: AuditTransaction,
+      orgId: string,
+      { id, actor, conclusion, reference }: Parameters<SignedStates['recordInvestigation']>[2],
+    ): Promise<InvestigationRecording> {
+      if (actor.type !== 'user') throw new RangeError('An investigation is recorded by a person');
+      if (!isInvestigationConclusion(conclusion)) throw new RangeError('An investigation concludes as one of its own');
+      if (!isIncidentReference(reference)) throw new RangeError("An investigation's reference is an incident's ID");
+      const hold = await integrityHold(tx, orgId, 'head');
+      if (hold.outcome === 'tampered') return hold;
+      if (hold.outcome === 'clear') return MISSING_HOLD;
+      const recorded = await recordHoldEvent(trail, tx, orgId, {
+        actor,
+        action: 'integrity_hold.investigated',
+        subject: { type: INVESTIGATION_SUBJECT, id, version: 1 },
+        details: { holdVersion: hold.version, holdEventId: hold.eventId, conclusion, reference },
+      });
+      return Object.freeze({
+        outcome: 'recorded',
+        investigation: Object.freeze({
+          id: id.toLowerCase(),
+          holdVersion: hold.version,
+          holdEventId: hold.eventId,
+          conclusion,
+          reference,
+          recordedBy: actor.id.toLowerCase(),
+          recordedAt: recorded.recordedAt,
+        }),
+      });
+    },
+
+    async holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck> {
+      const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: INVESTIGATION_SUBJECT, id } });
+      if (found.kind === 'none') return MISSING;
+      if (found.kind === 'broken') return alarm(INVESTIGATION_SUBJECT, { orgId, id }, 'log', found.seq);
+      const investigation = investigationIn(found);
+      return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
     },
 
     async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {

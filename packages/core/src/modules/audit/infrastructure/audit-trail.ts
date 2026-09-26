@@ -73,7 +73,7 @@ import {
   eventContent,
   subjectKeyProblems,
 } from '../domain/event.ts';
-import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
+import { HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -110,6 +110,28 @@ export type LatestSignedState =
       readonly recordedAt: Date;
       readonly version: number;
       readonly seal: StateSeal;
+    }
+  | { readonly kind: 'broken'; readonly seq?: bigint };
+
+/** An event to find: by its own ID, or as the one event about an object recorded once. */
+type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
+
+/**
+ * One event, found by its ID or its object (recordedEvent):
+ * - `none`: no event of the organisation's has that ID, or is about that object
+ * - `recorded`: the event, whole, sealed and no later than the chain's head
+ * - `broken`: it can't be believed: it can't be read or fails its own hash or
+ *   MAC, it lies past the head, or the chain holds any event past its head or
+ *   has no head for the events there are (as latestSignedState reads a chain)
+ */
+export type RecordedEventCheck =
+  | { readonly kind: 'none' }
+  | {
+      readonly kind: 'recorded';
+      readonly id: string;
+      readonly seq: bigint;
+      readonly recordedAt: Date;
+      readonly event: AuditEvent;
     }
   | { readonly kind: 'broken'; readonly seq?: bigint };
 
@@ -172,6 +194,15 @@ export interface AuditTrail {
    * organisation, like `verify`.
    */
   subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]>;
+  /**
+   * One event of the organisation's, found by its own ID, or as the first
+   * event about an object recorded once (an investigation of the hold): read
+   * with the chain's head in one statement and believed only whole
+   * (RecordedEventCheck). A second event about such an object, whole, would
+   * need the app's keys. Only in withTenant's transaction for that
+   * organisation, like `verify`.
+   */
+  recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -339,16 +370,22 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader {
 }
 
 /**
+ * The subject types only the integrity hold's own steps record: the hold, and
+ * its investigations (B3+-2b), which clearing it rests on.
+ */
+const HOLD_SUBJECTS: ReadonlySet<string> = new Set([HOLD_SUBJECT, INVESTIGATION_SUBJECT]);
+
+/**
  * Each trail's recording step for the integrity hold's own events, which the
  * public `record` refuses: only recordHoldEvent reaches it, from this module.
  */
 const holdRecorders = new WeakMap<AuditTrail, AuditTrail['record']>();
 
 /**
- * Adds an event about the integrity hold (domain/integrity-hold.ts) to the
- * chain, as `record` does. For the audit module's signed states alone: the
- * public `record` refuses the hold's subject type, so no other module can
- * write an event the hold would be read from.
+ * Adds an event about the integrity hold (domain/integrity-hold.ts), or one of
+ * its investigations, to the chain, as `record` does. For the audit module's
+ * signed states alone: the public `record` refuses both subject types, so no
+ * other module can write an event the hold, or its clearing, is read from.
  */
 export function recordHoldEvent(
   trail: AuditTrail,
@@ -385,11 +422,11 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     input: AuditEvent,
   ): Promise<RecordedAuditEvent> => {
     const event = checkedEvent(input, hidesField);
-    if ((event.subject.type === HOLD_SUBJECT) !== hold) {
+    if (HOLD_SUBJECTS.has(event.subject.type) !== hold) {
       throw new AuditEventRefused([
         hold
-          ? 'only the integrity hold is recorded by its own steps'
-          : `subject.type ${HOLD_SUBJECT} is the integrity hold's, recorded by its own steps`,
+          ? 'only the integrity hold and its investigations are recorded by their own steps'
+          : `subject.type ${event.subject.type} is the integrity hold's, recorded by its own steps`,
       ]);
     }
     if (stateSealIn(event.details) === 'malformed') {
@@ -519,6 +556,66 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         .limit(limit + 1)
         .execute();
       return rows.map(({ subject_id: id }) => id);
+    },
+
+    async recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck> {
+      let which;
+      if ('eventId' in find) {
+        which = sql`e.id = ${find.eventId}`;
+      } else {
+        const problems = subjectKeyProblems(find.onlyAbout);
+        if (problems.length > 0) throw new AuditEventRefused(problems);
+        which = sql`e.subject_type = ${find.onlyAbout.type} and e.subject_id = ${find.onlyAbout.id}`;
+      }
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      // One statement, so the head and the event come from the same moment.
+      const { rows } = await sql<Record<string, unknown>>`
+        select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
+               h.mac_key_version as head_mac_key_version, past.past_head,
+               e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
+               e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
+               e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+        from (values (1)) as one (x)
+        left join audit.heads h on h.org_id = ${chain.orgId}
+        cross join lateral (
+          select pg_catalog.min(p.seq) as past_head from audit.events p
+          where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+        ) as past
+        left join lateral (
+          select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit 1
+        ) as e on true
+      `.execute(tx);
+      const [row] = rows;
+      const past = row?.past_head;
+      if (typeof past === 'bigint') return { kind: 'broken', seq: past };
+      if (row === undefined || row.seq === null) return { kind: 'none' };
+      const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
+      const sealed = sealedFields(row);
+      const content = contentOf(row);
+      const details = detailsObject(row.details);
+      if (
+        sealed === undefined ||
+        content === undefined ||
+        details === undefined ||
+        head === undefined ||
+        !entryIsSealed(keys, chain, { ...sealed, content })
+      ) {
+        return typeof row.seq === 'bigint' ? { kind: 'broken', seq: row.seq } : { kind: 'broken' };
+      }
+      const { actor_type: actorType, actor_id: actorId, action, subject_type: type, subject_id: subjectId } = row;
+      return Object.freeze({
+        kind: 'recorded',
+        id: sealed.id,
+        seq: sealed.seq,
+        recordedAt: sealed.recordedAt,
+        event: Object.freeze({
+          actor: { type: actorType as ActorType, id: String(actorId) },
+          action: String(action),
+          subject: { type: String(type), id: String(subjectId), version: Number(row.subject_version) },
+          details: Object.freeze({ ...details }) as AuditEvent['details'],
+        }),
+      });
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));
