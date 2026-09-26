@@ -122,6 +122,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/members',
       'POST /test/both',
       'POST /v1/auth/sign-out',
+      'POST /v1/integrity-hold/clear',
+      'POST /v1/integrity-hold/clear/confirm',
       'POST /v1/integrity-hold/investigations',
       'POST /v1/invitations/accept',
       'POST /v1/members/invitations',
@@ -1100,8 +1102,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
-    // member change routes and the integrity hold's two, with each GET's HEAD.
-    expect(answers.length).toBe(27);
+    // member change routes and the integrity hold's four, with each GET's HEAD.
+    expect(answers.length).toBe(29);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1111,6 +1113,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'ConfirmationAsked',
       'Error',
+      'HoldClearingAsked',
       'HoldInvestigation',
       'IntegrityHold',
       'Invitation',
