@@ -311,6 +311,8 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
 
     await expect(outbox.fanOut(app, claimed.id, many)).rejects.toThrow(RangeError);
     expect(await rows()).toHaveLength(1);
+    // As many as it may write is taken, each person once.
+    expect(await outbox.fanOut(app, claimed.id, many.slice(1))).toBe(1);
   });
 
   it('gives a notice up at once for a failure no retry can mend', async () => {
