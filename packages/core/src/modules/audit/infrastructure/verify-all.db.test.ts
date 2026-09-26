@@ -228,7 +228,11 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     const id = await newRow(AGENTS);
     await tamper(agents, id);
 
-    expect(await verifyAll()).toEqual({ outcome: 'tampered', findings: [finding('agent', id, sign)] });
+    // The organisation named in upper case: every finding names it in lower case, as the alarm does.
+    expect(await withTenant(app, org, (tx) => states.verifyAll(tx, org.toUpperCase(), [AGENTS, KEYS], 100))).toEqual({
+      outcome: 'tampered',
+      findings: [finding('agent', id, sign)],
+    });
     expect(alarms()).toEqual([
       expect.objectContaining({
         level: 'error',
@@ -368,6 +372,13 @@ describe('the lists verifyAll is built on', () => {
     expect(await withTenant(app, org, (tx) => signedRowIds(tx, AGENTS, org, 2))).toEqual(made);
     expect(await withTenant(app, org, (tx) => trail.subjectIds(tx, org.toUpperCase(), 'agent', 2))).toEqual(made);
     expect(await withTenant(app, org, (tx) => signedRowIds(tx, AGENTS, org, 1))).toEqual(made.slice(0, 2));
+  });
+
+  it('refuses a table not named as schema.table, before any SQL', async () => {
+    const odd = { ...AGENTS, table: 'agents; drop table probe.agents' };
+    await expect(withTenant(app, org, (tx) => signedRowIds(tx, odd, org, 5))).rejects.toThrow(
+      'A signed-state table is named schema.table, in lower-case words',
+    );
   });
 
   it('refuses an organisation that is not a UUID, and a subject type the log never holds', async () => {
