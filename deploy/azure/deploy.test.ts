@@ -36,6 +36,8 @@ import {
   type Makers,
   parseArguments,
   issuedMissing,
+  COPIED_SECRETS,
+  secretsRunFor,
   issuedProblems,
   passwordProblems,
   peopleAskedFor,
@@ -263,6 +265,9 @@ describe('the secrets a run writes', () => {
       '  login-client-public-key: kept as the vault has it',
       '  zitadel-masterkey: written only if the vault has none yet',
       '  api-oidc-client-secret: kept as the vault has it',
+      '  zitadel-directory-token: kept as the vault has it',
+      // B5-3: copied from the email service on every run, whatever the run writes.
+      '  acs-access-key: copied from its Azure service, as every run does',
       ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
     ]);
     expect(describePlan(all)).toContain('  zitadel-admin-password: written, from what you paste');
@@ -679,8 +684,13 @@ class RecordingAz implements Az {
           const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
           return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
         }
-        // Unless a test says otherwise, the vault holds the API's client secret, which apps needs (B2-6).
-        const names = (this.#deployed ? this.options.after : this.options.before) ?? ['api-oidc-client-secret'];
+        // Unless a test says otherwise, the vault holds what apps needs: the API's client secret (B2-6), its
+        // directory token and the email key (B5-3).
+        const names = (this.#deployed ? this.options.after : this.options.before) ?? [
+          'api-oidc-client-secret',
+          'zitadel-directory-token',
+          'acs-access-key',
+        ];
         const pages = this.options.pages ?? {};
         const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
         const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
@@ -986,10 +996,10 @@ describe("what a secrets run did to the app's keys", () => {
 });
 
 describe('deploy secrets', () => {
-  /** What a first --all writes: every secret but the one Zitadel issues, which only its name writes (B2-6). */
+  /** What a first --all writes: every secret but the ones Zitadel issues, which only their names write (B2-6, B5-3). */
   const nine = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source !== 'issued');
-  /** Every secret a deployment leaves: the nine and the app's keys. */
-  const everything = [...nine, ...APP_KEYS];
+  /** Every secret a deployment leaves: the nine, the email key it copies (B5-3) and the app's keys. */
+  const everything = [...nine, ...COPIED_SECRETS, ...APP_KEYS];
 
   it('on a first run, asks for both pastes, writes every secret, and lists the vault afterwards', async () => {
     const admin = aPaste();
@@ -1008,7 +1018,7 @@ describe('deploy secrets', () => {
       'rest --method get',
       'deployment group create',
       'deployment group show',
-      // Fifteen secrets, three a page, and the empty page Azure ends with.
+      // Sixteen secrets, three a page: the last one part full.
       ...Array<string>(6).fill('rest --method get'),
       ...RECORDING,
     ]);
@@ -1017,12 +1027,12 @@ describe('deploy secrets', () => {
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
     expect(deployment?.args).toContain(RESOURCE_GROUP);
     const values = deployment?.values ?? {};
-    // All but the API's client secret, which Zitadel issues later and only its name writes.
+    // All but the two Zitadel issues later, which only their names write.
     expect(
       Object.entries(values)
         .filter(([, value]) => value === '')
         .map(([name]) => name),
-    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET']);
+    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET', 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN']);
     expect(values.AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD).toBe(admin);
     expect(values.AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD).toBe(zitadel);
     for (const call of done.az.calls) {
@@ -1031,7 +1041,7 @@ describe('deploy secrets', () => {
       }
     }
     done.terminal.neverSaid(Object.values(values));
-    expect(done.terminal.said.slice(-17, -2)).toEqual([...everything].sort().map((name) => `  ${name}`));
+    expect(done.terminal.said.slice(-18, -2)).toEqual([...everything].sort().map((name) => `  ${name}`));
     expect(done.terminal.said.slice(-2)).toEqual([
       "The app's 6 keys are there, and none that was there before was written again.",
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
@@ -1217,7 +1227,7 @@ describe('deploy apps', () => {
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret .*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token .*that run copies the email key too.*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
@@ -1236,9 +1246,19 @@ describe('deploy apps', () => {
     expect(done.az.deployment).toBeUndefined();
   });
 
-  it('names only the issued secrets a vault lacks', () => {
-    expect(issuedMissing([])).toEqual(['api-oidc-client-secret']);
-    expect(issuedMissing(['db-app-password', 'api-oidc-client-secret'])).toEqual([]);
+  it('names only the issued and copied secrets a vault lacks, and the secrets run that writes them', () => {
+    expect(issuedMissing([])).toEqual(['api-oidc-client-secret', 'zitadel-directory-token', 'acs-access-key']);
+    const held = ['db-app-password', 'api-oidc-client-secret', 'zitadel-directory-token', 'acs-access-key'];
+    expect(issuedMissing(held)).toEqual([]);
+    expect(issuedMissing(held.filter((name) => name !== 'zitadel-directory-token'))).toEqual([
+      'zitadel-directory-token',
+    ]);
+    expect(issuedMissing(held.filter((name) => name !== 'acs-access-key'))).toEqual(['acs-access-key']);
+    expect(secretsRunFor(['zitadel-directory-token', 'acs-access-key'])).toBe(
+      'secrets --rotate zitadel-directory-token',
+    );
+    // The email key alone: any secrets run copies it, so the one that writes nothing else.
+    expect(secretsRunFor(['acs-access-key'])).toBe('secrets --keys');
   });
 
   it("deploys main's newest image only once it is verified, by digest, with the hosts as typed", async () => {
@@ -1254,8 +1274,10 @@ describe('deploy apps', () => {
     expect(done.az.sequence).toEqual([
       'account show --output',
       'bicep version',
-      // The vault holds the API's client secret, which the API reads (B2-6).
+      // The vault holds the API's client secret (B2-6), its directory token and the email key (B5-3), which the
+      // API reads: three, a full page, and the empty page Azure ends with.
       'keyvault list --subscription',
+      'rest --method get',
       'rest --method get',
       'deployment group create',
       'deployment group show',
@@ -1551,7 +1573,7 @@ describe('what a hand deploy records (T1b)', () => {
       told: { answers: ['y', AUTH_HOST, APP_HOST], dns: readyDns() },
     },
   ];
-  const keys = [...Object.keys(VAULT_SECRETS), ...APP_KEYS];
+  const keys = [...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS];
   /** Staging answering as the options say, with the vault's keys sound. */
   const staging = (options: AzAnswers = {}): RecordingAz => new RecordingAz({ before: keys, after: keys, ...options });
 
@@ -1863,7 +1885,7 @@ describe('the tool and the deployment agree', () => {
     const created = snapshot.predictedResources
       .filter((resource) => resource.type === 'Microsoft.KeyVault/vaults/secrets')
       .map((resource) => resource.name.split('/').at(-1));
-    expect(created.sort()).toEqual([...Object.keys(VAULT_SECRETS), ...APP_KEYS].sort());
+    expect(created.sort()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS].sort());
     const paramsText = readFileSync(path.join(AZURE_DIR, 'staging.secrets.bicepparam'), 'utf8');
     const read = [...paramsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
     expect(read.sort()).toEqual(

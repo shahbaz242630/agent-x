@@ -81,6 +81,10 @@ param loginClientPublicKey string
 @secure()
 param apiOidcClientSecret string
 
+@description('The API\'s token for reading a person\'s verified address in Zitadel (B5-3), which Zitadel gave its read-only service user, pasted by a person. Empty leaves the vault\'s as it is.')
+@secure()
+param directoryToken string
+
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
 @secure()
@@ -136,7 +140,20 @@ var secrets = [
     value: apiOidcClientSecret
     readers: ['api']
   }
+  {
+    name: 'zitadel-directory-token'
+    value: directoryToken
+    readers: ['api']
+  }
 ]
+
+// Copied from Communication Services on every run (B5-3): the key the API
+// signs each email with. Nobody pastes it, and a run after the service's key
+// is rotated in Azure brings the new one.
+var copiedKey = {
+  name: 'acs-access-key'
+  readers: ['api']
+}
 
 // The one secret no run writes twice.
 var masterKey = {
@@ -150,7 +167,7 @@ var access = concat(
     name: secret.name
     readers: secret.readers
   }),
-  [masterKey],
+  [masterKey, copiedKey],
   // The API reads every key; the operator's command the audit chains' MAC and
   // the field encryption alone, each version of them, as the API does
   // (ADR-011 §3, B4-6b).
@@ -185,6 +202,19 @@ resource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
   }
 }
 
+// The email service (communication.bicep), whose key is copied in.
+resource communication 'Microsoft.Communication/communicationServices@2026-03-18' existing = {
+  name: names.communication
+}
+
+resource copied 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {
+  parent: vault
+  name: copiedKey.name
+  properties: {
+    value: communication.listKeys().primaryKey
+  }
+}
+
 // The app's keys, each created once (appKeys).
 @onlyIfNotExists()
 resource keys 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = [
@@ -210,6 +240,7 @@ module readAccess 'modules/secret-access.bicep' = {
   dependsOn: [
     written
     created
+    copied
     keys
   ]
 }

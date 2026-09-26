@@ -96,6 +96,7 @@ function standInEnvironment(): Record<string, string> {
     AGENTX_AZURE_LOGIN_CLIENT_PRIVATE_KEY: standIn(24),
     AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY: standIn(24),
     AGENTX_AZURE_API_OIDC_CLIENT_SECRET: standIn(24),
+    AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN: standIn(24),
     AGENTX_AZURE_APP_KEYS: newAppKeys(),
   };
 }

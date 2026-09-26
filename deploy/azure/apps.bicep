@@ -149,6 +149,46 @@ var appsEnvironmentId = appsEnvironment.id
 // certificate serves, and peer-to-peer encryption covers it besides (G2b).
 var zitadelInternalUrl = 'https://${appName(environment, 'zitadel')}.internal.${appsEnvironment.properties.defaultDomain}'
 
+// Email (B5-3): the foundation's Communication Services and the domain it
+// sends from (communication.bicep). Azure names both: the service's host, in
+// its data location's geography, and the domain's, a GUID under azurecomm.net.
+resource communication 'Microsoft.Communication/communicationServices@2026-03-18' existing = {
+  name: names.communication
+}
+
+resource emailService 'Microsoft.Communication/emailServices@2026-03-18' existing = {
+  name: names.emailService
+}
+
+resource emailDomain 'Microsoft.Communication/emailServices/domains@2026-03-18' existing = {
+  parent: emailService
+  name: 'AzureManagedDomain'
+}
+
+var emailEndpoint = 'https://${communication.properties.hostName}'
+
+// What an app that sends the admins' notices is told (B5-3), known only once
+// the deployment reads the email resources, so added to its container
+// alone, as Zitadel's address is: the two origins it may call out to, where
+// each notice is sent, and the address it is sent from, Azure's own
+// domain's DoNotReply. The API is the one app that both reaches Zitadel
+// inside the environment and sends email, so its allowlist lives here: an app
+// that reached Zitadel without sending email would need its own.
+var emailSettings = [
+  {
+    name: 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'
+    value: '${zitadelInternalUrl},${emailEndpoint}'
+  }
+  {
+    name: 'AGENTX_EMAIL_ENDPOINT'
+    value: emailEndpoint
+  }
+  {
+    name: 'AGENTX_EMAIL_SENDER'
+    value: 'DoNotReply@${emailDomain.properties.mailFromSenderDomain}'
+  }
+]
+
 // What every container of ours is told, wherever it runs: which environment
 // this is, which build it is, and where the database is. Each job adds the
 // role it logs in as and the file its login is in.
@@ -562,9 +602,11 @@ var apps = [
     targetPort: 8080
     transport: 'auto'
     // Sign-in (B2-6): the API calls Zitadel inside the environment, as the
-    // login pages do, naming the issuer's host in Zitadel's headers; that
-    // internal address is the one origin it may call out to.
-    zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN', 'AGENTX_OUTBOUND_ALLOWED_ORIGINS']
+    // login pages do, naming the issuer's host in Zitadel's headers. That
+    // internal address and the email endpoint (B5-3) are the two origins it
+    // may call out to (AGENTX_OUTBOUND_ALLOWED_ORIGINS, `emailSettings`).
+    zitadelSettings: ['AGENTX_OIDC_INTERNAL_ORIGIN']
+    sendsEmail: true
     // The rate limit's counts are one replica's, in memory (ADR-011 §4): a
     // second replica would give every client two allowances. The worker, which
     // holds no such count, is the part that scales in Phase 4.
@@ -583,6 +625,16 @@ var apps = [
         {
           reads: 'api-oidc-client-secret'
           setting: 'AGENTX_OIDC_CLIENT_SECRET_FILE'
+        }
+        // B5-3: the email service's key, copied in by the secrets deployment,
+        // and Zitadel's read-only token for the admins' addresses.
+        {
+          reads: 'acs-access-key'
+          setting: 'AGENTX_EMAIL_ACCESS_KEY_FILE'
+        }
+        {
+          reads: 'zitadel-directory-token'
+          setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
         }
       ],
       map(appKeys, key => {
@@ -653,6 +705,7 @@ var apps = [
     // compose stack.
     transport: 'http2'
     zitadelSettings: []
+    sendsEmail: false
     // Its projections and its cache are one replica's; a second would also take
     // ten more of the server's connections.
     maxReplicas: 1
@@ -703,6 +756,7 @@ var apps = [
     // environment's default domain is Azure's to give, and Bicep needs this
     // list settled before the deployment starts.
     zitadelSettings: ['ZITADEL_API_URL']
+    sendsEmail: false
     settings: [
       // The host the browser uses, which Zitadel reads before the Host header
       // (ADR-003 Amendment S10), so the pages need no Host override here.
@@ -904,7 +958,8 @@ resource deployedApps 'Microsoft.App/containerApps@2026-01-01' = [
               map(app.zitadelSettings, setting => {
                 name: setting
                 value: zitadelInternalUrl
-              })
+              }),
+              app.sendsEmail ? emailSettings : []
             )
             volumeMounts: empty(app.files)
               ? []
