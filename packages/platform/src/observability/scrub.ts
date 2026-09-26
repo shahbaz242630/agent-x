@@ -159,6 +159,17 @@ const IPV4_CANDIDATE = /(?<!\d|\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\d|\.\d)/g;
  */
 const WHOLE_HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
 
+/**
+ * A UUID on its own, as the app logs every ID, in either case: it holds no
+ * personal detail, yet about one in a few hundred has a group like
+ * `aa97-74f9-a825` whose IBAN check digits happen to be right (S54, a random
+ * ID in a test's log line), and one starting `00` looks like an international
+ * phone number in part. Only a whole value is let through, as a hash is: an ID
+ * inside other text may be hidden in part, the safe way to be wrong, since an
+ * IBAN right after one must still be found.
+ */
+const WHOLE_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+
 function trailingPunctuation(text: string): number {
   let length = 0;
   while (length < text.length && TRAILING_PUNCTUATION.has(text.charAt(text.length - 1 - length))) length += 1;
@@ -266,7 +277,7 @@ function cleanIpv4(candidate: string): string {
 
 /** Returns the text with every secret, personal detail and payment detail replaced by a label. */
 export function scrub(text: string): string {
-  if (WHOLE_HASH.test(text)) return text;
+  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text)) return text;
   return (
     text
       // URLs first: their credentials and whole query go, before anything else changes their text.
