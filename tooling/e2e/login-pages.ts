@@ -45,9 +45,10 @@ export const where = (page: Page): string => `at ${page.url()}`;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const TOTP_STEP_MS = 30_000;
-/** How often a form that hasn't moved on is sent again, and how long each try waits for it to. */
-const SUBMIT_ATTEMPTS = 3;
-const SUBMIT_WAIT_MS = 10_000;
+/** How long a sent form is waited for, the page then let settle, and the one resend waited for. */
+const FIRST_WAIT_MS = 20_000;
+const SETTLE_MS = 5_000;
+const RETRY_WAIT_MS = 10_000;
 
 export function loginDriver({ password, callback }: { password: string; callback: RegExp }): LoginDriver {
   const pages: Record<PageName, RegExp> = { ...LOGIN_PAGES, callback };
@@ -70,24 +71,34 @@ export function loginDriver({ password, callback }: { password: string; callback
    * Fills the page's form and submits it, and waits for the login to move on.
    * The login's pages are a React app: filled or clicked before its scripts
    * have taken over the page, the form keeps nothing, or the button does
-   * nothing, and the page just sits there (S43–S53: "did not move on from the
-   * password page", three times in one day). So the page is let settle first,
-   * and a form that hasn't moved on after a while is filled and sent again, a
-   * few times, before the login is called stuck.
+   * nothing, and the page just sits there (S49–S53: "did not move on from the
+   * password page", three times in one day). So a page that hasn't moved on
+   * is let settle and sent once more, before the login is called stuck. A
+   * retry that meets the page already leaving (the first send was only slow)
+   * counts as moved on. The worst case is about what one send used to wait.
    */
   async function submitAndLeave(page: Page, current: PageName, fill?: () => Promise<void>): Promise<void> {
-    for (let attempt = 1; attempt <= SUBMIT_ATTEMPTS; attempt += 1) {
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined);
-      // It may have moved on just as the last try gave up waiting.
-      if (attempt > 1 && pageNameOf(page.url()) !== current) return;
-      if (fill !== undefined) await fill();
-      await page.getByTestId('submit-button').click();
-      const left = await page
-        .waitForURL((url) => pageNameOf(url.href) !== current, { timeout: SUBMIT_WAIT_MS })
+    const leaves = (timeout: number) =>
+      page
+        .waitForURL((url) => pageNameOf(url.href) !== current, { timeout })
         .then(() => true)
         .catch(() => false);
-      if (left) return;
+    const send = async () => {
+      if (fill !== undefined) await fill();
+      await page.getByTestId('submit-button').click();
+    };
+    await send();
+    if (await leaves(FIRST_WAIT_MS)) return;
+    await page.waitForLoadState('networkidle', { timeout: SETTLE_MS }).catch(() => undefined);
+    if (pageNameOf(page.url()) !== current) return;
+    try {
+      await send();
+    } catch (error) {
+      // Navigating away mid-fill or mid-click: the first send got through after all.
+      if (pageNameOf(page.url()) !== current) return;
+      throw error;
     }
+    if (await leaves(RETRY_WAIT_MS)) return;
     throw new Error(`the login did not move on from the ${current} page ${where(page)}`);
   }
 
@@ -134,7 +145,7 @@ export function loginDriver({ password, callback }: { password: string; callback
         case 'otp': {
           if (user.totpSecret === undefined) throw new Error(`asked for a code the user cannot give ${where(page)}`);
           const secret = user.totpSecret;
-          // A new code on each try: Zitadel refuses one used already.
+          // A new code on the resend: Zitadel refuses one used already.
           await submitAndLeave(page, current, async () => page.fill('input[name=code]', await freshCode(secret)));
           break;
         }
