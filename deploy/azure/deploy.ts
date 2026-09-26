@@ -6,7 +6,8 @@
 //
 // and, later, `secrets --rotate db-app-password [more names]`; `secrets
 // --keys`, which creates the app's keys the vault doesn't hold yet (a new one,
-// or a new version) and changes nothing else; `apps
+// or a new version), and copies the email key as every secrets run does,
+// and changes nothing else; `apps
 // --keep-running`, which keeps one replica of each app running, billed, until
 // `apps` runs again without it (for a test, or while something needs the apps
 // up); `alerts`, which changes nothing and says whether the alerts can reach
@@ -129,7 +130,16 @@ export const VAULT_SECRETS: Readonly<
   'login-client-public-key': { variable: 'AGENTX_AZURE_LOGIN_CLIENT_PUBLIC_KEY', source: 'pair' },
   'zitadel-masterkey': { variable: 'AGENTX_AZURE_ZITADEL_MASTERKEY', source: 'once' },
   'api-oidc-client-secret': { variable: 'AGENTX_AZURE_API_OIDC_CLIENT_SECRET', source: 'issued' },
+  // B5-3: the token Zitadel gave the API's read-only service user, for the admins' addresses.
+  'zitadel-directory-token': { variable: 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN', source: 'issued' },
 };
+
+/**
+ * The secrets every secrets run copies from an Azure service of the
+ * foundation (secrets.bicep, B5-3): nobody pastes or makes them, and no
+ * variable carries them, so none passes through this machine.
+ */
+export const COPIED_SECRETS: readonly string[] = ['acs-access-key'];
 
 /**
  * The app's keys (app-keys.json), fresh on every run as one JSON value
@@ -149,6 +159,7 @@ const PERSON_LABELS: Readonly<Record<string, string>> = {
   'db-admin-password': "the database admin's password",
   'zitadel-admin-password': "Zitadel's first admin's password",
   'api-oidc-client-secret': "the API's client secret, as Zitadel showed it",
+  'zitadel-directory-token': "the API's directory token, as Zitadel showed it for its read-only service user",
 };
 
 /** Every secret (`all`), the ones named (`rotate`), or only the app's keys the vault lacks (`keys`). */
@@ -316,7 +327,11 @@ export function describePlan(plan: SecretPlan): string[] {
       ? `  ${name}: written, from what you paste`
       : `  ${name}: written, made fresh by this run`;
   });
-  return [...secrets, ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`)];
+  return [
+    ...secrets,
+    ...COPIED_SECRETS.map((name) => `  ${name}: copied from its Azure service, as every run does`),
+    ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
+  ];
 }
 
 /**
@@ -1051,14 +1066,24 @@ function vaultIn(steps: Steps, subscription: string): string {
 }
 
 /**
- * The issued secrets the vault doesn't hold yet (B2-6). An app reads each by
- * its URL, so a deployment without one leaves that app unable to start; each
- * is issued by a service already running, then written by name.
+ * The issued secrets the vault doesn't hold yet (B2-6), and the copied ones
+ * (B5-3). An app reads each by its URL, so a deployment without one leaves
+ * that app unable to start; each issued one is issued by a service already
+ * running, then written by name, and any secrets run copies the rest.
  */
 export function issuedMissing(held: readonly string[]): string[] {
-  return Object.entries(VAULT_SECRETS)
-    .filter(([name, secret]) => secret.source === 'issued' && !held.includes(name))
-    .map(([name]) => name);
+  return [
+    ...Object.entries(VAULT_SECRETS)
+      .filter(([name, secret]) => secret.source === 'issued' && !held.includes(name))
+      .map(([name]) => name),
+    ...COPIED_SECRETS.filter((name) => !held.includes(name)),
+  ];
+}
+
+/** The secrets run that writes what `issuedMissing` found: the issued ones by name, or, for a copied one alone, the run that writes nothing else. */
+export function secretsRunFor(missing: readonly string[]): string {
+  const issued = missing.filter((name) => VAULT_SECRETS[name]?.source === 'issued');
+  return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
 }
 
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
@@ -1402,7 +1427,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   );
   if (missing.length > 0) {
     throw new Error(
-      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Register the API with Zitadel, then run secrets --rotate ${missing.join(' ')} (Azure.md, "Sign-in"). A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
+      `The vault doesn't hold ${missing.join(', ')} yet, or holds it disabled, which the API reads, so the API couldn't start. Get each issued one from Zitadel, then run ${secretsRunFor(missing)} (Azure.md, "Sign-in" and "Email"); that run copies the email key too. A new environment, where Zitadel doesn't run yet, needs its first apps without sign-in (Carry-Forward.md). Nothing was deployed.`,
     );
   }
   const release = commit ?? (await images.latestCommit());

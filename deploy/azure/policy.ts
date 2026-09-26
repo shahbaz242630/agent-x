@@ -249,6 +249,9 @@ const GRANTS: ReadonlySet<string> = new Set([
   'api reads db-app-password',
   // B2-6: the API's own secret as the login service's client, which Zitadel gave.
   'api reads api-oidc-client-secret',
+  // B5-3: the email service's key, copied from it, and the login service's read-only token for addresses.
+  'api reads acs-access-key',
+  'api reads zitadel-directory-token',
   'operator reads db-app-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
@@ -525,6 +528,23 @@ const LONGEST_RUN_SECONDS = 3600;
  */
 const CREATED_ONCE: ReadonlySet<string> = new Set(['zitadel-masterkey', ...APP_KEYS]);
 
+/**
+ * The secrets a run copies from an Azure service of this deployment on every
+ * run, by the type of the service (B5-3): nobody pastes or makes them, and a
+ * run after the service's key is rotated brings the new one.
+ */
+const COPIED: Readonly<Record<string, string>> = { 'acs-access-key': TYPES.communication };
+
+/** A copied key's value, as a template and a snapshot write it: the primary key the service lists. */
+const LISTED_KEY = /^\[listKeys\('([^']+)', '[^']+'\)\.primaryKey\]$/;
+
+/** Whether a vault secret's value is copied from the service COPIED names for it, one this deployment creates. */
+const isCopiedKey = (snapshot: Snapshot, secret: PredictedResource, value: unknown): boolean => {
+  const type = COPIED[secretNameOf(secret)];
+  const from = typeof value === 'string' ? LISTED_KEY.exec(value)?.[1] : undefined;
+  return type !== undefined && from !== undefined && ofType(snapshot, type).some((service) => service.id === from);
+};
+
 /** Key Vault Secrets User, by its id: reads a secret's value and nothing else (Microsoft's built-in role). */
 const VAULT_READER_ROLE = '4633458b-17de-408a-b874-0445c86b69e6';
 
@@ -797,8 +817,9 @@ const isOwnKeyMember = (secret: PredictedResource, value: unknown): boolean =>
  * any property whose name ends in "password" or "secret" (a switch named after
  * one, like `passwordAuth`, doesn't), a key vault secret's value, and the value
  * of every entry in a `secrets` list (Container Apps' own secrets). One of the
- * app's keys holds its own member of the parameter they arrive in, and a job
- * holds what `HELD` gives it, which is no secret, as written there.
+ * app's keys holds its own member of the parameter they arrive in, a copied
+ * key what its service lists (`COPIED`), and a job holds what `HELD` gives
+ * it, which is no secret, as written there.
  */
 const noSecretLiterals: Check = (snapshot, _expected, add) => {
   const refuse = (resource: PredictedResource, where: string): void => {
@@ -831,7 +852,12 @@ const noSecretLiterals: Check = (snapshot, _expected, add) => {
   };
   for (const resource of snapshot.predictedResources) {
     const value = at(resource.properties, 'value');
-    if (resource.type === TYPES.vaultSecret && literal(value) && !isOwnKeyMember(resource, value)) {
+    if (
+      resource.type === TYPES.vaultSecret &&
+      literal(value) &&
+      !isOwnKeyMember(resource, value) &&
+      !isCopiedKey(snapshot, resource, value)
+    ) {
       refuse(resource, 'value');
     }
     walk(resource, resource.properties, '');
@@ -895,13 +921,20 @@ export function templateProblems(file: string, template: unknown): Problem[] {
     const value = at(resource, 'properties', 'value');
     const expression = typeof value === 'string' ? /^\[(.+)\]$/.exec(value)?.[1] : undefined;
     const whenGiven = expression !== undefined && condition === `[not(empty(${expression}))]`;
+    // A copied key, written on every run from what its service lists: `vault-secrets` holds which service.
+    const copied = !once && condition === undefined && typeof value === 'string' && LISTED_KEY.test(value);
     const problem = (message: string): Problem[] => [{ rule: 'vault-secrets', resource: `${file}: ${name}`, message }];
+    if (once && typeof value === 'string' && LISTED_KEY.test(value)) {
+      return problem(
+        "is copied from its service only if it doesn't exist: a copied key is written on every run, so a key rotated in Azure reaches the vault",
+      );
+    }
     if (once && condition !== undefined) {
       return problem(
         "is written on a condition and only if it doesn't exist: a secret that rotates takes the condition alone, one created once (the master key, the app's keys) @onlyIfNotExists() alone",
       );
     }
-    if (!once && !whenGiven) {
+    if (!once && !whenGiven && !copied) {
       return problem(
         condition === undefined
           ? 'is written on every run: write it only when its value is given (if (!empty(value))), or create it once (@onlyIfNotExists())'
@@ -1720,7 +1753,8 @@ const WRITTEN_WHEN_GIVEN = /^\[not\(empty\(parameters\('([^']+)'\)\)\)\]$/;
  * a run that rotates one secret leaves the rest as they are. Zitadel's master
  * key has no such condition, since it is created once: a snapshot drops the
  * option that does that, so `templateProblems` reads it from the compiled
- * template. A value written into the code is `no-secret-literals`'s to refuse.
+ * template. A copied key (`COPIED`) is written on every run, from its
+ * service. A value written into the code is `no-secret-literals`'s to refuse.
  */
 const vaultSecrets: Check = (snapshot, _expected, add) => {
   const vaults = new Set(ofType(snapshot, TYPES.vault).map((vault) => vault.id));
@@ -1739,6 +1773,12 @@ const vaultSecrets: Check = (snapshot, _expected, add) => {
     if (CREATED_ONCE.has(name)) {
       if (secret.condition !== undefined) {
         problem('is created once (@onlyIfNotExists()), never on a condition a later run could meet');
+      }
+    } else if (COPIED[name] !== undefined) {
+      if (secret.condition !== undefined || !isCopiedKey(snapshot, secret, at(secret.properties, 'value'))) {
+        problem(
+          `is copied on every run from the ${COPIED[name]} this deployment creates (its listKeys().primaryKey), on no condition`,
+        );
       }
     } else if (condition === undefined || (value !== undefined && value !== condition)) {
       problem(

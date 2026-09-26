@@ -311,6 +311,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'loginClientPrivateKey',
       'loginClientPublicKey',
       'apiOidcClientSecret',
+      'directoryToken',
       'appKeyValues',
     ]);
     for (const [environment, { together }] of deployed) {
@@ -409,11 +410,13 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     ]);
   });
 
-  it("writes the secrets, each only when given but the master key and the app's keys, and lets each app and job read its own", () => {
+  it("writes the secrets, each only when given but the master key and the app's keys, and the email key copied, and lets each app and job read its own", () => {
     const part = stagingPart('staging.secrets.bicepparam').predictedResources;
+    const copied = (resource: PredictedResource): boolean =>
+      String(at(resource.properties, 'value')).startsWith('[listKeys(');
     const label = (resource: PredictedResource): string =>
       SECRETS(resource)
-        ? `${resource.id.slice(resource.id.lastIndexOf('/') + 1)} ${resource.condition ?? 'once'}`
+        ? `${resource.id.slice(resource.id.lastIndexOf('/') + 1)} ${resource.condition ?? (copied(resource) ? 'copied' : 'once')}`
         : String(at(resource.properties, 'description'));
     const givenOnly = (parameter: string): string => `[not(empty(parameters('${parameter}')))]`;
     expect(part.map(label)).toEqual([
@@ -426,7 +429,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `login-client-private-key ${givenOnly('loginClientPrivateKey')}`,
       `login-client-public-key ${givenOnly('loginClientPublicKey')}`,
       `api-oidc-client-secret ${givenOnly('apiOidcClientSecret')}`,
+      `zitadel-directory-token ${givenOnly('directoryToken')}`,
       'zitadel-masterkey once',
+      // B5-3: on every run, from the email service this deployment creates.
+      'acs-access-key copied',
       ...APP_KEYS.map((key) => `${key} once`),
       ...[
         'db-setup reads db-admin-password',
@@ -444,8 +450,10 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'login reads login-client-private-key',
         'zitadel reads login-client-public-key',
         'api reads api-oidc-client-secret',
+        'api reads zitadel-directory-token',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
+        'api reads acs-access-key',
         // The operator's command reads the audit chains' MAC too (B1c), and the field encryption (B4-6b), each version.
         ...APP_KEYS.flatMap((key) =>
           key.startsWith('key-audit-mac-v') || key.startsWith('key-field-encryption-v')
@@ -459,7 +467,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(11);
+    expect(variables).toHaveLength(12);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
@@ -468,7 +476,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(10 + APP_KEYS.length);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(12 + APP_KEYS.length);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.
@@ -1966,6 +1974,43 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]);
   });
 
+  it('SEC-OPS-11 vault-secrets, B5-3: the email key copied on a condition, from another service, or written in the code; a copy standing in for another secret', () => {
+    const COPIED_KEY = SECRET('acs-access-key');
+    const listed = String(at(staging.predictedResources.find(COPIED_KEY)?.properties, 'value'));
+    const service = String(staging.predictedResources.find(COMMUNICATION)?.id);
+    // As staging has it: the primary key of the service this deployment creates.
+    expect(listed).toBe(`[listKeys('${service}', '2026-03-18').primaryKey]`);
+    const value = (to: string) => (secret: Mutable) => (inside(secret, 'properties').value = to);
+    // Only when a condition holds: a rotation run could leave the old key while the API reads the new.
+    expect(
+      brokenRules(changed(COPIED_KEY, (secret) => (secret.condition = "[not(empty(parameters('directoryToken')))]"))),
+    ).toEqual(['vault-secrets']);
+    // From a service abroad or no service of ours, from our email service by another name, or the key written down.
+    for (const change of [
+      value(listed.replace('/resourceGroups/rg-agentx-staging/', '/resourceGroups/rg-elsewhere/')),
+      value(listed.replace('/communicationServices/acs-agentx-stg-', '/communicationServices/acs-other-')),
+      value(listed.replace(service, String(staging.predictedResources.find(EMAIL_SERVICE)?.id))),
+      value('written in the code'),
+    ]) {
+      expect(brokenRules(changed(COPIED_KEY, change))).toEqual(['no-secret-literals', 'vault-secrets']);
+    }
+    // The secondary key, or any other property of the list: still copied from our service, but not the one named.
+    expect(brokenRules(changed(COPIED_KEY, value(listed.replace('.primaryKey]', '.secondaryKey]'))))).toEqual([
+      'no-secret-literals',
+      'vault-secrets',
+    ]);
+    // A copy of the email key standing in for another secret: a value that isn't its own, whatever its condition.
+    expect(brokenRules(changed(SECRET('db-app-password'), value(listed)))).toEqual(['no-secret-literals']);
+    expect(
+      brokenRules(
+        changed(SECRET('db-app-password'), (secret) => {
+          value(listed)(secret);
+          delete secret.condition;
+        }),
+      ),
+    ).toEqual(['no-secret-literals', 'vault-secrets']);
+  });
+
   it('SEC-OPS-11 vault-secrets in a compiled template: a secret written on every run, on another condition, or both on a condition and once', () => {
     const master = "@onlyIfNotExists()\nresource created 'Microsoft.KeyVault/vaults/secrets@2025-05-01' = {";
     for (const [from, to] of [
@@ -2026,6 +2071,16 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
     for (const value of ['p', "x[parameters('p')]", "[parameters('p')]x"]) {
       expect(templateProblems('t.bicep', { resources: [{ ...given, properties: { value } }] })).toHaveLength(1);
+    }
+    // B5-3: a key copied from a service on every run, on no condition; `vault-secrets` holds which service.
+    const copied = { ...secret, properties: { value: "[listKeys('communication', '2026-03-18').primaryKey]" } };
+    expect(templateProblems('t.bicep', { resources: [copied] })).toEqual([]);
+    expect(templateProblems('t.bicep', { resources: [{ ...copied, condition: '[true()]' }] })).toHaveLength(1);
+    expect(
+      templateProblems('t.bicep', { resources: [{ ...copied, '@options': { onlyIfNotExists: [] } }] }),
+    ).toHaveLength(1);
+    for (const value of ["[listKeys('communication', '2026-03-18')]", "x[listKeys('c', 'v').primaryKey]"]) {
+      expect(templateProblems('t.bicep', { resources: [{ ...copied, properties: { value } }] })).toHaveLength(1);
     }
   });
 
