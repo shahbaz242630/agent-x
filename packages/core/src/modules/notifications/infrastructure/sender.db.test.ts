@@ -204,15 +204,15 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(JSON.stringify(lines)).not.toMatch(/@example\.test|socket hang up/);
   });
 
-  it("names a notifier's failure it can't keep as send_failed, never in the provider's words", async () => {
-    const { service } = notifier(() => ({
-      outcome: 'failed',
-      failure: 'Mailbox full: admin@example.test',
-      lasting: false,
-    }));
+  it.each([
+    ["in the provider's own words", 'Mailbox full: admin@example.test'],
+    ["by the outbox's own reason for a lease run out (review)", 'lease_expired'],
+  ])("names a notifier's failure given %s as send_failed, and still sends the next", async (_how, failure) => {
+    const { sent, service } = notifier(() => ({ outcome: 'failed', failure, lasting: false }));
 
     await sender(service).run.run();
 
+    expect(sent).toHaveLength(2);
     expect((await rows()).map(({ last_failure }) => last_failure)).toEqual(['send_failed', 'send_failed']);
   });
 

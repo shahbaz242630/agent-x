@@ -12,8 +12,9 @@
 //   an address book that can't be reached leaves it to be tried again
 //   (`address_unavailable`).
 // - Anything else thrown by the notifier, or a failure it names in anything
-//   but a short constant, is counted as a failed try (`send_error`,
-//   `send_failed`), never lost: the next notice is still sent.
+//   but a short constant, or by the outbox's own LEASE_EXPIRED, is counted as
+//   a failed try (`send_error`, `send_failed`), never lost: the next notice
+//   is still sent (review).
 // - A run stops between notices once its signal is aborted; a notice it had
 //   claimed and not reached is taken again once its lease runs out.
 //
@@ -24,7 +25,7 @@ import type { Kysely } from 'kysely';
 
 import { messageFor, type NoticeMessage } from '../domain/messages.ts';
 import type { ClaimedNotice } from '../domain/notice.ts';
-import type { Outbox } from './outbox.ts';
+import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
 
 /** How a send went, as the notifier tells it. */
@@ -134,7 +135,8 @@ export function createNoticeSender({
       return;
     }
     if (sent.outcome === 'failed') {
-      await failed(notice, FAILURE.test(sent.failure) ? sent.failure : 'send_failed', sent.lasting);
+      const keptAs = FAILURE.test(sent.failure) && sent.failure !== LEASE_EXPIRED ? sent.failure : 'send_failed';
+      await failed(notice, keptAs, sent.lasting);
       return;
     }
     await outbox.sent(db, notice.id);
