@@ -935,7 +935,7 @@ export function createSignedStates({
           ...stepUp,
         },
       });
-      return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId.toLowerCase() });
+      return Object.freeze({ outcome: 'cleared', version: recorded.version, eventId: recorded.eventId });
     },
 
     async hold(tx: AuditTransaction, finding: TamperFinding, findings: number): Promise<'set' | 'already'> {
