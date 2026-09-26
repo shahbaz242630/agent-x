@@ -110,10 +110,13 @@ const IBAN = /(?<![0-9])[A-Z]{2}\d{2}(?:(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,4})?
 /**
  * An IBAN in any case, grouped with spaces, non-breaking spaces or dashes. Hex
  * hashes look like this in lower case, so it's hidden only when its check
- * digits are right (ISO 13616: the number mod 97 is 1).
+ * digits are right (ISO 13616: the number mod 97 is 1). It never starts right
+ * after four hex digits and a dash, the inside of an ID such as a UUID: about
+ * one UUID in a few hundred has a group like `aa97-74f9-a825` whose check
+ * digits happen to be right (S54, a random ID in a test's log line).
  */
 const IBAN_ANY_CASE =
-  /(?<![A-Za-z0-9])[A-Za-z]{2}\d{2}(?:(?:[ \u00A0-][A-Za-z0-9]{4}){2,7}(?:[ \u00A0-][A-Za-z0-9]{1,4})?|[A-Za-z0-9]{11,30})(?![A-Za-z0-9])/g;
+  /(?<![A-Za-z0-9])(?<![0-9A-Fa-f]{4}-)[A-Za-z]{2}\d{2}(?:(?:[ \u00A0-][A-Za-z0-9]{4}){2,7}(?:[ \u00A0-][A-Za-z0-9]{1,4})?|[A-Za-z0-9]{11,30})(?![A-Za-z0-9])/g;
 
 /** An Emirates ID: 784, then the birth year, seven digits and a check digit, dashed or not. */
 const EMIRATES_ID = /(?<![0-9])784[- ]?\d{4}[- ]?\d{7}[- ]?\d(?![0-9])/g;
@@ -158,6 +161,13 @@ const IPV4_CANDIDATE = /(?<!\d|\d\.)\d{1,3}(?:\.\d{1,3}){3}(?!\d|\.\d)/g;
  * token in a query, is cleaned as usual.
  */
 const WHOLE_HASH = /^(?:sha256:)?[0-9a-f]{64}$/;
+
+/**
+ * A UUID on its own, as the app logs every ID, in either case: it holds no
+ * personal detail, and one starting `00` looks like an international phone
+ * number in part (S54). Only a whole value is let through, as a hash is.
+ */
+const WHOLE_UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 
 function trailingPunctuation(text: string): number {
   let length = 0;
@@ -266,7 +276,7 @@ function cleanIpv4(candidate: string): string {
 
 /** Returns the text with every secret, personal detail and payment detail replaced by a label. */
 export function scrub(text: string): string {
-  if (WHOLE_HASH.test(text)) return text;
+  if (WHOLE_HASH.test(text) || WHOLE_UUID.test(text)) return text;
   return (
     text
       // URLs first: their credentials and whole query go, before anything else changes their text.

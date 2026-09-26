@@ -199,6 +199,8 @@ describe('scrub: ordinary log text is left alone', () => {
     ['a time of day', '10:15:30'],
     ['a UUIDv7', '01920000-0000-7000-8000-000000000001'],
     ['an uppercase UUID', '0192A1B2-C3D4-7E5F-8A9B-0C1D2E3F4A5B'],
+    ['a UUID with an IBAN-shaped group whose check digits are right', '01a0ddb2-aa97-74f9-a825-d554be9c16c3'],
+    ['the same UUID in capitals', '01A0DDB2-AA97-74F9-A825-D554BE9C16C3'],
     ['a config hash', `sha256:${'ab12'.repeat(16)}`],
     ['a short lowercase hex value', 'ab12cd34ef56ab78cd90ef12ab34cd56'],
     ['a reason code', 'DUPLICATE_ORDER_REFERENCE'],
@@ -289,6 +291,19 @@ describe('scrub: properties that hold for any text', () => {
         expect(findLeaks(cleaned)).toEqual([]);
       }),
       RUNS,
+    );
+  });
+
+  it('leaves any UUID as it is, in either case, whole or in a sentence', () => {
+    fc.assert(
+      fc.property(fc.uuid(), (id) => {
+        expect(scrub(id)).toBe(id);
+        expect(scrub(id.toUpperCase())).toBe(id.toUpperCase());
+        // In a sentence, one starting `00` is hidden as a phone number, the safe way to be wrong;
+        // ours are UUIDv7s, whose time can't start `00` after 2004.
+        if (!id.startsWith('00')) expect(scrub(`invitation ${id} accepted`)).toBe(`invitation ${id} accepted`);
+      }),
+      { ...RUNS, numRuns: 5000 },
     );
   });
 
