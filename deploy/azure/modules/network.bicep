@@ -253,6 +253,25 @@ resource appsRules 'Microsoft.Network/networkSecurityGroups@2025-01-01' = {
         }
       }
       {
+        // Communication Services has no service tag of its own and no private
+        // link for email: its endpoint answers behind Azure Front Door
+        // (`azurecommunicationservice.azurefd.net`, checked S54). The tag is
+        // broad, every Front Door site, so the API's own list of the exact
+        // origins it may call (AGENTX_OUTBOUND_ALLOWED_ORIGINS) is the real limit.
+        name: 'allow-out-communication'
+        properties: {
+          description: 'Azure Communication Services, which sends the admins\' notices by email (B5): its endpoint sits behind Front Door.'
+          priority: 300
+          direction: 'Outbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: appsPrefix
+          sourcePortRange: '*'
+          destinationAddressPrefix: 'AzureFrontDoor.Frontend'
+          destinationPortRange: '443'
+        }
+      }
+      {
         name: 'deny-out-rest'
         properties: {
           description: 'Overrides Azure\'s default rules that let the subnet reach the whole internet: nothing leaves but what is allowed above.'

@@ -178,6 +178,9 @@ const ERRORS_ALERT = named(/-app-errors$/);
 const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
+const COMMUNICATION = type('Microsoft.Communication/communicationServices');
+const EMAIL_SERVICE = type('Microsoft.Communication/emailServices');
+const EMAIL_DOMAIN = type('Microsoft.Communication/emailServices/domains');
 const ALERTS = type('Microsoft.Insights/scheduledQueryRules');
 const LOGIN_ALERT = named(/-privileged-login$/);
 const OWNER_ALERT = named(/-owner-login$/);
@@ -393,6 +396,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-audit-integrity',
+      expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
+      expect.stringMatching(
+        /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
+      ),
+      expect.stringMatching(/^Microsoft\.Communication\/communicationServices acs-agentx-stg-[a-z0-9]{6}$/),
       'Microsoft.ManagedIdentity/userAssignedIdentities id-agentx-stg-release',
       'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials id-agentx-stg-release/github',
       expect.stringMatching(
@@ -556,6 +564,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
   it('in-country: a resource outside the region, or a global-only type pinned to one', () => {
     expect(brokenRules(changed(VAULT, (vault) => (vault.location = 'westeurope')))).toEqual(['in-country']);
     expect(brokenRules(changed(ACTION_GROUP, (group) => (group.location = 'uaenorth')))).toEqual(['in-country']);
+    // Email's three are global too; their data location is rule `email`'s.
+    for (const pick of [COMMUNICATION, EMAIL_SERVICE, EMAIL_DOMAIN]) {
+      expect(brokenRules(changed(pick, (resource) => (resource.location = 'uaenorth')))).toEqual(['in-country']);
+    }
     expect(brokenRules(staging, { region: 'westeurope', environment: 'staging' })).toEqual(['in-country']);
   });
 
@@ -1179,6 +1191,40 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(without(BUDGET))).toEqual(['budget']);
   });
 
+  it("email: data kept outside the UAE or not said, opens and clicks tracked, or a domain that isn't ours", () => {
+    const properties = (resource: Mutable): Mutable => inside(resource, 'properties');
+    for (const [pick, change] of [
+      // Another geography, another spelling of the UAE, or none said, on either resource.
+      [COMMUNICATION, (service: Mutable) => (properties(service).dataLocation = 'Europe')],
+      [COMMUNICATION, (service: Mutable) => (properties(service).dataLocation = 'United Arab Emirates')],
+      [COMMUNICATION, (service: Mutable) => delete properties(service).dataLocation],
+      [EMAIL_SERVICE, (service: Mutable) => (properties(service).dataLocation = 'United States')],
+      [EMAIL_SERVICE, (service: Mutable) => delete properties(service).dataLocation],
+      // Opens and clicks tracked, or tracking not said, which leaves it to Azure.
+      [EMAIL_DOMAIN, (domain: Mutable) => (properties(domain).userEngagementTracking = 'Enabled')],
+      [EMAIL_DOMAIN, (domain: Mutable) => delete properties(domain).userEngagementTracking],
+      // Sending from a domain another deployment holds, beside ours or instead.
+      [
+        COMMUNICATION,
+        (service: Mutable) =>
+          (properties(service).linkedDomains = [
+            ...(properties(service).linkedDomains as string[]),
+            '/subscriptions/x/resourceGroups/y/providers/Microsoft.Communication/emailServices/e/domains/AzureManagedDomain',
+          ]),
+      ],
+      [COMMUNICATION, (service: Mutable) => (properties(service).linkedDomains = ['elsewhere'])],
+    ] as const) {
+      expect(brokenRules(changed(pick, change))).toEqual(['email']);
+    }
+    // The service linked to the domain this deployment creates, which the rule compares by id.
+    const domain = staging.predictedResources.find(EMAIL_DOMAIN);
+    expect(at(staging.predictedResources.find(COMMUNICATION)?.properties, 'linkedDomains')).toEqual([domain?.id]);
+    // Without the domain, the service's link points at nothing of ours.
+    expect(brokenRules(without(EMAIL_DOMAIN))).toEqual(['email']);
+    // A service linked to no domain sends nothing, so breaks nothing.
+    expect(brokenRules(changed(COMMUNICATION, (service) => (properties(service).linkedDomains = [])))).toEqual([]);
+  });
+
   it('apps-environment: another subnet, a dedicated profile, traffic unencrypted, or logs sent with a key or not at all', () => {
     const properties = (environment: Mutable): Mutable => inside(environment, 'properties');
     const network = staging.predictedResources.find(NETWORK);
@@ -1336,6 +1382,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (group: Mutable) => {
         dropRule(group, 'allow-out-github-downloads');
       },
+      (group: Mutable) => {
+        dropRule(group, 'allow-out-communication');
+      },
+      // Email's door widened to every Azure address, or to the whole of Front Door's.
+      (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureCloud'),
+      (group: Mutable) => (out(group, 'communication').destinationAddressPrefix = 'AzureFrontDoor'),
+      (group: Mutable) => (out(group, 'communication').destinationPortRange = '*'),
       // GitHub's ranges drifting from github-ranges.json, either way.
       (group: Mutable) => prefixes(group, 'github-registry').push('203.0.113.7/32'),
       (group: Mutable) => prefixes(group, 'github-registry').pop(),
