@@ -136,6 +136,11 @@ const readInvestigation = (id: string) => inOrg((tx, states) => states.holdInves
 /** The IDs of every investigation event in the organisation's log. */
 const investigationEvents = () => withTenant(app, org, (tx) => trail.subjectIds(tx, org, 'hold_investigation', 100));
 
+/** Stand-ins that match any value of their type, typed as it, for comparing whole objects. */
+const A_DATE = expect.any(Date) as Date;
+const A_STRING = expect.any(String) as string;
+const A_BIGINT = expect.any(BigInt) as bigint;
+
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
 
 beforeAll(async () => {
@@ -171,7 +176,7 @@ describe(`the hold for showing (holdRecord, Postgres ${server.version})`, () => 
   it('reads a new organisation CLEAR, since its hold started', async () => {
     const shown = await holdRecord();
 
-    expect(shown).toEqual({ outcome: 'clear', version: 1, since: expect.any(Date) });
+    expect(shown).toEqual({ outcome: 'clear', version: 1, since: A_DATE });
     expect(alarms()).toEqual([]);
   });
 
@@ -183,7 +188,7 @@ describe(`the hold for showing (holdRecord, Postgres ${server.version})`, () => 
       outcome: 'held',
       version: 2,
       eventId: held.outcome === 'held' ? held.eventId : 'not held',
-      since: expect.any(Date),
+      since: A_DATE,
       reason: 'seal',
       foundOn: 'agent',
     });
@@ -197,7 +202,7 @@ describe(`the hold for showing (holdRecord, Postgres ${server.version})`, () => 
     // Raised by the read, and again by the hold set for it once the read's transaction ended.
     expect(alarms().length).toBeGreaterThan(0);
     expect(alarms()).toEqual(
-      alarms().map(() => expect.objectContaining({ subjectType: 'integrity_hold', objectId: org })),
+      alarms().map((): unknown => expect.objectContaining({ subjectType: 'integrity_hold', objectId: org })),
     );
   });
 
@@ -229,7 +234,7 @@ describe(`an investigation of the hold (recordInvestigation and holdInvestigatio
       conclusion: 'NO_TAMPERING',
       reference: 'ticket_7.b-X',
       recordedBy: ADMIN.id,
-      recordedAt: expect.any(Date),
+      recordedAt: A_DATE,
     };
     expect(recorded).toEqual({ outcome: 'recorded', investigation });
     expect(await readInvestigation(id)).toEqual({
@@ -419,14 +424,18 @@ describe(`one event by its ID (recordedEvent, Postgres ${server.version})`, () =
       ),
     ).toEqual({
       kind: 'recorded',
-      id: expect.any(String),
-      seq: expect.any(BigInt),
-      recordedAt: expect.any(Date),
+      id: A_STRING,
+      seq: A_BIGINT,
+      recordedAt: A_DATE,
       event: {
         actor: ADMIN,
         action: 'integrity_hold.investigated',
         subject: { type: 'hold_investigation', id, version: 1 },
-        details: expect.objectContaining({ conclusion: 'CAUSE_REMOVED', reference: 'INC-9', holdVersion: 2 }),
+        details: expect.objectContaining({
+          conclusion: 'CAUSE_REMOVED',
+          reference: 'INC-9',
+          holdVersion: 2,
+        }) as Record<string, unknown>,
       },
     });
   });

@@ -114,7 +114,7 @@ export type LatestSignedState =
   | { readonly kind: 'broken'; readonly seq?: bigint };
 
 /** An event to find: by its own ID, or as the one event about an object recorded once. */
-export type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
+type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
 
 /**
  * One event, found by its ID or its object (recordedEvent):
