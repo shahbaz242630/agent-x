@@ -13,8 +13,12 @@ export const isNoticeRole = (value: unknown): value is NoticeRole => NOTICE_ROLE
 /** A notice to one person, as the change writes it. */
 export interface Notice {
   readonly orgId: string;
-  /** The person to tell, by their user ID; the sender finds their address. */
-  readonly recipientUserId: string;
+  /**
+   * The person to tell, by their user ID; the sender finds their address.
+   * Null: the organisation's active admins but the member the notice is about,
+   * found as it is sent (`fanOut`).
+   */
+  readonly recipientUserId: string | null;
   readonly kind: NoticeKind;
   /** The membership the notice is about. */
   readonly membershipId: string;

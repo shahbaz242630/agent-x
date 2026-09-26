@@ -6,7 +6,7 @@ export interface NotificationsTables {
 interface OutboxTable {
   id: string;
   org_id: string;
-  recipient_user_id: string;
+  recipient_user_id: string | null;
   kind: string;
   membership_id: string;
   role: string;

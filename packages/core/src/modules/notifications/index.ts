@@ -3,6 +3,7 @@
 // sent by the API's sender. B5-1a holds the table and the outbox store.
 export {
   type ClaimedNotice,
+  isNoticeKind,
   isNoticeRole,
   type Notice,
   NOTICE_KINDS,

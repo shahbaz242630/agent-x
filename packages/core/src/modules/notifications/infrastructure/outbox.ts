@@ -13,8 +13,12 @@
 //   same notice (`SKIP LOCKED`). A notice whose last try's lease ran out is
 //   given up (`lease_expired`) rather than taken again, so one that brings its
 //   sender down every time is still tried MOST_ATTEMPTS times at most
-//   (review). A notice may so be sent twice after a crash; the provider is
-//   given its ID to tell (B5-3).
+//   (review). A last try merely slow past its lease can so be given up while
+//   it sends; `sent` still marks it sent (confirmation review). A notice may
+//   be sent twice after a crash; the provider is given its ID to tell (B5-3).
+// - `fanOut` turns a notice to the organisation's admins (no recipient) into
+//   one notice to each admin the sender found, and marks the first sent, in
+//   one transaction: done once, and never a second set of notices.
 // - `sent` marks a notice sent; `failed` records why a try failed and sets the
 //   next one further off each time, or gives the notice up after its
 //   MOST_ATTEMPTS-th try, or at once for a failure no retry can mend. Neither
@@ -49,7 +53,17 @@ export interface Outbox {
   add(tx: Transaction<NotificationsTables>, notices: readonly Notice[]): Promise<void>;
   /** Starts a try of up to `most` due notices, soonest due first, each held for the lease; gives up any whose last try's lease ran out. */
   claimDue(db: Kysely<NotificationsTables>, most: number): Promise<ClaimedNotice[]>;
-  /** Marks the notice sent; false if it was already sent or given up. */
+  /**
+   * Turns a notice to the organisation's admins into one notice to each of
+   * `recipients`, due at once, and marks it sent. Says how many it wrote; 0 if
+   * the notice is not one to the admins, or is already done.
+   */
+  fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number>;
+  /**
+   * Marks the notice sent; false if it was already sent or given up. A notice
+   * given up because its last try's lease ran out is marked sent all the
+   * same: that try was only slow.
+   */
   sent(db: Kysely<NotificationsTables>, id: string): Promise<boolean>;
   /**
    * Records why the notice's try failed, `failure` a short constant: the next
@@ -76,7 +90,7 @@ const isId = (value: unknown): value is string => typeof value === 'string' && U
 /** Why a notice can't be written, if it can't. */
 function problemWith(notice: Notice): string | undefined {
   if (!isId(notice.orgId)) return 'its organisation is not a UUID';
-  if (!isId(notice.recipientUserId)) return 'its recipient is not a UUID';
+  if (notice.recipientUserId !== null && !isId(notice.recipientUserId)) return 'its recipient is not a UUID';
   if (!isNoticeKind(notice.kind)) return 'its kind is not one we send';
   if (!isId(notice.membershipId)) return 'its membership is not a UUID';
   if (!isNoticeRole(notice.role)) return 'its role is not one of the four';
@@ -117,7 +131,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
           notices.map((notice) => ({
             id: ids.next(),
             org_id: notice.orgId.toLowerCase(),
-            recipient_user_id: notice.recipientUserId.toLowerCase(),
+            recipient_user_id: notice.recipientUserId?.toLowerCase() ?? null,
             kind: notice.kind,
             membership_id: notice.membershipId.toLowerCase(),
             role: notice.role,
@@ -184,16 +198,55 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
       });
     },
 
+    async fanOut(db, id, recipients) {
+      if (!recipients.every(isId)) throw new RangeError("a notice's recipient is not a UUID");
+      if (!isId(id)) return 0;
+      const now = clock.now();
+      return limited(db, async (tx) => {
+        const notice = await tx
+          .selectFrom('notifications.outbox')
+          .select(['org_id', 'kind', 'membership_id', 'role'])
+          .where('id', '=', id)
+          .where('recipient_user_id', 'is', null)
+          .where('sent_at', 'is', null)
+          .where('given_up_at', 'is', null)
+          .forUpdate()
+          .executeTakeFirst();
+        if (notice === undefined) return 0;
+        const unique = [...new Set(recipients.map((recipient) => recipient.toLowerCase()))];
+        if (unique.length > 0) {
+          await tx
+            .insertInto('notifications.outbox')
+            .values(
+              unique.map((recipient) => ({
+                id: ids.next(),
+                org_id: notice.org_id,
+                recipient_user_id: recipient,
+                kind: notice.kind,
+                membership_id: notice.membership_id,
+                role: notice.role,
+                created_at: now,
+                attempts: 0,
+                next_attempt_at: now,
+              })),
+            )
+            .execute();
+        }
+        await tx.updateTable('notifications.outbox').set({ sent_at: now }).where('id', '=', id).execute();
+        return unique.length;
+      });
+    },
+
     async sent(db, id) {
       if (!isId(id)) return false;
       const now = clock.now();
       return limited(db, async (tx) => {
         const row = await tx
           .updateTable('notifications.outbox')
-          .set({ sent_at: now })
+          .set({ sent_at: now, given_up_at: null })
           .where('id', '=', id)
           .where('sent_at', 'is', null)
-          .where('given_up_at', 'is', null)
+          .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', 'lease_expired')]))
           .returning('id')
           .executeTakeFirst();
         return row !== undefined;

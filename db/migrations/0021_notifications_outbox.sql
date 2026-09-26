@@ -10,6 +10,14 @@
 -- in which organisation, what kind of notice, and about which membership and
 -- role. Never an address, a name or free text.
 --
+-- A notice with no recipient is to the organisation's admins: the change
+-- that writes it reads no one (an authority table is read only through its
+-- signed state, and verifying every admin inside the change would take locks
+-- two changes at once could each wait on for the other). The sender finds
+-- the active admins, but the member the notice is about, through their
+-- signed states in a transaction of its own, writes a notice to each, and
+-- marks the first sent, in one transaction (B5-1a review).
+--
 -- A global table, on the CI-06 list (ADR-005 §8 names the job queue as one):
 -- the sender works across every organisation. The app adds notices, reads
 -- them, moves a notice's tries on and marks it sent or given up, and deletes
@@ -22,7 +30,8 @@ GRANT USAGE ON SCHEMA notifications TO agentx_app, agentx_backup;
 CREATE TABLE notifications.outbox (
   id uuid PRIMARY KEY,
   org_id uuid NOT NULL REFERENCES directory.orgs (org_id),
-  recipient_user_id uuid NOT NULL REFERENCES identity.users (id),
+  -- Null: the organisation's admins, found as it is sent.
+  recipient_user_id uuid REFERENCES identity.users (id),
   kind text NOT NULL CHECK (kind IN ('role_granted', 'member_rejoined')),
   -- The membership the notice is about, and the role it holds now.
   membership_id uuid NOT NULL,

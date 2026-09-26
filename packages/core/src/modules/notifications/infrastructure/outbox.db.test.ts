@@ -3,8 +3,8 @@
 // it, refused whole when anything is malformed; taken when due, soonest
 // first, each try counted, held for the lease and never by two senders at
 // once; marked sent, or tried again further off each time and given up,
-// also when the last try's lease runs out; swept once done and past the
-// retention.
+// also when the last try's lease runs out; a notice to the admins turned
+// into one to each, once; swept once done and past the retention.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
@@ -230,6 +230,43 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it('still marks sent a last try only slow past its lease, given up meanwhile (confirmation review)', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    let last = '';
+    for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
+      const [claimed] = await outbox.claimDue(app, 1);
+      last = claimed?.id ?? '';
+      clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+    }
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+    expect(await rows()).toMatchObject([{ last_failure: 'lease_expired' }]);
+
+    // The slow sender's send lands after all.
+    expect(await outbox.sent(app, last)).toBe(true);
+    expect(await rows()).toMatchObject([{ sent_at: clock.now(), given_up_at: null }]);
+    expect(await outbox.sent(app, last)).toBe(false);
+  });
+
+  it('gives a notice up after its last try, however its tries ended: failed, or its sender gone', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
+      const [claimed] = await outbox.claimDue(app, 1);
+      if (claimed === undefined) throw new Error(`nothing due at try ${String(tries + 1)}`);
+      if (tries % 2 === 0) {
+        await outbox.failed(app, claimed.id, 'provider_unavailable', false);
+        const [row] = await rows();
+        if (row?.given_up_at === null) clock.set(row.next_attempt_at);
+      } else {
+        clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+      }
+    }
+
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+    const [row] = await rows();
+    expect(row?.attempts).toBe(MOST_ATTEMPTS);
+    expect(row?.given_up_at).not.toBeNull();
+  });
+
   it('gives a notice up at once for a failure no retry can mend', async () => {
     await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
@@ -253,6 +290,65 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     await expect(outbox.failed(app, MEMBERSHIP, 'Mailbox full: someone@example.test', false)).rejects.toThrow(
       RangeError,
     );
+  });
+
+  it('writes a notice to the admins with no recipient, and turns it into one to each admin found, once', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    const [claimed] = await outbox.claimDue(app, 1);
+    if (claimed === undefined) throw new Error('nothing claimed');
+    expect(claimed.recipientUserId).toBeNull();
+
+    clock.set(new Date(START.getTime() + MINUTE));
+    expect(await outbox.fanOut(app, claimed.id, [ADMIN, OTHER_ADMIN.toUpperCase(), ADMIN])).toBe(2);
+    expect(await outbox.fanOut(app, claimed.id, [ADMIN])).toBe(0);
+
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: null, sent_at: new Date(START.getTime() + MINUTE), attempts: 1 },
+      ...[ADMIN, OTHER_ADMIN].map((recipient) => ({
+        org_id: ORG,
+        recipient_user_id: recipient,
+        kind: 'role_granted',
+        membership_id: MEMBERSHIP,
+        role: 'admin',
+        attempts: 0,
+        next_attempt_at: new Date(START.getTime() + MINUTE),
+        sent_at: null,
+      })),
+    ]);
+    expect((await outbox.claimDue(app, 10)).map(({ recipientUserId }) => recipientUserId).sort()).toEqual([
+      ADMIN,
+      OTHER_ADMIN,
+    ]);
+  });
+
+  it('marks a notice to the admins sent when no admin is found, writing none', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    const [claimed] = await outbox.claimDue(app, 1);
+    if (claimed === undefined) throw new Error('nothing claimed');
+
+    expect(await outbox.fanOut(app, claimed.id, [])).toBe(0);
+    expect(await rows()).toMatchObject([{ recipient_user_id: null, sent_at: START }]);
+  });
+
+  it('turns only a notice to the admins, never one to a person, and refuses a recipient not a UUID', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: null })]));
+    const [toPerson, toAdmins] = await rows();
+    if (toPerson === undefined || toAdmins === undefined) throw new Error('not written');
+
+    expect(await outbox.fanOut(app, toPerson.id, [OTHER_ADMIN])).toBe(0);
+    await expect(outbox.fanOut(app, toAdmins.id, ['someone@example.test'])).rejects.toThrow(RangeError);
+    expect(await rows()).toHaveLength(2);
+  });
+
+  it('sweeps a notice given up once past the retention too', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    const [claimed] = await outbox.claimDue(app, 1);
+    if (claimed === undefined) throw new Error('nothing claimed');
+    await outbox.failed(app, claimed.id, 'no_address', true);
+
+    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY));
+    expect(await outbox.sweep(app, 10)).toBe(1);
+    expect(await rows()).toEqual([]);
   });
 
   it('sweeps notices done and past the retention, oldest first, and never one still to send', async () => {
