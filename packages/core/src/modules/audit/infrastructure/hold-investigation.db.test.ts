@@ -358,6 +358,35 @@ describe(`an investigation of the hold (recordInvestigation and holdInvestigatio
     org = mine;
   });
 
+  it('is read from the first event about it: a later one, even whole, never replaces it', async () => {
+    await putOnHold();
+    const recorded = await investigate({ conclusion: 'CAUSE_REMOVED', reference: 'INC-FIRST' });
+    const id = recorded.outcome === 'recorded' ? recorded.investigation.id : 'none';
+    const { holdVersion, holdEventId } =
+      recorded.outcome === 'recorded' ? recorded.investigation : { holdVersion: 0, holdEventId: '' };
+    await withTenant(app, org, (tx) =>
+      recordHoldEvent(trail, tx, org, {
+        actor: ADMIN,
+        action: 'integrity_hold.investigated',
+        subject: { type: 'hold_investigation', id, version: 1 },
+        details: { holdVersion, holdEventId, conclusion: 'NO_TAMPERING', reference: 'INC-SECOND' },
+      }),
+    );
+
+    expect(await readInvestigation(id)).toMatchObject({
+      outcome: 'found',
+      investigation: { conclusion: 'CAUSE_REMOVED', reference: 'INC-FIRST' },
+    });
+  });
+
+  it("belongs to no table: a table under an investigation's subject type is refused before any SQL", async () => {
+    const posing = { ...AGENTS, subject: 'hold_investigation' } as const;
+
+    await expect(
+      inOrg((tx, states) => states.verifiedState(tx, posing, { orgId: org, id: org }, 'share')),
+    ).rejects.toThrow("The subject type hold_investigation is the integrity hold's own");
+  });
+
   it('is tampered with once its event is changed past the app, with the alarm', async () => {
     await putOnHold();
     const recorded = await investigate();

@@ -366,17 +366,15 @@ const MISSING = Object.freeze({ outcome: 'missing' as const });
 const MISSING_HOLD = Object.freeze({ outcome: 'not_held' as const });
 
 /**
- * The investigation an event records, or nothing if it records none: only
- * the hold's own steps write its subject type (audit-trail.ts), so a whole
- * event under it that doesn't read as one is never believed as one.
+ * The investigation an event about one records, or nothing if its facts don't
+ * read as one. Only the hold's own steps write its subject type, always as
+ * recordInvestigation does (audit-trail.ts), and the event is believed only
+ * whole: the checks here narrow the facts' types.
  */
 function investigationIn(found: Extract<RecordedEventCheck, { kind: 'recorded' }>): HoldInvestigation | undefined {
   const { event } = found;
   const { holdVersion, holdEventId, conclusion, reference } = event.details;
   if (
-    event.subject.type !== INVESTIGATION_SUBJECT ||
-    event.action !== 'integrity_hold.investigated' ||
-    event.actor.type !== 'user' ||
     typeof holdVersion !== 'number' ||
     typeof holdEventId !== 'string' ||
     !isInvestigationConclusion(conclusion) ||
@@ -387,7 +385,7 @@ function investigationIn(found: Extract<RecordedEventCheck, { kind: 'recorded' }
   return Object.freeze({
     id: event.subject.id.toLowerCase(),
     holdVersion,
-    holdEventId: holdEventId.toLowerCase(),
+    holdEventId,
     conclusion,
     reference,
     recordedBy: event.actor.id.toLowerCase(),

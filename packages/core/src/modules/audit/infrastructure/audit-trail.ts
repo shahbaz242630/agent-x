@@ -561,12 +561,11 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     async recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck> {
       let which;
       if ('eventId' in find) {
-        if (!UUID.test(find.eventId)) throw new AuditEventRefused(['the event ID must be a UUID']);
-        which = sql`e.id = ${find.eventId.toLowerCase()}`;
+        which = sql`e.id = ${find.eventId}`;
       } else {
         const problems = subjectKeyProblems(find.onlyAbout);
         if (problems.length > 0) throw new AuditEventRefused(problems);
-        which = sql`e.subject_type = ${find.onlyAbout.type} and e.subject_id = ${find.onlyAbout.id.toLowerCase()}`;
+        which = sql`e.subject_type = ${find.onlyAbout.type} and e.subject_id = ${find.onlyAbout.id}`;
       }
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
@@ -600,7 +599,6 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         content === undefined ||
         details === undefined ||
         head === undefined ||
-        sealed.seq > head.seq ||
         !entryIsSealed(keys, chain, { ...sealed, content })
       ) {
         return typeof row.seq === 'bigint' ? { kind: 'broken', seq: row.seq } : { kind: 'broken' };
