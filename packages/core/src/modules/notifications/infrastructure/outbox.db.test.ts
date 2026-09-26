@@ -1,23 +1,18 @@
 // B5-1a: the notifications outbox (0021) on the real migrated schema, as the
 // app role: notices written in the caller's transaction and rolled back with
 // it, refused whole when anything is malformed; taken when due, soonest
-// first, held for the lease and never by two senders at once; marked sent,
-// or tried again further off each time and given up; swept once done and
-// past the retention.
+// first, each try counted, held for the lease and never by two senders at
+// once; marked sent, or tried again further off each time and given up,
+// also when the last try's lease runs out; swept once done and past the
+// retention.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import {
-  CLAIM_LEASE_MS,
-  createOutbox,
-  MOST_ATTEMPTS,
-  MOST_NOTICES_A_BATCH,
-  type Notice,
-  OUTBOX_RETENTION_DAYS,
-} from './outbox.ts';
+import { CLAIM_LEASE_MS, createOutbox, MOST_ATTEMPTS, MOST_NOTICES_A_BATCH, OUTBOX_RETENTION_DAYS } from './outbox.ts';
+import type { Notice } from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -110,6 +105,13 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       },
       { recipient_user_id: OTHER_ADMIN },
     ]);
+  });
+
+  it('takes a transaction, never the pool, so a notice is always written with its change (review)', () => {
+    const writeOutsideAChange = () =>
+      // @ts-expect-error: a pool is no transaction, so a notice can't be written apart from its change.
+      outbox.add(app, [notice()]);
+    expect(typeof writeOutsideAChange).toBe('function');
   });
 
   it('rolls a notice back with the change it tells of', async () => {
@@ -213,6 +215,21 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(await outbox.claimDue(app, 10)).toEqual([]);
   });
 
+  it("counts a try whose sender died as a try, and gives the notice up once its last try's lease runs out (review)", async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
+      const [claimed] = await outbox.claimDue(app, 1);
+      expect(claimed?.attempts, `try ${String(tries + 1)}`).toBe(tries);
+      // The sender dies: no sent, no failed. The lease runs out.
+      clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+    }
+
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+    expect(await rows()).toMatchObject([
+      { attempts: MOST_ATTEMPTS, last_failure: 'lease_expired', given_up_at: clock.now(), sent_at: null },
+    ]);
+  });
+
   it('gives a notice up at once for a failure no retry can mend', async () => {
     await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
@@ -229,7 +246,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     await outbox.sent(app, claimed.id);
 
     expect(await outbox.failed(app, claimed.id, 'provider_unavailable', false)).toBe('done');
-    expect(await rows()).toMatchObject([{ attempts: 0, last_failure: null, sent_at: START, given_up_at: null }]);
+    expect(await rows()).toMatchObject([{ attempts: 1, last_failure: null, sent_at: START, given_up_at: null }]);
   });
 
   it('refuses a failure that is not a short lowercase name, so no provider text is kept', async () => {
