@@ -301,6 +301,8 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
   }
 
   const binding = (sessionId: string) => ({ sessionId, action: 'members.invite', changeHash: CHANGE });
+  /** An admin's change: its step-up must be proved with a passkey (SEC-HA-12). */
+  const NEED = { passkeyRequired: true };
 
   it('asks the login service to sign the person in again with the challenge nonce, then records the evidence and rotates the cookie ID', async () => {
     const { done, challenge } = await signedInWithChallenge();
@@ -317,7 +319,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     expect(stepped.cookie).not.toBe(done.cookie);
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
     expect(await sessions.use(app, stepped.cookie)).toMatchObject({ sessionId: done.sessionId });
-    const consumed = await challenges.consume(app, challenge.challengeId, binding(done.sessionId));
+    const consumed = await challenges.consume(app, challenge.challengeId, binding(done.sessionId), NEED);
     expect(consumed?.evidence).toEqual({
       authTime: FRESH.authTime,
       amr: ['pwd', 'user', 'mfa'],
@@ -429,7 +431,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     await expect(failed).rejects.toBeInstanceOf(StepUpFailed);
     await expect(failed).rejects.toMatchObject({ failure });
     expect(await sessions.use(app, done.cookie)).toBeDefined();
-    expect(await challenges.consume(app, challenge.challengeId, binding(done.sessionId))).toBeUndefined();
+    expect(await challenges.consume(app, challenge.challengeId, binding(done.sessionId), NEED)).toBeUndefined();
     // Still pending, so the person can try again: unless its time ran out, which is the failure.
     if (clock.now().getTime() === START.getTime()) {
       expect(await challenges.pending(app, challenge.challengeId, done.sessionId)).toMatchObject({

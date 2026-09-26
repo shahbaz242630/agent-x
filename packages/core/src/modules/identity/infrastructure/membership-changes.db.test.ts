@@ -147,10 +147,10 @@ const confirm = (admin: InvitingAdmin, id: string, change: MembershipChange, cha
   );
 
 /** The admin signs in again for the challenge, as the step-up's return records it. */
-const stepUp = (admin: InvitingAdmin, challengeId: string) =>
+const stepUp = (admin: InvitingAdmin, challengeId: string, amr: readonly string[] = ['pwd', 'user', 'mfa']) =>
   challenges().recordEvidence(app, challengeId, admin.sessionId, {
     authTime: clock.now(),
-    amr: ['pwd', 'user', 'mfa'],
+    amr,
     idpSessionId: 'V1_2',
     idTokenHash: createHash('sha256').update('an ID token').digest(),
   });
@@ -287,6 +287,21 @@ describe(`changing a member's role (B4-5a, SEC-HA-10, Postgres ${server.version}
       outcome: 'written',
       member: { role },
     });
+  });
+
+  it('SEC-HA-12 refuses a step-up proved with an app code, not a passkey, changing nothing', async () => {
+    const who = await organization();
+    const approver = await member(who.org, 'approver');
+    const challengeId = await asked(who.admin, approver.membershipId, TO_DEVELOPER);
+    await stepUp(who.admin, challengeId, ['pwd', 'otp', 'mfa']);
+
+    expect(await confirm(who.admin, approver.membershipId, TO_DEVELOPER, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect(await membershipFor(app, services(), who.org, approver.userId)).toMatchObject({ role: 'approver' });
+    expect(await sessionsOf(approver.userId)).toBe(1);
   });
 
   it('refuses before the admin signs in again, changing nothing and ending no session; the same key changes after', async () => {

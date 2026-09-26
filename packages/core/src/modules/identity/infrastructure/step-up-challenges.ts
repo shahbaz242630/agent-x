@@ -14,6 +14,9 @@
 //    evidence in one statement, only for the same session, action and change
 //    hash, verified and still in time: used once, and for nothing else
 //    (SEC-HA-03, 04). The evidence goes to the audit trail with the change.
+//    A change an admin or a finance approver makes asks for a passkey too
+//    (SEC-HA-12, ADR-012 §7; B3+-1): the fresh sign-in's `amr` must hold
+//    `user`, and one proved with an authenticator app alone is left unused.
 //
 // Each runs one statement on the handle it is given, so the caller decides
 // the transaction; `sweep` deletes challenges past their time a batch at a
@@ -25,6 +28,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { PASSKEY_METHOD } from '../domain/step-up.ts';
 import type { IdentityTables } from './tables.ts';
 
 /** How long a person has to sign in again and confirm the change. */
@@ -79,10 +83,16 @@ export interface StepUpChallenges {
   /**
    * Uses the challenge for exactly this change, in the change's own
    * transaction: deleted and read in one statement, only if it binds this
-   * session, action and change hash, is verified and still in time. Undefined
-   * otherwise, and the challenge is left as it was.
+   * session, action and change hash, is verified and still in time, and,
+   * where `passkeyRequired`, was proved with a passkey. Undefined otherwise,
+   * and the challenge is left as it was.
    */
-  consume(db: Handle, challengeId: string, binding: StepUpBinding): Promise<ConsumedStepUp | undefined>;
+  consume(
+    db: Handle,
+    challengeId: string,
+    binding: StepUpBinding,
+    need: { readonly passkeyRequired: boolean },
+  ): Promise<ConsumedStepUp | undefined>;
   /** Deletes up to `most` challenges past their time, and says how many. */
   sweep(db: Kysely<IdentityTables>, most: number): Promise<number>;
 }
@@ -258,7 +268,7 @@ export function createStepUpChallenges({
       return recorded !== undefined;
     },
 
-    async consume(db, challengeId, binding) {
+    async consume(db, challengeId, binding, { passkeyRequired }) {
       refuse(bindingProblem(binding));
       if (!isId(challengeId)) return undefined;
       const row = await db
@@ -269,6 +279,7 @@ export function createStepUpChallenges({
         .where('change_hash', '=', binding.changeHash)
         .where('verified_at', 'is not', null)
         .where('ends_at', '>', clock.now())
+        .$if(passkeyRequired, (query) => query.where((eb) => eb(eb.val(PASSKEY_METHOD), '=', eb.fn.any('amr'))))
         .returning([...PENDING, 'verified_at', 'auth_time', 'amr', 'idp_session_id', 'id_token_hash'])
         .executeTakeFirst();
       if (row === undefined) return undefined;

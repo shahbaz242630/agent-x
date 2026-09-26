@@ -112,10 +112,10 @@ const confirm = (admin: InvitingAdmin, id: string, key = 'confirm-1') =>
   writes.confirm(admin, keyed(admin, 'members.invite.confirm', key, id), id, CORRELATION);
 
 /** The admin signs in again for the challenge: its evidence recorded, as the step-up's return does. */
-const stepUp = (admin: InvitingAdmin, challengeId: string) =>
+const stepUp = (admin: InvitingAdmin, challengeId: string, amr: readonly string[] = ['pwd', 'user', 'mfa']) =>
   challenges().recordEvidence(app, challengeId, admin.sessionId, {
     authTime: clock.now(),
-    amr: ['pwd', 'otp', 'mfa'],
+    amr,
     idpSessionId: 'V1_2',
     idTokenHash: createHash('sha256').update('an ID token').digest(),
   });
@@ -256,7 +256,7 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     expect(JSON.parse(opened?.details ?? '{}')).toMatchObject({
       stepUpChallengeId: challengeId,
       signedInAt: START.toISOString(),
-      methods: 'pwd otp mfa',
+      methods: 'pwd user mfa',
       proofHash: createHash('sha256').update('an ID token').digest('hex'),
       changeHash: invitationChange({
         orgId: org,
@@ -288,6 +288,15 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
       status: 409,
       code: 'INVITATION_CLOSED',
     });
+  });
+
+  it('SEC-HA-12 refuses a step-up proved with an app code, not a passkey, leaving the draft', async () => {
+    const { org, admin } = await organization();
+    const { id, challengeId } = await drafted(admin);
+    await stepUp(admin, challengeId, ['pwd', 'otp', 'mfa']);
+
+    expect(await confirm(admin, id)).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
+    expect(await statusOf(org, id)).toEqual({ status: 'DRAFT' });
   });
 
   it('refuses before the admin signs in again, leaving the draft, and confirms with the same key after', async () => {

@@ -3,15 +3,19 @@
 // its job runs on Azure, creates an organisation and invites its first admin
 // with a token's hash (the token itself made here, where the link would be
 // shown); the invited person signs in through the API in a real Chrome, with
-// their password and code, and accepts with the token: they join at once as
-// its admin, since no one else is there, and a second first-admin invitation
-// is then refused. Neither run writes the address, the token or its hash.
+// their password and a security key registered at that first sign-in (an
+// admin needs a passkey, B3+-1), and accepts with the token: they join at
+// once as its admin, since no one else is there, and a second first-admin
+// invitation is then refused. Neither run writes the address, the token or
+// its hash.
 //
 // B4-6d-2 goes on from there, the journey an organisation's people take: the
 // admin invites a second person as a developer, signing in again (step-up)
 // before the link is made; that person, in their own browser, accepts and
-// joins; the admin then changes their role and deactivates them, each change
-// with a step-up, and each ends every session the person held (SEC-HA-10).
+// joins; the admin then makes them an admin and deactivates them, each change
+// with a step-up by security key, and each ends every session the person held
+// (SEC-HA-10). Signed in with their app code, the new admin may still read the
+// members, and is refused an admin's change for want of a passkey (SEC-HA-12).
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -74,6 +78,19 @@ beforeAll(async () => {
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   context = await browser.newContext();
   page = await context.newPage();
+  // Chrome's own authenticator, through the DevTools protocol: the WebAuthn ceremony runs for real with no hardware.
+  const devtools = await context.newCDPSession(page);
+  await devtools.send('WebAuthn.enable');
+  await devtools.send('WebAuthn.addVirtualAuthenticator', {
+    options: {
+      protocol: 'ctap2',
+      transport: 'internal',
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
 });
 
 afterAll(async () => {
@@ -139,11 +156,19 @@ describe('B4-6d-1 the operator invites a new organisation’s first admin, who a
     expect(eventsOf(run)).toContain('operator.first_admin_invited');
   });
 
-  it('signs the invited person in through the API with their password and code; they are no member yet', async () => {
+  it('signs the invited person in through the API, registering a security key as the login asks for a second factor; they are no member yet', async () => {
     await page.goto(`${API_ORIGIN}/v1/auth/sign-in?returnTo=${encodeURIComponent(RETURN_TO)}`);
-    const { stoppedAt, shown } = await drive(page, user, []);
-    expect(stoppedAt, where(page)).toBe('callback');
-    expect(shown).toEqual(['loginName', 'password', 'otp', 'callback']);
+    const { stoppedAt } = await drive(page, user, ['factorSetup']);
+    expect(stoppedAt, where(page)).toBe('factorSetup');
+    await page.locator('a[href*="/ui/v2/login/u2f/set"]').click();
+    await page.waitForURL(/\/ui\/v2\/login\/u2f\/set/);
+    const deviceName = page.locator('input[name=name]');
+    if ((await deviceName.count()) > 0) await deviceName.fill('end-to-end key');
+    await page.getByTestId('submit-button').click();
+    await page.waitForURL((url) => url.href.startsWith(`${API_ORIGIN}${RETURN_TO}`), { timeout: 60_000 });
+
+    const session = await call('GET', '/v1/auth/session');
+    expect((session.json as { methods: string[] }).methods).toContain('user');
 
     expect((await call('GET', '/v1/members', { organization: orgId })).status).toBe(403);
   });
@@ -228,12 +253,12 @@ describe('B4-6d-2 the admin invites a second person, then changes their role and
     expect(stoppedAt, where(memberPage)).toBe('callback');
   }
 
-  /** The admin signs in again for a challenge (ADR-003 §9): the password and code are asked again. */
+  /** The admin signs in again for a challenge (ADR-003 §9): the password and security key are asked again. */
   async function stepUp(challengeId: string): Promise<void> {
     await page.goto(`${API_ORIGIN}/v1/auth/step-up?challenge=${challengeId}&returnTo=${encodeURIComponent(RETURN_TO)}`);
     const { stoppedAt, shown } = await drive(page, user, []);
     expect(stoppedAt, where(page)).toBe('callback');
-    expect(shown).toEqual(expect.arrayContaining(['password', 'otp', 'callback']));
+    expect(shown).toEqual(expect.arrayContaining(['password', 'u2f', 'callback']));
   }
 
   /** The organisation's members, as the admin sees them, by membership. */
@@ -297,11 +322,11 @@ describe('B4-6d-2 the admin invites a second person, then changes their role and
     expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(200);
   });
 
-  it('SEC-HA-10 changes their role with a step-up, and ends every session they held', async () => {
+  it('SEC-HA-10 makes them an admin with a step-up, and ends every session they held', async () => {
     expect(await signedIn(memberPage)).toBe(200);
     const asked = await call('POST', `/v1/members/${membershipId}/role`, {
       organization: orgId,
-      body: { role: 'viewer' },
+      body: { role: 'admin' },
     });
     expect(asked.status).toBe(202);
     const { stepUpChallengeId } = asked.json as { stepUpChallengeId: string };
@@ -309,15 +334,24 @@ describe('B4-6d-2 the admin invites a second person, then changes their role and
 
     const changed = await call('POST', `/v1/members/${membershipId}/role/confirm`, {
       organization: orgId,
-      body: { role: 'viewer', stepUpChallengeId },
+      body: { role: 'admin', stepUpChallengeId },
     });
     expect(changed.status).toBe(200);
-    expect(changed.json).toMatchObject({ member: { id: membershipId, role: 'viewer', status: 'ACTIVE' } });
+    expect(changed.json).toMatchObject({ member: { id: membershipId, role: 'admin', status: 'ACTIVE' } });
     expect(await signedIn(memberPage)).toBe(401);
+  });
 
-    // Signed in again, they hold the new role.
+  it('SEC-HA-12 lets the new admin, signed in with an app code, read the members, and refuses them an admin’s change', async () => {
     await signIn();
     expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(200);
+
+    const refused = await call('POST', '/v1/members/invitations', {
+      organization: orgId,
+      on: memberPage,
+      body: { email: 'someone-else@agentx.localhost', role: 'viewer' },
+    });
+    expect(refused.status).toBe(403);
+    expect(refused.json).toMatchObject({ error: { code: 'PASSKEY_REQUIRED' } });
   });
 
   it('SEC-HA-10 deactivates them with a step-up: every session ends, and they reach the organisation no more', async () => {

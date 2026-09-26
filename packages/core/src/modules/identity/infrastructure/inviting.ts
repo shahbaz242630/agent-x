@@ -199,11 +199,17 @@ export function createInvitationWrites({
         if (read.outcome === 'missing') throw new WriteRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw new WriteRefused(503, 'INTEGRITY_FAILED');
         if (read.outcome !== 'draft') throw new WriteRefused(409, 'INVITATION_CLOSED');
-        const consumed = await challenges.consume(tx, read.stepUpChallengeId, {
-          sessionId: admin.sessionId,
-          action: INVITE_OPERATION,
-          changeHash: read.changeHash,
-        });
+        const consumed = await challenges.consume(
+          tx,
+          read.stepUpChallengeId,
+          {
+            sessionId: admin.sessionId,
+            action: INVITE_OPERATION,
+            changeHash: read.changeHash,
+          },
+          // An admin's change: proved with a passkey (SEC-HA-12).
+          { passkeyRequired: true },
+        );
         if (consumed === undefined) throw new WriteRefused(403, 'STEP_UP_FAILED');
         token = await openInvitation(tx, states, {
           orgId: admin.orgId,

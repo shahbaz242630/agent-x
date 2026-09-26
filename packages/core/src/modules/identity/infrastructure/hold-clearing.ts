@@ -187,11 +187,17 @@ export function createHoldClearings({
         if (whole.outcome === 'too_many') throw new Error(`more ${whole.subjectType} records than clearing checks`);
         await mustBeAdmin(tx, states, admin);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
-        const consumed = await challenges.consume(tx, stepUpChallengeId, {
-          sessionId: admin.sessionId,
-          action: CLEAR_OPERATION,
-          changeHash: clearingHash(admin.orgId, holdEventId, investigationId),
-        });
+        const consumed = await challenges.consume(
+          tx,
+          stepUpChallengeId,
+          {
+            sessionId: admin.sessionId,
+            action: CLEAR_OPERATION,
+            changeHash: clearingHash(admin.orgId, holdEventId, investigationId),
+          },
+          // An admin's change: proved with a passkey (SEC-HA-12).
+          { passkeyRequired: true },
+        );
         if (consumed === undefined) throw new ClearingRefused(403, 'STEP_UP_FAILED');
         const cleared = await states.clearIntegrityHold(tx, admin.orgId, {
           actor: { type: 'user', id: admin.userId },

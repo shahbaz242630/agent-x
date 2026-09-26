@@ -126,6 +126,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "PASSKEY_REQUIRED",
+                    "description": "Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello)."
+                  },
+                  {
+                    "type": "string",
                     "const": "PAYLOAD_TOO_LARGE",
                     "description": "The request body is larger than this address accepts, so it is refused."
                   },
@@ -157,7 +162,7 @@
                   {
                     "type": "string",
                     "const": "STEP_UP_FAILED",
-                    "description": "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor."
+                    "description": "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver."
                   },
                   {
                     "type": "string",

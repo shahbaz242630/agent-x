@@ -53,6 +53,8 @@ export const REASON_CODES = {
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
   OWN_MEMBERSHIP:
     "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change.",
+  PASSKEY_REQUIRED:
+    'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
@@ -62,7 +64,7 @@ export const REASON_CODES = {
   SIGN_IN_UNAVAILABLE:
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
   STEP_UP_FAILED:
-    "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor.",
+    "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
   UNAUTHENTICATED:
