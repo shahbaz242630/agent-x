@@ -24,6 +24,8 @@ export {
   TooManyEventsAboutObject,
 } from './infrastructure/audit-trail.ts';
 export {
+  type ClearingStepUp,
+  type HoldClearing,
   type OrganisationCheck,
   type HoldInvestigation,
   type HoldRecord,
