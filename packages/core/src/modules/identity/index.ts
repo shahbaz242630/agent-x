@@ -24,6 +24,7 @@ export {
   type StepUpRefusal,
   stepUpRefusal,
 } from './domain/step-up.ts';
+export { AddressBookUnavailable, createAddressBook } from './infrastructure/address-book.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
   createSessions,
@@ -146,4 +147,4 @@ export {
   type StepUpEvidence,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
-export { userForSubject } from './infrastructure/users.ts';
+export { subjectOfUser, userForSubject } from './infrastructure/users.ts';

@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { SignInRefused } from '../domain/sign-in.ts';
 import type { IdentityTables } from './tables.ts';
-import { userForSubject } from './users.ts';
+import { subjectOfUser, userForSubject } from './users.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -41,6 +41,13 @@ afterAll(async () => {
 });
 
 describe(`the people who sign in (Postgres ${server.version})`, () => {
+  it('gives the issuer and subject a user signs in as, by their ID, as the app role (B5-3)', async () => {
+    const subject = newSubject();
+    const id = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock });
+    await expect(subjectOfUser(app, id)).resolves.toEqual({ issuer: ISSUER, subject });
+    await expect(subjectOfUser(app, '01a0f000-0000-7000-8000-0000000000ff')).resolves.toBeUndefined();
+  });
+
   it('makes a user at their first sign-in and finds the same one at every one after', async () => {
     const subject = newSubject();
     const first = await userForSubject(app, { issuer: ISSUER, subject }, { ids, clock });

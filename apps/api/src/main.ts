@@ -15,8 +15,8 @@
 //    sweep (B2-4a), the security events' retention sweep (B2-5a) and the
 //    notices' sweep (B5-1b); and the security events' recorder, writing its
 //    counts each minute (B2-5b). Role grants write their notices to the
-//    outbox (B5-1b); the sender that sends them starts once a notifier is
-//    configured (B5-3)
+//    outbox (B5-1b); the sender sends them by email, each minute, once the
+//    config names email (B5-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
 //    request in flight is answered, then the anchor check and the sweep, then
 //    the recorder's last counts, then the pool
@@ -76,6 +76,7 @@ import { scheduleRuns } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
+import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 
@@ -520,6 +521,17 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     SWEEP_EVERY_MS,
   );
+  // The notices, once the config names email (B5-3), on a timer of their own too.
+  const sender = noticeSenderFrom({
+    config,
+    db: database,
+    outbox,
+    listMembers: (orgId) => membersFor(database, { keys, ids: uuidV7Ids, logger }, orgId),
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    logger,
+  });
+  const noticeSending = sender === undefined ? undefined : scheduleRuns(sender, NOTICES_EVERY_MS);
+  logger.info('api.notices', { sending: noticeSending !== undefined });
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -535,6 +547,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           challengeSweeping.stop(),
           eventSweeping.stop(),
           noticeSweeping.stop(),
+          noticeSending?.stop(),
           recording.stop(),
         ]);
       },

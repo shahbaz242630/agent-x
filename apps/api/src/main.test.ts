@@ -410,9 +410,19 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // The schema is checked before anything is written: the platform chain's
     // own tables are among what the check covers (A3e-1b).
     expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded', 'anchor check started']);
-    expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
+    expect(events()).toEqual([
+      'api.starting',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+      'api.notices',
+    ]);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
+    );
+    // No email in this config (B5-3), so the notices wait in the outbox.
+    expect(capture.lines().find((line) => line.event === 'api.notices')).toEqual(
+      expect.objectContaining({ sending: false }),
     );
   });
 

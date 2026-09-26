@@ -23,6 +23,17 @@ const SETTINGS: Env = {
   AGENTX_OIDC_CLIENT_SECRET: 'client pass words',
 };
 
+/** The same, with email on (B5-3). */
+const WITH_EMAIL: Env = {
+  ...SETTINGS,
+  AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://auth.agentx.example,https://acs.agentx.example',
+  AGENTX_EMAIL_ENDPOINT: 'https://acs.agentx.example',
+  AGENTX_EMAIL_SENDER: 'DoNotReply@agentx.example',
+  // Plain words, built at run time, as every stand-in for a secret here.
+  AGENTX_EMAIL_ACCESS_KEY: Buffer.from('stand in email words').toString('base64'),
+  AGENTX_DIRECTORY_TOKEN: ['directory', 'words'].join('-'),
+};
+
 /** What a KeyProvider describes: versions and check values, never keys. */
 const AUDIT_MAC: KeyDescription = {
   purpose: 'audit-mac',
@@ -167,6 +178,17 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(hashOf({ ...local, AGENTX_DB_TLS: 'disable' })).not.toBe(hashOf(local));
   });
 
+  it("ignores the email service's key and the directory's token (B5-3), as it does the password", () => {
+    expect(
+      hashOf({ ...WITH_EMAIL, AGENTX_EMAIL_ACCESS_KEY: Buffer.from('other email words').toString('base64') }),
+    ).toBe(hashOf(WITH_EMAIL));
+    expect(hashOf({ ...WITH_EMAIL, AGENTX_DIRECTORY_TOKEN: ['other', 'directory', 'words'].join('-') })).toBe(
+      hashOf(WITH_EMAIL),
+    );
+    expect(hashOf({ ...WITH_EMAIL, AGENTX_EMAIL_SENDER: 'Notices@agentx.example' })).not.toBe(hashOf(WITH_EMAIL));
+    expect(hashOf(WITH_EMAIL)).not.toBe(hashOf(SETTINGS));
+  });
+
   it('ignores the OIDC client secret, as it does the password', () => {
     expect(hashOf({ ...SETTINGS, AGENTX_OIDC_CLIENT_SECRET: 'other pass words' })).toBe(hashOf(SETTINGS));
   });
@@ -177,10 +199,14 @@ describe('SEC-OPS-05 the config fingerprint', () => {
   });
 
   it('names every setting one by one: everything in the config but the release and the secrets', () => {
-    const config = loadConfig(SETTINGS);
+    const config = loadConfig(WITH_EMAIL);
     const left = leaves(config).filter(
       (leaf) =>
-        !leaf.startsWith('release: ') && !leaf.startsWith('db.password: ') && !leaf.startsWith('signIn.clientSecret: '),
+        !leaf.startsWith('release: ') &&
+        !leaf.startsWith('db.password: ') &&
+        !leaf.startsWith('signIn.clientSecret: ') &&
+        !leaf.startsWith('email.accessKey: ') &&
+        !leaf.startsWith('email.directoryToken: '),
     );
     expect(leaves(fingerprintedSettings(config)).sort()).toEqual(left.sort());
   });

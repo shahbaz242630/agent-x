@@ -53,6 +53,7 @@ import type { Clock } from '../../../shared-kernel/index.ts';
 import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
+import { routedToIssuer } from './zitadel-route.ts';
 
 export interface OidcClientSettings {
   /** The issuer, exactly as its tokens name it. */
@@ -233,13 +234,7 @@ export function createOidcClient({
    * document's, and the endpoints `endpoint` has held to it.
    */
   function routed(url: string, init: RequestInit): [string, RequestInit] {
-    if (internalOrigin === undefined) return [url, init];
-    const target = new URL(url);
-    const headers = new Headers(init.headers);
-    const { host } = new URL(issuer);
-    headers.set('x-zitadel-instance-host', host);
-    headers.set('x-zitadel-public-host', host);
-    return [`${internalOrigin}${target.pathname}${target.search}`, { ...init, headers }];
+    return routedToIssuer(issuer, internalOrigin, url, init);
   }
 
   /** A call to the login service, bounded in time; a network failure is the provider's. */
