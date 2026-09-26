@@ -179,6 +179,24 @@ describe(`showing the hold to the organisation's admin (Postgres ${server.versio
     });
   });
 
+  it('refuses an admin since deactivated', async () => {
+    await withSignedStates(app, org, services(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+
+    expect(await investigations.show(admin, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+    await putOnHold();
+    expect(await record()).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+  });
+
   it('refuses someone who is no member at all', async () => {
     expect(await investigations.show({ orgId: org, userId: ids.next() }, CORRELATION)).toEqual({
       outcome: 'refused',
