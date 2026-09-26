@@ -120,6 +120,23 @@ describe('SEC-DATA-01 scrub: personal and payment details', () => {
       'ref-[card]-paid',
     ],
     ['a local mobile joined to words by dashes', `call-${SAMPLES.localMobile}-now`, 'call-[phone]-now'],
+    [
+      'a card number run together, right after a digit and a dash',
+      `id 7-${join('4111', '1111', '1111', '1111')} charged`,
+      'id 7-[card] charged',
+    ],
+    ['a grouped card number right after a digit and a dash', `id 0-${SAMPLES.card}`, 'id 0-[card]'],
+    ['a local mobile right after a digit and a dash', 'caller 5-0501234567 phoned', 'caller 5-[phone] phoned'],
+    [
+      'a spaced local mobile right after a digit and a dash',
+      `caller 5-${SAMPLES.localMobile} phoned`,
+      'caller 5-[phone] phoned',
+    ],
+    [
+      'an international number from 00, right after a digit and a dash',
+      'dial 9-00971501234567 now',
+      'dial 9-[phone] now',
+    ],
     ['an American Express layout', join('3782 ', '822463 ', '10005'), '[card]'],
     ['a Diners layout', join('3056 ', '930902 ', '5904'), '[card]'],
     ['a phone number', `call ${SAMPLES.phone}`, 'call [phone]'],
@@ -316,6 +333,18 @@ describe('scrub: properties that hold for any text', () => {
         expect(scrub(id.toUpperCase())).toBe(id.toUpperCase());
       }),
       { ...RUNS, numRuns: 5000 },
+    );
+  });
+
+  it('hides each sensitive sample right after a digit and a dash, as an order number joined to it', () => {
+    const digit = fc.constantFrom(...Array.from('0123456789'));
+    fc.assert(
+      fc.property(filler, digit, sample, (before, number, secret) => {
+        const cleaned = scrub(`${before} ${number}-${secret} seen`);
+        expect(cleaned).not.toContain(secret);
+        expect(findLeaks(cleaned)).toEqual([]);
+      }),
+      RUNS,
     );
   });
 

@@ -123,24 +123,27 @@ const EMIRATES_ID = /(?<![0-9])784[- ]?\d{4}[- ]?\d{7}[- ]?\d(?![0-9])/g;
  * written in groups. Groups are found as a run of digit groups separated by
  * single spaces or dashes, and every card-shaped window of the run is tried,
  * so a card right after another number (`… 4567 4111 1111 1111`) is still
- * found. A run can't start or end inside a longer code: not right after a
- * letter or a digit, or a digit and a dash, and not right before one, or a
- * dash and a digit. So the digit groups of an ID such as a UUID
- * (`01920000-0000-7000-…`) never count, while a card joined to a word by a
- * dash (`4111 1111 1111 1111-paid`, `ref-4111…`) is still found (S54).
+ * found. Neither may start or end inside a longer run of letters and digits.
+ * A run of groups also can't start or end inside a longer code: not right
+ * after a digit and a dash, nor right before a dash and a digit, so the digit
+ * groups of an ID such as a UUID (`01920000-0000-7000-…`) never count. A card
+ * run together needs no such rule, since no group of a UUID holds 13 digits:
+ * it is found after `7-` too. A card joined to a word by a dash
+ * (`4111 1111 1111 1111-paid`, `ref-4111…`) is found either way (S54).
  */
-const CARD_JOINED = /(?<![0-9A-Za-z]|[0-9]-)\d{13,19}(?![0-9A-Za-z]|-[0-9])/g;
+const CARD_JOINED = /(?<![0-9A-Za-z])\d{13,19}(?![0-9A-Za-z])/g;
 const DIGIT_GROUPS = /(?<![0-9A-Za-z]|[0-9]-)\d{1,7}(?:[ -]\d{1,7}){2,15}(?![0-9A-Za-z]|-[0-9])/g;
 
 /**
  * A phone number: international with `+` or `00`, spaced, dotted, dashed or
  * bracketed; or a UAE mobile written locally (05X XXX XXXX). Neither may start
- * inside a longer code (right after a letter or a digit, or a digit and a
- * dash), so an ID's digit groups don't count; one joined to a word by a dash
- * (`call-050 123 4567`) is still found (S54).
+ * or end inside a longer run of letters and digits; a dash beside one doesn't
+ * matter (`call-050 123 4567`, `5-0501234567`, S54). An ID's digit groups
+ * still never make one: no UUID group holds a mobile's ten digits, and ten
+ * digits across its groups of four always end inside the next group.
  */
-const PHONE = /(?:\+|(?<![0-9A-Za-z]|[0-9]-)00)[1-9](?:[ .()-]{0,3}\d){7,14}(?![0-9])/g;
-const UAE_MOBILE = /(?<![0-9A-Za-z]|[0-9]-)05\d(?:[ .-]{0,2}\d){7}(?![0-9A-Za-z]|-[0-9])/g;
+const PHONE = /(?:\+|(?<![0-9A-Za-z])00)[1-9](?:[ .()-]{0,3}\d){7,14}(?![0-9])/g;
+const UAE_MOBILE = /(?<![0-9A-Za-z])05\d(?:[ .-]{0,2}\d){7}(?![0-9A-Za-z])/g;
 
 /**
  * Text shaped like an IPv6 address, including one ending in an IPv4 address
