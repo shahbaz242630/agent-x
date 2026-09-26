@@ -13,7 +13,10 @@ export default defineConfig({
     globalSetup: ['tooling/e2e/global-setup.ts'],
     // The OIDC callback listens on one fixed port, so files run one at a time.
     fileParallelism: false,
-    testTimeout: 120_000,
+    // A login of three pages may each be sent twice before one is called stuck
+    // (login-pages.ts, about 35 s a page, more for a code): room for that, so
+    // the driver's own error names the page rather than a bare timeout.
+    testTimeout: 180_000,
     hookTimeout: 180_000,
   },
 });
