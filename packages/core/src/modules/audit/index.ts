@@ -25,6 +25,10 @@ export {
 } from './infrastructure/audit-trail.ts';
 export {
   type OrganisationCheck,
+  type HoldInvestigation,
+  type HoldRecord,
+  type InvestigationCheck,
+  type InvestigationRecording,
   type RecordedState,
   type SignedChange,
   SignedStateFailed,
@@ -34,5 +38,11 @@ export {
   type TamperSign,
   type VerifiedState,
 } from './infrastructure/signed-states.ts';
+export {
+  INVESTIGATION_CONCLUSIONS,
+  INVESTIGATION_REFERENCE_MAX,
+  type InvestigationConclusion,
+  isIncidentReference,
+} from './domain/integrity-hold.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
 export { holdOrganisation, type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';
