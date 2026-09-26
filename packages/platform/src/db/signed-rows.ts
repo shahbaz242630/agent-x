@@ -257,6 +257,31 @@ export async function readSignedRow<Schema>(
 }
 
 /**
+ * The IDs of the table's rows in the organisation, in order (Postgres gives a
+ * uuid as text in lower case), at most `limit` and one more, so the caller can tell a list cut short. Locks
+ * nothing: each row is read again through readSignedRow. Only in withTenant's
+ * transaction for the organisation, like readSignedRow.
+ */
+export async function signedRowIds<Schema>(
+  tx: Transaction<Schema>,
+  table: SignedStateTable,
+  orgId: string,
+  limit: number,
+): Promise<string[]> {
+  checkTable(table);
+  if (!UUID.test(orgId)) throw new RangeError('A signed row is named by UUIDs');
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<{ id: string }>`
+    select target.id::text as id from ${sql.table(table.table)} as target
+    where target.org_id = ${orgId}
+    order by target.id
+    limit ${limit + 1}
+  `.execute(tx);
+  return rows.map(({ id }) => id);
+}
+
+/**
  * Writes the authority fields `set` names and gives back the row as it now
  * is, with each value written read as text by the same SQL. From `new`: a row
  * at version 1 pointing nowhere, the one the transaction has just inserted,

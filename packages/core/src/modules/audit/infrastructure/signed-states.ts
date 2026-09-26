@@ -46,6 +46,7 @@ import {
   type SignedFieldValues,
   type SignedRow,
   type SignedRowKey,
+  signedRowIds,
   type SignedStateTable,
   StatusChangeFailed,
   type StatusTable,
@@ -123,6 +124,16 @@ export interface VerifiedState {
 export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
+/**
+ * Every object of the tables checked (verifyAll): all verified, with how many
+ * there were; some tampered with, each finding named (every alarm is already
+ * raised); or more objects in one table than the limit, with none judged.
+ */
+export type OrganisationCheck =
+  | { readonly outcome: 'verified'; readonly objects: number }
+  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
+  | { readonly outcome: 'too_many'; readonly subjectType: string };
+
 /** Who made a change, and the facts about it; the subject and the seal are added. */
 export interface SignedChange {
   readonly actor: AuditActor;
@@ -179,6 +190,24 @@ export interface SignedStates {
    * row stays locked as asked to the end of the transaction.
    */
   verifiedState(tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey, lock: RowLock): Promise<StateCheck>;
+  /**
+   * Every object of these tables in the organisation, verified as
+   * verifiedState does and locked `share`, for a decision that rests on
+   * nothing of the organisation's being tampered with (clearing its integrity
+   * hold, B3+). The objects are the table's rows and every object the log
+   * holds an event about, so a row deleted is found as well as one changed or
+   * planted: one listed but with neither a row nor a signed state when read is
+   * `deleted` too (its seals stripped as well), with its alarm. Table by
+   * table in the order given, which must be the lock order's (ADR-006 §6),
+   * and by ID within each. Past `limit` rows, or objects in the log, in one
+   * table: `too_many`, with nothing more judged.
+   */
+  verifyAll(
+    tx: AuditTransaction,
+    orgId: string,
+    tables: readonly SignedStateTable[],
+    limit: number,
+  ): Promise<OrganisationCheck>;
   /**
    * Writes the authority fields `set` names and records the row's new state,
    * in this transaction. From `from`: the state verifiedState last gave for
@@ -548,6 +577,37 @@ export function createSignedStates({
 
   return Object.freeze({
     verifiedState,
+
+    async verifyAll(
+      tx: AuditTransaction,
+      orgId: string,
+      tables: readonly SignedStateTable[],
+      limit: number,
+    ): Promise<OrganisationCheck> {
+      const findings: TamperFinding[] = [];
+      let objects = 0;
+      for (const table of tables) {
+        notTheHold(table);
+        const rowIds = await signedRowIds(tx, table, orgId, limit);
+        const loggedIds = await trail.subjectIds(tx, orgId, table.subject, limit);
+        const every = [...new Set([...rowIds, ...loggedIds])].sort();
+        if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
+        for (const id of every) {
+          const key = { orgId, id };
+          const check = await verifiedState(tx, table, key, 'share');
+          // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
+          const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
+          if (found.outcome === 'tampered') {
+            findings.push(
+              Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: found.sign }),
+            );
+          }
+          objects += 1;
+        }
+      }
+      if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
+      return Object.freeze({ outcome: 'verified', objects });
+    },
 
     async record(
       tx: AuditTransaction,

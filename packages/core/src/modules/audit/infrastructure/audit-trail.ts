@@ -164,6 +164,14 @@ export interface AuditTrail {
    * organisation, like `verify`.
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
+  /**
+   * The IDs of every object of this type the organisation's log holds any
+   * event about, sealed or not, in order (a uuid, so lower case): at most `limit`
+   * and one more, so the caller can tell a list cut short. For finding an
+   * object whose row is gone. Only in withTenant's transaction for that
+   * organisation, like `verify`.
+   */
+  subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -493,6 +501,24 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         version,
         seal,
       });
+    },
+
+    async subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]> {
+      // Any UUID stands in for the ID: only the type is checked here.
+      const problems = subjectKeyProblems({ type, id: orgId });
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+      await assertTenant(tx, orgId);
+      const rows = await tx
+        .selectFrom('audit.events')
+        .select('subject_id')
+        .distinct()
+        .where('org_id', '=', chainOf(orgId).orgId)
+        .where('subject_type', '=', type)
+        .orderBy('subject_id')
+        .limit(limit + 1)
+        .execute();
+      return rows.map(({ subject_id: id }) => id);
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));
