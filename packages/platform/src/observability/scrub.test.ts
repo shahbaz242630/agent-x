@@ -112,6 +112,14 @@ describe('SEC-DATA-01 scrub: personal and payment details', () => {
     ['a dashed card number', join('4111-', '1111-', '1111-', '1111'), '[card]'],
     ['a card number run together', join('4111', '1111', '1111', '1111'), '[card]'],
     ['a card number right after another number', `call 050 123 4567 ${SAMPLES.card} now`, 'call [phone] [card] now'],
+    ['a card number joined to a word after it by a dash', `${SAMPLES.card}-paid`, '[card]-paid'],
+    ['a card number joined to a word before it by a dash', `ref-${SAMPLES.card}`, 'ref-[card]'],
+    [
+      'a card number run together, between dashes and words',
+      `ref-${join('4111', '1111', '1111', '1111')}-paid`,
+      'ref-[card]-paid',
+    ],
+    ['a local mobile joined to words by dashes', `call-${SAMPLES.localMobile}-now`, 'call-[phone]-now'],
     ['an American Express layout', join('3782 ', '822463 ', '10005'), '[card]'],
     ['a Diners layout', join('3056 ', '930902 ', '5904'), '[card]'],
     ['a phone number', `call ${SAMPLES.phone}`, 'call [phone]'],
@@ -226,6 +234,7 @@ describe('scrub: ordinary log text is left alone', () => {
     ['a sixteen-digit number that fails the Luhn check', '4111111111111112'],
     ['a long run of number groups with no card in it', '2026 09 14 1015 3000 1200 4500 7800 9900'],
     ['digits that pass the Luhn check, grouped unlike a card', '4111 11 1111 1111 11'],
+
     ['a status and a duration', 'status 404 after 1200 ms'],
   ])('%s', (_what, text) => {
     expect(scrub(text)).toBe(text);
@@ -286,7 +295,7 @@ describe('scrub: check-digit helpers', () => {
 
 describe('scrub: properties that hold for any text', () => {
   const filler = fc.string({ unit: fc.constantFrom(...Array.from('abcdefghij klmnop,;()')), maxLength: 30 });
-  const separator = fc.constantFrom(' ', '.', ',', ';', '(', ')', '"', '\t', '\n');
+  const separator = fc.constantFrom(' ', '.', ',', ';', '(', ')', '"', '\t', '\n', '-');
   const sample = fc.constantFrom(...Object.values(SAMPLES));
 
   it('hides each sensitive sample, whatever punctuation and text surround it', () => {
