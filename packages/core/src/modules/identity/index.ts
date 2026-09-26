@@ -101,6 +101,14 @@ export {
   TooManyMembers,
 } from './infrastructure/memberships.ts';
 export {
+  createHoldInvestigations,
+  type HoldAdmin,
+  type HoldInvestigations,
+  type HoldShown,
+  INVESTIGATE_OPERATION,
+  type InvestigationWrite,
+} from './infrastructure/hold-investigations.ts';
+export {
   createOidcClient,
   type LoginFlow,
   type OidcClient,

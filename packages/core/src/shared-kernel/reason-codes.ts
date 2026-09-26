@@ -39,6 +39,8 @@ export const REASON_CODES = {
   MEMBER_DEACTIVATED:
     "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
+  NOT_ON_HOLD:
+    "The organisation isn't on its integrity hold, so there is no hold to investigate or clear. Nothing was changed.",
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
