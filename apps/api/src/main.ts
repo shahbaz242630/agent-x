@@ -526,7 +526,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     config,
     db: database,
     outbox,
-    listMembers: (orgId) => membersFor(database, { keys, ids: uuidV7Ids, logger }, orgId),
+    // The organisation's verified members, as the members route lists them.
+    listMembers: membersFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     fetch: createOutboundFetch(config.outbound.allowedOrigins),
     logger,
   });
