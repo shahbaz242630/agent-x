@@ -29,6 +29,7 @@ import {
   createAcceptanceConfirmations,
   createInvitationAcceptance,
   createInvitationWrites,
+  createHoldInvestigations,
   createMembershipChanges,
   createStepUpChallenges,
   type IdentityTables,
@@ -375,6 +376,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
+    holdInvestigations: createHoldInvestigations({ database, keys, ids: uuidV7Ids, logger }),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

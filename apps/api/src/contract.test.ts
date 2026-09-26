@@ -110,6 +110,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/auth/session',
       'GET /v1/auth/sign-in',
       'GET /v1/auth/step-up',
+      'GET /v1/integrity-hold',
       'GET /v1/members',
       'HEAD /health',
       'HEAD /test/items/{ref}',
@@ -117,9 +118,11 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/auth/session',
       'HEAD /v1/auth/sign-in',
       'HEAD /v1/auth/step-up',
+      'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
       'POST /test/both',
       'POST /v1/auth/sign-out',
+      'POST /v1/integrity-hold/investigations',
       'POST /v1/invitations/accept',
       'POST /v1/members/invitations',
       'POST /v1/members/invitations/{id}/approve',
@@ -1096,9 +1099,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     const answers = Object.values(document.paths).flatMap((item) =>
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
-    // The test's route, /health, the five sign-in routes, the members list, the six invitation routes and the four
-    // member change routes, with each GET's HEAD.
-    expect(answers.length).toBe(24);
+    // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
+    // member change routes and the integrity hold's two, with each GET's HEAD.
+    expect(answers.length).toBe(27);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1108,6 +1111,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'ConfirmationAsked',
       'Error',
+      'HoldInvestigation',
+      'IntegrityHold',
       'Invitation',
       'InvitationAccepted',
       'InvitationConfirmed',
