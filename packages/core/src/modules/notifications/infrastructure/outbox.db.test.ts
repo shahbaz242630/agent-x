@@ -11,7 +11,15 @@ import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { CLAIM_LEASE_MS, createOutbox, MOST_ATTEMPTS, MOST_NOTICES_A_BATCH, OUTBOX_RETENTION_DAYS } from './outbox.ts';
+import {
+  CLAIM_LEASE_MS,
+  createOutbox,
+  LEASE_EXPIRED,
+  MOST_ATTEMPTS,
+  MOST_NOTICES_A_BATCH,
+  MOST_RECIPIENTS,
+  OUTBOX_RETENTION_DAYS,
+} from './outbox.ts';
 import type { Notice } from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
 
@@ -267,6 +275,44 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(row?.given_up_at).not.toBeNull();
   });
 
+  it('never marks sent a notice given up for any reason but its lease, and refuses that reason from a caller (review)', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    const [claimed] = await outbox.claimDue(app, 1);
+    if (claimed === undefined) throw new Error('nothing claimed');
+    await expect(outbox.failed(app, claimed.id, LEASE_EXPIRED, false)).rejects.toThrow(RangeError);
+    await outbox.failed(app, claimed.id, 'no_address', true);
+
+    expect(await outbox.sent(app, claimed.id)).toBe(false);
+    expect(await rows()).toMatchObject([{ sent_at: null, given_up_at: START, last_failure: 'no_address' }]);
+  });
+
+  it('still fans out a notice to the admins whose last try was only slow past its lease (review)', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    let last = '';
+    for (let tries = 0; tries < MOST_ATTEMPTS; tries += 1) {
+      const [claimed] = await outbox.claimDue(app, 1);
+      last = claimed?.id ?? '';
+      clock.set(new Date(clock.now().getTime() + CLAIM_LEASE_MS));
+    }
+    expect(await outbox.claimDue(app, 10)).toEqual([]);
+
+    expect(await outbox.fanOut(app, last, [ADMIN])).toBe(1);
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: null, sent_at: clock.now(), given_up_at: null },
+      { recipient_user_id: ADMIN, sent_at: null, given_up_at: null },
+    ]);
+  });
+
+  it('refuses a notice to the admins turned into more than it may write', async () => {
+    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: null })]));
+    const [claimed] = await outbox.claimDue(app, 1);
+    if (claimed === undefined) throw new Error('nothing claimed');
+    const many = Array.from({ length: MOST_RECIPIENTS + 1 }, () => ADMIN);
+
+    await expect(outbox.fanOut(app, claimed.id, many)).rejects.toThrow(RangeError);
+    expect(await rows()).toHaveLength(1);
+  });
+
   it('gives a notice up at once for a failure no retry can mend', async () => {
     await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
     const [claimed] = await outbox.claimDue(app, 1);
@@ -300,7 +346,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
 
     clock.set(new Date(START.getTime() + MINUTE));
     expect(await outbox.fanOut(app, claimed.id, [ADMIN, OTHER_ADMIN.toUpperCase(), ADMIN])).toBe(2);
-    expect(await outbox.fanOut(app, claimed.id, [ADMIN])).toBe(0);
+    expect(await outbox.fanOut(app, claimed.id, [ADMIN])).toBe('not_open');
 
     expect(await rows()).toMatchObject([
       { recipient_user_id: null, sent_at: new Date(START.getTime() + MINUTE), attempts: 1 },
@@ -335,7 +381,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     const [toPerson, toAdmins] = await rows();
     if (toPerson === undefined || toAdmins === undefined) throw new Error('not written');
 
-    expect(await outbox.fanOut(app, toPerson.id, [OTHER_ADMIN])).toBe(0);
+    expect(await outbox.fanOut(app, toPerson.id, [OTHER_ADMIN])).toBe('not_open');
     await expect(outbox.fanOut(app, toAdmins.id, ['someone@example.test'])).rejects.toThrow(RangeError);
     expect(await rows()).toHaveLength(2);
   });

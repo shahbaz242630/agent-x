@@ -13,8 +13,10 @@ export {
 export {
   CLAIM_LEASE_MS,
   createOutbox,
+  LEASE_EXPIRED,
   MOST_ATTEMPTS,
   MOST_NOTICES_A_BATCH,
+  MOST_RECIPIENTS,
   type Outbox,
   OUTBOX_RETENTION_DAYS,
 } from './infrastructure/outbox.ts';

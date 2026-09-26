@@ -18,7 +18,11 @@
 //   be sent twice after a crash; the provider is given its ID to tell (B5-3).
 // - `fanOut` turns a notice to the organisation's admins (no recipient) into
 //   one notice to each admin the sender found, and marks the first sent, in
-//   one transaction: done once, and never a second set of notices.
+//   one transaction: done once, and never a second set of notices. A last try
+//   slow past its lease is rescued the same way as `sent` (review).
+// - LEASE_EXPIRED is the outbox's own reason, never a caller's: `failed`
+//   refuses it, so only a lease run out can make a notice given up that a
+//   late `sent` or `fanOut` may still complete (review).
 // - `sent` marks a notice sent; `failed` records why a try failed and sets the
 //   next one further off each time, or gives the notice up after its
 //   MOST_ATTEMPTS-th try, or at once for a failure no retry can mend. Neither
@@ -42,6 +46,12 @@ export const CLAIM_LEASE_MS = 10 * 60_000;
 /** The waits after each failed try but the last: a minute, then longer, to six hours. */
 const BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 2 * 3_600_000, 4 * 3_600_000, 6 * 3_600_000];
 
+/** Why the outbox gave a notice up: its last try's lease ran out. The outbox's own; `failed` refuses it. */
+export const LEASE_EXPIRED = 'lease_expired';
+
+/** The most notices one `fanOut` writes: an organisation's admins are never near it. */
+export const MOST_RECIPIENTS = 1_000;
+
 /** How long a notice sent or given up is kept. */
 export const OUTBOX_RETENTION_DAYS = 30;
 
@@ -55,10 +65,12 @@ export interface Outbox {
   claimDue(db: Kysely<NotificationsTables>, most: number): Promise<ClaimedNotice[]>;
   /**
    * Turns a notice to the organisation's admins into one notice to each of
-   * `recipients`, due at once, and marks it sent. Says how many it wrote; 0 if
-   * the notice is not one to the admins, or is already done.
+   * `recipients` (at most MOST_RECIPIENTS), due at once, and marks it sent.
+   * Says how many it wrote, or `not_open` if the notice is not one to the
+   * admins, or is already done; a notice given up because its last try's
+   * lease ran out is done all the same (that try was only slow).
    */
-  fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number>;
+  fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number | 'not_open'>;
   /**
    * Marks the notice sent; false if it was already sent or given up. A notice
    * given up because its last try's lease ran out is marked sent all the
@@ -150,7 +162,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
         // A notice due again after its last try: that try's lease ran out, its sender gone.
         await tx
           .updateTable('notifications.outbox')
-          .set({ given_up_at: now, last_failure: 'lease_expired' })
+          .set({ given_up_at: now, last_failure: LEASE_EXPIRED })
           .where('sent_at', 'is', null)
           .where('given_up_at', 'is', null)
           .where('next_attempt_at', '<=', now)
@@ -199,8 +211,11 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
     },
 
     async fanOut(db, id, recipients) {
+      if (recipients.length > MOST_RECIPIENTS) {
+        throw new RangeError(`at most ${String(MOST_RECIPIENTS)} notices are written from one notice to the admins`);
+      }
       if (!recipients.every(isId)) throw new RangeError("a notice's recipient is not a UUID");
-      if (!isId(id)) return 0;
+      if (!isId(id)) return 'not_open';
       const now = clock.now();
       return limited(db, async (tx) => {
         const notice = await tx
@@ -209,10 +224,10 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
           .where('id', '=', id)
           .where('recipient_user_id', 'is', null)
           .where('sent_at', 'is', null)
-          .where('given_up_at', 'is', null)
+          .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', LEASE_EXPIRED)]))
           .forUpdate()
           .executeTakeFirst();
-        if (notice === undefined) return 0;
+        if (notice === undefined) return 'not_open';
         const unique = [...new Set(recipients.map((recipient) => recipient.toLowerCase()))];
         if (unique.length > 0) {
           await tx
@@ -232,7 +247,11 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
             )
             .execute();
         }
-        await tx.updateTable('notifications.outbox').set({ sent_at: now }).where('id', '=', id).execute();
+        await tx
+          .updateTable('notifications.outbox')
+          .set({ sent_at: now, given_up_at: null })
+          .where('id', '=', id)
+          .execute();
         return unique.length;
       });
     },
@@ -246,7 +265,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
           .set({ sent_at: now, given_up_at: null })
           .where('id', '=', id)
           .where('sent_at', 'is', null)
-          .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', 'lease_expired')]))
+          .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', LEASE_EXPIRED)]))
           .returning('id')
           .executeTakeFirst();
         return row !== undefined;
@@ -255,6 +274,8 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
 
     async failed(db, id, failure, lasting) {
       if (!FAILURE.test(failure)) throw new RangeError("a notice's failure is not a short lowercase name");
+      if (failure === LEASE_EXPIRED)
+        throw new RangeError(`${LEASE_EXPIRED} is the outbox's own reason, never a caller's`);
       if (!isId(id)) return 'done';
       const now = clock.now();
       return limited(db, async (tx) => {
