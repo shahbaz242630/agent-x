@@ -639,6 +639,21 @@
         "additionalProperties": false,
         "description": "The reset kept as a draft, waiting for the admin who asked to sign in again and send it."
       },
+      "FactorResetConfirmed": {
+        "type": "object",
+        "properties": {
+          "coolingOffUntil": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "coolingOffUntil"
+        ],
+        "additionalProperties": false,
+        "description": "The reset, confirmed: its cooling-off has begun."
+      },
       "RegisteredContact": {
         "type": "object",
         "properties": {
@@ -2847,6 +2862,67 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RegisteredContactChanged"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/factor-resets/confirm": {
+      "post": {
+        "summary": "Confirm a reset of a second factor, as a registered contact",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "maxLength": 256
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": [
+          "public"
+        ],
+        "x-body-limit": 512,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorResetConfirmed"
                 }
               }
             }

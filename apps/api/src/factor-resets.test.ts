@@ -3,6 +3,8 @@
 // (role-matrix.test.ts); what the writes do in the database is the identity
 // module's reset-changes.db.test.ts.
 import type {
+  ContactConfirmation,
+  ContactConfirmations,
   InvitingAdmin,
   LiveSession,
   MembershipCheck,
@@ -83,8 +85,19 @@ interface Call {
 /** A server whose writes answer `answer` and whose list answers `listed` (no writes given the server when undefined), the caller holding `role`. */
 async function withResets(
   answer: ResetChangeWrite | undefined,
-  { role = 'admin', listed = { outcome: 'listed', resets: [] } }: { role?: Role; listed?: ResetsList } = {},
+  {
+    role = 'admin',
+    listed = { outcome: 'listed', resets: [] },
+    confirmed,
+  }: { role?: Role; listed?: ResetsList; confirmed?: ContactConfirmation } = {},
 ) {
+  const pressed: string[] = [];
+  const confirmations: ContactConfirmations = {
+    confirm: (token) => {
+      pressed.push(token);
+      return confirmed === undefined ? Promise.reject(new Error('no confirmations')) : Promise.resolve(confirmed);
+    },
+  };
   const asked: Call[] = [];
   const lists: string[] = [];
   const answered = () => (answer === undefined ? Promise.reject(new Error('no writes')) : Promise.resolve(answer));
@@ -130,10 +143,11 @@ async function withResets(
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...(answer !== undefined && { resetChanges: changes }),
+    ...(confirmed !== undefined && { contactConfirmations: confirmations }),
   });
   servers.push(app);
   await app.ready();
-  return { app, asked, lists };
+  return { app, asked, lists, pressed };
 }
 
 const headers = { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: ORG, origin: PUBLIC_ORIGIN };
@@ -336,5 +350,64 @@ describe('all three reset writes (B6-3b)', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_INVALID' } });
     expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/factor-resets/confirm: a registered contact confirms by its link (B6-3b-3)', () => {
+  const TOKEN = `${ORG}.${RESET}.0199a0f0-0000-7000-8000-0000000000e6.${'s'.repeat(43)}`;
+  /** A press on the console's page: no session, no organisation header, no idempotency key. */
+  const press = (payload: Record<string, unknown>, origin: string | null = PUBLIC_ORIGIN): InjectOptions => ({
+    method: 'POST',
+    url: '/v1/factor-resets/confirm',
+    headers: origin === null ? {} : { origin },
+    payload,
+  });
+
+  it('answers when the factor is removed, and nothing else, to anyone holding the link', async () => {
+    const { app, pressed } = await withResets(undefined, {
+      confirmed: { outcome: 'confirmed', coolingOffUntil: new Date('2026-09-28T10:00:00Z') },
+    });
+
+    const response = await app.inject(press({ token: TOKEN }));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ coolingOffUntil: '2026-09-28T10:00:00.000Z' });
+    expect(pressed).toEqual([TOKEN]);
+  });
+
+  it.each([
+    [404, 'NOT_FOUND'],
+    [409, 'CONTACT_NOT_ACTIVE'],
+    [409, 'RESET_CLOSED'],
+    [503, 'INTEGRITY_FAILED'],
+  ] as const)('answers the refusal %i %s', async (status, code) => {
+    const { app } = await withResets(undefined, { confirmed: { outcome: 'refused', status, code } });
+
+    const response = await app.inject(press({ token: TOKEN }));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+
+  it('refuses a press from another origin, a body without its token or with more, and one over the limit', async () => {
+    const { app, pressed } = await withResets(undefined, {
+      confirmed: { outcome: 'confirmed', coolingOffUntil: new Date('2026-09-28T10:00:00Z') },
+    });
+
+    expect((await app.inject(press({ token: TOKEN }, 'https://elsewhere.example'))).statusCode).toBe(403);
+    expect((await app.inject(press({ token: TOKEN }, null))).statusCode).toBe(403);
+    expect((await app.inject(press({}))).statusCode).toBe(400);
+    expect((await app.inject(press({ token: TOKEN, contact: 'x' }))).statusCode).toBe(400);
+    expect((await app.inject(press({ token: 'x'.repeat(600) }))).statusCode).toBe(413);
+    expect(pressed).toEqual([]);
+  });
+
+  it('answers NOT_FOUND when the server was given no confirmations', async () => {
+    const { app } = await withResets({ outcome: 'busy' });
+
+    const response = await app.inject(press({ token: TOKEN }));
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ error: { code: 'NOT_FOUND' } });
   });
 });

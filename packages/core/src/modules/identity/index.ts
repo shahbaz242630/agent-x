@@ -159,6 +159,11 @@ export {
   createContactChanges,
 } from './infrastructure/contact-changes.ts';
 export {
+  type ContactConfirmation,
+  type ContactConfirmations,
+  createContactConfirmations,
+} from './infrastructure/contact-confirmations.ts';
+export {
   createResetChanges,
   RESET_ASK_CONFIRM_OPERATION,
   RESET_ASK_OPERATION,

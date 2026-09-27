@@ -126,6 +126,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/registered-contacts',
       'POST /test/both',
       'POST /v1/auth/sign-out',
+      'POST /v1/factor-resets/confirm',
       'POST /v1/factor-resets/{id}/cancel',
       'POST /v1/factor-resets/{id}/confirm',
       'POST /v1/integrity-hold/clear',
@@ -1114,8 +1115,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
-    // four (B6-3b), with each GET's HEAD.
-    expect(answers.length).toBe(40);
+    // five (B6-3b), with each GET's HEAD.
+    expect(answers.length).toBe(41);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1127,6 +1128,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'Error',
       'FactorReset',
       'FactorResetChanged',
+      'FactorResetConfirmed',
       'FactorResetDrafted',
       'FactorResets',
       'HoldClearingAsked',
