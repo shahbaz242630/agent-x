@@ -203,7 +203,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     clock.advanceBy(10 * 60_000);
     await copierWith(feed).run();
     // From just before the latest event copied, for Zitadel's span leaves out its own start.
-    expect(asked[0]?.since).toEqual(new Date(older.createdAt.getTime() - 5_000));
+    expect(asked[0]?.since).toEqual(new Date(older.createdAt.getTime() - 1));
     expect(asked[0]?.until).toEqual(new Date(clock.now().getTime() - 60_000));
   });
 
@@ -364,11 +364,11 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 
     expect(asked.length).toBe(2);
     expect(await orgRecords(org)).toHaveLength(150);
-    // The second page reads the last five seconds of the first again, and copies none of them twice.
-    expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 155, records: 150 })]);
+    // The second page reads the first's last event again, from a millisecond before it, and copies it once.
+    expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 151, records: 150 })]);
   });
 
-  it('moves past a burst of more than a page within the overlap, copied before, run after run', async () => {
+  it('moves through a burst of more than a page on each page, never reading it again from its start', async () => {
     const who = await person();
     const org = await organization(who.userId);
     const base = clock.now().getTime() - 30 * 60_000;
@@ -389,6 +389,45 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     await copierWith(feed).run();
 
     expect(await orgRecords(org)).toHaveLength(121);
+    expect(lines('idp_events.tied_page')).toEqual([]);
+  });
+
+  it(
+    'moves on by what each page holds, run after run, however many events share a few seconds',
+    { timeout: 120_000 },
+    async () => {
+      const who = await person();
+      const org = await organization(who.userId);
+      const base = clock.now().getTime() - 30 * 60_000;
+      const many = Array.from({ length: 1100 }, (_, index) =>
+        event('user.token.added', who.subject, { createdAt: new Date(base + index * 3) }),
+      );
+      const { feed } = feedOf(() => many);
+
+      await copierWith(feed).run();
+      // Ten pages: the first a hundred, each after it its last one's last event again and 99 more.
+      expect(await orgRecords(org)).toHaveLength(991);
+      clock.advanceBy(60_000);
+      await copierWith(feed).run();
+
+      expect(await orgRecords(org)).toHaveLength(1100);
+    },
+  );
+
+  it('reads again the events at a page’s last time that the page cut off, and copies each once', async () => {
+    const who = await person();
+    const org = await organization(who.userId);
+    const base = clock.now().getTime() - 30 * 60_000;
+    const spread = Array.from({ length: 98 }, (_, index) =>
+      event('user.human.password.changed', who.subject, { createdAt: new Date(base + index * 1000) }),
+    );
+    const at = new Date(base + 200_000);
+    const tied = Array.from({ length: 5 }, () => event('user.locked', who.subject, { createdAt: at }));
+    const { feed } = feedOf(() => [...spread, ...tied]);
+
+    await copierWith(feed).run();
+
+    expect(await orgRecords(org)).toHaveLength(103);
     expect(lines('idp_events.tied_page')).toEqual([]);
   });
 

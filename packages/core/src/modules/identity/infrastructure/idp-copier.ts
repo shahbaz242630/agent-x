@@ -24,17 +24,18 @@
 // person, so a factor removed before someone joins still limits them.
 //
 // Where it got to is the latest time the platform chain holds for a copied
-// event: each run reads from OVERLAP_MS before it to a minute before now (an
-// event written late, by an older clock, is still read), at most MOST_PAGES
-// pages a run. Zitadel's span excludes its own start (review: its search reads
-// events after `since`), so without the overlap an event another organisation
-// had yet to be told of, when a run stopped part-way, or one at the same time
-// as the last one copied, would never be read again; the overlap is read
-// again, and skipped as below. A full page of events copied before (a burst
-// of more than a page within the overlap) moves the next page on past its
-// last event's time, so the burst is never read again as the whole of every
-// run (confirmation review); a full page all at one time can't be told apart
-// from the next, so it is logged as an error (`idp_events.tied_page`) and
+// event: each run reads from a millisecond before it to a minute before now
+// (an event written late, by an older clock, is still read), at most
+// MOST_PAGES pages a run, each page from a millisecond before the last one's
+// last event. Zitadel's span leaves out its own start (review: its search
+// reads events after `since`), so reading from a millisecond before reads
+// again the event a run stopped part-way at (it stops at the first that
+// fails, which is then the latest copied), and any at the same time as the
+// last one read, which a page's end or a run's may cut through; those copied
+// already are skipped, as below. Each page so moves on by the events it
+// holds, never reading a burst again from its start (reviews). A full page
+// all within one millisecond can't be moved past without leaving out any more
+// at that time, so it is logged as an error (`idp_events.tied_page`) and
 // passed.
 // An event, with an organisation, already on the platform chain is skipped,
 // so a run that stops part-way, or reads the same time again, copies nothing
@@ -76,8 +77,8 @@ const FIRST_RUN_BACK_MS = 24 * 3_600_000;
 /** How long an event may be written after its time and still be read: runs read up to this long ago. */
 const SETTLE_MS = 60_000;
 
-/** How far before where it got to each run reads again, for Zitadel's span excludes its start. */
-const OVERLAP_MS = 5_000;
+/** How far before where it got to, or the last page's last event, each read starts: Zitadel's span leaves out its start. */
+const OVERLAP_MS = 1;
 
 /** The most pages of events one run reads. */
 const MOST_PAGES = 10;
@@ -190,37 +191,30 @@ export function createIdpEventCopier({
   const copyAll = async (signal: AbortSignal | undefined): Promise<{ events: number; written: number }> => {
     let events = 0;
     let written = 0;
-    // Where the next page starts once a full page held nothing new: past its last event.
-    let from: Date | undefined;
+    const until = new Date(clock.now().getTime() - SETTLE_MS);
+    const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at');
+    let since =
+      latest === undefined
+        ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
+        : new Date(latest.getTime() - OVERLAP_MS);
     for (let page = 0; page < MOST_PAGES; page += 1) {
-      const until = new Date(clock.now().getTime() - SETTLE_MS);
-      const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at');
-      const since =
-        from ??
-        (latest === undefined
-          ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
-          : new Date(latest.getTime() - OVERLAP_MS));
       if (since.getTime() >= until.getTime()) break;
       const found = await feed.eventsBetween(since, until, PAGE);
-      let newOnes = 0;
       for (const event of found) {
         if (signal?.aborted === true) return { events, written };
-        const copied = await copy(event);
+        written += await copy(event);
         events += 1;
-        written += copied;
-        if (copied > 0) newOnes += 1;
       }
       // A page not full is the last.
-      if (found.length < PAGE) break;
-      from = undefined;
-      const first = found[0];
       const last = found.at(-1);
-      if (newOnes === 0 && first !== undefined && last !== undefined) {
-        // Nothing new to move the cursor on: the next page starts past this one's last event.
-        if (first.createdAt.getTime() === last.createdAt.getTime()) {
-          logger.error('idp_events.tied_page', { at: last.createdAt.toISOString(), events: found.length });
-        }
-        from = last.createdAt;
+      if (found.length < PAGE || last === undefined) break;
+      const next = new Date(last.createdAt.getTime() - OVERLAP_MS);
+      if (next.getTime() <= since.getTime()) {
+        // The whole page within a millisecond: moving on leaves out any more at that time.
+        logger.error('idp_events.tied_page', { at: last.createdAt.toISOString(), events: found.length });
+        since = last.createdAt;
+      } else {
+        since = next;
       }
     }
     return { events, written };
