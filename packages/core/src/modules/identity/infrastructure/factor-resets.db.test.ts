@@ -417,6 +417,16 @@ describe(`sending it to the contacts (B6-3a, Postgres ${server.version})`, () =>
     await expect(ask(who, id)).rejects.toMatchObject({ code: '23505' });
   });
 
+  it('refuses one no longer a draft, writing no secret for it', async () => {
+    const who = await organization();
+    const { id } = await draft(who);
+    await move(who, id, 'cancel');
+
+    await expect(ask(who, id)).rejects.toBeInstanceOf(ResetNotChanged);
+    expect(await secretOf(who.org, id, who.contacts[0])).toBeUndefined();
+    expect(await record(who.org, id)).toMatchObject({ reset: { status: 'CANCELLED' } });
+  });
+
   it('matches a link’s secret only for its own reset and contact', async () => {
     const who = await organization();
     const { id } = await draft(who);

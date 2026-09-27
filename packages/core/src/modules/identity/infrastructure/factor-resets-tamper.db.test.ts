@@ -192,6 +192,16 @@ async function deniedAndHeld(id: string, sign: TamperSign): Promise<void> {
   ]);
 }
 
+/** The alarm raised on the reset by a check already made, the organisation held, and a read by ID denied too. */
+async function deniedAndHeldAgain(id: string, sign: TamperSign): Promise<void> {
+  expect(lines('audit.integrity_failed')).toEqual([
+    expect.objectContaining({ reason: sign, subjectType: 'factor_reset', objectId: id, orgId: org }),
+  ]);
+  expect(await hold()).toMatchObject({ outcome: 'held' });
+  capture = new LogCapture();
+  expect(await read(id)).toEqual({ outcome: 'tampered', sign });
+}
+
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
@@ -322,6 +332,49 @@ describe(`FX-TAMPER as the owner on a factor reset: denied, and held (Postgres $
     ).toEqual({ outcome: 'tampered', sign: 'unsigned' });
     capture = new LogCapture();
     expect(await read(id)).toEqual({ outcome: 'tampered', sign: 'unsigned' });
+  });
+
+  describe('an open reset hidden from the person’s open resets, so a second could be asked (review)', () => {
+    const openFor = () =>
+      withSignedStates(app, org, services(), (tx, states) => openResetsFor(tx, states, org, person));
+
+    it('by its status written as CANCELLED', async () => {
+      const id = await reset();
+      await onTo(id, { confirmed: true });
+      await owner.setColumn(id, 'status', 'CANCELLED');
+
+      expect(await openFor()).toEqual({ outcome: 'tampered', sign: 'seal' });
+      await deniedAndHeldAgain(id, 'seal');
+    });
+
+    it('by its person written as another', async () => {
+      const id = await reset();
+      const other = ids.next();
+      await withSignedStates(app, org, quiet(), async (tx, states) =>
+        addMembership(tx, states, {
+          orgId: org,
+          id: other,
+          userId: await newUser('elsewhere'),
+          role: 'developer',
+          joinedAt: clock.now(),
+          actor: OPERATOR,
+        }),
+      );
+      await owner.setColumn(id, 'person', other);
+
+      expect(await openFor()).toEqual({ outcome: 'tampered', sign: 'seal' });
+      await deniedAndHeldAgain(id, 'seal');
+    });
+
+    it('by its row deleted, which the app role cannot do', async () => {
+      const id = await reset();
+      await onTo(id, { confirmed: false });
+      await owner.query('delete from identity.factor_reset_confirmations where reset_id = $1', [id]);
+      await owner.deleteRow(id);
+
+      expect(await openFor()).toEqual({ outcome: 'tampered', sign: 'deleted' });
+      await deniedAndHeldAgain(id, 'deleted');
+    });
   });
 
   it('its events stripped of their seals', async () => {

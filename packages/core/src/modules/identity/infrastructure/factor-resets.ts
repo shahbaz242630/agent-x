@@ -44,7 +44,7 @@ import type {
   TamperSign,
   VerifiedState,
 } from '../../audit/index.ts';
-import { FACTOR_RESET, type FactorResetStatus, OPEN_RESET_STATUSES } from '../domain/factor-reset.ts';
+import { FACTOR_RESET, type FactorResetStatus, isOpenReset } from '../domain/factor-reset.ts';
 import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -163,9 +163,10 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Reset
   const expiresAt = fields.get('expires_at');
   const confirmedBy = fields.get('confirmed_by');
   const coolingOffUntil = fields.get('cooling_off_until');
-  // The table's checks hold each field to its kind, and the seal to what was written.
+  // The table's checks hold each field to its kind (the status to the machine's states), and the
+  // seal to what was written: a status the app never wrote fails the seal before it is read here.
   if (
-    !FACTOR_RESET.isState(status ?? '') ||
+    typeof status !== 'string' ||
     typeof person !== 'string' ||
     typeof requestedBy !== 'string' ||
     typeof stepUpChallengeId !== 'string' ||
@@ -237,13 +238,35 @@ export async function resetForChange(
 }
 
 /**
+ * The most resets, closed ones included, and the most objects the log holds
+ * about them, that `openResetsFor` reads for an organisation: many years of
+ * resets at the pilot's size (Carry-Forward: a narrower read before production).
+ */
+const MOST_RESET_RECORDS = 500;
+
+/** More resets, or objects in the log about them, than `openResetsFor` reads. */
+class TooManyResets extends Error {
+  constructor() {
+    super(`The organisation has more than ${String(MOST_RESET_RECORDS)} reset records, more than a check reads`);
+    this.name = 'TooManyResets';
+  }
+}
+
+/**
  * The person's open resets (DRAFT, AWAITING_CONTACT or COOLING_OFF), each
- * read for a change and verified, in the caller's transaction, which must be
- * withSignedStates' for the organisation; or tampered with, at the first that
- * doesn't verify. At most one is open at a time, which the ask holds (B6-3b):
- * under a lock for the person, it finds the one there, to refuse it, or to let
- * it lapse first. The status narrows the rows read; each is then judged by its
- * signed state, and one planted as closed can't hide an open one it isn't.
+ * read for a decision (`share`) and verified, in the caller's transaction,
+ * which must be withSignedStates' for the organisation; or tampered with,
+ * when any reset the table or the log knows of doesn't verify (every alarm is
+ * raised, and the organisation held). At most one is open at a time, which
+ * the ask holds (B6-3b): under a lock for the person, it finds the one there
+ * and refuses. A reset read here can't be changed in the same transaction
+ * (the lock order's rule), so one that lapsed is moved on in a transaction of
+ * its own.
+ *
+ * Every reset of the organisation is verified first (verifyAll), so an open
+ * one can't be hidden from this check by its row's status or person changed,
+ * or by the row deleted (review); the person's are then judged open by their
+ * verified status alone. More than MOST_RESET_RECORDS throws TooManyResets.
  */
 export async function openResetsFor(
   tx: ResetsTransaction,
@@ -254,21 +277,26 @@ export async function openResetsFor(
   | { readonly outcome: 'found'; readonly resets: readonly ResetRecord[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
+  const whole = await states.verifyAll(tx, orgId, [FACTOR_RESETS], MOST_RESET_RECORDS);
+  if (whole.outcome === 'too_many') throw new TooManyResets();
+  if (whole.outcome === 'tampered') {
+    const [first] = whole.findings;
+    if (first === undefined) throw new Error('verifyAll found tampering it names no finding for');
+    return { outcome: 'tampered', sign: first.sign };
+  }
   const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows' IDs alone, each then read through its signed state
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows' IDs alone, each then read through its signed state; verifyAll has just checked every one the table or the log knows of
     .selectFrom(FACTOR_RESETS.table)
     .select('id')
     .where('person', '=', person)
-    .where('status', 'in', OPEN_RESET_STATUSES)
     .orderBy('id')
     .execute();
   const resets: ResetRecord[] = [];
   for (const { id } of rows) {
-    const read = await resetForChange(tx, states, { orgId, id });
-    if (read.outcome === 'tampered') return read;
-    // Gone between the two reads: the row's check finds that too, on the next read.
-    if (read.outcome === 'missing') continue;
-    resets.push(read.reset);
+    const read = await resetRecord(tx, states, orgId, id);
+    // Verified by verifyAll in this transaction, and locked for share since.
+    if (read.outcome !== 'found') throw new Error(`a reset verifyAll verified reads as ${read.outcome}: ${id}`);
+    if (isOpenReset(read.reset.status)) resets.push(read.reset);
   }
   return { outcome: 'found', resets };
 }
