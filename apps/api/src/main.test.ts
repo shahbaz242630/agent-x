@@ -417,6 +417,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       'api.listening',
       'api.notices',
       'api.idp_events',
+      'api.factor_resets',
     ]);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
@@ -428,6 +429,10 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // Nor the login service's events (B6-2b), read with the same token.
     expect(capture.lines().find((line) => line.event === 'api.idp_events')).toEqual(
       expect.objectContaining({ copying: false }),
+    );
+    // Nor the resets carried out (B6-3c): no reset token.
+    expect(capture.lines().find((line) => line.event === 'api.factor_resets')).toEqual(
+      expect.objectContaining({ removing: false }),
     );
   });
 

@@ -97,6 +97,8 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
           },
     // The access key and the directory's token are left out: they're secrets.
     email: config.email === undefined ? null : { endpoint: config.email.endpoint, sender: config.email.sender },
+    // The token is left out: it's a secret. Whether resets are carried out at all is kept.
+    factorResets: config.factorResets === undefined ? null : {},
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     securityEvents: { retentionDays: config.securityEvents.retentionDays },
     payees: { coolingOffHours: config.payees.coolingOffHours },

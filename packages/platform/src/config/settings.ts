@@ -194,6 +194,12 @@ const SETTINGS = {
   AGENTX_EMAIL_ACCESS_KEY_FILE: { schema: text },
   AGENTX_DIRECTORY_TOKEN: { schema: text },
   AGENTX_DIRECTORY_TOKEN_FILE: { schema: text },
+  // B6-3c: the login service's token for removing a person's second factors,
+  // once a reset a registered contact confirmed has cooled off: a service
+  // user of its own, with the organisation's Org User Manager role. Optional,
+  // and only with sign-in; read by secretSetting (database.ts).
+  AGENTX_FACTOR_RESET_TOKEN: { schema: text },
+  AGENTX_FACTOR_RESET_TOKEN_FILE: { schema: text },
   // ADR-003 §7: a console session ends after this long unused, and this long
   // after it opened however much it is used.
   AGENTX_SESSION_IDLE_MINUTES: {
@@ -318,6 +324,8 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_EMAIL_ACCESS_KEY_FILE',
       'AGENTX_DIRECTORY_TOKEN',
       'AGENTX_DIRECTORY_TOKEN_FILE',
+      'AGENTX_FACTOR_RESET_TOKEN',
+      'AGENTX_FACTOR_RESET_TOKEN_FILE',
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',

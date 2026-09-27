@@ -140,7 +140,7 @@ interface People {
  * themselves, and to the organisation's admins but them, found as they are
  * sent; and to its ACTIVE contacts once it was sent to them.
  */
-const toldOf = (orgId: string, kind: NoticeKind, personUserId: string, toContacts: boolean): Notice[] => {
+export const toldOfReset = (orgId: string, kind: NoticeKind, personUserId: string, toContacts: boolean): Notice[] => {
   const about = { orgId, kind, membershipId: null, role: null, aboutId: personUserId } as const;
   return [
     { ...about, recipientUserId: personUserId },
@@ -354,7 +354,10 @@ export function createResetChanges({
         // Can't be believed (the ask refuses it), or confirmed or moved on by another ask since it was read.
         if (person.outcome !== 'found' || read.outcome !== 'found' || !hasLapsed(read.reset, clock.now())) return;
         await moveReset(tx, states, { orgId, id, event: 'expire', actor: { type: 'system', id: 'api' }, details: {} });
-        await outbox.add(tx, toldOf(orgId, 'factor_reset_expired', person.member.userId, sentToContacts(read.reset)));
+        await outbox.add(
+          tx,
+          toldOfReset(orgId, 'factor_reset_expired', person.member.userId, sentToContacts(read.reset)),
+        );
       });
     }
   };
@@ -429,7 +432,7 @@ export function createResetChanges({
         });
         await outbox.add(tx, [
           ...linksTo(admin.orgId, reset.id, contactIds),
-          ...toldOf(admin.orgId, 'factor_reset_asked', people.person.userId, false),
+          ...toldOfReset(admin.orgId, 'factor_reset_asked', people.person.userId, false),
         ]);
         return { status: 200, resourceId: reset.id };
       });
@@ -452,7 +455,7 @@ export function createResetChanges({
           actor: { type: 'user', id: admin.userId },
           details: {},
         });
-        await outbox.add(tx, toldOf(admin.orgId, 'factor_reset_cancelled', person.userId, sentToContacts(reset)));
+        await outbox.add(tx, toldOfReset(admin.orgId, 'factor_reset_cancelled', person.userId, sentToContacts(reset)));
         return { status: 200, resourceId: reset.id };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;

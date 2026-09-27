@@ -198,6 +198,10 @@ export async function registerTotp(client: ZitadelClient, userId: string): Promi
 export const verifyTotp = (client: ZitadelClient, userId: string, code: string): Promise<unknown> =>
   client.post(`/v2/users/${userId}/totp/verify`, { code });
 
+/** Adds codes by email as a second factor (the user's email is verified): a second kind for a reset to remove (B6-3c). */
+export const addOtpEmail = (client: ZitadelClient, userId: string): Promise<unknown> =>
+  client.post(`/v2/users/${userId}/otp_email`);
+
 /** The IDs of the users, of any kind, with exactly this user name. */
 export async function usersNamed(client: ZitadelClient, userName: string): Promise<string[]> {
   const { result = [] } = await client.post<{ result?: { id: string }[] }>('/management/v1/users/_search', {

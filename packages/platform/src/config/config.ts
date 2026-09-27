@@ -110,6 +110,17 @@ export interface Config {
         readonly directoryToken: string;
       }
     | undefined;
+  /**
+   * B6-3c: removing a person's second factors once a reset a registered
+   * contact confirmed has cooled off. Undefined when no token is set, and no
+   * reset is carried out then: each waits, due.
+   */
+  readonly factorResets:
+    | {
+        /** The login service's token for removing second factors. Never logged, never in the fingerprint. */
+        readonly token: string;
+      }
+    | undefined;
   /** ADR-003 §7: how long a console session lives unused, and at most. */
   readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
   /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
@@ -259,6 +270,24 @@ const BASE64_KEY = /^(?:[A-Za-z0-9+/]{4}){1,256}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9
 /** A token as the login service gives them (the address book holds the same shape). */
 const VISIBLE_TOKEN = /^[!-~]{1,4096}$/;
 
+/**
+ * B6-3c: the factors are removed at the login service sign-in uses, so the
+ * token goes only with sign-in (whose issuer is on the outbound allowlist).
+ */
+function factorResetProblems(token: string | undefined, signInSet: boolean): string[] {
+  if (token === undefined) return [];
+  return [
+    ...(signInSet
+      ? []
+      : [
+          'AGENTX_FACTOR_RESET_TOKEN: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service holds the factors',
+        ]),
+    ...(VISIBLE_TOKEN.test(token)
+      ? []
+      : ['AGENTX_FACTOR_RESET_TOKEN: must be 1 to 4096 visible ASCII characters, as the login service gives it']),
+  ];
+}
+
 /** The email settings, once emailProblems has found them all set or none. */
 function emailFrom(
   endpoint: string | undefined,
@@ -325,6 +354,7 @@ export function loadConfig(env: Env = process.env): Config {
     emailSender: setting(env, 'AGENTX_EMAIL_SENDER'),
     emailAccessKey: optionalSecretSetting(env, 'AGENTX_EMAIL_ACCESS_KEY'),
     directoryToken: optionalSecretSetting(env, 'AGENTX_DIRECTORY_TOKEN'),
+    factorResetToken: optionalSecretSetting(env, 'AGENTX_FACTOR_RESET_TOKEN'),
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
@@ -397,6 +427,9 @@ export function loadConfig(env: Env = process.env): Config {
           allowedOrigins.value ?? [],
         )
       : []),
+    ...(checks.factorResetToken.ok && checks.oidcIssuer.ok
+      ? factorResetProblems(checks.factorResetToken.value, checks.oidcIssuer.value !== undefined)
+      : []),
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
@@ -441,6 +474,8 @@ export function loadConfig(env: Env = process.env): Config {
       checks.emailAccessKey.value,
       checks.directoryToken.value,
     ),
+    factorResets:
+      checks.factorResetToken.value === undefined ? undefined : Object.freeze({ token: checks.factorResetToken.value }),
     sessions: Object.freeze({
       idleSeconds: checks.sessionIdle.value * 60,
       absoluteSeconds: checks.sessionAbsolute.value * 3600,

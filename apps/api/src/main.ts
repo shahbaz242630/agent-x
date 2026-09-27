@@ -83,6 +83,7 @@ import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
+import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -591,6 +592,19 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const idpCopying = scheduleRunsIfAny(copier, IDP_EVENTS_EVERY_MS);
   logger.info('api.idp_events', { copying: idpCopying.running });
+  // Resets of lost second factors carried out once cooled off (B6-3c), on a timer of their own.
+  const removals = resetRemovalsFrom({
+    config,
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock: systemClock,
+    outbox,
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    logger,
+  });
+  const factorRemoving = scheduleRunsIfAny(removals, FACTOR_REMOVALS_EVERY_MS);
+  logger.info('api.factor_resets', { removing: factorRemoving.running });
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -608,6 +622,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           noticeSweeping.stop(),
           noticeSending?.stop(),
           idpCopying.stop(),
+          factorRemoving.stop(),
           recording.stop(),
         ]);
       },

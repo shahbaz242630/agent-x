@@ -15,6 +15,7 @@ import { type ApiSignIn, apiSignIn } from './api-sign-in.ts';
 import { LOGIN_ORIGIN, readAutomationToken } from './compose.ts';
 import { totp } from './totp.ts';
 import {
+  addOtpEmail,
   createHumanUser,
   createOidcApp,
   deleteProject,
@@ -62,6 +63,8 @@ export interface E2eFixtures {
     readonly firstAdmin: TestUser;
     /** As `totp`, invited by the first admin, then made an admin, which their app code can't use, and deactivated (B4-6d-2). */
     readonly member: TestUser & { readonly totpSecret: string };
+    /** A password, an authenticator app and codes by email: every second factor removed by a reset (B6-3c). */
+    readonly resetTarget: TestUser;
   };
   /** The API as the login service's client. */
   readonly api: ApiSignIn;
@@ -109,6 +112,11 @@ export default async function setup(project: TestProject): Promise<() => Promise
     created.push(member);
     const memberSecret = await registerTotp(client, member.userId);
     await verifyTotp(client, member.userId, totp(memberSecret, Date.now()));
+    const resetTarget = await createHumanUser(client, `${run}-reset-target`, password);
+    created.push(resetTarget);
+    const resetSecret = await registerTotp(client, resetTarget.userId);
+    await verifyTotp(client, resetTarget.userId, totp(resetSecret, Date.now()));
+    await addOtpEmail(client, resetTarget.userId);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpKey, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpApp, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
@@ -116,6 +124,11 @@ export default async function setup(project: TestProject): Promise<() => Promise
     await loginSees(client, signIn, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
     await loginSees(client, firstAdmin, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, member, ['AUTHENTICATION_METHOD_TYPE_PASSWORD', 'AUTHENTICATION_METHOD_TYPE_TOTP']);
+    await loginSees(client, resetTarget, [
+      'AUTHENTICATION_METHOD_TYPE_PASSWORD',
+      'AUTHENTICATION_METHOD_TYPE_TOTP',
+      'AUTHENTICATION_METHOD_TYPE_OTP_EMAIL',
+    ]);
     const api = await apiSignIn(client);
 
     project.provide('e2e', {
@@ -131,6 +144,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         stepUpKey,
         firstAdmin,
         member: { ...member, totpSecret: memberSecret },
+        resetTarget,
       },
       api,
       policy: await loginPolicy(client),

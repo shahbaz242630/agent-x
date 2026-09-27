@@ -14,6 +14,11 @@
 // an access key for the stand-in email service (deploy/compose/mail-sink.ts),
 // one copy for the API and one in the service's own folder.
 //
+// And it turns on the resets' removal of second factors (B6-3c), as on
+// staging: the login service's service user `agentx-resets`, with the
+// organisation's Org User Manager role alone (partner, S57), its token beside
+// the others.
+//
 // The registration is the stack's, not the run's: a later run finds it (the
 // client ID in the file still one of the project's apps; the token still
 // reading the feed) and keeps it, so it is made again only for a fresh stack.
@@ -61,6 +66,11 @@ const EMAIL_KEY_FILE = path.join(SECRETS_DIR, 'api-sign-in', 'email-access-key')
 const EMAIL_KEY_MOUNTED = '/mnt/sign-in/email-access-key';
 const SINK_KEY_FILE = path.join(SECRETS_DIR, 'mail-sink', 'access-key');
 
+/** The service user the API removes second factors as (B6-3c), named as on staging, and its token's file. */
+const RESETS_USER = 'agentx-resets';
+const RESET_TOKEN_FILE = path.join(SECRETS_DIR, 'api-sign-in', 'reset-token');
+const RESET_TOKEN_MOUNTED = '/mnt/sign-in/reset-token';
+
 /** The stand-in email service, as the API reaches it on the stack's network (compose.yaml's `mail`). */
 const MAIL_ORIGIN = 'http://mail:8080';
 
@@ -95,6 +105,7 @@ const settingsFor = (clientId: string): string =>
     'AGENTX_EMAIL_SENDER=DoNotReply@agentx.localhost',
     `AGENTX_EMAIL_ACCESS_KEY_FILE=${EMAIL_KEY_MOUNTED}`,
     `AGENTX_DIRECTORY_TOKEN_FILE=${TOKEN_MOUNTED}`,
+    `AGENTX_FACTOR_RESET_TOKEN_FILE=${RESET_TOKEN_MOUNTED}`,
     '',
   ].join(String.fromCharCode(10));
 
@@ -195,6 +206,46 @@ async function apiEmail(client: ZitadelClient): Promise<boolean> {
   return true;
 }
 
+/**
+ * Whether the token can read another user of the organisation, which the Org
+ * User Manager role gives: Zitadel grants a role a moment after it records
+ * it, so a new token is asked again until it can.
+ */
+async function resetsRead(token: string, otherUserId: string): Promise<boolean> {
+  try {
+    await zitadelClient(LOGIN_ORIGIN, token).get(`/management/v1/users/${otherUserId}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The reset token, kept if it still works; true if it was made afresh. `otherUserId`: a user it must be able to read. */
+async function apiResets(client: ZitadelClient, otherUserId: string): Promise<boolean> {
+  const token = textOf(RESET_TOKEN_FILE);
+  const found = await usersNamed(client, RESETS_USER);
+  if (token !== undefined && found.length === 1 && (await resetsRead(token, otherUserId))) return false;
+
+  await Promise.all(found.map((id) => deleteUser(client, id)));
+  const made = await createServiceUser(client, RESETS_USER, 'Agent X resets (local stack)');
+  await grantOrgRoles(client, made.userId, ['ORG_USER_MANAGER']);
+  const deadline = Date.now() + 60_000;
+  while (!(await resetsRead(made.token, otherUserId))) {
+    if (Date.now() > deadline) throw new Error("the reset token still can't read the organisation's users");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  // Readable by the API's own user.
+  writeFileSync(RESET_TOKEN_FILE, made.token, { mode: 0o644 });
+  return true;
+}
+
+/** The reset token as the API reads it, for a test to use as the API does (B6-3c). Never printed. */
+export function resetToken(): string {
+  const token = textOf(RESET_TOKEN_FILE);
+  if (token === undefined || token === '') throw new Error('the reset token has not been made');
+  return token;
+}
+
 /** The API's client with the login service: the one the files name if it is still there, else a new one. */
 async function apiClient(client: ZitadelClient): Promise<ApiSignIn & { made: boolean }> {
   const projects = await projectsNamed(client, PROJECT);
@@ -217,10 +268,12 @@ async function apiClient(client: ZitadelClient): Promise<ApiSignIn & { made: boo
 export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
   const { clientId, clientSecret, made } = await apiClient(client);
   const emailMade = await apiEmail(client);
+  const [directoryUser = ''] = await usersNamed(client, DIRECTORY_USER);
+  const resetsMade = await apiResets(client, directoryUser);
   writeFileSync(SETTINGS_FILE, settingsFor(clientId), { mode: 0o644 });
   // A new container when a secret file changed, which compose can't see; otherwise compose makes
   // one only if the settings changed (this file, or a stack started afresh since).
-  await restart(['api'], made || emailMade);
+  await restart(['api'], made || emailMade || resetsMade);
   await apiAnswers();
   return { clientId, clientSecret };
 }
