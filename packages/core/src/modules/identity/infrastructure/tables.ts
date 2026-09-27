@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql, 0025_factor_resets.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -10,6 +10,8 @@ export interface IdentityTables {
   'identity.invitations': InvitationsTable;
   'identity.session_emails': SessionEmailsTable;
   'identity.registered_contacts': RegisteredContactsTable;
+  'identity.factor_resets': FactorResetsTable;
+  'identity.factor_reset_confirmations': FactorResetConfirmationsTable;
 }
 
 interface UsersTable {
@@ -118,4 +120,30 @@ interface RegisteredContactsTable {
   /** These two are written by the signed state's steps alone (the audit module's record). */
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;
+}
+
+interface FactorResetsTable {
+  org_id: string;
+  id: string;
+  status: string;
+  person: string;
+  requested_by: string;
+  step_up_challenge_id: string;
+  expires_at: Date;
+  /** Null until a contact confirms, with the cooling-off's end. */
+  confirmed_by: string | null;
+  cooling_off_until: Date | null;
+  created_at: Date;
+  /** These two are written by the signed state's steps alone (the audit module's record). */
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
+}
+
+interface FactorResetConfirmationsTable {
+  org_id: string;
+  reset_id: string;
+  contact_id: string;
+  secret_ciphertext: Buffer;
+  secret_key_version: number;
+  created_at: Date;
 }

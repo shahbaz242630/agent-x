@@ -18,6 +18,12 @@ export {
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from './domain/idp-event.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
+export {
+  FACTOR_RESET,
+  type FactorResetStatus,
+  RESET_CONFIRM_HOURS,
+  RESET_COOLING_OFF_HOURS,
+} from './domain/factor-reset.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
   AUTH_TIME_TOLERANCE_SECONDS,
@@ -142,6 +148,7 @@ export {
   REGISTERED_CONTACTS,
   registeredContactsFor,
 } from './infrastructure/registered-contacts.ts';
+export { FACTOR_RESETS } from './infrastructure/factor-resets.ts';
 export {
   CONTACT_ADD_CONFIRM_OPERATION,
   CONTACT_ADD_OPERATION,
