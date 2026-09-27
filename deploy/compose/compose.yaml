@@ -188,6 +188,36 @@ services:
       - ./secrets/operator-requests:/mnt/requests:ro
     restart: 'no'
 
+  # The stand-in for Azure Communication Services' email API (mail-sink.ts,
+  # B6-2c): the API sends its notices here once the end-to-end suite gives
+  # it email settings, as it sends them to ACS on Azure. It checks each
+  # send's signature with the suite's copy of the access key, answers as ACS
+  # does, and logs one line per email, which the suite reads. Nothing is
+  # delivered: the internal network reaches nothing outside. The pinned Node
+  # image, as its unprivileged user, reading only its script and its key.
+  mail:
+    image: node:24.21.0-trixie-slim@sha256:db3ae80f5d8df06e04dabdf7b44cbf008d32de168205fa0294444aabbc08c590
+    command: ['node', '/sink/mail-sink.ts']
+    user: '1000:1000'
+    read_only: true
+    volumes:
+      - ./mail-sink.ts:/sink/mail-sink.ts:ro
+      - ./secrets/mail-sink:/mnt/mail:ro
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    networks: [internal]
+    restart: unless-stopped
+
   # Makes the folder for Zitadel's automation token writable by Zitadel (uid
   # 1000). A named volume starts out owned by root; a distroless image can't
   # chown. Needs no network and nothing but the right to change an owner.

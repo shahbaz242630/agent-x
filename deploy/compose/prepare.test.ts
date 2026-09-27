@@ -14,6 +14,7 @@ import {
   HalfKeyPair,
   IncompleteEnvFile,
   LOGIN_CLIENT_KEYS,
+  MAIL_SINK,
   MASTER_KEY,
   NotAKeyFile,
   newKeyPair,
@@ -24,7 +25,7 @@ import {
   prepareAppKeys,
   prepareEnv,
   prepareKeys,
-  prepareSignInDir,
+  prepareSuiteDir,
   renderEnv,
   SECRETS_DIR,
   VARIABLES,
@@ -202,7 +203,7 @@ describe('the login key pair is two files, the shape Zitadel and the login conta
     expect(readFileSync(path.join(made, LOGIN_CLIENT_KEYS.public), 'utf8')).toBe('public half');
   });
 
-  it('one run does all four, and says which were already there', () => {
+  it('one run does all five, and says which were already there', () => {
     const file = path.join(dir, 'both.env');
     const made = keysDir('both');
     expect(prepare(file, made, bytes(0x08), wordsPair)).toEqual({
@@ -210,31 +211,34 @@ describe('the login key pair is two files, the shape Zitadel and the login conta
       keys: 'created',
       appKeys: 'created',
       signInDir: 'created',
+      mailDir: 'created',
     });
     expect(prepare(file, made, bytes(0x09), wordsPair)).toEqual({
       env: 'kept',
       keys: 'kept',
       appKeys: 'kept',
       signInDir: 'kept',
+      mailDir: 'kept',
     });
     expect(readdirSync(path.join(made, APP_KEYS))).toHaveLength(PURPOSES.length);
     expect(readdirSync(path.join(made, API_SIGN_IN))).toEqual([]);
+    expect(readdirSync(path.join(made, MAIL_SINK))).toEqual([]);
   });
 });
 
-describe("the API's sign-in folder: made before the stack starts, so the suite can write the secret into it", () => {
+describe("the suite's folders: made before the stack starts, so the suite can write into them", () => {
   it('makes the folder empty, keeps what it holds on later runs, and says which', () => {
     const made = path.join(keysDir('sign-in'), API_SIGN_IN);
-    expect(prepareSignInDir(made)).toBe('created');
+    expect(prepareSuiteDir(made)).toBe('created');
     writeFileSync(path.join(made, 'kept'), 'kept');
-    expect(prepareSignInDir(made)).toBe('kept');
+    expect(prepareSuiteDir(made)).toBe('kept');
     expect(readFileSync(path.join(made, 'kept'), 'utf8')).toBe('kept');
   });
 
   it('refuses a file in its place', () => {
     const made = path.join(keysDir('sign-in-file'), API_SIGN_IN);
     writeFileSync(made, 'not a folder');
-    expect(() => prepareSignInDir(made)).toThrow(/EEXIST/);
+    expect(() => prepareSuiteDir(made)).toThrow(/EEXIST/);
   });
 });
 

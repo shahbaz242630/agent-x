@@ -16,6 +16,15 @@
 // with a step-up by security key, and each ends every session the person held
 // (SEC-HA-10). Signed in with their app code, the new admin may still read the
 // members, and is refused an admin's change for want of a passkey (SEC-HA-12).
+//
+// B6-2c ends it: the admin's security key is removed in the login service
+// itself, behind Agent X's back, as someone with rights in Zitadel's console
+// could. At the API's next run of the events copier (made to come at once by
+// restarting it, as a revision restarts) the change is on the organisation's
+// audit chain and the platform chain, and the admin is told by email, through
+// the stack's stand-in for ACS (SEC-OPS-02). On the way it pins down the event
+// feed's span as the copier relies on it: an event at `since` itself is left
+// out, and one a millisecond after is read.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -24,8 +33,20 @@ import { type Browser, type BrowserContext, chromium, type Page } from 'playwrig
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { uuidV7Ids } from '../../packages/core/src/shared-kernel/ids.ts';
-import { API_ORIGIN, type Run, runOperator, SECRETS_DIR } from './compose.ts';
+import { apiAnswers } from './api-sign-in.ts';
+import {
+  adminQuery,
+  API_ORIGIN,
+  LOGIN_ORIGIN,
+  readAutomationToken,
+  restartInPlace,
+  type Run,
+  runOperator,
+  SECRETS_DIR,
+  serviceLogs,
+} from './compose.ts';
 import { loginDriver, where } from './login-pages.ts';
+import { eventsBetween, removeSecurityKey, securityKeysOf, zitadelClient } from './zitadel.ts';
 
 const { password, users } = inject('e2e');
 const user = users.firstAdmin;
@@ -373,4 +394,147 @@ describe('B4-6d-2 the admin invites a second person, then changes their role and
     await signIn();
     expect((await call('GET', '/v1/members', { organization: orgId, on: memberPage })).status).toBe(403);
   });
+});
+
+describe('B6-2c a security key removed in the login service is copied into the audit trail and told', () => {
+  /** Zitadel's own type for it, one the copier watches (idp-event.ts). */
+  const REMOVED = 'user.human.mfa.u2f.token.removed';
+  /** How long after its time the copier first reads an event (idp-copier.ts's SETTLE_MS), and a second more. */
+  const SETTLED_MS = 61_000;
+  /** The removal as Zitadel recorded it: its name as the copier writes it, and its time exactly as the feed gives it. */
+  let removal: { key: string; creationDate: string };
+
+  /** Zitadel's user IDs are digits; checked before one goes into a query. */
+  const subject = (): string => {
+    if (!/^[0-9]{1,32}$/.test(user.userId)) throw new Error('the test user ID is not the digits Zitadel issues');
+    return user.userId;
+  };
+
+  /** A query's rows, one a line. */
+  const rowsOf = async (query: string): Promise<string[]> =>
+    (await adminQuery(query)).split(String.fromCharCode(10)).filter((row) => row !== '');
+
+  /** Waits for a value, asking again every two seconds until the deadline. */
+  async function eventually<T>(ask: () => Promise<T | undefined>, timeoutMs: number, what: string): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const found = await ask();
+      if (found !== undefined) return found;
+      if (Date.now() > deadline) throw new Error(`${what} after ${String(timeoutMs)} ms`);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+
+  it('removes the admin’s one security key as Zitadel’s console would, and finds the event in the feed', async () => {
+    const zitadel = zitadelClient(LOGIN_ORIGIN, await readAutomationToken());
+    const keys = await securityKeysOf(zitadel, subject());
+    expect(keys).toHaveLength(1);
+    const before = new Date(Date.now() - 5_000).toISOString();
+    await removeSecurityKey(zitadel, subject(), keys[0] ?? '');
+
+    const event = await eventually(
+      async () =>
+        (await eventsBetween(zitadel, [REMOVED], before, new Date(Date.now() + 5_000).toISOString())).find(
+          ({ aggregate }) => aggregate.id === subject(),
+        ),
+      30_000,
+      'the removal is still not in the feed',
+    );
+    removal = { key: `user:${subject()}:${String(event.sequence)}`, creationDate: event.creationDate };
+  });
+
+  it('reads the feed’s span as the copier relies on: `since` itself left out, a millisecond before it read', async () => {
+    const zitadel = zitadelClient(LOGIN_ORIGIN, await readAutomationToken());
+    const at = new Date(removal.creationDate);
+    const until = new Date(at.getTime() + 5_000).toISOString();
+    const found = async (since: string): Promise<boolean> =>
+      (await eventsBetween(zitadel, [REMOVED], since, until)).some(({ aggregate }) => aggregate.id === subject());
+
+    expect(await found(removal.creationDate)).toBe(false);
+    expect(await found(new Date(at.getTime() - 1).toISOString())).toBe(true);
+  });
+
+  it(
+    'SEC-OPS-02 copies it at the next run into the organisation’s chain and the platform chain',
+    { timeout: 240_000 },
+    async () => {
+      // The copier reads only events a minute old, and its next run is five minutes off; a start runs it at once.
+      const wait = new Date(removal.creationDate).getTime() + SETTLED_MS - Date.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      await restartInPlace('api');
+      await apiAnswers();
+
+      const onOrgChain = await eventually(
+        async () => {
+          const found = (
+            await rowsOf(
+              `SELECT subject_type || '|' || details FROM audit.events WHERE org_id = '${orgId}' ` +
+                "AND action = 'person.sign_in_changed' ORDER BY seq",
+            )
+          )
+            .map((row) => ({
+              subjectType: row.slice(0, row.indexOf('|')),
+              details: JSON.parse(row.slice(row.indexOf('|') + 1)) as Record<string, unknown>,
+            }))
+            .filter(({ details }) => details.event === removal.key);
+          return found.length === 0 ? undefined : found;
+        },
+        60_000,
+        'the removal is still not on the organisation’s chain',
+      );
+      expect(onOrgChain).toEqual([
+        {
+          subjectType: 'person',
+          details: {
+            event: removal.key,
+            type: REMOVED,
+            at: new Date(removal.creationDate).toISOString(),
+            by: 'other',
+          },
+        },
+      ]);
+
+      const onPlatform = (
+        await rowsOf("SELECT details FROM platform_controls.audit_events WHERE action = 'idp.event_copied'")
+      )
+        .map((row) => JSON.parse(row) as Record<string, unknown>)
+        .filter((details) => details.event === removal.key);
+      expect(onPlatform).toHaveLength(1);
+      expect(onPlatform[0]).toMatchObject({ org: orgId, type: REMOVED, by: 'other' });
+    },
+  );
+
+  it(
+    'tells the admin once by email, as the person it is about, through the stand-in for ACS',
+    { timeout: 180_000 },
+    async () => {
+      // Two notices: to the person, and to the admins but them (B6-2a review), which the sender
+      // turns into none, as they are its one admin. The sender runs each minute; none given up.
+      const toPerson = await eventually(
+        async () => {
+          const rows = (
+            await rowsOf(
+              "SELECT id || '|' || (recipient_user_id IS NULL) || '|' || (sent_at IS NOT NULL) || '|' || (given_up_at IS NOT NULL) " +
+                `FROM notifications.outbox WHERE org_id = '${orgId}' AND kind = 'second_factor_removed'`,
+            )
+          ).map((row) => row.split('|'));
+          if (rows.some(([, , , givenUp]) => givenUp === 'true')) throw new Error('a notice was given up');
+          if (rows.length !== 2 || !rows.every(([, , sent]) => sent === 'true')) return undefined;
+          expect(rows.filter(([, toGroup]) => toGroup === 'true')).toHaveLength(1);
+          return rows.find(([, toGroup]) => toGroup === 'false')?.[0];
+        },
+        150_000,
+        'the notices are still not sent',
+      );
+
+      const received = (await serviceLogs('mail'))
+        .split(String.fromCharCode(10))
+        .filter((line) => line.startsWith('{'))
+        .map((line) => JSON.parse(line) as { event: string; to?: string[]; operationId?: string });
+      expect(received.filter(({ event }) => event === 'mail.refused')).toEqual([]);
+      expect(received.filter(({ operationId }) => operationId === toPerson)).toEqual([
+        { event: 'mail.received', to: [email], subject: expect.any(String) as string, operationId: toPerson },
+      ]);
+    },
+  );
 });

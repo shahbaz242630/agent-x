@@ -95,6 +95,37 @@ export const serviceLogs = (service: string): Promise<string> =>
 export const execIn = (service: string, command: readonly string[], env: Record<string, string> = {}): Promise<Run> =>
   compose(['exec', '-T', ...Object.keys(env).flatMap((name) => ['-e', name]), service, ...command], undefined, env);
 
+/** A query as the database's admin, its rows as plain text. The password goes by the CLI's environment. */
+export async function adminQuery(query: string): Promise<string> {
+  const run = await execIn(
+    'db',
+    [
+      'psql',
+      '--username',
+      'postgres',
+      '--dbname',
+      'agentx',
+      '--no-align',
+      '--tuples-only',
+      '--quiet',
+      '--command',
+      query,
+    ],
+    { PGPASSWORD: localLogin('AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD') },
+  );
+  if (run.code !== 0) throw new Error(`psql failed: ${run.stderr.trim()}`);
+  return run.stdout.trim();
+}
+
+/**
+ * Stops a service and starts the same container again, as a revision restarts
+ * on Azure: its log is kept, and its background work runs at once, as at every
+ * start (B6-2c: the login service's events copied without waiting five minutes).
+ */
+export async function restartInPlace(service: string): Promise<void> {
+  await composeRun(['restart', service], 120_000);
+}
+
 /**
  * Runs the operator's command once (compose.yaml's `operator`, B4-6d), alone
  * (`--no-deps`: the stack is up), in a container removed after, as a person
@@ -134,7 +165,7 @@ const envEntries = (): [string, string][] =>
 export const localLogins = (): string[] => envEntries().map(([, value]) => value);
 
 /** One login prepare generated, by its name. Never printed. */
-export function localLogin(name: string): string {
+function localLogin(name: string): string {
   const found = envEntries().find(([entry]) => entry === name);
   if (found === undefined) throw new Error(`deploy/compose/.env has no ${name}`);
   return found[1];

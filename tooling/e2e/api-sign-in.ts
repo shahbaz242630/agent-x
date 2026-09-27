@@ -7,14 +7,35 @@
 // Zitadel by its name on the stack's network, naming the issuer's host in
 // Zitadel's own headers (AGENTX_OIDC_INTERNAL_ORIGIN, B2-6), as staging's does.
 //
+// It also turns the API's email on (B6-2c), as on staging (B5-3): the login
+// service's read-only service user `agentx-directory`, with the two roles it
+// holds there once the partner gives the second (Org Owner Viewer, and IAM
+// Owner Viewer for the event feed), its token beside the client's secret; and
+// an access key for the stand-in email service (deploy/compose/mail-sink.ts),
+// one copy for the API and one in the service's own folder.
+//
 // The registration is the stack's, not the run's: a later run finds it (the
-// client ID in the file still one of the project's apps) and keeps it, so it
-// is made again only for a fresh stack. Staging does the same by hand (B2-6).
+// client ID in the file still one of the project's apps; the token still
+// reading the feed) and keeps it, so it is made again only for a fresh stack.
+// Staging does the same by hand (B2-6, B5-3).
+import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { API_ORIGIN, LOGIN_ORIGIN, restart, SECRETS_DIR } from './compose.ts';
-import { clientIdsOf, createConfidentialApp, deleteProject, projectsNamed, type ZitadelClient } from './zitadel.ts';
+import {
+  clientIdsOf,
+  createConfidentialApp,
+  createServiceUser,
+  deleteProject,
+  deleteUser,
+  grantInstanceRoles,
+  grantOrgRoles,
+  projectsNamed,
+  usersNamed,
+  zitadelClient,
+  type ZitadelClient,
+} from './zitadel.ts';
 
 /** The Zitadel project that holds the API's client. */
 const PROJECT = 'Agent X API (local stack)';
@@ -29,6 +50,19 @@ const LOGIN_SERVICE_INTERNAL = 'http://zitadel:8080';
 const SETTINGS_FILE = path.join(SECRETS_DIR, 'api-sign-in.env');
 const SECRET_FILE = path.join(SECRETS_DIR, 'api-sign-in', 'oidc-client-secret');
 const SECRET_MOUNTED = '/mnt/sign-in/oidc-client-secret';
+
+/** The service user the API reads addresses and the event feed as, named as on staging. */
+const DIRECTORY_USER = 'agentx-directory';
+
+/** Its token, and the email access key, beside the client's secret; the key's copy in the stand-in's folder. */
+const TOKEN_FILE = path.join(SECRETS_DIR, 'api-sign-in', 'directory-token');
+const TOKEN_MOUNTED = '/mnt/sign-in/directory-token';
+const EMAIL_KEY_FILE = path.join(SECRETS_DIR, 'api-sign-in', 'email-access-key');
+const EMAIL_KEY_MOUNTED = '/mnt/sign-in/email-access-key';
+const SINK_KEY_FILE = path.join(SECRETS_DIR, 'mail-sink', 'access-key');
+
+/** The stand-in email service, as the API reaches it on the stack's network (compose.yaml's `mail`). */
+const MAIL_ORIGIN = 'http://mail:8080';
 
 export interface ApiSignIn {
   readonly clientId: string;
@@ -56,7 +90,11 @@ const settingsFor = (clientId: string): string =>
     `AGENTX_OIDC_CLIENT_ID=${clientId}`,
     `AGENTX_OIDC_CLIENT_SECRET_FILE=${SECRET_MOUNTED}`,
     `AGENTX_OIDC_INTERNAL_ORIGIN=${LOGIN_SERVICE_INTERNAL}`,
-    `AGENTX_OUTBOUND_ALLOWED_ORIGINS=${LOGIN_SERVICE_INTERNAL}`,
+    `AGENTX_OUTBOUND_ALLOWED_ORIGINS=${LOGIN_SERVICE_INTERNAL},${MAIL_ORIGIN}`,
+    `AGENTX_EMAIL_ENDPOINT=${MAIL_ORIGIN}`,
+    'AGENTX_EMAIL_SENDER=DoNotReply@agentx.localhost',
+    `AGENTX_EMAIL_ACCESS_KEY_FILE=${EMAIL_KEY_MOUNTED}`,
+    `AGENTX_DIRECTORY_TOKEN_FILE=${TOKEN_MOUNTED}`,
     '',
   ].join(String.fromCharCode(10));
 
@@ -65,7 +103,7 @@ const settingsFor = (clientId: string): string =>
  * address up again at most every ten seconds, so a new container can be
  * unreachable for that long after it is healthy.
  */
-async function apiAnswers(timeoutMs = 60_000): Promise<void> {
+export async function apiAnswers(timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const status = await fetch(`${API_ORIGIN}/health`).then(
@@ -97,18 +135,73 @@ async function clientListed(
   }
 }
 
-/** The API registered with the login service and running with sign-in on. */
-export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
+/** A file's text, or undefined when it isn't there. */
+function textOf(file: string): string | undefined {
+  try {
+    return readFileSync(file, 'utf8').trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the token can do both things the API asks of it: read a person (the
+ * address book, B5-3) and read the event feed (B6-2b), which IAM Owner Viewer
+ * gives. Zitadel grants a role a moment after it records it, so a new token is
+ * asked again until it can.
+ */
+async function directoryReads(token: string, userId: string): Promise<boolean> {
+  const directory = zitadelClient(LOGIN_ORIGIN, token);
+  try {
+    await directory.get(`/v2/users/${userId}`);
+    await directory.post('/admin/v1/events/_search', { limit: 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The directory's token and the email key, kept if they still work; true if they were made afresh. */
+async function apiEmail(client: ZitadelClient): Promise<boolean> {
+  const token = textOf(TOKEN_FILE);
+  const key = textOf(EMAIL_KEY_FILE);
+  const found = await usersNamed(client, DIRECTORY_USER);
+  const [userId] = found;
+  if (
+    token !== undefined &&
+    key !== undefined &&
+    key === textOf(SINK_KEY_FILE) &&
+    found.length === 1 &&
+    userId !== undefined &&
+    (await directoryReads(token, userId))
+  ) {
+    return false;
+  }
+
+  await Promise.all(found.map((id) => deleteUser(client, id)));
+  const made = await createServiceUser(client, DIRECTORY_USER, 'Agent X directory (local stack)');
+  await grantOrgRoles(client, made.userId, ['ORG_OWNER_VIEWER']);
+  await grantInstanceRoles(client, made.userId, ['IAM_OWNER_VIEWER']);
+  const deadline = Date.now() + 60_000;
+  while (!(await directoryReads(made.token, made.userId))) {
+    if (Date.now() > deadline) throw new Error("the directory's token still can't read a user and the event feed");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  // An access key as ACS gives them, in base64. Readable by the API's and the stand-in's own users.
+  const accessKey = randomBytes(32).toString('base64');
+  writeFileSync(TOKEN_FILE, made.token, { mode: 0o644 });
+  writeFileSync(EMAIL_KEY_FILE, accessKey, { mode: 0o644 });
+  writeFileSync(SINK_KEY_FILE, accessKey, { mode: 0o644 });
+  return true;
+}
+
+/** The API's client with the login service: the one the files name if it is still there, else a new one. */
+async function apiClient(client: ZitadelClient): Promise<ApiSignIn & { made: boolean }> {
   const projects = await projectsNamed(client, PROJECT);
   const current = written();
   if (current !== undefined && projects.length === 1) {
     const [projectId = ''] = projects;
-    if ((await clientIdsOf(client, projectId)).includes(current.clientId)) {
-      // Started with them already, unless the stack was started afresh since: then compose sees the change.
-      await restart(['api'], false);
-      await apiAnswers();
-      return current;
-    }
+    if ((await clientIdsOf(client, projectId)).includes(current.clientId)) return { ...current, made: false };
   }
 
   await Promise.all(projects.map((projectId) => deleteProject(client, projectId)));
@@ -117,9 +210,17 @@ export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
   await clientListed(client, projectId, made.clientId);
   // Readable by the API, which runs as its own user with every capability dropped (as prepare's keys).
   writeFileSync(SECRET_FILE, made.clientSecret, { mode: 0o644 });
-  writeFileSync(SETTINGS_FILE, settingsFor(made.clientId), { mode: 0o644 });
-  // A new container: compose can't see a changed secret file.
-  await restart(['api'], true);
+  return { clientId: made.clientId, clientSecret: made.clientSecret, made: true };
+}
+
+/** The API registered with the login service and running with sign-in and email on. */
+export async function apiSignIn(client: ZitadelClient): Promise<ApiSignIn> {
+  const { clientId, clientSecret, made } = await apiClient(client);
+  const emailMade = await apiEmail(client);
+  writeFileSync(SETTINGS_FILE, settingsFor(clientId), { mode: 0o644 });
+  // A new container when a secret file changed, which compose can't see; otherwise compose makes
+  // one only if the settings changed (this file, or a stack started afresh since).
+  await restart(['api'], made || emailMade);
   await apiAnswers();
-  return { clientId: made.clientId, clientSecret: made.clientSecret };
+  return { clientId, clientSecret };
 }

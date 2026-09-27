@@ -11,7 +11,7 @@ import { type Browser, type BrowserContext, chromium, type Cookie, type Page } f
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
-import { API_ORIGIN, execIn, localLogin, serviceLogs } from './compose.ts';
+import { adminQuery as sql, API_ORIGIN, serviceLogs } from './compose.ts';
 import { loginDriver, where } from './login-pages.ts';
 
 const { password, users, api } = inject('e2e');
@@ -27,28 +27,6 @@ const { drive } = loginDriver({
   password,
   callback: new RegExp(`^${`${API_ORIGIN}${RETURN_TO}`.replaceAll('.', '[.]')}$`),
 });
-
-/** A query as the database's admin, its rows as plain text. The password goes by the CLI's environment. */
-async function sql(query: string): Promise<string> {
-  const run = await execIn(
-    'db',
-    [
-      'psql',
-      '--username',
-      'postgres',
-      '--dbname',
-      'agentx',
-      '--no-align',
-      '--tuples-only',
-      '--quiet',
-      '--command',
-      query,
-    ],
-    { PGPASSWORD: localLogin('AGENTX_LOCAL_POSTGRES_ADMIN_PASSWORD') },
-  );
-  if (run.code !== 0) throw new Error(`psql failed: ${run.stderr.trim()}`);
-  return run.stdout.trim();
-}
 
 /** Zitadel's user IDs are digits; checked before one goes into a query. */
 const subject = (): string => {
