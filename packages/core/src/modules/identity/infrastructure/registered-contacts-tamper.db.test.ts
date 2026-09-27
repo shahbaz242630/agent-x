@@ -36,6 +36,7 @@ import {
   activeContactsFor,
   contactAddressFor,
   ContactsTampered,
+  registeredContactsFor,
   contactChange,
   contactRecord,
   contactsOf,
@@ -279,6 +280,13 @@ describe(`FX-TAMPER as the owner on a registered contact: denied, and held (Post
     expect(await read(id)).toEqual({ outcome: 'tampered', sign: 'deleted' });
     // B6-1b: so a notice to the contacts waits, naming nobody, rather than skip the one deleted.
     await expect(activeContactsFor(app, services(), org)).rejects.toBeInstanceOf(ContactsTampered);
+    // B6-1c: the admins' list is withheld, with the request's correlation ID on the alarm.
+    capture = new LogCapture();
+    expect(await registeredContactsFor(app, services(), org, 'correlation-2')).toEqual({
+      outcome: 'tampered',
+      sign: 'deleted',
+    });
+    expect(lines('audit.integrity_failed')).toEqual([expect.objectContaining({ correlationId: 'correlation-2' })]);
   });
 
   it('B6-1b a contact’s start moved: its address is not given, and a notice to it waits', async () => {

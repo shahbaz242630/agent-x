@@ -15,6 +15,7 @@ import {
   activateContact,
   activeContactsFor,
   contactAddressFor,
+  registeredContactsFor,
   ContactNotChanged,
   contactChange,
   contactRecord,
@@ -542,6 +543,18 @@ describe(`the organisation's contacts (B6-1a, Postgres ${server.version})`, () =
     expect(await contactAddressFor(app, services(), (await organization()).org, active.id)).toBeUndefined();
     expect(await activeContactsFor(app, services(), (await organization()).org)).toEqual([]);
     expect(alarms()).toEqual([]);
+  });
+
+  it('B6-1c lists the ACTIVE contacts alone, each with its address, logged with the request’s correlation ID', async () => {
+    const who = await organization();
+    await draft(who, { email: 'draft@example.test' });
+    const active = await draft(who, { email: 'owner@example.test' });
+    await activate(who, active.id);
+
+    expect(await registeredContactsFor(app, services(), who.org, 'correlation-1')).toEqual({
+      outcome: 'listed',
+      contacts: [expect.objectContaining({ id: active.id, status: 'ACTIVE', email: 'owner@example.test' })],
+    });
   });
 
   it(`reads up to ${String(MOST_CONTACT_RECORDS)} contacts, and refuses to read more rather than cut the list short`, async () => {

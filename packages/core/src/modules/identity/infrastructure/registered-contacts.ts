@@ -484,3 +484,47 @@ export function contactAddressFor(
     return contactEmail(tx, services.keys, orgId, read.contact.id);
   });
 }
+
+/**
+ * One contact with its address, read for an answer (`share`) and verified, in
+ * the caller's transaction, which must be withSignedStates' for its
+ * organisation: what a change's answer shows (B6-1c).
+ */
+export async function contactShown(
+  tx: ContactsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  id: string,
+): Promise<Found<{ readonly outcome: 'found'; readonly contact: ContactWithAddress }>> {
+  const read = await contactRecord(tx, states, orgId, id);
+  if (read.outcome !== 'found') return read;
+  return {
+    outcome: 'found',
+    contact: { ...read.contact, email: await contactEmail(tx, keys, orgId, read.contact.id) },
+  };
+}
+
+/**
+ * The organisation's ACTIVE contacts, each with its address, read and
+ * verified in a transaction of their own, withSignedStates' for it: what the
+ * contacts route lists (B6-1c), logged with the request's correlation ID; or
+ * tampered with. Each statement is limited to 10 seconds.
+ */
+export function registeredContactsFor(
+  db: Kysely<IdentityTables & AuditTables>,
+  { keys, ids, logger }: SignedStatesServices,
+  orgId: string,
+  correlationId: string,
+): Promise<
+  | { readonly outcome: 'listed'; readonly contacts: readonly ContactWithAddress[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const services = { keys, ids, logger: logger.child({ correlationId }) };
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    const listed = await contactsOf(tx, states, keys, orgId);
+    if (listed.outcome === 'tampered') return listed;
+    return { outcome: 'listed', contacts: listed.contacts.filter((contact) => contact.status === 'ACTIVE') };
+  });
+}
