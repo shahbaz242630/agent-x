@@ -19,6 +19,7 @@
 import type {
   AcceptanceConfirmations,
   ContactChanges,
+  ContactConfirmations,
   InvitationAcceptance,
   InvitationWrites,
   HoldClearings,
@@ -84,6 +85,8 @@ export interface ServerOptions {
   readonly contactChanges?: ContactChanges | undefined;
   /** Resets of a member's lost second factor (the identity module's reset-changes.ts); without it, no one reaches those routes. */
   readonly resetChanges?: ResetChanges | undefined;
+  /** A registered contact confirming a reset by its link (contact-confirmations.ts); without it, the route answers 404. */
+  readonly contactConfirmations?: ContactConfirmations | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -221,7 +224,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
-  registerFactorResets(app, options.resetChanges);
+  registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

@@ -49,6 +49,8 @@ import {
   withSignedStates,
 } from '../../audit/index.ts';
 import { confirmableAt, FACTOR_RESET, type FactorResetStatus, isOpenReset } from '../domain/factor-reset.ts';
+import { countsNow } from '../domain/registered-contact.ts';
+import { contactRecord } from './registered-contacts.ts';
 import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -488,6 +490,27 @@ export async function confirmationSecret(
 /** The page a contact's link opens, on the console's origin: confirming there takes a press (B6-3b). */
 const RESET_CONFIRM_PATH = '/factor-resets/confirm';
 
+/** A link's token: the organisation, the reset and the contact, by ID, and the secret, joined by dots. */
+const TOKEN =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/i;
+
+/** What a contact's link carries, as `resetLinkFor` made it. */
+export interface ResetLinkToken {
+  readonly orgId: string;
+  readonly resetId: string;
+  readonly contactId: string;
+  readonly secret: string;
+}
+
+/** The token after `#token=` read back, IDs in lower case; undefined for one not of that shape (B6-3b). */
+export function resetLinkToken(token: string): ResetLinkToken | undefined {
+  const [, orgId, resetId, contactId, secret] = TOKEN.exec(token) ?? [];
+  if (orgId === undefined || resetId === undefined || contactId === undefined || secret === undefined) {
+    return undefined;
+  }
+  return { orgId: orgId.toLowerCase(), resetId: resetId.toLowerCase(), contactId: contactId.toLowerCase(), secret };
+}
+
 /** A reset that failed its check (the alarm raised, the organisation held): no link is sent for it. */
 export class ResetsTampered extends Error {
   constructor(orgId: string) {
@@ -502,10 +525,12 @@ export class ResetsTampered extends Error {
  * sender puts in the contact's email (B6-3b). The token, after `#token=`, is
  * the organisation, the reset, the contact and the secret written for them,
  * joined by dots: a fragment, so it never reaches a server's log by the URL.
- * Undefined when the reset no longer waits for a contact (AWAITING_CONTACT),
- * has lapsed, or has no secret for the contact: its link would do nothing. A
- * reset that can't be believed throws ResetsTampered; a secret that won't
- * open, ConfirmationUnreadable. Each statement is limited to 10 seconds.
+ * Undefined when the contact no longer counts (removed since it was asked,
+ * review of B6-3b-1), the reset no longer waits for a contact
+ * (AWAITING_CONTACT), has lapsed, or has no secret for the contact: its link
+ * would do nothing. A contact or reset that can't be believed throws
+ * ResetsTampered; a secret that won't open, ConfirmationUnreadable. Each
+ * statement is limited to 10 seconds.
  */
 export function resetLinkFor(
   db: Kysely<IdentityTables & AuditTables>,
@@ -517,11 +542,20 @@ export function resetLinkFor(
 ): Promise<{ readonly url: string; readonly expiresAt: Date } | undefined> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
     await sql`set local statement_timeout = '10s'`.execute(tx);
+    // The contact (level 2b) before the reset (2c).
+    const contact = await contactRecord(tx, states, orgId, contactId);
     const read = await resetRecord(tx, states, orgId, resetId);
-    if (read.outcome === 'tampered') throw new ResetsTampered(orgId);
-    if (read.outcome === 'missing') return undefined;
+    if (contact.outcome === 'tampered' || read.outcome === 'tampered') throw new ResetsTampered(orgId);
+    if (contact.outcome === 'missing' || read.outcome === 'missing') return undefined;
     const { reset } = read;
-    if (reset.status !== 'AWAITING_CONTACT' || !confirmableAt(reset.expiresAt, clock.now())) return undefined;
+    const now = clock.now();
+    if (
+      !countsNow(contact.contact, now) ||
+      reset.status !== 'AWAITING_CONTACT' ||
+      !confirmableAt(reset.expiresAt, now)
+    ) {
+      return undefined;
+    }
     const secret = await confirmationSecret(tx, services.keys, { orgId, resetId: reset.id, contactId });
     if (secret === undefined) return undefined;
     const token = [orgId, reset.id, contactId].map((id) => id.toLowerCase()).join('.');

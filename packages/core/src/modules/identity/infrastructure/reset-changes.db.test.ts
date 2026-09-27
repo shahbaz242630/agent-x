@@ -4,7 +4,8 @@
 // role: the idempotency store, the step-up challenge, the reset, its secrets
 // and its notices in one transaction each (SEC-OPS-04). The routes' answers
 // are apps/api's factor-resets.test.ts; the reset's own table is
-// factor-resets.db.test.ts.
+// factor-resets.db.test.ts. B6-3b-3: a contact confirming it by its link
+// (contact-confirmations.ts).
 import { createHash } from 'node:crypto';
 
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
@@ -26,10 +27,11 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
-import { RESET_CONFIRM_HOURS, resetExpiresAt } from '../domain/factor-reset.ts';
+import { RESET_CONFIRM_HOURS, RESET_COOLING_OFF_HOURS, resetExpiresAt } from '../domain/factor-reset.ts';
 import type { Role } from '../domain/membership.ts';
 import { CONTACT_COOLING_OFF_DAYS, contactCountsFrom } from '../domain/registered-contact.ts';
-import { draftReset, FACTOR_RESETS, resetChange } from './factor-resets.ts';
+import { createContactConfirmations } from './contact-confirmations.ts';
+import { confirmationSecret, draftReset, FACTOR_RESETS, resetChange } from './factor-resets.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
 import {
@@ -621,5 +623,130 @@ describe(`listing them (B6-3b, Postgres ${server.version})`, () => {
       ],
     });
     expect(await changes.list(await newOrganization(), CORRELATION)).toEqual({ outcome: 'listed', resets: [] });
+  });
+});
+
+describe(`a contact confirming it by its link (B6-3b-3, Postgres ${server.version})`, () => {
+  let capture: LogCapture;
+  const confirmations = () => {
+    capture = new LogCapture();
+    return createContactConfirmations({
+      database: app,
+      keys,
+      ids,
+      clock,
+      outbox: createOutbox({ ids, clock }),
+      logger: loggerFor(capture),
+    });
+  };
+
+  /** The contact's token, as its link carries it. */
+  const tokenOf = async (org: string, resetId: string, contactId: string) => {
+    const secret = await withTenant(app, org, (tx) => confirmationSecret(tx, keys, { orgId: org, resetId, contactId }));
+    return `${org}.${resetId}.${contactId}.${secret ?? 'none'}`;
+  };
+
+  const press = (token: string) => confirmations().confirm(token, CORRELATION);
+
+  it('SEC-OPS-04 starts the cooling-off, names the contact, and tells the person, the admins and the contacts', async () => {
+    const who = await organization();
+    const id = await sent(who);
+    await clearNotices(who.org);
+    const token = await tokenOf(who.org, id, who.contacts[1]);
+    const until = new Date(clock.now().getTime() + RESET_COOLING_OFF_HOURS * HOUR_MS);
+
+    expect(await press(token)).toEqual({ outcome: 'confirmed', coolingOffUntil: until });
+
+    expect(await changes.list(who.org, CORRELATION)).toMatchObject({
+      resets: [{ id, status: 'COOLING_OFF', confirmedBy: who.contacts[1], coolingOffUntil: until }],
+    });
+    expect(await noticesOf(who.org)).toEqual(told('factor_reset_confirmed', who.person.userId, true));
+    expect(await lastEvent(who.org)).toMatchObject({ action: 'factor_reset.confirmed', actor_id: 'api' });
+    // Pressed again, later: answered as the first press was, with nothing written.
+    clock.advanceBy(HOUR_MS);
+    expect(await press(token)).toEqual({ outcome: 'confirmed', coolingOffUntil: until });
+    expect(await press(token.toUpperCase().replace(/\.[^.]*$/, token.slice(token.lastIndexOf('.'))))).toEqual({
+      outcome: 'confirmed',
+      coolingOffUntil: until,
+    });
+    expect(await noticesOf(who.org)).toHaveLength(3);
+    // The other contact's link does nothing now.
+    expect(await press(await tokenOf(who.org, id, who.contacts[0]))).toEqual(refused(409, 'RESET_CLOSED'));
+  });
+
+  it('answers NOT_FOUND alike to any link that isn’t one we wrote, changing nothing', async () => {
+    const who = await organization();
+    const id = await sent(who);
+    const token = await tokenOf(who.org, id, who.contacts[0]);
+    const [org, reset, contact, secret] = token.split('.') as [string, string, string, string];
+    const other = await newOrganization();
+    const changed = `${secret.slice(0, -1)}${secret.endsWith('A') ? 'B' : 'A'}`;
+
+    for (const link of [
+      `${org}.${reset}.${contact}.${changed}`,
+      `${org}.${reset}.${who.contacts[1]}.${secret}`,
+      `${org}.${ids.next()}.${contact}.${secret}`,
+      `${other}.${reset}.${contact}.${secret}`,
+      `${org}.${reset}.${contact}`,
+      `${org}.${reset}.${contact}.${secret}.more`,
+      'not a token',
+    ]) {
+      expect(await press(link), link).toEqual(refused(404, 'NOT_FOUND'));
+    }
+    expect(await changes.list(who.org, CORRELATION)).toMatchObject({ resets: [{ id, status: 'AWAITING_CONTACT' }] });
+  });
+
+  it('refuses a contact removed since it was asked, and a reset cancelled or lapsed', async () => {
+    const who = await organization();
+    const removedFor = await sent(who);
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      removeContact(tx, states, { orgId: who.org, id: who.contacts[0], actor: OPERATOR, details: {} }),
+    );
+    expect(await press(await tokenOf(who.org, removedFor, who.contacts[0]))).toEqual(
+      refused(409, 'CONTACT_NOT_ACTIVE'),
+    );
+    written(await cancel(who.admin, removedFor));
+    expect(await press(await tokenOf(who.org, removedFor, who.contacts[1]))).toEqual(refused(409, 'RESET_CLOSED'));
+
+    const lapsing = await sent(who);
+    clock.advanceBy(RESET_CONFIRM_HOURS * HOUR_MS);
+    expect(await press(await tokenOf(who.org, lapsing, who.contacts[1]))).toEqual(refused(409, 'RESET_CLOSED'));
+  });
+
+  it('answers 503 INTEGRITY_FAILED when the reset can’t be believed, or its secret won’t open', async () => {
+    const who = await organization();
+    const id = await sent(who);
+    const token = await tokenOf(who.org, id, who.contacts[0]);
+    const owner = await tamperAsOwner(database, FACTOR_RESETS, who.org);
+    try {
+      await owner.setColumn(id, 'expires_at', '2030-01-01T00:00:00Z');
+    } finally {
+      await owner.end();
+    }
+    expect(await press(token)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+
+    const planted = await organization();
+    const plantedId = await sent(planted);
+    const [first, second] = planted.contacts;
+    const plantedToken = await tokenOf(planted.org, plantedId, first);
+    // The first contact's secret copied over the second's row, past the app: it won't open there.
+    const planter = await tamperAsOwner(database, FACTOR_RESETS, planted.org);
+    try {
+      await planter.query(
+        'delete from identity.factor_reset_confirmations where org_id = $1 and reset_id = $2 and contact_id = $3',
+        [planted.org, plantedId, second],
+      );
+      await planter.query(
+        `insert into identity.factor_reset_confirmations
+           select org_id, reset_id, $4, secret_ciphertext, secret_key_version, created_at
+           from identity.factor_reset_confirmations where org_id = $1 and reset_id = $2 and contact_id = $3`,
+        [planted.org, plantedId, first, second],
+      );
+    } finally {
+      await planter.end();
+    }
+
+    expect(await press(plantedToken.replace(`.${first}.`, `.${second}.`))).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(capture.lines().map(({ event }) => event)).toContain('factor_reset.confirmation_unreadable');
   });
 });

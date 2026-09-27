@@ -12,7 +12,7 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { resetCoolingOffUntil, resetExpiresAt } from '../domain/factor-reset.ts';
-import { contactCountsFrom } from '../domain/registered-contact.ts';
+import { CONTACT_COOLING_OFF_DAYS, contactCountsFrom } from '../domain/registered-contact.ts';
 import {
   askContacts,
   confirmationMatches,
@@ -30,7 +30,13 @@ import {
   ResetsTampered,
 } from './factor-resets.ts';
 import { addMembership } from './memberships.ts';
-import { activateContact, contactChange, contactToActivate, draftContact } from './registered-contacts.ts';
+import {
+  activateContact,
+  contactChange,
+  contactToActivate,
+  draftContact,
+  removeContact,
+} from './registered-contacts.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -132,6 +138,8 @@ async function organization(): Promise<Who> {
     await activeContact(org, admin, adminUser, 'finance.office@example.test'),
     await activeContact(org, admin, adminUser, 'owner@example.test'),
   ] as const;
+  // Past their cooling-off, so they count (B6-3b-3: a contact that doesn't is sent no link).
+  clock.advanceBy(CONTACT_COOLING_OFF_DAYS * 86_400_000);
   return { org, admin, adminUser, person, contacts };
 }
 
@@ -608,6 +616,15 @@ describe(`a contact's link, as the sender reads it (B6-3b, Postgres ${server.ver
     expect(await linkOf(who, asked.id, who.contacts[0], new Date(lapse.getTime() - 1))).toBeDefined();
     expect(await linkOf(who, asked.id, who.contacts[0], lapse)).toBeUndefined();
 
+    // A contact removed since it was asked is sent no link (review of B6-3b-1).
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      removeContact(tx, states, { orgId: who.org, id: who.contacts[1], actor: OPERATOR, details: {} }),
+    );
+    const both = await draft(who);
+    await ask(who, both.id);
+    expect(await linkOf(who, both.id, who.contacts[1])).toBeUndefined();
+    expect(await linkOf(who, both.id, who.contacts[0])).toBeDefined();
+
     await confirm(who, asked.id, who.contacts[0]);
     expect(await linkOf(who, asked.id, who.contacts[0])).toBeUndefined();
 
@@ -624,7 +641,7 @@ describe(`a contact's link, as the sender reads it (B6-3b, Postgres ${server.ver
     await withTenant(app, who.org, (tx) =>
       tx
         .updateTable('identity.factor_resets')
-        .set({ expires_at: new Date('2027-01-01T00:00:00Z') })
+        .set({ expires_at: new Date(clock.now().getTime() + 1_000 * 86_400_000) })
         .where('id', '=', id)
         .execute(),
     );

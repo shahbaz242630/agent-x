@@ -13,6 +13,13 @@
 //    the contacts: 200, AWAITING_CONTACT.
 // 4. `POST /v1/factor-resets/{id}/cancel`: CANCELLED, with no step-up
 //    (stopping is never gated).
+// 5. `POST /v1/factor-resets/confirm` (B6-3b-3), public: a registered
+//    contact confirms with the token its emailed link carries, from the
+//    console's page (a browser write, so from our own origin, and a press:
+//    never a GET that acts). 200 with when the factor is removed; 404 for a
+//    link that isn't one we wrote, whatever the reason; 409
+//    CONTACT_NOT_ACTIVE for a contact removed since; 409 RESET_CLOSED. Safe
+//    to press again: the same contact's second press answers as the first.
 // Refusals: 409 OWN_RESET for the admin's own; 409 MEMBER_DEACTIVATED; 409
 // MEMBER_ELSEWHERE for a member of another organisation too (the runbook);
 // 409 NO_COUNTING_CONTACTS; 409 RESET_OPEN while one is under way; 409
@@ -22,6 +29,7 @@
 // a record it rests on can't be verified. The use case is the identity
 // module's reset-changes.ts.
 import {
+  type ContactConfirmations,
   FACTOR_RESET,
   RESET_ASK_CONFIRM_OPERATION,
   RESET_ASK_OPERATION,
@@ -39,6 +47,8 @@ import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
 
 /** The most a body that names nothing may be. */
 const NOTHING_BODY_LIMIT = 64;
+/** The most a contact's confirmation may be: its token, with room to spare. */
+const TOKEN_BODY_LIMIT = 512;
 
 const RESET = z
   .object({
@@ -121,6 +131,27 @@ const CANCEL_SCHEMA = {
   response: { 200: CHANGED },
 };
 
+const CONTACT_CONFIRM_SCHEMA = {
+  summary: 'Confirm a reset of a second factor, as a registered contact',
+  body: z
+    .strictObject({
+      token: z.string().max(256).describe("The token from the contact's emailed link, after `#token=`."),
+    })
+    .describe("The contact's link."),
+  response: {
+    200: z
+      .object({
+        coolingOffUntil: z.iso
+          .datetime()
+          .describe('When the second factor is removed, unless an admin cancels the reset first.'),
+      })
+      .register(API_SCHEMAS, {
+        id: 'FactorResetConfirmed',
+        description: 'The reset, confirmed: its cooling-off has begun.',
+      }),
+  },
+};
+
 type Reset = Extract<ResetChangeWrite, { outcome: 'written' }>['reset'];
 
 /** A reset as the API answers it. */
@@ -152,11 +183,28 @@ const refusalOf = (
     : answerRefusedWrite(written, request, reply);
 
 /**
- * The resets' routes. `changes` does them; without it the routes are still
- * documented, and no one reaches them, as no one holds a role.
+ * The resets' routes. `changes` does the admins', and `confirmations` the
+ * contacts'; without them the routes are still documented, and answer 404
+ * NOT_FOUND (the contacts') or reach no one, as no one holds a role.
  */
-export function registerFactorResets(app: FastifyInstance, changes: ResetChanges | undefined): void {
+export function registerFactorResets(
+  app: FastifyInstance,
+  { changes, confirmations }: { changes: ResetChanges | undefined; confirmations: ContactConfirmations | undefined },
+): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+
+  routes.post(
+    '/v1/factor-resets/confirm',
+    { schema: CONTACT_CONFIRM_SCHEMA, bodyLimit: TOKEN_BODY_LIMIT, config: { access: ['public'] } },
+    async (request, reply) => {
+      if (confirmations === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      const confirmed = await confirmations.confirm(request.body.token, request.id);
+      if (confirmed.outcome === 'refused') {
+        return sendErrorBody(reply, confirmed.status, confirmed.code, request.id);
+      }
+      return { coolingOffUntil: confirmed.coolingOffUntil.toISOString() };
+    },
+  );
   const changesOf = (): ResetChanges => {
     if (changes === undefined) throw new Error('the factor reset routes ran without their writes');
     return changes;
