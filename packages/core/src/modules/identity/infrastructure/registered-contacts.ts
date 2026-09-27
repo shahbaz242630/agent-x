@@ -22,9 +22,8 @@
 //    and moves it to ACTIVE, with the step-up's evidence on the event.
 //
 // Removing one: `contactToRemove` reads it for the change, ACTIVE, with the
-// hash a removal's step-up binds to (the organisation, the contact and the
-// version its signed state has reached, so a step-up for it removes it only
-// as it was); `removeContact` moves it to REMOVED.
+// hash a removal's step-up binds to (the organisation and the contact: it is
+// ACTIVE once only); `removeContact` moves it to REMOVED.
 //
 // `contactsOf` gives the organisation's contacts, each verified, with its
 // address: only once every contact the table or the log knows of verifies
@@ -174,8 +173,6 @@ const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): Conta
     !REGISTERED_CONTACT.states.some((state) => state === status) ||
     typeof addedBy !== 'string' ||
     countsFrom === undefined ||
-    // A start from the moment it stops being a DRAFT (0022).
-    (countsFrom === null) !== (status === 'DRAFT') ||
     typeof stepUpChallengeId !== 'string'
   ) {
     throw new Error(`A verified contact holds a field that isn't one of its own: ${id}`);
@@ -324,9 +321,12 @@ export async function activateContact(
   if (moved.outcome !== 'changed') throw new ContactNotChanged(id, moved.outcome);
 }
 
-/** A removal's SHA-256: the organisation, the contact and the version its signed state has reached. */
-const removalHash = (orgId: string, id: string, version: number): Buffer =>
-  changeHashOf([orgId.toLowerCase(), id.toLowerCase(), String(version)]);
+/**
+ * A removal's SHA-256: the organisation and the contact. A contact is ACTIVE
+ * once only (it is never brought back), so these name the one state a
+ * removal can apply to; the challenge binds the action beside it.
+ */
+const removalHash = (orgId: string, id: string): Buffer => changeHashOf([orgId.toLowerCase(), id.toLowerCase()]);
 
 /**
  * The contact, read for the change that removes it (`change`, so it is locked
@@ -349,7 +349,7 @@ export async function contactToRemove(
   if (state.outcome !== 'verified') return state;
   const contact = recordOf(id.toLowerCase(), state.fields);
   if (contact.status !== 'ACTIVE') return { outcome: 'not_active' };
-  return { outcome: 'active', contact, changeHash: removalHash(orgId, id, state.version) };
+  return { outcome: 'active', contact, changeHash: removalHash(orgId, id) };
 }
 
 /**
