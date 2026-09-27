@@ -59,8 +59,8 @@ const ZAP_REPORT = {
 };
 
 const JUNIT = `<?xml version="1.0" encoding="utf-8"?>
-<testsuites errors="0" failures="2" skipped="0" tests="3" time="1.0">
-  <testsuite name="schemathesis" errors="0" failures="2" skipped="0" tests="3" time="1.0">
+<testsuites errors="0" failures="3" skipped="0" tests="4" time="1.0">
+  <testsuite name="schemathesis" errors="0" failures="3" skipped="0" tests="4" time="1.0">
     <testcase name="POST /v1/auth/sign-out" time="0.5">
       <failure type="failure">1. Test Case ID: wORqH9
 
@@ -177,7 +177,10 @@ describe('B7 the dynamic scan of staging', () => {
       }),
       finding({ rule: 'zap/10049', title: 'Non-Storable Content', severity: 'info' }),
     ]);
-    expect(zapFindings({})).toEqual([]);
+    // A report of no site is a scan that never reached the API.
+    expect(() => zapFindings({})).toThrow(/no site/);
+    expect(() => zapFindings({ site: [] })).toThrow(/no site/);
+    expect(zapFindings({ site: [{ alerts: [] }] })).toEqual([]);
   });
 
   it("reads Schemathesis's report: each failed check at its operation, not the lines indented under it", () => {
@@ -236,6 +239,33 @@ describe('B7 the dynamic scan of staging', () => {
       ),
       st('schemathesis/server-error', 'Server error', 'medium', 'GET', '/v1/auth/callback'),
     ]);
+  });
+
+  it('fails closed: a case that could not run is a high finding, and a report that tested nothing or miscounts throws', () => {
+    const report = (counts: string, cases: string) =>
+      `<testsuites ${counts}><testsuite name="schemathesis" ${counts}>${cases}</testsuite></testsuites>`;
+    const crashed = `<testcase name="GET /v1/members"><error type="error">Traceback (most recent call last):
+  ConnectionError: the stack went away</error></testcase><testcase name="GET /health"><error/></testcase>`;
+    const unreadable = (method: string, path: string): Finding => ({
+      tool: 'schemathesis',
+      rule: 'schemathesis/unreadable-failure',
+      title: 'A case that failed without a check it names',
+      severity: 'high',
+      method,
+      path,
+    });
+
+    expect(schemathesisFindings(report('tests="2" failures="0" errors="2"', crashed))).toEqual([
+      unreadable('GET', '/v1/members'),
+      unreadable('GET', '/health'),
+    ]);
+    expect(gateLines(schemathesisFindings(report('tests="2" failures="0" errors="2"', crashed)))).toHaveLength(2);
+    expect(() => schemathesisFindings(report('tests="0" failures="0" errors="0"', ''))).toThrow(/no test case/);
+    expect(() => schemathesisFindings('')).toThrow(/no test case/);
+    expect(() => schemathesisFindings(report('tests="2" failures="0" errors="1"', crashed))).toThrow(
+      /2 were read|and 2/,
+    );
+    expect(() => schemathesisFindings(report('tests="2" failures="1" errors="2"', crashed))).toThrow(/counts 1 failed/);
   });
 
   it('keeps only what is accepted with a reason: an unknown method’s 404, and ZAP’s metadata probe answered by the edge', () => {

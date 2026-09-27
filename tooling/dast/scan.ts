@@ -216,7 +216,10 @@ interface ZapReport {
 
 /** The findings of ZAP's JSON report: one per rule, method and path. */
 export function zapFindings(report: ZapReport): Finding[] {
-  return (report.site ?? []).flatMap((site) =>
+  // Fails closed: a report of no site is a scan that never reached the API, not a clean one.
+  if (report.site === undefined || report.site.length === 0)
+    throw new Error("ZAP's report holds no site: the scan didn't run");
+  return report.site.flatMap((site) =>
     (site.alerts ?? []).flatMap((alert) =>
       (alert.instances ?? []).map((instance) => ({
         tool: 'zap' as const,
@@ -257,28 +260,58 @@ const schemathesisSeverity = (check: string): Severity =>
  * (`POST /v1/…`), and each failure holds one or more cases (`1. Test Case ID: …`),
  * each listing the checks it failed as lines of their own beginning `- ` at the
  * line's start, then its answer's status as `[431] …`.
+ *
+ * Fails closed (review): a report that tested nothing, or whose own counts of
+ * failures and errors differ from the elements read, throws; a failure or an
+ * error holding no check it names (a case that couldn't run: the API away,
+ * a timeout, the scanner's own exception) is a high finding of its own, never
+ * nothing.
  */
 export function schemathesisFindings(xml: string): Finding[] {
+  const suites = /<testsuites\b([^>]*)>/.exec(xml)?.[1] ?? '';
+  const counted = (name: string): number => Number(new RegExp(`\\b${name}="(\\d+)"`).exec(suites)?.[1] ?? Number.NaN);
+  if (!(counted('tests') > 0)) throw new Error("Schemathesis's report holds no test case: the scan didn't run");
   const findings: Finding[] = [];
+  let failed = 0;
+  let errored = 0;
   for (const [, attributes = '', body = ''] of xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
     const name = unescapeXml(/\bname="([^"]*)"/.exec(attributes)?.[1] ?? '');
     const [method = '', operationPath = ''] = name.split(' ');
-    for (const [, text = ''] of body.matchAll(/<(?:failure|error)\b[^>]*>([\s\S]*?)<\/(?:failure|error)>/g)) {
+    const at = { tool: 'schemathesis' as const, method: method.toUpperCase(), path: operationPath };
+    // The report counts test cases with a failure, and with an error, not the elements.
+    if (/<failure\b/.test(body)) failed += 1;
+    if (/<error\b/.test(body)) errored += 1;
+    // An element with a body, or an empty one (`<error/>`): each counts.
+    for (const match of body.matchAll(/<(failure|error)\b[^>]*>([\s\S]*?)<\/\1>|<(?:failure|error)\b[^>]*\/>/g)) {
+      const text = match[2] ?? '';
+      let checks = 0;
       for (const failure of unescapeXml(text).split(/^(?=\d+\. Test Case ID:)/m)) {
         const status = /^\[(\d{3})\] /m.exec(failure)?.[1];
         for (const [, check = ''] of failure.matchAll(/^- (.+)$/gm)) {
+          checks += 1;
           findings.push({
-            tool: 'schemathesis',
+            ...at,
             rule: ruleOf(check.trim()),
             title: check.trim(),
             severity: schemathesisSeverity(check),
-            method: method.toUpperCase(),
-            path: operationPath,
             ...(status !== undefined && { status: Number(status) }),
           });
         }
       }
+      if (checks === 0) {
+        findings.push({
+          ...at,
+          rule: 'schemathesis/unreadable-failure',
+          title: 'A case that failed without a check it names',
+          severity: 'high',
+        });
+      }
     }
+  }
+  if (failed !== counted('failures') || errored !== counted('errors')) {
+    throw new Error(
+      `Schemathesis's report counts ${String(counted('failures'))} failed and ${String(counted('errors'))} errored test cases, but ${String(failed)} and ${String(errored)} were read`,
+    );
   }
   return findings;
 }
