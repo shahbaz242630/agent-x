@@ -329,9 +329,12 @@ export function createResetChanges({
 
   /**
    * Moves each of the person's resets that lapsed, no contact having
-   * confirmed it in time, to EXPIRED, each in a transaction of its own and
-   * under the person's lock, and tells of it. One that can't be believed, or
-   * more than a check reads, is left to the ask, which refuses it.
+   * confirmed it in time, to EXPIRED, each in a transaction of its own, and
+   * tells of it. No lock of the person's is needed: each reset is read for
+   * the change and judged again, so two at once expire it once, and an ask
+   * reading it meanwhile waits for, or is waited on by, that row lock
+   * (mutation pass, S58). One that can't be believed, or more than a check
+   * reads, is left to the ask, which refuses it.
    */
   const expireLapsed = async (orgId: string, personId: string, services: SignedStatesServices): Promise<void> => {
     let open: Awaited<ReturnType<typeof openResetsFor>>;
@@ -346,7 +349,6 @@ export function createResetChanges({
     const lapsed = open.resets.filter((reset) => hasLapsed(reset, clock.now()));
     for (const { id } of lapsed) {
       await inOrganization(orgId, services, async (tx, states) => {
-        await oneAtATime(tx, orgId, personId);
         const person = await memberOf(tx, states, { orgId, id: personId }, 'share');
         const read = await resetForChange(tx, states, { orgId, id });
         // Can't be believed (the ask refuses it), or confirmed or moved on by another ask since it was read.
