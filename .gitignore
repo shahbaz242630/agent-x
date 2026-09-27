@@ -44,3 +44,4 @@ deploy/azure/*.snapshot.json
 .claude/settings.local.json
 .claude/worktrees/
 .playwright-mcp/
+dast-results/

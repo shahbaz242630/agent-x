@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+import { SCANNER_IMAGES } from '../dast/scan.ts';
 import { POSTGRES_IMAGES } from '../test-db/postgres-images.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
@@ -62,6 +63,11 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     const pulled = Object.values(compose).filter((image) => image !== OUR_IMAGE);
     expect(pulled.length).toBeGreaterThanOrEqual(4);
     expect(imageProblems(pulled)).toEqual([]);
+  });
+
+  it("pins the dynamic scan's scanners (B7)", () => {
+    expect(Object.keys(SCANNER_IMAGES)).toEqual(['zap', 'schemathesis']);
+    expect(imageProblems(Object.values(SCANNER_IMAGES))).toEqual([]);
   });
 
   it('pins the base image of both Dockerfile stages, and uses the same one twice', () => {

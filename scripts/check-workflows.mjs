@@ -23,6 +23,8 @@ export const ALLOWED_ACTIONS = new Set([
   'actions/dependency-review-action',
   'github/codeql-action/init',
   'github/codeql-action/analyze',
+  // B7: the dynamic scan's findings go to code scanning, which only the repository's writers read.
+  'github/codeql-action/upload-sarif',
   'gitleaks/gitleaks-action',
   'zizmorcore/zizmor-action',
   // SEC-SC-02: the software bill of materials of the image the End to end job builds.
