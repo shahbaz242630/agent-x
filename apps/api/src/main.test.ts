@@ -416,6 +416,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       'api.start_recorded',
       'api.listening',
       'api.notices',
+      'api.idp_events',
     ]);
     expect(capture.lines()[1]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
@@ -423,6 +424,10 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // No email in this config (B5-3), so the notices wait in the outbox.
     expect(capture.lines().find((line) => line.event === 'api.notices')).toEqual(
       expect.objectContaining({ sending: false }),
+    );
+    // Nor the login service's events (B6-2b), read with the same token.
+    expect(capture.lines().find((line) => line.event === 'api.idp_events')).toEqual(
+      expect.objectContaining({ copying: false }),
     );
   });
 

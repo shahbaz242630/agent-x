@@ -76,10 +76,11 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
-import { scheduleRuns } from './background.ts';
+import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
+import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
@@ -550,6 +551,19 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const noticeSending = sender === undefined ? undefined : scheduleRuns(sender, NOTICES_EVERY_MS);
   logger.info('api.notices', { sending: noticeSending !== undefined });
+  // The login service's admin events, copied into the audit trail and told (B6-2b), on a timer of their own.
+  const copier = idpEventCopierFrom({
+    config,
+    database,
+    keys,
+    ids: uuidV7Ids,
+    clock: systemClock,
+    outbox,
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    logger,
+  });
+  const idpCopying = scheduleRunsIfAny(copier, IDP_EVENTS_EVERY_MS);
+  logger.info('api.idp_events', { copying: idpCopying.running });
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -566,6 +580,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           eventSweeping.stop(),
           noticeSweeping.stop(),
           noticeSending?.stop(),
+          idpCopying.stop(),
           recording.stop(),
         ]);
       },

@@ -104,6 +104,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
       'api.start_recorded',
       'api.listening',
       'api.notices',
+      'api.idp_events',
     ]);
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });

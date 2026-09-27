@@ -7,7 +7,7 @@
 const DEPENDENCIES = {
   directory: [],
   organizations: ['directory'],
-  identity: ['organizations', 'directory', 'notifications'],
+  identity: ['organizations', 'directory', 'notifications', 'platform-controls'],
   agents: ['organizations', 'directory'],
   suppliers: ['organizations'],
   providers: [],
