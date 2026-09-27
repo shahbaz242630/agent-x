@@ -39,6 +39,8 @@ const MEMBERSHIP = '0199a0f0-0000-7000-8000-00000000b5a4';
 const CONTACT = '0199a0f0-0000-7000-8000-00000000b6a1';
 const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a2';
 const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a3';
+/** A reset of a person's second factor (B6-3b), which a contact's link notice is about. */
+const RESET = '0199a0f0-0000-7000-8000-00000000b6a4';
 
 /** A clock the tests set, forwards and back: the sweep's far future, then each test's own time. */
 const clock = {
@@ -206,6 +208,21 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       'one_recipient',
     ],
     ['a kind not one we send', { kind: 'free_text', about_id: CONTACT }, 'outbox_kind_check'],
+    [
+      'B6-3b a reset’s link to the admins',
+      { kind: 'factor_reset_link', about_id: CONTACT },
+      'reset_link_to_one_contact',
+    ],
+    [
+      'B6-3b a reset’s link to a person',
+      { recipient_user_id: ADMIN, kind: 'factor_reset_link', about_id: CONTACT },
+      'reset_link_to_one_contact',
+    ],
+    [
+      'B6-3b a reset’s link to the contacts',
+      { to_contacts: true, kind: 'factor_reset_link', about_id: CONTACT },
+      'reset_link_to_one_contact',
+    ],
   ])('the table refuses %s, past the module', async (_what, values, constraint) => {
     await expect(
       app
@@ -242,6 +259,43 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     await expect(
       app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'password_changed', aboutId: null })])),
     ).rejects.toThrow(RangeError);
+  });
+
+  it.each([
+    ['the admins', {}],
+    ['a person', { recipientUserId: ADMIN }],
+    ['the contacts', { toContacts: true }],
+  ])('B6-3b refuses a reset’s link to %s: its email carries one contact’s own link', async (_to, change) => {
+    await expect(
+      app
+        .transaction()
+        .execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, ...change })])),
+    ).rejects.toThrow(RangeError);
+    expect(await rows()).toEqual([]);
+  });
+
+  it('B6-3b writes a reset’s link to one contact, about the reset, and its notices about the person', async () => {
+    const told = [
+      'factor_reset_asked',
+      'factor_reset_confirmed',
+      'factor_reset_cancelled',
+      'factor_reset_expired',
+      'factor_reset_completed',
+    ] as const;
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          aboutAContact({ kind: 'factor_reset_link', aboutId: RESET, recipientContactId: CONTACT }),
+          ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, recipientUserId: ADMIN })),
+          ...told.map((kind) => aboutAContact({ kind, aboutId: ADMIN, toContacts: true })),
+        ]),
+      );
+
+    const written = await rows();
+    expect(written).toHaveLength(11);
+    expect(written[0]).toMatchObject({ kind: 'factor_reset_link', recipient_contact_id: CONTACT, about_id: RESET });
+    expect(new Set(written.slice(1).map(({ kind }) => kind))).toEqual(new Set(told));
   });
 
   it('B6-1b writes a notice about a contact, to the admins, a contact or the contacts, and takes each back as written', async () => {

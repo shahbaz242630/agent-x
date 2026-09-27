@@ -1,8 +1,11 @@
 // The notice sender as the API runs it (B5-3): the outbox's notices sent by
 // email through Azure Communication Services, to the address the login
 // service gives, each organisation's admins found in their verified
-// memberships, and its registered contacts in their verified rows (B6-1b). Off, and the notices left waiting in the outbox, unless the
-// config names email (and so sign-in, whose login service gives the addresses).
+// memberships, and its registered contacts in their verified rows (B6-1b); a
+// contact asked to confirm a reset sent its link, read from the reset's
+// verified row (B6-3b). Off, and the notices left waiting in the outbox,
+// unless the config names email (and so sign-in, whose login service gives
+// the addresses).
 import { createAddressBook, type IdentityTables, type MembersList, subjectOfUser } from '@agentx/core/modules/identity';
 import {
   type Admin,
@@ -12,6 +15,7 @@ import {
   type NoticeSender,
   type NotificationsTables,
   type Outbox,
+  type ResetLinks,
 } from '@agentx/core/modules/notifications';
 import { systemClock } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
@@ -58,6 +62,7 @@ export function noticeSenderFrom({
   listMembers,
   listContacts,
   contactAddress,
+  resetLink,
   fetch,
   logger,
 }: {
@@ -69,6 +74,8 @@ export function noticeSenderFrom({
   readonly listContacts: (orgId: string) => Promise<readonly string[]>;
   /** A contact's address from its verified row (identity's contactAddressFor). */
   readonly contactAddress: (orgId: string, contactId: string) => Promise<string | undefined>;
+  /** A contact's link to confirm a reset, from its verified row (identity's resetLinkFor, B6-3b). */
+  readonly resetLink: ResetLinks['linkFor'];
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): NoticeSender | undefined {
@@ -90,6 +97,7 @@ export function noticeSenderFrom({
       fetch,
     }),
     contactAddresses: { addressOf: contactAddress },
+    resetLinks: { linkFor: resetLink },
     audience: audienceFrom(listMembers, listContacts),
     logger,
   });

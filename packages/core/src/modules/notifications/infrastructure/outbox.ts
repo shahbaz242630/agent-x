@@ -36,7 +36,14 @@
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
-import { type ClaimedNotice, isAboutAMembership, isNoticeKind, isNoticeRole, type Notice } from '../domain/notice.ts';
+import {
+  type ClaimedNotice,
+  isAboutAMembership,
+  isNoticeKind,
+  isNoticeRole,
+  type Notice,
+  RESET_LINK_KIND,
+} from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
 
 /** How many times a notice is tried before it is given up. */
@@ -111,6 +118,8 @@ function problemWith(notice: Notice): string | undefined {
   const recipients = [notice.recipientUserId !== null, contact !== null, notice.toContacts === true];
   if (recipients.filter(Boolean).length > 1) return 'it names more than one recipient';
   if (!isNoticeKind(notice.kind)) return 'its kind is not one we send';
+  // Its email carries one contact's own link: never to a group, nor to a person (0026).
+  if (notice.kind === RESET_LINK_KIND && contact === null) return "a reset's link goes to one contact";
   if (isAboutAMembership(notice.kind)) {
     if (!isId(notice.membershipId)) return 'its membership is not a UUID';
     if (!isNoticeRole(notice.role)) return 'its role is not one of the four';

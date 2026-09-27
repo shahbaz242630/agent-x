@@ -9,6 +9,12 @@
 //   that can't be read leaves it to be tried again (`audience_unavailable`).
 // - A contact's address is its own row's, decrypted at send time (B6-1b); a
 //   person's is the login service's.
+// - A notice asking a contact to confirm a reset (B6-3b) is sent with that
+//   contact's link, read at send time from the reset's own verified row and
+//   the secret written for the contact; a reset no longer waiting for a
+//   contact gives the notice up at once (`reset_closed`), as its link would do
+//   nothing; links that can't be read leave it to be tried again
+//   (`link_unavailable`).
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -26,12 +32,12 @@
 //   their lease.
 //
 // Its log lines name the notice, its kind and how it went: never the
-// address, and never the provider's own words.
+// address, never a link, and never the provider's own words.
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
-import { messageFor, type NoticeMessage } from '../domain/messages.ts';
-import { type ClaimedNotice, isAboutASignIn } from '../domain/notice.ts';
+import { messageFor, type NoticeMessage, type ResetLink } from '../domain/messages.ts';
+import { type ClaimedNotice, isAboutAPerson, RESET_LINK_KIND } from '../domain/notice.ts';
 import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
 
@@ -60,6 +66,16 @@ export interface ContactAddresses {
    * Throws if it can't be read, or can't be believed.
    */
   addressOf(orgId: string, contactId: string): Promise<string | undefined>;
+}
+
+/** Finds a registered contact's link to confirm a reset, at send time (B6-3b): identity's, which the API wires. */
+export interface ResetLinks {
+  /**
+   * The contact's link for the reset, and when the reset lapses; undefined
+   * when the reset no longer waits for a contact, or no link was written for
+   * the contact. Throws if it can't be read, or can't be believed.
+   */
+  linkFor(orgId: string, resetId: string, contactId: string): Promise<ResetLink | undefined>;
 }
 
 /** An organisation's active admin, as their verified membership says. */
@@ -92,6 +108,7 @@ export function createNoticeSender({
   notifier,
   addresses,
   contactAddresses,
+  resetLinks,
   audience,
   logger,
 }: {
@@ -100,6 +117,7 @@ export function createNoticeSender({
   readonly notifier: Notifier;
   readonly addresses: AddressBook;
   readonly contactAddresses: ContactAddresses;
+  readonly resetLinks: ResetLinks;
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
@@ -118,12 +136,13 @@ export function createNoticeSender({
   /**
    * The group's members a notice to it goes to: the ACTIVE contacts, or the
    * admins but the member it is about, by their membership, or, for a notice
-   * about a person's sign-in, by their user ID (B6-2a review): that person is
-   * told apart, as themselves, once.
+   * about a person (their sign-in, or a reset of their second factor), by
+   * their user ID (B6-2a review): that person is told apart, as themselves,
+   * once.
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
     if (notice.toContacts) return audience.contactsOf(notice.orgId);
-    const aboutPerson = isAboutASignIn(notice.kind) ? notice.aboutId : null;
+    const aboutPerson = isAboutAPerson(notice.kind) ? notice.aboutId : null;
     const admins = await audience.adminsOf(notice.orgId);
     return admins
       .filter(
@@ -164,9 +183,23 @@ export function createNoticeSender({
       await failed(notice, 'no_address', true);
       return;
     }
+    let link: ResetLink | undefined;
+    if (notice.kind === RESET_LINK_KIND) {
+      try {
+        // The outbox writes a link notice to one contact, and about the reset, only.
+        link = await resetLinks.linkFor(notice.orgId, notice.aboutId ?? '', notice.recipientContactId ?? '');
+      } catch {
+        await failed(notice, 'link_unavailable', false);
+        return;
+      }
+      if (link === undefined) {
+        await failed(notice, 'reset_closed', true);
+        return;
+      }
+    }
     let sent: SendOutcome;
     try {
-      sent = await notifier.send(messageFor(notice, address));
+      sent = await notifier.send(messageFor(notice, address, link));
     } catch {
       await failed(notice, 'send_error', false);
       return;

@@ -6,14 +6,16 @@
 // stopped between notices; a notice to the admins turned into one to each
 // but the member it is about, and those sent in the same run; a notice to the
 // registered contacts turned into one to each ACTIVE contact, each sent to the
-// address its own row gives (B6-1b). Its log never holds an address.
+// address its own row gives (B6-1b); a contact asked to confirm a reset sent
+// its link, read at send time, or the notice given up once the reset no
+// longer waits (B6-3b). Its log never holds an address, nor a link.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import type { NoticeMessage } from '../domain/messages.ts';
+import type { NoticeMessage, ResetLink } from '../domain/messages.ts';
 import type { Notice } from '../domain/notice.ts';
 import { createOutbox } from './outbox.ts';
 import {
@@ -23,6 +25,7 @@ import {
   type ContactAddresses,
   createNoticeSender,
   type Notifier,
+  type ResetLinks,
   type SendOutcome,
 } from './sender.ts';
 import type { NotificationsTables } from './tables.ts';
@@ -52,6 +55,12 @@ const ADDRESSES = new Map([
 const CONTACT = '0199a0f0-0000-7000-8000-00000000b6b1';
 const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b2';
 const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b3';
+/** A reset of the member's second factor (B6-3b), and the one link written for CONTACT. */
+const RESET = '0199a0f0-0000-7000-8000-00000000b6b4';
+const LINK: ResetLink = {
+  url: `https://app.example.test/factor-resets/confirm#token=${ORG}.${RESET}.${CONTACT}.a-contacts-own-words`,
+  expiresAt: new Date('2026-09-29T09:00:00Z'),
+};
 const CONTACT_ADDRESSES = new Map([
   [CONTACT, 'finance.office@example.test'],
   [OTHER_CONTACT, 'owner@example.test'],
@@ -123,6 +132,28 @@ const audience = (
   },
 });
 
+const resetLinks = (
+  lookup: (resetId: string, contactId: string) => ResetLink | undefined | Error = (resetId, contactId) =>
+    resetId === RESET && contactId === CONTACT ? LINK : undefined,
+): ResetLinks => ({
+  linkFor: (orgId, resetId, contactId) => {
+    expect(orgId).toBe(ORG);
+    const found = lookup(resetId, contactId);
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
+});
+
+/** The notice asking one contact to confirm the reset (B6-3b). */
+const resetLinkTo = (contact: string): Notice => ({
+  orgId: ORG,
+  recipientUserId: null,
+  recipientContactId: contact,
+  kind: 'factor_reset_link',
+  membershipId: null,
+  role: null,
+  aboutId: RESET,
+});
+
 /** A notice about a registered contact (B6-1b), to the admins, the contacts, or one contact. */
 const aboutAContact = (to: { contact?: string; contacts?: boolean }): Notice => ({
   orgId: ORG,
@@ -140,6 +171,7 @@ function sender(
   addresses: AddressBook = addressBook(),
   admins: Audience = audience(),
   contacts: ContactAddresses = contactAddresses(),
+  links: ResetLinks = resetLinks(),
 ) {
   const capture = new LogCapture();
   const logger = createLogger({
@@ -155,6 +187,7 @@ function sender(
       notifier: service,
       addresses,
       contactAddresses: contacts,
+      resetLinks: links,
       audience: admins,
       logger,
     }),
@@ -331,6 +364,74 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ).toEqual([null]);
   });
 
+  it('B6-3b leaves the person out of a notice to the admins about a reset of their second factor: told once, as themselves', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const aboutAdmin = {
+      orgId: ORG,
+      kind: 'factor_reset_asked',
+      membershipId: null,
+      role: null,
+      aboutId: ADMIN,
+    } as const;
+    await app.transaction().execute((tx) =>
+      outbox.add(tx, [
+        { ...aboutAdmin, recipientUserId: ADMIN },
+        { ...aboutAdmin, recipientUserId: null },
+      ]),
+    );
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    expect(sent.find(({ to }) => to === 'admin@example.test')?.text).toContain(
+      "You're told because this is your own login.",
+    );
+  });
+
+  it('B6-3b sends a contact asked to confirm a reset its own link, read at send time, and never logs it', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [resetLinkTo(CONTACT)]));
+    const { sent, service } = notifier();
+
+    const { capture, run } = sender(service);
+    await run.run();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ to: 'finance.office@example.test' });
+    expect(sent[0]?.text).toContain(LINK.url);
+    expect(sent[0]?.text).toContain('The link works until 2026-09-29T09:00:00.000Z.');
+    expect(capture.lines().find(({ event }) => event === 'notification.sent')).toMatchObject({
+      kind: 'factor_reset_link',
+    });
+    expect(JSON.stringify(capture.lines())).not.toMatch(/a-contacts-own-words|factor-resets|@example\.test/);
+  });
+
+  it('B6-3b gives a link notice up once its reset no longer waits for a contact, and tries again when links can’t be read', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [resetLinkTo(OTHER_CONTACT), resetLinkTo(CONTACT)]));
+    const { sent, service } = notifier();
+
+    await sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks((_reset, contact) => (contact === CONTACT ? new Error('tampered') : undefined)),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    const outboxRows = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_contact_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('recipient_contact_id')
+      .execute();
+    expect(outboxRows).toEqual([
+      { recipient_contact_id: CONTACT, sent_at: null, given_up_at: null, last_failure: 'link_unavailable' },
+      { recipient_contact_id: OTHER_CONTACT, sent_at: null, given_up_at: START, last_failure: 'reset_closed' },
+    ]);
+  });
+
   it('B6-1b turns a notice to the contacts into one to each ACTIVE contact, each sent to its own address', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true })]));
@@ -438,6 +539,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       notifier: service,
       addresses: addressBook(),
       contactAddresses: contactAddresses(),
+      resetLinks: resetLinks(),
       audience: audience(),
       logger: createLogger({
         service: 'test',
@@ -452,6 +554,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       notifier: service,
       addresses: addressBook(),
       contactAddresses: contactAddresses(),
+      resetLinks: resetLinks(),
       audience: audience(),
       logger: createLogger({
         service: 'test',

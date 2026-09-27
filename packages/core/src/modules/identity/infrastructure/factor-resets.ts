@@ -15,7 +15,8 @@
 // 2. Once stepped up, `resetForChange` reads it for the change (DRAFT), and
 //    `askContacts` writes one secret for each contact that counts, encrypted,
 //    and moves it to AWAITING_CONTACT. The sender reads each secret back with
-//    `confirmationSecret` to make the contact's link.
+//    `resetLinkFor` to make the contact's link (B6-3b), while the reset still
+//    waits for a contact and hasn't lapsed.
 // 3. A contact's link: `confirmationMatches` checks the secret it carries
 //    against the one written for that reset and contact, and `confirmReset`
 //    names the contact, sets the cooling-off and moves it to COOLING_OFF.
@@ -33,18 +34,21 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import type { Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-  VerifiedState,
+import type { Clock } from '../../../shared-kernel/index.ts';
+import {
+  type AuditActor,
+  type AuditDetails,
+  type AuditTables,
+  type RecordedState,
+  type SignedStates,
+  type SignedStatesServices,
+  type TamperSign,
+  type VerifiedState,
+  withSignedStates,
 } from '../../audit/index.ts';
-import { FACTOR_RESET, type FactorResetStatus, isOpenReset } from '../domain/factor-reset.ts';
+import { confirmableAt, FACTOR_RESET, type FactorResetStatus, isOpenReset } from '../domain/factor-reset.ts';
 import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -420,6 +424,50 @@ export async function confirmationSecret(
   } catch (error) {
     throw new ConfirmationUnreadable(resetId, contactId, { cause: error });
   }
+}
+
+/** The page a contact's link opens, on the console's origin: confirming there takes a press (B6-3b). */
+const RESET_CONFIRM_PATH = '/factor-resets/confirm';
+
+/** A reset that failed its check (the alarm raised, the organisation held): no link is sent for it. */
+export class ResetsTampered extends Error {
+  constructor(orgId: string) {
+    super(`An organisation's resets failed their check: ${orgId}`);
+    this.name = 'ResetsTampered';
+  }
+}
+
+/**
+ * The contact's link to confirm the reset, and when the reset lapses, read in
+ * a transaction of its own, withSignedStates' for the organisation: what the
+ * sender puts in the contact's email (B6-3b). The token, after `#token=`, is
+ * the organisation, the reset, the contact and the secret written for them,
+ * joined by dots: a fragment, so it never reaches a server's log by the URL.
+ * Undefined when the reset no longer waits for a contact (AWAITING_CONTACT),
+ * has lapsed, or has no secret for the contact: its link would do nothing. A
+ * reset that can't be believed throws ResetsTampered; a secret that won't
+ * open, ConfirmationUnreadable. Each statement is limited to 10 seconds.
+ */
+export function resetLinkFor(
+  db: Kysely<IdentityTables & AuditTables>,
+  services: SignedStatesServices,
+  { publicOrigin, clock }: { readonly publicOrigin: string; readonly clock: Clock },
+  orgId: string,
+  resetId: string,
+  contactId: string,
+): Promise<{ readonly url: string; readonly expiresAt: Date } | undefined> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    const read = await resetRecord(tx, states, orgId, resetId);
+    if (read.outcome === 'tampered') throw new ResetsTampered(orgId);
+    if (read.outcome === 'missing') return undefined;
+    const { reset } = read;
+    if (reset.status !== 'AWAITING_CONTACT' || !confirmableAt(reset.expiresAt, clock.now())) return undefined;
+    const secret = await confirmationSecret(tx, services.keys, { orgId, resetId: reset.id, contactId });
+    if (secret === undefined) return undefined;
+    const token = [orgId, reset.id, contactId].map((id) => id.toLowerCase()).join('.');
+    return { url: `${publicOrigin}${RESET_CONFIRM_PATH}#token=${token}.${secret}`, expiresAt: reset.expiresAt };
+  });
 }
 
 /**

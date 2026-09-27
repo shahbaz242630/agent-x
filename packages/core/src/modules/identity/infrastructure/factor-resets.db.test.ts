@@ -1,6 +1,7 @@
 // B6-3a: resets of a lost second factor (0025), on the real migrated schema,
 // as the app role. What the owner can do past the app is
-// factor-resets-tamper.db.test.ts.
+// factor-resets-tamper.db.test.ts. B6-3b: a contact's link, as the sender
+// reads it.
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -23,8 +24,10 @@ import {
   openResetsFor,
   resetChange,
   resetForChange,
+  resetLinkFor,
   resetRecord,
   ResetNotChanged,
+  ResetsTampered,
 } from './factor-resets.ts';
 import { addMembership } from './memberships.ts';
 import { activateContact, contactChange, contactToActivate, draftContact } from './registered-contacts.ts';
@@ -198,6 +201,12 @@ const move = (who: Who, id: string, event: 'cancel' | 'expire' | 'complete') =>
   withSignedStates(app, who.org, services(), (tx, states) =>
     moveReset(tx, states, { orgId: who.org, id, event, actor: API, details: {} }),
   );
+
+const ORIGIN = 'https://app.example.test';
+
+/** The contact's link, as the sender reads it at `now`. */
+const linkOf = (who: Who, id: string, contactId: string, now = clock.now()) =>
+  resetLinkFor(app, services(), { publicOrigin: ORIGIN, clock: { now: () => now } }, who.org, id, contactId);
 
 const openFor = (who: Who, person = who.person) =>
   withSignedStates(app, who.org, services(), (tx, states) => openResetsFor(tx, states, who.org, person));
@@ -561,5 +570,66 @@ describe(`a contact confirming it, and its end (B6-3a, Postgres ${server.version
     expect(events.filter(({ action }) => action === 'factor_reset.cancelled')).toHaveLength(1);
     expect(events.filter(({ action }) => action === 'factor_reset.completed')).toHaveLength(1);
     expect(alarms()).toEqual([]);
+  });
+});
+
+describe(`a contact's link, as the sender reads it (B6-3b, Postgres ${server.version})`, () => {
+  it('is the confirm page with the organisation, reset, contact and secret after #token=, and the lapse', async () => {
+    const who = await organization();
+    const { id } = await draft(who);
+    await ask(who, id);
+    const [first] = who.contacts;
+    const secret = await secretOf(who.org, id, first);
+
+    const link = await linkOf({ ...who, org: who.org.toUpperCase() }, id.toUpperCase(), first.toUpperCase());
+
+    expect(link).toEqual({
+      url: `${ORIGIN}/factor-resets/confirm#token=${who.org}.${id}.${first}.${secret ?? 'none'}`,
+      expiresAt: resetExpiresAt(clock.now()),
+    });
+    const other = await linkOf(who, id, who.contacts[1]);
+    expect(other?.url.startsWith(`${ORIGIN}/factor-resets/confirm#token=${who.org}.${id}.${who.contacts[1]}.`)).toBe(
+      true,
+    );
+    expect(other?.url).not.toContain(secret ?? 'none');
+    expect(alarms()).toEqual([]);
+  });
+
+  it('is none for a draft, a contact not asked, a reset confirmed or cancelled, or one lapsed', async () => {
+    const who = await organization();
+    const drafted = await draft(who);
+    expect(await linkOf(who, drafted.id, who.contacts[0])).toBeUndefined();
+    expect(await linkOf(who, ids.next(), who.contacts[0])).toBeUndefined();
+
+    const asked = await draft(who);
+    await ask(who, asked.id, [who.contacts[0]]);
+    expect(await linkOf(who, asked.id, who.contacts[1])).toBeUndefined();
+    const lapse = resetExpiresAt(clock.now());
+    expect(await linkOf(who, asked.id, who.contacts[0], new Date(lapse.getTime() - 1))).toBeDefined();
+    expect(await linkOf(who, asked.id, who.contacts[0], lapse)).toBeUndefined();
+
+    await confirm(who, asked.id, who.contacts[0]);
+    expect(await linkOf(who, asked.id, who.contacts[0])).toBeUndefined();
+
+    const cancelled = await draft(who);
+    await ask(who, cancelled.id);
+    await move(who, cancelled.id, 'cancel');
+    expect(await linkOf(who, cancelled.id, who.contacts[0])).toBeUndefined();
+  });
+
+  it('throws for a reset that fails its check, raising the alarm, and sends no link', async () => {
+    const who = await organization();
+    const { id } = await draft(who);
+    await ask(who, id);
+    await withTenant(app, who.org, (tx) =>
+      tx
+        .updateTable('identity.factor_resets')
+        .set({ expires_at: new Date('2027-01-01T00:00:00Z') })
+        .where('id', '=', id)
+        .execute(),
+    );
+
+    await expect(linkOf(who, id, who.contacts[0])).rejects.toBeInstanceOf(ResetsTampered);
+    expect(alarms()).not.toEqual([]);
   });
 });

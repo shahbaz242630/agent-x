@@ -50,6 +50,7 @@ function senderWith(
     listMembers: () => Promise.reject(new Error('not asked')),
     listContacts: () => Promise.reject(new Error('not asked')),
     contactAddress: () => Promise.reject(new Error('not asked')),
+    resetLink: () => Promise.reject(new Error('not asked')),
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
   });
