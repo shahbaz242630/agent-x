@@ -518,10 +518,10 @@ describe('B6-2c a security key removed in the login service is copied into the a
                 `FROM notifications.outbox WHERE org_id = '${orgId}' AND kind = 'second_factor_removed'`,
             )
           ).map((row) => row.split('|'));
-          if (rows.some(([, , , givenUp]) => givenUp === 't')) throw new Error('a notice was given up');
-          if (rows.length !== 2 || !rows.every(([, , sent]) => sent === 't')) return undefined;
-          expect(rows.filter(([, toGroup]) => toGroup === 't')).toHaveLength(1);
-          return rows.find(([, toGroup]) => toGroup === 'f')?.[0];
+          if (rows.some(([, , , givenUp]) => givenUp === 'true')) throw new Error('a notice was given up');
+          if (rows.length !== 2 || !rows.every(([, , sent]) => sent === 'true')) return undefined;
+          expect(rows.filter(([, toGroup]) => toGroup === 'true')).toHaveLength(1);
+          return rows.find(([, toGroup]) => toGroup === 'false')?.[0];
         },
         150_000,
         'the notices are still not sent',
