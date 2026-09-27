@@ -460,6 +460,34 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(lines('factor_resets.removal_failed', org)).toEqual([expect.objectContaining({ resetId: id })]);
   });
 
+  it('locks the person’s sessions before their membership, so a deactivation under way can’t deadlock with it', async () => {
+    const who = await organization();
+    const id = await coolingOff(who);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    // A deactivation part-way (B4-5): the person's sessions locked (level 0b), their membership not yet.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.sessions where user_id = $1 for no key update', [who.person.userId]);
+      const { factors } = loginService();
+      const running = within(20_000, removalsWith(factors).run(), 'the run');
+      await waitUntilQueued(database.as('admin'), 1);
+      // The deactivation goes on to the membership: the run holds nothing of it yet, so it isn't kept waiting.
+      await holder.query("set local lock_timeout = '5s'");
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        who.person.membershipId,
+      ]);
+      await holder.query('commit');
+      await running;
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+
+    expect(await statusOf(who.org, id)).toBe('COMPLETED');
+  });
+
   it('holds the reset while the login service removes, so an admin’s cancel waits and then finds it done', async () => {
     const who = await organization();
     const id = await coolingOff(who);
