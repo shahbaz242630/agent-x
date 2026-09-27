@@ -13,6 +13,8 @@ import { contactCountsFrom } from '../domain/registered-contact.ts';
 import { addMembership } from './memberships.ts';
 import {
   activateContact,
+  activeContactsFor,
+  contactAddressFor,
   ContactNotChanged,
   contactChange,
   contactRecord,
@@ -520,6 +522,25 @@ describe(`the organisation's contacts (B6-1a, Postgres ${server.version})`, () =
         expect.objectContaining({ id: third.id, status: 'REMOVED', email: 'ceo@example.test' }),
       ],
     });
+    expect(alarms()).toEqual([]);
+  });
+
+  it('B6-1b gives the ACTIVE contacts to tell, counted or not yet, and each one’s address, a removed one’s too', async () => {
+    const who = await organization();
+    const drafted = await draft(who, { email: 'Finance.Office@Example.test' });
+    const active = await draft(who, { email: 'owner@example.test' });
+    const removed = await draft(who, { email: 'ceo@example.test' });
+    await activate(who, active.id);
+    await activate(who, removed.id);
+    await remove(who, removed.id);
+
+    expect(await activeContactsFor(app, services(), who.org)).toEqual([active.id]);
+    expect(await contactAddressFor(app, services(), who.org, active.id)).toBe('owner@example.test');
+    expect(await contactAddressFor(app, services(), who.org, removed.id.toUpperCase())).toBe('ceo@example.test');
+    // A draft is never told, and a contact not in the organisation has no address here.
+    expect(await contactAddressFor(app, services(), who.org, drafted.id)).toBeUndefined();
+    expect(await contactAddressFor(app, services(), (await organization()).org, active.id)).toBeUndefined();
+    expect(await activeContactsFor(app, services(), (await organization()).org)).toEqual([]);
     expect(alarms()).toEqual([]);
   });
 

@@ -12,9 +12,25 @@ const NOTICE: ClaimedNotice = {
   kind: 'role_granted',
   membershipId: '0199a0f0-0000-7000-8000-00000000b5c4',
   role: 'approver',
+  recipientContactId: null,
+  toContacts: false,
+  aboutId: null,
   createdAt: new Date('2026-09-26T09:00:00Z'),
   attempts: 0,
 };
+
+const CONTACT = '0199a0f0-0000-7000-8000-00000000b6c5';
+
+/** A notice about a registered contact, to a contact or an admin (B6-1b). */
+const aboutAContact = (kind: 'contact_added' | 'contact_removed', toAContact: boolean): ClaimedNotice => ({
+  ...NOTICE,
+  kind,
+  membershipId: null,
+  role: null,
+  aboutId: CONTACT,
+  recipientUserId: toAContact ? null : NOTICE.recipientUserId,
+  recipientContactId: toAContact ? '0199a0f0-0000-7000-8000-00000000b6c6' : null,
+});
 
 describe('a notice’s email (B5-1b)', () => {
   it('tells an admin a member was made a finance approver, naming the organisation and membership by ID', () => {
@@ -34,6 +50,40 @@ describe('a notice’s email (B5-1b)', () => {
     const rejoined = messageFor({ ...NOTICE, kind: 'member_rejoined', role: 'viewer' }, 'a@example.test');
     expect(rejoined.subject).toBe('Agent X: a member rejoined your organisation as a viewer');
     expect(rejoined.text).toContain('rejoined it, as a viewer.');
+  });
+
+  it('B6-1b tells of a registered contact added, by its ID, and when it starts to count', () => {
+    const message = messageFor(aboutAContact('contact_added', false), 'admin@example.test');
+
+    expect(message.subject).toBe('Agent X: a registered contact was added to your organisation');
+    expect(message.text).toContain('It counts for confirming sensitive changes only 7 days from now.');
+    expect(message.text).toContain(`Registered contact: ${CONTACT}`);
+    expect(message.text).not.toContain('Membership:');
+    expect(message.text).toContain("You're told because you're an admin of this organisation.");
+  });
+
+  it('B6-1b tells a contact why it is told, and of a contact removed', () => {
+    const message = messageFor(aboutAContact('contact_removed', true), 'contact@example.test');
+
+    expect(message.subject).toBe('Agent X: a registered contact was removed from your organisation');
+    expect(message.text).toContain('A registered contact was removed from one of your Agent X organisations.');
+    expect(message.text).toContain("tell the organisation's admins at once");
+    expect(message.text).toContain(
+      "You're told because this address is one of the organisation's registered contacts.",
+    );
+    expect(message.text).not.toContain("you're an admin");
+  });
+
+  it.each([
+    ['a role granted', NOTICE],
+    ['a contact added, to a contact', aboutAContact('contact_added', true)],
+    ['a contact removed, to an admin', aboutAContact('contact_removed', false)],
+  ])('SEC-HA-11 %s: no link, no token, and it says it can change nothing', (_what, notice) => {
+    const { subject, text } = messageFor(notice, 'someone@example.test');
+
+    expect(`${subject} ${text}`).not.toMatch(/https?:|www\.|token|#/i);
+    expect(text).toContain("This email can't approve or change anything.");
+    expect(text).not.toContain('someone@example.test');
   });
 
   it('SEC-HA-11 carries no link and no token, and says it can change nothing', () => {

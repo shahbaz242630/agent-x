@@ -230,6 +230,10 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         'sent_at',
         'given_up_at',
         'last_failure',
+        // B6-1b (0023): a registered contact, or all of them, as the recipient; what it's about.
+        'recipient_contact_id',
+        'to_contacts',
+        'about_id',
       ],
       // Added, read, and deleted once done and past its retention; changed
       // only in its tries and outcome, never in whom or what it tells of.

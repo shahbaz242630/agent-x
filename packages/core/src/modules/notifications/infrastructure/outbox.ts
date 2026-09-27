@@ -17,9 +17,11 @@
 //   it sends; `sent` still marks it sent (confirmation review). A notice may
 //   be sent twice after a crash; the provider is given its ID to tell (B5-3).
 // - `fanOut` turns a notice to the organisation's admins (no recipient) into
-//   one notice to each admin the sender found, and marks the first sent, in
-//   one transaction: done once, and never a second set of notices. A last try
-//   slow past its lease is rescued the same way as `sent` (review).
+//   one notice to each admin the sender found, and a notice to its registered
+//   contacts (`to_contacts`, B6-1b) into one to each contact, and marks the
+//   first sent, in one transaction: done once, and never a second set of
+//   notices. A last try slow past its lease is rescued the same way as `sent`
+//   (review).
 // - LEASE_EXPIRED is the outbox's own reason, never a caller's: `failed`
 //   refuses it, so only a lease run out can make a notice given up that a
 //   late `sent` or `fanOut` may still complete (review).
@@ -34,7 +36,7 @@
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
-import { type ClaimedNotice, isNoticeKind, isNoticeRole, type Notice } from '../domain/notice.ts';
+import { type ClaimedNotice, isAboutAMembership, isNoticeKind, isNoticeRole, type Notice } from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
 
 /** How many times a notice is tried before it is given up. */
@@ -65,10 +67,11 @@ export interface Outbox {
   claimDue(db: Kysely<NotificationsTables>, most: number): Promise<ClaimedNotice[]>;
   /**
    * Turns a notice to the organisation's admins into one notice to each of
-   * `recipients` (at most MOST_RECIPIENTS), due at once, and marks it sent.
-   * Says how many it wrote, or `not_open` if the notice is not one to the
-   * admins, or is already done; a notice given up because its last try's
-   * lease ran out is done all the same (that try was only slow).
+   * `recipients` (at most MOST_RECIPIENTS), user IDs, due at once, and marks
+   * it sent; a notice to its registered contacts the same, `recipients` then
+   * contact IDs (B6-1b). Says how many it wrote, or `not_open` if the notice
+   * is not one to a group, or is already done; a notice given up because its
+   * last try's lease ran out is done all the same (that try was only slow).
    */
   fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number | 'not_open'>;
   /**
@@ -101,11 +104,21 @@ const isId = (value: unknown): value is string => typeof value === 'string' && U
 
 /** Why a notice can't be written, if it can't. */
 function problemWith(notice: Notice): string | undefined {
+  const contact = notice.recipientContactId ?? null;
   if (!isId(notice.orgId)) return 'its organisation is not a UUID';
   if (notice.recipientUserId !== null && !isId(notice.recipientUserId)) return 'its recipient is not a UUID';
+  if (contact !== null && !isId(contact)) return 'its contact is not a UUID';
+  const recipients = [notice.recipientUserId !== null, contact !== null, notice.toContacts === true];
+  if (recipients.filter(Boolean).length > 1) return 'it names more than one recipient';
   if (!isNoticeKind(notice.kind)) return 'its kind is not one we send';
-  if (!isId(notice.membershipId)) return 'its membership is not a UUID';
-  if (!isNoticeRole(notice.role)) return 'its role is not one of the four';
+  if (isAboutAMembership(notice.kind)) {
+    if (!isId(notice.membershipId)) return 'its membership is not a UUID';
+    if (!isNoticeRole(notice.role)) return 'its role is not one of the four';
+    if ((notice.aboutId ?? null) !== null) return 'a membership notice is about nothing else';
+  } else {
+    if (!isId(notice.aboutId)) return 'what it is about is not a UUID';
+    if (notice.membershipId !== null || notice.role !== null) return 'it is not about a membership';
+  }
   return undefined;
 }
 
@@ -144,9 +157,12 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
             id: ids.next(),
             org_id: notice.orgId.toLowerCase(),
             recipient_user_id: notice.recipientUserId?.toLowerCase() ?? null,
+            recipient_contact_id: notice.recipientContactId?.toLowerCase() ?? null,
+            to_contacts: notice.toContacts === true,
             kind: notice.kind,
-            membership_id: notice.membershipId.toLowerCase(),
+            membership_id: notice.membershipId?.toLowerCase() ?? null,
             role: notice.role,
+            about_id: notice.aboutId?.toLowerCase() ?? null,
             created_at: now,
             attempts: 0,
             next_attempt_at: now,
@@ -187,21 +203,36 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
             next_attempt_at: new Date(now.getTime() + CLAIM_LEASE_MS),
           }))
           .where('id', 'in', due)
-          .returning(['id', 'org_id', 'recipient_user_id', 'kind', 'membership_id', 'role', 'created_at', 'attempts'])
+          .returning([
+            'id',
+            'org_id',
+            'recipient_user_id',
+            'recipient_contact_id',
+            'to_contacts',
+            'kind',
+            'membership_id',
+            'role',
+            'about_id',
+            'created_at',
+            'attempts',
+          ])
           .execute();
         // Every row taken now has the same next try, the lease's end, so they go in the order they were written.
         return rows
           .map((row) => {
-            if (!isNoticeKind(row.kind) || !isNoticeRole(row.role)) {
+            if (!isNoticeKind(row.kind) || (row.role !== null && !isNoticeRole(row.role))) {
               throw new Error("a notice's kind or role is not one the table allows");
             }
             return {
               id: row.id,
               orgId: row.org_id,
               recipientUserId: row.recipient_user_id,
+              recipientContactId: row.recipient_contact_id,
+              toContacts: row.to_contacts,
               kind: row.kind,
               membershipId: row.membership_id,
               role: row.role,
+              aboutId: row.about_id,
               createdAt: row.created_at,
               attempts: row.attempts - 1,
             };
@@ -212,7 +243,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
 
     async fanOut(db, id, recipients) {
       if (recipients.length > MOST_RECIPIENTS) {
-        throw new RangeError(`at most ${String(MOST_RECIPIENTS)} notices are written from one notice to the admins`);
+        throw new RangeError(`at most ${String(MOST_RECIPIENTS)} notices are written from one notice to a group`);
       }
       if (!recipients.every(isId)) throw new RangeError("a notice's recipient is not a UUID");
       if (!isId(id)) return 'not_open';
@@ -220,9 +251,10 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
       return limited(db, async (tx) => {
         const notice = await tx
           .selectFrom('notifications.outbox')
-          .select(['org_id', 'kind', 'membership_id', 'role'])
+          .select(['org_id', 'kind', 'membership_id', 'role', 'about_id', 'to_contacts'])
           .where('id', '=', id)
           .where('recipient_user_id', 'is', null)
+          .where('recipient_contact_id', 'is', null)
           .where('sent_at', 'is', null)
           .where((eb) => eb.or([eb('given_up_at', 'is', null), eb('last_failure', '=', LEASE_EXPIRED)]))
           .forUpdate()
@@ -236,10 +268,13 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
               unique.map((recipient) => ({
                 id: ids.next(),
                 org_id: notice.org_id,
-                recipient_user_id: recipient,
+                // One notice to each of the group it was to: the admins' user IDs, or the contacts' IDs.
+                recipient_user_id: notice.to_contacts ? null : recipient,
+                recipient_contact_id: notice.to_contacts ? recipient : null,
                 kind: notice.kind,
                 membership_id: notice.membership_id,
                 role: notice.role,
+                about_id: notice.about_id,
                 created_at: now,
                 attempts: 0,
                 next_attempt_at: now,

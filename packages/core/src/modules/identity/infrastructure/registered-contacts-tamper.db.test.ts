@@ -33,6 +33,9 @@ import { contactCountsFrom } from '../domain/registered-contact.ts';
 import { addMembership } from './memberships.ts';
 import {
   activateContact,
+  activeContactsFor,
+  contactAddressFor,
+  ContactsTampered,
   contactChange,
   contactRecord,
   contactsOf,
@@ -274,6 +277,18 @@ describe(`FX-TAMPER as the owner on a registered contact: denied, and held (Post
     await alarmedAndHeld(id, 'deleted');
     capture = new LogCapture();
     expect(await read(id)).toEqual({ outcome: 'tampered', sign: 'deleted' });
+    // B6-1b: so a notice to the contacts waits, naming nobody, rather than skip the one deleted.
+    await expect(activeContactsFor(app, services(), org)).rejects.toBeInstanceOf(ContactsTampered);
+  });
+
+  it('B6-1b a contact’s start moved: its address is not given, and a notice to it waits', async () => {
+    const id = await contact();
+    await activate(id);
+    await owner.setColumn(id, 'counts_from', '2026-09-27T09:00:01Z');
+
+    await expect(contactAddressFor(app, services(), org, id)).rejects.toBeInstanceOf(ContactsTampered);
+    await alarmedAndHeld(id, 'seal');
+    await expect(activeContactsFor(app, services(), org)).rejects.toBeInstanceOf(ContactsTampered);
   });
 });
 

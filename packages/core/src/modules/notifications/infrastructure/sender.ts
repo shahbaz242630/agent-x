@@ -4,8 +4,11 @@
 //
 // - A notice to the organisation's admins is turned into one to each active
 //   admin the audience finds, but the member it is about (`fanOut`), and
-//   those are sent in the same run. An audience that can't be read leaves it
-//   to be tried again (`audience_unavailable`).
+//   those are sent in the same run; a notice to its registered contacts
+//   (B6-1b) into one to each ACTIVE contact the audience finds. An audience
+//   that can't be read leaves it to be tried again (`audience_unavailable`).
+// - A contact's address is its own row's, decrypted at send time (B6-1b); a
+//   person's is the login service's.
 // - A notice sent is marked sent. A failed send is counted as the notifier
 //   says: tried again later, or given up at once when no retry can mend it.
 // - A recipient with no address gives the notice up at once (`no_address`);
@@ -49,16 +52,28 @@ export interface AddressBook {
   addressOf(userId: string): Promise<string | undefined>;
 }
 
+/** Finds a registered contact's address at send time, from its own row (B6-1b): identity's, which the API wires. */
+export interface ContactAddresses {
+  /**
+   * The contact's address, from its verified row, removed ones included (a
+   * contact is told of its own removal); undefined for a draft or none.
+   * Throws if it can't be read, or can't be believed.
+   */
+  addressOf(orgId: string, contactId: string): Promise<string | undefined>;
+}
+
 /** An organisation's active admin, as their verified membership says. */
 export interface Admin {
   readonly userId: string;
   readonly membershipId: string;
 }
 
-/** Finds an organisation's active admins at send time: identity's verified memberships, which the API wires. */
+/** Finds an organisation's groups at send time: identity's verified memberships and contacts, which the API wires. */
 export interface Audience {
   /** Its active admins, each verified. Throws if they can't be read, or can't be believed. */
   adminsOf(orgId: string): Promise<readonly Admin[]>;
+  /** Its ACTIVE registered contacts' IDs, each verified (B6-1b). Throws if they can't be read, or can't be believed. */
+  contactsOf(orgId: string): Promise<readonly string[]>;
 }
 
 /** How many notices a run takes at a time. */
@@ -76,6 +91,7 @@ export function createNoticeSender({
   outbox,
   notifier,
   addresses,
+  contactAddresses,
   audience,
   logger,
 }: {
@@ -83,6 +99,7 @@ export function createNoticeSender({
   readonly outbox: Outbox;
   readonly notifier: Notifier;
   readonly addresses: AddressBook;
+  readonly contactAddresses: ContactAddresses;
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
@@ -98,31 +115,38 @@ export function createNoticeSender({
     });
   };
 
-  /** Turns a notice to the admins into one to each, but the member it is about. */
+  /** The group's members a notice to it goes to: the admins but the member it is about, or the ACTIVE contacts. */
+  const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
+    if (notice.toContacts) return audience.contactsOf(notice.orgId);
+    const admins = await audience.adminsOf(notice.orgId);
+    return admins
+      .filter(({ membershipId }) => membershipId.toLowerCase() !== notice.membershipId)
+      .map(({ userId }) => userId);
+  };
+
+  /** Turns a notice to a group into one to each of its members. */
   const fanOut = async (notice: ClaimedNotice): Promise<void> => {
-    let admins: readonly Admin[];
+    let recipients: readonly string[];
     try {
-      admins = await audience.adminsOf(notice.orgId);
+      recipients = await groupOf(notice);
     } catch {
       await failed(notice, 'audience_unavailable', false);
       return;
     }
-    const others = admins.filter(({ membershipId }) => membershipId.toLowerCase() !== notice.membershipId);
-    const written = await outbox.fanOut(
-      db,
-      notice.id,
-      others.map(({ userId }) => userId),
-    );
+    const written = await outbox.fanOut(db, notice.id, recipients);
     // Not open: another sender turned it first, or it was given up for good meanwhile.
     if (written === 'not_open') return;
     logger.info('notification.fanned_out', { noticeId: notice.id, kind: notice.kind, notices: written });
   };
 
   /** Sends one notice to its recipient and records how it went. */
-  const sendOne = async (notice: ClaimedNotice, recipientUserId: string): Promise<void> => {
+  const sendOne = async (notice: ClaimedNotice): Promise<void> => {
     let address: string | undefined;
     try {
-      address = await addresses.addressOf(recipientUserId);
+      address =
+        notice.recipientContactId === null
+          ? await addresses.addressOf(notice.recipientUserId ?? '')
+          : await contactAddresses.addressOf(notice.orgId, notice.recipientContactId);
     } catch {
       await failed(notice, 'address_unavailable', false);
       return;
@@ -166,11 +190,11 @@ export function createNoticeSender({
       let fannedOut = false;
       for (const notice of due) {
         if (stopped()) return;
-        if (notice.recipientUserId === null) {
+        if (notice.recipientUserId === null && notice.recipientContactId === null) {
           await fanOut(notice);
           fannedOut = true;
         } else {
-          await sendOne(notice, notice.recipientUserId);
+          await sendOne(notice);
         }
       }
       // A full batch may have left more due, and a fan-out has just made some.
