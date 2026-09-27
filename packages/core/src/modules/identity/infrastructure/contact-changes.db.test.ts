@@ -9,7 +9,16 @@ import { createHash } from 'node:crypto';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  tamperAsOwner,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
@@ -20,8 +29,8 @@ import type { Role } from '../domain/membership.ts';
 import { MOST_CONTACTS } from '../domain/registered-contact.ts';
 import { type ContactChanges, type ContactChangeWrite, createContactChanges } from './contact-changes.ts';
 import type { InvitingAdmin } from './inviting.ts';
-import { addMembership } from './memberships.ts';
-import { contactChange } from './registered-contacts.ts';
+import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { contactChange, REGISTERED_CONTACTS } from './registered-contacts.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -306,6 +315,57 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
 
     expect(await add(approver)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
   });
+
+  it('answers 503 INTEGRITY_FAILED, not a refusal of the admin, when their membership can’t be believed', async () => {
+    const { org, admin } = await organization();
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, org);
+    try {
+      await owner.setColumn(admin.membershipId, 'joined_at', '2020-01-01T00:00:00Z');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await add(admin)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  });
+
+  it('answers 503 INTEGRITY_FAILED when a contact can’t be believed: one deleted is never room made', async () => {
+    const { org, admin } = await organization();
+    const id = await added(admin);
+    const owner = await tamperAsOwner(database, REGISTERED_CONTACTS, org);
+    try {
+      await owner.deleteRow(id);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await add(admin, 'owner@example.test')).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+  });
+
+  it('confirms only once it holds the organisation’s contact changes’ lock, so two can’t both take the last place', async () => {
+    const { org, admin } = await organization();
+    const asked = written(await add(admin));
+    await stepUp(admin, asked.stepUpChallengeId ?? '');
+    // Another change of the organisation's contacts, part-way: its lock taken, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.registered-contacts:${org}`,
+      ]);
+      const confirming = within(20_000, confirm(admin, asked.contact.id), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
 });
 
 describe(`removing a registered contact (B6-1c, Postgres ${server.version})`, () => {
@@ -387,5 +447,28 @@ describe(`removing a registered contact (B6-1c, Postgres ${server.version})`, ()
     expect(await remove(developer, id)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
     expect(await removeConfirm(developer, id, ids.next())).toMatchObject({ code: 'FORBIDDEN' });
     expect(await confirm(developer, id)).toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('removes only once it holds the organisation’s contact changes’ lock, as a confirmation does', async () => {
+    const { org, admin } = await organization();
+    const id = await added(admin);
+    const asked = await remove(admin, id);
+    if (asked.outcome !== 'asked') throw new Error('not asked');
+    await stepUp(admin, asked.stepUpChallengeId);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.registered-contacts:${org}`,
+      ]);
+      const removing = within(20_000, removeConfirm(admin, id, asked.stepUpChallengeId), 'the removal');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await removing).toMatchObject({ outcome: 'written', contact: { status: 'REMOVED' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
