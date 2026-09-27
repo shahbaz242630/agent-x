@@ -44,6 +44,7 @@ import {
   membersFor,
   activeContactsFor,
   contactAddressFor,
+  resetLinkFor,
   membershipFor,
   type Sessions,
   type StepUpChallenges,
@@ -546,6 +547,13 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     // Its registered contacts, and each one's address, from their verified rows (B6-1b).
     listContacts: activeContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     contactAddress: contactAddressFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
+    // A contact's link to confirm a reset, on the console's origin (B6-3b).
+    resetLink: resetLinkFor.bind(
+      undefined,
+      database,
+      { keys, ids: uuidV7Ids, logger },
+      { publicOrigin: config.http.publicOrigin, clock: systemClock },
+    ),
     fetch: createOutboundFetch(config.outbound.allowedOrigins),
     logger,
   });

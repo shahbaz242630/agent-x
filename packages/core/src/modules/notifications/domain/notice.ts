@@ -4,7 +4,9 @@
 // A notice about a membership (a role granted, a member rejoining) names the
 // membership and its role; a notice about a registered contact (one added or
 // removed) names the contact in `aboutId`, and one about a person's sign-in
-// changed at the login service (B6-2a) names the person, by their user ID.
+// changed at the login service (B6-2a), or about a reset of their second
+// factor (B6-3b), names the person, by their user ID. The one notice that
+// asks a contact to confirm a reset names the reset (0026).
 
 /** The kinds about a membership. */
 const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined'] as const;
@@ -20,7 +22,28 @@ export const SIGN_IN_NOTICE_KINDS = [
 ] as const;
 export type SignInNoticeKind = (typeof SIGN_IN_NOTICE_KINDS)[number];
 
-export const NOTICE_KINDS = [...MEMBERSHIP_NOTICE_KINDS, ...CONTACT_NOTICE_KINDS, ...SIGN_IN_NOTICE_KINDS] as const;
+/**
+ * The kind that asks one registered contact to confirm a reset, about the
+ * reset (B6-3b, 0026): its email carries the contact's link, read at send
+ * time, the one notice that does.
+ */
+export const RESET_LINK_KIND = 'factor_reset_link';
+/** The kinds about a reset of a person's second factor, told to them, their admins and its contacts (B6-3b, 0026). */
+const RESET_NOTICE_KINDS = [
+  'factor_reset_asked',
+  'factor_reset_confirmed',
+  'factor_reset_cancelled',
+  'factor_reset_expired',
+  'factor_reset_completed',
+] as const;
+
+export const NOTICE_KINDS = [
+  ...MEMBERSHIP_NOTICE_KINDS,
+  ...CONTACT_NOTICE_KINDS,
+  ...SIGN_IN_NOTICE_KINDS,
+  RESET_LINK_KIND,
+  ...RESET_NOTICE_KINDS,
+] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
 const NOTICE_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -30,7 +53,13 @@ export const isNoticeKind = (value: unknown): value is NoticeKind => NOTICE_KIND
 export const isNoticeRole = (value: unknown): value is NoticeRole => NOTICE_ROLES.some((role) => role === value);
 
 /** Whether a kind is about a person's sign-in, `aboutId` their user ID (B6-2a). */
-export const isAboutASignIn = (kind: NoticeKind): boolean => SIGN_IN_NOTICE_KINDS.some((each) => each === kind);
+const isAboutASignIn = (kind: NoticeKind): boolean => SIGN_IN_NOTICE_KINDS.some((each) => each === kind);
+
+/** Whether a kind is about a reset of a person's second factor, `aboutId` their user ID (B6-3b). */
+const isAboutAReset = (kind: NoticeKind): boolean => RESET_NOTICE_KINDS.some((each) => each === kind);
+
+/** Whether a kind is about a person, `aboutId` their user ID: their sign-in, or a reset of their second factor. */
+export const isAboutAPerson = (kind: NoticeKind): boolean => isAboutASignIn(kind) || isAboutAReset(kind);
 
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
@@ -54,7 +83,7 @@ export interface Notice {
   readonly membershipId: string | null;
   /** The role that membership holds now; null for any other. */
   readonly role: NoticeRole | null;
-  /** What any other notice is about (B6-1b): a registered contact. */
+  /** What any other notice is about (B6-1b): a registered contact, a person, or a reset (the link's). */
   readonly aboutId?: string | null;
 }
 

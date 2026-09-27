@@ -1,9 +1,11 @@
 // B5-1b: what a notice's email says. It tells, from IDs and constants alone,
 // and does nothing: no link, no token, no approval power (PRD §4.4, SEC-HA-11).
+// B6-3b: the one exception, a registered contact's link to confirm a reset,
+// which confirms that reset only, and says so.
 import { describe, expect, it } from 'vitest';
 
-import { messageFor } from './messages.ts';
-import { type ClaimedNotice, SIGN_IN_NOTICE_KINDS, type SignInNoticeKind } from './notice.ts';
+import { messageFor, type ResetLink } from './messages.ts';
+import { type ClaimedNotice, type NoticeKind, SIGN_IN_NOTICE_KINDS, type SignInNoticeKind } from './notice.ts';
 
 const NOTICE: ClaimedNotice = {
   id: '0199a0f0-0000-7000-8000-00000000b5c1',
@@ -103,6 +105,82 @@ describe('a notice’s email (B5-1b)', () => {
     expect(messageFor(signIn(person, 'sign_in_restored'), 'p@example.test').text).toContain('can sign in again');
     expect(messageFor(signIn(person, 'password_changed'), 'p@example.test').subject).toContain('password');
     expect(messageFor(signIn(person, 'sign_in_email_changed'), 'p@example.test').subject).toContain('email address');
+  });
+
+  describe('B6-3b a reset of a person’s second factor', () => {
+    const person = '0199a0f0-0000-7000-8000-00000000b6e1';
+    const reset = '0199a0f0-0000-7000-8000-00000000b6e2';
+    const link: ResetLink = {
+      url: `https://app.example.test/factor-resets/confirm#token=${NOTICE.orgId}.${reset}.${CONTACT}.words`,
+      expiresAt: new Date('2026-09-29T09:00:00Z'),
+    };
+    const aboutReset = (kind: NoticeKind, recipientUserId: string | null, contact: string | null): ClaimedNotice => ({
+      ...NOTICE,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: kind === 'factor_reset_link' ? reset : person,
+      recipientUserId,
+      recipientContactId: contact,
+    });
+    const TOLD = [
+      'factor_reset_asked',
+      'factor_reset_confirmed',
+      'factor_reset_cancelled',
+      'factor_reset_expired',
+      'factor_reset_completed',
+    ] as const;
+
+    it('asks a contact to confirm with its link, what it does, until when, and that it confirms that reset alone', () => {
+      const { subject, text } = messageFor(aboutReset('factor_reset_link', null, CONTACT), 'c@example.test', link);
+
+      expect(subject).toBe("Agent X: please confirm a reset of a person's second factor");
+      expect(text).toContain(`To confirm, open this link and press Confirm:\n${link.url}\n`);
+      expect(text).toContain('The link works until 2026-09-29T09:00:00.000Z.');
+      expect(text).toContain('by a way you already trust');
+      expect(text).toContain('removed 24 hours later, unless an admin cancels the reset first');
+      expect(text).toContain(`Reset: ${reset}`);
+      expect(text).toContain(
+        "This link confirms this one reset only: it can't approve a payment or change anything else",
+      );
+      expect(text).not.toContain('c@example.test');
+      expect(text).not.toContain(person);
+    });
+
+    it.each(TOLD)('tells of %s with no link, naming the person, and that it can change nothing', (kind) => {
+      const own = messageFor(aboutReset(kind, person, null), 'p@example.test');
+      const admin = messageFor(aboutReset(kind, NOTICE.recipientUserId, null), 'a@example.test');
+      const contact = messageFor(aboutReset(kind, null, CONTACT), 'c@example.test');
+
+      for (const { subject, text } of [own, admin, contact]) {
+        expect(subject).toMatch(/^Agent X: /);
+        expect(`${subject} ${text}`).not.toMatch(/https?:|www\.|token|#/i);
+        expect(text).toContain(`Person: ${person}`);
+        expect(text).toContain("This email can't approve or change anything.");
+      }
+      expect(own.text).toContain("You're told because this is your own login.");
+      expect(admin.text).toContain("You're told because you're an admin of this organisation.");
+      expect(contact.text).toContain("one of the organisation's registered contacts");
+    });
+
+    it('says what each step means', () => {
+      const text = (kind: NoticeKind) => messageFor(aboutReset(kind, person, null), 'p@example.test').text;
+
+      expect(text('factor_reset_asked')).toContain('registered contacts are asked to confirm it');
+      expect(text('factor_reset_asked')).toContain('any admin can sign in to Agent X and cancel it');
+      expect(text('factor_reset_confirmed')).toContain('It will be removed in 24 hours, unless an admin cancels');
+      expect(text('factor_reset_cancelled')).toContain('Nothing was removed.');
+      expect(text('factor_reset_expired')).toContain('within 72 hours. Nothing was removed.');
+      expect(text('factor_reset_completed')).toContain('set up a new one');
+    });
+
+    it('throws for a link notice without its link, and for a link given to any other notice: a bug', () => {
+      expect(() => messageFor(aboutReset('factor_reset_link', null, CONTACT), 'c@example.test')).toThrow(RangeError);
+      expect(() => messageFor(aboutReset('factor_reset_asked', person, null), 'p@example.test', link)).toThrow(
+        RangeError,
+      );
+      expect(() => messageFor(NOTICE, 'a@example.test', link)).toThrow(RangeError);
+    });
   });
 
   it.each([
