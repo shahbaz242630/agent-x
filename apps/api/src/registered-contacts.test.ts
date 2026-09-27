@@ -124,6 +124,7 @@ async function withContacts(
     ids: new SequentialIds(),
     healthChecks: [],
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
+    restrictedUntil: () => Promise.resolve(undefined),
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
     ...(answer !== undefined && { contactChanges: changes }),

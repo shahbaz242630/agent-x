@@ -8,5 +8,10 @@ export {
   type PlatformTransaction,
   type RecordedPlatformEvent,
 } from './infrastructure/platform-chain.ts';
-export { latestPlatformTime, platformEventWith } from './infrastructure/platform-events.ts';
+export {
+  latestPlatformTime,
+  latestPlatformTimeOf,
+  platformEventWith,
+  type PlatformEventsMatching,
+} from './infrastructure/platform-events.ts';
 export type { PlatformControlsTables } from './infrastructure/tables.ts';

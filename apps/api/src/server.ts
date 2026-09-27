@@ -25,6 +25,7 @@ import type {
   HoldClearings,
   HoldInvestigations,
   MembershipChanges,
+  RemovalRestriction,
   ResetChanges,
   SignIn,
 } from '@agentx/core/modules/identity';
@@ -65,6 +66,8 @@ export interface ServerOptions {
   readonly securityEvents?: SecurityEventSink | undefined;
   /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
   readonly findMembership?: FindMembership | undefined;
+  /** Reads until when a person, a second factor of theirs removed, has no admin's or approver's powers (access.ts); without it, no one has them. */
+  readonly restrictedUntil?: RemovalRestriction | undefined;
   /** Reads an organisation's members (members.ts); without it, no one reaches the list, as no one holds a role. */
   readonly listMembers?: ListMembers | undefined;
   /** Inviting members (the identity module's inviting.ts); without it, no one reaches the invitation routes, as no one holds a role. */
@@ -199,7 +202,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
-  registerAccess(app, signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie), options.findMembership);
+  registerAccess(
+    app,
+    signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
+    options.findMembership,
+    options.restrictedUntil,
+  );
   // After the access hook, which finds the person.
   app.addHook(
     'onRequest',

@@ -31,7 +31,19 @@
 // an authenticator app alone won't do. Without one, such a person keeps only
 // what a developer or a viewer may do there: a route naming neither is 403
 // PASSKEY_REQUIRED, which tells them to sign in again with their passkey.
-import { type LiveSession, type MembershipCheck, PASSKEY_METHOD, type Role } from '@agentx/core/modules/identity';
+//
+// B6-3d (SEC-OPS-04, ADR-003 §4): for 7 days after a second factor of theirs
+// is removed, by a reset or at the login service, a person keeps the same
+// only: a route naming neither is 403 SECOND_FACTOR_REMOVED, in every
+// organisation. The restriction is read last, for those routes alone, and
+// without its reader no one reaches them.
+import {
+  type LiveSession,
+  type MembershipCheck,
+  PASSKEY_METHOD,
+  type RemovalRestriction,
+  type Role,
+} from '@agentx/core/modules/identity';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -157,12 +169,15 @@ export function accessProblems(access: unknown, url: string): string[] {
 const WITHOUT_PASSKEY: readonly Principal[] = ['developer', 'viewer'];
 
 /**
- * Whether a session, its role already named by the route, needs a passkey it
- * wasn't signed in with: a route only an admin or an approver may call. Their
- * role need not be asked again, as a developer's or a viewer's route names it.
+ * Whether a route is for an admin's or an approver's powers: one only an admin
+ * or an approver may call. Their role need not be asked again, as a
+ * developer's or a viewer's route names it.
  */
+const needsPowers = (access: readonly Principal[]): boolean => !access.some((name) => WITHOUT_PASSKEY.includes(name));
+
+/** Whether a session, its role already named by the route, needs a passkey it wasn't signed in with. */
 const passkeyMissing = (amr: readonly string[], access: readonly Principal[]): boolean =>
-  !amr.includes(PASSKEY_METHOD) && !access.some((name) => WITHOUT_PASSKEY.includes(name));
+  !amr.includes(PASSKEY_METHOD) && needsPowers(access);
 
 /** A signed-in person the route doesn't answer. */
 const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
@@ -176,6 +191,8 @@ const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
  * body is read. An unknown address is left to the not-found answer.
  * `findSession` is the console's sign-in; with sign-in off no one is signed in.
  * `findMembership` reads a person's membership; without it no one holds a role.
+ * `restrictedUntil` reads whether a person is in the 7 days after a second
+ * factor removed; without it no one has an admin's or approver's powers.
  *
  * In callback style, calling done() only to let a request through: an async
  * hook that returned the refusal would be waited on until the answer ended,
@@ -186,6 +203,7 @@ export function registerAccess(
   app: FastifyInstance,
   findSession: FindSession | undefined,
   findMembership: FindMembership | undefined,
+  restrictedUntil: RemovalRestriction | undefined,
 ): void {
   app.decorateRequest('person', null);
   app.decorateRequest('member', null);
@@ -225,9 +243,21 @@ export function registerAccess(
             } else if (passkeyMissing(session.amr, access)) {
               void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id);
             } else {
-              request.person = session;
-              request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
-              done();
+              const through = () => {
+                request.person = session;
+                request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
+                done();
+              };
+              if (!needsPowers(access)) {
+                through();
+              } else if (restrictedUntil === undefined) {
+                void forbidden(request, reply);
+              } else {
+                restrictedUntil(session.userId).then((until) => {
+                  if (until === undefined) through();
+                  else void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id);
+                }, failed);
+              }
             }
           }, failed);
         }

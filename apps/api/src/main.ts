@@ -39,6 +39,7 @@ import {
   createContactChanges,
   createContactConfirmations,
   createResetChanges,
+  createRemovalRestriction,
   registeredContactsFor,
   createStepUpChallenges,
   type IdentityTables,
@@ -373,6 +374,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     securityEvents: recorder,
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
+    restrictedUntil: createRemovalRestriction({ database, clock: systemClock }),
     listMembers: (orgId, correlationId) =>
       membersFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId),
     acceptanceConfirmations: createAcceptanceConfirmations({

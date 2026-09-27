@@ -21,7 +21,13 @@
 //    organisation can't reset it for the others: the runbook), is not reset:
 //    CANCELLED by the job, told. Otherwise every session of the person ended,
 //    their challenges with them; the reset COMPLETED, with how many factors
-//    were removed; the person, the admins and the contacts told.
+//    were removed; the person, the admins and the contacts told. Either way
+//    (the factors are gone), last, the platform chain's
+//    `person.second_factors_removed` about the person, from which their 7
+//    days without an admin's or approver's powers count (B6-3d;
+//    removal-restriction.ts). A session opened between the removal and this
+//    commit is ended with the others (a completed reset), and any opened
+//    after it is restricted.
 //
 // A cancel committed before step 1 reads the reset stops it: any cancel made
 // within the cooling-off does. One made in the moments after it ended, while
@@ -46,10 +52,12 @@ import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedElsewhere, listedMember, listedOrganizations } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
+import { createPlatformChain, type PlatformControlsTables } from '../../platform-controls/index.ts';
 import { isDue } from '../domain/factor-reset.ts';
 import { listedPersonOf, moveReset, resetForChange, resetRecord, resetsOf } from './factor-resets.ts';
 import type { SecondFactorRemover } from './idp-factors.ts';
 import { memberOf } from './memberships.ts';
+import { SECOND_FACTORS_REMOVED } from './removal-restriction.ts';
 import { toldOfReset } from './reset-changes.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { lockChallengesOf } from './step-up-challenges.ts';
@@ -59,7 +67,7 @@ import { subjectOfUser } from './users.ts';
 /** Who carries a reset out: the API's own job. */
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables;
+type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables & PlatformControlsTables;
 
 /** What became of one due reset. */
 type RemovalOutcome = 'completed' | 'cancelled' | 'not_due' | 'removed_after_cancel';
@@ -103,6 +111,8 @@ export function createResetRemovals({
   readonly outbox: Outbox;
   readonly logger: Logger;
 }): ResetRemovals {
+  const platform = createPlatformChain({ keys, ids });
+
   /** Runs the work in the organisation's transaction, each statement limited to 10 seconds. */
   const inOrganization = <T>(
     orgId: string,
@@ -198,24 +208,32 @@ export function createResetRemovals({
     const factorsRemoved = await factors.removeAll(signsInAs.subject);
     return inOrganization(orgId, async (tx, states) => {
       const not = await again(tx, states);
-      // Cancelled, or the person deactivated or listed elsewhere, while the factors were being removed.
       // Completed by another run (a second replica, or two revisions at a release): the same removal, benign.
       if (not === 'done') return 'not_due';
-      if (not === 'not_due') return 'removed_after_cancel';
-      if (not !== undefined) {
+      let outcome: RemovalOutcome = 'removed_after_cancel';
+      if (not === undefined) {
+        const signInsEnded = await endSessionsOf(tx, userId);
+        await moveReset(tx, states, {
+          orgId,
+          id,
+          event: 'complete',
+          actor: ACTOR,
+          details: { factorsRemoved, signInsEnded },
+        });
+        await outbox.add(tx, toldOfReset(orgId, 'factor_reset_completed', userId, true));
+        outcome = 'completed';
+      } else if (not !== 'not_due') {
+        // The person deactivated or listed elsewhere while the factors were being removed.
         await cancel(tx, states, { ...key, reason: not });
-        return 'removed_after_cancel';
       }
-      const signInsEnded = await endSessionsOf(tx, userId);
-      await moveReset(tx, states, {
-        orgId,
-        id,
-        event: 'complete',
+      // Cancelled or not, the factors are gone, so the restriction counts from now. The platform head last of all
+      // (ADR-006 §6).
+      await platform.record(tx, {
         actor: ACTOR,
-        details: { factorsRemoved, signInsEnded },
+        action: SECOND_FACTORS_REMOVED,
+        details: { person: userId, org: orgId, reset: id, at: clock.now().toISOString() },
       });
-      await outbox.add(tx, toldOfReset(orgId, 'factor_reset_completed', userId, true));
-      return 'completed';
+      return outcome;
     });
   };
 
