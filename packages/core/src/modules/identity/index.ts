@@ -5,7 +5,8 @@
 // bound to one pending change in a session. Memberships and roles (B4-1): a
 // person in an organisation, an authority table read through its signed state.
 // Invitations (B4-3a): the pending change an admin's step-up binds to, then
-// opened with a token shown once.
+// opened with a token shown once. Registered contacts (B6-1a): an
+// organisation's trust anchor, added and removed with step-up.
 export {
   CONFIRMED_ROLES,
   EMAIL_MAX,
@@ -15,6 +16,7 @@ export {
   needsConfirmation,
 } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
+export { CONTACT_COOLING_OFF_DAYS, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
   AUTH_TIME_TOLERANCE_SECONDS,
@@ -118,6 +120,7 @@ export {
   createHoldClearings,
   type HoldClearings,
 } from './infrastructure/hold-clearing.ts';
+export { REGISTERED_CONTACTS } from './infrastructure/registered-contacts.ts';
 export {
   createOidcClient,
   type LoginFlow,
