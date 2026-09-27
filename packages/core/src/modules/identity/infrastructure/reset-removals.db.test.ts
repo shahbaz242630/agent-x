@@ -171,6 +171,16 @@ async function organization(): Promise<Org> {
   return { org, admin, person, contact: counting };
 }
 
+/** Deactivates the person's membership, as B4-5 does. */
+const deactivate = ({ org, person }: Org) =>
+  withSignedStates(app, org, quiet(), (tx, states) =>
+    states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: person.membershipId }, 'deactivate', {
+      actor: OPERATOR,
+      action: 'membership.deactivated',
+      details: {},
+    }),
+  );
+
 /** A reset of the person, asked, sent and confirmed by the contact now, as B6-3b does: its ID. */
 async function coolingOff({ org, admin, person, contact: contactId }: Org): Promise<string> {
   const id = ids.next();
@@ -398,16 +408,58 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(await statusOf(second.org, secondId)).toBe('COMPLETED');
   });
 
+  it('leaves a deactivated person’s reset an admin cancelled while the job was about to, with nothing logged as failed', async () => {
+    const who = await organization();
+    const id = await coolingOff(who);
+    await deactivate(who);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    // The job's second read waits on the person's sessions, held here, while the admin cancels.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.sessions where user_id = $1 for no key update', [who.person.userId]);
+      const running = within(20_000, removalsWith(loginService().factors).run(), 'the run');
+      await waitUntilQueued(database.as('admin'), 1);
+      const changes = createResetChanges({
+        database: app,
+        keys,
+        ids,
+        clock,
+        challenges: createStepUpChallenges({ ids, clock }),
+        outbox: createOutbox({ ids, clock }),
+        logger: loggerFor(new LogCapture()),
+      });
+      const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
+      expect(
+        await changes.cancel(
+          admin,
+          {
+            orgId: who.org,
+            client: { kind: 'user', id: admin.userId },
+            operation: 'resets.cancel',
+            key: 'cancel-3',
+            payload: id,
+          },
+          id,
+          CORRELATION,
+        ),
+      ).toMatchObject({ outcome: 'written', reset: { status: 'CANCELLED' } });
+      await holder.query('commit');
+      await running;
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+
+    expect(await lastEvent(who.org)).toMatchObject({ action: 'factor_reset.cancelled', actor_id: who.admin.userId });
+    expect(lines('factor_resets.removal_failed', who.org)).toEqual([]);
+    expect(lines('factor_resets.cancelled', who.org)).toEqual([]);
+  });
+
   it('cancels, rather than resets, a person deactivated since, removing nothing', async () => {
     const who = await organization();
     const id = await coolingOff(who);
-    await withSignedStates(app, who.org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: who.org, id: who.person.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivate(who);
     clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
     const { asked, factors } = loginService();
 
@@ -460,19 +512,33 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(lines('factor_resets.removal_failed', org)).toEqual([expect.objectContaining({ resetId: id })]);
   });
 
-  it('locks the person’s sessions before their membership, so a deactivation under way can’t deadlock with it', async () => {
+  it.each([
+    ['their sessions, as a deactivation under way holds them', 'sessions'],
+    ['a step-up challenge of theirs being used', 'challenge'],
+  ])('waits for %s before taking their membership, so the two can’t deadlock (level 0b)', async (_, held) => {
     const who = await organization();
     const id = await coolingOff(who);
     clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
-    // A deactivation part-way (B4-5): the person's sessions locked (level 0b), their membership not yet.
+    const opened = await createStepUpChallenges({ ids, clock }).open(app, {
+      sessionId: await signedIn(who.person.userId),
+      action: 'resets.ask',
+      changeHash: Buffer.alloc(32, 9),
+    });
+    expect(opened).toBeDefined();
+    // The other change part-way: the person's sessions or challenge locked, their membership not yet.
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select id from identity.sessions where user_id = $1 for no key update', [who.person.userId]);
+      await (held === 'sessions'
+        ? holder.query('select id from identity.sessions where user_id = $1 for no key update', [who.person.userId])
+        : holder.query(
+            'select c.id from identity.step_up_challenges c join identity.sessions s on s.id = c.session_id where s.user_id = $1 for update of c',
+            [who.person.userId],
+          ));
       const { factors } = loginService();
       const running = within(20_000, removalsWith(factors).run(), 'the run');
       await waitUntilQueued(database.as('admin'), 1);
-      // The deactivation goes on to the membership: the run holds nothing of it yet, so it isn't kept waiting.
+      // It goes on to the membership: the run holds nothing of it yet, so it isn't kept waiting.
       await holder.query("set local lock_timeout = '5s'");
       await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
         who.org,
@@ -488,7 +554,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(await statusOf(who.org, id)).toBe('COMPLETED');
   });
 
-  it('holds the reset while the login service removes, so an admin’s cancel waits and then finds it done', async () => {
+  it('holds nothing while the login service removes: an admin lists and cancels at once, and the removal is logged as after a cancel', async () => {
     const who = await organization();
     const id = await coolingOff(who);
     clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
@@ -511,28 +577,79 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       logger: loggerFor(new LogCapture()),
     });
     const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
-    const cancelling = within(
-      20_000,
-      changes.cancel(
-        admin,
-        {
-          orgId: who.org,
-          client: { kind: 'user', id: admin.userId },
-          operation: 'resets.cancel',
-          key: 'cancel-1',
-          payload: id,
-        },
-        id,
-        CORRELATION,
+    // Each within far less than a statement's 10 s: nothing waits on the removal (review).
+    expect(await within(3_000, changes.list(who.org, CORRELATION), 'the list')).toMatchObject({
+      resets: [{ id, status: 'COOLING_OFF' }],
+    });
+    expect(
+      await within(
+        3_000,
+        changes.cancel(
+          admin,
+          {
+            orgId: who.org,
+            client: { kind: 'user', id: admin.userId },
+            operation: 'resets.cancel',
+            key: 'cancel-1',
+            payload: id,
+          },
+          id,
+          CORRELATION,
+        ),
+        'the cancel',
       ),
-      'the cancel',
-    );
-    await waitUntilQueued(database.as('admin'), 1);
+    ).toMatchObject({ outcome: 'written', reset: { status: 'CANCELLED' } });
     release(2);
     await running;
 
-    expect(await cancelling).toEqual({ outcome: 'refused', status: 409, code: 'RESET_CLOSED' });
-    expect(await statusOf(who.org, id)).toBe('COMPLETED');
+    expect(await statusOf(who.org, id)).toBe('CANCELLED');
+    expect(lines('factor_resets.removed_after_cancel', who.org)).toEqual([
+      expect.objectContaining({ level: 'error', resetId: id }),
+    ]);
+    // Nothing more written: the cancel's own notices only, and the sessions left.
+    expect(await noticesOf(who.org)).toEqual(told('factor_reset_cancelled', who.person.userId));
+    expect(await sessionsOf(who.person.userId)).toBe(1);
+  });
+
+  it('cancels, and logs as after a cancel, a person deactivated while the factors were being removed', async () => {
+    const who = await organization();
+    const id = await coolingOff(who);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    const { factors } = loginService(async () => {
+      await deactivate(who);
+      return 1;
+    });
+
+    await removalsWith(factors).run();
+
+    expect(await statusOf(who.org, id)).toBe('CANCELLED');
+    expect(await lastEvent(who.org)).toMatchObject({ details: { reason: 'member_deactivated' } });
+    expect(lines('factor_resets.removed_after_cancel', who.org)).toEqual([expect.objectContaining({ resetId: id })]);
+  });
+
+  it('removes nothing for a membership the directory lists for someone else: the victim’s factors are never touched', async () => {
+    // Signed in first, so their ID comes first, and theirs is the entry found for the person's membership.
+    const victim = await newUser();
+    const who = await organization();
+    const id = await coolingOff(who);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+        victim.userId,
+        who.org,
+        who.person.membershipId,
+      ]);
+    } finally {
+      await owner.end();
+    }
+    const { asked, factors } = loginService();
+
+    await removalsWith(factors).run();
+
+    expect(asked).toEqual([]);
+    expect(await statusOf(who.org, id)).toBe('COOLING_OFF');
+    expect(lines('factor_resets.removal_failed', who.org)).toEqual([expect.objectContaining({ resetId: id })]);
   });
 
   it('leaves a reset cancelled after the run listed it, its lock read again before any removal', async () => {

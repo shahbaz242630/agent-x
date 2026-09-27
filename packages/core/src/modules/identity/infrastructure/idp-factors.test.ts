@@ -213,6 +213,18 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
       );
     });
 
+    it('a security key left, which the methods don’t list (Zitadel lists one the login pages added only with a domain)', async () => {
+      const person = everyKind();
+      person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_U2F');
+      const { fetch } = zitadel(person, (method, path) =>
+        method === 'DELETE' && path.startsWith('/u2f/') ? json({ details: {} }) : undefined,
+      );
+
+      await expect(removerWith(fetch).removeAll(SUBJECT)).rejects.toThrow(
+        failure('a second factor is still there after its removal'),
+      );
+    });
+
     it('a method still listed after every factor was removed', async () => {
       const person = everyKind();
       const { fetch } = zitadel(person, (method, path) => {

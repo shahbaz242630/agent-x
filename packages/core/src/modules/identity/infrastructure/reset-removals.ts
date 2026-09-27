@@ -5,29 +5,35 @@
 //
 // For each organisation the directory lists, its resets are read and
 // verified (`resetsOf`: one that can't be believed raises the alarm and holds
-// the organisation, and the job leaves them all); then each due reset in one
-// transaction of its own, withSignedStates' for the organisation:
-// 1. the person the reset's row names, and whom the directory lists with that
-//    membership: where to look, never whose it is;
-// 2. their sessions and step-up challenges locked (ADR-006 §6 level 0b, as a
-//    deactivation does), then their membership read (2a), naming the same
-//    person, then the reset read for the change (2c), naming the same
-//    membership, and due still: an admin's cancel waits on this lock, or was
-//    first and the reset is left;
-// 3. a person deactivated since, or listed in another organisation since
-//    (their login signs in to each, and one organisation can't reset it for
-//    the others: the runbook), is not reset: CANCELLED by the job, told;
-// 4. otherwise every second factor removed at the login service, while the
-//    reset is held, so no cancel can come between the removal and its record;
-//    every session of the person ended, their challenges with them; the reset
-//    COMPLETED, with how many were removed; the person, the admins and the
-//    contacts told, in the same transaction.
+// the organisation, and the job leaves them all); then each due reset:
+// 1. read and judged, in a transaction of its own that holds nothing after:
+//    the person the reset's row names, and whom the directory lists with that
+//    membership (where to look, never whose it is); their membership (2a),
+//    naming the same person; the reset (2c), due still;
+// 2. unless it is to be cancelled, every second factor removed at the login
+//    service, outside any transaction: nothing of the organisation is held
+//    while the login service answers, so an admin's cancel, list or ask is
+//    never kept waiting on it (review: they would pass their 10 s);
+// 3. read and judged again in one transaction, with their sessions and step-up
+//    challenges locked first (ADR-006 §6 level 0b, as a deactivation does) and
+//    the reset read for the change: a person deactivated since, or listed in
+//    another organisation since (their login signs in to each, and one
+//    organisation can't reset it for the others: the runbook), is not reset:
+//    CANCELLED by the job, told. Otherwise every session of the person ended,
+//    their challenges with them; the reset COMPLETED, with how many factors
+//    were removed; the person, the admins and the contacts told.
+//
+// A cancel committed before step 1 reads the reset stops it: any cancel made
+// within the cooling-off does. One made in the moments after it ended, while
+// the factors were being removed, leaves the reset CANCELLED with its factors
+// gone: logged as an error (`factor_resets.removed_after_cancel`), and on the
+// record by the login service's own events, which the copier copies and tells
+// (B6-2b), as it does a factor removed before a removal failed part-way.
 //
 // A removal the login service refuses, or one that leaves a factor, throws:
-// the transaction rolls back and the reset stays due, tried again at the next
-// run (a factor removed before the failure is on the login service's own
-// record, which the copier copies and tells, B6-2b). A commit that fails after
-// the removal leaves the same: the next run finds none left and completes it.
+// nothing is written and the reset stays due, tried again at the next run. A
+// commit that fails after the removal leaves the same: the next run finds none
+// left and completes it.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // reset, and the run goes on to the next. Each statement is limited to 10
@@ -41,7 +47,7 @@ import { type AuditTables, type SignedStates, type SignedStatesServices, withSig
 import { type DirectoryTables, listedElsewhere, listedMember, listedOrganizations } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import { isDue } from '../domain/factor-reset.ts';
-import { listedPersonOf, moveReset, resetForChange, resetsOf } from './factor-resets.ts';
+import { listedPersonOf, moveReset, resetForChange, resetRecord, resetsOf } from './factor-resets.ts';
 import type { SecondFactorRemover } from './idp-factors.ts';
 import { memberOf } from './memberships.ts';
 import { toldOfReset } from './reset-changes.ts';
@@ -56,7 +62,10 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTables;
 
 /** What became of one due reset. */
-type RemovalOutcome = 'completed' | 'cancelled' | 'not_due';
+type RemovalOutcome = 'completed' | 'cancelled' | 'not_due' | 'removed_after_cancel';
+
+/** Why a reset read now isn't carried out: not due (cancelled or done since), or its person can't be reset. */
+type NotCarriedOut = 'not_due' | 'member_deactivated' | 'member_elsewhere';
 
 export interface ResetRemovals {
   /** Carries out every due reset, until none is left or the signal is aborted. Never throws. */
@@ -111,43 +120,85 @@ export function createResetRemovals({
     return listed.resets.filter((reset) => isDue(reset, now)).map((reset) => reset.id);
   };
 
-  /** Carries out one due reset, in one transaction; what became of it. */
-  const carryOut = (orgId: string, id: string): Promise<RemovalOutcome> =>
-    inOrganization(orgId, async (tx, states) => {
-      const personId = await listedPersonOf(tx, orgId, id);
-      const userId = personId === undefined ? undefined : await listedMember(tx, orgId, personId);
-      if (personId === undefined || userId === undefined) throw new RemovalRefused('its person is not listed');
+  /**
+   * The reset's person, and why it isn't carried out now, if it isn't: read
+   * for a decision, or (`change`) with the person's sessions and challenges
+   * locked first and the reset read for the change. Throws for a person or
+   * reset that can't be believed.
+   */
+  const judged = async (
+    tx: Transaction<Tables>,
+    states: SignedStates,
+    orgId: string,
+    id: string,
+    lock: 'share' | 'change',
+  ): Promise<{ readonly userId: string; readonly not: NotCarriedOut | undefined }> => {
+    const personId = await listedPersonOf(tx, orgId, id);
+    const userId = personId === undefined ? undefined : await listedMember(tx, orgId, personId);
+    if (personId === undefined || userId === undefined) throw new RemovalRefused('its person is not listed');
+    if (lock === 'change') {
       // Level 0b, before any membership: the person's sessions, then their challenges.
       await lockSessionsOf(tx, [userId]);
       await lockChallengesOf(tx, [userId]);
-      // Each read that can't be believed has raised the alarm and held the organisation.
-      const person = await memberOf(tx, states, { orgId, id: personId }, 'share');
-      if (person.outcome !== 'found' || person.member.userId !== userId) {
-        throw new RemovalRefused("the person's membership can't be believed");
-      }
-      // The reset's person is sealed and the app never deletes one: anything else is the row changed past it.
-      const read = await resetForChange(tx, states, { orgId, id });
-      if (read.outcome !== 'found' || read.reset.person !== personId.toLowerCase()) {
-        throw new RemovalRefused("the reset can't be believed");
-      }
-      // Cancelled, or carried out, since the list was read.
-      if (!isDue(read.reset, clock.now())) return 'not_due';
+    }
+    // Each read that can't be believed has raised the alarm and held the organisation.
+    const person = await memberOf(tx, states, { orgId, id: personId }, 'share');
+    if (person.outcome !== 'found' || person.member.userId !== userId) {
+      throw new RemovalRefused("the person's membership can't be believed");
+    }
+    // The reset's person is sealed, and verified from the row listedPersonOf read.
+    const read =
+      lock === 'change' ? await resetForChange(tx, states, { orgId, id }) : await resetRecord(tx, states, orgId, id);
+    if (read.outcome !== 'found') throw new RemovalRefused("the reset can't be believed");
+    if (!isDue(read.reset, clock.now())) return { userId, not: 'not_due' };
+    if (person.member.status !== 'ACTIVE') return { userId, not: 'member_deactivated' };
+    if (await listedElsewhere(tx, orgId, userId)) return { userId, not: 'member_elsewhere' };
+    return { userId, not: undefined };
+  };
 
-      const reason =
-        person.member.status !== 'ACTIVE'
-          ? 'member_deactivated'
-          : (await listedElsewhere(tx, orgId, userId))
-            ? 'member_elsewhere'
-            : undefined;
-      if (reason !== undefined) {
-        await moveReset(tx, states, { orgId, id, event: 'cancel', actor: ACTOR, details: { reason } });
-        await outbox.add(tx, toldOfReset(orgId, 'factor_reset_cancelled', userId, true));
+  /** Cancels the reset, which the job judged not to be carried out, and tells everyone, in the caller's transaction. */
+  const cancel = async (
+    tx: Transaction<Tables>,
+    states: SignedStates,
+    {
+      orgId,
+      id,
+      userId,
+      reason,
+    }: { orgId: string; id: string; userId: string; reason: Exclude<NotCarriedOut, 'not_due'> },
+  ): Promise<void> => {
+    await moveReset(tx, states, { orgId, id, event: 'cancel', actor: ACTOR, details: { reason } });
+    await outbox.add(tx, toldOfReset(orgId, 'factor_reset_cancelled', userId, true));
+  };
+
+  /** Carries out one due reset; what became of it. */
+  const carryOut = async (orgId: string, id: string): Promise<RemovalOutcome> => {
+    const { userId, not: first } = await inOrganization(orgId, (tx, states) => judged(tx, states, orgId, id, 'share'));
+    if (first === 'not_due') return 'not_due';
+    // Judged again with the person's sessions and challenges locked: the person is the membership's,
+    // which is sealed, so the same one.
+    const again = (tx: Transaction<Tables>, states: SignedStates) =>
+      judged(tx, states, orgId, id, 'change').then(({ not }) => not);
+    const key = { orgId, id, userId };
+    if (first !== undefined) {
+      // Not to be reset: cancelled, unless cancelled or done since.
+      return inOrganization(orgId, async (tx, states) => {
+        if ((await again(tx, states)) === 'not_due') return 'not_due';
+        await cancel(tx, states, { ...key, reason: first });
         return 'cancelled';
+      });
+    }
+    const signsInAs = await subjectOfUser(database, userId);
+    if (signsInAs?.issuer !== issuer) throw new RemovalRefused('the person signs in with another login service');
+    const factorsRemoved = await factors.removeAll(signsInAs.subject);
+    return inOrganization(orgId, async (tx, states) => {
+      const not = await again(tx, states);
+      // Cancelled, or the person deactivated or listed elsewhere, while the factors were being removed.
+      if (not === 'not_due') return 'removed_after_cancel';
+      if (not !== undefined) {
+        await cancel(tx, states, { ...key, reason: not });
+        return 'removed_after_cancel';
       }
-
-      const signsInAs = await subjectOfUser(tx, userId);
-      if (signsInAs?.issuer !== issuer) throw new RemovalRefused('the person signs in with another login service');
-      const factorsRemoved = await factors.removeAll(signsInAs.subject);
       const signInsEnded = await endSessionsOf(tx, userId);
       await moveReset(tx, states, {
         orgId,
@@ -159,6 +210,7 @@ export function createResetRemovals({
       await outbox.add(tx, toldOfReset(orgId, 'factor_reset_completed', userId, true));
       return 'completed';
     });
+  };
 
   return {
     async run(signal) {
@@ -183,7 +235,8 @@ export function createResetRemovals({
           if (signal?.aborted === true) return;
           try {
             const outcome = await carryOut(orgId, resetId);
-            if (outcome !== 'not_due') log.info(`factor_resets.${outcome}`, { resetId });
+            if (outcome === 'removed_after_cancel') log.error('factor_resets.removed_after_cancel', { resetId });
+            else if (outcome !== 'not_due') log.info(`factor_resets.${outcome}`, { resetId });
           } catch (error) {
             log.error('factor_resets.removal_failed', { resetId, err: error });
           }
