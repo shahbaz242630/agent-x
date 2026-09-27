@@ -30,7 +30,12 @@
 // events after `since`), so without the overlap an event another organisation
 // had yet to be told of, when a run stopped part-way, or one at the same time
 // as the last one copied, would never be read again; the overlap is read
-// again, and skipped as below.
+// again, and skipped as below. A full page of events copied before (a burst
+// of more than a page within the overlap) moves the next page on past its
+// last event's time, so the burst is never read again as the whole of every
+// run (confirmation review); a full page all at one time can't be told apart
+// from the next, so it is logged as an error (`idp_events.tied_page`) and
+// passed.
 // An event, with an organisation, already on the platform chain is skipped,
 // so a run that stops part-way, or reads the same time again, copies nothing
 // twice. The first run starts a day back.
@@ -185,13 +190,16 @@ export function createIdpEventCopier({
   const copyAll = async (signal: AbortSignal | undefined): Promise<{ events: number; written: number }> => {
     let events = 0;
     let written = 0;
+    // Where the next page starts once a full page held nothing new: past its last event.
+    let from: Date | undefined;
     for (let page = 0; page < MOST_PAGES; page += 1) {
       const until = new Date(clock.now().getTime() - SETTLE_MS);
       const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at');
       const since =
-        latest === undefined
+        from ??
+        (latest === undefined
           ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
-          : new Date(latest.getTime() - OVERLAP_MS);
+          : new Date(latest.getTime() - OVERLAP_MS));
       if (since.getTime() >= until.getTime()) break;
       const found = await feed.eventsBetween(since, until, PAGE);
       let newOnes = 0;
@@ -202,11 +210,17 @@ export function createIdpEventCopier({
         written += copied;
         if (copied > 0) newOnes += 1;
       }
-      // A page not full is the last; a full one of events all copied before can't move the cursor on.
+      // A page not full is the last.
       if (found.length < PAGE) break;
-      if (newOnes === 0) {
-        logger.warn('idp_events.stuck', { at: since.toISOString(), events: found.length });
-        break;
+      from = undefined;
+      const first = found[0];
+      const last = found.at(-1);
+      if (newOnes === 0 && first !== undefined && last !== undefined) {
+        // Nothing new to move the cursor on: the next page starts past this one's last event.
+        if (first.createdAt.getTime() === last.createdAt.getTime()) {
+          logger.error('idp_events.tied_page', { at: last.createdAt.toISOString(), events: found.length });
+        }
+        from = last.createdAt;
       }
     }
     return { events, written };

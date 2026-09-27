@@ -368,21 +368,45 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 155, records: 150 })]);
   });
 
-  it('stops, saying so, when a full page holds nothing new: more events at one time than a page', async () => {
+  it('moves past a burst of more than a page within the overlap, copied before, run after run', async () => {
     const who = await person();
-    await organization(who.userId);
+    const org = await organization(who.userId);
+    const base = clock.now().getTime() - 30 * 60_000;
+    const burst = Array.from({ length: 120 }, (_, index) =>
+      event('user.human.password.changed', who.subject, { createdAt: new Date(base + index * 40) }),
+    );
+    const events = [...burst];
+    const { feed } = feedOf(() => events);
+
+    await copierWith(feed).run();
+    expect(await orgRecords(org)).toHaveLength(120);
+
+    // Another event, well after the burst: every later run reaches it, never held up by the burst.
+    events.push(event('user.locked', who.subject, { createdAt: new Date(base + 10 * 60_000) }));
+    clock.advanceBy(60_000);
+    await copierWith(feed).run();
+    clock.advanceBy(60_000);
+    await copierWith(feed).run();
+
+    expect(await orgRecords(org)).toHaveLength(121);
+    expect(lines('idp_events.tied_page')).toEqual([]);
+  });
+
+  it('logs as an error, and passes, a full page all at one time, copied before', async () => {
+    const who = await person();
+    const org = await organization(who.userId);
     const at = new Date(clock.now().getTime() - 10 * 60_000);
     const same = Array.from({ length: 100 }, () =>
       event('user.human.password.changed', who.subject, { createdAt: at }),
     );
-    const { feed, asked } = feedOf(() => same);
+    const later = event('user.unlocked', who.subject, { createdAt: new Date(at.getTime() + 60_000) });
+    const { feed } = feedOf(() => [...same, later]);
 
     await copierWith(feed).run();
 
-    expect(asked.length).toBe(2);
-    // Where it read from: just before the time they all share.
-    expect(lines('idp_events.stuck')).toEqual([
-      expect.objectContaining({ level: 'warn', at: new Date(at.getTime() - 5_000).toISOString() }),
+    expect(await orgRecords(org)).toHaveLength(101);
+    expect(lines('idp_events.tied_page')).toEqual([
+      expect.objectContaining({ level: 'error', at: at.toISOString(), events: 100 }),
     ]);
   });
 
