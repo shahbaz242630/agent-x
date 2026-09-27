@@ -64,8 +64,11 @@ type Tables = IdentityTables & DirectoryTables & AuditTables & NotificationsTabl
 /** What became of one due reset. */
 type RemovalOutcome = 'completed' | 'cancelled' | 'not_due' | 'removed_after_cancel';
 
-/** Why a reset read now isn't carried out: not due (cancelled or done since), or its person can't be reset. */
-type NotCarriedOut = 'not_due' | 'member_deactivated' | 'member_elsewhere';
+/**
+ * Why a reset read now isn't carried out: done (by another run), not due
+ * (cancelled or lapsed since), or its person can't be reset.
+ */
+type NotCarriedOut = 'done' | 'not_due' | 'member_deactivated' | 'member_elsewhere';
 
 export interface ResetRemovals {
   /** Carries out every due reset, until none is left or the signal is aborted. Never throws. */
@@ -150,6 +153,7 @@ export function createResetRemovals({
     const read =
       lock === 'change' ? await resetForChange(tx, states, { orgId, id }) : await resetRecord(tx, states, orgId, id);
     if (read.outcome !== 'found') throw new RemovalRefused("the reset can't be believed");
+    if (read.reset.status === 'COMPLETED') return { userId, not: 'done' };
     if (!isDue(read.reset, clock.now())) return { userId, not: 'not_due' };
     if (person.member.status !== 'ACTIVE') return { userId, not: 'member_deactivated' };
     if (await listedElsewhere(tx, orgId, userId)) return { userId, not: 'member_elsewhere' };
@@ -165,7 +169,7 @@ export function createResetRemovals({
       id,
       userId,
       reason,
-    }: { orgId: string; id: string; userId: string; reason: Exclude<NotCarriedOut, 'not_due'> },
+    }: { orgId: string; id: string; userId: string; reason: Exclude<NotCarriedOut, 'done' | 'not_due'> },
   ): Promise<void> => {
     await moveReset(tx, states, { orgId, id, event: 'cancel', actor: ACTOR, details: { reason } });
     await outbox.add(tx, toldOfReset(orgId, 'factor_reset_cancelled', userId, true));
@@ -174,7 +178,7 @@ export function createResetRemovals({
   /** Carries out one due reset; what became of it. */
   const carryOut = async (orgId: string, id: string): Promise<RemovalOutcome> => {
     const { userId, not: first } = await inOrganization(orgId, (tx, states) => judged(tx, states, orgId, id, 'share'));
-    if (first === 'not_due') return 'not_due';
+    if (first === 'done' || first === 'not_due') return 'not_due';
     // Judged again with the person's sessions and challenges locked: the person is the membership's,
     // which is sealed, so the same one.
     const again = (tx: Transaction<Tables>, states: SignedStates) =>
@@ -183,7 +187,8 @@ export function createResetRemovals({
     if (first !== undefined) {
       // Not to be reset: cancelled, unless cancelled or done since.
       return inOrganization(orgId, async (tx, states) => {
-        if ((await again(tx, states)) === 'not_due') return 'not_due';
+        const not = await again(tx, states);
+        if (not === 'done' || not === 'not_due') return 'not_due';
         await cancel(tx, states, { ...key, reason: first });
         return 'cancelled';
       });
@@ -194,6 +199,8 @@ export function createResetRemovals({
     return inOrganization(orgId, async (tx, states) => {
       const not = await again(tx, states);
       // Cancelled, or the person deactivated or listed elsewhere, while the factors were being removed.
+      // Completed by another run (a second replica, or two revisions at a release): the same removal, benign.
+      if (not === 'done') return 'not_due';
       if (not === 'not_due') return 'removed_after_cancel';
       if (not !== undefined) {
         await cancel(tx, states, { ...key, reason: not });

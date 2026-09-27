@@ -611,6 +611,31 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(await sessionsOf(who.person.userId)).toBe(1);
   });
 
+  it('takes a reset another run completed meanwhile as done, not as after a cancel (two revisions at a release)', async () => {
+    const who = await organization();
+    const id = await coolingOff(who);
+    clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
+    const { promise: removing, resolve: removingStarted } = Promise.withResolvers<undefined>();
+    const { promise: released, resolve: release } = Promise.withResolvers<number>();
+    const slow = loginService(() => {
+      removingStarted(undefined);
+      return released;
+    });
+    const slowRun = removalsWith(slow.factors);
+    const slowCapture = capture;
+    const running = within(20_000, slowRun.run(), 'the slow run');
+    await removing;
+
+    await removalsWith(loginService().factors).run();
+    expect(await statusOf(who.org, id)).toBe('COMPLETED');
+    release(0);
+    await running;
+
+    const slowLines = slowCapture.lines().filter((line) => line.orgId === who.org);
+    expect(slowLines.filter(({ event }) => String(event).startsWith('factor_resets.'))).toEqual([]);
+    expect(await noticesOf(who.org)).toEqual(told('factor_reset_completed', who.person.userId));
+  });
+
   it('cancels, and logs as after a cancel, a person deactivated while the factors were being removed', async () => {
     const who = await organization();
     const id = await coolingOff(who);
