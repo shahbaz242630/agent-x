@@ -80,10 +80,11 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(compose.db).toBe(POSTGRES_IMAGES[newest]);
   });
 
-  it('uses the app image itself for the jobs that share it, and the base image for the volume step', () => {
+  it('uses the app image itself for the jobs that share it, and the base image for the volume step and the stand-in email service', () => {
     expect(compose.api).toBe(OUR_IMAGE);
     expect(compose.migrate).toBe(OUR_IMAGE);
     expect(compose['zitadel-volume']).toBe(dockerfile[0]);
+    expect(compose.mail).toBe(dockerfile[0]);
   });
 
   it('keeps Zitadel and its login on the same version', () => {

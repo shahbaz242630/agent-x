@@ -8,12 +8,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { API_SIGN_IN, APP_KEYS, LOGIN_CLIENT_KEYS, VARIABLES } from '../../deploy/compose/prepare.ts';
+import { KEY_FILE } from '../../deploy/compose/mail-sink.ts';
+import { API_SIGN_IN, APP_KEYS, LOGIN_CLIENT_KEYS, MAIL_SINK, VARIABLES } from '../../deploy/compose/prepare.ts';
 
 const COMPOSE_FILE = 'deploy/compose/compose.yaml';
 
 interface Service {
   image?: string;
+  user?: string;
   environment?: Record<string, string>;
   networks?: string[] | Record<string, { ipv4_address?: string } | null>;
   network_mode?: string;
@@ -144,7 +146,7 @@ describe('ADR-010 §7 the compose stack is air-gapped behind one front door', ()
     expect(socket.map(([name]) => name)).toEqual([]);
   });
 
-  it.each(['api', 'migrate', 'db-setup', 'operator'])('runs %s read-only', (name) => {
+  it.each(['api', 'migrate', 'db-setup', 'operator', 'mail'])('runs %s read-only', (name) => {
     expect(file.services[name]?.read_only).toBe(true);
   });
 
@@ -268,6 +270,22 @@ describe("ADR-011 §2: the app's keys, as Azure mounts them", () => {
   it('starts the API with sign-in off until the suite registers it: its settings file is optional', () => {
     expect(file.services.api?.env_file).toEqual([{ path: `./secrets/${API_SIGN_IN}.env`, required: false }]);
     expect(services.filter(([, service]) => service.env_file !== undefined).map(([name]) => name)).toEqual(['api']);
+  });
+});
+
+describe('B6-2c the stand-in email service', () => {
+  it('runs its one script as the image’s unprivileged user, with no setting of its own', () => {
+    expect(file.services.mail?.command).toEqual(['node', '/sink/mail-sink.ts']);
+    expect(file.services.mail?.user).toBe('1000:1000');
+    expect(file.services.mail?.environment).toBeUndefined();
+  });
+
+  it('mounts its script and the key’s copy alone, neither writable, and no other service the copy', () => {
+    expect(file.services.mail?.volumes).toEqual([
+      './mail-sink.ts:/sink/mail-sink.ts:ro',
+      `./secrets/${MAIL_SINK}:${KEY_FILE.slice(0, KEY_FILE.lastIndexOf('/'))}:ro`,
+    ]);
+    expect(mountersOf(MAIL_SINK)).toEqual(['mail']);
   });
 });
 

@@ -23,6 +23,9 @@
 //   the API with the login service (tooling/e2e/api-sign-in.ts). Made here,
 //   before the stack starts, so the folder is this user's: one Docker made
 //   would be root's on Linux, and the suite couldn't write into it
+// - deploy/compose/secrets/mail-sink, an empty folder the stand-in email
+//   service mounts (mail-sink.ts), where the suite puts its copy of the
+//   API's email access key; made here for the same reason
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -69,6 +72,9 @@ export const APP_KEYS = 'app-keys';
 
 /** The API's sign-in secret, in a folder of its own that compose mounts into the API alone. */
 export const API_SIGN_IN = 'api-sign-in';
+
+/** The stand-in email service's copy of the access key, in a folder of its own that compose mounts into it alone. */
+export const MAIL_SINK = 'mail-sink';
 
 /** Every variable the .env file holds, in the order it's written. */
 export const VARIABLES: readonly string[] = [...PASSWORDS, MASTER_KEY];
@@ -249,21 +255,25 @@ export function prepareEnv(file: string = ENV_FILE, random: Random = randomBytes
   return 'kept';
 }
 
-/** What one run did to each of the four, so the operator is told which was already there. */
+/** What one run did to each of the five, so the operator is told which was already there. */
 export interface Prepared {
   readonly env: 'created' | 'kept';
   readonly keys: 'created' | 'kept';
   readonly appKeys: 'created' | 'kept';
   readonly signInDir: 'created' | 'kept';
+  readonly mailDir: 'created' | 'kept';
 }
 
-/** The folder for the API's sign-in secret, empty until the end-to-end suite registers the API. */
-export function prepareSignInDir(dir: string = path.join(SECRETS_DIR, API_SIGN_IN)): 'created' | 'kept' {
+/**
+ * A folder the end-to-end suite writes into once the stack is up, empty until
+ * then: the API's sign-in secret (API_SIGN_IN), the email key's copy (MAIL_SINK).
+ */
+export function prepareSuiteDir(dir: string = path.join(SECRETS_DIR, API_SIGN_IN)): 'created' | 'kept' {
   // mkdirSync names the first folder it made, or nothing if the folder was there.
   return mkdirSync(dir, { recursive: true }) === undefined ? 'kept' : 'created';
 }
 
-/** The whole preparation: the logins, the login key pair, the app's keys, then the sign-in folder. */
+/** The whole preparation: the logins, the login key pair, the app's keys, then the suite's two folders. */
 export function prepare(
   file: string = ENV_FILE,
   dir: string = SECRETS_DIR,
@@ -274,7 +284,8 @@ export function prepare(
     env: prepareEnv(file, random),
     keys: prepareKeys(dir, keyPair),
     appKeys: prepareAppKeys(path.join(dir, APP_KEYS), random),
-    signInDir: prepareSignInDir(path.join(dir, API_SIGN_IN)),
+    signInDir: prepareSuiteDir(path.join(dir, API_SIGN_IN)),
+    mailDir: prepareSuiteDir(path.join(dir, MAIL_SINK)),
   };
 }
 
@@ -297,6 +308,8 @@ if (import.meta.main) {
         : `Kept the app's keys in ${path.join(SECRETS_DIR, APP_KEYS)}.`,
     );
     if (done.signInDir === 'created') console.log(`Made ${path.join(SECRETS_DIR, API_SIGN_IN)} for the API's sign-in.`);
+    if (done.mailDir === 'created')
+      console.log(`Made ${path.join(SECRETS_DIR, MAIL_SINK)} for the stand-in email service.`);
   } catch (error) {
     const told = error instanceof IncompleteEnvFile || error instanceof HalfKeyPair || error instanceof NotAKeyFile;
     if (!told) throw error;

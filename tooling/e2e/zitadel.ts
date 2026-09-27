@@ -197,3 +197,71 @@ export async function registerTotp(client: ZitadelClient, userId: string): Promi
 /** Completes the registration with a code from the secret. */
 export const verifyTotp = (client: ZitadelClient, userId: string, code: string): Promise<unknown> =>
   client.post(`/v2/users/${userId}/totp/verify`, { code });
+
+/** The IDs of the users, of any kind, with exactly this user name. */
+export async function usersNamed(client: ZitadelClient, userName: string): Promise<string[]> {
+  const { result = [] } = await client.post<{ result?: { id: string }[] }>('/management/v1/users/_search', {
+    queries: [{ userNameQuery: { userName, method: 'TEXT_QUERY_METHOD_EQUALS' } }],
+  });
+  return result.map(({ id }) => id);
+}
+
+/** A service user with a personal access token, as the partner made `agentx-directory` on staging (B5-3). */
+export async function createServiceUser(
+  client: ZitadelClient,
+  userName: string,
+  name: string,
+): Promise<{ userId: string; token: string }> {
+  const { userId } = await client.post<{ userId: string }>('/management/v1/users/machine', {
+    userName,
+    name,
+    accessTokenType: 'ACCESS_TOKEN_TYPE_BEARER',
+  });
+  const { token } = await client.post<{ token: string }>(`/management/v1/users/${userId}/pats`, {
+    expirationDate: '2036-01-01T00:00:00Z',
+  });
+  return { userId, token };
+}
+
+/** Roles in the automation user's own organisation (Agent X's, as on staging). */
+export const grantOrgRoles = (client: ZitadelClient, userId: string, roles: readonly string[]): Promise<unknown> =>
+  client.post('/management/v1/orgs/me/members', { userId, roles });
+
+/** Roles on the whole instance: IAM Owner Viewer is the one the event feed needs (B6-2b). */
+export const grantInstanceRoles = (client: ZitadelClient, userId: string, roles: readonly string[]): Promise<unknown> =>
+  client.post('/admin/v1/members', { userId, roles });
+
+/** The IDs of the user's security keys (U2F), as the login registered them. */
+export async function securityKeysOf(client: ZitadelClient, userId: string): Promise<string[]> {
+  const { result = [] } = await client.post<{ result?: { u2f?: { id: string } }[] }>(
+    `/management/v1/users/${userId}/auth_factors/_search`,
+  );
+  return result.flatMap(({ u2f }) => (u2f === undefined ? [] : [u2f.id]));
+}
+
+/** Removes one security key, as an admin in Zitadel's console would, behind Agent X's back. */
+export const removeSecurityKey = (client: ZitadelClient, userId: string, keyId: string): Promise<void> =>
+  client.delete(`/management/v1/users/${userId}/auth_factors/u2f/${keyId}`);
+
+export interface FeedEvent {
+  readonly type: { readonly type: string };
+  readonly aggregate: { readonly id: string };
+  readonly sequence: string | number;
+  readonly creationDate: string;
+}
+
+/** The instance's events of these types created within a span, oldest first, as the API's feed asks (idp-feed.ts). */
+export async function eventsBetween(
+  client: ZitadelClient,
+  types: readonly string[],
+  since: string,
+  until: string,
+): Promise<FeedEvent[]> {
+  const { events = [] } = await client.post<{ events?: FeedEvent[] }>('/admin/v1/events/_search', {
+    asc: true,
+    limit: 100,
+    event_types: types,
+    range: { since, until },
+  });
+  return events;
+}
