@@ -312,6 +312,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'loginClientPublicKey',
       'apiOidcClientSecret',
       'directoryToken',
+      'resetToken',
       'appKeyValues',
     ]);
     for (const [environment, { together }] of deployed) {
@@ -430,6 +431,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       `login-client-public-key ${givenOnly('loginClientPublicKey')}`,
       `api-oidc-client-secret ${givenOnly('apiOidcClientSecret')}`,
       `zitadel-directory-token ${givenOnly('directoryToken')}`,
+      `zitadel-reset-token ${givenOnly('resetToken')}`,
       'zitadel-masterkey once',
       // B5-3: on every run, from the email service this deployment creates.
       'acs-access-key copied',
@@ -451,6 +453,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
         'zitadel reads login-client-public-key',
         'api reads api-oidc-client-secret',
         'api reads zitadel-directory-token',
+        'api reads zitadel-reset-token',
         'zitadel-setup reads zitadel-masterkey',
         'zitadel reads zitadel-masterkey',
         'api reads acs-access-key',
@@ -467,7 +470,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
   it('compiles a rotation run, one secret given and every other empty, and refuses one without a master key', () => {
     const text = params.get('staging.secrets.bicepparam')?.text ?? '';
     const variables = [...text.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1] ?? '');
-    expect(variables).toHaveLength(12);
+    expect(variables).toHaveLength(13);
     // The API's login given; every other secret set but empty, so left as the vault has it; the master key a
     // fresh 32 characters and the app's keys fresh too, which Azure leaves alone once they exist. Empty values
     // reach Bicep from Node, as G3's tool sends them.
@@ -476,7 +479,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
     inCopy((dir) => {
       const rotation = environmentSnapshot(dir, 'staging', kept).together;
       expect(policyProblems(rotation, STAGING).map(describeProblem)).toEqual([]);
-      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(12 + APP_KEYS.length);
+      expect(rotation.predictedResources.filter(SECRETS)).toHaveLength(13 + APP_KEYS.length);
       // The keys must come every run too: without them the run stops before Azure.
       expect(() => environmentSnapshot(dir, 'staging', { ...kept, AGENTX_AZURE_APP_KEYS: '' })).toThrow();
       // A master key must come every run, even though only the first is kept: an empty one stops the run before Azure.

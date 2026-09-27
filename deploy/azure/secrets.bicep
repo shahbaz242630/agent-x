@@ -85,6 +85,10 @@ param apiOidcClientSecret string
 @secure()
 param directoryToken string
 
+@description('The API\'s token for removing a person\'s second factors in Zitadel once a reset has cooled off (B6-3c), which Zitadel gave its service user with the organisation\'s Org User Manager role, pasted by a person. Empty leaves the vault\'s as it is.')
+@secure()
+param resetToken string
+
 @description('A fresh value for each of the app\'s keys (appKeys), on every run, as JSON: each key\'s name and 32 random bytes as base64url. Only a key the vault doesn\'t hold yet is written; the rest keep their values. Never empty, so a run without them stops before Azure.')
 @minLength(2)
 @secure()
@@ -143,6 +147,11 @@ var secrets = [
   {
     name: 'zitadel-directory-token'
     value: directoryToken
+    readers: ['api']
+  }
+  {
+    name: 'zitadel-reset-token'
+    value: resetToken
     readers: ['api']
   }
 ]

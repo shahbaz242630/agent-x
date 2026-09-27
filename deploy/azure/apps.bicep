@@ -636,6 +636,12 @@ var apps = [
           reads: 'zitadel-directory-token'
           setting: 'AGENTX_DIRECTORY_TOKEN_FILE'
         }
+        // B6-3c: Zitadel's token for removing a person's second factors once
+        // a reset has cooled off, its own service user's (Org User Manager).
+        {
+          reads: 'zitadel-reset-token'
+          setting: 'AGENTX_FACTOR_RESET_TOKEN_FILE'
+        }
       ],
       map(appKeys, key => {
         reads: key
