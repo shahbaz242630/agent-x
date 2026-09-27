@@ -1,8 +1,8 @@
-// What a notice says (B5-1b, B6-1b): plain text, from the notice's own
+// What a notice says (B5-1b, B6-1b, B6-2a): plain text, from the notice's own
 // constants and IDs alone. It tells, and does nothing: no link that acts, no
 // token, no approval power (PRD §4.4, SEC-HA-11), and nothing of the person
 // or contact it is about beyond the IDs an admin can look up once signed in.
-import type { ClaimedNotice, NoticeKind } from './notice.ts';
+import { type ClaimedNotice, isAboutASignIn, type NoticeKind } from './notice.ts';
 
 /** An email as the notifier sends it. */
 export interface NoticeMessage {
@@ -31,6 +31,8 @@ interface Wording {
 const MEMBERS_CHECK = "If you didn't expect this, sign in to Agent X and check the organisation's members.";
 const CONTACTS_CHECK =
   "If you didn't expect this, tell the organisation's admins at once: an admin can sign in to Agent X and check its registered contacts.";
+const SIGN_IN_CHECK =
+  "If you didn't expect this, tell the organisation's admins at once, and the person if it wasn't you: someone may be trying to take over this login.";
 
 const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   role_granted: {
@@ -55,6 +57,35 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     firstLine: () => 'A registered contact was removed from one of your Agent X organisations.',
     check: CONTACTS_CHECK,
   },
+  second_factor_removed: {
+    subject: () => "Agent X: a second factor was removed from a person's login",
+    firstLine: () =>
+      'An authenticator app, a security key or a passkey was removed from the login of a person in one of your Agent X organisations.',
+    check: SIGN_IN_CHECK,
+  },
+  password_changed: {
+    subject: () => "Agent X: a person's password was changed or a reset was asked for",
+    firstLine: () =>
+      'The password of a person in one of your Agent X organisations was changed, or a reset of it was asked for.',
+    check: SIGN_IN_CHECK,
+  },
+  sign_in_email_changed: {
+    subject: () => "Agent X: the email address of a person's login was changed",
+    firstLine: () => 'The email address of the login of a person in one of your Agent X organisations was changed.',
+    check: SIGN_IN_CHECK,
+  },
+  sign_in_blocked: {
+    subject: () => "Agent X: a person's login was locked, deactivated or removed",
+    firstLine: () =>
+      'The login of a person in one of your Agent X organisations was locked, deactivated or removed: they can no longer sign in.',
+    check: SIGN_IN_CHECK,
+  },
+  sign_in_restored: {
+    subject: () => "Agent X: a person's login was unlocked or reactivated",
+    firstLine: () =>
+      'The login of a person in one of your Agent X organisations was unlocked or reactivated: they can sign in again.',
+    check: SIGN_IN_CHECK,
+  },
 };
 
 function article(word: string): string {
@@ -66,11 +97,15 @@ export function messageFor(notice: ClaimedNotice, to: string): NoticeMessage {
   const role = notice.role === null ? '' : ROLE_NAMES[notice.role];
   const wording = WORDING[notice.kind];
   const about =
-    notice.membershipId === null ? `Registered contact: ${notice.aboutId ?? ''}` : `Membership: ${notice.membershipId}`;
+    notice.membershipId !== null
+      ? `Membership: ${notice.membershipId}`
+      : `${isAboutASignIn(notice.kind) ? 'Person' : 'Registered contact'}: ${notice.aboutId ?? ''}`;
   const why =
-    notice.recipientContactId === null
-      ? "You're told because you're an admin of this organisation."
-      : "You're told because this address is one of the organisation's registered contacts.";
+    notice.recipientContactId !== null
+      ? "You're told because this address is one of the organisation's registered contacts."
+      : isAboutASignIn(notice.kind) && notice.recipientUserId === notice.aboutId
+        ? "You're told because this is your own login."
+        : "You're told because you're an admin of this organisation.";
   return {
     id: notice.id,
     to,

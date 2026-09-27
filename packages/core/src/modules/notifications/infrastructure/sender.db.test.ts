@@ -303,6 +303,34 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it('B6-2a leaves an admin out of a notice to the admins about their own sign-in: they are told once, as themselves', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const aboutAdmin = {
+      orgId: ORG,
+      kind: 'second_factor_removed',
+      membershipId: null,
+      role: null,
+      aboutId: ADMIN,
+    } as const;
+    await app.transaction().execute((tx) =>
+      outbox.add(tx, [
+        { ...aboutAdmin, recipientUserId: ADMIN },
+        { ...aboutAdmin, recipientUserId: null },
+      ]),
+    );
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    // The admin once, as themselves; the other admin, and the member the role notices are about, as admins.
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'other.admin@example.test']);
+    const toAdmin = sent.find(({ to }) => to === 'admin@example.test');
+    expect(toAdmin?.text).toContain("You're told because this is your own login.");
+    expect(
+      (await rows()).filter(({ recipient_user_id }) => recipient_user_id === MEMBER).map(({ sent_at }) => sent_at),
+    ).toEqual([null]);
+  });
+
   it('B6-1b turns a notice to the contacts into one to each ACTIVE contact, each sent to its own address', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true })]));

@@ -31,7 +31,7 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
 import { messageFor, type NoticeMessage } from '../domain/messages.ts';
-import type { ClaimedNotice } from '../domain/notice.ts';
+import { type ClaimedNotice, isAboutASignIn } from '../domain/notice.ts';
 import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
 
@@ -115,12 +115,21 @@ export function createNoticeSender({
     });
   };
 
-  /** The group's members a notice to it goes to: the admins but the member it is about, or the ACTIVE contacts. */
+  /**
+   * The group's members a notice to it goes to: the ACTIVE contacts, or the
+   * admins but the member it is about, by their membership, or, for a notice
+   * about a person's sign-in, by their user ID (B6-2a review): that person is
+   * told apart, as themselves, once.
+   */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
     if (notice.toContacts) return audience.contactsOf(notice.orgId);
+    const aboutPerson = isAboutASignIn(notice.kind) ? notice.aboutId : null;
     const admins = await audience.adminsOf(notice.orgId);
     return admins
-      .filter(({ membershipId }) => membershipId.toLowerCase() !== notice.membershipId)
+      .filter(
+        ({ membershipId, userId }) =>
+          membershipId.toLowerCase() !== notice.membershipId && userId.toLowerCase() !== aboutPerson,
+      )
       .map(({ userId }) => userId);
   };
 

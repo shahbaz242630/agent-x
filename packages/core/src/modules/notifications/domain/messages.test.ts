@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { messageFor } from './messages.ts';
-import type { ClaimedNotice } from './notice.ts';
+import { type ClaimedNotice, SIGN_IN_NOTICE_KINDS, type SignInNoticeKind } from './notice.ts';
 
 const NOTICE: ClaimedNotice = {
   id: '0199a0f0-0000-7000-8000-00000000b5c1',
@@ -72,6 +72,37 @@ describe('a notice’s email (B5-1b)', () => {
       "You're told because this address is one of the organisation's registered contacts.",
     );
     expect(message.text).not.toContain("you're an admin");
+  });
+
+  it('B6-2a tells a person of their own login changed, and an admin of a person in their organisation', () => {
+    const person = '0199a0f0-0000-7000-8000-00000000b6d1';
+    const signIn = (recipientUserId: string, kind: SignInNoticeKind = 'second_factor_removed'): ClaimedNotice => ({
+      ...NOTICE,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: person,
+      recipientUserId,
+    });
+
+    const own = messageFor(signIn(person), 'person@example.test');
+    const admin = messageFor(signIn(NOTICE.recipientUserId ?? ''), 'admin@example.test');
+
+    expect(own.subject).toBe("Agent X: a second factor was removed from a person's login");
+    expect(own.text).toContain(`Person: ${person}`);
+    expect(own.text).toContain("You're told because this is your own login.");
+    expect(admin.text).toContain("You're told because you're an admin of this organisation.");
+    expect(admin.text).toContain('someone may be trying to take over this login');
+    for (const kind of SIGN_IN_NOTICE_KINDS) {
+      const { subject, text } = messageFor(signIn(person, kind), 'person@example.test');
+      expect(subject).toMatch(/^Agent X: /);
+      expect(`${subject} ${text}`).not.toMatch(/https?:|www\.|token|#/i);
+      expect(text).toContain("This email can't approve or change anything.");
+    }
+    expect(messageFor(signIn(person, 'sign_in_blocked'), 'p@example.test').text).toContain('can no longer sign in');
+    expect(messageFor(signIn(person, 'sign_in_restored'), 'p@example.test').text).toContain('can sign in again');
+    expect(messageFor(signIn(person, 'password_changed'), 'p@example.test').subject).toContain('password');
+    expect(messageFor(signIn(person, 'sign_in_email_changed'), 'p@example.test').subject).toContain('email address');
   });
 
   it.each([

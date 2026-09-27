@@ -13,6 +13,8 @@ export {
   NOTICE_KINDS,
   type NoticeKind,
   type NoticeRole,
+  SIGN_IN_NOTICE_KINDS,
+  type SignInNoticeKind,
 } from './domain/notice.ts';
 export {
   CLAIM_LEASE_MS,
