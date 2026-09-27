@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql), as Kysely sees them. */
+/** The identity schema's tables (db/migrations/0010_identity.sql, 0011_login_flows.sql, 0013_step_up_challenges.sql, 0014_step_up_flows.sql, 0015_memberships.sql, 0016_invitations.sql, 0017_session_emails.sql, 0018_invitation_acceptance.sql, 0019_membership_reactivation.sql, 0020_first_admin_invitation.sql, 0022_registered_contacts.sql), as Kysely sees them. */
 export interface IdentityTables {
   'identity.users': UsersTable;
   'identity.sessions': SessionsTable;
@@ -9,6 +9,7 @@ export interface IdentityTables {
   'identity.memberships': MembershipsTable;
   'identity.invitations': InvitationsTable;
   'identity.session_emails': SessionEmailsTable;
+  'identity.registered_contacts': RegisteredContactsTable;
 }
 
 interface UsersTable {
@@ -101,4 +102,20 @@ interface SessionEmailsTable {
   session_id: string;
   email_ciphertext: Buffer;
   email_key_version: number;
+}
+
+interface RegisteredContactsTable {
+  org_id: string;
+  id: string;
+  status: string;
+  added_by: string;
+  /** Null for a DRAFT. */
+  counts_from: Date | null;
+  step_up_challenge_id: string;
+  created_at: Date;
+  email_ciphertext: Buffer;
+  email_key_version: number;
+  /** These two are written by the signed state's steps alone (the audit module's record). */
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
 }

@@ -13,7 +13,7 @@
 // its migration.
 import type { SignedStateTable } from '@agentx/platform/db';
 
-import { INVITATIONS, MEMBERSHIPS } from './modules/identity/index.ts';
+import { INVITATIONS, MEMBERSHIPS, REGISTERED_CONTACTS } from './modules/identity/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 
 /**
@@ -36,8 +36,14 @@ export interface AuthorityTableEntry extends SignedStateTable {
 /**
  * In the global lock order (ADR-006 §6): the organisation (2), then its
  * invitations and memberships (2a, an invitation before a membership, as
- * accepting and confirming take them). Clearing the integrity hold checks
+ * accepting and confirming take them), then its registered contacts (2b,
+ * B6-1a: an admin's membership is read before the contacts it changes). Clearing the integrity hold checks
  * every row of each in this order (verifyAll, B3+-2c), so a new table goes in
  * at its level.
  */
-export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [ORGANIZATIONS, INVITATIONS, MEMBERSHIPS];
+export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
+  ORGANIZATIONS,
+  INVITATIONS,
+  MEMBERSHIPS,
+  REGISTERED_CONTACTS,
+];

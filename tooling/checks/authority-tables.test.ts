@@ -17,7 +17,14 @@ import {
   AUTHORITY_TABLES as PRODUCT_AUTHORITY_TABLES,
   type AuthorityTableEntry,
 } from '../../packages/core/src/authority-tables.ts';
-import { INVITATION, INVITATIONS, MEMBERSHIP, MEMBERSHIPS } from '../../packages/core/src/modules/identity/index.ts';
+import {
+  INVITATION,
+  INVITATIONS,
+  MEMBERSHIP,
+  MEMBERSHIPS,
+  REGISTERED_CONTACT,
+  REGISTERED_CONTACTS,
+} from '../../packages/core/src/modules/identity/index.ts';
 import { ORGANIZATION, ORGANIZATIONS } from '../../packages/core/src/modules/organizations/index.ts';
 import { AUTHORITY_TABLES } from '../authority-tables.ts';
 import { SCHEMA_POLICY } from '../schema-policy.ts';
@@ -88,13 +95,14 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1) and an invitation (B4-3a)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships.
-    const [organizations, invitations, memberships, ...others] = PRODUCT_AUTHORITY_TABLES;
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a) and a registered contact (B6-1a)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts.
+    const [organizations, invitations, memberships, contacts, ...others] = PRODUCT_AUTHORITY_TABLES;
 
     expect(organizations).toBe(ORGANIZATIONS);
     expect(invitations).toBe(INVITATIONS);
     expect(memberships).toBe(MEMBERSHIPS);
+    expect(contacts).toBe(REGISTERED_CONTACTS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -116,6 +124,12 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: MEMBERSHIPS.fields,
         status: MEMBERSHIP,
       },
+      {
+        table: REGISTERED_CONTACTS.table,
+        subject: REGISTERED_CONTACTS.subject,
+        fields: REGISTERED_CONTACTS.fields,
+        status: REGISTERED_CONTACT,
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -123,6 +137,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[1]?.status).toBe(INVITATION);
     expect(AUTHORITY_TABLES[2]?.fields).toBe(MEMBERSHIPS.fields);
     expect(AUTHORITY_TABLES[2]?.status).toBe(MEMBERSHIP);
+    expect(AUTHORITY_TABLES[3]?.fields).toBe(REGISTERED_CONTACTS.fields);
+    expect(AUTHORITY_TABLES[3]?.status).toBe(REGISTERED_CONTACT);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {
