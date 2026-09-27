@@ -725,6 +725,19 @@ describe(`a contact confirming it by its link (B6-3b-3, Postgres ${server.versio
     }
     expect(await press(token)).toEqual(refused(503, 'INTEGRITY_FAILED'));
 
+    // The contact confirming can't be believed.
+    const doubted = await organization();
+    const doubtedId = await sent(doubted);
+    const contactOwner = await tamperAsOwner(database, REGISTERED_CONTACTS, doubted.org);
+    try {
+      await contactOwner.setColumn(doubted.contacts[0], 'counts_from', '2030-01-01T00:00:00Z');
+    } finally {
+      await contactOwner.end();
+    }
+    expect(await press(await tokenOf(doubted.org, doubtedId, doubted.contacts[0]))).toEqual(
+      refused(503, 'INTEGRITY_FAILED'),
+    );
+
     const planted = await organization();
     const plantedId = await sent(planted);
     const [first, second] = planted.contacts;

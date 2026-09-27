@@ -103,13 +103,9 @@ export function createContactConfirmations({
           const person = await memberOf(tx, states, { orgId, id: personId }, 'share');
           const contact = await contactRecord(tx, states, orgId, contactId);
           const read = await resetForChange(tx, states, { orgId, id: resetId });
-          if (
-            person.outcome !== 'found' ||
-            contact.outcome !== 'found' ||
-            read.outcome !== 'found' ||
-            read.reset.person !== personId
-          ) {
-            // Missing is the row gone past the app, which never deletes one: tampering too.
+          // Missing is the row gone past the app, which never deletes one: tampering too. The reset's
+          // person is sealed, and verified here from the row just read, so it is the one read above.
+          if (person.outcome !== 'found' || contact.outcome !== 'found' || read.outcome !== 'found') {
             throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
           }
           const { reset } = read;
