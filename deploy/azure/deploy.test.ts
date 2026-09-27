@@ -266,6 +266,7 @@ describe('the secrets a run writes', () => {
       '  zitadel-masterkey: written only if the vault has none yet',
       '  api-oidc-client-secret: kept as the vault has it',
       '  zitadel-directory-token: kept as the vault has it',
+      '  zitadel-reset-token: kept as the vault has it',
       // B5-3: copied from the email service on every run, whatever the run writes.
       '  acs-access-key: copied from its Azure service, as every run does',
       ...APP_KEYS.map((key) => `  ${key}: written only if the vault has none yet`),
@@ -685,10 +686,11 @@ class RecordingAz implements Az {
           return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
         }
         // Unless a test says otherwise, the vault holds what apps needs: the API's client secret (B2-6), its
-        // directory token and the email key (B5-3).
+        // directory token and the email key (B5-3), its reset token (B6-3c).
         const names = (this.#deployed ? this.options.after : this.options.before) ?? [
           'api-oidc-client-secret',
           'zitadel-directory-token',
+          'zitadel-reset-token',
           'acs-access-key',
         ];
         const pages = this.options.pages ?? {};
@@ -1027,12 +1029,16 @@ describe('deploy secrets', () => {
     expect(deployment?.args).toContain('staging.secrets.bicepparam');
     expect(deployment?.args).toContain(RESOURCE_GROUP);
     const values = deployment?.values ?? {};
-    // All but the two Zitadel issues later, which only their names write.
+    // All but the three Zitadel issues later, which only their names write.
     expect(
       Object.entries(values)
         .filter(([, value]) => value === '')
         .map(([name]) => name),
-    ).toEqual(['AGENTX_AZURE_API_OIDC_CLIENT_SECRET', 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN']);
+    ).toEqual([
+      'AGENTX_AZURE_API_OIDC_CLIENT_SECRET',
+      'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN',
+      'AGENTX_AZURE_ZITADEL_RESET_TOKEN',
+    ]);
     expect(values.AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD).toBe(admin);
     expect(values.AGENTX_AZURE_ZITADEL_ADMIN_PASSWORD).toBe(zitadel);
     for (const call of done.az.calls) {
@@ -1227,7 +1233,7 @@ describe('deploy apps', () => {
     const done = await run(['apps'], { answers, images, az: new RecordingAz({ before: ['db-app-password'] }) });
     expect(done.error).toMatchObject({
       message: expect.stringMatching(
-        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token .*that run copies the email key too.*Nothing was deployed\.$/,
+        /^The vault doesn't hold api-oidc-client-secret, zitadel-directory-token, zitadel-reset-token, acs-access-key yet, or holds it disabled, .*secrets --rotate api-oidc-client-secret zitadel-directory-token zitadel-reset-token .*that run copies the email key too.*Nothing was deployed\.$/,
       ) as unknown,
     });
     expect(done.az.deployment).toBeUndefined();
@@ -1247,8 +1253,22 @@ describe('deploy apps', () => {
   });
 
   it('names only the issued and copied secrets a vault lacks, and the secrets run that writes them', () => {
-    expect(issuedMissing([])).toEqual(['api-oidc-client-secret', 'zitadel-directory-token', 'acs-access-key']);
-    const held = ['db-app-password', 'api-oidc-client-secret', 'zitadel-directory-token', 'acs-access-key'];
+    expect(issuedMissing([])).toEqual([
+      'api-oidc-client-secret',
+      'zitadel-directory-token',
+      'zitadel-reset-token',
+      'acs-access-key',
+    ]);
+    const held = [
+      'db-app-password',
+      'api-oidc-client-secret',
+      'zitadel-directory-token',
+      'zitadel-reset-token',
+      'acs-access-key',
+    ];
+    // B6-3c: the reset token alone, as staging lacks it until the partner's run.
+    expect(issuedMissing(held.filter((name) => name !== 'zitadel-reset-token'))).toEqual(['zitadel-reset-token']);
+    expect(secretsRunFor(['zitadel-reset-token'])).toBe('secrets --rotate zitadel-reset-token');
     expect(issuedMissing(held)).toEqual([]);
     expect(issuedMissing(held.filter((name) => name !== 'zitadel-directory-token'))).toEqual([
       'zitadel-directory-token',

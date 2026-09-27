@@ -132,6 +132,8 @@ export const VAULT_SECRETS: Readonly<
   'api-oidc-client-secret': { variable: 'AGENTX_AZURE_API_OIDC_CLIENT_SECRET', source: 'issued' },
   // B5-3: the token Zitadel gave the API's read-only service user, for the admins' addresses.
   'zitadel-directory-token': { variable: 'AGENTX_AZURE_ZITADEL_DIRECTORY_TOKEN', source: 'issued' },
+  // B6-3c: the token Zitadel gave the API's service user with Org User Manager, for removing second factors.
+  'zitadel-reset-token': { variable: 'AGENTX_AZURE_ZITADEL_RESET_TOKEN', source: 'issued' },
 };
 
 /**
@@ -160,6 +162,7 @@ const PERSON_LABELS: Readonly<Record<string, string>> = {
   'zitadel-admin-password': "Zitadel's first admin's password",
   'api-oidc-client-secret': "the API's client secret, as Zitadel showed it",
   'zitadel-directory-token': "the API's directory token, as Zitadel showed it for its read-only service user",
+  'zitadel-reset-token': "the API's reset token, as Zitadel showed it for its Org User Manager service user",
 };
 
 /** Every secret (`all`), the ones named (`rotate`), or only the app's keys the vault lacks (`keys`). */

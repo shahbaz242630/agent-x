@@ -252,6 +252,8 @@ const GRANTS: ReadonlySet<string> = new Set([
   // B5-3: the email service's key, copied from it, and the login service's read-only token for addresses.
   'api reads acs-access-key',
   'api reads zitadel-directory-token',
+  // B6-3c: the login service's token for removing second factors once a reset has cooled off.
+  'api reads zitadel-reset-token',
   'operator reads db-app-password',
   'db-setup reads db-admin-password',
   'db-setup reads db-owner-password',
