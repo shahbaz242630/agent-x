@@ -12,12 +12,14 @@ import {
   distinct,
   documentedPath,
   type Finding,
+  gateLines,
   OPENAPI_FILE,
   originOf,
   sarifOf,
   SCANNER_IMAGES,
   schemathesisArgs,
   schemathesisFindings,
+  STACK_ORIGIN,
   summaryOf,
   zapArgs,
   zapFindings,
@@ -81,6 +83,19 @@ Reproduce with:
 [204] No Content:
 
     &lt;EMPTY&gt;</failure>
+    </testcase>
+    <testcase name="POST /v1/factor-resets/confirm" time="0.3">
+      <failure type="failure">1. Test Case ID: aaaaaa
+
+- API accepted schema-violating request
+
+[413] Content Too Large:
+
+2. Test Case ID: bbbbbb
+
+- API accepted schema-violating request
+
+[302] Found:</failure>
     </testcase>
     <testcase name="POST /v1/integrity-hold/clear" time="3.3" />
     <testcase name="GET /v1/auth/callback" time="0.2">
@@ -191,6 +206,27 @@ describe('B7 the dynamic scan of staging', () => {
         ),
         status: 204,
       },
+      // Two cases in one failure, each with its own answer.
+      {
+        ...st(
+          'schemathesis/api-accepted-schema-violating-request',
+          'API accepted schema-violating request',
+          'low',
+          'POST',
+          '/v1/factor-resets/confirm',
+        ),
+        status: 413,
+      },
+      {
+        ...st(
+          'schemathesis/api-accepted-schema-violating-request',
+          'API accepted schema-violating request',
+          'low',
+          'POST',
+          '/v1/factor-resets/confirm',
+        ),
+        status: 302,
+      },
       st(
         'schemathesis/api-accepted-schema-violating-request-more',
         'API accepted schema-violating request & more',
@@ -207,7 +243,10 @@ describe('B7 the dynamic scan of staging', () => {
       /SEC-DATA-04/,
     );
     expect(acceptedReason(finding({ rule: 'zap/100001', path: '/latest/meta-data/' }))).toMatch(/Azure's edge/);
+    expect(acceptedReason(finding({ rule: 'zap/100001', path: '/openstack/latest/meta_data.json' }))).toMatch(/edge/);
+    // At an address the API serves, whatever its parameters, it is a finding.
     expect(acceptedReason(finding({ rule: 'zap/100001', path: '/v1/members' }))).toBeUndefined();
+    expect(acceptedReason(finding({ rule: 'zap/100001', path: '/v1/members/abc/role' }))).toBeUndefined();
     expect(
       acceptedReason(finding({ tool: 'schemathesis', rule: 'zap/100001', path: '/latest/meta-data/' })),
     ).toBeUndefined();
@@ -215,6 +254,7 @@ describe('B7 the dynamic scan of staging', () => {
     // A schema-violating request is accepted only when the answer was the 431 refusal.
     const violating = finding({ tool: 'schemathesis', rule: 'schemathesis/api-accepted-schema-violating-request' });
     expect(acceptedReason({ ...violating, status: 431 })).toMatch(/HEADERS_TOO_LARGE/);
+    expect(acceptedReason({ ...violating, status: 413 })).toMatch(/PAYLOAD_TOO_LARGE/);
     expect(acceptedReason({ ...violating, status: 302 })).toBeUndefined();
     expect(acceptedReason(violating)).toBeUndefined();
   });
@@ -301,8 +341,50 @@ describe('B7 the dynamic scan of staging', () => {
     ).join('\n');
 
     expect(summary).toContain('zap: high 1, medium 0, low 1, info 1');
-    expect(summary).toContain('schemathesis: high 0, medium 1, low 3, info 0');
+    expect(summary).toContain('schemathesis: high 0, medium 1, low 4, info 0');
     expect(summary).toContain('accepted (listed in tooling/dast/scan.ts): 2');
     expect(summary).not.toMatch(/example\.test|\/v1\/|\/health|https?:/);
+  });
+
+  it('runs Schemathesis on every pull request against the compose stack, on the runner’s network, shorter', () => {
+    const args = schemathesisArgs(STACK_ORIGIN, '/r', 'stack');
+
+    expect(STACK_ORIGIN).toBe('http://localhost:8080');
+    expect(args.slice(0, 7)).toEqual([
+      'run',
+      '--rm',
+      '--network',
+      'host',
+      '--volume',
+      '/r:/wrk',
+      SCANNER_IMAGES.schemathesis,
+    ]);
+    expect(args).toEqual(expect.arrayContaining(['--url', STACK_ORIGIN, '--header', `Origin: ${STACK_ORIGIN}`]));
+    expect(args[args.indexOf('--max-time') + 1]).toBe('300');
+    expect(schemathesisArgs(ORIGIN, '/r')).not.toContain('--network');
+    // Never following a redirect into the login service's pages.
+    expect(args[args.indexOf('--max-redirects') + 1]).toBe('0');
+  });
+
+  it('stops a pull request on each finding not accepted, informational notes aside, naming its answer', () => {
+    const violating = finding({
+      tool: 'schemathesis',
+      rule: 'schemathesis/api-accepted-schema-violating-request',
+      path: '/v1/auth/callback',
+    });
+
+    expect(
+      gateLines([
+        { ...violating, status: 431 },
+        { ...violating, status: 302 },
+        finding({ tool: 'schemathesis', rule: 'schemathesis/unsupported-methods' }),
+        finding({ severity: 'info' }),
+        finding({ rule: 'zap/2', severity: 'high', method: 'POST' }),
+      ]),
+    ).toEqual([
+      'low schemathesis/api-accepted-schema-violating-request: GET /v1/auth/callback (answered 302)',
+      'high zap/2: POST /health',
+    ]);
+    expect(gateLines([])).toEqual([]);
   });
 });

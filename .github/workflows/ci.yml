@@ -212,6 +212,12 @@ jobs:
       - name: End-to-end tests (SEC-HA-01, ADR-010 §7)
         run: pnpm e2e
 
+      # B7-3: Schemathesis fuzzes every documented operation of the stack the
+      # tests just used, failing on any finding not accepted in tooling/dast/scan.ts.
+      # Staging is scanned weekly by dast.yml; nothing here touches it.
+      - name: API fuzzing on the stack (Schemathesis)
+        run: node tooling/dast/scan.ts --stack
+
       - name: Software bill of materials for the image (CycloneDX)
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
