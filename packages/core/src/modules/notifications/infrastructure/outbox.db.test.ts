@@ -35,6 +35,10 @@ const ORG = '0199a0f0-0000-7000-8000-00000000b5a1';
 const ADMIN = '0199a0f0-0000-7000-8000-00000000b5a2';
 const OTHER_ADMIN = '0199a0f0-0000-7000-8000-00000000b5a3';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-00000000b5a4';
+/** Registered contacts (B6-1b): two to tell, and the one a notice is about. */
+const CONTACT = '0199a0f0-0000-7000-8000-00000000b6a1';
+const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a2';
+const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6a3';
 
 /** A clock the tests set, forwards and back: the sweep's far future, then each test's own time. */
 const clock = {
@@ -54,6 +58,17 @@ const notice = (change: Partial<Notice> = {}): Notice => ({
   kind: 'role_granted',
   membershipId: MEMBERSHIP,
   role: 'admin',
+  ...change,
+});
+
+/** A notice about a registered contact (B6-1b), to the admins unless `change` says otherwise. */
+const aboutAContact = (change: Partial<Notice> = {}): Notice => ({
+  orgId: ORG,
+  recipientUserId: null,
+  kind: 'contact_added',
+  membershipId: null,
+  role: null,
+  aboutId: ABOUT_CONTACT,
   ...change,
 });
 
@@ -140,11 +155,102 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ['a kind we do not send', { kind: 'free_text' as Notice['kind'] }],
     ['a membership that is not a UUID', { membershipId: '' }],
     ['a role not one of the four', { role: 'owner' as Notice['role'] }],
+    ['B6-1b a membership notice about something else too', { aboutId: ABOUT_CONTACT }],
+    ['B6-1b a contact that is not a UUID', { recipientUserId: null, recipientContactId: 'someone@example.test' }],
+    ['B6-1b a person and a contact both', { recipientContactId: CONTACT }],
+    ['B6-1b a person and the contacts both', { toContacts: true }],
+    ['B6-1b a contact and the contacts both', { recipientUserId: null, recipientContactId: CONTACT, toContacts: true }],
   ])('refuses the whole batch for %s, writing nothing', async (_what, change) => {
     await expect(app.transaction().execute((tx) => outbox.add(tx, [notice(), notice(change)]))).rejects.toThrow(
       RangeError,
     );
     expect(await rows()).toEqual([]);
+  });
+
+  it.each([
+    ['nothing it is about', { aboutId: null }],
+    ['what it is about not a UUID', { aboutId: 'contact-1' }],
+    ['a membership too', { membershipId: MEMBERSHIP }],
+    ['a role too', { role: 'admin' as Notice['role'] }],
+  ])('B6-1b refuses a notice about a contact with %s, writing nothing', async (_what, change) => {
+    await expect(
+      app.transaction().execute((tx) => outbox.add(tx, [aboutAContact(), aboutAContact(change)])),
+    ).rejects.toThrow(RangeError);
+    expect(await rows()).toEqual([]);
+  });
+
+  it.each([
+    [
+      'B6-1b a membership notice with no role',
+      { recipient_user_id: ADMIN, kind: 'role_granted', membership_id: MEMBERSHIP, role: null, about_id: null },
+      'about_what_its_kind_says',
+    ],
+    [
+      'B6-1b a contact notice with a membership',
+      { recipient_user_id: ADMIN, kind: 'contact_added', membership_id: MEMBERSHIP, role: null, about_id: CONTACT },
+      'about_what_its_kind_says',
+    ],
+    [
+      'B6-1b a contact notice about nothing',
+      { recipient_user_id: ADMIN, kind: 'contact_removed', membership_id: null, role: null, about_id: null },
+      'about_what_its_kind_says',
+    ],
+    [
+      'B6-1b a person and a contact both',
+      { recipient_user_id: ADMIN, recipient_contact_id: CONTACT, kind: 'contact_added', about_id: CONTACT },
+      'one_recipient',
+    ],
+    [
+      'B6-1b a contact and the contacts both',
+      { recipient_contact_id: CONTACT, to_contacts: true, kind: 'contact_added', about_id: CONTACT },
+      'one_recipient',
+    ],
+    ['a kind not one we send', { kind: 'free_text', about_id: CONTACT }, 'outbox_kind_check'],
+  ])('the table refuses %s, past the module', async (_what, values, constraint) => {
+    await expect(
+      app
+        .insertInto('notifications.outbox')
+        .values({
+          id: ids.next(),
+          org_id: ORG,
+          recipient_user_id: null,
+          membership_id: null,
+          role: null,
+          created_at: START,
+          attempts: 0,
+          next_attempt_at: START,
+          ...values,
+        } as never)
+        .execute(),
+    ).rejects.toMatchObject({ code: '23514', constraint });
+  });
+
+  it('B6-1b writes a notice about a contact, to the admins, a contact or the contacts, and takes each back as written', async () => {
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          aboutAContact(),
+          aboutAContact({ recipientContactId: CONTACT.toUpperCase(), kind: 'contact_removed' }),
+          aboutAContact({ toContacts: true }),
+        ]),
+      );
+
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: null, recipient_contact_id: null, to_contacts: false, kind: 'contact_added' },
+      { recipient_contact_id: CONTACT, to_contacts: false, kind: 'contact_removed' },
+      { recipient_contact_id: null, to_contacts: true, kind: 'contact_added' },
+    ]);
+    const claimed = await outbox.claimDue(app, 10);
+    expect(claimed).toHaveLength(3);
+    expect(
+      claimed.every((one) => one.aboutId === ABOUT_CONTACT && one.membershipId === null && one.role === null),
+    ).toBe(true);
+    expect(claimed.map(({ recipientContactId, toContacts }) => [recipientContactId, toContacts])).toEqual([
+      [null, false],
+      [CONTACT, false],
+      [null, true],
+    ]);
   });
 
   it(`refuses more than ${String(MOST_NOTICES_A_BATCH)} notices at a time`, async () => {
@@ -376,6 +482,37 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
 
     expect(await outbox.fanOut(app, claimed.id, [])).toBe(0);
     expect(await rows()).toMatchObject([{ recipient_user_id: null, sent_at: START }]);
+  });
+
+  it('B6-1b turns a notice to the contacts into one to each contact found, once, never one to a contact', async () => {
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [aboutAContact({ toContacts: true }), aboutAContact({ recipientContactId: CONTACT })]),
+      );
+    const [toContacts, toContact] = await outbox.claimDue(app, 2);
+    if (toContacts === undefined || toContact === undefined) throw new Error('nothing claimed');
+
+    expect(await outbox.fanOut(app, toContact.id, [OTHER_CONTACT])).toBe('not_open');
+    expect(await outbox.fanOut(app, toContacts.id, [CONTACT, OTHER_CONTACT.toUpperCase(), CONTACT])).toBe(2);
+    expect(await outbox.fanOut(app, toContacts.id, [CONTACT])).toBe('not_open');
+
+    const written = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_user_id', 'recipient_contact_id', 'to_contacts', 'kind', 'about_id', 'sent_at'])
+      .where('attempts', '=', 0)
+      .orderBy('recipient_contact_id')
+      .execute();
+    expect(written).toEqual(
+      [CONTACT, OTHER_CONTACT].map((contact) => ({
+        recipient_user_id: null,
+        recipient_contact_id: contact,
+        to_contacts: false,
+        kind: 'contact_added',
+        about_id: ABOUT_CONTACT,
+        sent_at: null,
+      })),
+    );
   });
 
   it('turns only a notice to the admins, never one to a person, and refuses a recipient not a UUID', async () => {

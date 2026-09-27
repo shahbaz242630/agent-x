@@ -28,6 +28,7 @@ export {
   type AddressBook,
   type Admin,
   type Audience,
+  type ContactAddresses,
   createNoticeSender,
   type Notifier,
   type NoticeSender,

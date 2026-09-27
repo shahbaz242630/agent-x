@@ -4,8 +4,9 @@
 // notifier says; no address given up at once, an address book away tried
 // again; a notifier that throws never loses a notice or stops the run; a run
 // stopped between notices; a notice to the admins turned into one to each
-// but the member it is about, and those sent in the same run. Its log never
-// holds an address.
+// but the member it is about, and those sent in the same run; a notice to the
+// registered contacts turned into one to each ACTIVE contact, each sent to the
+// address its own row gives (B6-1b). Its log never holds an address.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
@@ -19,6 +20,7 @@ import {
   type AddressBook,
   type Admin,
   type Audience,
+  type ContactAddresses,
   createNoticeSender,
   type Notifier,
   type SendOutcome,
@@ -45,6 +47,14 @@ const ADMINS: readonly Admin[] = [
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
   [OTHER_ADMIN, 'other.admin@example.test'],
+]);
+/** The organisation's ACTIVE registered contacts (B6-1b), and the contact the notices are about. */
+const CONTACT = '0199a0f0-0000-7000-8000-00000000b6b1';
+const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b2';
+const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b3';
+const CONTACT_ADDRESSES = new Map([
+  [CONTACT, 'finance.office@example.test'],
+  [OTHER_CONTACT, 'owner@example.test'],
 ]);
 
 const clock = { now: (): Date => START };
@@ -87,15 +97,50 @@ const addressBook = (
   },
 });
 
-const audience = (admins: () => readonly Admin[] | Error = () => ADMINS): Audience => ({
+const contactAddresses = (
+  lookup: (contactId: string) => string | undefined | Error = (id) => CONTACT_ADDRESSES.get(id),
+): ContactAddresses => ({
+  addressOf: (orgId, contactId) => {
+    expect(orgId).toBe(ORG);
+    const found = lookup(contactId);
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
+});
+
+const audience = (
+  admins: () => readonly Admin[] | Error = () => ADMINS,
+  contacts: () => readonly string[] | Error = () => [CONTACT, OTHER_CONTACT],
+): Audience => ({
   adminsOf: (orgId) => {
     expect(orgId).toBe(ORG);
     const found = admins();
     return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
   },
+  contactsOf: (orgId) => {
+    expect(orgId).toBe(ORG);
+    const found = contacts();
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
 });
 
-function sender(service: Notifier, addresses: AddressBook = addressBook(), admins: Audience = audience()) {
+/** A notice about a registered contact (B6-1b), to the admins, the contacts, or one contact. */
+const aboutAContact = (to: { contact?: string; contacts?: boolean }): Notice => ({
+  orgId: ORG,
+  recipientUserId: null,
+  recipientContactId: to.contact ?? null,
+  toContacts: to.contacts === true,
+  kind: 'contact_removed',
+  membershipId: null,
+  role: null,
+  aboutId: ABOUT_CONTACT,
+});
+
+function sender(
+  service: Notifier,
+  addresses: AddressBook = addressBook(),
+  admins: Audience = audience(),
+  contacts: ContactAddresses = contactAddresses(),
+) {
   const capture = new LogCapture();
   const logger = createLogger({
     service: 'test',
@@ -104,7 +149,15 @@ function sender(service: Notifier, addresses: AddressBook = addressBook(), admin
   });
   return {
     capture,
-    run: createNoticeSender({ db: app, outbox, notifier: service, addresses, audience: admins, logger }),
+    run: createNoticeSender({
+      db: app,
+      outbox,
+      notifier: service,
+      addresses,
+      contactAddresses: contacts,
+      audience: admins,
+      logger,
+    }),
   };
 }
 
@@ -250,6 +303,105 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
   });
 
+  it('B6-1b turns a notice to the contacts into one to each ACTIVE contact, each sent to its own address', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true })]));
+    const { sent, service } = notifier();
+
+    const { capture, run } = sender(service);
+    await run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['finance.office@example.test', 'owner@example.test']);
+    expect(sent.every(({ text }) => text.includes(`Registered contact: ${ABOUT_CONTACT}`))).toBe(true);
+    const outboxRows = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_user_id', 'recipient_contact_id', 'to_contacts', 'about_id', 'sent_at'])
+      .orderBy('recipient_contact_id')
+      .execute();
+    expect(outboxRows).toEqual([
+      {
+        recipient_user_id: null,
+        recipient_contact_id: CONTACT,
+        to_contacts: false,
+        about_id: ABOUT_CONTACT,
+        sent_at: START,
+      },
+      {
+        recipient_user_id: null,
+        recipient_contact_id: OTHER_CONTACT,
+        to_contacts: false,
+        about_id: ABOUT_CONTACT,
+        sent_at: START,
+      },
+      {
+        recipient_user_id: null,
+        recipient_contact_id: null,
+        to_contacts: true,
+        about_id: ABOUT_CONTACT,
+        sent_at: START,
+      },
+    ]);
+    expect(capture.lines().find(({ event }) => event === 'notification.fanned_out')).toMatchObject({ notices: 2 });
+    expect(JSON.stringify(capture.lines())).not.toMatch(/@example\.test/);
+  });
+
+  it('B6-1b sends a notice to one contact to the address its row gives, and gives it up when it has none', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [aboutAContact({ contact: CONTACT }), aboutAContact({ contact: OTHER_CONTACT })]),
+      );
+    const { sent, service } = notifier();
+
+    await sender(
+      service,
+      addressBook(() => new Error('a person is not asked')),
+      audience(),
+      contactAddresses((id) => (id === CONTACT ? 'finance.office@example.test' : undefined)),
+    ).run.run();
+
+    expect(sent.map(({ to }) => to)).toEqual(['finance.office@example.test']);
+    const outboxRows = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_contact_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('recipient_contact_id')
+      .execute();
+    expect(outboxRows).toEqual([
+      { recipient_contact_id: CONTACT, sent_at: START, given_up_at: null, last_failure: null },
+      { recipient_contact_id: OTHER_CONTACT, sent_at: null, given_up_at: START, last_failure: 'no_address' },
+    ]);
+  });
+
+  it('B6-1b tries a notice to the contacts again when they cannot be read, or a contact’s address can’t', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app
+      .transaction()
+      .execute((tx) => outbox.add(tx, [aboutAContact({ contacts: true }), aboutAContact({ contact: CONTACT })]));
+    const { sent, service } = notifier();
+
+    await sender(
+      service,
+      addressBook(),
+      audience(
+        () => ADMINS,
+        () => new Error('tampered'),
+      ),
+      contactAddresses(() => new Error('tampered')),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    const outboxRows = await app
+      .selectFrom('notifications.outbox')
+      .select(['to_contacts', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('to_contacts')
+      .execute();
+    expect(outboxRows).toEqual([
+      { to_contacts: false, sent_at: null, given_up_at: null, last_failure: 'address_unavailable' },
+      { to_contacts: true, sent_at: null, given_up_at: null, last_failure: 'audience_unavailable' },
+    ]);
+  });
+
   it('never throws when the outbox fails under it: it logs, and the next run goes on (review)', async () => {
     const { service } = notifier();
     const broken = createNoticeSender({
@@ -257,6 +409,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       outbox: { ...outbox, claimDue: () => Promise.reject(new Error('canceling statement due to statement timeout')) },
       notifier: service,
       addresses: addressBook(),
+      contactAddresses: contactAddresses(),
       audience: audience(),
       logger: createLogger({
         service: 'test',
@@ -270,6 +423,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       outbox: { ...outbox, sent: () => Promise.reject(new Error('connection terminated')) },
       notifier: service,
       addresses: addressBook(),
+      contactAddresses: contactAddresses(),
       audience: audience(),
       logger: createLogger({
         service: 'test',

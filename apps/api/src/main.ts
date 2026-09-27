@@ -40,6 +40,8 @@ import {
   type IdentityTables,
   type LoginFlows,
   membersFor,
+  activeContactsFor,
+  contactAddressFor,
   membershipFor,
   type Sessions,
   type StepUpChallenges,
@@ -528,6 +530,9 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     outbox,
     // The organisation's verified members, as the members route lists them.
     listMembers: membersFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
+    // Its registered contacts, and each one's address, from their verified rows (B6-1b).
+    listContacts: activeContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
+    contactAddress: contactAddressFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     fetch: createOutboundFetch(config.outbound.allowedOrigins),
     logger,
   });

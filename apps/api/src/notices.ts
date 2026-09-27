@@ -1,7 +1,7 @@
 // The notice sender as the API runs it (B5-3): the outbox's notices sent by
 // email through Azure Communication Services, to the address the login
 // service gives, each organisation's admins found in their verified
-// memberships. Off, and the notices left waiting in the outbox, unless the
+// memberships, and its registered contacts in their verified rows (B6-1b). Off, and the notices left waiting in the outbox, unless the
 // config names email (and so sign-in, whose login service gives the addresses).
 import { createAddressBook, type IdentityTables, type MembersList, subjectOfUser } from '@agentx/core/modules/identity';
 import {
@@ -30,9 +30,16 @@ export class AudienceTampered extends Error {
   }
 }
 
-/** The active admins in an organisation's verified list; a list that can't be believed throws. */
-export function audienceFrom(listMembers: (orgId: string) => Promise<MembersList>): Audience {
+/**
+ * The active admins in an organisation's verified list, and its ACTIVE
+ * registered contacts; a list that can't be believed throws.
+ */
+export function audienceFrom(
+  listMembers: (orgId: string) => Promise<MembersList>,
+  listContacts: (orgId: string) => Promise<readonly string[]>,
+): Audience {
   return {
+    contactsOf: listContacts,
     async adminsOf(orgId): Promise<readonly Admin[]> {
       const listed = await listMembers(orgId);
       if (listed.outcome !== 'listed') throw new AudienceTampered();
@@ -49,6 +56,8 @@ export function noticeSenderFrom({
   db,
   outbox,
   listMembers,
+  listContacts,
+  contactAddress,
   fetch,
   logger,
 }: {
@@ -56,6 +65,10 @@ export function noticeSenderFrom({
   readonly db: Database<IdentityTables & NotificationsTables>;
   readonly outbox: Outbox;
   readonly listMembers: (orgId: string) => Promise<MembersList>;
+  /** The organisation's ACTIVE registered contacts' IDs, verified (identity's activeContactsFor). */
+  readonly listContacts: (orgId: string) => Promise<readonly string[]>;
+  /** A contact's address from its verified row (identity's contactAddressFor). */
+  readonly contactAddress: (orgId: string, contactId: string) => Promise<string | undefined>;
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): NoticeSender | undefined {
@@ -76,7 +89,8 @@ export function noticeSenderFrom({
       token: email.directoryToken,
       fetch,
     }),
-    audience: audienceFrom(listMembers),
+    contactAddresses: { addressOf: contactAddress },
+    audience: audienceFrom(listMembers, listContacts),
     logger,
   });
 }

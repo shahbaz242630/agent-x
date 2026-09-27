@@ -120,7 +120,12 @@ export {
   createHoldClearings,
   type HoldClearings,
 } from './infrastructure/hold-clearing.ts';
-export { REGISTERED_CONTACTS } from './infrastructure/registered-contacts.ts';
+export {
+  activeContactsFor,
+  contactAddressFor,
+  ContactsTampered,
+  REGISTERED_CONTACTS,
+} from './infrastructure/registered-contacts.ts';
 export {
   createOidcClient,
   type LoginFlow,

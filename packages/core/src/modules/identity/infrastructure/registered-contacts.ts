@@ -36,16 +36,18 @@
 // plain).
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import type { Transaction } from 'kysely';
+import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  type AuditDetails,
+  type AuditTables,
+  type RecordedState,
+  type SignedStates,
+  type SignedStatesServices,
+  type TamperSign,
+  type VerifiedState,
+  withSignedStates,
 } from '../../audit/index.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { REGISTERED_CONTACT } from '../domain/registered-contact.ts';
@@ -431,4 +433,54 @@ export async function contactsOf(
     contacts.push({ ...read.contact, email: await contactEmail(tx, keys, orgId, id) });
   }
   return { outcome: 'listed', contacts };
+}
+
+/** An organisation's contacts couldn't be believed: whatever rested on them waits (the alarm is raised). */
+export class ContactsTampered extends Error {
+  constructor(orgId: string) {
+    super(`An organisation's registered contacts failed their check: ${orgId}`);
+    this.name = 'ContactsTampered';
+  }
+}
+
+/**
+ * The organisation's ACTIVE contacts' IDs, counted or not yet, read and
+ * verified in a transaction of their own, withSignedStates' for it: whom a
+ * notice to its contacts goes to (B6-1b). Contacts that can't be believed
+ * throw ContactsTampered. Each statement is limited to 10 seconds.
+ */
+export function activeContactsFor(
+  db: Kysely<IdentityTables & AuditTables>,
+  services: SignedStatesServices,
+  orgId: string,
+): Promise<readonly string[]> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    const listed = await contactsOf(tx, states, services.keys, orgId);
+    if (listed.outcome === 'tampered') throw new ContactsTampered(orgId);
+    return listed.contacts.filter((contact) => contact.status === 'ACTIVE').map((contact) => contact.id);
+  });
+}
+
+/**
+ * The contact's address, from its verified row, in a transaction of its own,
+ * withSignedStates' for the organisation: where a notice to it goes (B6-1b).
+ * A removed contact's too, as it is told of its own removal; undefined for a
+ * draft, or no such contact. A contact that can't be believed throws
+ * ContactsTampered; an address that won't open, ContactUnreadable. Each
+ * statement is limited to 10 seconds.
+ */
+export function contactAddressFor(
+  db: Kysely<IdentityTables & AuditTables>,
+  services: SignedStatesServices,
+  orgId: string,
+  contactId: string,
+): Promise<string | undefined> {
+  return withSignedStates(db, orgId, services, async (tx, states) => {
+    await sql`set local statement_timeout = '10s'`.execute(tx);
+    const read = await contactRecord(tx, states, orgId, contactId);
+    if (read.outcome === 'tampered') throw new ContactsTampered(orgId);
+    if (read.outcome === 'missing' || read.contact.status === 'DRAFT') return undefined;
+    return contactEmail(tx, services.keys, orgId, read.contact.id);
+  });
 }

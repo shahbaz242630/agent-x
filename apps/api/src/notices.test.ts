@@ -48,6 +48,8 @@ function senderWith(
     db: (parts.db ?? {}) as never,
     outbox: (parts.outbox ?? {}) as never,
     listMembers: () => Promise.reject(new Error('not asked')),
+    listContacts: () => Promise.reject(new Error('not asked')),
+    contactAddress: () => Promise.reject(new Error('not asked')),
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
     logger,
   });
@@ -75,10 +77,13 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
       ],
     };
     const asked: string[] = [];
-    const audience = audienceFrom((orgId) => {
-      asked.push(orgId);
-      return Promise.resolve(listed);
-    });
+    const audience = audienceFrom(
+      (orgId) => {
+        asked.push(orgId);
+        return Promise.resolve(listed);
+      },
+      () => Promise.reject(new Error('not asked')),
+    );
     await expect(audience.adminsOf(ORG)).resolves.toEqual([
       { userId: 'user-m1', membershipId: 'm1' },
       { userId: 'user-m6', membershipId: 'm6' },
@@ -88,7 +93,26 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
 
   it('throws for memberships that failed their check, so the notice waits and names nobody', async () => {
     const tampered = { outcome: 'tampered', sign: {} } as unknown as MembersList;
-    await expect(audienceFrom(() => Promise.resolve(tampered)).adminsOf(ORG)).rejects.toThrow(AudienceTampered);
+    await expect(
+      audienceFrom(
+        () => Promise.resolve(tampered),
+        () => Promise.reject(new Error('not asked')),
+      ).adminsOf(ORG),
+    ).rejects.toThrow(AudienceTampered);
+  });
+
+  it("B6-1b gives an organisation's ACTIVE contacts as identity lists them", async () => {
+    const asked: string[] = [];
+    const audience = audienceFrom(
+      () => Promise.reject(new Error('not asked')),
+      (orgId) => {
+        asked.push(orgId);
+        return Promise.resolve(['c1', 'c2']);
+      },
+    );
+
+    await expect(audience.contactsOf(ORG)).resolves.toEqual(['c1', 'c2']);
+    expect(asked).toEqual([ORG]);
   });
 
   it('is off without email in the config, and on with it', () => {
@@ -105,6 +129,9 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
       kind: 'role_granted',
       membershipId: '01a0f000-0000-7000-8000-0000000000e1',
       role: 'admin',
+      recipientContactId: null,
+      toContacts: false,
+      aboutId: null,
       createdAt: new Date('2026-09-26T12:00:00Z'),
       attempts: 0,
     };
