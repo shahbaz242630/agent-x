@@ -102,6 +102,29 @@ export function organizationsOf(db: Kysely<DirectoryTables>, userId: string): Pr
 }
 
 /**
+ * Whether the directory lists the person in any organisation but this one, in
+ * the caller's transaction, which must be withTenant's for this organisation:
+ * a reset of their second factor, which reaches every organisation their
+ * login signs in to, is refused then (B6-3b). An entry there, whatever its
+ * membership's status, counts: a deactivated member may rejoin.
+ */
+export async function listedElsewhere(
+  tx: Transaction<DirectoryTables>,
+  orgId: string,
+  userId: string,
+): Promise<boolean> {
+  await assertTenant(tx, orgId);
+  const entry = await tx
+    .selectFrom('directory.members')
+    .select('org_id')
+    .where('user_id', '=', userId)
+    .where('org_id', '<>', orgId)
+    .limit(1)
+    .executeTakeFirst();
+  return entry !== undefined;
+}
+
+/**
  * The organisation's entries, by person, at most `most` of them in order of
  * membership ID, in the caller's transaction, which must be withTenant's for
  * that organisation. Where to look: each membership is then read by its ID

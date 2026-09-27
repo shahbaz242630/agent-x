@@ -159,6 +159,15 @@ export {
   createContactChanges,
 } from './infrastructure/contact-changes.ts';
 export {
+  createResetChanges,
+  RESET_ASK_CONFIRM_OPERATION,
+  RESET_ASK_OPERATION,
+  RESET_CANCEL_OPERATION,
+  type ResetChanges,
+  type ResetChangeWrite,
+  type ResetsList,
+} from './infrastructure/reset-changes.ts';
+export {
   createOidcClient,
   type LoginFlow,
   type OidcClient,

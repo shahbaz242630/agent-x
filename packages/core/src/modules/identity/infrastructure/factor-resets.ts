@@ -248,8 +248,8 @@ export async function resetForChange(
  */
 const MOST_RESET_RECORDS = 500;
 
-/** More resets, or objects in the log about them, than `openResetsFor` reads. */
-class TooManyResets extends Error {
+/** More resets, or objects in the log about them, than `openResetsFor` or `resetsOf` reads. */
+export class TooManyResets extends Error {
   constructor() {
     super(`The organisation has more than ${String(MOST_RESET_RECORDS)} reset records, more than a check reads`);
     this.name = 'TooManyResets';
@@ -303,6 +303,65 @@ export async function openResetsFor(
     if (isOpenReset(read.reset.status)) resets.push(read.reset);
   }
   return { outcome: 'found', resets };
+}
+
+/**
+ * Every reset of the organisation, each read for an answer (`share`) and
+ * verified, in order of ID, in the caller's transaction, which must be
+ * withSignedStates' for it: what the resets route lists (B6-3b). Or tampered
+ * with, when any reset the table or the log knows of doesn't verify. More than
+ * MOST_RESET_RECORDS throws TooManyResets.
+ */
+export async function resetsOf(
+  tx: ResetsTransaction,
+  states: SignedStates,
+  orgId: string,
+): Promise<
+  | { readonly outcome: 'found'; readonly resets: readonly ResetRecord[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const whole = await states.verifyAll(tx, orgId, [FACTOR_RESETS], MOST_RESET_RECORDS);
+  if (whole.outcome === 'too_many') throw new TooManyResets();
+  if (whole.outcome === 'tampered') {
+    const [first] = whole.findings;
+    if (first === undefined) throw new Error('verifyAll found tampering it names no finding for');
+    return { outcome: 'tampered', sign: first.sign };
+  }
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows' IDs alone, each then read through its signed state; verifyAll has just checked every one the table or the log knows of
+    .selectFrom(FACTOR_RESETS.table)
+    .select('id')
+    .orderBy('id')
+    .execute();
+  const resets: ResetRecord[] = [];
+  for (const { id } of rows) {
+    const read = await resetRecord(tx, states, orgId, id);
+    if (read.outcome !== 'found') throw new Error(`a reset verifyAll verified reads as ${read.outcome}: ${id}`);
+    resets.push(read.reset);
+  }
+  return { outcome: 'found', resets };
+}
+
+/**
+ * The membership the reset's row names as the person, unverified, or
+ * undefined for no such reset, in the caller's transaction, which must be
+ * withTenant's for its organisation: which memberships to read before the
+ * reset itself (ADR-006 §6: memberships, level 2a, before resets, 2c), never
+ * whose it is. The reset's verified state must then name the same person.
+ */
+export async function listedPersonOf(
+  tx: Transaction<IdentityTables>,
+  orgId: string,
+  id: string,
+): Promise<string | undefined> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look only: the reset is then read through its signed state, and must name the same person
+    .selectFrom(FACTOR_RESETS.table)
+    .select('person')
+    .where('org_id', '=', orgId)
+    .where('id', '=', id)
+    .executeTakeFirst();
+  return row?.person;
 }
 
 /** A reset that didn't move as its caller read it would: a failure on our side, or the row tampered with. */

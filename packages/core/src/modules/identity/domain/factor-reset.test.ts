@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   confirmableAt,
   FACTOR_RESET,
+  hasLapsed,
   isDue,
   isOpenReset,
   OPEN_RESET_STATUSES,
@@ -47,6 +48,19 @@ describe('SEC-OPS-04 a reset of a lost second factor', () => {
     expect(resetExpiresAt(at)).toEqual(hours(72));
     expect(confirmableAt(hours(72), new Date(hours(72).getTime() - 1))).toBe(true);
     expect(confirmableAt(hours(72), hours(72))).toBe(false);
+  });
+
+  it('B6-3b has lapsed only while waiting for its admin or a contact, from the lapse on', () => {
+    const expiresAt = hours(72);
+    const just = new Date(expiresAt.getTime() - 1);
+
+    for (const status of ['DRAFT', 'AWAITING_CONTACT'] as const) {
+      expect(hasLapsed({ status, expiresAt }, just)).toBe(false);
+      expect(hasLapsed({ status, expiresAt }, expiresAt)).toBe(true);
+    }
+    for (const status of ['COOLING_OFF', 'COMPLETED', 'CANCELLED', 'EXPIRED'] as const) {
+      expect(hasLapsed({ status, expiresAt }, hours(100))).toBe(false);
+    }
   });
 
   it('is due a day after a contact confirmed, and only while cooling off', () => {

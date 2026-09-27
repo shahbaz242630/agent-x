@@ -37,6 +37,7 @@ import {
   createHoldInvestigations,
   createMembershipChanges,
   createContactChanges,
+  createResetChanges,
   registeredContactsFor,
   createStepUpChallenges,
   type IdentityTables,
@@ -400,6 +401,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     membershipChanges: createMembershipChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
     listContacts: registeredContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     contactChanges: createContactChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
+    resetChanges: createResetChanges({
       database,
       keys,
       ids: uuidV7Ids,
