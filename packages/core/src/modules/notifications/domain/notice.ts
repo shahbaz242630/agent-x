@@ -29,6 +29,9 @@ export type NoticeRole = (typeof NOTICE_ROLES)[number];
 export const isNoticeKind = (value: unknown): value is NoticeKind => NOTICE_KINDS.some((kind) => kind === value);
 export const isNoticeRole = (value: unknown): value is NoticeRole => NOTICE_ROLES.some((role) => role === value);
 
+/** Whether a kind is about a person's sign-in, `aboutId` their user ID (B6-2a). */
+export const isAboutASignIn = (kind: NoticeKind): boolean => SIGN_IN_NOTICE_KINDS.some((each) => each === kind);
+
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
 

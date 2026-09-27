@@ -2,7 +2,7 @@
 // constants and IDs alone. It tells, and does nothing: no link that acts, no
 // token, no approval power (PRD §4.4, SEC-HA-11), and nothing of the person
 // or contact it is about beyond the IDs an admin can look up once signed in.
-import { type ClaimedNotice, type NoticeKind, SIGN_IN_NOTICE_KINDS } from './notice.ts';
+import { type ClaimedNotice, isAboutASignIn, type NoticeKind } from './notice.ts';
 
 /** An email as the notifier sends it. */
 export interface NoticeMessage {
@@ -87,9 +87,6 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
     check: SIGN_IN_CHECK,
   },
 };
-
-/** Whether the notice is about a person's sign-in (B6-2a). */
-const isAboutASignIn = (kind: NoticeKind): boolean => SIGN_IN_NOTICE_KINDS.some((each) => each === kind);
 
 function article(word: string): string {
   return /^[aeiou]/.test(word) ? 'an' : 'a';
