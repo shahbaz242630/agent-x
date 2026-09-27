@@ -100,7 +100,7 @@ function event(type: string, aggregateId: string, changes: Partial<IdpEvent> = {
   };
 }
 
-/** A stand-in for the feed: answers each span with the events in it, and keeps what was asked. */
+/** A stand-in for the feed: answers each span with the events after its start and before its end, as Zitadel does, and keeps what was asked. */
 function feedOf(events: () => readonly IdpEvent[] | Error) {
   const asked: { since: Date; until: Date; most: number }[] = [];
   const feed: IdpEventFeed = {
@@ -110,7 +110,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
       if (found instanceof Error) return Promise.reject(found);
       return Promise.resolve(
         found
-          .filter((each) => each.createdAt >= since && each.createdAt <= until)
+          .filter((each) => each.createdAt > since && each.createdAt < until)
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
           .slice(0, most),
       );
@@ -202,7 +202,8 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     asked.length = 0;
     clock.advanceBy(10 * 60_000);
     await copierWith(feed).run();
-    expect(asked[0]?.since.getTime()).toBeGreaterThanOrEqual(older.createdAt.getTime());
+    // From just before the latest event copied, for Zitadel's span leaves out its own start.
+    expect(asked[0]?.since).toEqual(new Date(older.createdAt.getTime() - 5_000));
     expect(asked[0]?.until).toEqual(new Date(clock.now().getTime() - 60_000));
   });
 
@@ -285,6 +286,58 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     ]);
   });
 
+  it('records an event about someone who belongs to no organisation on the platform chain alone, naming them', async () => {
+    const who = await person();
+    const removed = event('user.human.mfa.u2f.token.removed', who.subject);
+    const { feed } = feedOf(() => [removed]);
+
+    await copierWith(feed).run();
+
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toEqual([
+      expect.objectContaining({ org: 'none', person: who.userId, type: 'user.human.mfa.u2f.token.removed' }),
+    ]);
+  });
+
+  it('tells an organisation it had yet to tell when a run stopped part-way, from where it got to, on the next run', async () => {
+    const who = await person();
+    const first = await organization(who.userId);
+    const second = await organization(who.userId);
+    const removed = event('user.human.mfa.otp.removed', who.subject);
+    const { feed } = feedOf(() => [removed]);
+    const outbox = createOutbox({ ids, clock });
+    let failNext = false;
+    const failing = {
+      ...outbox,
+      add: (...args: Parameters<typeof outbox.add>) => {
+        if (failNext) return Promise.reject(new Error('the database went away'));
+        failNext = true;
+        return outbox.add(...args);
+      },
+    };
+    const copier = (sink: typeof outbox) =>
+      createIdpEventCopier({
+        database: app,
+        feed,
+        keys,
+        ids,
+        clock,
+        issuer: ISSUER,
+        outbox: sink,
+        logger: loggerFor(capture),
+      });
+
+    await copier(failing).run();
+    expect(lines('idp_events.run_failed')).toHaveLength(1);
+    expect([(await orgRecords(first)).length, (await orgRecords(second)).length].sort()).toEqual([0, 1]);
+
+    clock.advanceBy(10 * 60_000);
+    await copier(outbox).run();
+
+    expect(await orgRecords(first)).toHaveLength(1);
+    expect(await orgRecords(second)).toHaveLength(1);
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(2);
+  });
+
   it('logs impersonation as an error and a token issued as a warning, and tells no one of either', async () => {
     const who = await person();
     const org = await organization(who.userId);
@@ -311,7 +364,8 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 
     expect(asked.length).toBe(2);
     expect(await orgRecords(org)).toHaveLength(150);
-    expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 151, records: 150 })]);
+    // The second page reads the last five seconds of the first again, and copies none of them twice.
+    expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 155, records: 150 })]);
   });
 
   it('stops, saying so, when a full page holds nothing new: more events at one time than a page', async () => {
@@ -326,7 +380,10 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     await copierWith(feed).run();
 
     expect(asked.length).toBe(2);
-    expect(lines('idp_events.stuck')).toEqual([expect.objectContaining({ level: 'warn', at: at.toISOString() })]);
+    // Where it read from: just before the time they all share.
+    expect(lines('idp_events.stuck')).toEqual([
+      expect.objectContaining({ level: 'warn', at: new Date(at.getTime() - 5_000).toISOString() }),
+    ]);
   });
 
   it('never throws: a feed away is logged, and the next run copies what it can', async () => {

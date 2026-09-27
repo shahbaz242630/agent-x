@@ -15,13 +15,22 @@
 // - the platform chain records `idp.event_copied` with the event, the
 //   organisation and its time, last (ADR-006 §6: the platform head is the
 //   last lock of all).
-// An event about no one who has signed in to Agent X, or about the login
-// service's own organisations or instance, is recorded on the platform chain
-// alone, organisation `none`.
+// An event about no one who has signed in to Agent X, about someone who has
+// but belongs to no organisation, or about the login service's own
+// organisations or instance, is recorded on the platform chain alone,
+// organisation `none`, naming the person when there is one (B6-2b review: a
+// deliberate rule, not a gap). There is no organisation to tell, and none to
+// tell later: B6-3's cooling-off after a reset reads the platform chain by
+// person, so a factor removed before someone joins still limits them.
 //
 // Where it got to is the latest time the platform chain holds for a copied
-// event: each run reads from there to a minute before now (an event written
-// late, by an older clock, is still read), at most MOST_PAGES pages a run.
+// event: each run reads from OVERLAP_MS before it to a minute before now (an
+// event written late, by an older clock, is still read), at most MOST_PAGES
+// pages a run. Zitadel's span excludes its own start (review: its search reads
+// events after `since`), so without the overlap an event another organisation
+// had yet to be told of, when a run stopped part-way, or one at the same time
+// as the last one copied, would never be read again; the overlap is read
+// again, and skipped as below.
 // An event, with an organisation, already on the platform chain is skipped,
 // so a run that stops part-way, or reads the same time again, copies nothing
 // twice. The first run starts a day back.
@@ -61,6 +70,9 @@ const FIRST_RUN_BACK_MS = 24 * 3_600_000;
 
 /** How long an event may be written after its time and still be read: runs read up to this long ago. */
 const SETTLE_MS = 60_000;
+
+/** How far before where it got to each run reads again, for Zitadel's span excludes its start. */
+const OVERLAP_MS = 5_000;
 
 /** The most pages of events one run reads. */
 const MOST_PAGES = 10;
@@ -175,9 +187,11 @@ export function createIdpEventCopier({
     let written = 0;
     for (let page = 0; page < MOST_PAGES; page += 1) {
       const until = new Date(clock.now().getTime() - SETTLE_MS);
+      const latest = await latestPlatformTime(database, IDP_EVENT_COPIED, 'at');
       const since =
-        (await latestPlatformTime(database, IDP_EVENT_COPIED, 'at')) ??
-        new Date(clock.now().getTime() - FIRST_RUN_BACK_MS);
+        latest === undefined
+          ? new Date(clock.now().getTime() - FIRST_RUN_BACK_MS)
+          : new Date(latest.getTime() - OVERLAP_MS);
       if (since.getTime() >= until.getTime()) break;
       const found = await feed.eventsBetween(since, until, PAGE);
       let newOnes = 0;
