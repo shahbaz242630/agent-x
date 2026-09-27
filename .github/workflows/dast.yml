@@ -1,0 +1,58 @@
+# B7 (partner S59): the free dynamic scan of staging, OWASP ZAP's API scan and
+# Schemathesis's fuzzing from the API's own OpenAPI document
+# (tooling/dast/scan.ts). Weekly and on demand, from main only, never on a
+# pull request: staging is Free Trial compute. Report only: it never blocks
+# anything. The staging address comes from the repository variable
+# STAGING_APP_ORIGIN, never the repository, and is masked in the log; the
+# findings go to code scanning (category dast), which only the repository's
+# writers read, and the log shows counts alone.
+name: DAST (staging)
+
+on:
+  schedule:
+    - cron: '41 5 * * 1' # Mondays 05:41 UTC, after the weekly sweep
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast-staging
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: ZAP and Schemathesis against staging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      AGENTX_DAST_ORIGIN: ${{ vars.STAGING_APP_ORIGIN }}
+    steps:
+      - name: Keep the staging address out of the log
+        run: |
+          if [ -z "$AGENTX_DAST_ORIGIN" ]; then echo 'The repository variable STAGING_APP_ORIGIN is not set.'; exit 1; fi
+          echo "::add-mask::$AGENTX_DAST_ORIGIN"
+          echo "::add-mask::${AGENTX_DAST_ORIGIN#https://}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          package-manager-cache: false
+
+      # Node builtins only: nothing is installed.
+      - name: Scan staging
+        run: node tooling/dast/scan.ts
+
+      - uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: dast-results/dast.sarif
+          category: dast
