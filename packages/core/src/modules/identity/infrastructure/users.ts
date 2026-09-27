@@ -38,6 +38,21 @@ export async function userForSubject(
 }
 
 /**
+ * The user's ID for this issuer and subject, if they have signed in; undefined
+ * otherwise, and nothing is made (B6-2b: the login service's events name the
+ * subject).
+ */
+export async function userOfSubject(db: Kysely<IdentityTables>, who: Subject): Promise<string | undefined> {
+  const found = await db
+    .selectFrom('identity.users')
+    .select('id')
+    .where('issuer', '=', who.issuer)
+    .where('subject', '=', who.subject)
+    .executeTakeFirst();
+  return found?.id;
+}
+
+/**
  * The issuer and subject a user signs in as, by their ID (B5-3: the address
  * book asks the login service by the subject); undefined for no such user.
  */

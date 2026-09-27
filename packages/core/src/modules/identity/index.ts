@@ -16,6 +16,7 @@ export {
   needsConfirmation,
 } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
+export { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from './domain/idp-event.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
@@ -27,6 +28,19 @@ export {
   stepUpRefusal,
 } from './domain/step-up.ts';
 export { AddressBookUnavailable, createAddressBook } from './infrastructure/address-book.ts';
+export {
+  createIdpEventCopier,
+  IDP_EVENT_COPIED,
+  type IdpEventCopier,
+  SIGN_IN_CHANGED,
+} from './infrastructure/idp-copier.ts';
+export {
+  createIdpEventFeed,
+  type IdpEvent,
+  type IdpEventFeed,
+  IdpFeedUnavailable,
+  MOST_EVENTS_A_PAGE,
+} from './infrastructure/idp-feed.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
   createSessions,
@@ -166,4 +180,4 @@ export {
   type StepUpEvidence,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
-export { subjectOfUser, userForSubject } from './infrastructure/users.ts';
+export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';

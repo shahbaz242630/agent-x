@@ -17,6 +17,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 
 import type { AddressBook } from '../../notifications/index.ts';
 import type { Subject } from '../domain/sign-in.ts';
+import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
 
 /** How long one call to the login service may take. */
@@ -39,25 +40,6 @@ export class AddressBookUnavailable extends Error {
   constructor(step: string) {
     super(`the login service couldn't give an address: ${step}`);
   }
-}
-
-/** The body as text, refused past MOST_ANSWER_BYTES however the answer declares its length. */
-async function boundedText(response: Response): Promise<string> {
-  const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
-  if (reader === undefined) return '';
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MOST_ANSWER_BYTES) {
-      await reader.cancel();
-      throw new AddressBookUnavailable(`the answer was larger than ${String(MOST_ANSWER_BYTES)} bytes`);
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 /** The verified address in a Zitadel user answer, in lower case; undefined for none. */
@@ -111,7 +93,13 @@ export function createAddressBook({
       }
       let answer: unknown;
       try {
-        answer = JSON.parse(await boundedText(response));
+        answer = JSON.parse(
+          await boundedText(
+            response,
+            MOST_ANSWER_BYTES,
+            () => new AddressBookUnavailable(`the answer was larger than ${String(MOST_ANSWER_BYTES)} bytes`),
+          ),
+        );
       } catch (error) {
         if (error instanceof AddressBookUnavailable) throw error;
         throw new AddressBookUnavailable('the answer is not JSON');
