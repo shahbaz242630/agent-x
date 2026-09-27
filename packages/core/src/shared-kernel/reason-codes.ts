@@ -17,6 +17,13 @@ export const REASON_CODES = {
   ALREADY_A_MEMBER:
     "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
   BAD_REQUEST: "The request is malformed, so it can't be read.",
+  CONTACTS_FULL:
+    'The organisation already has as many registered contacts as it may, so no other can be added. Remove one first.',
+  CONTACT_CLOSED:
+    "This registered contact can't be confirmed: it was confirmed already, or it was asked for in another way. Ask for it again if it is still needed.",
+  CONTACT_EXISTS: "This address is already one of the organisation's registered contacts, so it was not added again.",
+  CONTACT_NOT_ACTIVE:
+    "This registered contact isn't active: it was removed already, or it was never confirmed. Nothing was changed.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
   FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",

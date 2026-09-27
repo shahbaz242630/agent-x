@@ -112,6 +112,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/auth/step-up',
       'GET /v1/integrity-hold',
       'GET /v1/members',
+      'GET /v1/registered-contacts',
       'HEAD /health',
       'HEAD /test/items/{ref}',
       'HEAD /v1/auth/callback',
@@ -120,6 +121,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/auth/step-up',
       'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
+      'HEAD /v1/registered-contacts',
       'POST /test/both',
       'POST /v1/auth/sign-out',
       'POST /v1/integrity-hold/clear',
@@ -135,6 +137,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/members/{id}/deactivate/confirm',
       'POST /v1/members/{id}/role',
       'POST /v1/members/{id}/role/confirm',
+      'POST /v1/registered-contacts',
+      'POST /v1/registered-contacts/{id}/confirm',
+      'POST /v1/registered-contacts/{id}/remove',
+      'POST /v1/registered-contacts/{id}/remove/confirm',
       'PUT /test/both',
     ]);
   });
@@ -1102,8 +1108,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
-    // member change routes and the integrity hold's four, with each GET's HEAD.
-    expect(answers.length).toBe(29);
+    // member change routes, the integrity hold's four and the registered contacts' five (B6-1c), with each GET's HEAD.
+    expect(answers.length).toBe(35);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1125,6 +1131,11 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'MemberChangeAsked',
       'MemberChanged',
       'Members',
+      'RegisteredContact',
+      'RegisteredContactChanged',
+      'RegisteredContactDrafted',
+      'RegisteredContactRemovalAsked',
+      'RegisteredContacts',
       'Session',
     ]);
   });

@@ -16,7 +16,7 @@ export {
   needsConfirmation,
 } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
-export { CONTACT_COOLING_OFF_DAYS, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
+export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
 export {
   AUTH_TIME_TOLERANCE_SECONDS,
@@ -124,8 +124,19 @@ export {
   activeContactsFor,
   contactAddressFor,
   ContactsTampered,
+  type ContactWithAddress,
   REGISTERED_CONTACTS,
+  registeredContactsFor,
 } from './infrastructure/registered-contacts.ts';
+export {
+  CONTACT_ADD_CONFIRM_OPERATION,
+  CONTACT_ADD_OPERATION,
+  CONTACT_REMOVE_CONFIRM_OPERATION,
+  CONTACT_REMOVE_OPERATION,
+  type ContactChanges,
+  type ContactChangeWrite,
+  createContactChanges,
+} from './infrastructure/contact-changes.ts';
 export {
   createOidcClient,
   type LoginFlow,

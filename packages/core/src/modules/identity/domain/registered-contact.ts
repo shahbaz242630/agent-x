@@ -34,3 +34,10 @@ export const contactCountsFrom = (activatedAt: Date): Date =>
 
 /** Whether an ACTIVE contact that starts to count at `countsFrom` counts at `now`. */
 export const counts = (countsFrom: Date, now: Date): boolean => countsFrom.getTime() <= now.getTime();
+
+/**
+ * Whether a contact counts at `now`, for confirming a reset (B6-3): ACTIVE,
+ * with its start, and past it. A draft or a removed contact never does.
+ */
+export const countsNow = (contact: { readonly status: string; readonly countsFrom: Date | null }, now: Date): boolean =>
+  contact.status === 'ACTIVE' && contact.countsFrom !== null && counts(contact.countsFrom, now);

@@ -18,6 +18,7 @@
 // serves nothing its OpenAPI document doesn't hold (contract.ts, SEC-WEB-06).
 import type {
   AcceptanceConfirmations,
+  ContactChanges,
   InvitationAcceptance,
   InvitationWrites,
   HoldClearings,
@@ -45,6 +46,7 @@ import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
+import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
 import { registerIdempotencyKeys } from './write-operations.ts';
@@ -74,6 +76,10 @@ export interface ServerOptions {
   readonly holdInvestigations?: HoldInvestigations | undefined;
   /** Clearing the integrity hold (the identity module's hold-clearing.ts); without it, no one reaches those routes. */
   readonly holdClearings?: HoldClearings | undefined;
+  /** Reads an organisation's registered contacts (registered-contacts.ts); without it, no one reaches the list. */
+  readonly listContacts?: ListContacts | undefined;
+  /** Adding and removing registered contacts (the identity module's contact-changes.ts); without it, no one reaches those routes. */
+  readonly contactChanges?: ContactChanges | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -210,6 +216,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
+  registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,
