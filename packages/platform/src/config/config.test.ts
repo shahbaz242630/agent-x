@@ -964,6 +964,55 @@ describe('config: email for the admins’ notices (B5-3)', () => {
   });
 });
 
+describe('config: removing second factors once a reset has cooled off (B6-3c)', () => {
+  const ISSUER = 'https://auth.agentx.example';
+  /** Plain words, as every stand-in for a secret here. */
+  const RESET_WORDS = ['stand', 'in', 'reset', 'words'].join('-');
+  const RESETS: Env = {
+    ...MINIMAL,
+    AGENTX_OUTBOUND_ALLOWED_ORIGINS: ISSUER,
+    AGENTX_OIDC_ISSUER: ISSUER,
+    AGENTX_OIDC_CLIENT_ID: 'agentx-api',
+    AGENTX_OIDC_CLIENT_SECRET: CLIENT_PASS,
+    AGENTX_FACTOR_RESET_TOKEN: RESET_WORDS,
+  };
+
+  it('is on with the token set, and off without it', () => {
+    expect(loadConfig(RESETS).factorResets).toEqual({ token: RESET_WORDS });
+    expect(loadConfig({ ...RESETS, AGENTX_FACTOR_RESET_TOKEN: undefined }).factorResets).toBeUndefined();
+    expect(loadConfig(MINIMAL).factorResets).toBeUndefined();
+  });
+
+  it('reads the token from a mounted file', () => {
+    const folder = mkdtempSync(join(tmpdir(), 'agentx-config-'));
+    writeFileSync(join(folder, 'reset'), `${RESET_WORDS}\n`);
+    const fromFile = {
+      ...RESETS,
+      AGENTX_FACTOR_RESET_TOKEN: undefined,
+      AGENTX_FACTOR_RESET_TOKEN_FILE: join(folder, 'reset'),
+    };
+    expect(loadConfig(fromFile).factorResets).toEqual({ token: RESET_WORDS });
+  });
+
+  it('is refused without sign-in, whose login service holds the factors', () => {
+    const alone = {
+      ...RESETS,
+      AGENTX_OIDC_ISSUER: undefined,
+      AGENTX_OIDC_CLIENT_ID: undefined,
+      AGENTX_OIDC_CLIENT_SECRET: undefined,
+    };
+    expect(problemsWith(alone)).toEqual([
+      'AGENTX_FACTOR_RESET_TOKEN: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service holds the factors',
+    ]);
+  });
+
+  it('refuses a token that isn’t one the login service gives', () => {
+    expect(problemsWith({ ...RESETS, AGENTX_FACTOR_RESET_TOKEN: 'with space' })).toEqual([
+      'AGENTX_FACTOR_RESET_TOKEN: must be 1 to 4096 visible ASCII characters, as the login service gives it',
+    ]);
+  });
+});
+
 describe('config: sign-in (ADR-003 §5, §7)', () => {
   const ISSUER = 'https://auth.agentx.example';
   const SIGN_IN: Env = {

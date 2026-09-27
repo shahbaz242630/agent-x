@@ -32,6 +32,7 @@ const WITH_EMAIL: Env = {
   // Plain words, built at run time, as every stand-in for a secret here.
   AGENTX_EMAIL_ACCESS_KEY: Buffer.from('stand in email words').toString('base64'),
   AGENTX_DIRECTORY_TOKEN: ['directory', 'words'].join('-'),
+  AGENTX_FACTOR_RESET_TOKEN: ['reset', 'words'].join('-'),
 };
 
 /** What a KeyProvider describes: versions and check values, never keys. */
@@ -186,6 +187,11 @@ describe('SEC-OPS-05 the config fingerprint', () => {
       hashOf(WITH_EMAIL),
     );
     expect(hashOf({ ...WITH_EMAIL, AGENTX_EMAIL_SENDER: 'Notices@agentx.example' })).not.toBe(hashOf(WITH_EMAIL));
+    // B6-3c: the reset token too; whether resets are carried out at all is in it.
+    expect(hashOf({ ...WITH_EMAIL, AGENTX_FACTOR_RESET_TOKEN: ['other', 'reset', 'words'].join('-') })).toBe(
+      hashOf(WITH_EMAIL),
+    );
+    expect(hashOf({ ...WITH_EMAIL, AGENTX_FACTOR_RESET_TOKEN: undefined })).not.toBe(hashOf(WITH_EMAIL));
     expect(hashOf(WITH_EMAIL)).not.toBe(hashOf(SETTINGS));
   });
 
@@ -206,7 +212,8 @@ describe('SEC-OPS-05 the config fingerprint', () => {
         !leaf.startsWith('db.password: ') &&
         !leaf.startsWith('signIn.clientSecret: ') &&
         !leaf.startsWith('email.accessKey: ') &&
-        !leaf.startsWith('email.directoryToken: '),
+        !leaf.startsWith('email.directoryToken: ') &&
+        !leaf.startsWith('factorResets.token: '),
     );
     expect(leaves(fingerprintedSettings(config)).sort()).toEqual(left.sort());
   });

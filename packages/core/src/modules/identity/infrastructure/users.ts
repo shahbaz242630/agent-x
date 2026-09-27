@@ -1,7 +1,7 @@
 // The people who sign in (0010): one row per issuer and subject, made at the
 // person's first sign-in and found by it at every one after. The row is never
 // changed or deleted: memberships and audit events will point at its ID.
-import type { Kysely } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkSubject, type Subject } from '../domain/sign-in.ts';
@@ -56,6 +56,9 @@ export async function userOfSubject(db: Kysely<IdentityTables>, who: Subject): P
  * The issuer and subject a user signs in as, by their ID (B5-3: the address
  * book asks the login service by the subject); undefined for no such user.
  */
-export async function subjectOfUser(db: Kysely<IdentityTables>, userId: string): Promise<Subject | undefined> {
+export async function subjectOfUser(
+  db: Kysely<IdentityTables> | Transaction<IdentityTables>,
+  userId: string,
+): Promise<Subject | undefined> {
   return db.selectFrom('identity.users').select(['issuer', 'subject']).where('id', '=', userId).executeTakeFirst();
 }

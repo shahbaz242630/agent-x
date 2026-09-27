@@ -47,6 +47,11 @@ export {
   IdpFeedUnavailable,
   MOST_EVENTS_A_PAGE,
 } from './infrastructure/idp-feed.ts';
+export {
+  createSecondFactorRemover,
+  IdpFactorsUnavailable,
+  type SecondFactorRemover,
+} from './infrastructure/idp-factors.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
 export {
   createSessions,
@@ -172,6 +177,7 @@ export {
   type ResetChangeWrite,
   type ResetsList,
 } from './infrastructure/reset-changes.ts';
+export { createResetRemovals, type ResetRemovals } from './infrastructure/reset-removals.ts';
 export {
   createOidcClient,
   type LoginFlow,

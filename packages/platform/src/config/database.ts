@@ -38,7 +38,8 @@ export type SecretName =
   | 'AGENTX_DB_ZITADEL_PASSWORD'
   | 'AGENTX_OIDC_CLIENT_SECRET'
   | 'AGENTX_EMAIL_ACCESS_KEY'
-  | 'AGENTX_DIRECTORY_TOKEN';
+  | 'AGENTX_DIRECTORY_TOKEN'
+  | 'AGENTX_FACTOR_RESET_TOKEN';
 
 const refused = (problem: string): Checked<never> => ({ ok: false, problem });
 
