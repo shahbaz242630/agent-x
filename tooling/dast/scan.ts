@@ -87,9 +87,16 @@ export const ACCEPTED: readonly Accepted[] = [
   {
     tool: 'schemathesis',
     rule: 'schemathesis/api-accepted-schema-violating-request',
-    statuses: [413, 431],
+    statuses: [413, 414, 431],
     reason:
-      "Refused, before any route runs: a body past its route's limit is answered 413 PAYLOAD_TOO_LARGE, and an address past Node's limit on a request's head (its first line counts) 431 HEADERS_TOO_LARGE; Schemathesis counts neither as a refusal.",
+      "Refused, before any route runs: a body past its route's limit is answered 413 PAYLOAD_TOO_LARGE, an address past Node's limit on a request's head (its first line counts) 431 HEADERS_TOO_LARGE, and one past the compose stack's front door's (nginx) 414; Schemathesis counts none of them as a refusal.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-content-type',
+    statuses: [414],
+    reason:
+      "The compose stack's front door (nginx) refuses an over-long address 414 with its own page (text/html) before the API sees it; the API's own answers are JSON.",
   },
 ];
 

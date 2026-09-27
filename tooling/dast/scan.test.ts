@@ -285,6 +285,12 @@ describe('B7 the dynamic scan of staging', () => {
     const violating = finding({ tool: 'schemathesis', rule: 'schemathesis/api-accepted-schema-violating-request' });
     expect(acceptedReason({ ...violating, status: 431 })).toMatch(/HEADERS_TOO_LARGE/);
     expect(acceptedReason({ ...violating, status: 413 })).toMatch(/PAYLOAD_TOO_LARGE/);
+    expect(acceptedReason({ ...violating, status: 414 })).toMatch(/nginx/);
+    // The stack's front door's own page, at its 414 only (CI, S60).
+    const htmlPage = finding({ tool: 'schemathesis', rule: 'schemathesis/undocumented-content-type' });
+    expect(acceptedReason({ ...htmlPage, status: 414 })).toMatch(/front door/);
+    expect(acceptedReason({ ...htmlPage, status: 200 })).toBeUndefined();
+    expect(acceptedReason(htmlPage)).toBeUndefined();
     expect(acceptedReason({ ...violating, status: 302 })).toBeUndefined();
     expect(acceptedReason(violating)).toBeUndefined();
   });
