@@ -38,6 +38,7 @@ import {
   contactToActivate,
   draftContact,
   REGISTERED_CONTACTS,
+  removeContact,
 } from './registered-contacts.ts';
 import { createResetChanges, type ResetChanges, type ResetChangeWrite } from './reset-changes.ts';
 import { createSessions } from './sessions.ts';
@@ -125,6 +126,16 @@ async function member(org: string, role: Role, userId?: string): Promise<Member>
   );
   return { orgId: org, userId: user, sessionId: await signedIn(user), membershipId };
 }
+
+/** Deactivates the membership, as B4-5 does. */
+const deactivate = (org: string, membershipId: string) =>
+  withSignedStates(app, org, services(), (tx, states) =>
+    states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: membershipId }, 'deactivate', {
+      actor: OPERATOR,
+      action: 'membership.deactivated',
+      details: {},
+    }),
+  );
 
 /** A contact made ACTIVE by the admin now, as B6-1c does once stepped up: it counts 7 days on. */
 async function contact(org: string, admin: Member, email: string): Promise<string> {
@@ -335,17 +346,14 @@ describe(`asking for a reset (B6-3b, Postgres ${server.version})`, () => {
     expect(await ask(developer, person.membershipId)).toEqual(refused(403, 'FORBIDDEN'));
     // An admin of another organisation, naming this one: no membership here.
     expect(await ask({ ...outsider, orgId: org }, person.membershipId)).toEqual(refused(403, 'FORBIDDEN'));
+    // An admin deactivated since the access hook read them.
+    await deactivate(org, admin.membershipId);
+    expect(await ask(admin, person.membershipId)).toEqual(refused(403, 'FORBIDDEN'));
   });
 
   it('refuses a person deactivated, or in another organisation too: the runbook', async () => {
     const { org, admin, person, otherAdmin } = await organization();
-    await withSignedStates(app, org, services(), (tx, states) =>
-      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: otherAdmin.membershipId }, 'deactivate', {
-        actor: OPERATOR,
-        action: 'membership.deactivated',
-        details: {},
-      }),
-    );
+    await deactivate(org, otherAdmin.membershipId);
     const elsewhere = await newOrganization();
     await member(elsewhere, 'viewer', person.userId);
 
@@ -526,6 +534,28 @@ describe(`sending it to the contacts (B6-3b, Postgres ${server.version})`, () =>
     expect(await confirm(admin, asked.reset.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await cancel(admin, asked.reset.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await secretsOf(org, asked.reset.id)).toEqual([]);
+  });
+
+  it.each([
+    ['the person was deactivated since', 'MEMBER_DEACTIVATED'],
+    ['the person joined another organisation since', 'MEMBER_ELSEWHERE'],
+    ['no contact counts any more', 'NO_COUNTING_CONTACTS'],
+  ] as const)('refuses to send it when %s, changing nothing', async (what, code) => {
+    const who = await organization();
+    const asked = written(await ask(who.admin, who.person.membershipId));
+    await stepUp(who.admin, asked.stepUpChallengeId ?? '');
+    if (code === 'MEMBER_DEACTIVATED') await deactivate(who.org, who.person.membershipId);
+    if (code === 'MEMBER_ELSEWHERE') await member(await newOrganization(), 'viewer', who.person.userId);
+    if (code === 'NO_COUNTING_CONTACTS') {
+      for (const id of who.contacts) {
+        await withSignedStates(app, who.org, services(), (tx, states) =>
+          removeContact(tx, states, { orgId: who.org, id, actor: OPERATOR, details: {} }),
+        );
+      }
+    }
+
+    expect(await confirm(who.admin, asked.reset.id), what).toEqual(refused(409, code));
+    expect(await secretsOf(who.org, asked.reset.id)).toEqual([]);
   });
 
   it('refuses one sent already, one lapsed, and one not in the organisation, changing nothing', async () => {
