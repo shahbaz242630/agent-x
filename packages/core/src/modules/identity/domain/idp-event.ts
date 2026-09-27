@@ -56,6 +56,9 @@ const BY_CLASS: Readonly<Record<IdpEventClass, readonly string[]>> = {
   ],
 };
 
+/** The event types of a second factor removed (B6-3d reads them). */
+export const SECOND_FACTOR_REMOVED_EVENTS: readonly string[] = BY_CLASS.second_factor_removed;
+
 /** Every event type copied, and what it means. */
 export const WATCHED_IDP_EVENTS: Readonly<Record<string, IdpEventClass>> = Object.freeze(
   Object.fromEntries(

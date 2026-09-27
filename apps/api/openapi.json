@@ -196,6 +196,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "SECOND_FACTOR_REMOVED",
+                    "description": "A second factor of yours was removed in the last 7 days, by a reset or at the login service, so for 7 days from then you keep only what a developer or a viewer may do, in every organisation. If you didn't ask for this, tell your organisation's admins at once."
+                  },
+                  {
+                    "type": "string",
                     "const": "SIGN_IN_FAILED",
                     "description": "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page."
                   },

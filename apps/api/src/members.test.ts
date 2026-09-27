@@ -98,6 +98,7 @@ async function withMembers(list: MembersList | Error, options: { listed?: boolea
     ids: new SequentialIds(),
     healthChecks: [],
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
+    restrictedUntil: () => Promise.resolve(undefined),
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? ACTIVE_VIEWER : ({ outcome: 'none' } as const)),
     ...((options.listed ?? true) && { listMembers }),

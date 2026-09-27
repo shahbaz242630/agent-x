@@ -77,6 +77,8 @@ export const REASON_CODES = {
   RESET_OPEN:
     "This member already has a reset of their second factor under way, so another isn't asked for. Look at the organisation's resets, and cancel that one first if it is wrong.",
   ROLE_UNCHANGED: 'The member already has this role, so nothing was changed.',
+  SECOND_FACTOR_REMOVED:
+    "A second factor of yours was removed in the last 7 days, by a reset or at the login service, so for 7 days from then you keep only what a developer or a viewer may do, in every organisation. If you didn't ask for this, tell your organisation's admins at once.",
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SIGN_IN_UNAVAILABLE:
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",

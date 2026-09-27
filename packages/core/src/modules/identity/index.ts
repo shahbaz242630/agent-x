@@ -17,6 +17,7 @@ export {
 } from './domain/invitation.ts';
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from './domain/idp-event.ts';
+export { REMOVAL_RESTRICTION_DAYS } from './domain/removal-restriction.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export {
   FACTOR_RESET,
@@ -177,6 +178,11 @@ export {
   type ResetChangeWrite,
   type ResetsList,
 } from './infrastructure/reset-changes.ts';
+export {
+  createRemovalRestriction,
+  type RemovalRestriction,
+  SECOND_FACTORS_REMOVED,
+} from './infrastructure/removal-restriction.ts';
 export { createResetRemovals, type ResetRemovals } from './infrastructure/reset-removals.ts';
 export {
   createOidcClient,

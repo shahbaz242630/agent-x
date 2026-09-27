@@ -6,7 +6,9 @@
 // (SEC-OPS-04); a person deactivated or in another organisation since not
 // reset; a failed removal tried again; an admin's cancel waiting on the job,
 // never coming between the removal and its record; a reset whose cooling-off
-// was cut short past the app never carried out.
+// was cut short past the app never carried out. B6-3d: a reset carried out
+// is recorded on the platform chain about the person, restricting them from
+// that moment; one cancelled isn't.
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -26,6 +28,7 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
+import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import { RESET_COOLING_OFF_HOURS, resetCoolingOffUntil, resetExpiresAt } from '../domain/factor-reset.ts';
 import type { Role } from '../domain/membership.ts';
 import { CONTACT_COOLING_OFF_DAYS, contactCountsFrom } from '../domain/registered-contact.ts';
@@ -40,6 +43,7 @@ import {
 } from './factor-resets.ts';
 import { IdpFactorsUnavailable, type SecondFactorRemover } from './idp-factors.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
+import { createRemovalRestriction, SECOND_FACTORS_REMOVED } from './removal-restriction.ts';
 import { activateContact, contactChange, contactToActivate, draftContact } from './registered-contacts.ts';
 import { createResetChanges } from './reset-changes.ts';
 import { createResetRemovals } from './reset-removals.ts';
@@ -48,7 +52,12 @@ import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
-type Tables = IdentityTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
+type Tables = IdentityTables &
+  OrganizationsTables &
+  DirectoryTables &
+  AuditTables &
+  NotificationsTables &
+  PlatformControlsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -286,6 +295,19 @@ const lastEvent = async (org: string) => {
   return { ...event, details: JSON.parse(event.details) as unknown };
 };
 
+/** The platform chain's records of the person's second factors removed by a reset, their details. */
+const removalsRecorded = async (userId: string) =>
+  (
+    await app
+      .selectFrom('platform_controls.audit_events')
+      .select(['actor_id', 'details'])
+      .where('action', '=', SECOND_FACTORS_REMOVED)
+      .orderBy('seq')
+      .execute()
+  )
+    .map((event) => ({ actor: event.actor_id, details: JSON.parse(event.details) as Record<string, unknown> }))
+    .filter(({ details }) => details.person === userId);
+
 /** The notices telling of a reset: to the person, the admins and the contacts. */
 const told = (kind: string, personUserId: string) => [
   { recipient_user_id: personUserId, to_contacts: false, kind, about_id: personUserId },
@@ -347,10 +369,20 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(lines('factor_resets.completed', who.org)).toEqual([
       expect.objectContaining({ orgId: who.org, resetId: id }),
     ]);
+    // B6-3d: on the platform chain about the person, restricting them from this moment for 7 days.
+    const removedAt = clock.now();
+    expect(await removalsRecorded(who.person.userId)).toEqual([
+      { actor: 'api', details: { person: who.person.userId, org: who.org, reset: id, at: removedAt.toISOString() } },
+    ]);
+    expect(await createRemovalRestriction({ database: app, clock })(who.person.userId)).toEqual(
+      new Date(removedAt.getTime() + 7 * 24 * HOUR_MS),
+    );
+    expect(await createRemovalRestriction({ database: app, clock })(who.admin.userId)).toBeUndefined();
 
-    // Done once: the next run finds nothing due.
+    // Done once: the next run finds nothing due, and records nothing more.
     await removalsWith(factors).run();
     expect(asked).toHaveLength(1);
+    expect(await removalsRecorded(who.person.userId)).toHaveLength(1);
   });
 
   it('waits for the cooling-off’s end, and carries it out from that moment', async () => {
@@ -476,6 +508,8 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(lines('factor_resets.cancelled', who.org)).toEqual([
       expect.objectContaining({ orgId: who.org, resetId: id }),
     ]);
+    // Nothing removed, so nothing restricts them.
+    expect(await removalsRecorded(who.person.userId)).toEqual([]);
   });
 
   it('cancels a person who joined another organisation since: their login signs in to both', async () => {
@@ -609,6 +643,8 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     // Nothing more written: the cancel's own notices only, and the sessions left.
     expect(await noticesOf(who.org)).toEqual(told('factor_reset_cancelled', who.person.userId));
     expect(await sessionsOf(who.person.userId)).toBe(1);
+    // B6-3d: but the factors are gone, so the restriction counts from now.
+    expect(await removalsRecorded(who.person.userId)).toMatchObject([{ details: { reset: id } }]);
   });
 
   it('takes a reset another run completed meanwhile as done, not as after a cancel (two revisions at a release)', async () => {
@@ -634,6 +670,8 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     const slowLines = slowCapture.lines().filter((line) => line.orgId === who.org);
     expect(slowLines.filter(({ event }) => String(event).startsWith('factor_resets.'))).toEqual([]);
     expect(await noticesOf(who.org)).toEqual(told('factor_reset_completed', who.person.userId));
+    // Recorded once, by the run that completed it.
+    expect(await removalsRecorded(who.person.userId)).toHaveLength(1);
   });
 
   it('cancels, and logs as after a cancel, a person deactivated while the factors were being removed', async () => {
@@ -650,6 +688,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     expect(await statusOf(who.org, id)).toBe('CANCELLED');
     expect(await lastEvent(who.org)).toMatchObject({ details: { reason: 'member_deactivated' } });
     expect(lines('factor_resets.removed_after_cancel', who.org)).toEqual([expect.objectContaining({ resetId: id })]);
+    expect(await removalsRecorded(who.person.userId)).toMatchObject([{ details: { reset: id } }]);
   });
 
   it('removes nothing for a membership the directory lists for someone else: the victim’s factors are never touched', async () => {

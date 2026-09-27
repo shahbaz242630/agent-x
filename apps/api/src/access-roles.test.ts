@@ -3,7 +3,8 @@
 // there says (access.ts). The membership's own reading and verifying is the
 // identity module's (memberships.db.test.ts); here, what the hook does with
 // each answer. B3+-1: an admin's and an approver's powers need a session
-// signed in with a passkey.
+// signed in with a passkey. B6-3d: and none for 7 days after a second factor
+// of theirs is removed (SEC-OPS-04).
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -56,11 +57,28 @@ afterEach(async () => {
 /** What the lookup was asked, and what it answered. */
 interface Lookup {
   readonly asked: [orgId: string, userId: string, correlationId: string][];
+  /** Whom the restriction's reader was asked about. */
+  readonly restrictionAsked: string[];
 }
 
-/** A server whose lookup answers `check` for the one organisation, and none for any other. */
-async function withRoutes(check: MembershipCheck | Error | undefined, options: { signIn?: boolean } = {}) {
-  const lookup: Lookup = { asked: [] };
+/**
+ * A server whose lookup answers `check` for the one organisation, and none for
+ * any other; and whose restriction's reader answers `restricted` (until when,
+ * or a failure; none by default), or is missing (null).
+ */
+async function withRoutes(
+  check: MembershipCheck | Error | undefined,
+  options: { signIn?: boolean; restricted?: Date | Error | null } = {},
+) {
+  const lookup: Lookup = { asked: [], restrictionAsked: [] };
+  const { restricted } = options;
+  const restrictedUntil =
+    restricted === null
+      ? undefined
+      : (userId: string) => {
+          lookup.restrictionAsked.push(userId);
+          return restricted instanceof Error ? Promise.reject(restricted) : Promise.resolve(restricted);
+        };
   const findMembership: FindMembership | undefined =
     check === undefined
       ? undefined
@@ -92,6 +110,7 @@ async function withRoutes(check: MembershipCheck | Error | undefined, options: {
     healthChecks: [],
     ...((options.signIn ?? true) && { signIn: { service: SIGN_IN, sessionSeconds: 43_200 } }),
     findMembership,
+    restrictedUntil,
   });
   servers.push(app);
   const reached: { member: Member | null; person: LiveSession | null }[] = [];
@@ -425,5 +444,91 @@ describe("the contract holds a route naming roles to the organisation's header",
     await expect(app.ready()).rejects.toThrow(
       "GET /v1/test-roles: its document doesn't show the organisation's header it requires (headers)",
     );
+  });
+});
+
+describe('SEC-OPS-04 no admin’s or approver’s powers for 7 days after a second factor is removed (B6-3d)', () => {
+  const UNTIL = new Date('2026-10-05T10:00:00.000Z');
+
+  it.each([
+    ['admin', 'POST', '/v1/test-members'],
+    ['admin', 'GET', '/v1/test-shared'],
+    ['approver', 'GET', '/v1/test-approvals'],
+  ] as const)(
+    'refuses an active %s with a passkey on %s %s as SECOND_FACTOR_REMOVED, asking about the person',
+    async (role, method, url) => {
+      const { app, reached, lookup } = await withRoutes(ACTIVE(role), { restricted: UNTIL });
+      const headers = { origin: PUBLIC_ORIGIN, 'idempotency-key': 'k-1' };
+
+      const response = await app.inject(signedIn({ method, url, headers }));
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(errorBody('SECOND_FACTOR_REMOVED', FIRST_ID));
+      expect(reached).toEqual([]);
+      expect(lookup.restrictionAsked).toEqual([LIVE.userId]);
+    },
+  );
+
+  it.each([
+    ['admin', '/v1/test-members'],
+    ['admin', '/v1/test-builds'],
+    ['approver', '/v1/test-reads'],
+  ] as const)(
+    'keeps what a developer or a viewer may do for a restricted %s, without asking: %s',
+    async (role, url) => {
+      const { app, reached, lookup } = await withRoutes(ACTIVE(role), { restricted: UNTIL });
+
+      const response = await app.inject(signedIn({ url }));
+
+      expect(response.statusCode).toBe(200);
+      expect(reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role }, person: LIVE }]);
+      expect(lookup.restrictionAsked).toEqual([]);
+    },
+  );
+
+  it('lets an admin with no removal through, their membership on the request', async () => {
+    const { app, reached, lookup } = await withRoutes(ACTIVE('admin'));
+
+    const response = await app.inject(signedIn({ url: '/v1/test-shared' }));
+
+    expect(response.statusCode).toBe(200);
+    expect(reached).toEqual([{ member: { orgId: ORG, membershipId: MEMBERSHIP, role: 'admin' }, person: LIVE }]);
+    expect(lookup.restrictionAsked).toEqual([LIVE.userId]);
+  });
+
+  it('asks for the passkey first, and asks nothing of a role the route doesn’t name', async () => {
+    const admin = await withRoutes(ACTIVE('admin'), { restricted: UNTIL });
+    const withApp = await admin.app.inject(
+      signedIn({ url: '/v1/test-shared', headers: { cookie: `${SESSION_COOKIE}=${APP_COOKIE}` } }),
+    );
+    expect(withApp.json()).toEqual(errorBody('PASSKEY_REQUIRED', FIRST_ID));
+    const viewer = await withRoutes(ACTIVE('viewer'), { restricted: UNTIL });
+    expect((await viewer.app.inject(signedIn({ url: '/v1/test-shared' }))).statusCode).toBe(403);
+
+    expect([...admin.lookup.restrictionAsked, ...viewer.lookup.restrictionAsked]).toEqual([]);
+  });
+
+  it('refuses an admin’s and an approver’s routes as FORBIDDEN without the reader, and keeps the rest', async () => {
+    const { app, reached } = await withRoutes(ACTIVE('admin'), { restricted: null });
+
+    const refused = await app.inject(signedIn({ url: '/v1/test-shared' }));
+
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toEqual(errorBody('FORBIDDEN', FIRST_ID));
+    expect(reached).toEqual([]);
+    expect((await app.inject(signedIn({ url: '/v1/test-members' }))).statusCode).toBe(200);
+  });
+
+  it('fails as INTERNAL_ERROR when the reader fails, never letting the request through', async () => {
+    const { app, reached, capture } = await withRoutes(ACTIVE('admin'), {
+      restricted: new Error('the database is away'),
+    });
+
+    const response = await app.inject(signedIn({ url: '/v1/test-shared' }));
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual(errorBody('INTERNAL_ERROR', FIRST_ID));
+    expect(reached).toEqual([]);
+    expect(capture.lines()).toContainEqual(expect.objectContaining({ level: 'error', correlationId: FIRST_ID }));
   });
 });
