@@ -225,6 +225,25 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     ).rejects.toMatchObject({ code: '23514', constraint });
   });
 
+  it('B6-2a writes a notice about a person’s sign-in, to the person and to the admins, about their user ID', async () => {
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          aboutAContact({ kind: 'second_factor_removed', aboutId: ADMIN, recipientUserId: ADMIN }),
+          aboutAContact({ kind: 'sign_in_blocked', aboutId: ADMIN }),
+        ]),
+      );
+
+    expect(await rows()).toMatchObject([
+      { recipient_user_id: ADMIN, kind: 'second_factor_removed', about_id: ADMIN, membership_id: null, role: null },
+      { recipient_user_id: null, kind: 'sign_in_blocked', about_id: ADMIN },
+    ]);
+    await expect(
+      app.transaction().execute((tx) => outbox.add(tx, [aboutAContact({ kind: 'password_changed', aboutId: null })])),
+    ).rejects.toThrow(RangeError);
+  });
+
   it('B6-1b writes a notice about a contact, to the admins, a contact or the contacts, and takes each back as written', async () => {
     await app
       .transaction()

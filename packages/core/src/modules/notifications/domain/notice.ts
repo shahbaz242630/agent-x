@@ -3,14 +3,24 @@
 //
 // A notice about a membership (a role granted, a member rejoining) names the
 // membership and its role; a notice about a registered contact (one added or
-// removed) names the contact in `aboutId`.
+// removed) names the contact in `aboutId`, and one about a person's sign-in
+// changed at the login service (B6-2a) names the person, by their user ID.
 
 /** The kinds about a membership. */
 const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined'] as const;
 /** The kinds about a registered contact (B6-1b). */
 const CONTACT_NOTICE_KINDS = ['contact_added', 'contact_removed'] as const;
+/** The kinds about a person's sign-in, changed at the login service (B6-2a, 0024). */
+export const SIGN_IN_NOTICE_KINDS = [
+  'second_factor_removed',
+  'password_changed',
+  'sign_in_email_changed',
+  'sign_in_blocked',
+  'sign_in_restored',
+] as const;
+export type SignInNoticeKind = (typeof SIGN_IN_NOTICE_KINDS)[number];
 
-export const NOTICE_KINDS = [...MEMBERSHIP_NOTICE_KINDS, ...CONTACT_NOTICE_KINDS] as const;
+export const NOTICE_KINDS = [...MEMBERSHIP_NOTICE_KINDS, ...CONTACT_NOTICE_KINDS, ...SIGN_IN_NOTICE_KINDS] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
 const NOTICE_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
