@@ -51,6 +51,12 @@ export const resetCoolingOffUntil = (confirmedAt: Date): Date =>
 /** Whether a reset that lapses at `expiresAt` may still be confirmed at `now`: strictly before it. */
 export const confirmableAt = (expiresAt: Date, now: Date): boolean => now.getTime() < expiresAt.getTime();
 
+/** Whether a reset has lapsed at `now`: still waiting for its admin or a contact, and past its lapse (B6-3b). */
+export const hasLapsed = (
+  reset: { readonly status: FactorResetStatus; readonly expiresAt: Date },
+  now: Date,
+): boolean => (reset.status === 'DRAFT' || reset.status === 'AWAITING_CONTACT') && !confirmableAt(reset.expiresAt, now);
+
 /** Whether a reset is due to be carried out at `now`: cooling off, and its cooling-off passed. */
 export const isDue = (
   reset: { readonly status: FactorResetStatus; readonly coolingOffUntil: Date | null },

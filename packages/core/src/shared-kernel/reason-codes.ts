@@ -47,9 +47,13 @@ export const REASON_CODES = {
     "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation.",
   MEMBER_DEACTIVATED:
     "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
+  MEMBER_ELSEWHERE:
+    "This member also belongs to another organisation, and their login signs in to each of them, so one organisation can't reset their second factor. Contact Agent X support, who follow the runbook.",
   NOT_FOUND: 'There is nothing at this address, or the feature is not available.',
   NOT_ON_HOLD:
     "The organisation isn't on its integrity hold, so there is no hold to investigate or clear. Nothing was changed.",
+  NO_COUNTING_CONTACTS:
+    'The organisation has no registered contact that counts yet (a contact counts 7 days after it is added), so no one can confirm a reset of a second factor. Add a contact, or wait until one counts.',
   NO_INVESTIGATION:
     'The integrity hold can only be cleared after its investigation is recorded, and there is no investigation by this ID of the hold as it now stands. Record the investigation first.',
   ORGANIZATION_INVALID:
@@ -60,12 +64,18 @@ export const REASON_CODES = {
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
   OWN_MEMBERSHIP:
     "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change.",
+  OWN_RESET:
+    "No one can ask to reset their own second factor: another admin must ask for it. If you're the organisation's only admin, contact Agent X support, who follow the runbook.",
   PASSKEY_REQUIRED:
     'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
+  RESET_CLOSED:
+    "This reset can't be confirmed or cancelled any more: it was confirmed already, cancelled, completed, or it lapsed. Nothing was changed. Look at the organisation's resets again.",
+  RESET_OPEN:
+    "This member already has a reset of their second factor under way, so another isn't asked for. Look at the organisation's resets, and cancel that one first if it is wrong.",
   ROLE_UNCHANGED: 'The member already has this role, so nothing was changed.',
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SIGN_IN_UNAVAILABLE:
@@ -74,6 +84,8 @@ export const REASON_CODES = {
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
+  TOO_MANY_RESETS:
+    "The organisation has more reset records than Agent X checks at once, so this reset can't be asked for. Contact Agent X support.",
   UNAUTHENTICATED:
     'This address answers only a signed-in person or an agent with its key, and the request came from neither, so it is refused.',
   UNSUPPORTED_MEDIA_TYPE: "The request body's content type isn't accepted at this address, so it is refused.",

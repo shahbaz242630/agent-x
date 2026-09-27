@@ -110,6 +110,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/auth/session',
       'GET /v1/auth/sign-in',
       'GET /v1/auth/step-up',
+      'GET /v1/factor-resets',
       'GET /v1/integrity-hold',
       'GET /v1/members',
       'GET /v1/registered-contacts',
@@ -119,11 +120,14 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/auth/session',
       'HEAD /v1/auth/sign-in',
       'HEAD /v1/auth/step-up',
+      'HEAD /v1/factor-resets',
       'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
       'HEAD /v1/registered-contacts',
       'POST /test/both',
       'POST /v1/auth/sign-out',
+      'POST /v1/factor-resets/{id}/cancel',
+      'POST /v1/factor-resets/{id}/confirm',
       'POST /v1/integrity-hold/clear',
       'POST /v1/integrity-hold/clear/confirm',
       'POST /v1/integrity-hold/investigations',
@@ -135,6 +139,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/members/invitations/{id}/decline',
       'POST /v1/members/{id}/deactivate',
       'POST /v1/members/{id}/deactivate/confirm',
+      'POST /v1/members/{id}/factor-reset',
       'POST /v1/members/{id}/role',
       'POST /v1/members/{id}/role/confirm',
       'POST /v1/registered-contacts',
@@ -1108,8 +1113,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       Object.values(item).map((operation) => [operation.responses['4XX'], operation.responses['5XX']]),
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
-    // member change routes, the integrity hold's four and the registered contacts' five (B6-1c), with each GET's HEAD.
-    expect(answers.length).toBe(35);
+    // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
+    // four (B6-3b), with each GET's HEAD.
+    expect(answers.length).toBe(40);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1119,6 +1125,10 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'ConfirmationAsked',
       'Error',
+      'FactorReset',
+      'FactorResetChanged',
+      'FactorResetDrafted',
+      'FactorResets',
       'HoldClearingAsked',
       'HoldInvestigation',
       'IntegrityHold',

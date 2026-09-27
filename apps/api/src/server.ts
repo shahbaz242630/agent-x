@@ -24,6 +24,7 @@ import type {
   HoldClearings,
   HoldInvestigations,
   MembershipChanges,
+  ResetChanges,
   SignIn,
 } from '@agentx/core/modules/identity';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -46,6 +47,7 @@ import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
+import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
 import { type ListMembers, registerMembers } from './members.ts';
@@ -80,6 +82,8 @@ export interface ServerOptions {
   readonly listContacts?: ListContacts | undefined;
   /** Adding and removing registered contacts (the identity module's contact-changes.ts); without it, no one reaches those routes. */
   readonly contactChanges?: ContactChanges | undefined;
+  /** Resets of a member's lost second factor (the identity module's reset-changes.ts); without it, no one reaches those routes. */
+  readonly resetChanges?: ResetChanges | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -217,6 +221,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
+  registerFactorResets(app, options.resetChanges);
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,
