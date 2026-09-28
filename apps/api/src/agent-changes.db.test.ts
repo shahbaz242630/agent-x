@@ -16,7 +16,13 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import {
+  createDatabase,
+  type Database,
+  IdempotencyFailed,
+  type IdempotentRequest,
+  withTenant,
+} from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
@@ -266,6 +272,19 @@ describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version}
     );
 
     expect(await suspend(developer, agent)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+  });
+});
+
+describe('failures that are not refusals (C1-3)', () => {
+  it('passes a failure of the write on, never answering it as a refusal or a change', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const agent = await agentOf(org, developer);
+    // A key the idempotency store refuses: a failure of the request's making, not a refusal of the change.
+    const unusable = { ...keyed(developer, SUSPEND_OPERATION, agent), key: 'not a key' };
+
+    await expect(suspend(developer, agent, unusable)).rejects.toBeInstanceOf(IdempotencyFailed);
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
   });
 });
 

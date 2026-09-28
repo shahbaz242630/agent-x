@@ -431,6 +431,12 @@ describe('what registering refuses, writing nothing', () => {
 });
 
 describe('reading agents', () => {
+  it('passes a failure of the read on, never answering it as a refusal: an agent ID the database won’t take', async () => {
+    const org = await organization();
+
+    await expect(registrations.show(org, 'not-a-uuid', CORRELATION)).rejects.toThrow();
+  });
+
   it('lists the organisation’s agents in pages, in order of ID, with the ID to ask the next page after', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
