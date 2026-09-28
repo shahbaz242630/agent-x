@@ -39,6 +39,15 @@ export const RESET_CONFIRM_HOURS = 72;
 /** How long after a contact confirms the factor is removed: time for the people told to stop it. */
 export const RESET_COOLING_OFF_HOURS = 24;
 
+/**
+ * The most resets an organisation's admins may ask for in any 24 hours,
+ * drafts included (B8-2, S61). Every reset asked stays a record, and a check
+ * reads a bounded number, so without this one admin asking and cancelling
+ * could fill it in a minute and leave the organisation's resets unaskable
+ * for good.
+ */
+export const MOST_RESETS_ASKED_A_DAY = 20;
+
 const HOUR_MS = 3_600_000;
 
 /** When a reset asked at `askedAt` lapses, if no contact has confirmed it. */

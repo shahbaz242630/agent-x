@@ -26,11 +26,11 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import type { Role } from '../domain/membership.ts';
-import { MOST_CONTACTS } from '../domain/registered-contact.ts';
+import { MOST_CONTACTS, MOST_CONTACTS_STARTED_A_DAY } from '../domain/registered-contact.ts';
 import { type ContactChanges, type ContactChangeWrite, createContactChanges } from './contact-changes.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
-import { contactChange, REGISTERED_CONTACTS } from './registered-contacts.ts';
+import { contactChange, draftContact, MOST_CONTACT_RECORDS, REGISTERED_CONTACTS } from './registered-contacts.ts';
 import { createSessions } from './sessions.ts';
 import { createStepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -51,6 +51,7 @@ const ids = new SequentialIds(0xc6c0_0000_0000);
 const START = new Date('2026-09-27T09:00:00Z');
 let clock: FixedClock;
 let changes: ContactChanges;
+let capture: LogCapture;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
@@ -85,6 +86,17 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
     addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { orgId: org, userId, sessionId, membershipId };
+}
+
+/** The same person signed in again, with a new session: after the clock has moved past the old one. */
+async function signedInAgain<T extends InvitingAdmin>(who: T): Promise<T> {
+  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+  const { sessionId } = await sessions.open(app, who.userId, {
+    idpSessionId: 'V1_1',
+    authTime: clock.now(),
+    amr: ['pwd', 'user', 'mfa'],
+  });
+  return { ...who, sessionId };
 }
 
 async function organization(): Promise<{ org: string; admin: InvitingAdmin & { membershipId: string } }> {
@@ -143,6 +155,31 @@ async function added(admin: InvitingAdmin, email = EMAIL): Promise<string> {
   return asked.contact.id;
 }
 
+const DAY_MS = 86_400_000;
+
+/** Drafts `count` contacts straight into the organisation's table, two days before START: records, not started today. */
+async function oldDrafts(org: string, admin: InvitingAdmin & { membershipId: string }, count: number): Promise<void> {
+  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, async (tx, states) => {
+    for (let each = 0; each < count; each += 1) {
+      const { change } = contactChange({
+        orgId: org,
+        id: ids.next(),
+        email: `old-${String(each)}@example.test`,
+        addedBy: admin.membershipId,
+      });
+      await draftContact(tx, states, keys, change, {
+        stepUpChallengeId: ids.next(),
+        createdAt: new Date(START.getTime() - 2 * DAY_MS),
+        actor: { type: 'user', id: admin.userId },
+      });
+    }
+  });
+}
+
+/** How many contact records the organisation holds. */
+const recordsOf = async (org: string) =>
+  (await withTenant(app, org, (tx) => tx.selectFrom('identity.registered_contacts').select('id').execute())).length;
+
 /** The notices the organisation's outbox holds, in the order written. */
 const noticesOf = (org: string) =>
   app
@@ -165,6 +202,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(START);
+  capture = new LogCapture();
   changes = createContactChanges({
     database: app,
     keys,
@@ -172,7 +210,7 @@ beforeEach(() => {
     clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(new LogCapture()),
+    logger: loggerFor(capture),
   });
 });
 
@@ -361,6 +399,83 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
       await holder.query('commit');
 
       expect(await confirming).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
+describe(`the organisation's budget of contacts started (B8-2, Postgres ${server.version})`, () => {
+  it(`refuses a contact started past ${String(MOST_CONTACTS_STARTED_A_DAY)} in 24 hours, a confirmed one among them, writing nothing, and starts one once 24 hours have passed`, async () => {
+    const { org, admin } = await organization();
+    await added(admin, 'confirmed@example.test');
+    for (let each = 1; each < MOST_CONTACTS_STARTED_A_DAY; each += 1)
+      written(await add(admin, `draft-${String(each)}@example.test`));
+
+    expect(await add(admin, 'one-more@example.test')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'CONTACT_ADDS_SPENT',
+    });
+    expect(await recordsOf(org)).toBe(MOST_CONTACTS_STARTED_A_DAY);
+
+    clock.advanceBy(DAY_MS - 1);
+    const almost = await signedInAgain(admin);
+    expect(await add(almost, 'one-more@example.test', 'almost-a-day')).toMatchObject({ code: 'CONTACT_ADDS_SPENT' });
+    clock.advanceBy(1);
+    const aDayOn = await signedInAgain(admin);
+    expect(await add(aDayOn, 'one-more@example.test', 'a-day-on')).toMatchObject({
+      outcome: 'written',
+      contact: { status: 'DRAFT' },
+    });
+  });
+
+  it('counts only contacts started in the last 24 hours, not the records held from before', async () => {
+    const { org, admin } = await organization();
+    await oldDrafts(org, admin, MOST_CONTACTS_STARTED_A_DAY);
+
+    expect(await add(admin)).toMatchObject({ outcome: 'written', contact: { status: 'DRAFT' } });
+  });
+
+  it(`warns once the organisation's records reach half of the ${String(MOST_CONTACT_RECORDS)} the list reads`, async () => {
+    const { org, admin } = await organization();
+    await oldDrafts(org, admin, MOST_CONTACT_RECORDS / 2 - 1);
+    written(await add(admin, 'below-half@example.test'));
+    expect(capture.lines().filter((line) => line.event === 'identity.records_filling')).toEqual([]);
+
+    written(await add(admin, 'at-half@example.test'));
+    expect(capture.lines().filter((line) => line.event === 'identity.records_filling')).toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        records: 'registered_contacts',
+        held: MOST_CONTACT_RECORDS / 2,
+        most: MOST_CONTACT_RECORDS,
+        correlationId: CORRELATION,
+      }),
+    ]);
+  });
+
+  it(`answers 409 TOO_MANY_CONTACTS, not a failure, past the ${String(MOST_CONTACT_RECORDS)} records the list reads`, async () => {
+    const { org, admin } = await organization();
+    await oldDrafts(org, admin, MOST_CONTACT_RECORDS + 1);
+
+    expect(await add(admin)).toEqual({ outcome: 'refused', status: 409, code: 'TOO_MANY_CONTACTS' });
+  });
+
+  it('starts a contact only once it holds the organisation’s contact changes’ lock, so two can’t both take the last one', async () => {
+    const { org, admin } = await organization();
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.registered-contacts:${org}`,
+      ]);
+      const adding = within(20_000, add(admin), 'the add');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await adding).toMatchObject({ outcome: 'written', contact: { status: 'DRAFT' } });
     } finally {
       await holder.query('rollback');
       await holder.end();

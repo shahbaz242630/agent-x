@@ -3,8 +3,10 @@
 // step-up (ADR-003 §8), each told to the organisation's admins and its
 // contacts, a removed contact told of its own removal too.
 //
-// 1. `add` (`contacts.add`): the key claimed first; the admin read again,
-//    active and still an admin; the organisation's contacts, every one
+// 1. `add` (`contacts.add`): the key claimed first; the organisation's
+//    contact changes one at a time, as confirm; the admin read again, active
+//    and still an admin; the organisation within its budget of contacts
+//    started (CONTACT_ADDS_SPENT, B8-2); the organisation's contacts, every one
 //    verified, so the address isn't one of its ACTIVE contacts already
 //    (CONTACT_EXISTS) and there is room (CONTACTS_FULL); then the pending
 //    change's SHA-256 bound into a step-up challenge for the admin's own
@@ -41,22 +43,27 @@ import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/inde
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import type { Notice, NotificationsTables, Outbox } from '../../notifications/index.ts';
-import { contactCountsFrom, MOST_CONTACTS } from '../domain/registered-contact.ts';
+import { contactCountsFrom, MOST_CONTACTS, MOST_CONTACTS_STARTED_A_DAY } from '../domain/registered-contact.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { membershipOf, type MembershipsTransaction } from './memberships.ts';
 import {
   activateContact,
   contactChange,
+  contactRecordsCount,
   type ContactWithAddress,
   contactShown,
   contactsOf,
   contactToActivate,
   contactToRemove,
   draftContact,
+  MOST_CONTACT_RECORDS,
   removeContact,
+  TooManyContacts,
 } from './registered-contacts.ts';
 import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+
+const DAY_MS = 86_400_000;
 
 /** Asking to add a contact: its operation, which the step-up challenge names as its action too. */
 export const CONTACT_ADD_OPERATION = 'contacts.add';
@@ -171,6 +178,23 @@ export function createContactChanges({
     if (active.length >= MOST_CONTACTS) throw new ContactRefused(409, 'CONTACTS_FULL');
   };
 
+  /**
+   * Refuses a contact started past the organisation's budget of
+   * MOST_CONTACTS_STARTED_A_DAY (CONTACT_ADDS_SPENT, B8-2), and warns once its
+   * records pass half of what the list reads, long before it can't be read.
+   * Under oneAtATime's lock, so two adds at once can't both take the last one.
+   */
+  const withinBudget = async (tx: Transaction<Tables>, orgId: string, log: Logger): Promise<void> => {
+    const count = await contactRecordsCount(tx, orgId, new Date(clock.now().getTime() - DAY_MS));
+    if (count.held * 2 >= MOST_CONTACT_RECORDS)
+      log.warn('identity.records_filling', {
+        records: 'registered_contacts',
+        held: count.held,
+        most: MOST_CONTACT_RECORDS,
+      });
+    if (count.started >= MOST_CONTACTS_STARTED_A_DAY) throw new ContactRefused(409, 'CONTACT_ADDS_SPENT');
+  };
+
   /** Runs the write in the organisation's transaction, its key claimed first; a refusal becomes an answer. */
   const write = async (
     admin: InvitingAdmin,
@@ -188,6 +212,8 @@ export function createContactChanges({
     } catch (error) {
       if (error instanceof ContactRefused)
         return { outcome: 'refused' as const, status: error.status, code: error.code };
+      if (error instanceof TooManyContacts)
+        return { outcome: 'refused' as const, status: 409, code: 'TOO_MANY_CONTACTS' as const };
       throw error;
     }
   };
@@ -228,7 +254,9 @@ export function createContactChanges({
   return {
     async add(admin, idempotent, email, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
+        await oneAtATime(tx, admin.orgId);
         const addedBy = await adminOf(tx, states, admin);
+        await withinBudget(tx, admin.orgId, logger.child({ correlationId }));
         const id = ids.next();
         const { change, changeHash } = contactChange({ orgId: admin.orgId, id, email, addedBy });
         await mustHaveRoomFor(tx, states, admin.orgId, change.email);

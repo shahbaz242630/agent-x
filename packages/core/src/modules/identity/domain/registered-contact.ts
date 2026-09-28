@@ -25,8 +25,20 @@ export const REGISTERED_CONTACT = defineStateMachine({
 /** How long a new contact waits before it counts (ADR-012 §1). */
 export const CONTACT_COOLING_OFF_DAYS = 7;
 
-/** The most contacts an organisation may have at once, drafts included: a short list of people it trusts. */
+/**
+ * The most ACTIVE contacts an organisation may have at once: a short list of
+ * people it trusts. A draft counts for nothing, so it isn't counted here;
+ * MOST_CONTACTS_STARTED_A_DAY bounds how many are started.
+ */
 export const MOST_CONTACTS = 5;
+
+/**
+ * The most contacts an organisation may start adding in any 24 hours, drafts
+ * included (B8-2, S61). Every contact started stays a record, and the list
+ * reads a bounded number, so without this one admin could fill it in a
+ * minute and leave the organisation's resets unaskable for good.
+ */
+export const MOST_CONTACTS_STARTED_A_DAY = 10;
 
 /** When a contact made ACTIVE at `activatedAt` starts to count. */
 export const contactCountsFrom = (activatedAt: Date): Date =>
