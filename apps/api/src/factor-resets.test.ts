@@ -405,6 +405,21 @@ describe('POST /v1/factor-resets/confirm: a registered contact confirms by its l
     expect(pressed).toEqual([]);
   });
 
+  it('refuses a token outside its alphabet, and takes the longest one the document allows within the body limit (B8-3)', async () => {
+    const { app, pressed } = await withResets(undefined, {
+      confirmed: { outcome: 'confirmed', coolingOffUntil: new Date('2026-09-28T10:00:00Z') },
+    });
+    // The longest token the document allows: 256 characters of its alphabet, each one byte.
+    const longest = 'aZ09._-'.repeat(37).slice(0, 256);
+
+    expect((await app.inject(press({ token: 'é'.repeat(10) }))).statusCode).toBe(400);
+    expect((await app.inject(press({ token: `${TOKEN} ` }))).statusCode).toBe(400);
+    expect((await app.inject(press({ token: `${TOKEN}\n` }))).statusCode).toBe(400);
+    expect(pressed).toEqual([]);
+    expect((await app.inject(press({ token: longest }))).statusCode).toBe(200);
+    expect(pressed).toEqual([longest]);
+  });
+
   it('answers NOT_FOUND when the server was given no confirmations', async () => {
     const { app } = await withResets({ outcome: 'busy' });
 

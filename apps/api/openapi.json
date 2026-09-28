@@ -2925,7 +2925,8 @@
                 "properties": {
                   "token": {
                     "type": "string",
-                    "maxLength": 256
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._-]*$"
                   }
                 },
                 "required": [
