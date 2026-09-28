@@ -1,5 +1,5 @@
-// BR-03 (C1-1, C1-2): an agent's and a key's machines, how scopes are kept,
-// an agent's name, and how a key is written and MACed.
+// BR-03 (C1-1, C1-2, C1-4a): an agent's and a key's machines, how scopes are
+// kept, an agent's name, and how a key is written, taken apart and MACed.
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -14,6 +14,7 @@ import {
   KEY_PREFIX,
   keyExpiresAt,
   keySecretMessage,
+  parseAgentKey,
   SCOPES,
   scopesOf,
   ScopesRefused,
@@ -79,6 +80,54 @@ describe('a key (C1-2)', () => {
 
   it('is MACed over a label, its ID in lower case and its secret, so a MAC can’t be moved to another key', () => {
     expect(keySecretMessage(KEY_ID, SECRET)).toEqual(['agent-key', KEY_ID.toLowerCase(), SECRET]);
+  });
+});
+
+describe('a key an agent sends, taken apart (C1-4a)', () => {
+  const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
+  // Bytes whose base64url holds both `-` and `_`, the characters it adds to base64.
+  const SECRET = Buffer.from(Array.from({ length: 32 }, (_, index) => (index % 2 === 0 ? 0xfb : 0xff)));
+  const text = agentKeyText(KEY_ID, SECRET);
+
+  it('gives back the ID, as a uuid in lower case, and the secret agentKeyText wrote', () => {
+    expect(text).toMatch(/-/);
+    expect(text.slice(37)).toMatch(/_/);
+    expect(parseAgentKey(text)).toEqual({ keyId: KEY_ID, secret: SECRET });
+  });
+
+  it('takes every key agentKeyText writes', () => {
+    for (let byte = 0; byte < 256; byte += 17) {
+      const secret = Buffer.alloc(32, byte);
+      expect(parseAgentKey(agentKeyText(KEY_ID, secret))).toEqual({ keyId: KEY_ID, secret });
+    }
+  });
+
+  const last = text.at(-1) ?? '';
+  // The secret's last character carries 4 bits of the 32nd byte and 2 spare ones; another with the same byte is another spelling.
+  const strayBits = String.fromCharCode(last.charCodeAt(0) + 1);
+
+  it.each([
+    ['nothing', ''],
+    ['the prefix alone', 'axk_'],
+    ['another prefix', `axs_${text.slice(4)}`],
+    ['the ID in upper case', `axk_${text.slice(4, 36).toUpperCase()}${text.slice(36)}`],
+    ['the ID with its dashes', `axk_${KEY_ID}_${SECRET.toString('base64url')}`],
+    ['an ID a digit short', `axk_${text.slice(5)}`],
+    ['a secret a character short', text.slice(0, -1)],
+    ['a secret a character long', `${text}A`],
+    ['a padded secret', `${text}=`],
+    ['a secret in plain base64', `axk_${text.slice(4, 36)}_${SECRET.toString('base64')}`],
+    ['a space before it', ` ${text}`],
+    ['a line after it', `${text}\n`],
+  ])('refuses %s', (_, sent) => {
+    expect(parseAgentKey(sent)).toBeUndefined();
+  });
+
+  it('refuses a secret whose last character carries stray bits: the same bytes, spelled another way', () => {
+    const stray = `${text.slice(0, -1)}${strayBits}`;
+
+    expect(Buffer.from(stray.slice(37), 'base64url')).toEqual(SECRET);
+    expect(parseAgentKey(stray)).toBeUndefined();
   });
 });
 

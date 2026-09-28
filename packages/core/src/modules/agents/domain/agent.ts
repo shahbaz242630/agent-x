@@ -154,6 +154,31 @@ export function agentKeyText(keyId: string, secret: Buffer): string {
   return `${KEY_PREFIX}${hex}_${secret.toString('base64url')}`;
 }
 
+/** A key an agent sent, taken apart: its ID as a uuid in lower case, and its secret. */
+export interface PresentedKey {
+  readonly keyId: string;
+  readonly secret: Buffer;
+}
+
+/** The whole shape agentKeyText writes: `axk_`, 32 lower-case hex digits, `_`, 43 base64url characters. */
+const KEY_TEXT = /^axk_([0-9a-f]{32})_([A-Za-z0-9_-]{43})$/;
+
+/**
+ * The key's ID and secret, if `text` is exactly as agentKeyText writes a key,
+ * or undefined: no other spelling of the same key (upper case, padding, a
+ * secret whose last character carries stray bits) is taken, so one key has
+ * one text, and nothing is looked up for text that couldn't be a key.
+ */
+export function parseAgentKey(text: string): PresentedKey | undefined {
+  const parts = KEY_TEXT.exec(text);
+  if (parts === null) return undefined;
+  const [, hex = '', encoded = ''] = parts;
+  const secret = Buffer.from(encoded, 'base64url');
+  if (secret.length !== KEY_SECRET_BYTES || secret.toString('base64url') !== encoded) return undefined;
+  const keyId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return { keyId, secret };
+}
+
 /**
  * What the agent-key pepper's MAC is taken over: a label, the key's ID in
  * lower case and its secret, so a MAC can't be moved to another key.

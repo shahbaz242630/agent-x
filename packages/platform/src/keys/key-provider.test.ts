@@ -1,6 +1,6 @@
-import { createHmac, createPublicKey, verify } from 'node:crypto';
+import { createHmac, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   createKeyProvider,
@@ -19,6 +19,12 @@ import {
   PURPOSES,
   type SigningPurpose,
 } from './purposes.ts';
+
+// timingSafeEqual as Node has it, watched: SEC-AG-01 asserts the comparison, it doesn't time it.
+vi.mock('node:crypto', async (original) => {
+  const crypto = await original<typeof import('node:crypto')>();
+  return { ...crypto, timingSafeEqual: vi.fn(crypto.timingSafeEqual) };
+});
 
 /** A stand-in key: 32 bytes of one value, so every key in a test is told apart by its fill. */
 const key = (fill: number): Buffer => Buffer.alloc(32, fill);
@@ -97,6 +103,19 @@ describe('SEC-DATA-07 keyed hashes (HMAC-SHA-256)', () => {
     expect(
       keys.verifyMac('audit-mac', keyVersion, ['request', ORG, 'POST /v1/suppliers', '{"name":"Acme!"}'], mac),
     ).toBe(false);
+  });
+
+  it('compares a hash in constant time: timingSafeEqual over two 32-byte MACs (SEC-AG-01)', () => {
+    const keys = provider();
+    const { keyVersion, mac } = keys.mac('agent-key-pepper', REQUEST);
+    vi.mocked(timingSafeEqual).mockClear();
+
+    expect(keys.verifyMac('agent-key-pepper', keyVersion, REQUEST, mac)).toBe(true);
+
+    expect(timingSafeEqual).toHaveBeenCalledTimes(1);
+    const [given, expected] = vi.mocked(timingSafeEqual).mock.calls[0] ?? [];
+    expect(given).toBe(mac);
+    expect(expected).toHaveLength(32);
   });
 
   it.each([
