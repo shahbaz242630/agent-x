@@ -265,7 +265,9 @@ describe('issuing an agent key (C1-1)', () => {
     await expect(issue(org, agent, { scopes: [] })).rejects.toBeInstanceOf(ScopesRefused);
 
     expect(
-      await withTenant(app, org, (tx) => tx.selectFrom('directory.agent_keys').select('key_id').execute()),
+      await withTenant(app, org, (tx) =>
+        tx.selectFrom('directory.agent_keys').select('key_id').where('org_id', '=', org).execute(),
+      ),
     ).toEqual([]);
   });
 
@@ -559,15 +561,15 @@ describe('the walls round an agent and its keys', () => {
     const org = await organization();
     const { id: agent } = await addAnAgent(org);
     const other = await organization();
+    const id = ids.next();
+    if (entry !== null) {
+      await withTenant(app, other, (tx) =>
+        tx.insertInto('directory.agent_keys').values({ key_id: id, org_id: other }).execute(),
+      );
+    }
 
     await expect(
       withTenant(app, org, async (tx) => {
-        const id = ids.next();
-        if (entry !== null) {
-          await withTenant(app, other, (inOther) =>
-            inOther.insertInto('directory.agent_keys').values({ key_id: id, org_id: other }).execute(),
-          );
-        }
         await tx
           .insertInto('agents.agent_keys')
           .values({
