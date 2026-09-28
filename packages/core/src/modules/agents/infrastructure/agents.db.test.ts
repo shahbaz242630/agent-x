@@ -432,10 +432,9 @@ describe("an agent's keys, each verified (C1-1)", () => {
     expect(await keysOf(org, agent)).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 
-  it(`refuses an agent with more than ${String(MOST_KEYS_LISTED)} keys, rather than cut the list short`, async () => {
-    const org = await organization();
-    const { id: agent } = await addAnAgent(org);
-    await withSignedStates(app, org, services(), async (tx, states) => {
+  /** One more key than a list reads, issued to the agent in one transaction. */
+  const tooManyKeys = (org: string, agent: string) =>
+    withSignedStates(app, org, services(), async (tx, states) => {
       for (let count = 0; count <= MOST_KEYS_LISTED; count += 1) {
         await addAgentKey(tx, states, {
           orgId: org,
@@ -451,7 +450,22 @@ describe("an agent's keys, each verified (C1-1)", () => {
       }
     });
 
+  it(`refuses an agent with more than ${String(MOST_KEYS_LISTED)} keys, rather than cut the list short`, async () => {
+    const org = await organization();
+    const { id: agent } = await addAnAgent(org);
+    await tooManyKeys(org, agent);
+
     await expect(keysOf(org, agent)).rejects.toBeInstanceOf(TooManyAgentKeys);
+  });
+
+  it('reads the agent’s own keys alone: another agent’s many keys neither count towards its limit nor are read', async () => {
+    const org = await organization();
+    const { id: agent } = await addAnAgent(org);
+    const { id: busy } = await addAnAgent(org);
+    const { id } = await issue(org, agent);
+    await tooManyKeys(org, busy);
+
+    expect(await keysOf(org, agent)).toMatchObject({ outcome: 'listed', keys: [{ id }] });
   });
 });
 
