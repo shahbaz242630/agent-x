@@ -131,13 +131,14 @@ export interface AgentKeyChanges {
 const DAY_MS = 86_400_000;
 
 /**
- * The pending change's SHA-256: the operation, the organisation and the
- * key's latest event, IDs in lower case. That event is the key's own, read
- * from its signed state, so it names the key and exactly the state it was
- * asked in: a key rotated or revoked since can't be changed by it.
+ * The pending change's SHA-256: the organisation and the key's latest
+ * event, IDs in lower case. That event is the key's own, read from its
+ * signed state, so it names the key and exactly the state it was asked in: a
+ * key rotated or revoked since can't be changed by it. Which change it is,
+ * a rotation or a revocation, is the challenge's own action.
  */
-const keyChangeHash = (operation: string, orgId: string, keyEventId: string): Buffer =>
-  changeHashOf([operation, orgId.toLowerCase(), keyEventId.toLowerCase()]);
+const keyChangeHash = (orgId: string, keyEventId: string): Buffer =>
+  changeHashOf([orgId.toLowerCase(), keyEventId.toLowerCase()]);
 
 export function createAgentKeyChanges({
   database,
@@ -202,7 +203,7 @@ export function createAgentKeyChanges({
     const challenge = await challenges.open(tx, {
       sessionId: member.sessionId,
       action: operation,
-      changeHash: keyChangeHash(operation, member.orgId, keyEventId),
+      changeHash: keyChangeHash(member.orgId, keyEventId),
     });
     // The session ended since the access hook found it.
     if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
@@ -224,7 +225,7 @@ export function createAgentKeyChanges({
       {
         sessionId: member.sessionId,
         action: operation,
-        changeHash: keyChangeHash(operation, member.orgId, keyEventId),
+        changeHash: keyChangeHash(member.orgId, keyEventId),
       },
       { passkeyRequired: role === 'admin' },
     );
