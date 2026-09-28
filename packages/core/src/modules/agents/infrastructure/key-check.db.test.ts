@@ -12,6 +12,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  within,
 } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -236,6 +237,24 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
     expect(await check(text)).toMatchObject({ outcome: 'accepted' });
     clock.advanceBy(1);
     await refusedFor(text, 'expired', id);
+  });
+});
+
+describe('the key check: bounded', () => {
+  it('gives up after 10 seconds, a wait for a lock included, rather than hold the request', async () => {
+    const agent = await newAgent();
+    const { text } = await issue(agent);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('lock table agents.agent_keys in access exclusive mode');
+    try {
+      const began = performance.now();
+      await expect(within(20_000, check(text), 'the check')).rejects.toThrow(/statement timeout/);
+      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
 
