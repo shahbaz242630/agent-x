@@ -50,7 +50,7 @@
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
 import {
-  isReturnPath,
+  RETURN_PATH,
   type SignIn,
   SignInFailed,
   type SignInFailure,
@@ -115,7 +115,8 @@ const SIGN_IN_SCHEMA = {
     returnTo: z
       .string()
       .max(512)
-      .refine(isReturnPath, { error: 'must be a path on this origin' })
+      // A pattern, not a refinement, so the document states the rule (B7: a scanner took any string as valid).
+      .regex(RETURN_PATH, { error: 'must be a path on this origin' })
       .optional()
       .describe('Where to go once signed in: a path on this origin. Home if none.'),
   }),
@@ -139,7 +140,8 @@ const STEP_UP_SCHEMA = {
     returnTo: z
       .string()
       .max(512)
-      .refine(isReturnPath, { error: 'must be a path on this origin' })
+      // A pattern, not a refinement, so the document states the rule (B7: a scanner took any string as valid).
+      .regex(RETURN_PATH, { error: 'must be a path on this origin' })
       .optional()
       .describe('Where to go once signed in again, to confirm the change: a path on this origin. Home if none.'),
   }),
@@ -168,7 +170,9 @@ const SESSION_SCHEMA = {
 const SIGN_OUT_SCHEMA = {
   summary: 'Sign out',
   response: {
-    204: z.object({}).register(API_SCHEMAS, { description: 'Signed out, or there was no session to end.' }),
+    // 200 with an empty object, which the contract writes, not a 204: a 204 carries no body, and the document
+    // can only describe a JSON one (B7: a scanner found the answer bare where JSON was promised).
+    200: z.object({}).register(API_SCHEMAS, { description: 'Signed out, or there was no session to end.' }),
   },
 };
 
@@ -320,7 +324,7 @@ export function registerSignIn(
       const ended = await signIn.signOut(cookieValue(request.headers.cookie, SESSION_COOKIE));
       if (ended) logger.child({ correlationId: request.id }).info('auth.signed_out');
       return reply
-        .code(204)
+        .code(200)
         .header('set-cookie', cookie(SESSION_COOKIE, '', 'Strict', 0))
         .send({});
     },

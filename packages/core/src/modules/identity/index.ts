@@ -25,7 +25,14 @@ export {
   RESET_CONFIRM_HOURS,
   RESET_COOLING_OFF_HOURS,
 } from './domain/factor-reset.ts';
-export { HOME_PATH, isReturnPath, type SignInEvidence, SignInRefused, type Subject } from './domain/sign-in.ts';
+export {
+  HOME_PATH,
+  isReturnPath,
+  RETURN_PATH,
+  type SignInEvidence,
+  SignInRefused,
+  type Subject,
+} from './domain/sign-in.ts';
 export {
   AUTH_TIME_TOLERANCE_SECONDS,
   type ChallengeFacts,

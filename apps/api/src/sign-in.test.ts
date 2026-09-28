@@ -372,8 +372,10 @@ describe('signing out', () => {
       headers: { origin: PUBLIC_ORIGIN, cookie: `${SESSION_COOKIE}=${SESSION_ID}` },
     });
 
-    expect(response.statusCode).toBe(204);
-    expect(response.body).toBe('');
+    // B7: 200 with the empty object its document promises, as JSON, never a bare 204.
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
+    expect(response.json()).toEqual({});
     expect(setCookies(response.headers['set-cookie'])).toEqual([
       `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`,
     ]);
@@ -387,7 +389,8 @@ describe('signing out', () => {
 
     const response = await app.inject({ method: 'POST', url: '/v1/auth/sign-out', headers: { origin: PUBLIC_ORIGIN } });
 
-    expect(response.statusCode).toBe(204);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({});
     expect(standIn.signedOut).toEqual([undefined]);
   });
 

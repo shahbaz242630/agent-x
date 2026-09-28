@@ -164,7 +164,7 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
 
   it('signs out: the session ends and the cookie is cleared', async () => {
     const status = await page.evaluate(async () => (await fetch('/v1/auth/sign-out', { method: 'POST' })).status);
-    expect(status).toBe(204);
+    expect(status).toBe(200);
     expect(cookieNamed(await context.cookies(API_ORIGIN), SESSION_COOKIE)).toBeUndefined();
     expect((await sessions()).count).toBe(0);
     expect(await apiEvents()).toContain('auth.signed_out');

@@ -1015,7 +1015,8 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 512,
+              "pattern": "^\\/(?!\\/)[A-Za-z0-9\\-._~/%?=&]{0,511}$"
             },
             "in": "query",
             "name": "returnTo",
@@ -1067,7 +1068,8 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 512,
+              "pattern": "^\\/(?!\\/)[A-Za-z0-9\\-._~/%?=&]{0,511}$"
             },
             "in": "query",
             "name": "returnTo",
@@ -1273,7 +1275,8 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 512,
+              "pattern": "^\\/(?!\\/)[A-Za-z0-9\\-._~/%?=&]{0,511}$"
             },
             "in": "query",
             "name": "returnTo",
@@ -1335,7 +1338,8 @@
           {
             "schema": {
               "type": "string",
-              "maxLength": 512
+              "maxLength": 512,
+              "pattern": "^\\/(?!\\/)[A-Za-z0-9\\-._~/%?=&]{0,511}$"
             },
             "in": "query",
             "name": "returnTo",
@@ -1468,7 +1472,7 @@
         ],
         "x-body-limit": 1,
         "responses": {
-          "204": {
+          "200": {
             "description": "Signed out, or there was no session to end.",
             "content": {
               "application/json": {
