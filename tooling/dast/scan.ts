@@ -4,7 +4,9 @@
  * `apps/api/openapi.json`, the staging origin given as AGENTX_DAST_ORIGIN.
  * Run by `.github/workflows/dast.yml` (weekly and on demand, never on a pull
  * request: staging is Free Trial compute) and by hand the same way:
- * `node tooling/dast/scan.ts`, with Docker running.
+ * `node tooling/dast/scan.ts`, with Docker running. With `--stack`, the End to
+ * end job runs Schemathesis alone against the compose stack on every pull
+ * request, failing it on any finding not accepted (B7-3).
  *
  * **Nothing about staging reaches the public log.** The repository is public
  * until pre-launch, so the scanners' own output (which names the host and
@@ -61,8 +63,10 @@ export interface Finding {
 interface Accepted {
   readonly tool: Finding['tool'];
   readonly rule: string;
-  /** The paths it is accepted at, or every path. */
-  readonly paths?: readonly string[];
+  /** Accepted only at addresses the document doesn't hold, or at any. */
+  readonly undocumentedOnly?: true;
+  /** Accepted only at these operations (`GET /v1/auth/sign-in`), or at any. */
+  readonly operations?: readonly string[];
   /** The statuses it is accepted with, or any. */
   readonly statuses?: readonly number[];
   readonly reason: string;
@@ -78,18 +82,47 @@ export const ACCEPTED: readonly Accepted[] = [
   {
     tool: 'zap',
     rule: 'zap/100001',
-    paths: ['/computeMetadata/v1/', '/latest/meta-data/', '/metadata/instance', '/opc/v1/instance/'],
+    undocumentedOnly: true,
     reason:
-      "ZAP's cloud-metadata probe sends another Host, which Azure's edge answers with its own 404 page (text/html) before the app sees it; nothing is exposed.",
+      "ZAP's cloud-metadata probes (/latest/meta-data/ and the like, more with each version) send another Host, which Azure's edge answers with its own 404 page (text/html) before the app sees it; nothing is exposed. At an address the API serves it is a finding.",
   },
   {
     tool: 'schemathesis',
     rule: 'schemathesis/api-accepted-schema-violating-request',
-    statuses: [431],
+    statuses: [413, 414, 431],
     reason:
-      "Refused: an address past Node's limit on a request's head (its first line counts) is answered 431 HEADERS_TOO_LARGE before any route runs; Schemathesis doesn't count 431 as a refusal.",
+      "Refused, before any route runs: a body past its route's limit is answered 413 PAYLOAD_TOO_LARGE, an address past Node's limit on a request's head (its first line counts) 431 HEADERS_TOO_LARGE, and one past the compose stack's front door's (nginx) 414; Schemathesis counts none of them as a refusal.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-content-type',
+    statuses: [414],
+    reason:
+      "The compose stack's front door (nginx) refuses an over-long address 414 with its own page (text/html) before the API sees it; the API's own answers are JSON.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-http-status-code',
+    operations: ['GET /v1/auth/sign-in'],
+    statuses: [200],
+    reason:
+      "Schemathesis follows sign-in's 302 to the login service and reads its sign-in page (200); forbidding redirects makes every sign-in a network error instead (CI, S60). The API's own answer is the documented 302.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-content-type',
+    operations: ['GET /v1/auth/sign-in'],
+    statuses: [200],
+    reason: "The login service's sign-in page (text/html), reached by following sign-in's 302: not the API's answer.",
   },
 ];
+
+/** The paths the API's document holds, read once. */
+let documented: readonly string[] | undefined;
+const documentedPaths = (): readonly string[] =>
+  (documented ??= Object.keys(
+    (JSON.parse(readFileSync(OPENAPI_FILE, 'utf8')) as { paths?: Record<string, unknown> }).paths ?? {},
+  ));
 
 /** Why a finding is kept, if it is. */
 export const acceptedReason = (finding: Finding): string | undefined =>
@@ -97,7 +130,8 @@ export const acceptedReason = (finding: Finding): string | undefined =>
     (one) =>
       one.tool === finding.tool &&
       one.rule === finding.rule &&
-      (one.paths === undefined || one.paths.includes(finding.path)) &&
+      (one.undocumentedOnly === undefined || documentedPath(finding.path, documentedPaths()) === undefined) &&
+      (one.operations === undefined || one.operations.includes(`${finding.method} ${finding.path}`)) &&
       (one.statuses === undefined || (finding.status !== undefined && one.statuses.includes(finding.status))),
   )?.reason;
 
@@ -148,11 +182,21 @@ export function zapArgs(origin: string, dir: string): string[] {
   ];
 }
 
-/** Schemathesis's run, as `docker run` arguments, writing `junit.xml` in the mounted directory. */
-export function schemathesisArgs(origin: string, dir: string): string[] {
+/** The compose stack's API, as the end-to-end tests reach it (tooling/e2e/compose.ts). */
+export const STACK_ORIGIN = 'http://localhost:8080';
+
+/**
+ * Schemathesis's run, as `docker run` arguments, writing `junit.xml` in the
+ * mounted directory. Against the compose stack (B7-3, every pull request) it
+ * shares the runner's network, so localhost is the stack's front door, and
+ * runs shorter.
+ */
+export function schemathesisArgs(origin: string, dir: string, target: 'staging' | 'stack' = 'staging'): string[] {
+  const stack = target === 'stack';
   return [
     'run',
     '--rm',
+    ...(stack ? ['--network', 'host'] : []),
     '--volume',
     `${dir}:/wrk`,
     SCANNER_IMAGES.schemathesis,
@@ -165,9 +209,9 @@ export function schemathesisArgs(origin: string, dir: string): string[] {
     '--rate-limit',
     '120/m',
     '--max-examples',
-    '20',
+    stack ? '10' : '20',
     '--max-time',
-    '900',
+    stack ? '300' : '900',
     '--phases',
     'examples,coverage,fuzzing',
     '--continue-on-failure',
@@ -194,7 +238,10 @@ interface ZapReport {
 
 /** The findings of ZAP's JSON report: one per rule, method and path. */
 export function zapFindings(report: ZapReport): Finding[] {
-  return (report.site ?? []).flatMap((site) =>
+  // Fails closed: a report of no site is a scan that never reached the API, not a clean one.
+  if (report.site === undefined || report.site.length === 0)
+    throw new Error("ZAP's report holds no site: the scan didn't run");
+  return report.site.flatMap((site) =>
     (site.alerts ?? []).flatMap((alert) =>
       (alert.instances ?? []).map((instance) => ({
         tool: 'zap' as const,
@@ -232,29 +279,61 @@ const schemathesisSeverity = (check: string): Severity =>
 
 /**
  * The findings of Schemathesis's JUnit report: each test case is an operation
- * (`POST /v1/…`), and each failure lists the checks it failed as lines of their
- * own beginning `- ` at the line's start, then the answer's status as `[431] …`.
+ * (`POST /v1/…`), and each failure holds one or more cases (`1. Test Case ID: …`),
+ * each listing the checks it failed as lines of their own beginning `- ` at the
+ * line's start, then its answer's status as `[431] …`.
+ *
+ * Fails closed (review): a report that tested nothing, or whose own counts of
+ * failures and errors differ from the elements read, throws; a failure or an
+ * error holding no check it names (a case that couldn't run: the API away,
+ * a timeout, the scanner's own exception) is a high finding of its own, never
+ * nothing.
  */
 export function schemathesisFindings(xml: string): Finding[] {
+  const suites = /<testsuites\b([^>]*)>/.exec(xml)?.[1] ?? '';
+  const counted = (name: string): number => Number(new RegExp(`\\b${name}="(\\d+)"`).exec(suites)?.[1] ?? Number.NaN);
+  if (!(counted('tests') > 0)) throw new Error("Schemathesis's report holds no test case: the scan didn't run");
   const findings: Finding[] = [];
+  let failed = 0;
+  let errored = 0;
   for (const [, attributes = '', body = ''] of xml.matchAll(/<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g)) {
     const name = unescapeXml(/\bname="([^"]*)"/.exec(attributes)?.[1] ?? '');
     const [method = '', operationPath = ''] = name.split(' ');
-    for (const [, text = ''] of body.matchAll(/<(?:failure|error)\b[^>]*>([\s\S]*?)<\/(?:failure|error)>/g)) {
-      const failure = unescapeXml(text);
-      const status = /^\[(\d{3})\] /m.exec(failure)?.[1];
-      for (const [, check = ''] of failure.matchAll(/^- (.+)$/gm)) {
+    const at = { tool: 'schemathesis' as const, method: method.toUpperCase(), path: operationPath };
+    // The report counts test cases with a failure, and with an error, not the elements.
+    if (/<failure\b/.test(body)) failed += 1;
+    if (/<error\b/.test(body)) errored += 1;
+    // An element with a body, or an empty one (`<error/>`): each counts.
+    for (const match of body.matchAll(/<(failure|error)\b[^>]*>([\s\S]*?)<\/\1>|<(?:failure|error)\b[^>]*\/>/g)) {
+      const text = match[2] ?? '';
+      let checks = 0;
+      for (const failure of unescapeXml(text).split(/^(?=\d+\. Test Case ID:)/m)) {
+        const status = /^\[(\d{3})\] /m.exec(failure)?.[1];
+        for (const [, check = ''] of failure.matchAll(/^- (.+)$/gm)) {
+          checks += 1;
+          findings.push({
+            ...at,
+            rule: ruleOf(check.trim()),
+            title: check.trim(),
+            severity: schemathesisSeverity(check),
+            ...(status !== undefined && { status: Number(status) }),
+          });
+        }
+      }
+      if (checks === 0) {
         findings.push({
-          tool: 'schemathesis',
-          rule: ruleOf(check.trim()),
-          title: check.trim(),
-          severity: schemathesisSeverity(check),
-          method: method.toUpperCase(),
-          path: operationPath,
-          ...(status !== undefined && { status: Number(status) }),
+          ...at,
+          rule: 'schemathesis/unreadable-failure',
+          title: 'A case that failed without a check it names',
+          severity: 'high',
         });
       }
     }
+  }
+  if (failed !== counted('failures') || errored !== counted('errors')) {
+    throw new Error(
+      `Schemathesis's report counts ${String(counted('failures'))} failed and ${String(counted('errors'))} errored test cases, but ${String(failed)} and ${String(errored)} were read`,
+    );
   }
   return findings;
 }
@@ -342,9 +421,9 @@ export function summaryOf(findings: readonly Finding[], accepted: number): strin
   ];
 }
 
-/** Runs one scanner in Docker, its own output kept out of the log. Exits the run for an error it reports. */
-function runScanner(tool: string, args: readonly string[], allowed: readonly number[]): void {
-  const done = spawnSync('docker', args, { stdio: 'ignore', timeout: 40 * 60_000 });
+/** Runs one scanner in Docker, its own output kept out of the log unless shown. Exits the run for an error it reports. */
+function runScanner(tool: string, args: readonly string[], allowed: readonly number[], shown = false): void {
+  const done = spawnSync('docker', args, { stdio: shown ? 'inherit' : 'ignore', timeout: 40 * 60_000 });
   if (done.error !== undefined) throw new Error(`${tool} could not be run: ${done.error.message}`);
   if (done.status === null || !allowed.includes(done.status)) {
     throw new Error(`${tool} ended with ${String(done.status ?? done.signal)}, not a finished scan`);
@@ -366,14 +445,47 @@ async function wake(origin: string): Promise<void> {
   throw new Error('the API did not answer its health check within 3 minutes');
 }
 
-async function main(): Promise<number> {
-  const origin = originOf(process.env.AGENTX_DAST_ORIGIN);
+/** The findings a gate stops on, one line each: every one not accepted, informational notes aside. */
+export const gateLines = (findings: readonly Finding[]): string[] =>
+  findings
+    .filter((finding) => finding.severity !== 'info' && acceptedReason(finding) === undefined)
+    .map(
+      (finding) =>
+        `${finding.severity} ${finding.rule}: ${finding.method} ${finding.path}${finding.status === undefined ? '' : ` (answered ${String(finding.status)})`}`,
+    );
+
+/** The results directory, made writable for the scanners (their images' own users, not the runner's), with the document in it. */
+function resultsDir(): { dir: string; openapiText: string } {
   const dir = path.resolve(RESULTS_DIR);
   mkdirSync(dir, { recursive: true });
-  // The scanners run as their images' own users, not the runner's: they must be able to write here.
   chmodSync(dir, 0o777);
   const openapiText = readFileSync(OPENAPI_FILE, 'utf8');
   writeFileSync(path.join(dir, 'openapi.json'), openapiText, 'utf8');
+  return { dir, openapiText };
+}
+
+/**
+ * B7-3, every pull request: Schemathesis against the compose stack the
+ * end-to-end job has started, failing on any finding not accepted. Nothing
+ * here is staging's, so the scanner's output and the findings are shown.
+ */
+function gateOnStack(): number {
+  const { dir } = resultsDir();
+  runScanner('Schemathesis', schemathesisArgs(STACK_ORIGIN, dir, 'stack'), [0, 1], true);
+  const lines = gateLines(distinct(schemathesisFindings(readFileSync(path.join(dir, 'junit.xml'), 'utf8'))));
+  for (const line of lines) console.log(line);
+  console.log(
+    lines.length === 0
+      ? 'No finding beyond those accepted in tooling/dast/scan.ts.'
+      : `${String(lines.length)} finding(s): fix each, with a test that holds it, or accept it in tooling/dast/scan.ts with its reason.`,
+  );
+  return lines.length === 0 ? 0 : 1;
+}
+
+async function main(argv: readonly string[]): Promise<number> {
+  if (argv.includes('--stack')) return gateOnStack();
+  const origin = originOf(process.env.AGENTX_DAST_ORIGIN);
+  const { dir, openapiText } = resultsDir();
   await wake(origin);
   // ZAP answers 0 to 2 for a finished scan (-I: warnings don't fail it); Schemathesis 0, or 1 when a check failed.
   runScanner('ZAP', zapArgs(origin, dir), [0, 1, 2]);
@@ -390,4 +502,4 @@ async function main(): Promise<number> {
   return 0;
 }
 
-if (import.meta.main) process.exitCode = await main();
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

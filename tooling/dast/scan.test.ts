@@ -12,12 +12,14 @@ import {
   distinct,
   documentedPath,
   type Finding,
+  gateLines,
   OPENAPI_FILE,
   originOf,
   sarifOf,
   SCANNER_IMAGES,
   schemathesisArgs,
   schemathesisFindings,
+  STACK_ORIGIN,
   summaryOf,
   zapArgs,
   zapFindings,
@@ -57,8 +59,8 @@ const ZAP_REPORT = {
 };
 
 const JUNIT = `<?xml version="1.0" encoding="utf-8"?>
-<testsuites errors="0" failures="2" skipped="0" tests="3" time="1.0">
-  <testsuite name="schemathesis" errors="0" failures="2" skipped="0" tests="3" time="1.0">
+<testsuites errors="0" failures="3" skipped="0" tests="4" time="1.0">
+  <testsuite name="schemathesis" errors="0" failures="3" skipped="0" tests="4" time="1.0">
     <testcase name="POST /v1/auth/sign-out" time="0.5">
       <failure type="failure">1. Test Case ID: wORqH9
 
@@ -81,6 +83,19 @@ Reproduce with:
 [204] No Content:
 
     &lt;EMPTY&gt;</failure>
+    </testcase>
+    <testcase name="POST /v1/factor-resets/confirm" time="0.3">
+      <failure type="failure">1. Test Case ID: aaaaaa
+
+- API accepted schema-violating request
+
+[413] Content Too Large:
+
+2. Test Case ID: bbbbbb
+
+- API accepted schema-violating request
+
+[302] Found:</failure>
     </testcase>
     <testcase name="POST /v1/integrity-hold/clear" time="3.3" />
     <testcase name="GET /v1/auth/callback" time="0.2">
@@ -162,7 +177,10 @@ describe('B7 the dynamic scan of staging', () => {
       }),
       finding({ rule: 'zap/10049', title: 'Non-Storable Content', severity: 'info' }),
     ]);
-    expect(zapFindings({})).toEqual([]);
+    // A report of no site is a scan that never reached the API.
+    expect(() => zapFindings({})).toThrow(/no site/);
+    expect(() => zapFindings({ site: [] })).toThrow(/no site/);
+    expect(zapFindings({ site: [{ alerts: [] }] })).toEqual([]);
   });
 
   it("reads Schemathesis's report: each failed check at its operation, not the lines indented under it", () => {
@@ -191,6 +209,27 @@ describe('B7 the dynamic scan of staging', () => {
         ),
         status: 204,
       },
+      // Two cases in one failure, each with its own answer.
+      {
+        ...st(
+          'schemathesis/api-accepted-schema-violating-request',
+          'API accepted schema-violating request',
+          'low',
+          'POST',
+          '/v1/factor-resets/confirm',
+        ),
+        status: 413,
+      },
+      {
+        ...st(
+          'schemathesis/api-accepted-schema-violating-request',
+          'API accepted schema-violating request',
+          'low',
+          'POST',
+          '/v1/factor-resets/confirm',
+        ),
+        status: 302,
+      },
       st(
         'schemathesis/api-accepted-schema-violating-request-more',
         'API accepted schema-violating request & more',
@@ -202,12 +241,42 @@ describe('B7 the dynamic scan of staging', () => {
     ]);
   });
 
+  it('fails closed: a case that could not run is a high finding, and a report that tested nothing or miscounts throws', () => {
+    const report = (counts: string, cases: string) =>
+      `<testsuites ${counts}><testsuite name="schemathesis" ${counts}>${cases}</testsuite></testsuites>`;
+    const crashed = `<testcase name="GET /v1/members"><error type="error">Traceback (most recent call last):
+  ConnectionError: the stack went away</error></testcase><testcase name="GET /health"><error/></testcase>`;
+    const unreadable = (method: string, path: string): Finding => ({
+      tool: 'schemathesis',
+      rule: 'schemathesis/unreadable-failure',
+      title: 'A case that failed without a check it names',
+      severity: 'high',
+      method,
+      path,
+    });
+
+    expect(schemathesisFindings(report('tests="2" failures="0" errors="2"', crashed))).toEqual([
+      unreadable('GET', '/v1/members'),
+      unreadable('GET', '/health'),
+    ]);
+    expect(gateLines(schemathesisFindings(report('tests="2" failures="0" errors="2"', crashed)))).toHaveLength(2);
+    expect(() => schemathesisFindings(report('tests="0" failures="0" errors="0"', ''))).toThrow(/no test case/);
+    expect(() => schemathesisFindings('')).toThrow(/no test case/);
+    expect(() => schemathesisFindings(report('tests="2" failures="0" errors="1"', crashed))).toThrow(
+      /2 were read|and 2/,
+    );
+    expect(() => schemathesisFindings(report('tests="2" failures="1" errors="2"', crashed))).toThrow(/counts 1 failed/);
+  });
+
   it('keeps only what is accepted with a reason: an unknown method’s 404, and ZAP’s metadata probe answered by the edge', () => {
     expect(acceptedReason(finding({ tool: 'schemathesis', rule: 'schemathesis/unsupported-methods' }))).toMatch(
       /SEC-DATA-04/,
     );
     expect(acceptedReason(finding({ rule: 'zap/100001', path: '/latest/meta-data/' }))).toMatch(/Azure's edge/);
+    expect(acceptedReason(finding({ rule: 'zap/100001', path: '/openstack/latest/meta_data.json' }))).toMatch(/edge/);
+    // At an address the API serves, whatever its parameters, it is a finding.
     expect(acceptedReason(finding({ rule: 'zap/100001', path: '/v1/members' }))).toBeUndefined();
+    expect(acceptedReason(finding({ rule: 'zap/100001', path: '/v1/members/abc/role' }))).toBeUndefined();
     expect(
       acceptedReason(finding({ tool: 'schemathesis', rule: 'zap/100001', path: '/latest/meta-data/' })),
     ).toBeUndefined();
@@ -215,6 +284,13 @@ describe('B7 the dynamic scan of staging', () => {
     // A schema-violating request is accepted only when the answer was the 431 refusal.
     const violating = finding({ tool: 'schemathesis', rule: 'schemathesis/api-accepted-schema-violating-request' });
     expect(acceptedReason({ ...violating, status: 431 })).toMatch(/HEADERS_TOO_LARGE/);
+    expect(acceptedReason({ ...violating, status: 413 })).toMatch(/PAYLOAD_TOO_LARGE/);
+    expect(acceptedReason({ ...violating, status: 414 })).toMatch(/nginx/);
+    // The stack's front door's own page, at its 414 only (CI, S60).
+    const htmlPage = finding({ tool: 'schemathesis', rule: 'schemathesis/undocumented-content-type' });
+    expect(acceptedReason({ ...htmlPage, status: 414 })).toMatch(/front door/);
+    expect(acceptedReason({ ...htmlPage, status: 200 })).toBeUndefined();
+    expect(acceptedReason(htmlPage)).toBeUndefined();
     expect(acceptedReason({ ...violating, status: 302 })).toBeUndefined();
     expect(acceptedReason(violating)).toBeUndefined();
   });
@@ -301,8 +377,63 @@ describe('B7 the dynamic scan of staging', () => {
     ).join('\n');
 
     expect(summary).toContain('zap: high 1, medium 0, low 1, info 1');
-    expect(summary).toContain('schemathesis: high 0, medium 1, low 3, info 0');
+    expect(summary).toContain('schemathesis: high 0, medium 1, low 4, info 0');
     expect(summary).toContain('accepted (listed in tooling/dast/scan.ts): 2');
     expect(summary).not.toMatch(/example\.test|\/v1\/|\/health|https?:/);
+  });
+
+  it('runs Schemathesis on every pull request against the compose stack, on the runner’s network, shorter', () => {
+    const args = schemathesisArgs(STACK_ORIGIN, '/r', 'stack');
+
+    expect(STACK_ORIGIN).toBe('http://localhost:8080');
+    expect(args.slice(0, 7)).toEqual([
+      'run',
+      '--rm',
+      '--network',
+      'host',
+      '--volume',
+      '/r:/wrk',
+      SCANNER_IMAGES.schemathesis,
+    ]);
+    expect(args).toEqual(expect.arrayContaining(['--url', STACK_ORIGIN, '--header', `Origin: ${STACK_ORIGIN}`]));
+    expect(args[args.indexOf('--max-time') + 1]).toBe('300');
+    expect(schemathesisArgs(ORIGIN, '/r')).not.toContain('--network');
+    // Redirects followed as Schemathesis does by default: forbidding them made sign-in a network error (CI, S60).
+    expect(args).not.toContain('--max-redirects');
+  });
+
+  it("keeps the login service's page that sign-in's redirect leads to, at that operation and a 200 only", () => {
+    const followed = (rule: string, changes: Partial<Finding> = {}) =>
+      finding({ tool: 'schemathesis', rule, method: 'GET', path: '/v1/auth/sign-in', status: 200, ...changes });
+
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code'))).toMatch(/302/);
+    expect(acceptedReason(followed('schemathesis/undocumented-content-type'))).toMatch(/sign-in page/);
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code', { status: 500 }))).toBeUndefined();
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code', { method: 'HEAD' }))).toBeUndefined();
+    expect(
+      acceptedReason(followed('schemathesis/undocumented-http-status-code', { path: '/v1/members' })),
+    ).toBeUndefined();
+  });
+
+  it('stops a pull request on each finding not accepted, informational notes aside, naming its answer', () => {
+    const violating = finding({
+      tool: 'schemathesis',
+      rule: 'schemathesis/api-accepted-schema-violating-request',
+      path: '/v1/auth/callback',
+    });
+
+    expect(
+      gateLines([
+        { ...violating, status: 431 },
+        { ...violating, status: 302 },
+        finding({ tool: 'schemathesis', rule: 'schemathesis/unsupported-methods' }),
+        finding({ severity: 'info' }),
+        finding({ rule: 'zap/2', severity: 'high', method: 'POST' }),
+      ]),
+    ).toEqual([
+      'low schemathesis/api-accepted-schema-violating-request: GET /v1/auth/callback (answered 302)',
+      'high zap/2: POST /health',
+    ]);
+    expect(gateLines([])).toEqual([]);
   });
 });
