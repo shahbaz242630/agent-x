@@ -11,6 +11,7 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import type { AgentChanges, AgentChangeWrite } from './agent-changes.ts';
 import type {
   AgentAsked,
   AgentFound,
@@ -35,7 +36,8 @@ const LIVE: LiveSession = {
   userId: '0199a0f0-0000-7000-8000-000000000011',
   idpSessionId: 'V1_1',
   authTime: new Date('2026-09-28T09:00:00.000Z'),
-  amr: ['pwd', 'otp', 'mfa'],
+  // A passkey's sign-in, as an admin needs (ADR-012 §7).
+  amr: ['pwd', 'user', 'mfa'],
   createdAt: new Date('2026-09-28T09:00:05.000Z'),
   lastSeenAt: new Date('2026-09-28T09:10:00.000Z'),
   endsAt: new Date('2099-09-28T21:00:05.000Z'),
@@ -101,7 +103,7 @@ afterEach(async () => {
 });
 
 interface Call {
-  readonly kind: 'ask' | 'confirm' | 'list' | 'show';
+  readonly kind: 'ask' | 'confirm' | 'list' | 'show' | 'suspend' | 'reactivate' | 'reactivateConfirm';
   readonly member?: RegisteringMember;
   readonly keyed?: IdempotentRequest;
   readonly asked?: AgentAsked;
@@ -112,6 +114,7 @@ interface Answers {
   readonly write?: RegistrationWrite | Error;
   readonly listed?: AgentsListed;
   readonly found?: AgentFound;
+  readonly change?: AgentChangeWrite;
 }
 
 /** A server whose use case answers `answers`, the caller holding `role`. */
@@ -139,6 +142,21 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
       return Promise.resolve(answers.found ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
     },
   };
+  const changed = () => Promise.resolve(answers.change ?? { outcome: 'busy' as const });
+  const changes: AgentChanges = {
+    suspend: (member, keyed, agentId) => {
+      calls.push({ kind: 'suspend', member, keyed, subject: agentId });
+      return changed();
+    },
+    reactivate: (member, keyed, agentId) => {
+      calls.push({ kind: 'reactivate', member, keyed, subject: agentId });
+      return changed();
+    },
+    reactivateConfirm: (member, keyed, agentId, challengeId) => {
+      calls.push({ kind: 'reactivateConfirm', member, keyed, subject: [agentId, challengeId] });
+      return changed();
+    },
+  };
   const config = {
     http: {
       host: '127.0.0.1',
@@ -164,6 +182,7 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
     findMembership: (orgId) =>
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...MEMBER, role } : ({ outcome: 'none' } as const)),
     agentRegistrations: registrations,
+    agentChanges: changes,
   });
   servers.push(app);
   await app.ready();
@@ -355,5 +374,87 @@ describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1
     expect((await tampered.app.inject({ method: 'GET', url: '/v1/agents', headers })).json()).toMatchObject({
       error: { code: 'INTEGRITY_FAILED' },
     });
+  });
+});
+
+describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)', () => {
+  const SUSPENDED = { ...AGENT, status: 'SUSPENDED' as const };
+  const change = (path: string, payload?: unknown): InjectOptions => ({
+    method: 'POST',
+    url: `/v1/agents/${AGENT_ID}${path}`,
+    headers: {
+      ...headers,
+      'idempotency-key': 'k-1',
+      ...(payload !== undefined && { 'content-type': 'application/json' }),
+    },
+    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+  });
+
+  it('suspends with no body at all, or an empty one, answering 200 with the agent as the change left it', async () => {
+    const { app, calls } = await withAgents({
+      change: { outcome: 'changed', agent: { agent: SUSPENDED, keys: [KEY] } },
+    });
+
+    const bare = await app.inject(change('/suspend'));
+    const empty = await app.inject(change('/suspend', {}));
+
+    expect(bare.statusCode).toBe(200);
+    expect(bare.json()).toEqual({ ...AGENT_ANSWERED, agent: { ...AGENT_ANSWERED.agent, status: 'SUSPENDED' } });
+    expect(empty.statusCode).toBe(200);
+    expect(calls.map(({ kind, subject, keyed }) => [kind, subject, keyed?.operation])).toEqual([
+      ['suspend', AGENT_ID, 'agents.suspend'],
+      ['suspend', AGENT_ID, 'agents.suspend'],
+    ]);
+  });
+
+  it('asks a step-up to reactivate: 202, then confirms it with the step-up’s ID: 200', async () => {
+    const asked = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
+    const confirmed = await withAgents(
+      { change: { outcome: 'changed', agent: { agent: AGENT, keys: [KEY] } } },
+      'admin',
+    );
+
+    const ask = await asked.app.inject(change('/reactivate'));
+    const confirm = await confirmed.app.inject(change('/reactivate/confirm', { stepUpChallengeId: CHALLENGE }));
+
+    expect(ask.statusCode).toBe(202);
+    expect(ask.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.json()).toEqual(AGENT_ANSWERED);
+    expect(confirmed.calls).toEqual([
+      {
+        kind: 'reactivateConfirm',
+        member: REGISTERING,
+        keyed: expect.objectContaining({ operation: 'agents.reactivate.confirm' }) as unknown,
+        subject: [AGENT_ID, CHALLENGE],
+      },
+    ]);
+  });
+
+  it.each<[string, InjectOptions]>([
+    ['a suspension with a body', change('/suspend', { reason: 'lost' })],
+    ['a reactivation with a body', change('/reactivate', { now: true })],
+    ['a confirm with no step-up', change('/reactivate/confirm', {})],
+    ['a confirm with a step-up that isn’t an ID', change('/reactivate/confirm', { stepUpChallengeId: 'c-1' })],
+    ['an agent that isn’t an ID', { ...change('/suspend'), url: '/v1/agents/not-an-id/suspend' }],
+  ])('refuses %s with 400, never reaching the use case', async (_, request) => {
+    const { app, calls } = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
+
+    expect((await app.inject(request)).statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each<[AgentChangeWrite, number, string]>([
+    [{ outcome: 'refused', status: 409, code: 'AGENT_NOT_SUSPENDED' }, 409, 'AGENT_NOT_SUSPENDED'],
+    [{ outcome: 'refused', status: 404, code: 'NOT_FOUND' }, 404, 'NOT_FOUND'],
+    [{ outcome: 'conflict' }, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' }, 409, 'IDEMPOTENCY_KEY_BUSY'],
+  ])('answers a refusal as its status and code: %j', async (answer, status, code) => {
+    const { app } = await withAgents({ change: answer }, 'admin');
+
+    const response = await app.inject(change('/reactivate'));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
   });
 });
