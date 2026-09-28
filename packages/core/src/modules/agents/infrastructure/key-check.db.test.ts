@@ -34,23 +34,29 @@ const server = inject('postgres');
 let database: TestDatabase;
 let app: Database<Tables>;
 
-/** Stand-in keys, one per purpose; the agent-key pepper has two versions, the second current. */
-const keys = createKeyProvider(
-  Object.fromEntries(
-    PURPOSES.map((purpose, index) => [
-      purpose,
-      purpose === 'agent-key-pepper'
-        ? {
-            current: 2,
-            versions: new Map([
-              [1, Buffer.alloc(32, 0x71)],
-              [2, Buffer.alloc(32, 0x72)],
-            ]),
-          }
-        : { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) },
-    ]),
-  ),
-);
+const OLD_PEPPER = Buffer.alloc(32, 0x71);
+const NEW_PEPPER = Buffer.alloc(32, 0x72);
+
+/** Stand-in keys, one per purpose, with the agent-key pepper's versions as given. */
+const withPepper = (pepper: { current: number; versions: Map<number, Buffer> }) =>
+  createKeyProvider({
+    ...Object.fromEntries(
+      PURPOSES.map((purpose, index) => [
+        purpose,
+        { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) },
+      ]),
+    ),
+    'agent-key-pepper': pepper,
+  });
+
+/** This process's keys: the pepper rotated, version 1 kept and version 2 current. */
+const keys = withPepper({
+  current: 2,
+  versions: new Map([
+    [1, OLD_PEPPER],
+    [2, NEW_PEPPER],
+  ]),
+});
 const ids = new SequentialIds(0xc140_0000_0000);
 const START = new Date('2026-09-28T09:00:00Z');
 const DAY_MS = 86_400_000;
@@ -96,19 +102,10 @@ const newAgent = (scopes: readonly Scope[] = ['requests:read', 'requests:write']
     return id;
   });
 
-/** The MAC an older pepper version made, for a key issued before it was rotated. */
-const olderPepperMac = (id: string, secret: Buffer): Buffer => {
-  const older = createKeyProvider({
-    ...Object.fromEntries(
-      PURPOSES.map((purpose, index) => [
-        purpose,
-        { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) },
-      ]),
-    ),
-    'agent-key-pepper': { current: 1, versions: new Map([[1, Buffer.alloc(32, 0x71)]]) },
-  });
-  return older.mac('agent-key-pepper', keySecretMessage(id, secret)).mac;
-};
+/** The MAC the pepper's first version made, for a key issued before it was rotated. */
+const olderPepperMac = (id: string, secret: Buffer): Buffer =>
+  withPepper({ current: 1, versions: new Map([[1, OLD_PEPPER]]) }).mac('agent-key-pepper', keySecretMessage(id, secret))
+    .mac;
 
 interface Issuing {
   readonly scopes?: readonly Scope[];
@@ -204,6 +201,25 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
     const { text } = await issue(agent, { version: 1 });
 
     expect(await check(text)).toMatchObject({ outcome: 'accepted' });
+  });
+
+  it('refuses a key made with a pepper version since retired, logging it as an error: ours to fix, not a wrong secret', async () => {
+    const agent = await newAgent();
+    const { id, text } = await issue(agent, { version: 1 });
+    const retired = withPepper({ current: 2, versions: new Map([[2, NEW_PEPPER]]) });
+
+    const checked = await createAgentKeyCheck({
+      database: app,
+      keys: retired,
+      ids,
+      clock,
+      logger: loggerFor(capture),
+    }).check(text, 'corr-1');
+
+    expect(checked).toEqual({ outcome: 'refused' });
+    expect(lines('agent_key.refused')).toEqual([
+      expect.objectContaining({ level: 'error', reason: 'key_not_held', keyId: id }),
+    ]);
   });
 
   it('compares the secret through the KeyProvider’s verifyMac, over two 32-byte MACs (its constant time is key-provider.test.ts’s)', async () => {

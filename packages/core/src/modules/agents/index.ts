@@ -43,7 +43,7 @@ export {
 export {
   type AcceptedKey,
   agentKeyAt,
-  type AgentKeyCheck,
+  type AgentKeyChecker,
   createAgentKeyCheck,
   type KeyAtCheck,
   type KeyChecked,

@@ -13,7 +13,8 @@
 //    The key's agent is sealed, so a row pointed at another agent is caught
 //    as tampering by the key's own read.
 // 4. The secret: HMAC-SHA-256 with the agent-key pepper's version the key was
-//    made with, over ('agent-key', keyId, secret), compared with the sealed
+//    made with (a version this process no longer holds is a refusal, logged
+//    as an error), over ('agent-key', keyId, secret), compared with the sealed
 //    MAC in constant time (the KeyProvider's verifyMac: two 32-byte MACs,
 //    timingSafeEqual). Checked before anything else about the key, so a
 //    caller without the secret is refused as one, whatever state the key is in.
@@ -55,7 +56,15 @@ export interface AcceptedKey {
 
 /** Why a key was refused: for the log alone, never an answer. */
 export type KeyRefusal =
-  'malformed' | 'unlisted' | 'missing' | 'tampered' | 'wrong_secret' | 'agent_suspended' | 'revoked' | 'expired';
+  | 'malformed'
+  | 'unlisted'
+  | 'missing'
+  | 'tampered'
+  | 'key_not_held'
+  | 'wrong_secret'
+  | 'agent_suspended'
+  | 'revoked'
+  | 'expired';
 
 /** The key checked in a transaction: accepted, or refused with its reason (logged, never answered). */
 export type KeyAtCheck =
@@ -94,6 +103,15 @@ export async function agentKeyAt(
   if (keyRead.outcome !== 'found') return refused(keyRead.outcome);
   const { agent } = agentRead;
   const { key } = keyRead;
+  // A pepper version retired while a key made with it still lives (Azure.md, "Rotating a key") can't
+  // check its secret: refused, and logged as the fault it is, never taken for a wrong secret.
+  const held = keys
+    .describe()
+    .some(
+      ({ purpose, versions }) =>
+        purpose === 'agent-key-pepper' && versions.some(({ version }) => version === key.secretKeyVersion),
+    );
+  if (!held) return refused('key_not_held');
   if (!keys.verifyMac('agent-key-pepper', key.secretKeyVersion, keySecretMessage(keyId, secret), key.secretMac)) {
     return refused('wrong_secret');
   }
@@ -111,7 +129,7 @@ export async function agentKeyAt(
   };
 }
 
-export interface AgentKeyCheck {
+export interface AgentKeyChecker {
   /** Whether the key text an agent sent may act: the same `refused` for every reason, logged with it. */
   check(text: string, correlationId: string): Promise<KeyChecked>;
 }
@@ -130,13 +148,15 @@ export function createAgentKeyCheck({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly logger: Logger;
-}): AgentKeyCheck {
+}): AgentKeyChecker {
   return {
     async check(text, correlationId) {
       const log = logger.child({ correlationId });
       const answer = (checked: KeyAtCheck, keyId: string | null): KeyChecked => {
         if (checked.outcome === 'accepted') return checked;
-        log.info('agent_key.refused', { reason: checked.reason, keyId });
+        // A pepper version this process doesn't hold is ours to fix, not the caller's doing.
+        if (checked.reason === 'key_not_held') log.error('agent_key.refused', { reason: checked.reason, keyId });
+        else log.info('agent_key.refused', { reason: checked.reason, keyId });
         return { outcome: 'refused' };
       };
       const presented = parseAgentKey(text);
