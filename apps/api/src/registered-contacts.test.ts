@@ -12,6 +12,7 @@ import type {
   Role,
   SignIn,
 } from '@agentx/core/modules/identity';
+import { TooManyContacts } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -79,7 +80,7 @@ interface Call {
 /** A server whose writes answer `answer` and whose list answers `listed` (none given the server when undefined), the caller holding `role`. */
 async function withContacts(
   answer: ContactChangeWrite | Error | undefined,
-  { role = 'admin', listed }: { role?: Role; listed?: Awaited<ReturnType<ListContacts>> } = {},
+  { role = 'admin', listed }: { role?: Role; listed?: Awaited<ReturnType<ListContacts>> | Error } = {},
 ) {
   const asked: Call[] = [];
   const answered = () =>
@@ -131,7 +132,7 @@ async function withContacts(
     ...(listed !== undefined && {
       listContacts: (orgId: string) => {
         lists.push(orgId);
-        return Promise.resolve(listed);
+        return listed instanceof Error ? Promise.reject(listed) : Promise.resolve(listed);
       },
     }),
   });
@@ -190,6 +191,17 @@ describe('GET /v1/registered-contacts lists the organisation’s ACTIVE contacts
       ],
     });
     expect(lists).toEqual([ORG]);
+  });
+
+  it('answers 409 TOO_MANY_CONTACTS past the records the list reads (B8-2), and 500 for any other failure', async () => {
+    const tooMany = await withContacts(undefined, { listed: new TooManyContacts() });
+    const failed = await withContacts(undefined, { listed: new Error('the database went away') });
+
+    const response = await tooMany.app.inject({ method: 'GET', url: '/v1/registered-contacts', headers });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'TOO_MANY_CONTACTS' } });
+    expect((await failed.app.inject({ method: 'GET', url: '/v1/registered-contacts', headers })).statusCode).toBe(500);
   });
 
   it('withholds the list when a contact can’t be believed: 503 INTEGRITY_FAILED', async () => {
@@ -345,6 +357,8 @@ describe('all four registered contact writes (B6-1c)', () => {
   it.each([
     [409, 'CONTACT_EXISTS'],
     [409, 'CONTACTS_FULL'],
+    [409, 'CONTACT_ADDS_SPENT'],
+    [409, 'TOO_MANY_CONTACTS'],
     [409, 'CONTACT_CLOSED'],
     [409, 'CONTACT_NOT_ACTIVE'],
     [403, 'STEP_UP_FAILED'],

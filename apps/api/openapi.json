@@ -36,6 +36,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "CONTACT_ADDS_SPENT",
+                    "description": "The organisation has started adding as many registered contacts as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once."
+                  },
+                  {
+                    "type": "string",
                     "const": "CONTACT_CLOSED",
                     "description": "This registered contact can't be confirmed: it was confirmed already, or it was asked for in another way. Ask for it again if it is still needed."
                   },
@@ -181,6 +186,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "RESET_ASKS_SPENT",
+                    "description": "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once."
+                  },
+                  {
+                    "type": "string",
                     "const": "RESET_CLOSED",
                     "description": "This reset can't be confirmed or cancelled any more: it was confirmed already, cancelled, completed, or it lapsed. Nothing was changed. Look at the organisation's resets again."
                   },
@@ -218,6 +228,11 @@
                     "type": "string",
                     "const": "SUPPLIER_CHANGED",
                     "description": "The supplier's payment details changed after the request was decided, so it is refused before hand-off."
+                  },
+                  {
+                    "type": "string",
+                    "const": "TOO_MANY_CONTACTS",
+                    "description": "The organisation has more registered contact records than Agent X checks at once, so its contacts can't be read or changed. Contact Agent X support."
                   },
                   {
                     "type": "string",

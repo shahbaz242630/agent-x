@@ -23,7 +23,9 @@
 // Refusals: 409 OWN_RESET for the admin's own; 409 MEMBER_DEACTIVATED; 409
 // MEMBER_ELSEWHERE for a member of another organisation too (the runbook);
 // 409 NO_COUNTING_CONTACTS; 409 RESET_OPEN while one is under way; 409
-// RESET_CLOSED for a reset sent, ended or lapsed; 409 TOO_MANY_RESETS; 404
+// RESET_CLOSED for a reset sent, ended or lapsed; 409 RESET_ASKS_SPENT past
+// the organisation's asks in 24 hours (B8-2); 409 TOO_MANY_RESETS or
+// TOO_MANY_CONTACTS past the records a check reads; 404
 // for a member or reset not in the organisation; 403 STEP_UP_FAILED for
 // another change than the one signed in again for; 503 INTEGRITY_FAILED when
 // a record it rests on can't be verified. The use case is the identity

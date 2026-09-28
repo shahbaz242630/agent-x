@@ -248,7 +248,7 @@ export async function resetForChange(
  * about them, that `openResetsFor` reads for an organisation: many years of
  * resets at the pilot's size (Carry-Forward: a narrower read before production).
  */
-const MOST_RESET_RECORDS = 500;
+export const MOST_RESET_RECORDS = 500;
 
 /** More resets, or objects in the log about them, than `openResetsFor` or `resetsOf` reads. */
 export class TooManyResets extends Error {
@@ -256,6 +256,29 @@ export class TooManyResets extends Error {
     super(`The organisation has more than ${String(MOST_RESET_RECORDS)} reset records, more than a check reads`);
     this.name = 'TooManyResets';
   }
+}
+
+/**
+ * How many resets the organisation's admins asked for after `since`, and how
+ * many records it holds in all (B8-2): a budget's count from the table's own
+ * rows, in the caller's transaction for the organisation. No reset is decided
+ * on from it, so it isn't verified; `openResetsFor` verifies every one.
+ */
+export async function resetRecordsCount(
+  tx: ResetsTransaction,
+  orgId: string,
+  since: Date,
+): Promise<{ readonly asked: number; readonly held: number }> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- counts alone, for a budget; no reset is decided on from them
+    .selectFrom(FACTOR_RESETS.table)
+    .select([
+      sql<number>`pg_catalog.count(*) filter (where created_at > ${since})::int`.as('asked'),
+      sql<number>`pg_catalog.count(*)::int`.as('held'),
+    ])
+    .where('org_id', '=', orgId)
+    .executeTakeFirstOrThrow();
+  return { asked: row.asked, held: row.held };
 }
 
 /**

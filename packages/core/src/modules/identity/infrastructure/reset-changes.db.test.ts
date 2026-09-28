@@ -27,11 +27,16 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
-import { RESET_CONFIRM_HOURS, RESET_COOLING_OFF_HOURS, resetExpiresAt } from '../domain/factor-reset.ts';
+import {
+  MOST_RESETS_ASKED_A_DAY,
+  RESET_CONFIRM_HOURS,
+  RESET_COOLING_OFF_HOURS,
+  resetExpiresAt,
+} from '../domain/factor-reset.ts';
 import type { Role } from '../domain/membership.ts';
 import { CONTACT_COOLING_OFF_DAYS, contactCountsFrom } from '../domain/registered-contact.ts';
 import { createContactConfirmations } from './contact-confirmations.ts';
-import { confirmationSecret, draftReset, FACTOR_RESETS, resetChange } from './factor-resets.ts';
+import { confirmationSecret, draftReset, FACTOR_RESETS, MOST_RESET_RECORDS, resetChange } from './factor-resets.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { addMembership, MEMBERSHIPS } from './memberships.ts';
 import {
@@ -64,6 +69,7 @@ const START = new Date('2026-09-27T09:00:00Z');
 const HOUR_MS = 3_600_000;
 let clock: FixedClock;
 let changes: ResetChanges;
+let capture: LogCapture;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
@@ -240,6 +246,29 @@ async function sent({ admin, person }: Org): Promise<string> {
 
 const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
 
+const DAY_MS = 24 * HOUR_MS;
+
+/** Drafts `count` resets of the person straight into the table, two days ago: records, not asked for today. */
+async function oldResets({ org, admin, person }: Pick<Org, 'org' | 'admin' | 'person'>, count: number): Promise<void> {
+  const askedAt = new Date(clock.now().getTime() - 2 * DAY_MS);
+  await withSignedStates(app, org, services(), async (tx, states) => {
+    for (let each = 0; each < count; each += 1) {
+      const { change } = resetChange({
+        orgId: org,
+        id: ids.next(),
+        person: person.membershipId,
+        requestedBy: admin.membershipId,
+        expiresAt: resetExpiresAt(askedAt),
+      });
+      await draftReset(tx, states, change, {
+        stepUpChallengeId: ids.next(),
+        createdAt: askedAt,
+        actor: { type: 'user', id: admin.userId },
+      });
+    }
+  });
+}
+
 /** The organisation's notices, in the order written. */
 const noticesOf = (org: string) =>
   app
@@ -293,6 +322,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(START);
+  capture = new LogCapture();
   changes = createResetChanges({
     database: app,
     keys,
@@ -300,7 +330,7 @@ beforeEach(() => {
     clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(new LogCapture()),
+    logger: loggerFor(capture),
   });
 });
 
@@ -453,25 +483,54 @@ describe(`asking for a reset (B6-3b, Postgres ${server.version})`, () => {
 
   it('refuses past the resets a check reads (TOO_MANY_RESETS), at the ask and the list', async () => {
     const { org, admin, person } = await organization();
-    await withSignedStates(app, org, services(), async (tx, states) => {
-      for (let count = 0; count < 501; count += 1) {
-        const { change } = resetChange({
-          orgId: org,
-          id: ids.next(),
-          person: person.membershipId,
-          requestedBy: admin.membershipId,
-          expiresAt: resetExpiresAt(clock.now()),
-        });
-        await draftReset(tx, states, change, {
-          stepUpChallengeId: ids.next(),
-          createdAt: clock.now(),
-          actor: { type: 'user', id: admin.userId },
-        });
-      }
-    });
+    await oldResets({ org, admin, person }, 501);
 
     expect(await ask(admin, person.membershipId)).toEqual(refused(409, 'TOO_MANY_RESETS'));
     expect(await changes.list(org, CORRELATION)).toEqual(refused(409, 'TOO_MANY_RESETS'));
+  }, 60_000);
+});
+
+describe(`the organisation's budget of resets asked (B8-2, Postgres ${server.version})`, () => {
+  it(`refuses an ask past ${String(MOST_RESETS_ASKED_A_DAY)} in 24 hours, cancelled ones included, writing nothing, and takes one once 24 hours have passed`, async () => {
+    const { org, admin, otherAdmin, person } = await organization();
+    for (let each = 0; each < MOST_RESETS_ASKED_A_DAY; each += 1)
+      written(await cancel(otherAdmin, written(await ask(admin, person.membershipId)).reset.id));
+    await clearNotices(org);
+
+    expect(await ask(admin, person.membershipId)).toEqual(refused(409, 'RESET_ASKS_SPENT'));
+    expect(await noticesOf(org)).toEqual([]);
+
+    clock.advanceBy(DAY_MS - 1);
+    const almost = { ...admin, sessionId: await signedIn(admin.userId) };
+    expect(await ask(almost, person.membershipId)).toEqual(refused(409, 'RESET_ASKS_SPENT'));
+    clock.advanceBy(1);
+    const aDayOn = { ...admin, sessionId: await signedIn(admin.userId) };
+    expect(await ask(aDayOn, person.membershipId)).toMatchObject({ outcome: 'written', reset: { status: 'DRAFT' } });
+  }, 60_000);
+
+  it('counts only resets asked in the last 24 hours, not the records held from before', async () => {
+    const { org, admin, otherAdmin, person } = await organization();
+    await oldResets({ org, admin, person: otherAdmin }, MOST_RESETS_ASKED_A_DAY);
+
+    expect(await ask(admin, person.membershipId)).toMatchObject({ outcome: 'written', reset: { status: 'DRAFT' } });
+  });
+
+  it(`warns once the organisation's records reach half of the ${String(MOST_RESET_RECORDS)} a check reads`, async () => {
+    const { org, admin, otherAdmin, person } = await organization();
+    await oldResets({ org, admin, person: otherAdmin }, MOST_RESET_RECORDS / 2 - 1);
+    written(await cancel(admin, written(await ask(admin, person.membershipId)).reset.id));
+    expect(capture.lines().filter((line) => line.event === 'identity.records_filling')).toEqual([]);
+
+    written(await ask(admin, person.membershipId));
+    expect(capture.lines().filter((line) => line.event === 'identity.records_filling')).toEqual([
+      expect.objectContaining({
+        level: 'warn',
+        records: 'factor_resets',
+        held: MOST_RESET_RECORDS / 2,
+        most: MOST_RESET_RECORDS,
+        correlationId: CORRELATION,
+      }),
+    ]);
   }, 60_000);
 });
 

@@ -15,7 +15,9 @@
 //    202 with its ID; `…/remove/confirm` with that ID, once signed in again,
 //    removes it.
 // Refusals: 409 CONTACT_EXISTS for an address one of its ACTIVE contacts has;
-// 409 CONTACTS_FULL past MOST_CONTACTS; 409 CONTACT_CLOSED for a contact
+// 409 CONTACTS_FULL past MOST_CONTACTS; 409 CONTACT_ADDS_SPENT past the
+// organisation's contacts started in 24 hours (B8-2); 409 TOO_MANY_CONTACTS
+// past the records the list reads; 409 CONTACT_CLOSED for a contact
 // confirmed already; 409 CONTACT_NOT_ACTIVE for one removed or never
 // confirmed; 404 for one not in the organisation; 403 STEP_UP_FAILED for
 // another change than the one signed in again for; 503 INTEGRITY_FAILED when
@@ -32,6 +34,7 @@ import {
   countsNow,
   EMAIL_MAX,
   MOST_CONTACTS,
+  TooManyContacts,
 } from '@agentx/core/modules/identity';
 import { systemClock } from '@agentx/core/shared-kernel';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -202,7 +205,11 @@ export function registerRegisteredContacts(
     async (request, reply) => {
       const admin = adminOf(request);
       if (listContacts === undefined) throw new Error('the registered contacts route ran without its list');
-      const list = await listContacts(admin.orgId, request.id);
+      const list = await listContacts(admin.orgId, request.id).catch((error: unknown) => {
+        if (error instanceof TooManyContacts) return { outcome: 'too_many' } as const;
+        throw error;
+      });
+      if (list.outcome === 'too_many') return sendErrorBody(reply, 409, 'TOO_MANY_CONTACTS', request.id);
       if (list.outcome === 'tampered') return sendErrorBody(reply, 503, 'INTEGRITY_FAILED', request.id);
       const now = systemClock.now();
       return { contacts: list.contacts.map((contact) => contactOf(contact, now)) };

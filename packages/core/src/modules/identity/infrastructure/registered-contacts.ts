@@ -387,6 +387,29 @@ export class TooManyContacts extends Error {
   }
 }
 
+/**
+ * How many contacts the organisation started after `since`, and how many
+ * records it holds in all (B8-2): a budget's count from the table's own rows,
+ * in the caller's transaction for the organisation. No contact is decided on
+ * from it, so it isn't verified; `contactsOf` verifies every one.
+ */
+export async function contactRecordsCount(
+  tx: ContactsTransaction,
+  orgId: string,
+  since: Date,
+): Promise<{ readonly started: number; readonly held: number }> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- counts alone, for a budget; no contact is decided on from them
+    .selectFrom(REGISTERED_CONTACTS.table)
+    .select([
+      sql<number>`pg_catalog.count(*) filter (where created_at > ${since})::int`.as('started'),
+      sql<number>`pg_catalog.count(*)::int`.as('held'),
+    ])
+    .where('org_id', '=', orgId)
+    .executeTakeFirstOrThrow();
+  return { started: row.started, held: row.held };
+}
+
 /** A contact with its address. */
 export interface ContactWithAddress extends ContactRecord {
   readonly email: string;

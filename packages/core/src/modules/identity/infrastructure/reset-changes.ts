@@ -11,7 +11,8 @@
 //    the person's resets one ask at a time (a transaction advisory lock for
 //    the organisation and person, so two asks can't both find none open);
 //    the admin and the person read in order of membership ID (ADR-006 §6
-//    level 2a): the admin active and still an admin, the person someone else
+//    level 2a): the admin active and still an admin, the organisation within
+//    its budget of asks (RESET_ASKS_SPENT, B8-2), the person someone else
 //    (OWN_RESET), listed as the directory says, active (MEMBER_DEACTIVATED)
 //    and in no other organisation (MEMBER_ELSEWHERE: their login signs in to
 //    each, and one organisation can't reset it for the others: the runbook);
@@ -48,26 +49,36 @@ import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/inde
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedElsewhere, listedMember, listedMembership } from '../../directory/index.ts';
 import type { Notice, NoticeKind, NotificationsTables, Outbox } from '../../notifications/index.ts';
-import { confirmableAt, hasLapsed, isOpenReset, resetExpiresAt } from '../domain/factor-reset.ts';
+import {
+  confirmableAt,
+  hasLapsed,
+  isOpenReset,
+  MOST_RESETS_ASKED_A_DAY,
+  resetExpiresAt,
+} from '../domain/factor-reset.ts';
 import { countsNow } from '../domain/registered-contact.ts';
 import {
   askContacts,
   draftReset,
   listedPersonOf,
+  MOST_RESET_RECORDS,
   moveReset,
   openResetsFor,
   resetChange,
   resetForChange,
   type ResetRecord,
   resetRecord,
+  resetRecordsCount,
   resetsOf,
   TooManyResets,
 } from './factor-resets.ts';
 import type { InvitingAdmin } from './inviting.ts';
 import { memberOf, type MemberRecord, type MembershipsTransaction } from './memberships.ts';
-import { contactsOf } from './registered-contacts.ts';
+import { contactsOf, TooManyContacts } from './registered-contacts.ts';
 import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+
+const DAY_MS = 86_400_000;
 
 /** Asking for a reset: its operation, which the step-up challenge names as its action too. */
 export const RESET_ASK_OPERATION = 'resets.ask';
@@ -269,6 +280,21 @@ export function createResetChanges({
     return read;
   };
 
+  /**
+   * Refuses an ask past the organisation's budget of MOST_RESETS_ASKED_A_DAY
+   * (RESET_ASKS_SPENT, B8-2), and warns once its records pass half of what a
+   * check reads, long before resets can't be asked. Counted under the
+   * person's lock only, so asks for different people at once may pass it by
+   * the few running together: a budget, not a boundary; the check's own
+   * bound behind it is exact.
+   */
+  const withinBudget = async (tx: Transaction<Tables>, orgId: string, log: Logger): Promise<void> => {
+    const count = await resetRecordsCount(tx, orgId, new Date(clock.now().getTime() - DAY_MS));
+    if (count.held * 2 >= MOST_RESET_RECORDS)
+      log.warn('identity.records_filling', { records: 'factor_resets', held: count.held, most: MOST_RESET_RECORDS });
+    if (count.asked >= MOST_RESETS_ASKED_A_DAY) throw new ResetRefused(409, 'RESET_ASKS_SPENT');
+  };
+
   /** Serialises the person's resets, so a check for an open one holds until the ask commits. */
   const oneAtATime = async (tx: Transaction<Tables>, orgId: string, personId: string): Promise<void> => {
     const key = `agentx.factor-resets:${orgId.toLowerCase()}:${personId.toLowerCase()}`;
@@ -302,6 +328,8 @@ export function createResetChanges({
       if (error instanceof ResetRefused) return { outcome: 'refused' as const, status: error.status, code: error.code };
       if (error instanceof TooManyResets)
         return { outcome: 'refused' as const, status: 409, code: 'TOO_MANY_RESETS' as const };
+      if (error instanceof TooManyContacts)
+        return { outcome: 'refused' as const, status: 409, code: 'TOO_MANY_CONTACTS' as const };
       throw error;
     }
   };
@@ -369,6 +397,7 @@ export function createResetChanges({
       const done = await write(admin, idempotent, services, async (tx, states) => {
         await oneAtATime(tx, admin.orgId, membershipId);
         const people = await peopleOf(tx, states, admin, membershipId);
+        await withinBudget(tx, admin.orgId, services.logger);
         await mustBeResettable(tx, admin.orgId, people);
         someoneToConfirm(await countingContacts(tx, states, admin.orgId));
         const open = await openResetsFor(tx, states, admin.orgId, people.person.id);

@@ -19,6 +19,8 @@ export const REASON_CODES = {
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   CONTACTS_FULL:
     'The organisation already has as many registered contacts as it may, so no other can be added. Remove one first.',
+  CONTACT_ADDS_SPENT:
+    "The organisation has started adding as many registered contacts as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
   CONTACT_CLOSED:
     "This registered contact can't be confirmed: it was confirmed already, or it was asked for in another way. Ask for it again if it is still needed.",
   CONTACT_EXISTS: "This address is already one of the organisation's registered contacts, so it was not added again.",
@@ -72,6 +74,8 @@ export const REASON_CODES = {
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
+  RESET_ASKS_SPENT:
+    "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once.",
   RESET_CLOSED:
     "This reset can't be confirmed or cancelled any more: it was confirmed already, cancelled, completed, or it lapsed. Nothing was changed. Look at the organisation's resets again.",
   RESET_OPEN:
@@ -86,6 +90,8 @@ export const REASON_CODES = {
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
+  TOO_MANY_CONTACTS:
+    "The organisation has more registered contact records than Agent X checks at once, so its contacts can't be read or changed. Contact Agent X support.",
   TOO_MANY_RESETS:
     "The organisation has more reset records than Agent X checks at once, so this reset can't be asked for. Contact Agent X support.",
   UNAUTHENTICATED:

@@ -160,6 +160,7 @@ export {
   type ContactWithAddress,
   REGISTERED_CONTACTS,
   registeredContactsFor,
+  TooManyContacts,
 } from './infrastructure/registered-contacts.ts';
 export { FACTOR_RESETS, resetLinkFor } from './infrastructure/factor-resets.ts';
 export {
