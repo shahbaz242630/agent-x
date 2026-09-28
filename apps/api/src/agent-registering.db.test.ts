@@ -21,7 +21,15 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -388,6 +396,29 @@ describe('what registering refuses, writing nothing', () => {
     const later = askedFor(await ask(again, last, 'ask-later'));
     await stepUp(again, later, APP_CODE);
     expect(registeredOf(await confirm(again, later, last)).agent.agent.name).toBe('One too many');
+  });
+
+  it('confirms only once it holds the organisation’s lock for adding agents, so two can’t both take the day’s last', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const challengeId = askedFor(await ask(developer));
+    await stepUp(developer, challengeId, APP_CODE);
+    // Another registration of the organisation's, part-way: its lock taken, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.agents:${org}`,
+      ]);
+      const confirming = within(20_000, confirm(developer, challengeId), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(registeredOf(await confirming).key).not.toBeNull();
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('a key used for another request: a conflict', async () => {

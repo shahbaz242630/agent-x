@@ -184,6 +184,9 @@ export async function agentsShown(
   });
 }
 
+/** The lowest uuid: every agent's ID is after it. */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
 /** The most agents a page gives. */
 export const MOST_AGENTS_A_PAGE = 50;
 
@@ -212,17 +215,20 @@ export async function agentsPage(
     .selectFrom(AGENTS.table)
     .select('id')
     .where('org_id', '=', orgId)
-    .$if(after !== null, (query) => query.where('id', '>', after ?? ''))
+    // From the start, every ID is after the nil uuid.
+    .where('id', '>', after ?? NIL_UUID)
     .orderBy('id')
     .limit(limit + 1)
     .execute();
-  const page = rows.slice(0, limit);
   const found: AgentRecord[] = [];
-  for (const { id } of page) {
+  let last: string | null = null;
+  for (const { id } of rows.slice(0, limit)) {
     const read = await agentOf(tx, states, { orgId, id }, 'share');
     if (read.outcome === 'tampered') return read;
     if (read.outcome === 'found') found.push(read.agent);
+    last = id;
   }
-  const next = rows.length > limit ? (page.at(-1)?.id ?? null) : null;
+  // One more than the page was there: the next page starts after this one's last.
+  const next = rows.length > limit ? last : null;
   return { outcome: 'listed', agents: await agentsShown(tx, orgId, found), next };
 }

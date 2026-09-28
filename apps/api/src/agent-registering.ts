@@ -157,19 +157,14 @@ type Tx = DatabaseTransaction<Tables>;
 const DAY_MS = 86_400_000;
 
 /**
- * The pending change's SHA-256: the organisation, the member's membership,
- * the name as it will be kept and the scopes as they will be sealed. The name
- * is composed (NFC) by the caller's check, so the same name typed either way
- * binds the same change.
+ * The pending change's SHA-256: the organisation, the name as it will be kept
+ * (composed, NFC, so the same name typed either way binds the same change) and
+ * the scopes as they will be sealed. Who owns it needs no place here: the
+ * challenge is bound to the member's own session, and a person has one
+ * membership in an organisation, read again at the confirm.
  */
-const registrationHash = (orgId: string, membershipId: string, { name, scopes }: AgentAsked): Buffer =>
-  changeHashOf([
-    REGISTER_OPERATION,
-    orgId.toLowerCase(),
-    membershipId.toLowerCase(),
-    name.normalize('NFC'),
-    scopesText(scopes),
-  ]);
+const registrationHash = (orgId: string, { name, scopes }: AgentAsked): Buffer =>
+  changeHashOf([REGISTER_OPERATION, orgId.toLowerCase(), name.normalize('NFC'), scopesText(scopes)]);
 
 export function createAgentRegistrations({
   database,
@@ -260,11 +255,11 @@ export function createAgentRegistrations({
   return {
     async ask(member, idempotent, asked, correlationId) {
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
-        const { membershipId } = await registrantOf(tx, states, member);
+        await registrantOf(tx, states, member);
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: REGISTER_OPERATION,
-          changeHash: registrationHash(member.orgId, membershipId, asked),
+          changeHash: registrationHash(member.orgId, asked),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new RegistrationRefused(401, 'UNAUTHENTICATED');
@@ -289,7 +284,7 @@ export function createAgentRegistrations({
           {
             sessionId: member.sessionId,
             action: REGISTER_OPERATION,
-            changeHash: registrationHash(member.orgId, membershipId, asked),
+            changeHash: registrationHash(member.orgId, asked),
           },
           // An admin's change is proved with a passkey (SEC-HA-12); a developer's with their second factor.
           { passkeyRequired: isAdmin },
@@ -325,12 +320,12 @@ export function createAgentRegistrations({
         return { status: 201, resourceId: agentId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      // Answered from the agent as it now stands; on a retry, without the key, which was shown once.
+      // Answered from the agent as it now stands. The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await answered(member.orgId, correlationId, (tx, states) =>
         withKeys(tx, states, member.orgId, done.result.resourceId),
       );
       if ('outcome' in agent) return agent;
-      return { outcome: 'registered', agent, key: done.outcome === 'done' ? key : null };
+      return { outcome: 'registered', agent, key };
     },
 
     async list(orgId, page, correlationId) {
