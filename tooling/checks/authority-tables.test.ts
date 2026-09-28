@@ -17,6 +17,7 @@ import {
   AUTHORITY_TABLES as PRODUCT_AUTHORITY_TABLES,
   type AuthorityTableEntry,
 } from '../../packages/core/src/authority-tables.ts';
+import * as agents from '../../packages/core/src/modules/agents/index.ts';
 import {
   FACTOR_RESET,
   FACTOR_RESETS,
@@ -97,15 +98,18 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a) and a factor reset (B6-3a)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets.
-    const [organizations, invitations, memberships, contacts, resets, ...others] = PRODUCT_AUTHORITY_TABLES;
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys.
+    const [organizations, invitations, memberships, contacts, resets, agentRows, agentKeys, ...others] =
+      PRODUCT_AUTHORITY_TABLES;
 
     expect(organizations).toBe(ORGANIZATIONS);
     expect(invitations).toBe(INVITATIONS);
     expect(memberships).toBe(MEMBERSHIPS);
     expect(contacts).toBe(REGISTERED_CONTACTS);
     expect(resets).toBe(FACTOR_RESETS);
+    expect(agentRows).toBe(agents.AGENTS);
+    expect(agentKeys).toBe(agents.AGENT_KEYS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -139,6 +143,18 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: FACTOR_RESETS.fields,
         status: FACTOR_RESET,
       },
+      {
+        table: agents.AGENTS.table,
+        subject: agents.AGENTS.subject,
+        fields: agents.AGENTS.fields,
+        status: agents.AGENT,
+      },
+      {
+        table: agents.AGENT_KEYS.table,
+        subject: agents.AGENT_KEYS.subject,
+        fields: agents.AGENT_KEYS.fields,
+        status: agents.AGENT_KEY,
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -150,6 +166,10 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[3]?.status).toBe(REGISTERED_CONTACT);
     expect(AUTHORITY_TABLES[4]?.fields).toBe(FACTOR_RESETS.fields);
     expect(AUTHORITY_TABLES[4]?.status).toBe(FACTOR_RESET);
+    expect(AUTHORITY_TABLES[5]?.fields).toBe(agents.AGENTS.fields);
+    expect(AUTHORITY_TABLES[5]?.status).toBe(agents.AGENT);
+    expect(AUTHORITY_TABLES[6]?.fields).toBe(agents.AGENT_KEYS.fields);
+    expect(AUTHORITY_TABLES[6]?.status).toBe(agents.AGENT_KEY);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

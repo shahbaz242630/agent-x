@@ -139,6 +139,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would leave an open invitation no one can accept.
       appMay: ['SELECT', 'INSERT'],
     },
+    'directory.agent_keys': {
+      reason:
+        "The directory's list of agent keys (ADR-005 §6, ADR-011 §1, C1-1): a key's ID and its organisation, found when a request carries the key, before any organisation is known; the key itself is read and verified inside that organisation's withTenant",
+      columns: ['key_id', 'org_id'],
+      // Added as its key is issued, and read; an entry changed would place a
+      // key in an organisation that has no such key (which then finds none),
+      // and one deleted would leave a key no request can be placed with.
+      appMay: ['SELECT', 'INSERT'],
+    },
     'identity.session_emails': {
       reason:
         "A session's verified email address (ADR-003 §5, B4-4a), encrypted, for an invitation to be matched against; it belongs to the person's session, which belongs to no organisation, and goes with it",

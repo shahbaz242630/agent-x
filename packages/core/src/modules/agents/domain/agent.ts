@@ -1,0 +1,94 @@
+// An AI agent and its keys (PRD §3 `Agent` / `AgentCredential`, ADR-011 §1;
+// BR-03).
+//
+// An agent belongs to one organisation and one owner, a member of it. It is
+// ACTIVE or SUSPENDED: suspending is the kill switch (ADR-012 §5), instant
+// and one click, and reactivating gives its authority back. The database's
+// status guard holds the same moves (0027).
+//
+// A key is ACTIVE until it is revoked, once, and works only until it expires.
+// A rotation issues a new key and brings the old one's expiry forward to the
+// end of the overlap (ADR-011 §1); an emergency revocation has no overlap.
+//
+// Scopes say what an agent may ask for. The agent's are the most any of its
+// keys may be given, and a request is allowed only what both the key's and
+// the agent's scopes hold, so narrowing an agent narrows its keys at once. A
+// key alone never grants spending: that is the mandate's (BR-03).
+import { defineStateMachine } from '../../../shared-kernel/index.ts';
+
+export const AGENT = defineStateMachine({
+  name: 'agent',
+  states: ['ACTIVE', 'SUSPENDED'],
+  initial: 'ACTIVE',
+  events: {
+    suspend: { from: ['ACTIVE'], to: 'SUSPENDED' },
+    reactivate: { from: ['SUSPENDED'], to: 'ACTIVE' },
+  },
+});
+
+export type AgentStatus = (typeof AGENT.states)[number];
+
+export const AGENT_KEY = defineStateMachine({
+  name: 'agent_key',
+  states: ['ACTIVE', 'REVOKED'],
+  initial: 'ACTIVE',
+  events: {
+    revoke: { from: ['ACTIVE'], to: 'REVOKED' },
+  },
+});
+
+export type AgentKeyStatus = (typeof AGENT_KEY.states)[number];
+
+/**
+ * Every scope there is, in order:
+ * - `requests:write`: ask for a payment, and cancel its own requests (Phase 3)
+ * - `requests:read`: read its own requests and their decisions (Phase 3)
+ * - `sources:read`: the safe summary of the organisation's funding sources (SEC-AG-05)
+ * - `suppliers:read`: the organisation's suppliers, by ID and name alone (SEC-AG-05)
+ */
+export const SCOPES = ['requests:read', 'requests:write', 'sources:read', 'suppliers:read'] as const;
+export type Scope = (typeof SCOPES)[number];
+
+export const isScope = (value: unknown): value is Scope => SCOPES.some((scope) => scope === value);
+
+/** A list of scopes that can't be kept: `problems` say why. */
+export class ScopesRefused extends Error {
+  readonly problems: readonly string[];
+
+  constructor(problems: readonly string[]) {
+    super(`The scopes were refused: ${problems.join('; ')}`);
+    this.name = 'ScopesRefused';
+    this.problems = problems;
+  }
+}
+
+/**
+ * The scopes as they are kept and sealed: at least one, each a known scope,
+ * given once, in SCOPES' order, one space apart; so the same scopes are
+ * always the same text. Anything else is `ScopesRefused`.
+ */
+export function scopesText(scopes: readonly string[]): string {
+  const problems: string[] = [];
+  if (scopes.length === 0) problems.push('at least one scope is given');
+  if (!scopes.every(isScope)) problems.push('a scope is not one there is');
+  if (new Set(scopes).size !== scopes.length) problems.push('a scope is given twice');
+  if (problems.length > 0) throw new ScopesRefused(problems);
+  return SCOPES.filter((scope) => scopes.includes(scope)).join(' ');
+}
+
+/**
+ * The scopes a kept text holds, in SCOPES' order. The text was sealed as
+ * scopesText gave it, so anything else is an error, never an empty grant.
+ */
+export function scopesOf(text: string): Scope[] {
+  const words = text.split(' ');
+  const scopes = words.filter(isScope);
+  if (scopes.length !== words.length || scopesText(scopes) !== text) {
+    throw new Error('Kept scopes are not as scopesText gives them');
+  }
+  return scopes;
+}
+
+/** Whether every one of `some` is among `all`: a key's scopes within its agent's. */
+export const scopesWithin = (some: readonly Scope[], all: readonly Scope[]): boolean =>
+  some.every((scope) => all.includes(scope));

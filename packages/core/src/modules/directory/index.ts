@@ -2,6 +2,7 @@
 // IDs only, for the work that runs before an organisation is known or across
 // organisations. Other modules write to them only through these functions, in
 // the same transaction as the tenant row an entry points to.
+export { listedAgentKey, registerAgentKey } from './infrastructure/agent-keys.ts';
 export { type InviteEntry, listedInvite, registerInvite } from './infrastructure/invites.ts';
 export {
   listedElsewhere,
