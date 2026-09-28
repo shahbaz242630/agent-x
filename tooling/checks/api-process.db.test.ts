@@ -94,19 +94,26 @@ function lines(): Line[] {
 }
 
 describe(`the API process (Postgres ${server.version})`, () => {
-  it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', () => {
-    const events = lines()
-      .map((line) => String(line.event))
-      .filter((event) => event.startsWith('api.'));
-    expect(events).toEqual([
-      'api.starting',
-      'api.database_connected',
-      'api.start_recorded',
-      'api.listening',
-      'api.notices',
-      'api.idp_events',
-      'api.factor_resets',
-    ]);
+  it('SEC-OPS-05 logs its config fingerprint, connects as the app role, records the start, then listens', async () => {
+    // The jobs' lines follow api.listening, which is all beforeAll waits for: wait for them, not the first read
+    // (a flake twice in a week, S60 and S61).
+    await vi.waitFor(
+      () => {
+        const events = lines()
+          .map((line) => String(line.event))
+          .filter((event) => event.startsWith('api.'));
+        expect(events).toEqual([
+          'api.starting',
+          'api.database_connected',
+          'api.start_recorded',
+          'api.listening',
+          'api.notices',
+          'api.idp_events',
+          'api.factor_resets',
+        ]);
+      },
+      { timeout: 10_000, interval: 50 },
+    );
     expect(lines().find((line) => line.event === 'api.starting')?.configHash).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
