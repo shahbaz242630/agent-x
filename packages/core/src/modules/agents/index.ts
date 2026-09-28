@@ -3,6 +3,7 @@
 // A key's ID is listed in the directory, so a request carrying the key can be
 // placed in its organisation before any is known. Registering an agent, with
 // its first key, is composed with the step-up in the API (C1-2, ADR-004 §7).
+// The key check (C1-4a) says whether a key an agent sends may act.
 export {
   AGENT,
   AGENT_KEY,
@@ -13,6 +14,8 @@ export {
   keyExpiresAt,
   keySecretMessage,
   MOST_AGENTS_ADDED_A_DAY,
+  parseAgentKey,
+  type PresentedKey,
   type Scope,
   SCOPES,
   ScopesRefused,
@@ -37,4 +40,13 @@ export {
   MOST_AGENTS_A_PAGE,
   oneAgentAddAtATime,
 } from './infrastructure/agents.ts';
+export {
+  type AcceptedKey,
+  agentKeyAt,
+  type AgentKeyChecker,
+  createAgentKeyCheck,
+  type KeyAtCheck,
+  type KeyChecked,
+  type KeyRefusal,
+} from './infrastructure/key-check.ts';
 export type { AgentsTables } from './infrastructure/tables.ts';
