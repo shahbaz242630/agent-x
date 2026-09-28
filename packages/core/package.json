@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./authority-tables": "./src/authority-tables.ts",
+    "./modules/agents": "./src/modules/agents/index.ts",
     "./modules/audit": "./src/modules/audit/index.ts",
     "./modules/directory": "./src/modules/directory/index.ts",
     "./modules/identity": "./src/modules/identity/index.ts",

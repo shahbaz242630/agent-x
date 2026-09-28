@@ -17,3 +17,4 @@ export {
   StateMachineInvalid,
   type Transition,
 } from './state-machine.ts';
+export { visibleName } from './visible-name.ts';

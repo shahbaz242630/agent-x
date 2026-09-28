@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { assertTenant, TenantContextError, withTenant } from './tenant.ts';
+import { assertTenant, limitStatements, STATEMENT_SECONDS, TenantContextError, withTenant } from './tenant.ts';
 
 interface ProbeSchema {
   'probe.items': { org_id: string; id: string; label: string };
@@ -359,6 +359,21 @@ describe('assertTenant', () => {
     await app.transaction().execute(async (tx) => {
       await expect(assertTenant(tx, ORG_A)).rejects.toThrow(refused);
     });
+  });
+});
+
+describe('limitStatements', () => {
+  it(`limits each later statement to ${String(STATEMENT_SECONDS)} seconds, for that transaction alone`, async () => {
+    const read = () => sql<{ limit: string }>`select pg_catalog.current_setting('statement_timeout') as limit`;
+    await withTenant(app, ORG_A, async (tx) => {
+      const before = (await read().execute(tx)).rows[0]?.limit;
+      await limitStatements(tx);
+      expect((await read().execute(tx)).rows[0]?.limit).toBe(`${String(STATEMENT_SECONDS)}s`);
+      expect(before).not.toBe(`${String(STATEMENT_SECONDS)}s`);
+    });
+    // The next transaction on the same pool starts without it.
+    const after = await app.transaction().execute(async (tx) => (await read().execute(tx)).rows[0]?.limit);
+    expect(after).not.toBe(`${String(STATEMENT_SECONDS)}s`);
   });
 });
 

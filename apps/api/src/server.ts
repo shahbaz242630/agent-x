@@ -49,6 +49,8 @@ import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
+import type { AgentRegistrations } from './agent-registering.ts';
+import { registerAgents } from './agents.ts';
 import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
@@ -90,6 +92,8 @@ export interface ServerOptions {
   readonly resetChanges?: ResetChanges | undefined;
   /** A registered contact confirming a reset by its link (contact-confirmations.ts); without it, the route answers 404. */
   readonly contactConfirmations?: ContactConfirmations | undefined;
+  /** Registering and reading agents (agent-registering.ts); without it, no one reaches those routes. */
+  readonly agentRegistrations?: AgentRegistrations | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -233,6 +237,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
+  registerAgents(app, { registrations: options.agentRegistrations });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

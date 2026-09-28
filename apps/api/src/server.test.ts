@@ -273,7 +273,7 @@ describe('SEC-DATA-04 errors show no internals', () => {
 
   it('answers an unknown address with a plain 404 that does not repeat it', async () => {
     const { app } = await setup();
-    const response = await app.inject(`/v1/agents/${SAMPLES.agentKey}?token=${encodeURIComponent(PLANTED)}`);
+    const response = await app.inject(`/v1/nowhere/${SAMPLES.agentKey}?token=${encodeURIComponent(PLANTED)}`);
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual(errorBody('NOT_FOUND', FIRST_ID));
   });

@@ -108,6 +108,18 @@ export async function assertTenant<Schema>(tx: Transaction<Schema>, orgId: strin
   }
 }
 
+/** The longest a request's statement runs: a hung read gives its connection back, and the request fails rather than hangs. */
+export const STATEMENT_SECONDS = 10;
+
+/**
+ * Limits every later statement of the transaction to STATEMENT_SECONDS, a wait
+ * for a lock included, until the transaction ends: what a request's work sets
+ * first, so the app layer needs no SQL of its own.
+ */
+export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
+  await sql`select pg_catalog.set_config('statement_timeout', ${`${String(STATEMENT_SECONDS)}s`}, true)`.execute(tx);
+}
+
 /**
  * What a connection must carry before any work runs on it: no tenant, and the
  * `search_path` the startup packet pinned. Both come back from one statement,

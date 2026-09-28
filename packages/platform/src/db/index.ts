@@ -1,4 +1,10 @@
-export { createDatabase, type Database, type DatabaseConnectionOptions, DatabaseOptionsError } from './database.ts';
+export {
+  createDatabase,
+  type Database,
+  type DatabaseConnectionOptions,
+  type DatabaseTransaction,
+  DatabaseOptionsError,
+} from './database.ts';
 export {
   createIdempotentWrites,
   IDEMPOTENCY_RETENTION_DAYS,
@@ -46,7 +52,7 @@ export {
   type WrittenRow,
   writeSignedRow,
 } from './signed-rows.ts';
-export { assertTenant, TenantContextError, withTenant } from './tenant.ts';
+export { assertTenant, limitStatements, STATEMENT_SECONDS, TenantContextError, withTenant } from './tenant.ts';
 export {
   createStatusChanger,
   type StatusChange,

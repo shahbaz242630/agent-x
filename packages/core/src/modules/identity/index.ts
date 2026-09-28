@@ -212,6 +212,7 @@ export {
   type StepUpFailure,
 } from './infrastructure/sign-in-flow.ts';
 export {
+  changeHashOf,
   type ConsumedStepUp,
   createStepUpChallenges,
   type PendingChallenge,
@@ -219,6 +220,7 @@ export {
   type StepUpBinding,
   type StepUpChallenges,
   type StepUpEvidence,
+  stepUpDetails,
 } from './infrastructure/step-up-challenges.ts';
 export type { IdentityTables } from './infrastructure/tables.ts';
 export { subjectOfUser, userForSubject, userOfSubject } from './infrastructure/users.ts';

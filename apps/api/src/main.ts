@@ -23,6 +23,7 @@
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
+import type { AgentsTables } from '@agentx/core/modules/agents';
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import {
@@ -79,6 +80,7 @@ import {
 } from '@agentx/platform/observability';
 import type { FastifyInstance } from 'fastify';
 
+import { createAgentRegistrations } from './agent-registering.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
@@ -92,6 +94,7 @@ import { recordStart } from './start-record.ts';
 
 /** Every table the API reaches, module by module. */
 type ApiTables = PlatformControlsTables &
+  AgentsTables &
   DirectoryTables &
   AuditTables &
   IdentityTables &
@@ -438,6 +441,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
       authorityTables: AUTHORITY_TABLES,
+    }),
+    agentRegistrations: createAgentRegistrations({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      logger,
     }),
   });
   try {

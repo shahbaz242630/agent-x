@@ -2,7 +2,7 @@
 // auth, with TLS in every deployed environment). Only this folder may import
 // the driver (ADR-004 §8), so every connection is made here, with the checks
 // below, and nothing else in the product can open one.
-import { Kysely, PostgresDialect } from 'kysely';
+import { Kysely, PostgresDialect, type Transaction } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import type { Logger } from '../observability/index.ts';
@@ -115,6 +115,9 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { r
 
 /** The app's handle on its database: a query builder over a pool of connections. */
 export type Database<Schema = unknown> = Kysely<Schema>;
+
+/** One transaction on it, as withTenant opens one: what an app layer's use case passes to each module. */
+export type DatabaseTransaction<Schema = unknown> = Transaction<Schema>;
 
 /**
  * A query builder over a pool of connections. Tenant data is reached only
