@@ -430,19 +430,29 @@ function runScanner(tool: string, args: readonly string[], allowed: readonly num
   }
 }
 
-/** Waits for the API, which sleeps when idle, to answer its health check: at most 3 minutes. */
-async function wake(origin: string): Promise<void> {
+/** Waits for an address to answer 2xx, following redirects: at most 3 minutes. */
+async function wakeAt(url: string, what: string): Promise<void> {
   const until = Date.now() + 3 * 60_000;
   while (Date.now() < until) {
     try {
-      const answer = await fetch(`${origin}/health`, { signal: AbortSignal.timeout(30_000) });
+      const answer = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (answer.ok) return;
     } catch {
       // Still waking.
     }
     await new Promise((resolve) => setTimeout(resolve, 10_000));
   }
-  throw new Error('the API did not answer its health check within 3 minutes');
+  throw new Error(`${what} did not answer within 3 minutes`);
+}
+
+/**
+ * Wakes what sleeps when idle: the API, then sign-in followed to the login
+ * service's page. A scan that reached the login service while it started
+ * read as a case failed without a check (S61).
+ */
+async function wake(origin: string): Promise<void> {
+  await wakeAt(`${origin}/health`, "the API's health check");
+  await wakeAt(`${origin}/v1/auth/sign-in`, 'sign-in and the login service');
 }
 
 /** The findings a gate stops on, one line each: every one not accepted, informational notes aside. */
