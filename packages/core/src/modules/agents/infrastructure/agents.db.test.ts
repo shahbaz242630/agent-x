@@ -12,7 +12,7 @@ import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { type Scope, ScopesRefused } from '../domain/agent.ts';
 import { addAgentKey, AGENT_KEYS, agentKeyOf, agentKeysOf, MOST_KEYS_LISTED, TooManyAgentKeys } from './agent-keys.ts';
-import { addAgent, AGENTS, agentOf, type AgentsTransaction } from './agents.ts';
+import { addAgent, AGENTS, agentOf, agentsPage, type AgentsTransaction, MOST_AGENTS_A_PAGE } from './agents.ts';
 import type { AgentsTables } from './tables.ts';
 
 type Tables = AgentsTables & OrganizationsTables & DirectoryTables & AuditTables;
@@ -689,5 +689,26 @@ describe('the walls round an agent and its keys', () => {
     expect(await backup.query('select status from agents.agent_keys where id = $1', [key])).toEqual([
       { status: 'ACTIVE' },
     ]);
+  });
+});
+
+describe("a page of the organisation's agents (C1-2)", () => {
+  it.each([0, MOST_AGENTS_A_PAGE + 1, 1.5])('refuses a page of %s agents before any SQL runs', async (limit) => {
+    const org = await organization();
+
+    await expect(
+      withSignedStates(app, org, services(), (tx, states) => agentsPage(tx, states, org, { after: null, limit })),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('gives each agent with its name, and no next page at the end', async () => {
+    const org = await organization();
+    const { id } = await addAnAgent(org);
+
+    const page = await withSignedStates(app, org, services(), (tx, states) =>
+      agentsPage(tx, states, org, { after: null, limit: 1 }),
+    );
+
+    expect(page).toMatchObject({ outcome: 'listed', agents: [{ id, name: 'Purchasing bot' }], next: null });
   });
 });

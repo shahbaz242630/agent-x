@@ -12,6 +12,8 @@
  *   evidence depend on it. Add new codes in alphabetical order.
  */
 export const REASON_CODES = {
+  AGENT_ADDS_SPENT:
+    "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once.",
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
