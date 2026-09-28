@@ -11,7 +11,16 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { type Scope, ScopesRefused } from '../domain/agent.ts';
-import { addAgentKey, AGENT_KEYS, agentKeyOf, agentKeysOf, MOST_KEYS_LISTED, TooManyAgentKeys } from './agent-keys.ts';
+import {
+  addAgentKey,
+  AGENT_KEYS,
+  agentKeyOf,
+  agentKeysOf,
+  bringKeyExpiryForward,
+  keysIssuedSince,
+  MOST_KEYS_LISTED,
+  TooManyAgentKeys,
+} from './agent-keys.ts';
 import { addAgent, AGENTS, agentOf, agentsPage, type AgentsTransaction, MOST_AGENTS_A_PAGE } from './agents.ts';
 import type { AgentsTables } from './tables.ts';
 
@@ -313,30 +322,57 @@ describe('issuing an agent key (C1-1)', () => {
     ).rejects.toMatchObject({ code: '23514', constraint: 'status_guard' });
   });
 
-  it('has its expiry brought forward through its signed state, as a rotation does', async () => {
+  const bringForward = (org: string, id: string, expiresAt: Date) =>
+    withSignedStates(app, org, services(), async (tx, states) => {
+      const read = await agentKeyOf(tx, states, { orgId: org, id }, 'change');
+      if (read.outcome !== 'found') throw new Error('no key');
+      return bringKeyExpiryForward(tx, states, {
+        orgId: org,
+        key: read.key,
+        state: read.state,
+        expiresAt,
+        actor: OPERATOR,
+        action: 'agent_key.rotated',
+        details: { rotatedTo: 'k-2' },
+      });
+    });
+
+  it('has its expiry brought forward through its signed state, as a rotation does (C1-4b)', async () => {
     const org = await organization();
     const { id: agent } = await addAnAgent(org);
     const { id } = await issue(org, agent);
 
-    await withSignedStates(app, org, services(), async (tx, states) => {
-      const read = await agentKeyOf(tx, states, { orgId: org, id }, 'change');
-      if (read.outcome !== 'found') throw new Error('no key');
-      await states.record(
-        tx,
-        AGENT_KEYS,
-        { orgId: org, id },
-        read.state,
-        { expires_at: inDays(1) },
-        {
-          actor: OPERATOR,
-          action: 'agent_key.overlap_set',
-          details: {},
-        },
-      );
-    });
+    const recorded = await bringForward(org, id, inDays(1));
 
     expect(await readKey(org, id)).toMatchObject({ outcome: 'found', key: { status: 'ACTIVE', expiresAt: inDays(1) } });
+    const event = await eventAt(org, recorded.seq);
+    expect(event).toMatchObject({ action: 'agent_key.rotated', subject_type: 'agent_key', subject_version: 2 });
+    expect(JSON.parse(event.details)).toMatchObject({ rotatedTo: 'k-2', expiresAt: inDays(1).toISOString() });
     expect(alarms()).toEqual([]);
+  });
+
+  it('refuses to move an expiry later, before any SQL runs, and takes the same expiry (C1-4b)', async () => {
+    const org = await organization();
+    const { id: agent } = await addAnAgent(org);
+    const { id } = await issue(org, agent);
+
+    await expect(bringForward(org, id, new Date(inDays(90).getTime() + 1))).rejects.toThrow(RangeError);
+    expect(await readKey(org, id)).toMatchObject({ key: { expiresAt: inDays(90) } });
+    await expect(bringForward(org, id, inDays(90))).resolves.toMatchObject({ version: 2 });
+  });
+
+  it('counts the keys the organisation issued after a time, and no other organisation’s (C1-4b)', async () => {
+    const org = await organization();
+    const other = await organization();
+    const { id: agent } = await addAnAgent(org);
+    const { id: theirs } = await addAnAgent(other);
+    await issue(org, agent);
+    await issue(org, agent);
+    await issue(other, theirs);
+    const count = (since: Date) => withSignedStates(app, org, services(), (tx) => keysIssuedSince(tx, org, since));
+
+    expect(await count(inDays(-1))).toBe(2);
+    expect(await count(clock.now())).toBe(0);
   });
 });
 

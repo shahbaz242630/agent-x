@@ -1,5 +1,6 @@
-// BR-03 (C1-1, C1-2, C1-4a): an agent's and a key's machines, how scopes are
-// kept, an agent's name, and how a key is written, taken apart and MACed.
+// BR-03 (C1-1, C1-2, C1-4a, C1-4b): an agent's and a key's machines, how scopes are
+// kept, an agent's name, and how a key is written, taken apart, MACed and
+// rotated.
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -9,12 +10,14 @@ import {
   agentName,
   AgentNameRefused,
   isAgentName,
+  isLiveKey,
   isScope,
   KEY_DAYS,
   KEY_PREFIX,
   keyExpiresAt,
   keySecretMessage,
   parseAgentKey,
+  rotatedKeyExpiresAt,
   SCOPES,
   scopesOf,
   ScopesRefused,
@@ -201,5 +204,29 @@ describe('scopes', () => {
     expect(scopesWithin(['requests:read'], ['requests:read', 'suppliers:read'])).toBe(true);
     expect(scopesWithin([], ['requests:read'])).toBe(true);
     expect(scopesWithin(['requests:read', 'requests:write'], ['requests:read'])).toBe(false);
+  });
+});
+
+describe('a key rotated, and a key that works (C1-4b)', () => {
+  const NOW = new Date('2026-09-28T09:00:00.000Z');
+
+  it('a rotated key expires at the end of the 24-hour overlap', () => {
+    expect(rotatedKeyExpiresAt(new Date('2026-12-27T09:00:00.000Z'), NOW)).toEqual(
+      new Date('2026-09-29T09:00:00.000Z'),
+    );
+  });
+
+  it('a key expiring within the overlap keeps its own expiry: never moved later', () => {
+    const soon = new Date('2026-09-28T10:00:00.000Z');
+
+    expect(rotatedKeyExpiresAt(soon, NOW)).toEqual(soon);
+  });
+
+  it('works while ACTIVE and before its expiry, to the millisecond', () => {
+    const expiresAt = new Date(NOW.getTime() + 1);
+
+    expect(isLiveKey({ status: 'ACTIVE', expiresAt }, NOW)).toBe(true);
+    expect(isLiveKey({ status: 'ACTIVE', expiresAt: NOW }, NOW)).toBe(false);
+    expect(isLiveKey({ status: 'REVOKED', expiresAt }, NOW)).toBe(false);
   });
 });

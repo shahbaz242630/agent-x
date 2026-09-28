@@ -81,6 +81,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 
 import { createAgentChanges } from './agent-changes.ts';
+import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
@@ -452,6 +453,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     agentChanges: createAgentChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
+    agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

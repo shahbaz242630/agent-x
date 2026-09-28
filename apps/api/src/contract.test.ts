@@ -131,6 +131,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /test/both',
       'POST /v1/agents',
       'POST /v1/agents/confirm',
+      'POST /v1/agents/{id}/keys/{keyId}/revoke',
+      'POST /v1/agents/{id}/keys/{keyId}/revoke/confirm',
+      'POST /v1/agents/{id}/keys/{keyId}/rotate',
+      'POST /v1/agents/{id}/keys/{keyId}/rotate/confirm',
       'POST /v1/agents/{id}/reactivate',
       'POST /v1/agents/{id}/reactivate/confirm',
       'POST /v1/agents/{id}/suspend',
@@ -1125,7 +1129,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
     // five (B6-3b), with each GET's HEAD.
-    expect(answers.length).toBe(50);
+    expect(answers.length).toBe(54);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1135,6 +1139,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'Agent',
       'AgentKey',
+      'AgentKeyChangeAsked',
       'AgentReactivationAsked',
       'AgentRegistrationAsked',
       'ConfirmationAsked',
