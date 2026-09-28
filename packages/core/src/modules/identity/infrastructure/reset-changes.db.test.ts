@@ -44,6 +44,7 @@ import {
   contactChange,
   contactToActivate,
   draftContact,
+  MOST_CONTACT_RECORDS,
   REGISTERED_CONTACTS,
   removeContact,
 } from './registered-contacts.ts';
@@ -487,6 +488,28 @@ describe(`asking for a reset (B6-3b, Postgres ${server.version})`, () => {
 
     expect(await ask(admin, person.membershipId)).toEqual(refused(409, 'TOO_MANY_RESETS'));
     expect(await changes.list(org, CORRELATION)).toEqual(refused(409, 'TOO_MANY_RESETS'));
+  }, 60_000);
+
+  it('answers 409 TOO_MANY_CONTACTS, not a failure, past the contact records a check reads (B8-2)', async () => {
+    const { org, admin, person } = await organization();
+    // The organisation's two contacts, and drafts up to one past what the list reads.
+    await withSignedStates(app, org, services(), async (tx, states) => {
+      for (let each = 2; each <= MOST_CONTACT_RECORDS; each += 1) {
+        const { change } = contactChange({
+          orgId: org,
+          id: ids.next(),
+          email: `draft-${String(each)}@example.test`,
+          addedBy: admin.membershipId,
+        });
+        await draftContact(tx, states, keys, change, {
+          stepUpChallengeId: ids.next(),
+          createdAt: clock.now(),
+          actor: { type: 'user', id: admin.userId },
+        });
+      }
+    });
+
+    expect(await ask(admin, person.membershipId)).toEqual(refused(409, 'TOO_MANY_CONTACTS'));
   }, 60_000);
 });
 
