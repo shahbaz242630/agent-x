@@ -137,7 +137,12 @@ const CONTACT_CONFIRM_SCHEMA = {
   summary: 'Confirm a reset of a second factor, as a registered contact',
   body: z
     .strictObject({
-      token: z.string().max(256).describe("The token from the contact's emailed link, after `#token=`."),
+      // The token's own alphabet, so 256 characters stay within the body limit's bytes (B8-3, Schemathesis).
+      token: z
+        .string()
+        .max(256)
+        .regex(/^[A-Za-z0-9._-]*$/)
+        .describe("The token from the contact's emailed link, after `#token=`: letters, digits, `.`, `-` and `_`."),
     })
     .describe("The contact's link."),
   response: {
