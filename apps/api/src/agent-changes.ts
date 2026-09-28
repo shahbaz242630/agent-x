@@ -15,8 +15,8 @@
 // - `reactivate` (`agents.reactivate`): gives the agent its authority back,
 //   so an admin's, with step-up (a passkey, SEC-HA-12). The ask: the key
 //   claimed first; the admin read again; the agent, SUSPENDED
-//   (AGENT_NOT_SUSPENDED otherwise); a challenge bound to the organisation,
-//   the agent and the event that suspended it, so it reactivates exactly
+//   (AGENT_NOT_SUSPENDED otherwise); a challenge bound to the organisation
+//   and the event that suspended the agent, so it reactivates exactly
 //   that suspension and not a later one. The confirm, with the challenge:
 //   the same reads, the agent for change; the challenge consumed; then
 //   SUSPENDED > ACTIVE, with the step-up's evidence on its event.
@@ -82,9 +82,13 @@ export interface AgentChanges {
   ): Promise<AgentChangeWrite>;
 }
 
-/** The pending change's SHA-256: the organisation, the agent and the event that suspended it, IDs in lower case. */
-const reactivationHash = (orgId: string, agentId: string, suspendedBy: string): Buffer =>
-  changeHashOf([REACTIVATE_OPERATION, orgId.toLowerCase(), agentId.toLowerCase(), suspendedBy.toLowerCase()]);
+/**
+ * The pending change's SHA-256: the organisation and the event that suspended
+ * the agent, IDs in lower case. That event is the agent's own, read from its
+ * signed state, so it names the agent and exactly this suspension.
+ */
+const reactivationHash = (orgId: string, suspendedBy: string): Buffer =>
+  changeHashOf([REACTIVATE_OPERATION, orgId.toLowerCase(), suspendedBy.toLowerCase()]);
 
 export function createAgentChanges({
   database,
@@ -156,7 +160,7 @@ export function createAgentChanges({
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: REACTIVATE_OPERATION,
-          changeHash: reactivationHash(member.orgId, agent.id, agent.suspendedBy),
+          changeHash: reactivationHash(member.orgId, agent.suspendedBy),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
@@ -176,7 +180,7 @@ export function createAgentChanges({
           {
             sessionId: member.sessionId,
             action: REACTIVATE_OPERATION,
-            changeHash: reactivationHash(member.orgId, agent.id, agent.suspendedBy),
+            changeHash: reactivationHash(member.orgId, agent.suspendedBy),
           },
           // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },

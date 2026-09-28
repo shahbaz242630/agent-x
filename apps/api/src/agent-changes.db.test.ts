@@ -289,6 +289,20 @@ describe('reactivating a suspended agent, with an admin’s step-up (C1-3)', () 
     });
   });
 
+  it('answers NOT_FOUND for another organisation’s agent, asking or confirming, leaving it SUSPENDED', async () => {
+    const org = await organization();
+    const other = await organization();
+    const theirAdmin = await member(other, 'admin');
+    const theirs = await agentOf(other, theirAdmin);
+    changedOf(await suspend(theirAdmin, theirs));
+    const admin = await member(org, 'admin');
+
+    const missing = { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
+    expect(await reactivate(admin, theirs)).toEqual(missing);
+    expect(await confirm(admin, theirs, ids.next())).toEqual(missing);
+    expect((await eventsAbout(other, theirs)).at(-1)?.action).toBe('agent.suspended');
+  });
+
   it('refuses a developer or anyone else not an admin: FORBIDDEN, asking or confirming', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
