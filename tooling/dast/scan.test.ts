@@ -398,8 +398,21 @@ describe('B7 the dynamic scan of staging', () => {
     expect(args).toEqual(expect.arrayContaining(['--url', STACK_ORIGIN, '--header', `Origin: ${STACK_ORIGIN}`]));
     expect(args[args.indexOf('--max-time') + 1]).toBe('300');
     expect(schemathesisArgs(ORIGIN, '/r')).not.toContain('--network');
-    // Never following a redirect into the login service's pages.
-    expect(args[args.indexOf('--max-redirects') + 1]).toBe('0');
+    // Redirects followed as Schemathesis does by default: forbidding them made sign-in a network error (CI, S60).
+    expect(args).not.toContain('--max-redirects');
+  });
+
+  it("keeps the login service's page that sign-in's redirect leads to, at that operation and a 200 only", () => {
+    const followed = (rule: string, changes: Partial<Finding> = {}) =>
+      finding({ tool: 'schemathesis', rule, method: 'GET', path: '/v1/auth/sign-in', status: 200, ...changes });
+
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code'))).toMatch(/302/);
+    expect(acceptedReason(followed('schemathesis/undocumented-content-type'))).toMatch(/sign-in page/);
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code', { status: 500 }))).toBeUndefined();
+    expect(acceptedReason(followed('schemathesis/undocumented-http-status-code', { method: 'HEAD' }))).toBeUndefined();
+    expect(
+      acceptedReason(followed('schemathesis/undocumented-http-status-code', { path: '/v1/members' })),
+    ).toBeUndefined();
   });
 
   it('stops a pull request on each finding not accepted, informational notes aside, naming its answer', () => {

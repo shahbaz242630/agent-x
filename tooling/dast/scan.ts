@@ -65,6 +65,8 @@ interface Accepted {
   readonly rule: string;
   /** Accepted only at addresses the document doesn't hold, or at any. */
   readonly undocumentedOnly?: true;
+  /** Accepted only at these operations (`GET /v1/auth/sign-in`), or at any. */
+  readonly operations?: readonly string[];
   /** The statuses it is accepted with, or any. */
   readonly statuses?: readonly number[];
   readonly reason: string;
@@ -98,6 +100,21 @@ export const ACCEPTED: readonly Accepted[] = [
     reason:
       "The compose stack's front door (nginx) refuses an over-long address 414 with its own page (text/html) before the API sees it; the API's own answers are JSON.",
   },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-http-status-code',
+    operations: ['GET /v1/auth/sign-in'],
+    statuses: [200],
+    reason:
+      "Schemathesis follows sign-in's 302 to the login service and reads its sign-in page (200); forbidding redirects makes every sign-in a network error instead (CI, S60). The API's own answer is the documented 302.",
+  },
+  {
+    tool: 'schemathesis',
+    rule: 'schemathesis/undocumented-content-type',
+    operations: ['GET /v1/auth/sign-in'],
+    statuses: [200],
+    reason: "The login service's sign-in page (text/html), reached by following sign-in's 302: not the API's answer.",
+  },
 ];
 
 /** The paths the API's document holds, read once. */
@@ -114,6 +131,7 @@ export const acceptedReason = (finding: Finding): string | undefined =>
       one.tool === finding.tool &&
       one.rule === finding.rule &&
       (one.undocumentedOnly === undefined || documentedPath(finding.path, documentedPaths()) === undefined) &&
+      (one.operations === undefined || one.operations.includes(`${finding.method} ${finding.path}`)) &&
       (one.statuses === undefined || (finding.status !== undefined && one.statuses.includes(finding.status))),
   )?.reason;
 
@@ -197,9 +215,6 @@ export function schemathesisArgs(origin: string, dir: string, target: 'staging' 
     '--phases',
     'examples,coverage,fuzzing',
     '--continue-on-failure',
-    // A redirect is the answer (sign-in's to the login service), never a page to follow.
-    '--max-redirects',
-    '0',
     '--report',
     'junit',
     '--report-junit-path',
