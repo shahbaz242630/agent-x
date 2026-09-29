@@ -467,14 +467,14 @@ export function createSignedStates({
   trail,
   logger,
   onTamper,
-  unrecorded = () => undefined,
+  unrecorded,
 }: {
   readonly keys: KeyProvider;
   readonly trail: AuditTrail;
   readonly logger: Logger;
   readonly onTamper: (finding: TamperFinding) => void;
   /** The finding of a hold this process couldn't record yet for the organisation, if one is waiting. */
-  readonly unrecorded?: (orgId: string) => TamperFinding | undefined;
+  readonly unrecorded: (orgId: string) => TamperFinding | undefined;
 }): HoldingSignedStates {
   const statuses = createStatusChanger({ logger });
   const rowsHeld = new WeakMap<AuditTransaction, Map<string, Held>>();

@@ -99,6 +99,8 @@ async function setHold(
       trail: createAuditTrail({ keys, ids }),
       logger,
       onTamper: () => undefined,
+      // It sets the hold, and reads none: nothing waiting could change what it does.
+      unrecorded: () => undefined,
     });
     const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
       await sql`set local lock_timeout = '5s'`.execute(tx);

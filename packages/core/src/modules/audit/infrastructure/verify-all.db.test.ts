@@ -167,7 +167,13 @@ afterAll(async () => {
 beforeEach(async () => {
   capture = new LogCapture();
   found = [];
-  states = createSignedStates({ keys, trail, logger: loggerFor(capture), onTamper: (one) => found.push(one) });
+  states = createSignedStates({
+    keys,
+    trail,
+    logger: loggerFor(capture),
+    onTamper: (one) => found.push(one),
+    unrecorded: () => undefined,
+  });
   org = newId();
   agents = await tamperAsOwner(database, AGENTS, org);
   agentKeys = await tamperAsOwner(database, KEYS, org);

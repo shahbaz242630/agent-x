@@ -89,10 +89,6 @@ export function scopesOf(text: string): Scope[] {
   return scopes;
 }
 
-/** Whether every one of `some` is among `all`: a key's scopes within its agent's. */
-export const scopesWithin = (some: readonly Scope[], all: readonly Scope[]): boolean =>
-  some.every((scope) => all.includes(scope));
-
 /** The most characters (Unicode code points) an agent's name may have: the table's own limit. */
 const MAX_NAME = 100;
 
