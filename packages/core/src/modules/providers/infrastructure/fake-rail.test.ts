@@ -30,7 +30,7 @@ function setUp(options: Partial<FakeRailOptions> = {}) {
 async function linked(accountId = ACCOUNT, organizationId = ORG, linkId = LINK) {
   const setup = setUp();
   const session = await setup.rail.startSourceLink({ organizationId, linkId });
-  const consentId = setup.bank.approve(session.sessionRef, accountId);
+  const consentId = await setup.bank.approve(organizationId, session.sessionRef, accountId);
   const outcome = await setup.rail.confirmSourceLink({ organizationId, linkId });
   return { ...setup, session, consentId, source: sourceOf(outcome) };
 }
@@ -110,17 +110,17 @@ describe('confirming a link, server to server (D1-1)', () => {
     const { rail, bank } = setUp();
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
     const controls = { ...USUAL_CONTROLS, period: 'week' as const, maxPaymentMinor: 100_000n };
-    bank.approve(session.sessionRef, ACCOUNT, { controls });
+    await bank.approve(ORG, session.sessionRef, ACCOUNT, { controls });
     expect(sourceOf(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).controls).toEqual(controls);
   });
 
   it('is linked but pending while the bank waits for another authoriser', async () => {
     const { rail, bank } = setUp();
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    const consentId = bank.approve(session.sessionRef, ACCOUNT, { awaitingOtherAuthorisers: true });
+    const consentId = await bank.approve(ORG, session.sessionRef, ACCOUNT, { awaitingOtherAuthorisers: true });
     const pending = sourceOf(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK }));
     expect(pending).toMatchObject({ availability: 'PENDING', consentStatus: 'AwaitingAuthorization' });
-    bank.changeConsent(consentId, 'Authorized');
+    await bank.changeConsent(ORG, consentId, 'Authorized');
     const active = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: pending.externalRef }));
     expect(active).toMatchObject({ availability: 'ACTIVE', consentStatus: 'Authorized' });
   });
@@ -128,12 +128,12 @@ describe('confirming a link, server to server (D1-1)', () => {
   it('is refused when the business turns it down at its bank', async () => {
     const { rail, bank } = setUp();
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    bank.reject(session.sessionRef);
+    await bank.reject(ORG, session.sessionRef);
     expect(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).toEqual({
       kind: 'refused',
       reason: 'rejected',
     });
-    expect(() => bank.approve(session.sessionRef, ACCOUNT)).toThrow('No link waiting');
+    await expect(bank.approve(ORG, session.sessionRef, ACCOUNT)).rejects.toThrow('No link waiting');
   });
 
   it('is refused once 15 minutes pass unapproved, and can’t be approved after', async () => {
@@ -146,7 +146,7 @@ describe('confirming a link, server to server (D1-1)', () => {
       kind: 'refused',
       reason: 'expired',
     });
-    expect(() => bank.approve(session.sessionRef, ACCOUNT)).toThrow('No link waiting');
+    await expect(bank.approve(ORG, session.sessionRef, ACCOUNT)).rejects.toThrow('No link waiting');
   });
 
   it('answers another organisation’s link as it answers none (SEC-PTR-08)', async () => {
@@ -159,8 +159,8 @@ describe('confirming a link, server to server (D1-1)', () => {
   it('can’t approve with an account the bank doesn’t hold, or an unknown session', async () => {
     const { rail, bank } = setUp();
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    expect(() => bank.approve(session.sessionRef, 'someone-else-acct-01')).toThrow('no such account');
-    expect(() => bank.approve('fake-link-unknown', ACCOUNT)).toThrow('No link waiting');
+    await expect(bank.approve(ORG, session.sessionRef, 'someone-else-acct-01')).rejects.toThrow('no such account');
+    await expect(bank.approve(ORG, 'fake-link-unknown', ACCOUNT)).rejects.toThrow('No link waiting');
   });
 });
 
@@ -179,27 +179,25 @@ describe('a source’s state (D1-1)', () => {
     const { rail, bank, clock, source, consentId } = await linked();
     const ref = { organizationId: ORG, externalRef: source.externalRef };
     clock.advanceBy(DAY);
-    bank.changeConsent(consentId, 'Suspended');
+    await bank.changeConsent(ORG, consentId, 'Suspended');
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       availability: 'SUSPENDED',
       consentStatus: 'Suspended',
       statusChangedAt: new Date(START.getTime() + DAY),
     });
-    bank.changeConsent(consentId, 'Authorized');
+    await bank.changeConsent(ORG, consentId, 'Authorized');
     expect(sourceOf(await rail.getSourceState(ref)).availability).toBe('ACTIVE');
   });
 
   it.each(['Revoked', 'Consumed'] as const)('is unavailable for good once %s', async (status) => {
     const { rail, bank, source, consentId } = await linked();
-    bank.changeConsent(consentId, status);
+    await bank.changeConsent(ORG, consentId, status);
     const ref = { organizationId: ORG, externalRef: source.externalRef };
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       availability: 'UNAVAILABLE',
       consentStatus: status,
     });
-    expect(() => {
-      bank.changeConsent(consentId, 'Authorized');
-    }).toThrow(`from ${status} to Authorized`);
+    await expect(bank.changeConsent(ORG, consentId, 'Authorized')).rejects.toThrow(`from ${status} to Authorized`);
   });
 
   it('expires at the consent’s expiry, dated then, and stays expired', async () => {
@@ -213,14 +211,12 @@ describe('a source’s state (D1-1)', () => {
       consentStatus: 'Expired',
       statusChangedAt: source.consentExpiresAt,
     });
-    expect(() => {
-      bank.changeConsent(consentId, 'Suspended');
-    }).toThrow('from Expired to Suspended');
+    await expect(bank.changeConsent(ORG, consentId, 'Suspended')).rejects.toThrow('from Expired to Suspended');
   });
 
   it('stays revoked past the expiry: a terminal status is never left', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
-    bank.changeConsent(consentId, 'Revoked');
+    await bank.changeConsent(ORG, consentId, 'Revoked');
     clock.advanceBy(366 * DAY);
     const ref = { organizationId: ORG, externalRef: source.externalRef };
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
@@ -234,7 +230,7 @@ describe('a source’s state (D1-1)', () => {
     const ref = { organizationId: ORG, externalRef: source.externalRef };
     clock.advanceBy(400 * DAY);
     const controls = { ...USUAL_CONTROLS, maxPeriodPayments: 10 };
-    const renewedId = bank.renew(source.externalRef, controls);
+    const renewedId = await bank.renew(ORG, source.externalRef, controls);
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       externalRef: source.externalRef,
       accountConsentId: renewedId,
@@ -244,15 +240,13 @@ describe('a source’s state (D1-1)', () => {
       controls,
     });
     expect(renewedId).not.toBe(consentId);
-    expect(() => {
-      bank.changeConsent(consentId, 'Revoked');
-    }).toThrow('No source holds that consent');
-    expect(() => bank.renew('fake-source-unknown')).toThrow('No such source');
+    await expect(bank.changeConsent(ORG, consentId, 'Revoked')).rejects.toThrow('No source holds that consent');
+    await expect(bank.renew(ORG, 'fake-source-unknown')).rejects.toThrow('No such source');
   });
 
   it('keeps the old controls through a renewal unless new ones are approved', async () => {
     const { rail, bank, source } = await linked();
-    bank.renew(source.externalRef);
+    await bank.renew(ORG, source.externalRef);
     const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
     expect(renewed.controls).toEqual(USUAL_CONTROLS);
   });
@@ -261,12 +255,12 @@ describe('a source’s state (D1-1)', () => {
     const { rail, bank } = setUp();
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
     const controls = { ...USUAL_CONTROLS };
-    bank.approve(session.sessionRef, ACCOUNT, { controls });
+    await bank.approve(ORG, session.sessionRef, ACCOUNT, { controls });
     Object.assign(controls, { maxPaymentMinor: 1n });
     const source = sourceOf(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK }));
     expect(source.controls).toEqual(USUAL_CONTROLS);
     const renewal = { ...USUAL_CONTROLS };
-    bank.renew(source.externalRef, renewal);
+    await bank.renew(ORG, source.externalRef, renewal);
     Object.assign(renewal, { maxPaymentMinor: 1n });
     const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
     expect(renewed.controls).toEqual(USUAL_CONTROLS);
@@ -305,7 +299,7 @@ describe('no account number in any answer (ADR-014 §3, PRD §6)', () => {
     const careless: RailAccount = { ...first, AccountHolderName: `Jasmine AI FZ-LLC ${iban?.Identification ?? ''}` };
     const { rail, bank } = setUp({ accounts: [careless] });
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    bank.approve(session.sessionRef, careless.AccountId);
+    await bank.approve(ORG, session.sessionRef, careless.AccountId);
     await expect(rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).rejects.toThrow(AccountNumberLeak);
   });
 
@@ -317,7 +311,7 @@ describe('no account number in any answer (ADR-014 §3, PRD §6)', () => {
     const careless: RailAccount = { ...first, AccountHolderName: `Jasmine AI FZ-LLC ${accountPart.slice(0, 8)}` };
     const { rail, bank } = setUp({ accounts: [careless] });
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    bank.approve(session.sessionRef, careless.AccountId);
+    await bank.approve(ORG, session.sessionRef, careless.AccountId);
     await expect(rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).rejects.toThrow(AccountNumberLeak);
   });
 
@@ -330,7 +324,7 @@ describe('no account number in any answer (ADR-014 §3, PRD §6)', () => {
     };
     const { rail, bank } = setUp({ accounts: [numbered] });
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
-    bank.approve(session.sessionRef, numbered.AccountId);
+    await bank.approve(ORG, session.sessionRef, numbered.AccountId);
     await expect(rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).rejects.toThrow(
       'only accounts with an IBAN',
     );

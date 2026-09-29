@@ -4,7 +4,11 @@
 // account's holder at the fake bank (Confirmation of Payee: a match, partly,
 // none, or the bank can't say), masks both, and gives the same payee
 // identity for the same account within an organisation, or none, as the
-// partner being mirrored would (BEN-2).
+// partner being mirrored would (BEN-2). Its records hold the masked parts
+// alone (D2-1): the identity is derived from the account each time, so the
+// account is never kept to find it again.
+import { createHash } from 'node:crypto';
+
 import { type Clock, type IdGenerator, visibleName } from '../../../shared-kernel/index.ts';
 import { accountHint, isUaeIban, withoutAccountNumbers } from '../domain/account-numbers.ts';
 import type {
@@ -12,10 +16,10 @@ import type {
   BeneficiaryRef,
   BeneficiaryRegistration,
   BeneficiaryRoute,
-  BeneficiaryState,
   PayeeDetails,
   PayeeNameCheck,
 } from '../domain/rail.ts';
+import type { BeneficiaryBody, FakeRecord, FakeRecords, RegistrationBody } from './fake-records.ts';
 import type { RailAccount } from './sandbox-accounts.ts';
 
 const MINUTE_MS = 60_000;
@@ -32,19 +36,11 @@ export interface FakePayeesOptions {
   readonly formMinutes: number;
 }
 
-interface Registration {
-  readonly organizationId: string;
-  readonly registrationId: string;
-  /** Set until a hosted form is filled in; null for a pass-through. */
-  readonly form: { readonly formRef: string; readonly expiresAt: Date } | null;
-  outcome: 'waiting' | 'invalid_details' | { readonly beneficiary: BeneficiaryState };
-}
-
-/** The payees' part of the fake partner: the adapter's two calls, and the person filling in the hosted form. */
+/** The payees' part of the fake partner, each on one organisation's records: the adapter's two calls, and the person filling in the hosted form. */
 export interface FakePayees {
-  register(input: BeneficiaryRegistration): BeneficiaryOutcome;
-  stateOf(ref: BeneficiaryRef): BeneficiaryOutcome;
-  fillForm(formUrl: string, payee: PayeeDetails): void;
+  register(records: FakeRecords, input: BeneficiaryRegistration): Promise<BeneficiaryOutcome>;
+  stateOf(records: FakeRecords, ref: BeneficiaryRef): Promise<BeneficiaryOutcome>;
+  fillForm(records: FakeRecords, formUrl: string, payee: PayeeDetails): Promise<void>;
 }
 
 const compact = (text: string): string => text.replaceAll(' ', '').toUpperCase();
@@ -68,10 +64,6 @@ const masked = (name: string): string =>
 
 export function createFakePayees(options: FakePayeesOptions): FakePayees {
   const { clock, ids, accounts, routes, stablePayeeIdentity, formMinutes } = options;
-  const registrations = new Map<string, Registration>();
-  const identities = new Map<string, string>();
-
-  const key = (organizationId: string, registrationId: string): string => `${organizationId} ${registrationId}`;
 
   /** The holder of an account at the fake bank, if it holds one with this IBAN. */
   const holderOf = (iban: string): string | undefined =>
@@ -89,80 +81,97 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
   /** The partner's identity for the account within the organisation: the same for the same account, another organisation's never. */
   const identityOf = (organizationId: string, iban: string): string | null => {
     if (!stablePayeeIdentity) return null;
-    const account = `${organizationId} ${compact(iban)}`;
-    const known = identities.get(account) ?? `fake-payee-${ids.next()}`;
-    identities.set(account, known);
-    return known;
+    const digest = createHash('sha256')
+      .update(`fake-payee ${organizationId} ${compact(iban)}`)
+      .digest('hex');
+    return `fake-payee-${digest.slice(0, 32)}`;
   };
 
   /** The payee registered, or `invalid_details` for an account the rail can't pay or a name no one could read. */
-  const registered = (registration: Registration, payee: PayeeDetails): Registration['outcome'] => {
+  const registered = (organizationId: string, payee: PayeeDetails): RegistrationBody['outcome'] => {
     if (!isUaeIban(payee.iban) || visibleName(payee.name, MAX_NAME).problems.length > 0) return 'invalid_details';
     const holder = holderOf(payee.iban);
-    const beneficiary: BeneficiaryState = {
-      organizationId: registration.organizationId,
-      registrationId: registration.registrationId,
+    const beneficiary: BeneficiaryBody = {
       beneficiaryRef: `fake-beneficiary-${ids.next()}`,
-      payeeIdentity: identityOf(registration.organizationId, payee.iban),
+      payeeIdentity: identityOf(organizationId, payee.iban),
       nameCheck: nameCheck(payee.name, holder),
       maskedName: holder === undefined ? null : masked(holder),
       hint: accountHint(payee.iban),
-      registeredAt: clock.now(),
+      registeredAt: clock.now().toISOString(),
     };
     return { beneficiary };
   };
 
-  const outcomeOf = (registration: Registration | undefined): BeneficiaryOutcome => {
+  const outcomeOf = (
+    organizationId: string,
+    registration: FakeRecord<'registration'> | undefined,
+  ): BeneficiaryOutcome => {
     if (registration === undefined) return { kind: 'refused', reason: 'unknown' };
-    const { outcome, form } = registration;
+    const { outcome, form } = registration.body;
     if (outcome === 'invalid_details') return { kind: 'refused', reason: 'invalid_details' };
     if (outcome !== 'waiting') {
       // Built from masked parts alone (the hint, the masked holder), so the
       // IBAN check is the last line here: no part of the number is named.
       const { beneficiary } = outcome;
       return withoutAccountNumbers(
-        { kind: 'registered', beneficiary: { ...beneficiary, registeredAt: new Date(beneficiary.registeredAt) } },
+        {
+          kind: 'registered',
+          beneficiary: {
+            organizationId,
+            registrationId: registration.ref,
+            ...beneficiary,
+            registeredAt: new Date(beneficiary.registeredAt),
+          },
+        },
         [],
       );
     }
     if (form === null) throw new Error('A pass-through registration is never left waiting');
-    if (clock.now() >= form.expiresAt) return { kind: 'refused', reason: 'expired' };
-    return { kind: 'waiting', formUrl: `${FORM_BASE}${form.formRef}`, expiresAt: new Date(form.expiresAt) };
+    const expiresAt = new Date(form.expiresAt);
+    if (clock.now() >= expiresAt) return { kind: 'refused', reason: 'expired' };
+    return { kind: 'waiting', formUrl: `${FORM_BASE}${form.formRef}`, expiresAt };
   };
 
+  const stateOf = async (records: FakeRecords, { registrationId }: BeneficiaryRef): Promise<BeneficiaryOutcome> =>
+    outcomeOf(records.organizationId, await records.get('registration', registrationId));
+
   return {
-    register(input) {
-      const known = registrations.get(key(input.organizationId, input.registrationId));
-      if (known !== undefined) return outcomeOf(known);
+    async register(records, input) {
+      const known = await records.get('registration', input.registrationId);
+      if (known !== undefined) return outcomeOf(records.organizationId, known);
       if (!routes.includes(input.route)) throw new RangeError(`This partner has no ${input.route} route`);
-      const registration: Registration = {
-        organizationId: input.organizationId,
-        registrationId: input.registrationId,
-        form:
-          input.route === 'hosted'
-            ? {
-                formRef: `fake-form-${ids.next()}`,
-                expiresAt: new Date(clock.now().getTime() + formMinutes * MINUTE_MS),
-              }
-            : null,
-        outcome: 'waiting',
+      const form =
+        input.route === 'hosted'
+          ? {
+              formRef: `fake-form-${ids.next()}`,
+              expiresAt: new Date(clock.now().getTime() + formMinutes * MINUTE_MS).toISOString(),
+            }
+          : null;
+      const registration: FakeRecord<'registration'> = {
+        ref: input.registrationId,
+        alias: form?.formRef ?? null,
+        body: {
+          form,
+          outcome: input.route === 'pass_through' ? registered(records.organizationId, input.payee) : 'waiting',
+        },
       };
-      if (input.route === 'pass_through') registration.outcome = registered(registration, input.payee);
-      registrations.set(key(input.organizationId, input.registrationId), registration);
-      return outcomeOf(registration);
+      // Another call with the same ID registered it first: its answer is the answer.
+      if (!(await records.add('registration', registration))) return stateOf(records, input);
+      return outcomeOf(records.organizationId, registration);
     },
 
-    stateOf: ({ organizationId, registrationId }) => outcomeOf(registrations.get(key(organizationId, registrationId))),
+    stateOf,
 
-    fillForm(formUrl, payee) {
-      const registration = [...registrations.values()].find(
-        ({ form }) => form !== null && `${FORM_BASE}${form.formRef}` === formUrl,
-      );
-      if (registration?.outcome !== 'waiting' || registration.form === null) throw new Error('No form open there');
-      if (clock.now() >= registration.form.expiresAt) throw new Error('No form open there');
-      const outcome = registered(registration, payee);
+    async fillForm(records, formUrl, payee) {
+      const formRef = formUrl.startsWith(FORM_BASE) ? formUrl.slice(FORM_BASE.length) : '';
+      const registration = await records.byAlias('registration', formRef);
+      const form = registration?.body.outcome === 'waiting' ? registration.body.form : null;
+      if (registration === undefined || form === null || clock.now() >= new Date(form.expiresAt)) {
+        throw new Error('No form open there');
+      }
+      const outcome = registered(records.organizationId, payee);
       if (outcome === 'invalid_details') throw new Error('The form refuses those details: fix them and send again');
-      registration.outcome = outcome;
+      await records.update('registration', { ...registration, body: { form, outcome } });
     },
   };
 }
