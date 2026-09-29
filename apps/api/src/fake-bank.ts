@@ -77,7 +77,7 @@ const DONE = (status: 'approved' | 'rejected') =>
   z.object({ status: z.literal(status).describe('What the bank did.') }).describe(`The link, ${status} at the bank.`);
 
 const APPROVE_SCHEMA = {
-  summary: 'Approve a link at the fake partner’s bank (staging only)',
+  summary: 'Approve a link at the fake partner’s bank (staging only; a retry answers 409 once done)',
   params: SESSION,
   body: z.strictObject({
     accountId: ACCOUNT_ID,
@@ -90,7 +90,7 @@ const APPROVE_SCHEMA = {
 };
 
 const REJECT_SCHEMA = {
-  summary: 'Turn a link down at the fake partner’s bank (staging only)',
+  summary: 'Turn a link down at the fake partner’s bank (staging only; a retry answers 409 once done)',
   params: SESSION,
   body: z
     .strictObject({})

@@ -5622,7 +5622,7 @@
     "/v1/fake-bank/sessions/{sessionRef}/approve": {
       "post": {
         "operationId": "fake-bank.approve",
-        "summary": "Approve a link at the fake partner’s bank (staging only)",
+        "summary": "Approve a link at the fake partner’s bank (staging only; a retry answers 409 once done)",
         "requestBody": {
           "required": true,
           "content": {
@@ -5731,7 +5731,7 @@
     "/v1/fake-bank/sessions/{sessionRef}/reject": {
       "post": {
         "operationId": "fake-bank.reject",
-        "summary": "Turn a link down at the fake partner’s bank (staging only)",
+        "summary": "Turn a link down at the fake partner’s bank (staging only; a retry answers 409 once done)",
         "requestBody": {
           "required": true,
           "content": {

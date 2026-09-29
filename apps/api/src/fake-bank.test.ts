@@ -206,6 +206,22 @@ describe('POST /v1/fake-bank/sessions/:sessionRef/approve (D2-3c)', () => {
 });
 
 describe('POST /v1/fake-bank/sessions/:sessionRef/reject (D2-3c)', () => {
+  it('takes no body at all', async () => {
+    const { app, rail, sessionRef } = await started();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v1/fake-bank/sessions/${sessionRef}/reject`,
+      headers: { ...headers(ORG), 'idempotency-key': crypto.randomUUID() },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK_ID })).toEqual({
+      kind: 'refused',
+      reason: 'rejected',
+    });
+  });
+
   it('turns the link down, so the partner confirms it rejected, and a second time answers 409', async () => {
     const { app, rail, sessionRef } = await started();
 
