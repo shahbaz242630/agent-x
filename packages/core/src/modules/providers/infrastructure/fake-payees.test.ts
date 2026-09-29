@@ -77,7 +77,7 @@ describe('a pass-through registration (D1-2)', () => {
       organizationId: ORG,
       registrationId: REGISTRATION,
       beneficiaryRef: 'fake-beneficiary-00000000-0000-7000-8000-000000000001',
-      payeeIdentity: 'fake-payee-00000000-0000-7000-8000-000000000002',
+      payeeIdentity: expect.stringMatching(/^fake-payee-[0-9a-f]{32}$/) as string,
       nameCheck: 'match',
       maskedName: 'J****** A* F*****',
       hint: `AE…${JASMINE.slice(-4)}`,
@@ -253,26 +253,24 @@ describe('a hosted-form registration (D1-2)', () => {
     expect(await rail.registerBeneficiary(hosted)).toEqual(waiting);
     expect(await rail.getBeneficiaryState(ref)).toEqual(waiting);
     expect(await rail.registerBeneficiary(hosted)).toEqual(waiting);
-    bank.fillForm(waiting.formUrl, jasmine);
+    await bank.fillForm(ORG, waiting.formUrl, jasmine);
     const beneficiary = beneficiaryOf(await rail.getBeneficiaryState(ref));
     expect(beneficiary).toMatchObject({
       registrationId: REGISTRATION,
       nameCheck: 'match',
       hint: `AE…${JASMINE.slice(-4)}`,
     });
-    expect(() => {
-      bank.fillForm(waiting.formUrl, jasmine);
-    }).toThrow('No form open there');
+    await expect(bank.fillForm(ORG, waiting.formUrl, jasmine)).rejects.toThrow('No form open there');
   });
 
   it('keeps the form open when it refuses details, until they are right', async () => {
     const { rail, bank } = setUp();
     const formUrl = formUrlOf(await rail.registerBeneficiary(hosted));
-    expect(() => {
-      bank.fillForm(formUrl, { name: 'A Supplier', iban: SENSITIVE_SAMPLES.lowercaseIban });
-    }).toThrow('The form refuses those details');
+    await expect(
+      bank.fillForm(ORG, formUrl, { name: 'A Supplier', iban: SENSITIVE_SAMPLES.lowercaseIban }),
+    ).rejects.toThrow('The form refuses those details');
     expect((await rail.getBeneficiaryState(ref)).kind).toBe('waiting');
-    bank.fillForm(formUrl, jasmine);
+    await bank.fillForm(ORG, formUrl, jasmine);
     expect((await rail.getBeneficiaryState(ref)).kind).toBe('registered');
   });
 
@@ -283,16 +281,14 @@ describe('a hosted-form registration (D1-2)', () => {
     expect((await rail.getBeneficiaryState(ref)).kind).toBe('waiting');
     clock.advanceBy(1);
     expect(await rail.getBeneficiaryState(ref)).toEqual({ kind: 'refused', reason: 'expired' });
-    expect(() => {
-      bank.fillForm(formUrl, jasmine);
-    }).toThrow('No form open there');
+    await expect(bank.fillForm(ORG, formUrl, jasmine)).rejects.toThrow('No form open there');
   });
 
-  it('opens no form at an address the partner didn’t give', () => {
+  it('opens no form at an address the partner didn’t give', async () => {
     const { bank } = setUp();
-    expect(() => {
-      bank.fillForm('https://payees.fake-partner.invalid/form/fake-form-unknown', jasmine);
-    }).toThrow('No form open there');
+    await expect(
+      bank.fillForm(ORG, 'https://payees.fake-partner.invalid/form/fake-form-unknown', jasmine),
+    ).rejects.toThrow('No form open there');
   });
 
   it('answers another organisation as none, before and after the form', async () => {
@@ -300,7 +296,7 @@ describe('a hosted-form registration (D1-2)', () => {
     const formUrl = formUrlOf(await rail.registerBeneficiary(hosted));
     const unknown = { kind: 'refused', reason: 'unknown' };
     expect(await rail.getBeneficiaryState({ ...ref, organizationId: OTHER_ORG })).toEqual(unknown);
-    bank.fillForm(formUrl, jasmine);
+    await bank.fillForm(ORG, formUrl, jasmine);
     expect(await rail.getBeneficiaryState({ ...ref, organizationId: OTHER_ORG })).toEqual(unknown);
   });
 });
@@ -312,7 +308,7 @@ describe('no account number in any answer (ADR-014 §3, SEC-PAY-05)', () => {
     const answers: unknown[] = [await rail.registerBeneficiary(passThrough(payee, ORG, 'reg-1'))];
     const hosted = { route: 'hosted', organizationId: ORG, registrationId: 'reg-2' } as const;
     const formUrl = formUrlOf(await rail.registerBeneficiary(hosted));
-    bank.fillForm(formUrl, payee);
+    await bank.fillForm(ORG, formUrl, payee);
     answers.push(
       await rail.getBeneficiaryState({ organizationId: ORG, registrationId: 'reg-1' }),
       await rail.getBeneficiaryState({ organizationId: ORG, registrationId: 'reg-2' }),
