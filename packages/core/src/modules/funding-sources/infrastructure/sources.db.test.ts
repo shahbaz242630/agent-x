@@ -230,6 +230,23 @@ describe(`a link (D2-2, Postgres ${server.version})`, () => {
     ).toBeUndefined();
   });
 
+  it('holds an end to its shape: a source for a link that made one, none for one that didn’t', async () => {
+    const org = await organization();
+    const { id } = await linkedSource(org);
+    const answer = await confirmed(org);
+    await addTheLink(org, answer);
+    const set = (outcome: string, sourceId: string | null) =>
+      withTenant(app, org, (tx) =>
+        tx
+          .updateTable('funding_sources.links')
+          .set({ outcome, source_id: sourceId, settled_at: clock.now() })
+          .where('id', '=', answer.linkId)
+          .execute(),
+      );
+    await expect(set('rejected', id)).rejects.toThrow('settled_once_with_its_end');
+    await expect(set('linked', null)).rejects.toThrow('settled_once_with_its_end');
+  });
+
   it('refuses a partner’s name that isn’t one, before any SQL runs', async () => {
     const org = await organization();
     await expect(
@@ -419,6 +436,61 @@ describe(`a funding source brought up to the partner’s answer (D2-2, Postgres 
     const { id, state } = await linkedSource(org);
     clock.advanceBy(366 * DAY_MS);
     expect(await refresh(org, id, state.externalRef)).toMatchObject({ status: 'ENDED', consentStatus: 'Expired' });
+  });
+
+  it.each([
+    ['its availability', (state: FundingSourceState) => ({ ...state, availability: 'SUSPENDED' as const })],
+    ['the partner’s word for it', (state: FundingSourceState) => ({ ...state, consentStatus: 'Suspended' })],
+    ['its consent', (state: FundingSourceState) => ({ ...state, accountConsentId: 'fake-consent-other' })],
+    ['the consent it renewed', (state: FundingSourceState) => ({ ...state, replacesConsentId: 'fake-consent-old' })],
+    [
+      'its expiry',
+      (state: FundingSourceState) => ({ ...state, consentExpiresAt: new Date(state.consentExpiresAt.getTime() - 1) }),
+    ],
+    ['its currency', (state: FundingSourceState) => ({ ...state, controls: { ...state.controls, currency: 'USD' } })],
+    [
+      'its period',
+      (state: FundingSourceState) => ({ ...state, controls: { ...state.controls, period: 'week' as const } }),
+    ],
+    [
+      'its most a payment',
+      (state: FundingSourceState) => ({ ...state, controls: { ...state.controls, maxPaymentMinor: 1n } }),
+    ],
+    [
+      'its most a period',
+      (state: FundingSourceState) => ({ ...state, controls: { ...state.controls, maxPeriodMinor: 1n } }),
+    ],
+    [
+      'its most payments a period',
+      (state: FundingSourceState) => ({ ...state, controls: { ...state.controls, maxPeriodPayments: 1 } }),
+    ],
+    [
+      'its holder’s name',
+      (state: FundingSourceState) => ({ ...state, summary: { ...state.summary, holderName: 'Renamed LLC' } }),
+    ],
+    [
+      'its account type',
+      (state: FundingSourceState) => ({ ...state, summary: { ...state.summary, accountType: 'corporate' as const } }),
+    ],
+    ['its hint', (state: FundingSourceState) => ({ ...state, summary: { ...state.summary, hint: 'AE…0000' } })],
+    [
+      'when it last changed',
+      (state: FundingSourceState) => ({ ...state, statusChangedAt: new Date(state.statusChangedAt.getTime() + 1) }),
+    ],
+  ])('records an answer that changes %s alone', async (_, changed) => {
+    const org = await organization();
+    const { id, state } = await linkedSource(org);
+    const answer = changed(state);
+    const now = await withSignedStates(app, org, services(), async (tx, states) => {
+      const check = await sourceOf(tx, states, { orgId: org, id }, 'change');
+      if (check.outcome !== 'found') throw new Error(`Not found: ${check.outcome}`);
+      return updateFromPartner(tx, states, { orgId: org, id }, check, { state: answer, actor: OPERATOR });
+    });
+    expect((await events(org, id)).map((event) => event.action)).toEqual([
+      'funding_source.linked',
+      'funding_source.partner_changed',
+    ]);
+    expect(await found(org, id)).toEqual(now);
   });
 
   it('refuses an answer for another source, or another organisation’s, before any SQL runs', async () => {

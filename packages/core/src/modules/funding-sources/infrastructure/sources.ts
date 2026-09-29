@@ -60,8 +60,17 @@ export const SOURCES = {
 /** A transaction on the tables sources are added and read in, opened by withSignedStates for their organisation. */
 export type FundingSourcesTransaction = Transaction<FundingSourcesTables & AuditTables>;
 
-/** The fields the partner's answer sets, sealed: everything but the partner, its reference and Agent X's status. */
-const partnerFields = (state: FundingSourceState) => ({
+/** What the partner says of a source: its answer, or what a source holds of the last one. */
+type PartnerWord = Pick<
+  FundingSourceState,
+  'availability' | 'consentStatus' | 'accountConsentId' | 'replacesConsentId' | 'consentExpiresAt' | 'statusChangedAt'
+> & {
+  readonly controls: SourceRecord['controls'];
+  readonly summary: SourceRecord['summary'];
+};
+
+/** The fields the partner's answer sets, sealed: everything but the link, the partner, its reference and Agent X's status. */
+const partnerFields = (state: PartnerWord) => ({
   availability: state.availability,
   consent_status: state.consentStatus,
   account_consent_id: state.accountConsentId,
@@ -254,22 +263,21 @@ export class NotThisSource extends Error {
   }
 }
 
-/** Whether the partner's answer says anything of the source other than it holds. */
-const partnerChanged = (source: SourceRecord, state: FundingSourceState): boolean =>
-  state.availability !== source.availability ||
-  state.consentStatus !== source.consentStatus ||
-  state.accountConsentId !== source.accountConsentId ||
-  state.replacesConsentId !== source.replacesConsentId ||
-  state.consentExpiresAt.getTime() !== source.consentExpiresAt.getTime() ||
-  state.controls.currency !== source.controls.currency ||
-  state.controls.period !== source.controls.period ||
-  state.controls.maxPaymentMinor !== source.controls.maxPaymentMinor ||
-  state.controls.maxPeriodMinor !== source.controls.maxPeriodMinor ||
-  state.controls.maxPeriodPayments !== source.controls.maxPeriodPayments ||
-  state.summary.holderName !== source.summary.holderName ||
-  state.summary.accountType !== source.summary.accountType ||
-  state.summary.hint !== source.summary.hint ||
-  state.statusChangedAt.getTime() !== source.partnerChangedAt.getTime();
+/** A field's value as two are compared: a time by its instant, anything else as it is. */
+const comparable = (value: unknown): unknown => (value instanceof Date ? value.getTime() : value);
+
+/**
+ * Whether the partner's answer says anything of the source other than it
+ * holds: every field the answer sets, compared one by one, so a field added
+ * to the answer is compared with the rest.
+ */
+function partnerChanged(source: SourceRecord, state: FundingSourceState): boolean {
+  const held: Readonly<Record<string, unknown>> = partnerFields({
+    ...source,
+    statusChangedAt: source.partnerChangedAt,
+  });
+  return Object.entries(partnerFields(state)).some(([column, value]) => comparable(value) !== comparable(held[column]));
+}
 
 /**
  * Brings the source up to the partner's latest answer, in the caller's
