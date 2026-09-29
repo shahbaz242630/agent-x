@@ -255,6 +255,78 @@ export async function sourceOf(
   return { outcome: 'found', source, state };
 }
 
+/**
+ * Ends the source the partner no longer knows by its reference (D2-4), in the
+ * caller's transaction, which read it with `change` (`found`): it funds
+ * nothing again, and using the account again means a new link. An ENDED
+ * source is left as it is. Gives the source as it now stands.
+ */
+export async function endUnknownToPartner(
+  tx: FundingSourcesTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  found: { readonly source: SourceRecord },
+  actor: AuditActor,
+): Promise<SourceRecord> {
+  if (found.source.status === 'ENDED') return found.source;
+  const ended = await states.changeStatus(tx, SOURCES, key, 'end', {
+    actor,
+    action: 'funding_source.ended',
+    details: { unknownToPartner: true },
+  });
+  // Verified and locked for change by the caller, in this transaction: it ends, or something past the app is at work.
+  if (ended.outcome !== 'changed') throw new Error(`A funding source the partner doesn't know didn't end: ${key.id}`);
+  return { ...found.source, status: 'ENDED' };
+}
+
+/** The most sources a page holds (D2-4). */
+export const MOST_SOURCES_A_PAGE = 50;
+
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * A page of the organisation's sources, in order of ID, after `after` (null
+ * from the start), in the caller's transaction, which must be
+ * withSignedStates' for the organisation: each read through its signed state
+ * (`share`), so a page holds nothing that can't be believed. Tampered with,
+ * the page is refused, the alarm raised and the organisation held, as for
+ * one source. `next` is the ID to ask the page after, or null at the end.
+ */
+export async function sourcesPage(
+  tx: FundingSourcesTransaction,
+  states: SignedStates,
+  orgId: string,
+  { after, limit }: { readonly after: string | null; readonly limit: number },
+): Promise<
+  | { readonly outcome: 'listed'; readonly sources: readonly SourceRecord[]; readonly next: string | null }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MOST_SOURCES_A_PAGE) {
+    throw new RangeError(`A page is 1 to ${String(MOST_SOURCES_A_PAGE)} sources`);
+  }
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each source is then read through its signed state
+    .selectFrom(SOURCES.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    // From the start, every ID is after the nil uuid.
+    .where('id', '>', after ?? NIL_UUID)
+    .orderBy('id')
+    .limit(limit + 1)
+    .execute();
+  const found: SourceRecord[] = [];
+  let last: string | null = null;
+  for (const { id } of rows.slice(0, limit)) {
+    const read = await sourceOf(tx, states, { orgId, id }, 'share');
+    if (read.outcome === 'tampered') return read;
+    if (read.outcome === 'found') found.push(read.source);
+    last = id;
+  }
+  // One more than the page was there: the next page starts after this one's last.
+  const next = rows.length > limit ? last : null;
+  return { outcome: 'listed', sources: found, next };
+}
+
 /** The partner's answer names another source than the one it was asked about. */
 export class NotThisSource extends Error {
   constructor() {
@@ -299,6 +371,8 @@ export async function updateFromPartner(
   if (!sameOrganisation(state.organizationId, key.orgId) || state.externalRef !== source.externalRef) {
     throw new NotThisSource();
   }
+  // An answer older than the one the source holds (two refreshes crossing, the later written first) changes nothing.
+  if (state.statusChangedAt < source.partnerChangedAt) return source;
   if (partnerChanged(source, state)) {
     await states.record(tx, SOURCES, key, found.state, partnerFields(state), {
       actor,

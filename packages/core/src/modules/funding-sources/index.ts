@@ -14,5 +14,14 @@ export {
   oneLinkStartAtATime,
   settleLink,
 } from './infrastructure/links.ts';
-export { addSource, SOURCES, sourceOf } from './infrastructure/sources.ts';
+export {
+  addSource,
+  endUnknownToPartner,
+  MOST_SOURCES_A_PAGE,
+  NotThisSource,
+  SOURCES,
+  sourceOf,
+  sourcesPage,
+  updateFromPartner,
+} from './infrastructure/sources.ts';
 export type { FundingSourcesTables } from './infrastructure/tables.ts';
