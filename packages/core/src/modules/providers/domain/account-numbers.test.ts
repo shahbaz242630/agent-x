@@ -5,7 +5,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import { SANDBOX_ACCOUNTS } from '../infrastructure/sandbox-accounts.ts';
-import { AccountNumberLeak, accountHint, withoutAccountNumbers } from './account-numbers.ts';
+import { AccountNumberLeak, accountHint, isUaeIban, withoutAccountNumbers } from './account-numbers.ts';
 
 const IBANS = SANDBOX_ACCOUNTS.flatMap((account) => account.AccountIdentifiers.map((each) => each.Identification));
 const [IBAN = ''] = IBANS;
@@ -92,6 +92,26 @@ describe('withoutAccountNumbers (D1-1)', () => {
         expect(leaks({ note: `${around} ${uaeIban(digits)} ${around}` })).toBe(true);
       }),
     );
+  });
+});
+
+describe('isUaeIban (D1-2)', () => {
+  it('takes a UAE IBAN with valid check digits, in groups or lower case', () => {
+    for (const iban of IBANS) expect(isUaeIban(iban)).toBe(true);
+    expect(isUaeIban(IBAN.toLowerCase().replace(/(.{4})/g, '$1 '))).toBe(true);
+  });
+
+  it('refuses bad check digits, another country, and the wrong length', () => {
+    expect(isUaeIban(`AE00${IBAN.slice(4)}`)).toBe(false);
+    expect(isUaeIban(SENSITIVE_SAMPLES.lowercaseIban)).toBe(false);
+    expect(isUaeIban(IBAN.slice(0, 22))).toBe(false);
+    expect(isUaeIban(`${IBAN}0`)).toBe(false);
+    // Another country's code on a UAE IBAN's 21 digits, with check digits that hold (S is 28, A is 10).
+    const digits = IBAN.slice(4);
+    const saudi = `SA${String(98n - (BigInt(`${digits}281000`) % 97n)).padStart(2, '0')}${digits}`;
+    expect(leaks({ note: saudi })).toBe(true);
+    expect(isUaeIban(saudi)).toBe(false);
+    expect(isUaeIban('')).toBe(false);
   });
 });
 

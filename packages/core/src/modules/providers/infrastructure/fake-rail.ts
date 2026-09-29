@@ -4,30 +4,36 @@
 // renewal is a new consent linked to the old (`BaseConsentId`); a consent may
 // be suspended and come back, or end revoked, expired or consumed. Its bank
 // offers the sandbox's synthetic business accounts, and its answers pass the
-// same account-number check a real adapter's must.
+// same account-number check a real adapter's must. Its payees are in
+// fake-payees.ts.
 //
 // `bank` plays everything that happens outside Agent X: the business at its
-// bank, the partner changing a consent, the partner going down. Tests use it,
-// and the Phase 1 demo on staging stands in for the partner with it.
+// bank, a person at the partner's payee form, the partner changing a consent,
+// the partner going down or its answer being lost. Tests use it, and the
+// Phase 1 demo on staging stands in for the partner with it.
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { accountHint, withoutAccountNumbers } from '../domain/account-numbers.ts';
 import {
+  BENEFICIARY_ROUTES,
+  type BeneficiaryRoute,
   type ConsentControls,
   type FinancialRailAdapter,
   type FundingSourceState,
   type LinkContext,
   type LinkOutcome,
   type PartnerLinkSession,
+  type PayeeDetails,
   RailUnavailable,
   type SourceLookup,
   type SourceRef,
   type SourceSummary,
 } from '../domain/rail.ts';
 import { availabilityOf, type ConsentStatus, consentMayMove } from '../domain/uae-consent.ts';
+import { createFakePayees } from './fake-payees.ts';
 import { type RailAccount, SANDBOX_ACCOUNTS } from './sandbox-accounts.ts';
 
-/** The rail's idempotency key: at most 40 characters, no spaces (rail map §3, `x-idempotency-key`). */
-const LINK_ID = /^[^\s]{1,40}$/;
+/** The rail's idempotency key, which our link and registration IDs are: at most 40 characters, no spaces (rail map §3, `x-idempotency-key`). */
+const PARTNER_KEY = /^[^\s]{1,40}$/;
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 
@@ -48,6 +54,12 @@ export interface FakeRailOptions {
   readonly linkMinutes?: number;
   /** How long an approved consent lasts. */
   readonly consentDays?: number;
+  /** How a supplier's details may reach this partner: both, unless a test mirrors a partner with one. */
+  readonly beneficiaryRoutes?: readonly BeneficiaryRoute[];
+  /** Whether this partner gives the same payee identity for the same account (BEN-2). */
+  readonly stablePayeeIdentity?: boolean;
+  /** How long a person has to fill in the hosted payee form. */
+  readonly formMinutes?: number;
 }
 
 export interface ApproveOptions {
@@ -66,9 +78,13 @@ export interface FakeBank {
   changeConsent(consentId: string, to: ConsentStatus): void;
   /** The business renews: a new consent, linked to the old one, for the same source; gives its ID. */
   renew(externalRef: string, controls?: ConsentControls): string;
+  /** A person fills in the partner's hosted payee form, opened at `formUrl`; the form refuses details it can't take. */
+  fillForm(formUrl: string, payee: PayeeDetails): void;
   /** Every call to the partner fails, as if it didn't answer, until it comes back. */
   goDown(): void;
   comeBack(): void;
+  /** The next call is done at the partner, but its answer is lost: the caller sees RailUnavailable. */
+  loseNextAnswer(): void;
 }
 
 export interface FakeRail extends FinancialRailAdapter {
@@ -114,10 +130,28 @@ function summaryOf(account: RailAccount): SourceSummary {
 }
 
 export function createFakeRail(options: FakeRailOptions): FakeRail {
-  const { clock, ids, accounts = SANDBOX_ACCOUNTS, linkMinutes = 15, consentDays = 365 } = options;
+  const {
+    clock,
+    ids,
+    accounts = SANDBOX_ACCOUNTS,
+    linkMinutes = 15,
+    consentDays = 365,
+    beneficiaryRoutes = BENEFICIARY_ROUTES,
+    stablePayeeIdentity = true,
+    formMinutes = 30,
+  } = options;
   const sessions = new Map<string, Session>();
   const sources = new Map<string, Source>();
+  const payees = createFakePayees({
+    clock,
+    ids,
+    accounts,
+    routes: beneficiaryRoutes,
+    stablePayeeIdentity,
+    formMinutes,
+  });
   let down = false;
+  let loseAnswer = false;
 
   const sessionFor = ({ organizationId, linkId }: LinkContext): Session | undefined =>
     [...sessions.values()].find((each) => each.organizationId === organizationId && each.linkId === linkId);
@@ -220,20 +254,38 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       sources.set(externalRef, renewed);
       return renewed.consentId;
     },
+    fillForm(formUrl, payee) {
+      payees.fillForm(formUrl, payee);
+    },
     goDown() {
       down = true;
     },
     comeBack() {
       down = false;
     },
+    loseNextAnswer() {
+      loseAnswer = true;
+    },
   };
 
-  /** Every call answers later, as a partner's would; while the partner is down it fails, whatever it asked. */
+  /**
+   * Every call answers later, as a partner's would. While the partner is down
+   * it fails, having done nothing; a lost answer fails after the work is done.
+   */
   const answer = <T>(work: () => T): Promise<T> =>
     Promise.resolve().then(() => {
       if (down) throw new RailUnavailable();
-      return work();
+      const answered = work();
+      if (loseAnswer) {
+        loseAnswer = false;
+        throw new RailUnavailable();
+      }
+      return answered;
     });
+
+  const partnerKey = (id: string): void => {
+    if (!PARTNER_KEY.test(id)) throw new RangeError('A link or registration ID is 1 to 40 characters, with no spaces');
+  };
 
   const started = (input: LinkContext): Session => {
     const sessionRef = `fake-link-${ids.next()}`;
@@ -262,9 +314,11 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
   return {
     bank,
 
+    capabilities: () => answer(() => ({ beneficiaryRoutes: [...beneficiaryRoutes], stablePayeeIdentity })),
+
     startSourceLink: (input: LinkContext): Promise<PartnerLinkSession> =>
       answer(() => {
-        if (!LINK_ID.test(input.linkId)) throw new RangeError('A link ID is 1 to 40 characters, with no spaces');
+        partnerKey(input.linkId);
         const session = sessionFor(input) ?? started(input);
         return {
           linkId: session.linkId,
@@ -282,5 +336,13 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
         if (source?.organizationId !== organizationId) return { kind: 'not_found' };
         return { kind: 'found', source: stateOf(brought(source)) };
       }),
+
+    registerBeneficiary: (input) =>
+      answer(() => {
+        partnerKey(input.registrationId);
+        return payees.register(input);
+      }),
+
+    getBeneficiaryState: (ref) => answer(() => payees.stateOf(ref)),
   };
 }

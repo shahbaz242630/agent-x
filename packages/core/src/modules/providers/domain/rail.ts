@@ -4,10 +4,10 @@
 // and a masked summary, never the partner's own fields or an account number
 // (PRD §6, ADR-014 §3).
 //
-// The contract grows with the phase that first uses each part. Phase 1 D1-1:
-// linking a business's bank account (PRD §2.3; rail map §2). The partner's
-// payee registration comes with D1-2; the hand-off, its status and events
-// with Phase 4.
+// The contract grows with the phase that first uses each part. Phase 1:
+// linking a business's bank account (D1-1; PRD §2.3, rail map §2) and
+// registering a supplier as the partner's payee (D1-2; ADR-014 §3). The
+// hand-off, its status and events come with Phase 4.
 //
 // Linking, on any rail:
 // 1. Agent X starts a link with its own ID for it; the partner answers with a
@@ -118,9 +118,96 @@ export class RailUnavailable extends Error {
   }
 }
 
+// Registering a payee (ADR-014 §3), on any rail. The supplier's bank details
+// go to the partner, never into Agent X's storage, by one of two routes:
+// - `hosted`: the partner's own form, so the details never touch Agent X
+// - `pass_through`: the details a person typed, forwarded within the same
+//   request and held only in its memory
+// Either way Agent X names the registration with its own ID (the partner's
+// idempotency key), and reads how it ended from the partner, server to
+// server, by that ID and only for its organisation: after a timeout, after
+// the hosted form, and before the payee is used.
+
+export const BENEFICIARY_ROUTES = ['hosted', 'pass_through'] as const;
+export type BeneficiaryRoute = (typeof BENEFICIARY_ROUTES)[number];
+
+/** What this partner offers, which decides how suppliers are registered (0f; BEN-1, BEN-2). */
+export interface RailCapabilities {
+  readonly beneficiaryRoutes: readonly BeneficiaryRoute[];
+  /**
+   * Whether the partner gives the same payee identity for the same account
+   * in an organisation (ADR-014 §3's payee key source (a)); if not, the
+   * payee key is our fingerprint (pass-through) or there is none (R-13).
+   */
+  readonly stablePayeeIdentity: boolean;
+}
+
+/** The details a person typed for a pass-through registration: held in memory for that one request. */
+export interface PayeeDetails {
+  readonly name: string;
+  readonly iban: string;
+}
+
+/** A registration Agent X starts: `registrationId` is ours, and the partner's idempotency key for it. */
+export type BeneficiaryRegistration =
+  | { readonly route: 'hosted'; readonly organizationId: string; readonly registrationId: string }
+  | {
+      readonly route: 'pass_through';
+      readonly organizationId: string;
+      readonly registrationId: string;
+      readonly payee: PayeeDetails;
+    };
+
+/**
+ * The partner's name check of the payee (Confirmation of Payee; rail map §3):
+ * the name matches the account's holder, partly, not at all, or the account's
+ * bank couldn't say.
+ */
+export type PayeeNameCheck = 'match' | 'partial' | 'no_match' | 'unavailable';
+
+/** A payee the partner registered, as it holds it now. */
+export interface BeneficiaryState {
+  readonly organizationId: string;
+  readonly registrationId: string;
+  /** The partner's opaque reference for the payee (PRD §6.2 `beneficiaryRef`). */
+  readonly beneficiaryRef: string;
+  /** The partner's identity for the account in this organisation, or null where it gives none. */
+  readonly payeeIdentity: string | null;
+  readonly nameCheck: PayeeNameCheck;
+  /** The account holder's name as the bank masks it, for a call-back to compare; null where none came back. */
+  readonly maskedName: string | null;
+  /** The country and last four characters of the account number, such as `AE…6026`. */
+  readonly hint: string;
+  readonly registeredAt: Date;
+}
+
+/**
+ * How a registration stands, as the partner says server to server:
+ * - `registered`: the payee, now the partner's
+ * - `waiting`: the hosted form hasn't been filled in yet; send the person to `formUrl`
+ * - `refused`: `invalid_details` (not an account this rail can pay),
+ *   `expired` (the form wasn't filled in time), or `unknown`: no
+ *   registration of that ID for that organisation (another organisation's
+ *   answers the same as none)
+ */
+export type BeneficiaryOutcome =
+  | { readonly kind: 'registered'; readonly beneficiary: BeneficiaryState }
+  | { readonly kind: 'waiting'; readonly formUrl: string; readonly expiresAt: Date }
+  | { readonly kind: 'refused'; readonly reason: 'invalid_details' | 'expired' | 'unknown' };
+
+/** A registration Agent X started for an organisation. */
+export interface BeneficiaryRef {
+  readonly organizationId: string;
+  readonly registrationId: string;
+}
+
 /** The adapter every partner implements, and its fake (Rule Book §6: both pass the same contract tests). */
 export interface FinancialRailAdapter {
+  capabilities(): Promise<RailCapabilities>;
   startSourceLink(input: LinkContext): Promise<PartnerLinkSession>;
   confirmSourceLink(input: LinkContext): Promise<LinkOutcome>;
   getSourceState(ref: SourceRef): Promise<SourceLookup>;
+  /** Registering again with the same ID answers as the first did, whatever details come with it. */
+  registerBeneficiary(input: BeneficiaryRegistration): Promise<BeneficiaryOutcome>;
+  getBeneficiaryState(ref: BeneficiaryRef): Promise<BeneficiaryOutcome>;
 }
