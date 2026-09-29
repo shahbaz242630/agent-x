@@ -25,7 +25,7 @@
 //   authority back, so an admin's, with step-up (a passkey, ADR-003 §8,
 //   SEC-HA-12). The ask: the key claimed first; the admin read again; the
 //   source, SUSPENDED (SOURCE_NOT_SUSPENDED otherwise); a challenge bound to
-//   the organisation and the event that suspended the source, so it
+//   the event that suspended the source, so it
 //   reactivates exactly that suspension and not a later one. The confirm,
 //   with the challenge: the same reads, the source for change; the challenge
 //   consumed; then SUSPENDED > ACTIVE, with the step-up's evidence on its
@@ -117,12 +117,13 @@ export interface FundingSourceChanges {
 }
 
 /**
- * The pending change's SHA-256: the organisation and the event that suspended
- * the source, IDs in lower case. That event is the source's own, read from its
- * signed state, so it names the source and exactly this suspension.
+ * The pending change's SHA-256: the event that suspended the source, its ID in
+ * lower case. That event is the source's own, read from its signed state
+ * inside the organisation's walls, so it names the organisation, the source
+ * and exactly this suspension.
  */
-const reactivationHash = (orgId: string, suspendedBy: string): Buffer =>
-  changeHashOf([REACTIVATE_OPERATION, orgId.toLowerCase(), suspendedBy.toLowerCase()]);
+const reactivationHash = (suspendedBy: string): Buffer =>
+  changeHashOf([REACTIVATE_OPERATION, suspendedBy.toLowerCase()]);
 
 export function createFundingSourceChanges({
   database,
@@ -230,7 +231,7 @@ export function createFundingSourceChanges({
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: REACTIVATE_OPERATION,
-          changeHash: reactivationHash(member.orgId, source.suspendedBy),
+          changeHash: reactivationHash(source.suspendedBy),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new FundingSourceRefused(401, 'UNAUTHENTICATED');
@@ -250,7 +251,7 @@ export function createFundingSourceChanges({
           {
             sessionId: member.sessionId,
             action: REACTIVATE_OPERATION,
-            changeHash: reactivationHash(member.orgId, source.suspendedBy),
+            changeHash: reactivationHash(source.suspendedBy),
           },
           // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },

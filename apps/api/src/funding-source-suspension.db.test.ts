@@ -222,6 +222,14 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
 
     expect(changedOf(await suspend(admin, source.id)).status).toBe('SUSPENDED');
     expect(await actions(org, source.id)).toEqual(['funding_source.linked', 'funding_source.suspended']);
+
+    const ended = await linked(admin, 'sme-trading-business-acct-01');
+    await rail.bank.changeConsent(org, ended.accountConsentId, 'Revoked');
+    changedOf(await changes.refresh(admin, keyed(admin, 'funding-sources.refresh'), ended.id, CORRELATION));
+    const recorded = await actions(org, ended.id);
+
+    expect(changedOf(await suspend(admin, ended.id)).status).toBe('ENDED');
+    expect(await actions(org, ended.id)).toEqual(recorded);
   });
 
   it('refuses a developer or a viewer: FORBIDDEN, the source left ACTIVE', async () => {
@@ -346,6 +354,28 @@ describe(`reactivating a suspended source, with an admin’s passkey step-up (D2
 
     expect(await confirm(admin, source.id, forOther)).toMatchObject({ code: 'STEP_UP_FAILED' });
     expect(await confirm(admin, source.id, notYet)).toMatchObject({ code: 'STEP_UP_FAILED' });
+  });
+
+  it('refuses a step-up done in another session of the same admin: STEP_UP_FAILED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id));
+    const challengeId = askedFor(await reactivate(admin, source.id));
+    await stepUp(admin, challengeId);
+    const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const { sessionId } = await sessions.open(app, admin.userId, {
+      idpSessionId: 'V1_3',
+      authTime: clock.now(),
+      amr: [...PASSKEY],
+    });
+
+    expect(await confirm({ ...admin, sessionId }, source.id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect((await eventsAbout(org, source.id)).at(-1)?.action).toBe('funding_source.suspended');
   });
 
   it('refuses a step-up asked for an earlier suspension: it reactivates exactly the one it was asked for', async () => {
