@@ -195,6 +195,11 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(hashOf(WITH_EMAIL)).not.toBe(hashOf(SETTINGS));
   });
 
+  it('changes with the payment partner (D2-3a)', () => {
+    const staging = { ...SETTINGS, AGENTX_ENV: 'staging' };
+    expect(hashOf({ ...staging, AGENTX_PARTNER_MODE: 'fake' })).not.toBe(hashOf(staging));
+  });
+
   it('ignores the OIDC client secret, as it does the password', () => {
     expect(hashOf({ ...SETTINGS, AGENTX_OIDC_CLIENT_SECRET: 'other pass words' })).toBe(hashOf(SETTINGS));
   });

@@ -104,6 +104,7 @@ describe(`the API process (Postgres ${server.version})`, () => {
           .filter((event) => event.startsWith('api.'));
         expect(events).toEqual([
           'api.starting',
+          'api.partner',
           'api.database_connected',
           'api.start_recorded',
           'api.listening',

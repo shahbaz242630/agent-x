@@ -316,6 +316,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const fingerprint = configFingerprint(config, keys.describe(), options.env);
   logger.info('api.starting', { ...fingerprint });
+  // ADR-014 §4: which payment partner this process talks to, if any.
+  logger.info('api.partner', { mode: config.partner?.mode ?? 'none' });
 
   const database = await connectDatabase(config, logger);
   if (database === undefined) {

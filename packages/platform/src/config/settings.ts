@@ -17,6 +17,7 @@ import {
   ENVIRONMENTS,
   LOCAL_ONLY,
   LOG_LEVELS,
+  PARTNER_MODES,
   type LogLevel,
 } from './common.ts';
 import { databaseHost, identifier, text, tlsMode, wholeNumber } from './primitives.ts';
@@ -237,6 +238,11 @@ const SETTINGS = {
     }),
     default: '90',
   },
+  // ADR-014 §4: which payment partner the app talks to. Only the fake is
+  // built (Phase 1 D2-3a); config.ts holds where each mode is allowed.
+  AGENTX_PARTNER_MODE: {
+    schema: text.pipe(z.enum(PARTNER_MODES, { error: `must be one of: ${PARTNER_MODES.join(', ')}` })).optional(),
+  },
   AGENTX_PAYEE_COOLING_OFF_HOURS: {
     schema: wholeNumber({
       min: 24,
@@ -341,6 +347,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_SESSION_IDLE_MINUTES',
       'AGENTX_SESSION_ABSOLUTE_HOURS',
       'AGENTX_SECURITY_EVENT_RETENTION_DAYS',
+      'AGENTX_PARTNER_MODE',
       'AGENTX_PAYEE_COOLING_OFF_HOURS',
       'AGENTX_AUDIT_ANCHOR_SECONDS',
       'AGENTX_KEYS_DIR',

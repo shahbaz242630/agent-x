@@ -35,6 +35,10 @@ param zitadelLoginImage = 'ghcr.io/zitadel/zitadel-login:v4.17.3@sha256:07ae03bd
 
 param appHost = readEnvironmentVariable('AGENTX_AZURE_APP_HOST')
 
+// ADR-014 §4: staging talks to the fake partner, which keeps its records in
+// the database (Phase 1 D2-1), until the partner's sandbox adapter (Phase 5).
+param partnerMode = 'fake'
+
 // The API as Zitadel's OIDC client (B2-6): the client ID Zitadel gave when the
 // API was registered with it; its secret is in the vault.
 param apiOidcClientId = readEnvironmentVariable('AGENTX_AZURE_API_OIDC_CLIENT_ID')

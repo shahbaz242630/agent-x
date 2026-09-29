@@ -102,6 +102,7 @@ export function fingerprintedSettings(config: Config): Record<string, unknown> {
     factorResets: config.factorResets === undefined ? null : {},
     sessions: { idleSeconds: config.sessions.idleSeconds, absoluteSeconds: config.sessions.absoluteSeconds },
     securityEvents: { retentionDays: config.securityEvents.retentionDays },
+    partner: config.partner === undefined ? undefined : { mode: config.partner.mode },
     payees: { coolingOffHours: config.payees.coolingOffHours },
     audit: { anchorSeconds: config.audit.anchorSeconds },
     keys: { directory: config.keys.directory, current: config.keys.current },

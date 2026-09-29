@@ -412,6 +412,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     expect(fake.steps).toEqual(['role checked', 'schema checked', 'start recorded', 'anchor check started']);
     expect(events()).toEqual([
       'api.starting',
+      'api.partner',
       'api.database_connected',
       'api.start_recorded',
       'api.listening',
@@ -419,7 +420,9 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       'api.idp_events',
       'api.factor_resets',
     ]);
-    expect(capture.lines()[1]).toEqual(
+    // A test runs with the fake partner, the default where nothing real is at stake (D2-3a).
+    expect(capture.lines()[1]).toEqual(expect.objectContaining({ event: 'api.partner', mode: 'fake' }));
+    expect(capture.lines()[2]).toEqual(
       expect.objectContaining({ event: 'api.database_connected', role: 'agentx_app' }),
     );
     // No email in this config (B5-3), so the notices wait in the outbox.
@@ -598,7 +601,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
 describe('SEC-OPS-05 the API logs its config fingerprint and starts listening', () => {
   it('logs the fingerprint, listens on the port it was given, and answers', async () => {
     const { server, capture } = await start();
-    const [starting, , , listening] = capture.lines().filter((line) => String(line.event).startsWith('api.'));
+    const [starting, , , , listening] = capture.lines().filter((line) => String(line.event).startsWith('api.'));
     expect(starting).toEqual(
       expect.objectContaining({
         event: 'api.starting',
