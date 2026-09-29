@@ -88,6 +88,12 @@ export function withoutAccountNumbers<T>(answer: T, accountNumbers: readonly str
   return answer;
 }
 
+/** Whether a text is a UAE IBAN (AE and 21 digits, spaces and case aside) with valid check digits: an account the rail can pay. */
+export function isUaeIban(text: string): boolean {
+  const number = compact(text);
+  return /^AE\d{21}$/.test(number) && checksumHolds(number);
+}
+
 /**
  * What may be kept of an account number: its country and its last four
  * characters (`AE…6026`), enough for a person to tell their accounts apart

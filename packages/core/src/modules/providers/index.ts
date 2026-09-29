@@ -2,14 +2,23 @@
 // partner's adapter contract, its fake, and the checks every adapter's
 // answers pass. The only module that knows a partner's API; `funding-sources`,
 // `suppliers` and the hand-off see only its normalised answers.
-export { AccountNumberLeak, accountHint, withoutAccountNumbers } from './domain/account-numbers.ts';
+export { AccountNumberLeak, accountHint, isUaeIban, withoutAccountNumbers } from './domain/account-numbers.ts';
 export {
+  BENEFICIARY_ROUTES,
+  type BeneficiaryOutcome,
+  type BeneficiaryRef,
+  type BeneficiaryRegistration,
+  type BeneficiaryRoute,
+  type BeneficiaryState,
   type ConsentControls,
   type FinancialRailAdapter,
   type FundingSourceState,
   type LinkContext,
   type LinkOutcome,
   type PartnerLinkSession,
+  type PayeeDetails,
+  type PayeeNameCheck,
+  type RailCapabilities,
   RailUnavailable,
   SOURCE_AVAILABILITIES,
   type SourceAvailability,
