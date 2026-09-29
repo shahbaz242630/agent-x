@@ -213,6 +213,36 @@ describe(`FX-TAMPER as the owner on a funding source: denied by the row check, a
     await deniedAndHeld(id, 'seal');
   });
 
+  it.each([
+    ['partner', 'another_partner'],
+    ['availability', 'PENDING'],
+    ['consent_status', 'Suspended'],
+    ['replaces_consent_id', 'fake-consent-planted'],
+    ['limit_period', 'year'],
+    ['max_period_minor', '999999999999'],
+    ['max_period_payments', 100000],
+    ['account_type', 'corporate'],
+    ['hint', 'AE…0000'],
+    ['partner_changed_at', '2030-01-01T00:00:00Z'],
+  ] as const)('its %s changed', async (column, value) => {
+    const id = await linkedSource();
+    await owner.setColumn(id, column, value);
+
+    await deniedAndHeld(id, 'seal');
+  });
+
+  it('moved to another link', async () => {
+    const id = await linkedSource();
+    const other = ids.next();
+    await owner.query(
+      "insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at) values ($1, $2, $3, 'fake', 'fake-link-other', now() + interval '1 day', now())",
+      [org, other, ids.next()],
+    );
+    await owner.setColumn(id, 'link_id', other);
+
+    await deniedAndHeld(id, 'seal');
+  });
+
   it('an ended source rolled back to its saved, validly signed, active state', async () => {
     const id = await linkedSource();
     const saved = await owner.saveRow(id);

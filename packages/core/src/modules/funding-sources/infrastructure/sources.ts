@@ -35,6 +35,7 @@ export const SOURCES = {
   table: 'funding_sources.sources',
   subject: 'funding_source',
   fields: [
+    { column: 'link_id', type: 'uuid' },
     { column: 'partner', type: 'text' },
     { column: 'external_ref', type: 'text' },
     { column: 'status', type: 'text' },
@@ -118,11 +119,17 @@ export async function addSource(
     throw new RangeError("The partner's answer is another organisation's");
   if (state.availability === 'UNAVAILABLE') throw new RangeError('A source the partner says is gone is never added');
   if (!PARTNER_NAME.test(partner)) throw new RangeError('A partner is named in lower-case words');
-  const fields = { partner, external_ref: state.externalRef, status: FUNDING_SOURCE.initial, ...partnerFields(state) };
+  const fields = {
+    link_id: linkId,
+    partner,
+    external_ref: state.externalRef,
+    status: FUNDING_SOURCE.initial,
+    ...partnerFields(state),
+  };
   await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') just below (see the top of this file)
     .insertInto(SOURCES.table)
-    .values({ org_id: orgId, id, link_id: linkId, ...fields, created_at: createdAt })
+    .values({ org_id: orgId, id, ...fields, created_at: createdAt })
     .execute();
   return states.record(tx, SOURCES, { orgId, id }, 'new', fields, {
     actor,
@@ -154,6 +161,7 @@ function recordOf(id: string, fields: ReadonlyMap<string, string | null>): Sourc
     const value = new Date(text(column) ?? Number.NaN);
     return Number.isNaN(value.getTime()) ? undefined : value;
   };
+  const linkId = text('link_id');
   const partner = text('partner');
   const externalRef = text('external_ref');
   const status = oneOf(FUNDING_SOURCE.states, text('status'));
@@ -173,6 +181,7 @@ function recordOf(id: string, fields: ReadonlyMap<string, string | null>): Sourc
   const hint = text('hint');
   const partnerChangedAt = time('partner_changed_at');
   if (
+    linkId === undefined ||
     partner === undefined ||
     externalRef === undefined ||
     status === undefined ||
@@ -194,6 +203,7 @@ function recordOf(id: string, fields: ReadonlyMap<string, string | null>): Sourc
   }
   return {
     id,
+    linkId,
     partner,
     externalRef,
     status,

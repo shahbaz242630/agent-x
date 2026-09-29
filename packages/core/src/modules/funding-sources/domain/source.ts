@@ -64,6 +64,8 @@ interface SourceSummary {
 /** A source, as its signed state says. */
 export interface SourceRecord {
   readonly id: string;
+  /** The link that made it. */
+  readonly linkId: string;
   readonly partner: string;
   /** The partner's reference for the source: the same through a renewal. */
   readonly externalRef: string;

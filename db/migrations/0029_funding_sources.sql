@@ -12,7 +12,10 @@
 -- anything that came back through the browser (SEC-PTR-08): linked (with the
 -- source it made), rejected, expired, or unknown to the partner. A link
 -- grants nothing, so it is a plain tenant table: the app adds it, reads it,
--- and fills in its end once.
+-- and fills in its end, once (the app's settle refuses a link already
+-- settled; the table's check only holds an end to its shape). The source
+-- seals the link it came from, so a link pointed at another source changes
+-- nothing a source may do.
 --
 -- funding_sources.sources is a linked source: a tenant table and an authority
 -- table (ADR-012 §2), since a hand-off will rest on it. Two statuses:
@@ -24,7 +27,8 @@
 --   UNAVAILABLE), with its own word for the consent kept as evidence.
 -- Only a source ACTIVE in both, before its consent's expiry, may fund a
 -- request. Sealed with them (they must equal the source's latest signed
--- event): the partner and its reference for the source, the consent's ID,
+-- event): the link it came from, the partner and its reference for the
+-- source, the consent's ID,
 -- the one it renewed and its expiry, the bank's controls (currency, period,
 -- the most a payment, the most a period in money and in payments), and what
 -- may be shown of the account (BR-02): the holder's name, the account's type
@@ -42,8 +46,8 @@
 --
 -- The app adds rows and reads them, and changes only a link's end, once, and
 -- a source's sealed fields and its two signed-state columns, all of which
--- the audit module's record writes and seals together (its partner and
--- reference among them, rewritten as they were). Never a key, a link or a
+-- the audit module's record writes and seals together (its link, partner
+-- and reference among them, rewritten as they were). Never a key or a
 -- creation time, and never deletes (a source deleted and added again would
 -- be born ACTIVE). The backup role reads everything, as it must for a
 -- logical backup.
@@ -128,7 +132,7 @@ CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON funding_sources.sources
 
 GRANT SELECT, INSERT ON funding_sources.sources TO agentx_app;
 GRANT UPDATE (
-  partner, external_ref, status, availability, consent_status, account_consent_id, replaces_consent_id,
+  link_id, partner, external_ref, status, availability, consent_status, account_consent_id, replaces_consent_id,
   consent_expires_at, currency, limit_period, max_payment_minor, max_period_minor, max_period_payments,
   holder_name, account_type, hint, partner_changed_at, state_version, state_event_id
 ) ON funding_sources.sources TO agentx_app;

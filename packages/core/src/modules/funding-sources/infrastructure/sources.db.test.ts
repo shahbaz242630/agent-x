@@ -251,9 +251,10 @@ describe(`a link (D2-2, Postgres ${server.version})`, () => {
 describe(`a funding source (D2-2, Postgres ${server.version})`, () => {
   it('is added ACTIVE from the partner’s answer, every authority field sealed', async () => {
     const org = await organization();
-    const { id, state } = await linkedSource(org);
+    const { id, linkId, state } = await linkedSource(org);
     expect(await found(org, id)).toEqual({
       id,
+      linkId,
       partner: 'fake',
       externalRef: state.externalRef,
       status: 'ACTIVE',
@@ -452,11 +453,13 @@ describe(`what the app may do to the tables (D2-2, Postgres ${server.version})`,
     expect(findLeaks(rows[0]?.text ?? '', ibans)).toEqual([]);
   });
 
-  it('lets the app neither delete nor change which link a source came from, or who started a link', async () => {
+  it('lets the app neither delete nor change when a source was added, or who started a link', async () => {
     const as = database.as('app');
     await expect(as.query('delete from funding_sources.sources')).rejects.toThrow('permission denied');
     await expect(as.query('delete from funding_sources.links')).rejects.toThrow('permission denied');
-    await expect(as.query('update funding_sources.sources set link_id = link_id')).rejects.toThrow('permission denied');
+    await expect(as.query('update funding_sources.sources set created_at = created_at')).rejects.toThrow(
+      'permission denied',
+    );
     await expect(as.query('update funding_sources.links set started_by = started_by')).rejects.toThrow(
       'permission denied',
     );
