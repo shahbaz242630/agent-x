@@ -37,6 +37,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import {
   createFundingSourceLinks,
+  railFor,
   type FundingSourceLinks,
   LINK_CONFIRM_OPERATION,
   LINK_START_OPERATION,
@@ -275,6 +276,17 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
       await holder.end();
     }
     expect((await rows(org)).links).toHaveLength(MOST_LINKS_STARTED_A_DAY);
+  });
+});
+
+describe(`the partner the config names (D2-3b, Postgres ${server.version})`, () => {
+  it('is none without one, and the fake over the database’s records with it', async () => {
+    expect(railFor(undefined, { database: app, clock, ids })).toBeUndefined();
+    const fake = railFor({ mode: 'fake' }, { database: app, clock, ids });
+    expect(await fake?.capabilities()).toEqual({
+      beneficiaryRoutes: ['hosted', 'pass_through'],
+      stablePayeeIdentity: true,
+    });
   });
 });
 

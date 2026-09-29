@@ -57,7 +57,7 @@ import {
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
-import { createDatabaseRecords, createFakeRail, type FakePartnerTables } from '@agentx/core/modules/providers';
+import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -85,7 +85,7 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
-import { createFundingSourceLinks } from './funding-source-links.ts';
+import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
@@ -470,10 +470,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       ids: uuidV7Ids,
       clock: systemClock,
       // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
-      rail:
-        config.partner === undefined
-          ? undefined
-          : createFakeRail({ clock: systemClock, ids: uuidV7Ids, records: createDatabaseRecords(database) }),
+      rail: railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids }),
       partner: partnerName(config.partner),
       logger,
     }),

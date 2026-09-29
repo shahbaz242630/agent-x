@@ -49,7 +49,14 @@ import {
 import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
-import { type FinancialRailAdapter, type LinkOutcome, RailUnavailable } from '@agentx/core/modules/providers';
+import {
+  createDatabaseRecords,
+  createFakeRail,
+  type FakePartnerTables,
+  type FinancialRailAdapter,
+  type LinkOutcome,
+  RailUnavailable,
+} from '@agentx/core/modules/providers';
 import type { Clock, IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import {
   createIdempotentWrites,
@@ -115,6 +122,21 @@ export interface FundingSourceLinks {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * The partner the config names (ADR-014 §4): the fake, over its own records in
+ * the app's database, or none, when every link answers PARTNER_UNAVAILABLE.
+ */
+export function railFor(
+  partner: { readonly mode: 'fake' } | undefined,
+  {
+    database,
+    clock,
+    ids,
+  }: { readonly database: Database<FakePartnerTables>; readonly clock: Clock; readonly ids: IdGenerator },
+): FinancialRailAdapter | undefined {
+  return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
+}
 
 /** A refusal thrown inside a write, so everything it did rolls back. */
 class LinkRefused extends Error {
