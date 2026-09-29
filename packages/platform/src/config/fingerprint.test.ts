@@ -131,7 +131,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     ['the absolute timeout', { AGENTX_SESSION_ABSOLUTE_HOURS: '11' }],
     ['the trusted proxies', { AGENTX_TRUSTED_PROXIES: '10.0.0.0/24' }],
     ['the public origin', { AGENTX_PUBLIC_ORIGIN: 'https://other.agentx.example' }],
-    ['the environment', { AGENTX_ENV: 'staging' }],
+    ['the environment', { AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' }],
     ['the database host', { AGENTX_DB_HOST: 'other.internal.example' }],
     ['the database port', { AGENTX_DB_PORT: '6432' }],
     ['the database name', { AGENTX_DB_NAME: 'agentx_uae' }],
@@ -195,9 +195,10 @@ describe('SEC-OPS-05 the config fingerprint', () => {
     expect(hashOf(WITH_EMAIL)).not.toBe(hashOf(SETTINGS));
   });
 
-  it('changes with the payment partner (D2-3a)', () => {
-    const staging = { ...SETTINGS, AGENTX_ENV: 'staging' };
-    expect(hashOf({ ...staging, AGENTX_PARTNER_MODE: 'fake' })).not.toBe(hashOf(staging));
+  it('names the payment partner, or none (D2-3a)', () => {
+    const staging = { ...SETTINGS, AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' };
+    expect(fingerprintedSettings(loadConfig(staging)).partner).toEqual({ mode: 'fake' });
+    expect(fingerprintedSettings(loadConfig(SETTINGS)).partner).toBeUndefined();
   });
 
   it('ignores the OIDC client secret, as it does the password', () => {
@@ -242,7 +243,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
 
 describe('SEC-OPS-05 what can change the app from outside its settings is visible, by name only', () => {
   // Staging, because production refuses the debug switches at start-up.
-  const STAGING: Env = { ...SETTINGS, AGENTX_ENV: 'staging' };
+  const STAGING: Env = { ...SETTINGS, AGENTX_ENV: 'staging', AGENTX_PARTNER_MODE: 'fake' };
 
   it.each(WATCHED_VARIABLES)('lists %s when set, and changes the hash', (name) => {
     const env = { ...STAGING, [name]: '/etc/ssl/bank-ca.pem' };

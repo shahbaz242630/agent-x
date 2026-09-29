@@ -129,9 +129,9 @@ export interface Config {
   readonly securityEvents: { readonly retentionDays: number };
   /**
    * ADR-014 §4: the payment partner the app talks to. The fake alone is built
-   * (D2-3a): the default in development and test, allowed in staging, never
-   * in production. Undefined in staging or production when none is set: then
-   * nothing reaches a partner.
+   * (D2-3a): the default in development and test, required in staging (D2-3b),
+   * never in production. Undefined in production, where none is set until
+   * the live adapter: then nothing reaches a partner.
    */
   readonly partner: { readonly mode: Extract<PartnerMode, 'fake'> } | undefined;
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
@@ -330,9 +330,13 @@ function portProblems(environment: Environment, value: number): string[] {
  * ADR-014 §4: where each partner mode is allowed. Only the fake is built, so
  * the partner's sandbox and live service are refused until their adapters
  * are (Phases 4 and 5); the fake is refused in production, whatever else is
- * set, so production never pretends to pay.
+ * set, so production never pretends to pay. Staging must name its partner
+ * (D2-3b): a missing setting never falls back to the fake there.
  */
 function partnerModeProblems(environment: Environment, mode: PartnerMode | undefined): string[] {
+  if (mode === undefined && environment === 'staging') {
+    return ['AGENTX_PARTNER_MODE: is required in staging; a missing setting never falls back to the fake'];
+  }
   if (mode === 'sandbox' || mode === 'live') {
     return [
       `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,

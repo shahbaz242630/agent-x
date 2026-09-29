@@ -5,7 +5,7 @@
 // server to server (SEC-PTR-08), never from anything that came back through
 // the browser. Locked at the funding source's level (ADR-006 §6: 5), before
 // the source it makes.
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 
 import { LINK_OUTCOMES, type LinkOutcomeKind, PARTNER_NAME } from '../domain/source.ts';
 import type { FundingSourcesTables } from './tables.ts';
@@ -44,6 +44,30 @@ export async function addLink(
       created_at: createdAt,
     })
     .execute();
+}
+
+/** The most links an organisation may start in 24 hours: links are never retired, so starting them is bounded (the B8-1 lesson). */
+export const MOST_LINKS_STARTED_A_DAY = 20;
+
+/**
+ * Takes the organisation's lock for starting links until the transaction
+ * ends, so two starts at once can't both take the last of the day's budget.
+ * Taken right after the idempotency key's claim, before any row lock.
+ */
+export async function oneLinkStartAtATime(tx: LinksTransaction, orgId: string): Promise<void> {
+  const key = `agentx.funding-links:${orgId.toLowerCase()}`;
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+}
+
+/** How many links the organisation started after `since`: its budget's count, in one statement. */
+export async function linksStartedSince(tx: LinksTransaction, orgId: string, since: Date): Promise<number> {
+  const row = await tx
+    .selectFrom('funding_sources.links')
+    .select(sql<number>`pg_catalog.count(*)::int`.as('started'))
+    .where('org_id', '=', orgId)
+    .where('created_at', '>', since)
+    .executeTakeFirstOrThrow();
+  return row.started;
 }
 
 /** A link, and how it ended: `open` until it is settled. */

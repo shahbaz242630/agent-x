@@ -59,6 +59,8 @@ export const REASON_CODES = {
     "This invitation can't be confirmed: it was confirmed already, or it has ended. Ask for a new invitation if one is still needed.",
   INVITATION_INVALID:
     "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation.",
+  LINK_STARTS_SPENT:
+    "The organisation has started as many bank account links as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
   MEMBER_DEACTIVATED:
     "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
   MEMBER_ELSEWHERE:
@@ -80,6 +82,8 @@ export const REASON_CODES = {
     "An admin can't change their own role or deactivate themselves, so the organisation always keeps an admin. Ask another admin to make the change.",
   OWN_RESET:
     "No one can ask to reset their own second factor: another admin must ask for it. If you're the organisation's only admin, contact Agent X support, who follow the runbook.",
+  PARTNER_UNAVAILABLE:
+    "The payment partner didn't answer, or none is set up here, so nothing was done at the partner. Try again in a few minutes.",
   PASSKEY_REQUIRED:
     'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',

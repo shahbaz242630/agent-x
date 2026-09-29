@@ -35,3 +35,4 @@ export {
   USUAL_CONTROLS,
 } from './infrastructure/fake-rail.ts';
 export { type RailAccount, SANDBOX_ACCOUNTS } from './infrastructure/sandbox-accounts.ts';
+export { createDatabaseRecords, type FakePartnerTables } from './infrastructure/fake-records.ts';
