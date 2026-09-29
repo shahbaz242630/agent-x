@@ -6,7 +6,13 @@
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, MOST_LINKS_STARTED_A_DAY } from '@agentx/core/modules/funding-sources';
-import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
+import {
+  addMembership,
+  type IdentityTables,
+  MEMBERSHIPS,
+  type Role,
+  userForSubject,
+} from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabaseRecords,
@@ -75,17 +81,18 @@ const loggerFor = (destination: LogCapture) =>
 let people = 0;
 
 /** A person with a membership in the organisation. */
-async function member(org: string, role: Role): Promise<LinkingMember> {
+async function member(org: string, role: Role): Promise<LinkingMember & { readonly membershipId: string }> {
   people += 1;
   const userId = await userForSubject(
     app,
     { issuer: 'https://auth.example.test', subject: `funding-links-${String(people)}` },
     { ids, clock },
   );
+  const membershipId = ids.next();
   await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
-    addMembership(tx, states, { orgId: org, id: ids.next(), userId, role, joinedAt: clock.now(), actor: OPERATOR }),
+    addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
-  return { orgId: org, userId };
+  return { orgId: org, userId, membershipId };
 }
 
 async function organization(): Promise<string> {
@@ -185,6 +192,21 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
     for (const role of ['approver', 'developer', 'viewer'] as const) {
       expect(await start(await member(org, role))).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
     }
+    expect((await rows(org)).links).toEqual([]);
+  });
+
+  it('refuses an admin whose membership is deactivated, adding nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+
+    expect(await start(admin)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
     expect((await rows(org)).links).toEqual([]);
   });
 
@@ -358,6 +380,30 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
 
     expect(confirmedOf(await confirm(admin, link.id, 'polling')).link.outcome).toBe('linked');
+  });
+
+  it('adds one source, not two, for two confirms at once: the second finds the link settled', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
+    // Something else holds the link for a change: both confirms queue behind it, then ask the partner, then settle.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select 1 from funding_sources.links where id = $1 for no key update', [link.id]);
+      const both = within(20_000, Promise.all([confirm(admin, link.id), confirm(admin, link.id)]), 'the two confirms');
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+
+      const [first, second] = (await both).map(confirmedOf);
+      expect(first?.link.outcome).toBe('linked');
+      expect(second).toEqual(first);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    expect((await rows(org)).sources).toHaveLength(1);
   });
 
   it('settles a link turned down at the bank as rejected, with no source', async () => {
