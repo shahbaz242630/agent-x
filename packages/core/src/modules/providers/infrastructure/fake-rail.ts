@@ -85,8 +85,30 @@ export interface ApproveOptions {
   readonly awaitingOtherAuthorisers?: boolean;
 }
 
+/** An account the fake bank offers, as a business picks it there: its ID at the bank and the safe summary alone. */
+export interface FakeBankAccount {
+  readonly accountId: string;
+  readonly summary: SourceSummary;
+}
+
+/** Why the fake bank refused a step asked of it: nothing was changed. */
+export type FakeBankRefusal = 'no_link_waiting' | 'no_such_account';
+
+/** A step the fake bank refused, as the staging demo's routes answer it (D2-3c). */
+export class FakeBankRefused extends Error {
+  readonly reason: FakeBankRefusal;
+
+  constructor(reason: FakeBankRefusal, message: string) {
+    super(message);
+    this.name = 'FakeBankRefused';
+    this.reason = reason;
+  }
+}
+
 /** What happens outside Agent X, at the business's bank and the partner, each for the organisation named. */
 export interface FakeBank {
+  /** The accounts the bank offers a business approving a link. */
+  accounts(): readonly FakeBankAccount[];
   /** The business approves the link at its bank with one of its accounts; gives the consent's ID. */
   approve(organizationId: string, sessionRef: string, accountId: string, options?: ApproveOptions): Promise<string>;
   /** The business turns the link down at its bank. */
@@ -170,7 +192,7 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
   const openSession = async (held: FakeRecords, sessionRef: string): Promise<FakeRecord<'link'>> => {
     const session = await held.byAlias('link', sessionRef);
     if (session?.body.outcome !== 'open' || clock.now() >= new Date(session.body.expiresAt)) {
-      throw new Error('No link waiting at the bank under that session');
+      throw new FakeBankRefused('no_link_waiting', 'No link waiting at the bank under that session');
     }
     return session;
   };
@@ -223,11 +245,14 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
   };
 
   const bank: FakeBank = {
+    accounts: () => accounts.map((account) => ({ accountId: account.AccountId, summary: summaryOf(account) })),
     approve: (organizationId, sessionRef, accountId, approval = {}) =>
       records.within(organizationId, async (held) => {
         const { controls = USUAL_CONTROLS, awaitingOtherAuthorisers = false } = approval;
+        if (!accounts.some((each) => each.AccountId === accountId)) {
+          throw new FakeBankRefused('no_such_account', 'The bank has no such account');
+        }
         const session = await openSession(held, sessionRef);
-        accountOf(accountId);
         const externalRef = `fake-source-${ids.next()}`;
         const { consentId, body } = newConsent(
           accountId,
