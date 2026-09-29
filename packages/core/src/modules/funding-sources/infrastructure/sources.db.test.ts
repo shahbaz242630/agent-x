@@ -589,6 +589,8 @@ describe(`a page of an organisation's funding sources (D2-4, Postgres ${server.v
 
     expect(await page(org, null, 2)).toEqual({ outcome: 'listed', sources: [first, second], next: second?.id });
     expect(await page(org, second?.id ?? null, 2)).toEqual({ outcome: 'listed', sources: [third], next: null });
+    // A page exactly full is the last when nothing follows it.
+    expect(await page(org, null, 3)).toEqual({ outcome: 'listed', sources: [first, second, third], next: null });
     expect(await page(org, null, MOST_SOURCES_A_PAGE)).toEqual({
       outcome: 'listed',
       sources: [first, second, third],

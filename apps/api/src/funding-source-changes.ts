@@ -97,6 +97,17 @@ export function createFundingSourceChanges({
           rail.getSourceState({ organizationId: member.orgId, externalRef: source.externalRef }),
         );
         if (asking === 'unavailable') return PARTNER_UNAVAILABLE;
+        // An answer about another source or organisation is the partner's fault: believed in nothing, and told.
+        if (
+          asking.kind === 'found' &&
+          (asking.source.externalRef !== source.externalRef ||
+            asking.source.organizationId.toLowerCase() !== member.orgId.toLowerCase())
+        ) {
+          logger
+            .child({ correlationId, orgId: member.orgId })
+            .error('funding_sources.partner_answer_mismatch', { sourceId });
+          return PARTNER_UNAVAILABLE;
+        }
         lookup = asking;
       }
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {

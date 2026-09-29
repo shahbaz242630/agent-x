@@ -218,6 +218,63 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     ]);
   });
 
+  it('answers a source ended while the partner was asked as it stands, recording nothing more', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { source, consentId } = await linked(admin);
+    const forgetful: FinancialRailAdapter = { ...rail, getSourceState: () => Promise.resolve({ kind: 'not_found' }) };
+    // Another admin's refresh ends the source between this refresh's first read and its write.
+    const endingMeanwhile: FinancialRailAdapter = {
+      ...rail,
+      getSourceState: async (ref) => {
+        const other = await member(org, 'admin');
+        await changesWith(forgetful).refresh(other, keyed(other, REFRESH_OPERATION), source.id, CORRELATION);
+        clock.advanceBy(60_000);
+        await rail.bank.changeConsent(org, consentId, 'Suspended');
+        return rail.getSourceState(ref);
+      },
+    };
+
+    const answered = refreshed(
+      await changesWith(endingMeanwhile).refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION),
+    );
+
+    expect(answered).toMatchObject({ status: 'ENDED', availability: 'ACTIVE', consentStatus: 'Authorized' });
+    expect((await events(org, source.id)).map((event) => event.action)).toEqual([
+      'funding_source.linked',
+      'funding_source.ended',
+    ]);
+  });
+
+  it('believes nothing of an answer about another source, answering 503 and logging the partner’s fault', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { source } = await linked(admin);
+    const { source: other } = await linked(admin, 'sme-trading-business-acct-01');
+    const mixedUp: FinancialRailAdapter = {
+      ...rail,
+      getSourceState: (ref) => rail.getSourceState({ ...ref, externalRef: other.externalRef }),
+    };
+    const capture = new LogCapture();
+    const confused = createFundingSourceChanges({
+      database: app,
+      keys,
+      ids,
+      rail: mixedUp,
+      logger: loggerFor(capture),
+    });
+
+    expect(await confused.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect(await events(org, source.id)).toHaveLength(1);
+    expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, correlationId: CORRELATION, sourceId: source.id }),
+    ]);
+  });
+
   it('answers a retry of the same write as the first did', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

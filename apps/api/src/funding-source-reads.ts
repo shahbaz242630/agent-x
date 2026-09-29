@@ -6,9 +6,12 @@
 // - `list` and `show`: for the organisation's members, every source, ENDED
 //   ones too, as Agent X holds it.
 // - `usableByAgent`: for an agent with `sources:read`, only the sources that
-//   may fund a request now (`mayFund`), so an agent never learns of one it
-//   can't use; the route answers each as the safe summary alone. Phase 2
-//   narrows it to the sources its mandate names (`Carry-Forward.md`).
+//   may fund a request now (`mayFund`), so nothing of one it can't use
+//   reaches it; the route answers each as the safe summary alone. The page is
+//   filtered after it is read, so a page may hold fewer than asked for, and
+//   an agent paging on can tell roughly how many others there are, never
+//   anything of them. Phase 2 narrows it to the sources its mandate names
+//   (`Carry-Forward.md`).
 import { mayFund, type SourceRecord, sourcesPage } from '@agentx/core/modules/funding-sources';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
