@@ -1034,7 +1034,7 @@ describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
   });
 
   it.each(['sandbox', 'live'])('refuses %s anywhere until its adapter is built', (mode) => {
-    for (const env of [STAGING, MINIMAL, { ...LOCAL, AGENTX_ENV: 'test' }]) {
+    for (const env of [STAGING, MINIMAL, { ...LOCAL, AGENTX_ENV: 'test' }, { ...LOCAL, AGENTX_ENV: 'development' }]) {
       expect(problemsWith({ ...env, AGENTX_PARTNER_MODE: mode })).toEqual([
         `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
       ]);
