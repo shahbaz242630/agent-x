@@ -823,6 +823,7 @@ describe("every exit writes the log's held-back counts first", () => {
     AGENTX_LOG_EVENT_CAP_PER_MINUTE: '20',
     AGENTX_RATE_LIMIT_PER_MINUTE: '10',
     AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
+    AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
   };
 
   /** Starts, then makes more requests than the cap, so lines of one event are being held back. */

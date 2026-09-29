@@ -64,6 +64,7 @@ describe('config: a correct config loads', () => {
         trustedProxies: [PROXIES],
         rateLimitPerMinute: 300,
         rateLimitPerUserPerMinute: 120,
+        rateLimitPerAgentPerMinute: 120,
       },
       db: DB_DEFAULTS,
       outbound: { allowedOrigins: [] },
@@ -92,6 +93,7 @@ describe('config: a correct config loads', () => {
       AGENTX_TRUSTED_PROXIES: '10.0.0.0/23,100.100.0.1,10.0.0.0/23',
       AGENTX_RATE_LIMIT_PER_MINUTE: '120',
       AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '60',
+      AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '30',
       AGENTX_OUTBOUND_ALLOWED_ORIGINS:
         'https://telemetry.example,https://api.partner.example:8443,https://telemetry.example,https://auth.staging.agentx.example',
       AGENTX_OIDC_ISSUER: 'https://auth.staging.agentx.example',
@@ -123,6 +125,7 @@ describe('config: a correct config loads', () => {
         trustedProxies: ['10.0.0.0/23', '100.100.0.1'],
         rateLimitPerMinute: 120,
         rateLimitPerUserPerMinute: 60,
+        rateLimitPerAgentPerMinute: 30,
       },
       db: {
         host: '10.0.0.5',
@@ -564,6 +567,7 @@ describe('SEC-AV-03 logging settings', () => {
       AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap,
       AGENTX_RATE_LIMIT_PER_MINUTE: '10',
       AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '10',
+      AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
     };
     expect(loadConfig(env).log.eventCapPerMinute).toBe(expected);
   });
@@ -852,6 +856,51 @@ describe('SEC-AV-07 the rate limit per signed-in person (B2-5c)', () => {
   it('refuses more than 100000', () => {
     expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: '100001' })).toEqual([
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: must be at most 100000 requests',
+    ]);
+  });
+});
+
+describe('SEC-AG-06 the rate limit per AI agent (C2-2)', () => {
+  const perAgent = (env: Record<string, string>) => loadConfig({ ...MINIMAL, ...env }).http.rateLimitPerAgentPerMinute;
+
+  it('is 120 requests a minute unless set', () => {
+    expect(perAgent({})).toBe(120);
+  });
+
+  it.each([
+    ['10', 10],
+    ['300', 300],
+  ])('accepts %s requests a minute', (value, expected) => {
+    expect(perAgent({ AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: value })).toBe(expected);
+  });
+
+  it('accepts 100000, with a log cap above it', () => {
+    expect(
+      perAgent({ AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '100000', AGENTX_LOG_EVENT_CAP_PER_MINUTE: '200000' }),
+    ).toBe(100_000);
+  });
+
+  it.each([
+    ['one over half the default log cap', '301', '600'],
+    ['over half a raised log cap', '501', '1000'],
+  ])("refuses a limit %s: one agent's requests could fill the request log (ADR-012 §9)", (_what, limit, cap) => {
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_LOG_EVENT_CAP_PER_MINUTE: cap, AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: limit }),
+    ).toEqual([
+      `AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (${cap}), ` +
+        "so one agent's requests can't fill the request log on their own",
+    ]);
+  });
+
+  it('refuses fewer than 10, which would stop an agent checking on its own requests', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '9' })).toEqual([
+      'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: must be at least 10 requests (fewer would stop an agent checking on its own requests)',
+    ]);
+  });
+
+  it('refuses more than 100000', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '100001' })).toEqual([
+      'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: must be at most 100000 requests',
     ]);
   });
 });

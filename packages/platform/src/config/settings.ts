@@ -163,6 +163,17 @@ const SETTINGS = {
     }),
     default: '120',
   },
+  // C2-2 (SEC-AG-06): an AI agent's own limit, whichever of its keys and
+  // addresses it uses, so one agent can't take the organisation's share.
+  AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: {
+    schema: wholeNumber({
+      min: 10,
+      max: 100_000,
+      unit: 'requests',
+      minimumReason: 'fewer would stop an agent checking on its own requests',
+    }),
+    default: '120',
+  },
   AGENTX_OUTBOUND_ALLOWED_ORIGINS: { schema: originList.optional() },
   // ADR-003 §5: the login service the API is the OIDC client of, all three
   // or none (sign-in is off without them). The issuer is its origin exactly,
@@ -312,6 +323,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_TRUSTED_PROXIES',
       'AGENTX_RATE_LIMIT_PER_MINUTE',
       'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
+      'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
       'AGENTX_OUTBOUND_ALLOWED_ORIGINS',
       'AGENTX_OIDC_ISSUER',
       'AGENTX_OIDC_CLIENT_ID',

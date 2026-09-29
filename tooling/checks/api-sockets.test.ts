@@ -42,6 +42,7 @@ async function listening() {
       trustedProxies: [],
       rateLimitPerMinute: 100,
       rateLimitPerUserPerMinute: 100,
+      rateLimitPerAgentPerMinute: 100,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

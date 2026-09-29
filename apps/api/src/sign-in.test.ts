@@ -109,6 +109,7 @@ async function server(signIn: SignIn | undefined, limits: { perAddress?: number;
       trustedProxies: [],
       rateLimitPerMinute: limits.perAddress ?? 100,
       rateLimitPerUserPerMinute: limits.perUser ?? 100,
+      rateLimitPerAgentPerMinute: limits.perUser ?? 100,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };

@@ -134,6 +134,38 @@ export function createPersonCounter(
 }
 
 /**
+ * The hook that counts each AI agent's requests against its own limit
+ * (ADR-011 §4, SEC-AG-06; C2-2), beside its address's: by the agent, not the
+ * key, so an agent holding two keys through a rotation's overlap, or sending
+ * from many addresses, is still one agent. It runs after the access hook, and
+ * counts only a request whose key it accepted; a refused key is held by its
+ * address's limit alone. Over the limit, it tells `limited` the client's
+ * address and the agent, sets the limit headers to the agent's, and throws
+ * the same 429. The request's line names the agent (request-log.ts).
+ */
+export function createAgentCounter(
+  app: FastifyInstance,
+  perMinute: number,
+  trust: ProxyTrust,
+  limited: (ip: string | undefined, agentId: string) => void,
+): CountRequest {
+  const limiter = app.createRateLimit({
+    max: perMinute,
+    timeWindow: WINDOW_MS,
+    // Only called for a request with an agent: the hook below looks first.
+    keyGenerator: (request) => request.agent?.agentId ?? UNREADABLE_ADDRESS,
+  });
+  return async (request, reply) => {
+    const agent = request.agent;
+    if (agent === null) return;
+    if (await overLimit(limiter, request, reply, 'when-refused')) {
+      limited(rawClientIp(request, trust), agent.agentId);
+      throw new RateLimited('rate limit exceeded');
+    }
+  };
+}
+
+/**
  * Counts the request and says whether it is over the limit. The limit headers
  * are set on every counted response (`always`), or only when this limit
  * refuses the request (`when-refused`), so the address's headers stand

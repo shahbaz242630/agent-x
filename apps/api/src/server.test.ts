@@ -37,6 +37,7 @@ const HTTP: Config['http'] = {
   trustedProxies: [],
   rateLimitPerMinute: 100,
   rateLimitPerUserPerMinute: 100,
+  rateLimitPerAgentPerMinute: 100,
 };
 const LOG: Config['log'] = { level: 'debug', eventCapPerMinute: 10_000 };
 
