@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig, partnerName } from './config.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -1010,6 +1010,46 @@ describe('config: email for the admins’ notices (B5-3)', () => {
     ["a directory's token with a space", { AGENTX_DIRECTORY_TOKEN: 'with space' }, /^AGENTX_DIRECTORY_TOKEN/],
   ])('refuses %s', (_, change, problem) => {
     expect(problemsWith({ ...EMAIL, ...change })).toEqual([expect.stringMatching(problem)]);
+  });
+});
+
+describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
+  const STAGING: Env = { ...MINIMAL, AGENTX_ENV: 'staging' };
+
+  it('is the fake by default where nothing real is at stake', () => {
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'development' }).partner).toEqual({ mode: 'fake' });
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'test' }).partner).toEqual({ mode: 'fake' });
+  });
+
+  it('is the fake in staging when set, and none when not: nothing reaches a partner then', () => {
+    expect(loadConfig({ ...STAGING, AGENTX_PARTNER_MODE: 'fake' }).partner).toEqual({ mode: 'fake' });
+    expect(loadConfig(STAGING).partner).toBeUndefined();
+  });
+
+  it('is never the fake in production: production never pretends to pay', () => {
+    expect(problemsWith({ ...MINIMAL, AGENTX_PARTNER_MODE: 'fake' })).toEqual([
+      'AGENTX_PARTNER_MODE: fake is refused in production; production never pretends to pay',
+    ]);
+    expect(loadConfig(MINIMAL).partner).toBeUndefined();
+  });
+
+  it.each(['sandbox', 'live'])('refuses %s anywhere until its adapter is built', (mode) => {
+    for (const env of [STAGING, MINIMAL, { ...LOCAL, AGENTX_ENV: 'test' }, { ...LOCAL, AGENTX_ENV: 'development' }]) {
+      expect(problemsWith({ ...env, AGENTX_PARTNER_MODE: mode })).toEqual([
+        `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
+      ]);
+    }
+  });
+
+  it('is named on the start-up line by its mode, or none', () => {
+    expect(partnerName({ mode: 'fake' })).toBe('fake');
+    expect(partnerName(undefined)).toBe('none');
+  });
+
+  it('refuses a mode that isn’t one', () => {
+    expect(problemsWith({ ...STAGING, AGENTX_PARTNER_MODE: 'Fake' })).toEqual([
+      'AGENTX_PARTNER_MODE: must be one of: fake, sandbox, live',
+    ]);
   });
 });
 

@@ -10,6 +10,10 @@ export const LOCAL_ONLY: readonly Environment[] = ['development', 'test'];
 export const LOG_LEVELS = ['error', 'warn', 'info', 'debug'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
+/** ADR-014 §4: which payment partner the app talks to: the fake, the partner's sandbox, or its live service. */
+export const PARTNER_MODES = ['fake', 'sandbox', 'live'] as const;
+export type PartnerMode = (typeof PARTNER_MODES)[number];
+
 /** The log settings when none are set; also what the start-up logger writes with before the config is read. */
 export const DEFAULT_LOG: { readonly level: LogLevel; readonly eventCapPerMinute: number } = Object.freeze({
   level: 'info',

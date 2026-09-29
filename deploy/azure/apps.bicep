@@ -107,6 +107,10 @@ param appHost string
 @maxLength(255)
 param apiOidcClientId string
 
+@description('The payment partner the API talks to (ADR-014 §4, AGENTX_PARTNER_MODE): `fake` in staging, over its own records in the database, until the adapter for the partner is built. The API refuses `fake` in production, and anything not yet built anywhere.')
+@allowed(['fake', 'sandbox', 'live'])
+param partnerMode string
+
 @description('How many replicas of each app keep running with no traffic. Staging scales to zero (ADR-002): nothing is billed while nothing runs, at the cost of a cold start on the first request. The deploy tool sets 1 for `apps --keep-running`.')
 @minValue(0)
 @maxValue(1)
@@ -695,6 +699,11 @@ var apps = [
       {
         name: 'AGENTX_OIDC_CLIENT_ID'
         value: apiOidcClientId
+      }
+      // The payment partner (ADR-014 §4, Phase 1 D2-3a).
+      {
+        name: 'AGENTX_PARTNER_MODE'
+        value: partnerMode
       }
     ])
   }

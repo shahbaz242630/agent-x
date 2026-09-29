@@ -7,7 +7,7 @@
 // Problems name the variable and the rule, never the value, so a secret pasted
 // into the wrong variable can't leak through the error.
 import type { KeySettings } from '../keys/load.ts';
-import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
+import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel, type PartnerMode } from './common.ts';
 import {
   checkLocation,
   optionalSecretSetting,
@@ -127,6 +127,13 @@ export interface Config {
   readonly sessions: { readonly idleSeconds: number; readonly absoluteSeconds: number };
   /** ADR-005 §6, ADR-011 §7: how long a security event is kept, in whole days. */
   readonly securityEvents: { readonly retentionDays: number };
+  /**
+   * ADR-014 §4: the payment partner the app talks to. The fake alone is built
+   * (D2-3a): the default in development and test, allowed in staging, never
+   * in production. Undefined in staging or production when none is set: then
+   * nothing reaches a partner.
+   */
+  readonly partner: { readonly mode: Extract<PartnerMode, 'fake'> } | undefined;
   /** ADR-012 §1: how long a new or changed payee waits before it can be paid. */
   readonly payees: { readonly coolingOffHours: number };
   /** ADR-012 §2: how often each audit chain is checked against its last anchor, and anchored again. */
@@ -319,6 +326,33 @@ function portProblems(environment: Environment, value: number): string[] {
     : [];
 }
 
+/**
+ * ADR-014 §4: where each partner mode is allowed. Only the fake is built, so
+ * the partner's sandbox and live service are refused until their adapters
+ * are (Phases 4 and 5); the fake is refused in production, whatever else is
+ * set, so production never pretends to pay.
+ */
+function partnerModeProblems(environment: Environment, mode: PartnerMode | undefined): string[] {
+  if (mode === 'sandbox' || mode === 'live') {
+    return [
+      `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
+    ];
+  }
+  return mode === 'fake' && environment === 'production'
+    ? ['AGENTX_PARTNER_MODE: fake is refused in production; production never pretends to pay']
+    : [];
+}
+
+/** The partner, once partnerModeProblems has passed: the fake where set, and by default where nothing real is at stake. */
+function partnerFrom(environment: Environment, mode: PartnerMode | undefined): Config['partner'] {
+  return mode === 'fake' || (mode === undefined && LOCAL_ONLY.includes(environment))
+    ? Object.freeze({ mode: 'fake' as const })
+    : undefined;
+}
+
+/** The partner as a start-up line names it: its mode, or `none` when nothing reaches a partner. */
+export const partnerName = (partner: Config['partner']): string => partner?.mode ?? 'none';
+
 /** The login service's settings, once signInProblems has found them all set or none. */
 function signInFrom(
   issuer: string | undefined,
@@ -362,6 +396,7 @@ export function loadConfig(env: Env = process.env): Config {
     sessionIdle: setting(env, 'AGENTX_SESSION_IDLE_MINUTES'),
     sessionAbsolute: setting(env, 'AGENTX_SESSION_ABSOLUTE_HOURS'),
     securityEventRetention: setting(env, 'AGENTX_SECURITY_EVENT_RETENTION_DAYS'),
+    partnerMode: setting(env, 'AGENTX_PARTNER_MODE'),
     coolingOffHours: setting(env, 'AGENTX_PAYEE_COOLING_OFF_HOURS'),
     anchorSeconds: setting(env, 'AGENTX_AUDIT_ANCHOR_SECONDS'),
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
@@ -441,6 +476,9 @@ export function loadConfig(env: Env = process.env): Config {
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
+    ...(environment.ok && checks.partnerMode.ok
+      ? partnerModeProblems(environment.value, checks.partnerMode.value)
+      : []),
     ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
     ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
   ];
@@ -490,6 +528,7 @@ export function loadConfig(env: Env = process.env): Config {
       absoluteSeconds: checks.sessionAbsolute.value * 3600,
     }),
     securityEvents: Object.freeze({ retentionDays: checks.securityEventRetention.value }),
+    partner: partnerFrom(checks.environment.value, checks.partnerMode.value),
     payees: Object.freeze({ coolingOffHours: checks.coolingOffHours.value }),
     audit: Object.freeze({ anchorSeconds: checks.anchorSeconds.value }),
     keys: Object.freeze({

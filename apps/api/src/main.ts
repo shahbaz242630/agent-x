@@ -60,7 +60,7 @@ import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/mo
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
-import { type Config, ConfigError, configFingerprint, loadConfig } from '@agentx/platform/config';
+import { type Config, ConfigError, configFingerprint, loadConfig, partnerName } from '@agentx/platform/config';
 import {
   assertRuntimeRole,
   createDatabase,
@@ -316,6 +316,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const fingerprint = configFingerprint(config, keys.describe(), options.env);
   logger.info('api.starting', { ...fingerprint });
+  // ADR-014 §4: which payment partner this process talks to, if any.
+  logger.info('api.partner', { mode: partnerName(config.partner) });
 
   const database = await connectDatabase(config, logger);
   if (database === undefined) {

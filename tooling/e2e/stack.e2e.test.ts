@@ -50,7 +50,13 @@ describe('ADR-010 §7 the stack from deploy/compose', () => {
     expect(migrateLog).toContain('"event":"migrate.done"');
     const { lines } = await apiLog();
     const own = lines.map((line) => String(line.event)).filter((event) => event.startsWith('api.'));
-    expect(own.slice(0, 4)).toEqual(['api.starting', 'api.database_connected', 'api.start_recorded', 'api.listening']);
+    expect(own.slice(0, 5)).toEqual([
+      'api.starting',
+      'api.partner',
+      'api.database_connected',
+      'api.start_recorded',
+      'api.listening',
+    ]);
   });
 
   it('writes only JSON lines, with none of the generated logins in them', async () => {

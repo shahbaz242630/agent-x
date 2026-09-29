@@ -122,6 +122,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     expect(api).toBeDefined();
     expect(events()).toEqual([
       'api.starting',
+      'api.partner',
       'api.database_connected',
       'api.start_recorded',
       'api.listening',
@@ -147,7 +148,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const { host, api, capture, events } = await start(envFor('owner'));
     expect(api).toBeUndefined();
     expect(host.exitCode).toBe(1);
-    expect(events()).toEqual(['api.starting', 'api.start_refused']);
+    expect(events()).toEqual(['api.starting', 'api.partner', 'api.start_refused']);
     expect(capture.lines().at(-1)?.problems).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/^it owns the database$/),
@@ -170,7 +171,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     const { host, api, capture, events } = await start(envFor('app', { AGENTX_DB_PASSWORD: wrong }));
     expect(api).toBeUndefined();
     expect(host.exitCode).toBe(1);
-    expect(events()).toEqual(['api.starting', 'api.database_unavailable']);
+    expect(events()).toEqual(['api.starting', 'api.partner', 'api.database_unavailable']);
     expect(findLeaks(capture.text, [wrong, database.connection('app').password])).toEqual([]);
   });
 
@@ -459,7 +460,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
 
       expect(api).toBeUndefined();
       expect(host.exitCode).toBe(1);
-      expect(events()).toEqual(['api.starting', 'api.database_connected', 'api.start_not_recorded']);
+      expect(events()).toEqual(['api.starting', 'api.partner', 'api.database_connected', 'api.start_not_recorded']);
       expect(capture.lines().find((line) => line.event === 'audit.integrity_failed')).toEqual(
         expect.objectContaining({ level: 'error', chain: 'platform', check: 'start' }),
       );
@@ -472,7 +473,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
   it('reports a database that is not there as unavailable, with the address redacted', async () => {
     const { api, capture, events } = await start(envFor('app', { AGENTX_DB_PORT: '1' }));
     expect(api).toBeUndefined();
-    expect(events()).toEqual(['api.starting', 'api.database_unavailable']);
+    expect(events()).toEqual(['api.starting', 'api.partner', 'api.database_unavailable']);
     expect(findLeaks(capture.text, ['127.0.0.1'])).toEqual([]);
   });
 });
