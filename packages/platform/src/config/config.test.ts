@@ -40,6 +40,9 @@ const DB_DEFAULTS = {
 /** The database settings a local run can't do without, for tests of the other settings' local defaults. */
 const LOCAL: Env = { AGENTX_DB_HOST: 'db', AGENTX_DB_PASSWORD: DB_LOGIN, AGENTX_KEYS_DIR: KEYS_DIR };
 
+/** Staging must name its payment partner (ADR-014 §4, D2-3b): the fake, in tests of anything else. */
+const partnerFor = (environment: string): Env => (environment === 'staging' ? { AGENTX_PARTNER_MODE: 'fake' } : {});
+
 /** The problems loadConfig reports, or [] when it accepts the config. */
 function problemsWith(env: Env): readonly string[] {
   try {
@@ -78,7 +81,9 @@ describe('config: a correct config loads', () => {
   });
 
   it.each(['development', 'test', 'staging', 'production'])('accepts the %s environment', (environment) => {
-    expect(loadConfig({ ...MINIMAL, AGENTX_ENV: environment }).environment).toBe(environment);
+    expect(loadConfig({ ...MINIMAL, AGENTX_ENV: environment, ...partnerFor(environment) }).environment).toBe(
+      environment,
+    );
   });
 
   it('reads every setting, sorting the lists and dropping repeats', () => {
@@ -102,6 +107,7 @@ describe('config: a correct config loads', () => {
       AGENTX_SESSION_IDLE_MINUTES: '60',
       AGENTX_SESSION_ABSOLUTE_HOURS: '8',
       AGENTX_SECURITY_EVENT_RETENTION_DAYS: '180',
+      AGENTX_PARTNER_MODE: 'fake',
       AGENTX_PAYEE_COOLING_OFF_HOURS: '48',
       AGENTX_AUDIT_ANCHOR_SECONDS: '600',
       AGENTX_DB_HOST: '10.0.0.5',
@@ -150,6 +156,7 @@ describe('config: a correct config loads', () => {
       },
       sessions: { idleSeconds: 3600, absoluteSeconds: 28_800 },
       securityEvents: { retentionDays: 180 },
+      partner: { mode: 'fake' },
       payees: { coolingOffHours: 48 },
       audit: { anchorSeconds: 600 },
       keys: { directory: '/mnt/keys', current: { 'request-hash': 1, 'audit-mac': 2, 'field-encryption': 3 } },
@@ -244,7 +251,9 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
   describe("the app's keys (ADR-011 §2)", () => {
     it.each(['development', 'test', 'staging', 'production'])('needs to know where they are in %s', (environment) => {
       const { AGENTX_KEYS_DIR: _keys, ...withoutKeys } = MINIMAL;
-      expect(problemsWith({ ...withoutKeys, AGENTX_ENV: environment })).toEqual(['AGENTX_KEYS_DIR: is required']);
+      expect(problemsWith({ ...withoutKeys, AGENTX_ENV: environment, ...partnerFor(environment) })).toEqual([
+        'AGENTX_KEYS_DIR: is required',
+      ]);
     });
 
     it.each(['secrets', './secrets', 'mnt/secrets'])(
@@ -506,13 +515,13 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
 
 describe('SEC-AV-03 release: every deployed build is named', () => {
   it.each(['staging', 'production'])('refuses %s without a release', (environment) => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_RELEASE: undefined })).toEqual([
-      `AGENTX_RELEASE: is required in ${environment}, so every log line and error names the build that ran`,
-    ]);
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_RELEASE: undefined }),
+    ).toEqual([`AGENTX_RELEASE: is required in ${environment}, so every log line and error names the build that ran`]);
   });
 
   it.each(['development', 'test'])('names a %s run without a release "local"', (environment) => {
-    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).release).toBe('local');
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment, ...partnerFor(environment) }).release).toBe('local');
   });
 
   it.each(['v1.2.3', '2026.09.14-a1b2c3d', 'a1b2c3d4e5f6', 'build_17', 'a'.repeat(64)])(
@@ -541,7 +550,10 @@ describe('SEC-AV-03 logging settings', () => {
   });
 
   it.each(['development', 'test', 'staging'])('accepts debug in %s', (environment) => {
-    expect(loadConfig({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_LOG_LEVEL: 'debug' }).log.level).toBe('debug');
+    expect(
+      loadConfig({ ...MINIMAL, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_LOG_LEVEL: 'debug' }).log
+        .level,
+    ).toBe('debug');
   });
 
   it('refuses debug in production, where lines could carry more detail than needed', () => {
@@ -597,7 +609,9 @@ describe('SEC-DATA-01 Node’s own debug output is off in production', () => {
   });
 
   it.each(['development', 'test', 'staging'])('allows NODE_DEBUG in %s, for troubleshooting', (environment) => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, NODE_DEBUG: 'fetch' })).toEqual([]);
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_ENV: environment, ...partnerFor(environment), NODE_DEBUG: 'fetch' }),
+    ).toEqual([]);
   });
 });
 
@@ -607,6 +621,7 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
       problemsWith({
         ...MINIMAL,
         AGENTX_ENV: environment,
+        ...partnerFor(environment),
         AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'https://api.partner.example,http://api.partner.example',
       }),
     ).toEqual([
@@ -616,7 +631,12 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
 
   it.each(['development', 'test'])('accepts a plain http origin in %s, for the local stack', (environment) => {
     expect(
-      problemsWith({ ...LOCAL, AGENTX_ENV: environment, AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://localhost:8080' }),
+      problemsWith({
+        ...LOCAL,
+        AGENTX_ENV: environment,
+        ...partnerFor(environment),
+        AGENTX_OUTBOUND_ALLOWED_ORIGINS: 'http://localhost:8080',
+      }),
     ).toEqual([]);
   });
 
@@ -627,13 +647,20 @@ describe('SEC-AV-03 cross-field rule: plain http only where nothing real is at s
 
 describe('SEC-WEB-01 the public origin: the one address browser writes are accepted from', () => {
   it.each(['staging', 'production'])('is required in %s', (environment) => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: undefined })).toEqual([
-      `AGENTX_PUBLIC_ORIGIN: is required in ${environment}; browser writes are accepted only from it`,
-    ]);
+    expect(
+      problemsWith({
+        ...MINIMAL,
+        AGENTX_ENV: environment,
+        ...partnerFor(environment),
+        AGENTX_PUBLIC_ORIGIN: undefined,
+      }),
+    ).toEqual([`AGENTX_PUBLIC_ORIGIN: is required in ${environment}; browser writes are accepted only from it`]);
   });
 
   it.each(['development', 'test'])('is the local address in %s, when not set', (environment) => {
-    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).http.publicOrigin).toBe('http://localhost:8080');
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment, ...partnerFor(environment) }).http.publicOrigin).toBe(
+      'http://localhost:8080',
+    );
   });
 
   it.each(['https://app.agentx.example', 'https://app.agentx.example:8443'])('accepts %s', (origin) => {
@@ -658,16 +685,26 @@ describe('SEC-WEB-01 the public origin: the one address browser writes are accep
 
   it.each(['staging', 'production'])('refuses plain http in %s', (environment) => {
     expect(
-      problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://app.agentx.example' }),
+      problemsWith({
+        ...MINIMAL,
+        AGENTX_ENV: environment,
+        ...partnerFor(environment),
+        AGENTX_PUBLIC_ORIGIN: 'http://app.agentx.example',
+      }),
     ).toEqual([
       `AGENTX_PUBLIC_ORIGIN: plain http is allowed only in development and test; ${environment} must use https`,
     ]);
   });
 
   it.each(['development', 'test'])('accepts plain http in %s, for the local stack', (environment) => {
-    expect(problemsWith({ ...LOCAL, AGENTX_ENV: environment, AGENTX_PUBLIC_ORIGIN: 'http://localhost:3000' })).toEqual(
-      [],
-    );
+    expect(
+      problemsWith({
+        ...LOCAL,
+        AGENTX_ENV: environment,
+        ...partnerFor(environment),
+        AGENTX_PUBLIC_ORIGIN: 'http://localhost:3000',
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -704,11 +741,15 @@ describe('SEC-AV-03 where the API listens', () => {
   });
 
   it.each(['development', 'test'])('accepts port 0 (any free port) in %s, for tests', (environment) => {
-    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' }).http.port).toBe(0);
+    expect(
+      loadConfig({ ...LOCAL, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_HTTP_PORT: '0' }).http.port,
+    ).toBe(0);
   });
 
   it.each(['staging', 'production'])('refuses port 0 in %s, where the ingress needs a known port', (environment) => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_HTTP_PORT: '0' })).toEqual([
+    expect(
+      problemsWith({ ...MINIMAL, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_HTTP_PORT: '0' }),
+    ).toEqual([
       `AGENTX_HTTP_PORT: 0 (any free port) is allowed only in development and test; ${environment} must name its port`,
     ]);
   });
@@ -762,14 +803,23 @@ describe('SEC-AV-07 trusted proxies are addresses or narrow ranges', () => {
   });
 
   it.each(['staging', 'production'])('is required in %s, where a TLS proxy is always in front', (environment) => {
-    expect(problemsWith({ ...MINIMAL, AGENTX_ENV: environment, AGENTX_TRUSTED_PROXIES: undefined })).toEqual([
+    expect(
+      problemsWith({
+        ...MINIMAL,
+        AGENTX_ENV: environment,
+        ...partnerFor(environment),
+        AGENTX_TRUSTED_PROXIES: undefined,
+      }),
+    ).toEqual([
       `AGENTX_TRUSTED_PROXIES: is required in ${environment}; without the TLS proxy's address, ` +
         'every client would share one rate limit',
     ]);
   });
 
   it.each(['development', 'test'])('is optional in %s, where the app is reached directly', (environment) => {
-    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment }).http.trustedProxies).toEqual([]);
+    expect(loadConfig({ ...LOCAL, AGENTX_ENV: environment, ...partnerFor(environment) }).http.trustedProxies).toEqual(
+      [],
+    );
   });
 });
 
@@ -1015,15 +1065,18 @@ describe('config: email for the admins’ notices (B5-3)', () => {
 
 describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
   const STAGING: Env = { ...MINIMAL, AGENTX_ENV: 'staging' };
+  const FAKE_STAGING: Env = { ...STAGING, AGENTX_PARTNER_MODE: 'fake' };
 
   it('is the fake by default where nothing real is at stake', () => {
     expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'development' }).partner).toEqual({ mode: 'fake' });
     expect(loadConfig({ ...LOCAL, AGENTX_ENV: 'test' }).partner).toEqual({ mode: 'fake' });
   });
 
-  it('is the fake in staging when set, and none when not: nothing reaches a partner then', () => {
+  it('is required in staging: a missing setting never falls back to the fake (D2-3b)', () => {
     expect(loadConfig({ ...STAGING, AGENTX_PARTNER_MODE: 'fake' }).partner).toEqual({ mode: 'fake' });
-    expect(loadConfig(STAGING).partner).toBeUndefined();
+    expect(problemsWith(STAGING)).toEqual([
+      'AGENTX_PARTNER_MODE: is required in staging; a missing setting never falls back to the fake',
+    ]);
   });
 
   it('is never the fake in production: production never pretends to pay', () => {
@@ -1034,7 +1087,12 @@ describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
   });
 
   it.each(['sandbox', 'live'])('refuses %s anywhere until its adapter is built', (mode) => {
-    for (const env of [STAGING, MINIMAL, { ...LOCAL, AGENTX_ENV: 'test' }, { ...LOCAL, AGENTX_ENV: 'development' }]) {
+    for (const env of [
+      FAKE_STAGING,
+      MINIMAL,
+      { ...LOCAL, AGENTX_ENV: 'test' },
+      { ...LOCAL, AGENTX_ENV: 'development' },
+    ]) {
       expect(problemsWith({ ...env, AGENTX_PARTNER_MODE: mode })).toEqual([
         `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
       ]);
@@ -1047,7 +1105,7 @@ describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
   });
 
   it('refuses a mode that isn’t one', () => {
-    expect(problemsWith({ ...STAGING, AGENTX_PARTNER_MODE: 'Fake' })).toEqual([
+    expect(problemsWith({ ...FAKE_STAGING, AGENTX_PARTNER_MODE: 'Fake' })).toEqual([
       'AGENTX_PARTNER_MODE: must be one of: fake, sandbox, live',
     ]);
   });

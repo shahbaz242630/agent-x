@@ -63,6 +63,8 @@ import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
 import { registerAgentSelf } from './agent-self.ts';
 import { registerAgents } from './agents.ts';
+import type { FundingSourceLinks } from './funding-source-links.ts';
+import { registerFundingSources } from './funding-sources.ts';
 import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
 import { registerMemberChanges } from './member-changes.ts';
@@ -112,6 +114,8 @@ export interface ServerOptions {
   readonly agentChanges?: AgentChanges | undefined;
   /** Rotating and revoking agents' keys (agent-key-changes.ts); without it, no one reaches those routes. */
   readonly agentKeyChanges?: AgentKeyChanges | undefined;
+  /** Linking the organisation's bank account (funding-source-links.ts); without it, no one reaches those routes. */
+  readonly fundingSourceLinks?: FundingSourceLinks | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -272,6 +276,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     changes: options.agentChanges,
     keyChanges: options.agentKeyChanges,
   });
+  registerFundingSources(app, { links: options.fundingSourceLinks });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

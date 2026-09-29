@@ -55,7 +55,9 @@ import {
   type SignIn,
 } from '@agentx/core/modules/identity';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
+import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
+import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -83,6 +85,7 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
+import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
@@ -97,6 +100,8 @@ import { recordStart } from './start-record.ts';
 /** Every table the API reaches, module by module. */
 type ApiTables = PlatformControlsTables &
   AgentsTables &
+  FundingSourcesTables &
+  FakePartnerTables &
   DirectoryTables &
   AuditTables &
   IdentityTables &
@@ -459,6 +464,16 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     agentChanges: createAgentChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
     checkAgentKey: keyCheck.check.bind(keyCheck),
+    fundingSourceLinks: createFundingSourceLinks({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
+      rail: railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids }),
+      partner: partnerName(config.partner),
+      logger,
+    }),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

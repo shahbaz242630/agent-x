@@ -8,6 +8,7 @@
     "./modules/agents": "./src/modules/agents/index.ts",
     "./modules/audit": "./src/modules/audit/index.ts",
     "./modules/directory": "./src/modules/directory/index.ts",
+    "./modules/funding-sources": "./src/modules/funding-sources/index.ts",
     "./modules/identity": "./src/modules/identity/index.ts",
     "./modules/notifications": "./src/modules/notifications/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",

@@ -15,6 +15,9 @@ type Env = Record<string, string | undefined>;
 const APP_LOGIN = 'app login for these tests';
 const OWNER_LOGIN = 'owner login for these tests';
 
+/** Staging must name its payment partner (ADR-014 §4, D2-3b): the fake, in tests of anything else. */
+const partnerFor = (environment: string): Env => (environment === 'staging' ? { AGENTX_PARTNER_MODE: 'fake' } : {});
+
 const APP: Env = {
   AGENTX_ENV: 'production',
   AGENTX_RELEASE: 'r-1',
@@ -137,13 +140,18 @@ describe('SEC-AV-03 database settings', () => {
   });
 
   it.each(['staging', 'production'])('refuses TLS disable in %s, where the server must be verified', (environment) => {
-    expect(appProblems({ ...APP, AGENTX_ENV: environment, AGENTX_DB_TLS: 'disable' })).toEqual([
+    expect(
+      appProblems({ ...APP, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_DB_TLS: 'disable' }),
+    ).toEqual([
       `AGENTX_DB_TLS: disable is allowed only in development and test; ${environment} must verify the server's certificate (verify-full)`,
     ]);
   });
 
   it.each(['development', 'test'])('accepts TLS disable in %s, for the local stack', (environment) => {
-    expect(loadConfig({ ...LOCAL_APP, AGENTX_ENV: environment, AGENTX_DB_TLS: 'disable' }).db.tls).toBe('disable');
+    expect(
+      loadConfig({ ...LOCAL_APP, AGENTX_ENV: environment, ...partnerFor(environment), AGENTX_DB_TLS: 'disable' }).db
+        .tls,
+    ).toBe('disable');
   });
 });
 
