@@ -10,7 +10,8 @@
 //    route naming roles, their membership in the organisation the request
 //    names (B4-2a); an agent by its key (C2-1)
 // 5. a signed-in person's request is counted against their own rate limit
-//    too (B2-5c); a refusal is noted as a security event with the person
+//    too (B2-5c); a refusal is noted as a security event with the person; an
+//    agent's, against the agent's own (C2-2, SEC-AG-06)
 // 6. a write is refused without a well-formed Idempotency-Key header
 //    (write-operations.ts, B2b-2)
 // Errors and unknown addresses get a plain body with a reason code (SEC-DATA-04),
@@ -43,7 +44,14 @@ import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
 import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
-import { createCounter, createPersonCounter, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
+import {
+  createAgentCounter,
+  createCounter,
+  createPersonCounter,
+  proxyTrust,
+  RATE_LIMIT_HEADERS,
+  registerRateLimit,
+} from './rate-limit.ts';
 import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
 import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.ts';
@@ -230,6 +238,14 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     'onRequest',
     createPersonCounter(app, config.http.rateLimitPerUserPerMinute, trust, (ip, userId) => {
       securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
+    }),
+  );
+  // After the access hook too, which finds the agent. The security events keep people, not
+  // agents: the refused request's line names the agent (request-log.ts).
+  app.addHook(
+    'onRequest',
+    createAgentCounter(app, config.http.rateLimitPerAgentPerMinute, trust, (ip) => {
+      securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip });
     }),
   );
   // After the caller is known and counted, before the body is read.

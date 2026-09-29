@@ -61,6 +61,8 @@ export interface Config {
     readonly rateLimitPerMinute: number;
     /** ADR-011 §4 (B2-5c): the most requests one signed-in person may make per minute, from any address. */
     readonly rateLimitPerUserPerMinute: number;
+    /** ADR-011 §4 (C2-2, SEC-AG-06): the most requests one AI agent may make per minute, with any of its keys. */
+    readonly rateLimitPerAgentPerMinute: number;
   };
   /** The app's database connection (ADR-002), as the app's own role (ADR-005 §3). */
   readonly db: {
@@ -171,11 +173,16 @@ function trustedProxiesProblems(environment: Environment, proxies: readonly stri
  * twice its limit in one: the limit must be at most half the cap.
  */
 function rateLimitProblems(
-  name: 'AGENTX_RATE_LIMIT_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE',
+  name:
+    'AGENTX_RATE_LIMIT_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE' | 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE',
   perMinute: number,
   eventCapPerMinute: number,
 ): string[] {
-  const whose = name === 'AGENTX_RATE_LIMIT_PER_MINUTE' ? "one client's" : "one person's";
+  const whose = {
+    AGENTX_RATE_LIMIT_PER_MINUTE: "one client's",
+    AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE: "one person's",
+    AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: "one agent's",
+  }[name];
   return perMinute * 2 > eventCapPerMinute
     ? [
         `${name}: must be at most half of AGENTX_LOG_EVENT_CAP_PER_MINUTE (${eventCapPerMinute}), ` +
@@ -345,6 +352,7 @@ export function loadConfig(env: Env = process.env): Config {
     trustedProxies: setting(env, 'AGENTX_TRUSTED_PROXIES'),
     rateLimit: setting(env, 'AGENTX_RATE_LIMIT_PER_MINUTE'),
     rateLimitPerUser: setting(env, 'AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE'),
+    rateLimitPerAgent: setting(env, 'AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE'),
     allowedOrigins: setting(env, 'AGENTX_OUTBOUND_ALLOWED_ORIGINS'),
     oidcIssuer: setting(env, 'AGENTX_OIDC_ISSUER'),
     oidcClientId: setting(env, 'AGENTX_OIDC_CLIENT_ID'),
@@ -394,6 +402,10 @@ export function loadConfig(env: Env = process.env): Config {
     // B2-5c: a person reaching us from many addresses, each under its own limit, is held by theirs.
     ...(checks.rateLimitPerUser.ok && eventCap.ok
       ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser.value, eventCap.value)
+      : []),
+    // C2-2: an agent using several keys, or several addresses, is held by its own.
+    ...(checks.rateLimitPerAgent.ok && eventCap.ok
+      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent.value, eventCap.value)
       : []),
     ...(environment.ok &&
     checks.oidcIssuer.ok &&
@@ -451,6 +463,7 @@ export function loadConfig(env: Env = process.env): Config {
       trustedProxies: Object.freeze(checks.trustedProxies.value ?? []),
       rateLimitPerMinute: checks.rateLimit.value,
       rateLimitPerUserPerMinute: checks.rateLimitPerUser.value,
+      rateLimitPerAgentPerMinute: checks.rateLimitPerAgent.value,
     }),
     db: Object.freeze({
       host: checks.dbHost.value,
