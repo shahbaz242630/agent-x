@@ -106,6 +106,11 @@ describe('isUaeIban (D1-2)', () => {
     expect(isUaeIban(SENSITIVE_SAMPLES.lowercaseIban)).toBe(false);
     expect(isUaeIban(IBAN.slice(0, 22))).toBe(false);
     expect(isUaeIban(`${IBAN}0`)).toBe(false);
+    // Another country's code on a UAE IBAN's 21 digits, with check digits that hold (S is 28, A is 10).
+    const digits = IBAN.slice(4);
+    const saudi = `SA${String(98n - (BigInt(`${digits}281000`) % 97n)).padStart(2, '0')}${digits}`;
+    expect(leaks({ note: saudi })).toBe(true);
+    expect(isUaeIban(saudi)).toBe(false);
     expect(isUaeIban('')).toBe(false);
   });
 });

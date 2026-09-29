@@ -37,7 +37,7 @@ interface Registration {
   readonly registrationId: string;
   /** Set until a hosted form is filled in; null for a pass-through. */
   readonly form: { readonly formRef: string; readonly expiresAt: Date } | null;
-  outcome: 'waiting' | 'invalid_details' | { readonly beneficiary: BeneficiaryState; readonly iban: string };
+  outcome: 'waiting' | 'invalid_details' | { readonly beneficiary: BeneficiaryState };
 }
 
 /** The payees' part of the fake partner: the adapter's two calls, and the person filling in the hosted form. */
@@ -109,7 +109,7 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
       hint: accountHint(payee.iban),
       registeredAt: clock.now(),
     };
-    return { beneficiary, iban: payee.iban };
+    return { beneficiary };
   };
 
   const outcomeOf = (registration: Registration | undefined): BeneficiaryOutcome => {
@@ -117,10 +117,12 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
     const { outcome, form } = registration;
     if (outcome === 'invalid_details') return { kind: 'refused', reason: 'invalid_details' };
     if (outcome !== 'waiting') {
-      const { beneficiary, iban } = outcome;
+      // Built from masked parts alone (the hint, the masked holder), so the
+      // IBAN check is the last line here: no part of the number is named.
+      const { beneficiary } = outcome;
       return withoutAccountNumbers(
         { kind: 'registered', beneficiary: { ...beneficiary, registeredAt: new Date(beneficiary.registeredAt) } },
-        [iban],
+        [],
       );
     }
     if (form === null) throw new Error('A pass-through registration is never left waiting');
@@ -130,9 +132,9 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
 
   return {
     register(input) {
-      if (!routes.includes(input.route)) throw new RangeError(`This partner has no ${input.route} route`);
       const known = registrations.get(key(input.organizationId, input.registrationId));
       if (known !== undefined) return outcomeOf(known);
+      if (!routes.includes(input.route)) throw new RangeError(`This partner has no ${input.route} route`);
       const registration: Registration = {
         organizationId: input.organizationId,
         registrationId: input.registrationId,

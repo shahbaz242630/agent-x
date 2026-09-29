@@ -146,6 +146,13 @@ describe('our registration ID, the partner’s idempotency key (BEN-6)', () => {
     expect(again).toEqual(first);
   });
 
+  it('answers the first answer even when the same ID comes again by a route it doesn’t offer', async () => {
+    const { rail } = setUp({ beneficiaryRoutes: ['pass_through'] });
+    const first = await rail.registerBeneficiary(passThrough(jasmine));
+    const hosted = { route: 'hosted', organizationId: ORG, registrationId: REGISTRATION } as const;
+    expect(await rail.registerBeneficiary(hosted)).toEqual(first);
+  });
+
   it('keeps each organisation’s registrations apart, even under the same ID', async () => {
     const { rail } = setUp();
     const ours = beneficiaryOf(await rail.registerBeneficiary(passThrough(jasmine)));
