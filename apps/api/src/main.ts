@@ -85,7 +85,9 @@ import type { FastifyInstance } from 'fastify';
 import { createAgentChanges } from './agent-changes.ts';
 import { createAgentKeyChanges } from './agent-key-changes.ts';
 import { createAgentRegistrations } from './agent-registering.ts';
+import { createFundingSourceChanges } from './funding-source-changes.ts';
 import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
+import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
@@ -475,6 +477,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       partner: partnerName(config.partner),
       logger,
     }),
+    fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, logger }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });

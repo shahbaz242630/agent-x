@@ -108,6 +108,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /health',
       'GET /test/items/{ref}',
       'GET /v1/agent',
+      'GET /v1/agent/funding-sources',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
       'GET /v1/auth/callback',
@@ -116,12 +117,15 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/auth/step-up',
       'GET /v1/factor-resets',
       'GET /v1/fake-bank/accounts',
+      'GET /v1/funding-sources',
+      'GET /v1/funding-sources/{id}',
       'GET /v1/integrity-hold',
       'GET /v1/members',
       'GET /v1/registered-contacts',
       'HEAD /health',
       'HEAD /test/items/{ref}',
       'HEAD /v1/agent',
+      'HEAD /v1/agent/funding-sources',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
       'HEAD /v1/auth/callback',
@@ -130,6 +134,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/auth/step-up',
       'HEAD /v1/factor-resets',
       'HEAD /v1/fake-bank/accounts',
+      'HEAD /v1/funding-sources',
+      'HEAD /v1/funding-sources/{id}',
       'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
       'HEAD /v1/registered-contacts',
@@ -151,6 +157,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/fake-bank/sessions/{sessionRef}/reject',
       'POST /v1/funding-sources/link-sessions',
       'POST /v1/funding-sources/link-sessions/{linkId}/confirm',
+      'POST /v1/funding-sources/{id}/refresh',
       'POST /v1/integrity-hold/clear',
       'POST /v1/integrity-hold/clear/confirm',
       'POST /v1/integrity-hold/investigations',
@@ -1137,8 +1144,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
-    // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c), with each GET's HEAD.
-    expect(answers.length).toBe(62);
+    // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
+    // the sources' list, one and refresh and the agent's list (D2-4a), with each GET's HEAD.
+    expect(answers.length).toBe(69);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1147,6 +1155,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // The one error body, and the answers that are named objects of their own: the session (B2-4b), the members (B4-2b), the invitations (B4-3b, B4-4c, B4-4d).
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'Agent',
+      'AgentFundingSource',
       'AgentKey',
       'AgentKeyChangeAsked',
       'AgentReactivationAsked',

@@ -29,7 +29,7 @@ import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
 import { createFakeRail } from '../../providers/index.ts';
 import { addLink, settleLink } from './links.ts';
-import { addSource, SOURCES, sourceOf } from './sources.ts';
+import { addSource, SOURCES, sourceOf, sourcesPage } from './sources.ts';
 import type { FundingSourcesTables } from './tables.ts';
 
 type Tables = FundingSourcesTables & OrganizationsTables & DirectoryTables & AuditTables;
@@ -276,6 +276,20 @@ describe(`FX-TAMPER as the owner on a funding source: denied by the row check, a
     );
 
     await deniedAndHeld(id, 'unsigned');
+  });
+
+  it('a page holding one source rewritten: the whole page refused, not the rest shown (D2-4)', async () => {
+    const kept = await linkedSource();
+    const id = await linkedSource();
+    await owner.setColumn(id, 'availability', 'SUSPENDED');
+
+    const page = await withSignedStates(app, org, services(), (tx, states) =>
+      sourcesPage(tx, states, org, { after: null, limit: 50 }),
+    );
+
+    expect(page).toEqual({ outcome: 'tampered', sign: 'seal' });
+    expect(kept).not.toBe(id);
+    expect(await hold()).toMatchObject({ outcome: 'held' });
   });
 
   it('its events stripped of their seals', async () => {

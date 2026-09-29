@@ -31,7 +31,16 @@ import {
   USUAL_CONTROLS,
 } from '../../providers/index.ts';
 import { addLink, LinkNotOpen, linkOf, settleLink } from './links.ts';
-import { addSource, NotThisSource, SOURCES, sourceOf, updateFromPartner } from './sources.ts';
+import {
+  addSource,
+  endUnknownToPartner,
+  MOST_SOURCES_A_PAGE,
+  NotThisSource,
+  SOURCES,
+  sourceOf,
+  sourcesPage,
+  updateFromPartner,
+} from './sources.ts';
 import type { FundingSourcesTables } from './tables.ts';
 
 type Tables = FundingSourcesTables & OrganizationsTables & DirectoryTables & AuditTables;
@@ -507,6 +516,94 @@ describe(`a funding source brought up to the partner’s answer (D2-2, Postgres 
     await expect(bring(elsewhere)).rejects.toThrow(NotThisSource);
     await expect(bring({ ...state, organizationId: other })).rejects.toThrow(NotThisSource);
     expect(await events(org, id)).toHaveLength(1);
+  });
+
+  it('changes nothing for an answer older than the one it holds: two refreshes crossing (D2-4)', async () => {
+    const org = await organization();
+    const { id, state } = await linkedSource(org);
+    const before = await found(org, id);
+    const older = {
+      ...state,
+      availability: 'SUSPENDED' as const,
+      consentStatus: 'Suspended',
+      statusChangedAt: new Date(state.statusChangedAt.getTime() - 1),
+    };
+    const now = await withSignedStates(app, org, services(), async (tx, states) => {
+      const check = await sourceOf(tx, states, { orgId: org, id }, 'change');
+      if (check.outcome !== 'found') throw new Error(`Not found: ${check.outcome}`);
+      return updateFromPartner(tx, states, { orgId: org, id }, check, { state: older, actor: OPERATOR });
+    });
+    expect(now).toEqual(before);
+    expect(await found(org, id)).toEqual(before);
+    expect(await events(org, id)).toHaveLength(1);
+  });
+});
+
+describe(`a funding source the partner no longer knows (D2-4, Postgres ${server.version})`, () => {
+  const endUnknown = (orgId: string, id: string) =>
+    withSignedStates(app, orgId, services(), async (tx, states) => {
+      const check = await sourceOf(tx, states, { orgId, id }, 'change');
+      if (check.outcome !== 'found') throw new Error(`Not found: ${check.outcome}`);
+      return endUnknownToPartner(tx, states, { orgId, id }, check, OPERATOR);
+    });
+
+  it.each(['ACTIVE', 'SUSPENDED'] as const)('ends from %s, recorded as unknown to the partner', async (from) => {
+    const org = await organization();
+    const { id } = await linkedSource(org);
+    if (from === 'SUSPENDED') await changeStatus(org, id, 'suspend');
+
+    const now = await endUnknown(org, id);
+
+    expect(now.status).toBe('ENDED');
+    expect(await found(org, id)).toEqual(now);
+    const last = (await events(org, id)).at(-1);
+    expect(last?.action).toBe('funding_source.ended');
+    expect(JSON.parse(String(last?.details))).toMatchObject({ unknownToPartner: true, statusTo: 'ENDED' });
+  });
+
+  it('leaves an ended source as it is, recording nothing', async () => {
+    const org = await organization();
+    const { id } = await linkedSource(org);
+    await changeStatus(org, id, 'end');
+    const recorded = (await events(org, id)).length;
+
+    expect((await endUnknown(org, id)).status).toBe('ENDED');
+    expect(await events(org, id)).toHaveLength(recorded);
+  });
+});
+
+describe(`a page of an organisation's funding sources (D2-4, Postgres ${server.version})`, () => {
+  const page = (orgId: string, after: string | null, limit: number) =>
+    withSignedStates(app, orgId, services(), (tx, states) => sourcesPage(tx, states, orgId, { after, limit }));
+
+  it('holds its own sources alone, in order of ID, a page at a time', async () => {
+    const org = await organization();
+    const other = await organization();
+    const mine = [
+      await linkedSource(org),
+      await linkedSource(org, 'sme-trading-business-acct-01'),
+      await linkedSource(org, 'corporate-treasury-listed-acct-01'),
+    ];
+    await linkedSource(other);
+    const [first, second, third] = await Promise.all(mine.map(({ id }) => found(org, id)));
+
+    expect(await page(org, null, 2)).toEqual({ outcome: 'listed', sources: [first, second], next: second?.id });
+    expect(await page(org, second?.id ?? null, 2)).toEqual({ outcome: 'listed', sources: [third], next: null });
+    expect(await page(org, null, MOST_SOURCES_A_PAGE)).toEqual({
+      outcome: 'listed',
+      sources: [first, second, third],
+      next: null,
+    });
+  });
+
+  it('is empty for an organisation with none', async () => {
+    const org = await organization();
+    expect(await page(org, null, 1)).toEqual({ outcome: 'listed', sources: [], next: null });
+  });
+
+  it.each([0, MOST_SOURCES_A_PAGE + 1, 1.5])('refuses a page of %j, before any SQL runs', async (limit) => {
+    const org = await organization();
+    await expect(page(org, null, limit)).rejects.toThrow(RangeError);
   });
 });
 

@@ -1,7 +1,9 @@
-// D2-3b: the funding sources' linking routes, answering an admin with each
-// outcome of the use case. Who reaches them is the access hook's
-// (role-matrix.test.ts); what the use case does with the partner and the
-// database is funding-source-links.db.test.ts.
+// D2-3b, D2-4a: the funding sources' routes, answering a member or an agent
+// with each outcome of the use cases. Who reaches them is the access hook's
+// (role-matrix.test.ts); what the use cases do with the partner and the
+// database is funding-source-links.db.test.ts and
+// funding-source-changes.db.test.ts.
+import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -11,7 +13,9 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
+import type { FundingSourceChanges, SourceChangeWrite } from './funding-source-changes.ts';
 import type { FundingSourceLinks, LinkConfirmWrite, LinkingMember, LinkStartWrite } from './funding-source-links.ts';
+import type { FundingSourceReads, SourcePage, SourceShown, SourcesListed } from './funding-source-reads.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -128,9 +132,63 @@ interface Call {
   readonly linkId?: string;
 }
 
-/** A server whose use case answers `start` and `confirm`. */
-async function withLinks(answers: { start?: LinkStartWrite; confirm?: LinkConfirmWrite }) {
+/** A read or a change asked of the D2-4a use cases. */
+type Asked =
+  | { readonly kind: 'list' | 'usableByAgent'; readonly orgId: string; readonly page: SourcePage }
+  | { readonly kind: 'show'; readonly orgId: string; readonly sourceId: string }
+  | {
+      readonly kind: 'refresh';
+      readonly member: LinkingMember;
+      readonly keyed: IdempotentRequest;
+      readonly sourceId: string;
+    };
+
+const AGENT_KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
+const AGENT_KEY_WITHOUT_SOURCES = `axk_${'c'.repeat(32)}_${'b'.repeat(43)}`;
+const acceptedKey = (scopes: AcceptedKey['scopes']): AcceptedKey => ({
+  orgId: ORG,
+  agentId: '0199a0f0-0000-7000-8000-0000000000a1',
+  keyId: '0199a0f0-0000-7000-8000-0000000000b1',
+  scopes,
+  expiresAt: new Date('2099-12-28T09:00:00.000Z'),
+});
+const AGENT_KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
+  [AGENT_KEY, acceptedKey(['sources:read'])],
+  [AGENT_KEY_WITHOUT_SOURCES, acceptedKey(['requests:read'])],
+]);
+
+/** A server whose use cases answer `start`, `confirm`, the reads and `refresh`. */
+async function withLinks(
+  answers: {
+    start?: LinkStartWrite;
+    confirm?: LinkConfirmWrite;
+    list?: SourcesListed;
+    show?: SourceShown;
+    refresh?: SourceChangeWrite;
+  },
+  asked: Asked[] = [],
+) {
   const calls: Call[] = [];
+  const reads: FundingSourceReads = {
+    list: (orgId, page) => {
+      asked.push({ kind: 'list', orgId, page });
+      return Promise.resolve(answers.list ?? { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    },
+    show: (orgId, sourceId) => {
+      asked.push({ kind: 'show', orgId, sourceId });
+      return Promise.resolve(answers.show ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+    },
+    usableByAgent: (orgId, page) => {
+      asked.push({ kind: 'usableByAgent', orgId, page });
+      return Promise.resolve(answers.list ?? { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    },
+  };
+  const changes: FundingSourceChanges = {
+    refresh: (member, keyed, sourceId) => {
+      asked.push({ kind: 'refresh', member, keyed, sourceId });
+      return Promise.resolve(answers.refresh ?? { outcome: 'busy' });
+    },
+  };
   const links: FundingSourceLinks = {
     start: (member, keyed) => {
       calls.push({ kind: 'start', member, keyed });
@@ -165,7 +223,13 @@ async function withLinks(answers: { start?: LinkStartWrite; confirm?: LinkConfir
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
     restrictedUntil: () => Promise.resolve(undefined),
     findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? ADMIN : ({ outcome: 'none' } as const)),
+    checkAgentKey: (text) => {
+      const key = AGENT_KEYS.get(text);
+      return Promise.resolve(key === undefined ? { outcome: 'refused' } : { outcome: 'accepted', key });
+    },
     fundingSourceLinks: links,
+    fundingSourceReads: reads,
+    fundingSourceChanges: changes,
   });
   servers.push(app);
   await app.ready();
@@ -310,5 +374,191 @@ describe('POST /v1/funding-sources/link-sessions/:linkId/confirm asks the partne
     expect((await app.inject(post('/not-a-link/confirm'))).statusCode).toBe(400);
     expect((await app.inject(post(`/${LINK_ID}/confirm`, { sourceId: SOURCE_ID }))).statusCode).toBe(400);
     expect(calls).toEqual([]);
+  });
+});
+
+const read = (url: string): InjectOptions => ({
+  method: 'GET',
+  url,
+  headers: { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: ORG },
+});
+
+const refresh = (sourceId: string, payload: unknown = {}): InjectOptions => ({
+  method: 'POST',
+  url: `/v1/funding-sources/${sourceId}/refresh`,
+  headers: {
+    cookie: `${SESSION_COOKIE}=${COOKIE}`,
+    [ORGANIZATION_HEADER]: ORG,
+    origin: PUBLIC_ORIGIN,
+    'idempotency-key': 'k-1',
+    'content-type': 'application/json',
+  },
+  payload: JSON.stringify(payload),
+});
+
+const LAST_ID = '0199a0f0-0000-7000-8000-0000000000ff';
+
+describe('GET /v1/funding-sources lists the organisation’s sources (D2-4a)', () => {
+  it('answers a page of sources as Agent X holds them, and where the next starts', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID } }, asked);
+
+    const response = await app.inject(read('/v1/funding-sources'));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID });
+    expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: null, limit: 50 } }]);
+  });
+
+  it('passes the page asked for', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null } }, asked);
+
+    const response = await app.inject(read(`/v1/funding-sources?after=${LAST_ID}&limit=2`));
+
+    expect(response.json()).toEqual({ sources: [], next: null });
+    expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: LAST_ID, limit: 2 } }]);
+  });
+
+  it.each(['limit=0', 'limit=51', 'after=not-an-id', 'other=1'])(
+    'refuses %s before the use case runs',
+    async (query) => {
+      const asked: Asked[] = [];
+      const { app } = await withLinks({}, asked);
+
+      expect((await app.inject(read(`/v1/funding-sources?${query}`))).statusCode).toBe(400);
+      expect(asked).toEqual([]);
+    },
+  );
+
+  it('answers 503 INTEGRITY_FAILED as the use case refuses', async () => {
+    const { app } = await withLinks({ list: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } });
+
+    const response = await app.inject(read('/v1/funding-sources'));
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: { code: 'INTEGRITY_FAILED' } });
+  });
+});
+
+describe('GET /v1/funding-sources/:id shows one (D2-4a)', () => {
+  it('answers the source as Agent X holds it', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ show: { outcome: 'found', source: SOURCE } }, asked);
+
+    const response = await app.inject(read(`/v1/funding-sources/${SOURCE_ID}`));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(SOURCE_ANSWERED);
+    expect(asked).toEqual([{ kind: 'show', orgId: ORG, sourceId: SOURCE_ID }]);
+  });
+
+  it('answers 404 as the use case refuses, and refuses an ID that isn’t one before it runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    expect((await app.inject(read(`/v1/funding-sources/${SOURCE_ID}`))).statusCode).toBe(404);
+    expect((await app.inject(read('/v1/funding-sources/not-an-id'))).statusCode).toBe(400);
+    expect(asked).toHaveLength(1);
+  });
+});
+
+describe('POST /v1/funding-sources/:id/refresh asks the partner how it stands (D2-4a)', () => {
+  it('answers 200 with the source brought up to the partner’s answer, passing the admin and the key', async () => {
+    const asked: Asked[] = [];
+    const suspended: SourceRecord = { ...SOURCE, availability: 'SUSPENDED', consentStatus: 'Suspended' };
+    const { app } = await withLinks({ refresh: { outcome: 'changed', source: suspended } }, asked);
+
+    const response = await app.inject(refresh(SOURCE_ID));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ...SOURCE_ANSWERED, availability: 'SUSPENDED', consentStatus: 'Suspended' });
+    expect(asked).toEqual([
+      {
+        kind: 'refresh',
+        member: LINKING,
+        keyed: expect.objectContaining({ orgId: ORG, operation: 'funding-sources.refresh' }) as unknown,
+        sourceId: SOURCE_ID,
+      },
+    ]);
+  });
+
+  it.each([
+    [404, 'NOT_FOUND'],
+    [503, 'PARTNER_UNAVAILABLE'],
+    [503, 'INTEGRITY_FAILED'],
+  ] as const)('answers %i %s as the use case refuses', async (status, code) => {
+    const { app } = await withLinks({ refresh: { outcome: 'refused', status, code } });
+
+    const response = await app.inject(refresh(SOURCE_ID));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+
+  it('answers a key reused for another request as the idempotency store says', async () => {
+    const { app } = await withLinks({ refresh: { outcome: 'conflict' } });
+
+    expect((await app.inject(refresh(SOURCE_ID))).statusCode).toBe(409);
+  });
+
+  it('refuses any body, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    expect((await app.inject(refresh(SOURCE_ID, { availability: 'ACTIVE' }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('GET /v1/agent/funding-sources: an agent sees the safe summary alone (D2-4a, SEC-AG-05)', () => {
+  const asAgent = (key: string, query = ''): InjectOptions => ({
+    method: 'GET',
+    url: `/v1/agent/funding-sources${query}`,
+    headers: { authorization: `Bearer ${key}` },
+  });
+
+  it('answers each usable source’s ID, currency, kind and hint, and nothing else of it', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID } }, asked);
+
+    const response = await app.inject(asAgent(AGENT_KEY, '?limit=10'));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      sources: [{ id: SOURCE_ID, currency: 'AED', accountType: 'sme', hint: 'AE…6026' }],
+      next: LAST_ID,
+    });
+    for (const withheld of ['Jasmine', 'fake-source', 'fake-consent', 'Authorized', '5000000', LINK_ID]) {
+      expect(response.body).not.toContain(withheld);
+    }
+    expect(asked).toEqual([{ kind: 'usableByAgent', orgId: ORG, page: { after: null, limit: 10 } }]);
+  });
+
+  it('refuses a key without sources:read, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    const response = await app.inject(asAgent(AGENT_KEY_WITHOUT_SOURCES));
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ error: { code: 'INSUFFICIENT_SCOPE' } });
+    expect(asked).toEqual([]);
+  });
+
+  it('refuses a member’s session: agent routes are the agents’ alone', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    const response = await app.inject(read('/v1/agent/funding-sources'));
+
+    expect([401, 403]).toContain(response.statusCode);
+    expect(asked).toEqual([]);
+  });
+
+  it('answers 503 INTEGRITY_FAILED as the use case refuses', async () => {
+    const { app } = await withLinks({ list: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } });
+
+    expect((await app.inject(asAgent(AGENT_KEY))).statusCode).toBe(503);
   });
 });

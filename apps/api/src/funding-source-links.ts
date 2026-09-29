@@ -36,7 +36,6 @@
 import {
   addLink,
   addSource,
-  type FundingSourcesTables,
   linkOf,
   type LinkRecord,
   linksStartedSince,
@@ -46,9 +45,7 @@ import {
   sourceOf,
   type SourceRecord,
 } from '@agentx/core/modules/funding-sources';
-import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   createDatabaseRecords,
   createFakeRail,
@@ -56,18 +53,22 @@ import {
   type FakeRail,
   type FinancialRailAdapter,
   type LinkOutcome,
-  RailUnavailable,
 } from '@agentx/core/modules/providers';
-import type { Clock, IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
-import {
-  createIdempotentWrites,
-  type Database,
-  type DatabaseTransaction,
-  type IdempotentRequest,
-  limitStatements,
-} from '@agentx/platform/db';
+import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+
+import {
+  asked,
+  createFundingSourceWork,
+  type FundingSourceMember,
+  FundingSourceRefused,
+  type FundingSourceTables,
+  type FundingSourceTx,
+  PARTNER_UNAVAILABLE,
+  type Refused,
+} from './funding-source-work.ts';
 
 /** Starting a link. */
 export const LINK_START_OPERATION = 'funding-sources.link.start';
@@ -78,21 +79,10 @@ export const LINK_CONFIRM_OPERATION = 'funding-sources.link.confirm';
 export const LINKING_ROLES = ['admin'] as const;
 
 /** The tables linking works on. */
-export type LinkingTables = IdentityTables & FundingSourcesTables & DirectoryTables & AuditTables;
-type LinkingTx = DatabaseTransaction<LinkingTables>;
+export type LinkingTables = FundingSourceTables;
 
 /** Who is linking: a signed-in member, in the organisation the access hook verified. */
-export interface LinkingMember {
-  readonly orgId: string;
-  readonly userId: string;
-}
-
-/** A refusal, as the use case answers it. */
-interface Refused {
-  readonly outcome: 'refused';
-  readonly status: number;
-  readonly code: ReasonCode;
-}
+export type LinkingMember = FundingSourceMember;
 
 /** A link, and the source it made once linked. */
 interface LinkWithSource {
@@ -140,37 +130,11 @@ export function railFor(
   return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
 }
 
-/** A refusal thrown inside a write, so everything it did rolls back. */
-class LinkRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
-  constructor(status: number, code: ReasonCode) {
-    super(`linking refused: ${code}`);
-    this.name = 'LinkRefused';
-    this.status = status;
-    this.code = code;
-  }
-}
-
 /** The link is still waiting at the bank: thrown inside the write, so nothing of it is kept, the key's claim included. */
 class StillWaiting extends Error {
   constructor() {
     super('the link is still waiting at the bank');
     this.name = 'StillWaiting';
-  }
-}
-
-const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });
-const PARTNER_UNAVAILABLE = refused(503, 'PARTNER_UNAVAILABLE');
-
-/** The partner's answer, or `unavailable` when it didn't give one. */
-async function asked<T>(call: () => Promise<T>): Promise<T | 'unavailable'> {
-  try {
-    return await call();
-  } catch (error) {
-    if (error instanceof RailUnavailable) return 'unavailable';
-    throw error;
   }
 }
 
@@ -193,79 +157,48 @@ export function createFundingSourceLinks({
   readonly partner: string;
   readonly logger: Logger;
 }): FundingSourceLinks {
-  const inOrganisation = <T>(
-    orgId: string,
-    correlationId: string,
-    work: (tx: LinkingTx, states: SignedStates) => Promise<T>,
-  ): Promise<T> =>
-    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+  const work = createFundingSourceWork({ database, keys, ids, logger });
+  const { inOrganisation, answered } = work;
 
-  /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
+  /** The write with its key claimed first; still waiting at the bank, answered with nothing of it kept. */
   const write = async (
     member: LinkingMember,
     idempotent: IdempotentRequest,
     correlationId: string,
-    work: (tx: LinkingTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+    change: (tx: FundingSourceTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
   ) => {
-    const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
     try {
-      return await inOrganisation(member.orgId, correlationId, (tx, states) =>
-        idempotency.run(tx, idempotent, () => work(tx, states)),
-      );
+      return await work.write(member, idempotent, correlationId, change);
     } catch (error) {
-      if (error instanceof LinkRefused) return refused(error.status, error.code);
       if (error instanceof StillWaiting) return { outcome: 'waiting' as const };
       throw error;
     }
   };
 
-  /** The member's membership, read again for this decision: an active admin, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
-  const adminIn = async (tx: LinkingTx, states: SignedStates, member: LinkingMember, roles: readonly Role[]) => {
-    const membership = await membershipOf(tx, states, member.orgId, member.userId);
-    if (membership.outcome === 'tampered') throw new LinkRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || !roles.includes(membership.role)) throw new LinkRefused(403, 'FORBIDDEN');
-    return membership;
-  };
+  const adminIn = work.memberIn;
 
   /** The link and the source it made, read (`share`): NOT_FOUND, or INTEGRITY_FAILED for a source that can't be believed. */
-  const withSource = async (tx: LinkingTx, states: SignedStates, orgId: string, linkId: string) => {
+  const withSource = async (tx: FundingSourceTx, states: SignedStates, orgId: string, linkId: string) => {
     const link = await linkOf(tx, { orgId, id: linkId }, 'share');
-    if (link === undefined) throw new LinkRefused(404, 'NOT_FOUND');
+    if (link === undefined) throw new FundingSourceRefused(404, 'NOT_FOUND');
     if (link.sourceId === null) return { link, source: null };
     const read = await sourceOf(tx, states, { orgId, id: link.sourceId }, 'share');
-    if (read.outcome === 'tampered') throw new LinkRefused(503, 'INTEGRITY_FAILED');
+    if (read.outcome === 'tampered') throw new FundingSourceRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') throw new Error(`a settled link names a source that isn't there: ${linkId}`);
     return { link, source: read.source };
   };
 
   /** Refused past the day's budget of link starts (LINK_STARTS_SPENT). */
-  const withinBudget = async (tx: LinkingTx, orgId: string): Promise<void> => {
+  const withinBudget = async (tx: FundingSourceTx, orgId: string): Promise<void> => {
     const since = new Date(clock.now().getTime() - DAY_MS);
     if ((await linksStartedSince(tx, orgId, since)) >= MOST_LINKS_STARTED_A_DAY) {
-      throw new LinkRefused(409, 'LINK_STARTS_SPENT');
-    }
-  };
-
-  /** A read in the organisation's transaction, a refusal inside it answered. */
-  const answered = async <T extends object>(
-    orgId: string,
-    correlationId: string,
-    work: (tx: LinkingTx, states: SignedStates) => Promise<T>,
-  ): Promise<T | Refused> => {
-    try {
-      return await inOrganisation(orgId, correlationId, work);
-    } catch (error) {
-      if (error instanceof LinkRefused) return refused(error.status, error.code);
-      throw error;
+      throw new FundingSourceRefused(409, 'LINK_STARTS_SPENT');
     }
   };
 
   /** Settles the open link from the partner's answer, adding its source when linked: the write's status. */
   const settle = async (
-    tx: LinkingTx,
+    tx: FundingSourceTx,
     states: SignedStates,
     member: LinkingMember,
     link: LinkRecord,
@@ -347,7 +280,7 @@ export function createFundingSourceLinks({
       // Only a link the organisation started is asked about, never an ID from anywhere else.
       const known = await answered(member.orgId, correlationId, async (tx) => {
         const link = await linkOf(tx, { orgId: member.orgId, id: linkId }, 'share');
-        if (link === undefined) throw new LinkRefused(404, 'NOT_FOUND');
+        if (link === undefined) throw new FundingSourceRefused(404, 'NOT_FOUND');
         return link;
       });
       if (known.outcome === 'refused') return known;
@@ -359,7 +292,7 @@ export function createFundingSourceLinks({
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         await adminIn(tx, states, member, LINKING_ROLES);
         const link = await linkOf(tx, { orgId: member.orgId, id: linkId }, 'change');
-        if (link === undefined) throw new LinkRefused(404, 'NOT_FOUND');
+        if (link === undefined) throw new FundingSourceRefused(404, 'NOT_FOUND');
         // Settled already, by this write's retry or another confirm (the lock waits for one at once, then reads what it
         // left): answered as it stands.
         if (link.outcome !== 'open' || outcome === undefined) return { status: 200, resourceId: linkId };

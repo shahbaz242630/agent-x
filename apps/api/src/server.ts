@@ -64,7 +64,9 @@ import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
 import { registerAgentSelf } from './agent-self.ts';
 import { registerAgents } from './agents.ts';
+import type { FundingSourceChanges } from './funding-source-changes.ts';
 import type { FundingSourceLinks } from './funding-source-links.ts';
+import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import { registerFactorResets } from './factor-resets.ts';
@@ -118,6 +120,10 @@ export interface ServerOptions {
   readonly agentKeyChanges?: AgentKeyChanges | undefined;
   /** Linking the organisation's bank account (funding-source-links.ts); without it, no one reaches those routes. */
   readonly fundingSourceLinks?: FundingSourceLinks | undefined;
+  /** Reading the organisation's funding sources (funding-source-reads.ts); without it, no one reaches those routes. */
+  readonly fundingSourceReads?: FundingSourceReads | undefined;
+  /** Changing a funding source (funding-source-changes.ts); without it, no one reaches those routes. */
+  readonly fundingSourceChanges?: FundingSourceChanges | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
   readonly fakeBank?: FakeBank | undefined;
 }
@@ -280,7 +286,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     changes: options.agentChanges,
     keyChanges: options.agentKeyChanges,
   });
-  registerFundingSources(app, { links: options.fundingSourceLinks });
+  registerFundingSources(app, {
+    links: options.fundingSourceLinks,
+    reads: options.fundingSourceReads,
+    changes: options.fundingSourceChanges,
+  });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

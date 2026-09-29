@@ -8,25 +8,42 @@
 //   the bank: asks the partner, server to server, how the link ended. 202 with
 //   the link while the business hasn't finished at its bank; 200 with the
 //   link, settled, and the source it made, if it made one. Admins.
+// - `GET /v1/funding-sources?after=&limit=` and `/v1/funding-sources/:id`
+//   (D2-4a): the sources as Agent X holds them, ENDED ones too, each verified
+//   against its signed state. Every member.
+// - `POST /v1/funding-sources/:id/refresh` (D2-4a): asks the partner, server
+//   to server, how the source stands now, and answers it brought up to that.
+//   Admins.
+// - `GET /v1/agent/funding-sources?after=&limit=` (D2-4a, SEC-AG-05): for an
+//   agent's key with `sources:read`, the sources that may fund a request now,
+//   each as the safe summary alone: its ID, currency, kind and hint. Never
+//   the holder, the partner's references, the consent or the bank's limits.
 // Refusals: 503 PARTNER_UNAVAILABLE when the partner didn't answer (nothing
 // was done; send it again) or none is set up; 409 LINK_STARTS_SPENT past the
-// day's budget; 404 NOT_FOUND for a link the organisation didn't start; 503
-// INTEGRITY_FAILED when the caller's membership or the source can't be
-// verified. The use case is funding-source-links.ts.
-import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
+// day's budget; 404 NOT_FOUND for a link or source not the organisation's;
+// 503 INTEGRITY_FAILED when the caller's membership or a source can't be
+// verified. The use cases are funding-source-links.ts, funding-source-reads.ts
+// and funding-source-changes.ts.
+import { type LinkRecord, MOST_SOURCES_A_PAGE, type SourceRecord } from '@agentx/core/modules/funding-sources';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { agentOf } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { type FundingSourceChanges, REFRESH_OPERATION, REFRESHING_ROLES } from './funding-source-changes.ts';
 import {
   type FundingSourceLinks,
   LINK_CONFIRM_OPERATION,
   LINK_START_OPERATION,
   LINKING_ROLES,
 } from './funding-source-links.ts';
+import type { FundingSourceReads } from './funding-source-reads.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+
+/** Every member may see the organisation's sources. */
+const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /** The most a bodyless write may be sent with: an empty object, with room to spare. */
 const NOTHING_BODY_LIMIT = 64;
@@ -145,13 +162,88 @@ const sourceOf = (source: SourceRecord) => ({
   },
 });
 
-/** The routes. `links` does them; without it they are still documented, and no one reaches them. */
-export function registerFundingSources(app: FastifyInstance, { links }: { links: FundingSourceLinks | undefined }) {
+const PAGE = z.strictObject({
+  after: z.uuid().optional().describe('The ID the page starts after: the last page’s `next`.'),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MOST_SOURCES_A_PAGE)
+    .optional()
+    .describe(`How many at most, ${String(MOST_SOURCES_A_PAGE)} unless fewer are asked for.`),
+});
+
+const NEXT = z.uuid().nullable().describe('The ID to ask the next page after; null at the end.');
+
+const LIST_SCHEMA = {
+  summary: "Your organisation's bank accounts",
+  querystring: PAGE,
+  response: {
+    200: z
+      .object({ sources: z.array(SOURCE).describe('The sources, in order of ID.'), next: NEXT })
+      .describe('A page of sources, each as its signed state says.'),
+  },
+};
+
+const SOURCE_ID = z.object({ id: z.uuid().describe('The source, by its ID.') });
+
+const SHOW_SCHEMA = {
+  summary: 'One of your organisation’s bank accounts',
+  params: SOURCE_ID,
+  response: { 200: SOURCE },
+};
+
+const REFRESH_SCHEMA = {
+  summary: 'Ask the partner how a bank account stands now',
+  params: SOURCE_ID,
+  body: NOTHING,
+  response: { 200: SOURCE.describe('The source, brought up to the partner’s answer.') },
+};
+
+const AGENT_SOURCE = z
+  .object({
+    id: z.uuid().describe('The source, by its ID.'),
+    currency: z.string().describe('The currency the bank’s limits are in.'),
+    accountType: z.enum(['retail', 'sme', 'corporate']).describe('What kind of account it is.'),
+    hint: z.string().describe('The country and the last four characters of the account number, such as AE…6026.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'AgentFundingSource',
+    description: 'A bank account the agent’s organisation may pay from now: the safe summary alone (SEC-AG-05).',
+  });
+
+const AGENT_LIST_SCHEMA = {
+  summary: 'The bank accounts your organisation may pay from now',
+  querystring: PAGE,
+  response: {
+    200: z
+      .object({
+        sources: z.array(AGENT_SOURCE).describe('Those of this page that may fund a request now, in order of ID.'),
+        next: NEXT,
+      })
+      .describe('A page of sources: it may hold fewer than asked for, and `next` still leads on.'),
+  },
+};
+
+/** The routes. Each use case does its own; without one they are still documented, and no one reaches them. */
+export function registerFundingSources(
+  app: FastifyInstance,
+  {
+    links,
+    reads,
+    changes,
+  }: {
+    links: FundingSourceLinks | undefined;
+    reads: FundingSourceReads | undefined;
+    changes: FundingSourceChanges | undefined;
+  },
+) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const linksOf = (): FundingSourceLinks => {
-    if (links === undefined) throw new Error('the funding-sources routes ran without their use case');
-    return links;
+  const need = <T>(useCase: T | undefined): T => {
+    if (useCase === undefined) throw new Error('a funding-sources route ran without its use case');
+    return useCase;
   };
+  const linksOf = (): FundingSourceLinks => need(links);
   const refused = (
     answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
     request: FastifyRequest,
@@ -198,6 +290,78 @@ export function registerFundingSources(app: FastifyInstance, { links }: { links:
       return reply
         .code(written.link.outcome === 'open' ? 202 : 200)
         .send({ link: linkOf(written.link), source: written.source === null ? null : sourceOf(written.source) });
+    },
+  );
+  routes.get(
+    '/v1/funding-sources',
+    { schema: LIST_SCHEMA, config: { access: [...READING_ROLES] } },
+    async (request, reply) => {
+      const { orgId } = memberOf(request);
+      const listed = await need(reads).list(
+        orgId,
+        { after: request.query.after ?? null, limit: request.query.limit ?? MOST_SOURCES_A_PAGE },
+        request.id,
+      );
+      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      return { sources: listed.sources.map(sourceOf), next: listed.next };
+    },
+  );
+
+  routes.get(
+    '/v1/funding-sources/:id',
+    { schema: SHOW_SCHEMA, config: { access: [...READING_ROLES] } },
+    async (request, reply) => {
+      const { orgId } = memberOf(request);
+      const found = await need(reads).show(orgId, request.params.id, request.id);
+      if (found.outcome === 'refused') return refused(found, request, reply);
+      return sourceOf(found.source);
+    },
+  );
+
+  routes.post(
+    '/v1/funding-sources/:id/refresh',
+    {
+      schema: REFRESH_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...REFRESHING_ROLES], operation: REFRESH_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(changes).refresh(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      if (written.outcome === 'refused') return refused(written, request, reply);
+      if (written.outcome === 'conflict' || written.outcome === 'busy') {
+        return answerRefusedWrite(written, request, reply);
+      }
+      return sourceOf(written.source);
+    },
+  );
+
+  routes.get(
+    '/v1/agent/funding-sources',
+    { schema: AGENT_LIST_SCHEMA, config: { access: ['agent'], agentScopes: ['sources:read'] } },
+    async (request, reply) => {
+      const { orgId } = agentOf(request);
+      const listed = await need(reads).usableByAgent(
+        orgId,
+        { after: request.query.after ?? null, limit: request.query.limit ?? MOST_SOURCES_A_PAGE },
+        request.id,
+      );
+      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      // The safe summary alone, field by field: nothing else of the source can reach an agent.
+      return {
+        sources: listed.sources.map((source) => ({
+          id: source.id,
+          currency: source.controls.currency,
+          accountType: source.summary.accountType,
+          hint: source.summary.hint,
+        })),
+        next: listed.next,
+      };
     },
   );
 }
