@@ -181,7 +181,13 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       if (account === undefined) throw new Error('The bank has no such account');
       const externalRef = `fake-source-${ids.next()}`;
       const source = newConsent(
-        { organizationId: session.organizationId, externalRef, account, replacesConsentId: null, controls },
+        {
+          organizationId: session.organizationId,
+          externalRef,
+          account,
+          replacesConsentId: null,
+          controls: { ...controls },
+        },
         awaitingOtherAuthorisers ? 'AwaitingAuthorization' : 'Authorized',
       );
       sources.set(externalRef, source);
@@ -202,7 +208,13 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       const old = sources.get(externalRef);
       if (old === undefined) throw new Error('No such source');
       const renewed = newConsent(
-        { ...old, replacesConsentId: old.consentId, controls: controls ?? old.controls },
+        {
+          organizationId: old.organizationId,
+          externalRef,
+          account: old.account,
+          replacesConsentId: old.consentId,
+          controls: { ...(controls ?? old.controls) },
+        },
         'Authorized',
       );
       sources.set(externalRef, renewed);

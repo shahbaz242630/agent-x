@@ -218,6 +218,17 @@ describe('a source’s state (D1-1)', () => {
     }).toThrow('from Expired to Suspended');
   });
 
+  it('stays revoked past the expiry: a terminal status is never left', async () => {
+    const { rail, bank, clock, source, consentId } = await linked();
+    bank.changeConsent(consentId, 'Revoked');
+    clock.advanceBy(366 * DAY);
+    const ref = { organizationId: ORG, externalRef: source.externalRef };
+    expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
+      consentStatus: 'Revoked',
+      statusChangedAt: START,
+    });
+  });
+
   it('keeps its reference through a renewal, with the new consent naming the one it replaced', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
     const ref = { organizationId: ORG, externalRef: source.externalRef };
@@ -242,6 +253,21 @@ describe('a source’s state (D1-1)', () => {
   it('keeps the old controls through a renewal unless new ones are approved', async () => {
     const { rail, bank, source } = await linked();
     bank.renew(source.externalRef);
+    const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
+    expect(renewed.controls).toEqual(USUAL_CONTROLS);
+  });
+
+  it('keeps its own copy of the controls a business approved', async () => {
+    const { rail, bank } = setUp();
+    const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
+    const controls = { ...USUAL_CONTROLS };
+    bank.approve(session.sessionRef, ACCOUNT, { controls });
+    Object.assign(controls, { maxPaymentMinor: 1n });
+    const source = sourceOf(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK }));
+    expect(source.controls).toEqual(USUAL_CONTROLS);
+    const renewal = { ...USUAL_CONTROLS };
+    bank.renew(source.externalRef, renewal);
+    Object.assign(renewal, { maxPaymentMinor: 1n });
     const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
     expect(renewed.controls).toEqual(USUAL_CONTROLS);
   });
@@ -277,6 +303,18 @@ describe('no account number in any answer (ADR-014 §3, PRD §6)', () => {
     if (first === undefined) throw new Error('No sandbox accounts');
     const [iban] = first.AccountIdentifiers;
     const careless: RailAccount = { ...first, AccountHolderName: `Jasmine AI FZ-LLC ${iban?.Identification ?? ''}` };
+    const { rail, bank } = setUp({ accounts: [careless] });
+    const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
+    bank.approve(session.sessionRef, careless.AccountId);
+    await expect(rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).rejects.toThrow(AccountNumberLeak);
+  });
+
+  it('refuses to answer when part of the account’s own number would come through, IBAN or not', async () => {
+    const [first] = SANDBOX_ACCOUNTS;
+    if (first === undefined) throw new Error('No sandbox accounts');
+    const [iban] = first.AccountIdentifiers;
+    const accountPart = iban?.Identification.slice(-16) ?? '';
+    const careless: RailAccount = { ...first, AccountHolderName: `Jasmine AI FZ-LLC ${accountPart.slice(0, 8)}` };
     const { rail, bank } = setUp({ accounts: [careless] });
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
     bank.approve(session.sessionRef, careless.AccountId);

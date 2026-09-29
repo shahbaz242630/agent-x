@@ -61,11 +61,10 @@ function runsOf(accountNumbers: readonly string[]): Set<string> {
   return runs;
 }
 
-/** Every text in a value, at any depth: strings, numbers written out, and the keys of objects. */
+/** Every text in a value, at any depth: strings, numbers written out, and the keys of objects (an array's too). */
 function textsIn(value: unknown, texts: string[]): string[] {
   if (typeof value === 'string') texts.push(value);
   else if (typeof value === 'number' || typeof value === 'bigint') texts.push(String(value));
-  else if (Array.isArray(value)) for (const each of value) textsIn(each, texts);
   else if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
     for (const [key, each] of Object.entries(value)) {
       texts.push(key);

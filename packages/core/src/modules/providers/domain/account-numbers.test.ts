@@ -46,6 +46,13 @@ describe('withoutAccountNumbers (D1-1)', () => {
     }
   });
 
+  it('finds an IBAN in groups with a word run on after it, and the shortest IBANs (15 characters)', () => {
+    const spaced = SENSITIVE_SAMPLES.lowercaseIban.replace(/(.{4})/g, '$1 ').trim();
+    expect(leaks({ note: `${spaced} paid` })).toBe(true);
+    // The IBAN registry's own example for Norway.
+    expect(leaks({ note: ['NO93', '8601', '1117', '947'].join('') })).toBe(true);
+  });
+
   it('looks in keys, arrays and nested objects, and at numbers written out', () => {
     expect(leaks({ [IBAN]: 'x' })).toBe(true);
     expect(leaks({ a: [{ b: [IBAN] }] })).toBe(true);
