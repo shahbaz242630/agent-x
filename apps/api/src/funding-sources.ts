@@ -14,6 +14,13 @@
 // - `POST /v1/funding-sources/:id/refresh` (D2-4a): asks the partner, server
 //   to server, how the source stands now, and answers it brought up to that.
 //   Admins.
+// - `POST /v1/funding-sources/:id/suspend` (D2-4b): the brake, at once and
+//   with no step-up: 200 with the source, SUSPENDED; one suspended or ended
+//   already is answered as it is. Admins and finance approvers.
+// - `POST /v1/funding-sources/:id/reactivate`, then `…/reactivate/confirm`
+//   with the step-up's ID once signed in again (a passkey) (D2-4b): 202 with
+//   the step-up, then 200 with the source, ACTIVE. 409 SOURCE_NOT_SUSPENDED
+//   for one that isn't suspended. Admins.
 // - `GET /v1/agent/funding-sources?after=&limit=` (D2-4a, SEC-AG-05): for an
 //   agent's key with `sources:read`, the sources that may fund a request now,
 //   each as the safe summary alone: its ID, currency, kind and hint. Never
@@ -32,7 +39,17 @@ import { z } from 'zod';
 import { agentOf } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { type FundingSourceChanges, REFRESH_OPERATION, REFRESHING_ROLES } from './funding-source-changes.ts';
+import {
+  type FundingSourceChanges,
+  REACTIVATE_CONFIRM_OPERATION,
+  REACTIVATE_OPERATION,
+  REACTIVATING_ROLES,
+  REFRESH_OPERATION,
+  REFRESHING_ROLES,
+  type SourceChangeWrite,
+  SUSPEND_OPERATION,
+  SUSPENDING_ROLES,
+} from './funding-source-changes.ts';
 import {
   type FundingSourceLinks,
   LINK_CONFIRM_OPERATION,
@@ -135,6 +152,13 @@ function memberOf(request: FastifyRequest) {
   return { orgId: member.orgId, userId: person.userId };
 }
 
+/** The route's caller in the session a step-up challenge is bound to. */
+function inSessionOf(request: FastifyRequest) {
+  const { person } = request;
+  if (person === null) throw new Error('a funding-sources route ran without a person');
+  return { ...memberOf(request), sessionId: person.sessionId };
+}
+
 const linkOf = (link: LinkRecord) => ({
   id: link.id,
   status: link.outcome,
@@ -200,6 +224,45 @@ const REFRESH_SCHEMA = {
   response: { 200: SOURCE.describe('The source, brought up to the partner’s answer.') },
 };
 
+/** The most a confirm's body may be: a challenge's ID, with room to spare. */
+const CHALLENGE_BODY_LIMIT = 128;
+
+const SOURCE_CHANGED = SOURCE.describe('The source, as the change left it.');
+
+const SUSPEND_SCHEMA = {
+  summary: 'Suspend a bank account: the brake, at once and with no step-up',
+  params: SOURCE_ID,
+  body: NOTHING,
+  response: { 200: SOURCE_CHANGED },
+};
+
+const REACTIVATION_ASKED = z
+  .object({
+    stepUpChallengeId: z
+      .uuid()
+      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'FundingSourceReactivationAsked',
+    description: 'Reactivating a bank account, waiting for the admin to sign in again.',
+  });
+
+const REACTIVATE_SCHEMA = {
+  summary: 'Ask to reactivate a suspended bank account',
+  params: SOURCE_ID,
+  body: NOTHING,
+  response: { 202: REACTIVATION_ASKED },
+};
+
+const REACTIVATE_CONFIRM_SCHEMA = {
+  summary: 'Reactivate the bank account, once signed in again for it',
+  params: SOURCE_ID,
+  body: z
+    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
+    .describe('The step-up signed in again for.'),
+  response: { 200: SOURCE_CHANGED },
+};
+
 const AGENT_SOURCE = z
   .object({
     id: z.uuid().describe('The source, by its ID.'),
@@ -249,6 +312,14 @@ export function registerFundingSources(
     request: FastifyRequest,
     reply: FastifyReply,
   ) => sendErrorBody(reply, answer.status, answer.code, request.id);
+
+  /** Answers a change: the source as it now stands, a step-up asked, or a refusal. */
+  const answerChange = (written: SourceChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
+    if (written.outcome === 'changed') return reply.code(200).send(sourceOf(written.source));
+    if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+    if (written.outcome === 'refused') return refused(written, request, reply);
+    return answerRefusedWrite(written, request, reply);
+  };
 
   routes.post(
     '/v1/funding-sources/link-sessions',
@@ -333,11 +404,7 @@ export function registerFundingSources(
         request.params.id,
         request.id,
       );
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
-      return sourceOf(written.source);
+      return answerChange(written, request, reply);
     },
   );
 
@@ -362,6 +429,63 @@ export function registerFundingSources(
         })),
         next: listed.next,
       };
+    },
+  );
+  routes.post(
+    '/v1/funding-sources/:id/suspend',
+    {
+      schema: SUSPEND_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(changes).suspend(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/funding-sources/:id/reactivate',
+    {
+      schema: REACTIVATE_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(changes).reactivate(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/funding-sources/:id/reactivate/confirm',
+    {
+      schema: REACTIVATE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(changes).reactivateConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerChange(written, request, reply);
     },
   );
 }

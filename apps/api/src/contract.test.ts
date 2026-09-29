@@ -157,7 +157,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/fake-bank/sessions/{sessionRef}/reject',
       'POST /v1/funding-sources/link-sessions',
       'POST /v1/funding-sources/link-sessions/{linkId}/confirm',
+      'POST /v1/funding-sources/{id}/reactivate',
+      'POST /v1/funding-sources/{id}/reactivate/confirm',
       'POST /v1/funding-sources/{id}/refresh',
+      'POST /v1/funding-sources/{id}/suspend',
       'POST /v1/integrity-hold/clear',
       'POST /v1/integrity-hold/clear/confirm',
       'POST /v1/integrity-hold/investigations',
@@ -1145,8 +1148,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
     // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
-    // the sources' list, one and refresh and the agent's list (D2-4a), with each GET's HEAD.
-    expect(answers.length).toBe(69);
+    // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
+    // with each GET's HEAD.
+    expect(answers.length).toBe(72);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1171,6 +1175,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'FakeBankAccount',
       'FundingSource',
       'FundingSourceLink',
+      'FundingSourceReactivationAsked',
       'HoldClearingAsked',
       'HoldInvestigation',
       'IntegrityHold',
