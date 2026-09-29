@@ -137,10 +137,11 @@ type Asked =
   | { readonly kind: 'list' | 'usableByAgent'; readonly orgId: string; readonly page: SourcePage }
   | { readonly kind: 'show'; readonly orgId: string; readonly sourceId: string }
   | {
-      readonly kind: 'refresh';
+      readonly kind: 'refresh' | 'suspend' | 'reactivate' | 'reactivateConfirm';
       readonly member: LinkingMember;
       readonly keyed: IdempotentRequest;
       readonly sourceId: string;
+      readonly stepUpChallengeId?: string;
     };
 
 const AGENT_KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
@@ -165,6 +166,7 @@ async function withLinks(
     list?: SourcesListed;
     show?: SourceShown;
     refresh?: SourceChangeWrite;
+    change?: SourceChangeWrite;
   },
   asked: Asked[] = [],
 ) {
@@ -187,6 +189,18 @@ async function withLinks(
     refresh: (member, keyed, sourceId) => {
       asked.push({ kind: 'refresh', member, keyed, sourceId });
       return Promise.resolve(answers.refresh ?? { outcome: 'busy' });
+    },
+    suspend: (member, keyed, sourceId) => {
+      asked.push({ kind: 'suspend', member, keyed, sourceId });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    reactivate: (member, keyed, sourceId) => {
+      asked.push({ kind: 'reactivate', member, keyed, sourceId });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    reactivateConfirm: (member, keyed, sourceId, stepUpChallengeId) => {
+      asked.push({ kind: 'reactivateConfirm', member, keyed, sourceId, stepUpChallengeId });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
   const links: FundingSourceLinks = {
@@ -560,5 +574,110 @@ describe('GET /v1/agent/funding-sources: an agent sees the safe summary alone (D
     const { app } = await withLinks({ list: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } });
 
     expect((await app.inject(asAgent(AGENT_KEY))).statusCode).toBe(503);
+  });
+});
+
+const change = (path: string, payload: unknown = {}): InjectOptions => ({
+  method: 'POST',
+  url: `/v1/funding-sources/${SOURCE_ID}/${path}`,
+  headers: {
+    cookie: `${SESSION_COOKIE}=${COOKIE}`,
+    [ORGANIZATION_HEADER]: ORG,
+    origin: PUBLIC_ORIGIN,
+    'idempotency-key': 'k-1',
+    'content-type': 'application/json',
+  },
+  payload: JSON.stringify(payload),
+});
+
+const CHALLENGE_ID = '0199a0f0-0000-7000-8000-0000000000c1';
+/** The member as the step-up routes pass them: with their session. */
+const IN_SESSION = { ...LINKING, sessionId: LIVE.sessionId };
+
+describe('POST /v1/funding-sources/:id/suspend: the brake (D2-4b)', () => {
+  it('answers 200 with the source, SUSPENDED, passing the member and the key', async () => {
+    const asked: Asked[] = [];
+    const suspended: SourceRecord = { ...SOURCE, status: 'SUSPENDED' };
+    const { app } = await withLinks({ change: { outcome: 'changed', source: suspended } }, asked);
+
+    const response = await app.inject(change('suspend'));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ...SOURCE_ANSWERED, status: 'SUSPENDED' });
+    expect(asked).toEqual([
+      {
+        kind: 'suspend',
+        member: LINKING,
+        keyed: expect.objectContaining({ orgId: ORG, operation: 'funding-sources.suspend' }) as unknown,
+        sourceId: SOURCE_ID,
+      },
+    ]);
+  });
+
+  it('refuses any body, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    expect((await app.inject(change('suspend', { status: 'SUSPENDED' }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/funding-sources/:id/reactivate, then /confirm, with a step-up (D2-4b)', () => {
+  it('answers the ask 202 with the step-up to sign in again for', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE_ID } }, asked);
+
+    const response = await app.inject(change('reactivate'));
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE_ID });
+    expect(asked).toMatchObject([{ kind: 'reactivate', member: IN_SESSION, sourceId: SOURCE_ID }]);
+  });
+
+  it('answers the confirm 200 with the source, ACTIVE, passing the step-up', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ change: { outcome: 'changed', source: SOURCE } }, asked);
+
+    const response = await app.inject(change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(SOURCE_ANSWERED);
+    expect(asked).toMatchObject([
+      { kind: 'reactivateConfirm', member: IN_SESSION, sourceId: SOURCE_ID, stepUpChallengeId: CHALLENGE_ID },
+    ]);
+  });
+
+  it.each([
+    [409, 'SOURCE_NOT_SUSPENDED'],
+    [403, 'STEP_UP_FAILED'],
+    [404, 'NOT_FOUND'],
+  ] as const)('answers %i %s as the use case refuses', async (status, code) => {
+    const { app } = await withLinks({ change: { outcome: 'refused', status, code } });
+
+    const response = await app.inject(change('reactivate/confirm', { stepUpChallengeId: CHALLENGE_ID }));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+
+  it('answers a key reused for another request as the idempotency store says', async () => {
+    const { app } = await withLinks({ change: { outcome: 'conflict' } });
+
+    expect((await app.inject(change('reactivate'))).statusCode).toBe(409);
+  });
+
+  it('refuses a confirm without a step-up’s ID, or with more, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({}, asked);
+
+    for (const payload of [
+      {},
+      { stepUpChallengeId: 'not-an-id' },
+      { stepUpChallengeId: CHALLENGE_ID, status: 'ACTIVE' },
+    ]) {
+      expect((await app.inject(change('reactivate/confirm', payload))).statusCode).toBe(400);
+    }
+    expect(asked).toEqual([]);
   });
 });

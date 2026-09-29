@@ -7,7 +7,13 @@
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, SOURCES, type SourceRecord } from '@agentx/core/modules/funding-sources';
-import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
+import {
+  addMembership,
+  createStepUpChallenges,
+  type IdentityTables,
+  type Role,
+  userForSubject,
+} from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabaseRecords,
@@ -145,7 +151,14 @@ const events = (org: string, sourceId: string) =>
   );
 
 const changesWith = (partner: FinancialRailAdapter | undefined) =>
-  createFundingSourceChanges({ database: app, keys, ids, rail: partner, logger: loggerFor(new LogCapture()) });
+  createFundingSourceChanges({
+    database: app,
+    keys,
+    ids,
+    rail: partner,
+    challenges: createStepUpChallenges({ ids, clock }),
+    logger: loggerFor(new LogCapture()),
+  });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -261,6 +274,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       keys,
       ids,
       rail: mixedUp,
+      challenges: createStepUpChallenges({ ids, clock }),
       logger: loggerFor(capture),
     });
 

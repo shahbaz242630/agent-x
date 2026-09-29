@@ -478,7 +478,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
-    fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, logger }),
+    fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });
