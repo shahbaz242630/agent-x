@@ -4,24 +4,29 @@
 // adapter, the links and sources the funding-sources module's, the member
 // identity's.
 //
-// 1. `start` (`funding-sources.link.start`), an admin: our link ID made, the
-//    partner asked for a session under it (the partner's idempotency key), and
-//    then, in one transaction, the key claimed, the member read again, the
-//    organisation's lock for starting links, the day's budget
-//    (LINK_STARTS_SPENT), and the link added. The partner is never called
+// 1. `start` (`funding-sources.link.start`), an admin: the member and the
+//    day's budget checked first, so no session is asked of the partner for a
+//    start that would be refused; our link ID made; the partner asked for a
+//    session under it (the partner's idempotency key); then, in one
+//    transaction, the key claimed, the organisation's lock for starting links,
+//    the member read again, the day's budget again (LINK_STARTS_SPENT, the
+//    check that counts), and the link added. The partner is never called
 //    inside the transaction: a network call must not hold its locks, and the
 //    fake partner's own records are another transaction. A retry of the same
 //    write answers the link the first one added; the session the retry asked
-//    for goes unused and runs out at the partner, as an unapproved link does.
+//    for goes unused and runs out at the partner, as an unapproved link does,
+//    and a retry while the partner is down answers PARTNER_UNAVAILABLE.
 // 2. The business approves at its bank, through the partner's page. Nothing
 //    that comes back through the browser is believed.
 // 3. `confirm` (`funding-sources.link.confirm`), an admin: the link must be
 //    the organisation's; the partner is asked, server to server, how the link
 //    it started for this organisation ended; then, in one transaction, the key
 //    claimed, the member read again, the link locked, and: still waiting, left
-//    open (202); linked, the source added from the partner's answer and the
-//    link settled with it; turned down, run out or unknown to the partner,
-//    the link settled so. A link settled already answers as it stands.
+//    open (202), and the key's claim rolled back, so asking again with the
+//    same key asks the partner again; linked, the source added from the
+//    partner's answer and the link settled with it; turned down, run out or
+//    unknown to the partner, the link settled so. A link settled already
+//    answers as it stands.
 //
 // A source already gone at the partner by the time it is confirmed is never
 // added: the link is settled `rejected`, and linking again makes a new one.
@@ -124,6 +129,14 @@ class LinkRefused extends Error {
   }
 }
 
+/** The link is still waiting at the bank: thrown inside the write, so nothing of it is kept, the key's claim included. */
+class StillWaiting extends Error {
+  constructor() {
+    super('the link is still waiting at the bank');
+    this.name = 'StillWaiting';
+  }
+}
+
 const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });
 const PARTNER_UNAVAILABLE = refused(503, 'PARTNER_UNAVAILABLE');
 
@@ -180,6 +193,7 @@ export function createFundingSourceLinks({
       );
     } catch (error) {
       if (error instanceof LinkRefused) return refused(error.status, error.code);
+      if (error instanceof StillWaiting) return { outcome: 'waiting' as const };
       throw error;
     }
   };
@@ -201,6 +215,14 @@ export function createFundingSourceLinks({
     if (read.outcome === 'tampered') throw new LinkRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') throw new Error(`a settled link names a source that isn't there: ${linkId}`);
     return { link, source: read.source };
+  };
+
+  /** Refused past the day's budget of link starts (LINK_STARTS_SPENT). */
+  const withinBudget = async (tx: LinkingTx, orgId: string): Promise<void> => {
+    const since = new Date(clock.now().getTime() - DAY_MS);
+    if ((await linksStartedSince(tx, orgId, since)) >= MOST_LINKS_STARTED_A_DAY) {
+      throw new LinkRefused(409, 'LINK_STARTS_SPENT');
+    }
   };
 
   /** A read in the organisation's transaction, a refusal inside it answered. */
@@ -227,7 +249,7 @@ export function createFundingSourceLinks({
   ): Promise<number> => {
     const key = { orgId: member.orgId, id: link.id };
     const now = clock.now();
-    if (outcome.kind === 'waiting') return 202;
+    if (outcome.kind === 'waiting') throw new StillWaiting();
     if (outcome.kind === 'refused') {
       await settleLink(tx, key, { outcome: outcome.reason }, now);
       return 200;
@@ -248,22 +270,26 @@ export function createFundingSourceLinks({
       actor: { type: 'user', id: member.userId },
     });
     await settleLink(tx, key, { outcome: 'linked', sourceId }, now);
-    return 201;
+    return 200;
   };
 
   return {
     async start(member, idempotent, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
+      // Checked before the partner is asked, so a start that would be refused opens no session there.
+      const early = await answered(member.orgId, correlationId, async (tx, states) => {
+        await adminIn(tx, states, member, LINKING_ROLES);
+        await withinBudget(tx, member.orgId);
+        return {};
+      });
+      if ('outcome' in early) return early;
       const linkId = ids.next();
       const session = await asked(() => rail.startSourceLink({ organizationId: member.orgId, linkId }));
       if (session === 'unavailable') return PARTNER_UNAVAILABLE;
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         await oneLinkStartAtATime(tx, member.orgId);
         const { id: startedBy } = await adminIn(tx, states, member, LINKING_ROLES);
-        const now = clock.now();
-        if ((await linksStartedSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_LINKS_STARTED_A_DAY) {
-          throw new LinkRefused(409, 'LINK_STARTS_SPENT');
-        }
+        await withinBudget(tx, member.orgId);
         await addLink(tx, {
           orgId: member.orgId,
           id: linkId,
@@ -271,11 +297,13 @@ export function createFundingSourceLinks({
           partner,
           sessionRef: session.sessionRef,
           expiresAt: session.expiresAt,
-          createdAt: now,
+          createdAt: clock.now(),
         });
         return { status: 201, resourceId: linkId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      // Only a confirm can find its link still waiting.
+      if (done.outcome === 'waiting') throw new Error('a link start answered as still waiting');
       const { resourceId } = done.result;
       // A retry answers the first write's link: the partner gives its session again, by the same ID.
       const answer =
@@ -313,6 +341,7 @@ export function createFundingSourceLinks({
         if (link.outcome !== 'open' || outcome === undefined) return { status: 200, resourceId: linkId };
         return { status: await settle(tx, states, member, link, outcome), resourceId: linkId };
       });
+      // Still waiting leaves nothing written: answered with the link as it stands, open.
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
       const read = await answered(member.orgId, correlationId, (tx, states) =>
         withSource(tx, states, member.orgId, linkId),

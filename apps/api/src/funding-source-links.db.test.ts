@@ -13,11 +13,20 @@ import {
   createFakeRail,
   type FakePartnerTables,
   type FakeRail,
+  RailUnavailable,
 } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -210,6 +219,103 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
     clock.advanceBy(24 * 60 * MINUTE_MS);
     startedOf(await start(admin));
   });
+
+  it('asks the partner for nothing when the start would be refused: past the budget, or not an admin', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    for (let started = 0; started < MOST_LINKS_STARTED_A_DAY; started += 1) startedOf(await start(admin));
+    // Down, so a call to it would answer PARTNER_UNAVAILABLE instead.
+    rail.bank.goDown();
+
+    expect(await start(admin)).toEqual({ outcome: 'refused', status: 409, code: 'LINK_STARTS_SPENT' });
+    expect(await start(await member(org, 'viewer'))).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+  });
+
+  it('starts one link, not two, from the day’s last, two starts at once: the organisation’s lock orders them', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    for (let started = 1; started < MOST_LINKS_STARTED_A_DAY; started += 1) startedOf(await start(admin));
+    // Another start of the organisation's, part-way: its lock taken, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.funding-links:${org}`,
+      ]);
+      const both = within(20_000, Promise.all([start(admin), start(admin)]), 'the two starts');
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+
+      const outcomes = (await both).map((each) => (each.outcome === 'refused' ? each.code : each.outcome)).sort();
+      expect(outcomes).toEqual(['LINK_STARTS_SPENT', 'started']);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+    expect((await rows(org)).links).toHaveLength(MOST_LINKS_STARTED_A_DAY);
+  });
+});
+
+describe(`failures passed on, never answered as refusals (D2-3b, Postgres ${server.version})`, () => {
+  /** The use case over `partner`, and `rail` standing in for the partner. */
+  const over = (partner: string, stand: Partial<FakeRail> = {}) =>
+    createFundingSourceLinks({
+      database: app,
+      keys,
+      ids,
+      clock,
+      rail: { ...rail, ...stand },
+      partner,
+      logger: loggerFor(new LogCapture()),
+    });
+
+  it('passes on a partner failure that isn’t a missing answer', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const failing = over('fake', { startSourceLink: () => Promise.reject(new TypeError('the adapter broke')) });
+
+    await expect(failing.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION)).rejects.toThrow(
+      'the adapter broke',
+    );
+  });
+
+  it('passes on a failure inside the write: a partner’s name the link can’t keep', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+
+    await expect(over('Not A Name').start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION)).rejects.toThrow(
+      'lower-case words',
+    );
+    expect((await rows(org)).links).toEqual([]);
+  });
+
+  it('passes on a failure of a read: a link ID the database won’t take', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+
+    await expect(confirm(admin, 'not-a-uuid')).rejects.toThrow();
+  });
+
+  it('answers PARTNER_UNAVAILABLE to a retry whose link the partner can’t give again, the link kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link } = startedOf(await start(admin, 'retried'));
+    let calls = 0;
+    // The retry's own session is given; the first write's, asked for again, isn't.
+    const flaky = over('fake', {
+      startSourceLink: (input) => {
+        calls += 1;
+        return calls === 1 ? rail.startSourceLink(input) : Promise.reject(new RailUnavailable());
+      },
+    });
+
+    expect(await flaky.start(admin, keyed(admin, LINK_START_OPERATION, 'retried'), CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect((await rows(org)).links).toEqual([{ id: link.id, outcome: null, source_id: null }]);
+  });
 });
 
 describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})`, () => {
@@ -242,6 +348,16 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     // Asked again, by another request: answered as it stands, no second source.
     expect(confirmedOf(await confirm(admin, link.id))).toEqual({ outcome: 'confirmed', link: settled, source });
     expect((await rows(org)).sources).toEqual([{ id: settled.sourceId, link_id: link.id, status: 'ACTIVE' }]);
+  });
+
+  it('asks the partner again when asked again with the same key while it waited: nothing of a wait is kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    expect(confirmedOf(await confirm(admin, link.id, 'polling')).link.outcome).toBe('open');
+    await rail.bank.approve(org, sessionOf(authoriseUrl), ACCOUNT);
+
+    expect(confirmedOf(await confirm(admin, link.id, 'polling')).link.outcome).toBe('linked');
   });
 
   it('settles a link turned down at the bank as rejected, with no source', async () => {
