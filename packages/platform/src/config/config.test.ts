@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { ConfigError } from './common.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig, partnerName } from './config.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -1039,6 +1039,11 @@ describe('SEC-OPS-07 config: the payment partner (ADR-014 §4, D2-3a)', () => {
         `AGENTX_PARTNER_MODE: ${mode} is not built yet; only fake is, until the partner's adapter (Phases 4 and 5)`,
       ]);
     }
+  });
+
+  it('is named on the start-up line by its mode, or none', () => {
+    expect(partnerName({ mode: 'fake' })).toBe('fake');
+    expect(partnerName(undefined)).toBe('none');
   });
 
   it('refuses a mode that isn’t one', () => {

@@ -350,6 +350,9 @@ function partnerFrom(environment: Environment, mode: PartnerMode | undefined): C
     : undefined;
 }
 
+/** The partner as a start-up line names it: its mode, or `none` when nothing reaches a partner. */
+export const partnerName = (partner: Config['partner']): string => partner?.mode ?? 'none';
+
 /** The login service's settings, once signInProblems has found them all set or none. */
 function signInFrom(
   issuer: string | undefined,
