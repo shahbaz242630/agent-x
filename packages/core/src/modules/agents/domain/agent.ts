@@ -129,6 +129,33 @@ const DAY_MS = 86_400_000;
 /** When a key issued at `issuedAt` expires. */
 export const keyExpiresAt = (issuedAt: Date): Date => new Date(issuedAt.getTime() + KEY_DAYS * DAY_MS);
 
+/** How long a rotated key keeps working beside its successor (ADR-011 §1's overlap; partner, S62). */
+const KEY_OVERLAP_HOURS = 24;
+
+/**
+ * The expiry of a key rotated at `now`: the end of the overlap, or its own
+ * expiry if that comes first, since an expiry is only ever brought forward.
+ */
+export const rotatedKeyExpiresAt = (expiresAt: Date, now: Date): Date =>
+  new Date(Math.min(expiresAt.getTime(), now.getTime() + KEY_OVERLAP_HOURS * 3_600_000));
+
+/** Whether a key works at `now`: ACTIVE and not yet expired. */
+export const isLiveKey = (key: { readonly status: AgentKeyStatus; readonly expiresAt: Date }, now: Date): boolean =>
+  key.status === 'ACTIVE' && key.expiresAt.getTime() > now.getTime();
+
+/**
+ * The most keys of one agent that work at once: the one in use and, for the
+ * overlap, its successor. A third waits for the overlap to end, or a revocation.
+ */
+export const MOST_LIVE_KEYS = 2;
+
+/**
+ * The most keys an organisation may issue by rotation in any 24 hours (the
+ * B8-2 lesson): every key stays a record. Registrations' first keys count
+ * towards it, but are held by their own budget (MOST_AGENTS_ADDED_A_DAY).
+ */
+export const MOST_KEYS_ISSUED_A_DAY = 20;
+
 /**
  * The most agents an organisation may register in any 24 hours (the B8-2
  * lesson): every agent stays a record, so without a budget one member could

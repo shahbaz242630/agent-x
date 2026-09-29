@@ -1,5 +1,5 @@
-// C1-2: the agents' routes, answering a member with each outcome of the
-// registration and the reads. Who reaches them is the access hook's
+// C1-2, C1-3, C1-4b: the agents' routes, answering a member with each
+// outcome of the registration, the reads and the changes. Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
 // agent-registering.db.test.ts.
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AgentChanges, AgentChangeWrite } from './agent-changes.ts';
+import type { AgentKeyChanges, AgentKeyChangeWrite } from './agent-key-changes.ts';
 import type {
   AgentAsked,
   AgentFound,
@@ -103,7 +104,18 @@ afterEach(async () => {
 });
 
 interface Call {
-  readonly kind: 'ask' | 'confirm' | 'list' | 'show' | 'suspend' | 'reactivate' | 'reactivateConfirm';
+  readonly kind:
+    | 'ask'
+    | 'confirm'
+    | 'list'
+    | 'show'
+    | 'suspend'
+    | 'reactivate'
+    | 'reactivateConfirm'
+    | 'rotate'
+    | 'rotateConfirm'
+    | 'revoke'
+    | 'revokeConfirm';
   readonly member?: RegisteringMember;
   readonly keyed?: IdempotentRequest;
   readonly asked?: AgentAsked;
@@ -115,6 +127,7 @@ interface Answers {
   readonly listed?: AgentsListed;
   readonly found?: AgentFound;
   readonly change?: AgentChangeWrite;
+  readonly keyChange?: AgentKeyChangeWrite;
 }
 
 /** A server whose use case answers `answers`, the caller holding `role`. */
@@ -157,6 +170,25 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
       return changed();
     },
   };
+  const keyChanged = () => Promise.resolve(answers.keyChange ?? { outcome: 'busy' as const });
+  const keyChanges: AgentKeyChanges = {
+    rotate: (member, keyed, named) => {
+      calls.push({ kind: 'rotate', member, keyed, subject: named });
+      return keyChanged();
+    },
+    rotateConfirm: (member, keyed, named, challengeId) => {
+      calls.push({ kind: 'rotateConfirm', member, keyed, subject: [named, challengeId] });
+      return keyChanged();
+    },
+    revoke: (member, keyed, named) => {
+      calls.push({ kind: 'revoke', member, keyed, subject: named });
+      return keyChanged();
+    },
+    revokeConfirm: (member, keyed, named, challengeId) => {
+      calls.push({ kind: 'revokeConfirm', member, keyed, subject: [named, challengeId] });
+      return keyChanged();
+    },
+  };
   const config = {
     http: {
       host: '127.0.0.1',
@@ -183,6 +215,7 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
       Promise.resolve(orgId.toLowerCase() === ORG ? { ...MEMBER, role } : ({ outcome: 'none' } as const)),
     agentRegistrations: registrations,
     agentChanges: changes,
+    agentKeyChanges: keyChanges,
   });
   servers.push(app);
   await app.ready();
@@ -453,6 +486,131 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
     const { app } = await withAgents({ change: answer }, 'admin');
 
     const response = await app.inject(change('/reactivate'));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+});
+
+describe('POST /v1/agents/:id/keys/:keyId/rotate and /revoke, each with its step-up (C1-4b)', () => {
+  const NEW_KEY_ID = '0199a0f0-0000-7000-8000-0000000000b2';
+  const NEW_KEY: AgentKeyRecord = { ...KEY, id: NEW_KEY_ID, expiresAt: new Date('2026-12-28T09:15:00.000Z') };
+  const OVERLAPPING: AgentKeyRecord = { ...KEY, expiresAt: new Date('2026-09-29T09:15:00.000Z') };
+  const NEW_TEXT = `axk_${NEW_KEY_ID.replaceAll('-', '')}_${'n'.repeat(43)}`;
+  const NAMED = { agentId: AGENT_ID, keyId: KEY_ID };
+  const keyChange = (path: string, payload?: unknown): InjectOptions => ({
+    method: 'POST',
+    url: `/v1/agents/${AGENT_ID}/keys/${KEY_ID}${path}`,
+    headers: {
+      ...headers,
+      'idempotency-key': 'k-1',
+      ...(payload !== undefined && { 'content-type': 'application/json' }),
+    },
+    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+  });
+
+  it.each([
+    ['/rotate', 'rotate', 'agents.keys.rotate'],
+    ['/revoke', 'revoke', 'agents.keys.revoke'],
+  ])(
+    'asks a step-up for %s: 202, passing the member, the key and the agent and key named',
+    async (path, kind, operation) => {
+      const { app, calls } = await withAgents({ keyChange: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+      const response = await app.inject(keyChange(path));
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+      expect(calls).toEqual([
+        {
+          kind,
+          member: REGISTERING,
+          keyed: expect.objectContaining({ orgId: ORG, operation, key: 'k-1' }) as unknown,
+          subject: NAMED,
+        },
+      ]);
+    },
+  );
+
+  it('rotates once stepped up: 201 with the agent, both keys and the new key, shown this once', async () => {
+    const { app, calls } = await withAgents({
+      keyChange: { outcome: 'rotated', agent: { agent: AGENT, keys: [OVERLAPPING, NEW_KEY] }, key: NEW_TEXT },
+    });
+
+    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toEqual({
+      agent: AGENT_ANSWERED.agent,
+      keys: [
+        { ...AGENT_ANSWERED.keys[0], expiresAt: '2026-09-29T09:15:00.000Z' },
+        { ...AGENT_ANSWERED.keys[0], id: NEW_KEY_ID, expiresAt: '2026-12-28T09:15:00.000Z' },
+      ],
+      key: NEW_TEXT,
+    });
+    expect(response.body).not.toContain(KEY.secretMac.toString('hex'));
+    expect(calls).toEqual([
+      {
+        kind: 'rotateConfirm',
+        member: REGISTERING,
+        keyed: expect.objectContaining({ operation: 'agents.keys.rotate.confirm' }) as unknown,
+        subject: [NAMED, CHALLENGE],
+      },
+    ]);
+  });
+
+  it('answers a retry of the rotation with the key as null: it was shown once', async () => {
+    const { app } = await withAgents({
+      keyChange: { outcome: 'rotated', agent: { agent: AGENT, keys: [OVERLAPPING, NEW_KEY] }, key: null },
+    });
+
+    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ key: null });
+  });
+
+  it('revokes once stepped up: 200 with the agent and its keys', async () => {
+    const REVOKED: AgentKeyRecord = { ...KEY, status: 'REVOKED' };
+    const { app, calls } = await withAgents({
+      keyChange: { outcome: 'revoked', agent: { agent: AGENT, keys: [REVOKED] } },
+    });
+
+    const response = await app.inject(keyChange('/revoke/confirm', { stepUpChallengeId: CHALLENGE }));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ...AGENT_ANSWERED, keys: [{ ...AGENT_ANSWERED.keys[0], status: 'REVOKED' }] });
+    expect(calls.map(({ kind, subject, keyed }) => [kind, subject, keyed?.operation])).toEqual([
+      ['revokeConfirm', [NAMED, CHALLENGE], 'agents.keys.revoke.confirm'],
+    ]);
+  });
+
+  it.each<[string, InjectOptions]>([
+    ['a rotation with a body', keyChange('/rotate', { now: true })],
+    ['a revocation with a body', keyChange('/revoke', { reason: 'leaked' })],
+    ['a confirm with no step-up', keyChange('/rotate/confirm', {})],
+    ['a confirm with a step-up that isn’t an ID', keyChange('/revoke/confirm', { stepUpChallengeId: 'c-1' })],
+    ['a key that isn’t an ID', { ...keyChange('/rotate'), url: `/v1/agents/${AGENT_ID}/keys/not-an-id/rotate` }],
+    ['an agent that isn’t an ID', { ...keyChange('/revoke'), url: `/v1/agents/not-an-id/keys/${KEY_ID}/revoke` }],
+  ])('refuses %s with 400, never reaching the use case', async (_, request) => {
+    const { app, calls } = await withAgents({ keyChange: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+
+    expect((await app.inject(request)).statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each<[AgentKeyChangeWrite, number, string]>([
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEY_NOT_LIVE' }, 409, 'AGENT_KEY_NOT_LIVE'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_FULL' }, 409, 'AGENT_KEYS_FULL'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEYS_SPENT' }, 409, 'AGENT_KEYS_SPENT'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_KEY_REVOKED' }, 409, 'AGENT_KEY_REVOKED'],
+    [{ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' }, 403, 'STEP_UP_FAILED'],
+    [{ outcome: 'conflict' }, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' }, 409, 'IDEMPOTENCY_KEY_BUSY'],
+  ])('answers a refusal as its status and code: %j', async (answer, status, code) => {
+    const { app } = await withAgents({ keyChange: answer });
+
+    const response = await app.inject(keyChange('/rotate/confirm', { stepUpChallengeId: CHALLENGE }));
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });

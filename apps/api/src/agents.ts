@@ -19,12 +19,21 @@
 //   step-up's ID (C1-3): an admin gives a suspended agent its authority back,
 //   signing in again with a passkey: 202 with the step-up, then 200 with the
 //   agent, ACTIVE. 409 AGENT_NOT_SUSPENDED for one that isn't suspended.
+// - `POST /v1/agents/:id/keys/:keyId/rotate`, then `…/rotate/confirm` with the
+//   step-up's ID (C1-4b): a new key, shown this once, and the old one kept
+//   working for the overlap (24 hours): 202 with the step-up, then 201 with
+//   the agent, its keys and the new key. 409 AGENT_KEY_NOT_LIVE for a key
+//   revoked or expired, AGENT_KEYS_FULL while a rotation's overlap runs,
+//   AGENT_KEYS_SPENT past the day's budget. Admins and developers.
+// - `POST /v1/agents/:id/keys/:keyId/revoke`, then `…/revoke/confirm` (C1-4b):
+//   the key stops at once: 202, then 200 with the agent and its keys. 409
+//   AGENT_KEY_REVOKED for one revoked already. Admins and developers.
 // The two registration writes: admins and developers, in the organisation the request
 // names. Refusals: 409 AGENT_ADDS_SPENT past the day's budget; 403
 // STEP_UP_FAILED for another step-up, or other name or scopes than asked; 404
 // NOT_FOUND for an agent the organisation doesn't have; 503 INTEGRITY_FAILED
 // when an agent, a key or the caller's membership can't be verified. The use
-// cases are agent-registering.ts and agent-changes.ts.
+// cases are agent-registering.ts, agent-changes.ts and agent-key-changes.ts.
 import { isAgentName, MOST_AGENTS_A_PAGE, SCOPES } from '@agentx/core/modules/agents';
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -47,6 +56,16 @@ import {
   SUSPEND_OPERATION,
   SUSPENDING_ROLES,
 } from './agent-changes.ts';
+import {
+  type AgentKeyChanges,
+  type AgentKeyChangeWrite,
+  KEY_CHANGING_ROLES,
+  type KeyNamed,
+  REVOKE_CONFIRM_OPERATION,
+  REVOKE_OPERATION,
+  ROTATE_CONFIRM_OPERATION,
+  ROTATE_OPERATION,
+} from './agent-key-changes.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
@@ -209,6 +228,63 @@ const REACTIVATE_CONFIRM_SCHEMA = {
   response: { 200: AGENT_CHANGED },
 };
 
+const KEY_NAMED = z.object({
+  id: z.uuid().describe('The agent, by its ID.'),
+  keyId: z.uuid().describe('Its key, by its ID.'),
+});
+
+const KEY_CHANGE_ASKED = z
+  .object({
+    stepUpChallengeId: z
+      .uuid()
+      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'AgentKeyChangeAsked',
+    description: "Rotating or revoking an agent's key, waiting for you to sign in again.",
+  });
+
+const STEP_UP_CONFIRM = z
+  .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
+  .describe('The step-up signed in again for.');
+
+const ROTATE_SCHEMA = {
+  summary: "Ask to rotate an agent's key: a new one, the old one kept working for the overlap",
+  params: KEY_NAMED,
+  body: NOTHING,
+  response: { 202: KEY_CHANGE_ASKED },
+};
+
+const ROTATE_CONFIRM_SCHEMA = {
+  summary: 'Rotate the key, once signed in again for it',
+  params: KEY_NAMED,
+  body: STEP_UP_CONFIRM,
+  response: {
+    201: AGENT_WITH_KEYS.extend({
+      key: z
+        .string()
+        .nullable()
+        .describe(
+          'The new key, `axk_<keyId>_<secret>`, shown this once: give it to the agent before the old one expires. Null on a retry of the same request.',
+        ),
+    }).describe('The agent and its keys: the new one, and the old one expiring at the end of the overlap.'),
+  },
+};
+
+const REVOKE_SCHEMA = {
+  summary: "Ask to revoke an agent's key: it stops at once, with no overlap",
+  params: KEY_NAMED,
+  body: NOTHING,
+  response: { 202: KEY_CHANGE_ASKED },
+};
+
+const REVOKE_CONFIRM_SCHEMA = {
+  summary: 'Revoke the key, once signed in again for it',
+  params: KEY_NAMED,
+  body: STEP_UP_CONFIRM,
+  response: { 200: AGENT_CHANGED },
+};
+
 /** The route's own caller: a member the access hook found, with their session. The hooks let no one else through. */
 function memberOf(request: FastifyRequest) {
   const { member, person } = request;
@@ -240,7 +316,15 @@ const withKeysOf = ({ agent, keys }: AgentWithKeys) => ({ agent: agentOf(agent),
  */
 export function registerAgents(
   app: FastifyInstance,
-  { registrations, changes }: { registrations: AgentRegistrations | undefined; changes: AgentChanges | undefined },
+  {
+    registrations,
+    changes,
+    keyChanges,
+  }: {
+    registrations: AgentRegistrations | undefined;
+    changes: AgentChanges | undefined;
+    keyChanges: AgentKeyChanges | undefined;
+  },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   const registrationsOf = (): AgentRegistrations => {
@@ -250,6 +334,10 @@ export function registerAgents(
   const changesOf = (): AgentChanges => {
     if (changes === undefined) throw new Error('the agents change routes ran without their use case');
     return changes;
+  };
+  const keyChangesOf = (): AgentKeyChanges => {
+    if (keyChanges === undefined) throw new Error("the agents' key routes ran without their use case");
+    return keyChanges;
   };
   const refused = (
     answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
@@ -396,6 +484,96 @@ export function registerAgents(
         request.id,
       );
       return answerChange(written, request, reply);
+    },
+  );
+  /** Answers a key change: the agent as it now stands (with the new key, once), a step-up asked, or a refusal. */
+  const answerKeyChange = (written: AgentKeyChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
+    if (written.outcome === 'rotated') {
+      return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
+    }
+    if (written.outcome === 'revoked') return reply.code(200).send(withKeysOf(written.agent));
+    if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+    if (written.outcome === 'refused') return refused(written, request, reply);
+    return answerRefusedWrite(written, request, reply);
+  };
+
+  const named = (params: { id: string; keyId: string }): KeyNamed => ({ agentId: params.id, keyId: params.keyId });
+
+  routes.post(
+    '/v1/agents/:id/keys/:keyId/rotate',
+    {
+      schema: ROTATE_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await keyChangesOf().rotate(
+        member,
+        idempotentRequest(request, member.orgId),
+        named(request.params),
+        request.id,
+      );
+      return answerKeyChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/agents/:id/keys/:keyId/rotate/confirm',
+    {
+      schema: ROTATE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await keyChangesOf().rotateConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        named(request.params),
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerKeyChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/agents/:id/keys/:keyId/revoke',
+    {
+      schema: REVOKE_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...KEY_CHANGING_ROLES], operation: REVOKE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await keyChangesOf().revoke(
+        member,
+        idempotentRequest(request, member.orgId),
+        named(request.params),
+        request.id,
+      );
+      return answerKeyChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/agents/:id/keys/:keyId/revoke/confirm',
+    {
+      schema: REVOKE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...KEY_CHANGING_ROLES], operation: REVOKE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await keyChangesOf().revokeConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        named(request.params),
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerKeyChange(written, request, reply);
     },
   );
 }

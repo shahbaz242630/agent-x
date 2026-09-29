@@ -16,8 +16,16 @@
 // Its secret's MAC is sealed but never put in an event: a seal is a MAC over
 // the fields, so the audit trail holds nothing a key could be guessed from.
 import type { SignedStateTable } from '@agentx/platform/db';
+import { sql } from 'kysely';
 
-import type { AuditActor, RecordedState, SignedStates, TamperSign, VerifiedState } from '../../audit/index.ts';
+import type {
+  AuditActor,
+  AuditDetails,
+  RecordedState,
+  SignedStates,
+  TamperSign,
+  VerifiedState,
+} from '../../audit/index.ts';
 import { registerAgentKey } from '../../directory/index.ts';
 import { AGENT_KEY, type AgentKeyStatus, type Scope, scopesOf, scopesText } from '../domain/agent.ts';
 import type { AgentsTransaction } from './agents.ts';
@@ -56,6 +64,8 @@ export interface NewAgentKey {
   readonly createdAt: Date;
   /** Who is issuing it. */
   readonly actor: AuditActor;
+  /** More facts for its event, such as the step-up and the key it rotates. */
+  readonly details?: AuditDetails;
 }
 
 /**
@@ -68,7 +78,7 @@ export interface NewAgentKey {
 export async function addAgentKey(
   tx: AgentsTransaction,
   states: SignedStates,
-  { orgId, id, agentId, scopes, secretMac, secretKeyVersion, expiresAt, createdAt, actor }: NewAgentKey,
+  { orgId, id, agentId, scopes, secretMac, secretKeyVersion, expiresAt, createdAt, actor, details = {} }: NewAgentKey,
 ): Promise<RecordedState> {
   if (secretMac.length !== MAC_BYTES) throw new RangeError(`A key's MAC is ${String(MAC_BYTES)} bytes`);
   const fields = {
@@ -88,7 +98,7 @@ export async function addAgentKey(
   return states.record(tx, AGENT_KEYS, { orgId, id }, 'new', fields, {
     actor,
     action: 'agent_key.issued',
-    details: { agentId, scopes: fields.scopes, expiresAt: expiresAt.toISOString() },
+    details: { ...details, agentId, scopes: fields.scopes, expiresAt: expiresAt.toISOString() },
   });
 }
 
@@ -207,4 +217,68 @@ export async function agentKeysOf(
     keys.push(read.key);
   }
   return { outcome: 'listed', keys };
+}
+
+/**
+ * Takes the organisation's lock for issuing keys by rotation until the
+ * transaction ends, so two rotations at once can't both take the last of the
+ * day's budget. Taken right after the idempotency key's claim, before any row lock.
+ */
+export async function oneKeyIssueAtATime(tx: AgentsTransaction, orgId: string): Promise<void> {
+  const key = `agentx.agent_keys:${orgId.toLowerCase()}`;
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+}
+
+/** How many keys the organisation issued after `since`, first keys included: its budget's count, in one statement. */
+export async function keysIssuedSince(tx: AgentsTransaction, orgId: string, since: Date): Promise<number> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone, for a budget; no key is decided on from it
+    .selectFrom(AGENT_KEYS.table)
+    .select(sql<number>`pg_catalog.count(*)::int`.as('issued'))
+    .where('org_id', '=', orgId)
+    .where('created_at', '>', since)
+    .executeTakeFirstOrThrow();
+  return row.issued;
+}
+
+/**
+ * Brings the key's expiry forward to `expiresAt`, from `state`, the key's
+ * state read for change in this transaction; never later than it was, which
+ * is refused before any SQL runs. What a rotation does to the key it replaces.
+ */
+export async function bringKeyExpiryForward(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  {
+    orgId,
+    key,
+    state,
+    expiresAt,
+    actor,
+    action,
+    details,
+  }: {
+    readonly orgId: string;
+    readonly key: AgentKeyRecord;
+    readonly state: VerifiedState;
+    readonly expiresAt: Date;
+    readonly actor: AuditActor;
+    readonly action: string;
+    readonly details: AuditDetails;
+  },
+): Promise<RecordedState> {
+  if (expiresAt.getTime() > key.expiresAt.getTime())
+    throw new RangeError("A key's expiry is only ever brought forward");
+  return states.record(
+    tx,
+    AGENT_KEYS,
+    { orgId, id: key.id },
+    state,
+    { expires_at: expiresAt },
+    {
+      actor,
+      action,
+      details: { ...details, expiresAt: expiresAt.toISOString() },
+    },
+  );
 }

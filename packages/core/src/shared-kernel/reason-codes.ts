@@ -14,6 +14,12 @@
 export const REASON_CODES = {
   AGENT_ADDS_SPENT:
     "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once.",
+  AGENT_KEYS_FULL:
+    'The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, or revoke one, then rotate again. Nothing was changed.',
+  AGENT_KEYS_SPENT:
+    "The organisation has issued as many agent keys as it may in 24 hours, so this one wasn't issued. Try again tomorrow; if no one at the organisation rotated them, tell its admins at once.",
+  AGENT_KEY_NOT_LIVE: 'The key is revoked or expired, so there is nothing to rotate. Nothing was changed.',
+  AGENT_KEY_REVOKED: 'The key is revoked already. Nothing was changed.',
   AGENT_NOT_SUSPENDED: 'The agent is active, so there is no suspension to lift. Nothing was changed.',
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",

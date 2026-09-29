@@ -50,6 +50,7 @@ import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
 import type { AgentChanges } from './agent-changes.ts';
+import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
 import { registerAgents } from './agents.ts';
 import { registerFactorResets } from './factor-resets.ts';
@@ -97,6 +98,8 @@ export interface ServerOptions {
   readonly agentRegistrations?: AgentRegistrations | undefined;
   /** Suspending and reactivating agents (agent-changes.ts); without it, no one reaches those routes. */
   readonly agentChanges?: AgentChanges | undefined;
+  /** Rotating and revoking agents' keys (agent-key-changes.ts); without it, no one reaches those routes. */
+  readonly agentKeyChanges?: AgentKeyChanges | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -240,7 +243,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
-  registerAgents(app, { registrations: options.agentRegistrations, changes: options.agentChanges });
+  registerAgents(app, {
+    registrations: options.agentRegistrations,
+    changes: options.agentChanges,
+    keyChanges: options.agentKeyChanges,
+  });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,
