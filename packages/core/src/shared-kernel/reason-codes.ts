@@ -37,7 +37,8 @@ export const REASON_CODES = {
     "This registered contact isn't active: it was removed already, or it was never confirmed. Nothing was changed.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
-  FORBIDDEN: "You're signed in, but this address answers other roles only, so the request is refused.",
+  FORBIDDEN:
+    "You're signed in, or an agent with its key, but this address answers other roles or callers only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
   HOLD_CHANGED:
@@ -48,6 +49,8 @@ export const REASON_CODES = {
     'This address changes something, so each request must carry an Idempotency-Key header: 1 to 255 visible ASCII characters, no spaces, new for each change you mean to make. Send the same key again only to retry the same request.',
   IDEMPOTENCY_KEY_REUSED:
     'This Idempotency-Key was already used for a different request, so this one is refused and nothing was changed. Use a new key for a new change.',
+  INSUFFICIENT_SCOPE:
+    "The agent's key doesn't hold every scope this address needs, so the request is refused. The WWW-Authenticate header names them: ask the organisation for a key that holds them.",
   INTEGRITY_FAILED:
     "Some of the organisation's records couldn't be verified, so this answer is withheld and the organisation is on hold while it is looked into. The Agent X team has been alerted.",
   INTERNAL_ERROR:

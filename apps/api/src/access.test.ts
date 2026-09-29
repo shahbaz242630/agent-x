@@ -53,11 +53,10 @@ const withAccess = (access: unknown): RouteShorthandOptions => ({
 describe('BR-04 every route names who may call it', () => {
   it.each<[string, readonly Principal[], string]>([
     ['one role', ['admin'], '/v1/members'],
-    ['several roles and agents', ['admin', 'approver', 'developer', 'viewer', 'agent'], '/v1/spend-requests'],
+    ['agents alone', ['agent'], '/v1/agent'],
     ['a parameter past the first segment', ['admin'], '/v1/members/:id'],
     ['the public alone', ['public'], '/health'],
     ['any signed-in person, for their own account', ['person'], '/v1/auth/session'],
-    ['any signed-in person and agents', ['person', 'agent'], '/v1/me'],
     ['operators alone, under /operator/', ['operator'], '/operator/hand-off/pause'],
   ])('takes %s', (_what, access, url) => {
     expect(accessProblems(access, url)).toEqual([]);
@@ -74,6 +73,8 @@ describe('BR-04 every route names who may call it', () => {
     ['any signed-in person beside a role', ['viewer', 'person'], '/v1/members', 'any signed-in person beside roles'],
     ['operators beside any signed-in person', ['operator', 'person'], '/operator/tools', 'operators beside others'],
     ['operators beside customers (SEC-OPS-01)', ['operator', 'admin'], '/operator/tools', 'operators beside others'],
+    ['agents beside roles (SEC-AG-05)', ['viewer', 'agent'], '/v1/suppliers', 'agents beside others'],
+    ['agents beside any signed-in person', ['person', 'agent'], '/v1/me', 'agents beside others'],
     ['operators on a tenant address', ['operator'], '/v1/organization/unfreeze', 'operators outside /operator/'],
     [
       'operators behind a parameter, which would answer a tenant address too',

@@ -45,7 +45,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { accessProblems, namesRole, ORGANIZATION_HEADER, ORGANIZATION_SCHEMA } from './access.ts';
+import { accessProblems, agentScopeProblems, namesRole, ORGANIZATION_HEADER, ORGANIZATION_SCHEMA } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { ERROR_BODY } from './errors.ts';
 import {
@@ -63,6 +63,9 @@ const COMPONENT_PREFIX = '#/components/schemas/';
 
 /** Where each operation shows who may call it; the swagger plugin copies `x-` keys of a route's schema into it. */
 const ACCESS_KEY = 'x-access';
+
+/** Where each operation agents may call shows the scopes their keys need. */
+const AGENT_SCOPES_KEY = 'x-agent-scopes';
 
 /** Where a write's operation shows the name its idempotency keys go by (OpenAPI holds it unique). */
 const OPERATION_ID_KEY = 'operationId';
@@ -436,6 +439,10 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if ((written || keys.has(ACCESS_KEY)) && keys.get(ACCESS_KEY) !== route.config?.access) {
     problems.push('the access its document shows is not its own (x-access)');
   }
+  problems.push(...agentScopeProblems(route.config?.access, route.config?.agentScopes));
+  if ((written || keys.has(AGENT_SCOPES_KEY)) && keys.get(AGENT_SCOPES_KEY) !== route.config?.agentScopes) {
+    problems.push('the agent scopes its document shows are not its own (x-agent-scopes)');
+  }
   const operation = route.config?.operation;
   problems.push(...operationProblems(operation, methodsOf(route), route.config?.access));
   // One method, so the document shows the name on one operation, as OpenAPI requires.
@@ -575,11 +582,14 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
     // A frozen copy, which the document and the access hook share: neither a change
     // to the document nor to a list the route was given can change who may call it.
     const access = Object.freeze([...(route.config?.access ?? [])]);
-    route.config = { ...route.config, access };
+    const own = route.config?.agentScopes;
+    const agentScopes = own === undefined ? undefined : Object.freeze([...own]);
+    route.config = { ...route.config, access, ...(agentScopes !== undefined && { agentScopes }) };
     const schema: FastifySchema & Record<typeof ACCESS_KEY, unknown> & Partial<Record<typeof BODY_LIMIT_KEY, number>> =
       {
         ...route.schema,
         [ACCESS_KEY]: access,
+        ...(agentScopes !== undefined && { [AGENT_SCOPES_KEY]: agentScopes }),
         ...(route.config.operation !== undefined && { [OPERATION_ID_KEY]: route.config.operation }),
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },

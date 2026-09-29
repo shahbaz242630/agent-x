@@ -6,15 +6,23 @@
 //
 // A caller is allowed when the answer is not the access hook's refusal
 // (UNAUTHENTICATED, FORBIDDEN, or the organisation's header refused): the
-// route may still refuse what it was sent, which is its own business. An agent's key and an operator's credentials
-// aren't read by the API yet (C2; operators have no API routes), so each is
-// anyone else to it: refused everywhere but the public routes.
+// route may still refuse what it was sent, which is its own business. An
+// operator's credentials aren't read by the API (operators have no API
+// routes), so an operator is anyone else to it: refused everywhere but the
+// public routes.
+//
+// SEC-AG-04 (C2-1): an agent, by a key the check accepts, is allowed exactly
+// where a route names `agent` and its key holds every scope the route needs
+// (x-agent-scopes), refused elsewhere as INSUFFICIENT_SCOPE; a key the check
+// refuses is anyone else; and a session sent beside a key is never read, so
+// an admin's cookie gives an agent nothing.
 //
 // SEC-HA-12 (B3+-1): an admin and an approver signed in with an authenticator
 // app, not a passkey, are allowed only where a developer or a viewer is too,
 // and refused everywhere else their role is named as PASSKEY_REQUIRED.
 // SEC-OPS-04 (B6-3d): so are an admin and an approver in the 7 days after a
 // second factor of theirs was removed, as SECOND_FACTOR_REMOVED.
+import { type Scope, SCOPES } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck, Role, SignIn } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -96,6 +104,13 @@ const restrictedUntil = (userId: string): Promise<Date | undefined> =>
       : undefined,
   );
 
+/** An agent's key the check accepts, with the scopes it holds, by the text sent. */
+const AGENT_KEYS: ReadonlyMap<string, readonly Scope[]> = new Map<string, readonly Scope[]>([
+  [`axk_${'a'.repeat(32)}_${'b'.repeat(43)}`, SCOPES],
+  [`axk_${'c'.repeat(32)}_${'d'.repeat(43)}`, []],
+]);
+const [FULL_KEY = '', BARE_KEY = ''] = AGENT_KEYS.keys();
+
 /** Every kind of caller, and what they send besides the request itself. */
 interface Caller {
   readonly name: string;
@@ -108,12 +123,22 @@ interface Caller {
    * refused elsewhere for this reason.
    */
   readonly withoutPowers?: { readonly role: Role; readonly code: 'PASSKEY_REQUIRED' | 'SECOND_FACTOR_REMOVED' };
+  /** An agent's: the scopes its key holds, allowed only where the route needs no others. */
+  readonly scopes?: readonly Scope[];
 }
 
 const CALLERS: readonly Caller[] = [
   { name: 'anyone', is: [], headers: {} },
-  // No agent key or operator credential is read yet: each is anyone else to the API.
-  { name: 'an agent', is: [], headers: { authorization: `Bearer axk_${'k'.repeat(40)}` } },
+  { name: 'an agent', is: ['agent'], scopes: SCOPES, headers: { authorization: `Bearer ${FULL_KEY}` } },
+  { name: 'an agent holding no scope', is: ['agent'], scopes: [], headers: { authorization: `Bearer ${BARE_KEY}` } },
+  { name: 'an agent whose key is refused', is: [], headers: { authorization: `Bearer axk_${'k'.repeat(40)}` } },
+  {
+    name: "an agent with an admin's session beside its key",
+    is: ['agent'],
+    scopes: SCOPES,
+    headers: { authorization: `Bearer ${FULL_KEY}`, cookie: `${SESSION_COOKIE}=${'A'.repeat(43)}` },
+  },
+  // No operator credential is read: an operator is anyone else to the API.
   { name: 'an operator', is: [], headers: {} },
   ...PEOPLE.map(({ name, role, passkey, restricted }, index) => ({
     name,
@@ -128,6 +153,8 @@ interface Operation {
   readonly method: string;
   readonly path: string;
   readonly access: readonly Principal[];
+  /** The scopes an agent's key needs, on an operation naming agents. */
+  readonly agentScopes: readonly Scope[];
 }
 
 let app: FastifyInstance;
@@ -159,6 +186,23 @@ beforeAll(async () => {
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
     restrictedUntil,
     findMembership: (orgId, userId) => membership(orgId, userId),
+    checkAgentKey: (text) => {
+      const scopes = AGENT_KEYS.get(text);
+      return Promise.resolve(
+        scopes === undefined
+          ? { outcome: 'refused' }
+          : {
+              outcome: 'accepted',
+              key: {
+                orgId: ORG,
+                agentId: '0199a0f0-0000-7000-8000-0000000000a1',
+                keyId: '0199a0f0-0000-7000-8000-0000000000b1',
+                scopes,
+                expiresAt: new Date('2026-12-28T09:00:00.000Z'),
+              },
+            },
+      );
+    },
   });
   await app.ready();
   const paths = app.swagger().paths ?? {};
@@ -174,6 +218,7 @@ beforeAll(async () => {
         method: method.toUpperCase(),
         path,
         access: (operation as { 'x-access': Principal[] })['x-access'],
+        agentScopes: (operation as { 'x-agent-scopes'?: Scope[] })['x-agent-scopes'] ?? [],
       })),
   );
 });
@@ -201,9 +246,14 @@ const requestFor = (operation: Operation, caller: Caller): InjectOptions => ({
 const accessRefusal = (status: number, body: string): boolean => {
   if (status !== 400 && status !== 401 && status !== 403) return false;
   const { error } = JSON.parse(body) as { error?: { code?: string } };
-  return ['UNAUTHENTICATED', 'FORBIDDEN', 'ORGANIZATION_INVALID', 'PASSKEY_REQUIRED', 'SECOND_FACTOR_REMOVED'].includes(
-    error?.code ?? '',
-  );
+  return [
+    'UNAUTHENTICATED',
+    'FORBIDDEN',
+    'ORGANIZATION_INVALID',
+    'PASSKEY_REQUIRED',
+    'SECOND_FACTOR_REMOVED',
+    'INSUFFICIENT_SCOPE',
+  ].includes(error?.code ?? '');
 };
 
 /** The refusal's reason code. */
@@ -215,9 +265,15 @@ const lacksPowers = (operation: Operation, caller: Caller): boolean =>
   operation.access.includes(caller.withoutPowers.role) &&
   !operation.access.some((principal) => WITHOUT_PASSKEY.includes(principal));
 
+/** Whether an agent's key lacks a scope the operation needs: refused as INSUFFICIENT_SCOPE. */
+const lacksScopes = (operation: Operation, caller: Caller): boolean =>
+  caller.scopes !== undefined && !operation.agentScopes.every((scope) => caller.scopes?.includes(scope) === true);
+
 const allowed = (operation: Operation, caller: Caller): boolean =>
   operation.access.includes('public') ||
-  (caller.is.some((principal) => operation.access.includes(principal)) && !lacksPowers(operation, caller));
+  (caller.is.some((principal) => operation.access.includes(principal)) &&
+    !lacksPowers(operation, caller) &&
+    !lacksScopes(operation, caller));
 
 describe('FX-ROLEMATRIX every operation × every caller', () => {
   it('reads the operations from the document, the sign-in and the session among them', () => {
@@ -227,6 +283,7 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
         'GET /v1/auth/step-up',
         'GET /v1/auth/sign-in',
         'GET /v1/members',
+        'GET /v1/agent',
       ]),
     );
   });
@@ -241,7 +298,9 @@ describe('FX-ROLEMATRIX every operation × every caller', () => {
           wrong.push(`${operation.method} ${operation.path} by ${caller.name}: ${String(response.statusCode)}`);
         } else if (
           refused &&
-          (codeOf(response.body) === caller.withoutPowers?.code) !== lacksPowers(operation, caller)
+          ((codeOf(response.body) === caller.withoutPowers?.code) !== lacksPowers(operation, caller) ||
+            (codeOf(response.body) === 'INSUFFICIENT_SCOPE') !==
+              (lacksScopes(operation, caller) && operation.access.includes('agent')))
         ) {
           wrong.push(`${operation.method} ${operation.path} by ${caller.name}: ${response.body}`);
         }

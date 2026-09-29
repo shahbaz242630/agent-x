@@ -1,13 +1,15 @@
 // ADR-011 §7: one line for each request, with its method, its route pattern
 // (never the address as sent, which can hold IDs and a query), and, once it's
-// answered, the status and duration. Never the client's IP address, the query
-// or the headers. Fastify's own request lines log all three, so this log
-// controller replaces them. Its other lines (a stream or serializer error) go
+// answered, the status and duration; an agent's, its agent and key by their
+// IDs (C2-1). Never the client's IP address, the query or the headers.
+// Fastify's own request lines log all three, so this log controller replaces
+// them. Its other lines (a stream or serializer error) go
 // through the framework logger, which keeps only their message and error.
 //
 // Each line is written under one of three events, which the logger caps per
 // minute separately (SEC-AV-09), so a flood that is rate-limited, or that hangs
 // up, can't crowd out the lines of the requests that were answered.
+import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { EventName, Logger } from '@agentx/platform/observability';
 import { type FastifyReply, type FastifyRequest, LogController } from 'fastify';
 
@@ -33,11 +35,15 @@ const routeOf = (request: FastifyRequest): string | null => request.routeOptions
 
 /** Writes the request's line. A response that failed on its way out is a warning, with its error. */
 export function logCompleted(logger: Logger, request: FastifyRequest, reply: FastifyReply, error?: Error | null): void {
+  // An agent's request names its agent and the key it was sent with (ADR-011 §1): IDs, public, never the secret.
+  // A request the router couldn't read (a malformed address) never had the field set up, so it may be missing.
+  const { agent } = request as { readonly agent?: AcceptedKey | null };
   const fields = {
     method: request.method,
     route: routeOf(request),
     status: reply.statusCode,
     durationMs: Math.round(reply.elapsedTime),
+    ...(agent !== null && agent !== undefined && { agentId: agent.agentId, agentKeyId: agent.keyId }),
   };
   const log = logger.child({ correlationId: request.id });
   const event = reply.statusCode === TOO_MANY_REQUESTS ? REQUEST_RATE_LIMITED : REQUEST_COMPLETED;

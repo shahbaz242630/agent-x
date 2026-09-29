@@ -23,7 +23,7 @@
 // A crash is logged before the process exits. Every exit writes the logger's
 // held-back line counts first, so none are lost.
 import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
-import type { AgentsTables } from '@agentx/core/modules/agents';
+import { type AgentsTables, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/core/modules/audit';
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import {
@@ -370,6 +370,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     now: () => systemClock.now().getTime(),
     logger,
   });
+  // An agent's key, checked before its request goes on (C2-1).
+  const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
   const server = await buildServer({
     config,
     logger,
@@ -454,6 +456,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     agentChanges: createAgentChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
+    checkAgentKey: keyCheck.check.bind(keyCheck),
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });
