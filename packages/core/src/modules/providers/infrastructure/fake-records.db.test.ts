@@ -44,6 +44,7 @@ const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000d2a2';
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
 const IBANS = SANDBOX_ACCOUNTS.flatMap((account) => account.AccountIdentifiers.map((each) => each.Identification));
 const [JASMINE = ''] = IBANS;
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -309,7 +310,11 @@ describe(`the fake partner on the database (D2-1, Postgres ${server.version})`, 
         [''],
       );
     expect(rows.length).toBeGreaterThan(SANDBOX_ACCOUNTS.length * 3);
-    expect(findLeaks(rows.map((row) => row.text).join('\n'), IBANS)).toEqual([]);
+    // The fake's own IDs are random UUIDs inside other text (`fake-consent-<uuid>`), and now and then one's groups
+    // read as an IBAN with valid check digits (main after #202). They hold no account number, so they are taken out
+    // first; every sandbox IBAN is still looked for as itself, and every IBAN's shape in what is left.
+    const text = rows.map((row) => row.text.replaceAll(UUID, 'id')).join('\n');
+    expect(findLeaks(text, IBANS)).toEqual([]);
   });
 
   it('shows the app nothing outside an organisation’s transaction: the tenant wall fails closed', async () => {
