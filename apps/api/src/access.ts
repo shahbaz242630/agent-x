@@ -11,8 +11,8 @@
 // request as `request.person`. With no live session the answer is 401
 // UNAUTHENTICATED, with a challenge saying how to sign in (the Cookie scheme
 // of draft-broyer-http-cookie-auth); a person the route doesn't name is 403
-// FORBIDDEN. A route about a person's own account names `person`; agents
-// come at C2.
+// FORBIDDEN. A route about a person's own account names `person`; an agent's
+// names `agent` (C2-1, below).
 //
 // B4-2a: a route naming roles answers a person acting in one organisation,
 // which the request names in its `AgentX-Organization` header, a UUID (400
@@ -37,6 +37,24 @@
 // only: a route naming neither is 403 SECOND_FACTOR_REMOVED, in every
 // organisation. The restriction is read last, for those routes alone, and
 // without its reader no one reaches them.
+//
+// C2-1 (ADR-011 §1, SEC-AG-01, SEC-AG-02): an AI agent sends its key as
+// `Authorization: Bearer axk_<keyId>_<secret>`. A request carrying an
+// Authorization header is an agent's, never a person's, whatever cookie comes
+// with it: on a route that doesn't name `agent` it is 403 FORBIDDEN before
+// any lookup, and the session is never read. On one that does, the key check
+// (the agents module's key-check.ts) finds the agent, its organisation and its
+// scopes; every refusal is the same 401 UNAUTHENTICATED with the Bearer
+// scheme's `invalid_token` challenge (RFC 6750 §3), the reason logged alone.
+// The organisation is the key's: an agent names none, so no header can point
+// it at another's (SEC-AG-02). A route naming agents names no one else: an
+// agent's answers are allowlisted apart from a member's (SEC-AG-05). A route names the scopes it needs in
+// `config.agentScopes`; a key without all of them is 403 INSUFFICIENT_SCOPE,
+// the challenge naming them. The agent goes on the request as `request.agent`.
+// An organisation frozen or on hold is refused where it matters, at a new
+// spend request (ORG_FROZEN, PRD §5.3) and at a hand-off, not here: its
+// agents may still read.
+import { type AcceptedKey, type KeyChecked, type Scope, SCOPES } from '@agentx/core/modules/agents';
 import {
   type LiveSession,
   type MembershipCheck,
@@ -78,14 +96,27 @@ declare module 'fastify' {
   interface FastifyContextConfig {
     /** Who may call the route. Required on every route (contract.ts). */
     readonly access?: readonly Principal[];
+    /** The scopes an agent's key must hold to call the route: on every route naming `agent`, and no other (contract.ts). */
+    readonly agentScopes?: readonly Scope[];
   }
   interface FastifyRequest {
     /** The signed-in person the request comes from, once the access hook has found their session; null before, and for anyone else. */
     person: LiveSession | null;
     /** On a route naming roles, the person's verified membership in the organisation the request names; null otherwise. */
     member: Member | null;
+    /** On a route naming `agent`, the agent its key was accepted as; null before, and for anyone else. */
+    agent: AcceptedKey | null;
   }
 }
+
+/** An agent's route's own caller: the agent the access hook accepted, which lets no one else through. */
+export function agentOf(request: Pick<FastifyRequest, 'agent'>): AcceptedKey {
+  if (request.agent === null) throw new Error("an agent's route ran without an agent");
+  return request.agent;
+}
+
+/** Checks the key text an agent sent (key-check.ts): the same `refused` for every reason. */
+export type CheckAgentKey = (text: string, correlationId: string) => Promise<KeyChecked>;
 
 /** Finds the live session a session cookie names, its last use moved on. */
 export type FindSession = (cookie: string) => Promise<LiveSession | undefined>;
@@ -114,6 +145,20 @@ const isOrganizationId = (value: unknown): value is string =>
  * address, and the session comes back in this cookie.
  */
 export const SESSION_CHALLENGE = `Cookie realm="Agent X", form-action="/v1/auth/sign-in", cookie-name="${SESSION_COOKIE}"`;
+
+/** The challenge a 401 carries on a route naming agents (RFC 6750 §3): send the key as a bearer token. */
+export const AGENT_CHALLENGE = 'Bearer realm="Agent X"';
+
+/** The challenge for a route's callers: the Bearer scheme's for agents, who stand alone, the Cookie scheme's for people. */
+const challengeFor = (access: readonly Principal[]): string =>
+  access.includes('agent') ? AGENT_CHALLENGE : SESSION_CHALLENGE;
+
+/**
+ * The token of an `Authorization: Bearer <token>` header (RFC 6750 §2.1,
+ * the scheme's name in any case), or '' for any other: the key check then
+ * refuses it as malformed, as it does anything not written as a key.
+ */
+export const bearerToken = (authorization: string): string => /^Bearer +(\S+)$/i.exec(authorization)?.[1] ?? '';
 
 const isPrincipal = (value: unknown): value is Principal => PRINCIPALS.some((principal) => principal === value);
 
@@ -146,6 +191,11 @@ export function accessProblems(access: unknown, url: string): string[] {
   if (names.includes('operator') && names.length > 1) {
     problems.push('its access names operators beside others');
   }
+  // SEC-AG-05 (C2-1): an agent's answers are allowlisted apart from a member's, and an agent names no
+  // organisation (its key's is the one), so agents have routes of their own.
+  if (names.includes('agent') && names.length > 1) {
+    problems.push('its access names agents beside others: give agents a route of their own');
+  }
   const operatorAddress = url.startsWith(OPERATOR_PREFIX);
   if (names.includes('operator') && !operatorAddress) {
     problems.push(`its access names operators outside ${OPERATOR_PREFIX}`);
@@ -159,6 +209,23 @@ export function accessProblems(access: unknown, url: string): string[] {
     problems.push("its address starts with a parameter or wildcard, which would answer other routes' addresses");
   }
   return problems;
+}
+
+/**
+ * Why a route's agent scopes can't stand, if they can't: a route naming
+ * agents says which scopes a key needs, none if it needs none, each scope
+ * once; a route not naming them says nothing, so no scope is ever thought to
+ * guard a route that agents can't reach anyway.
+ */
+export function agentScopeProblems(access: unknown, scopes: unknown): string[] {
+  const agents = Array.isArray(access) && access.includes('agent');
+  if (!agents) return scopes === undefined ? [] : ['it names scopes for agents, but not agents (config.agentScopes)'];
+  if (!Array.isArray(scopes)) return ['it names agents, but not the scopes their keys need (config.agentScopes)'];
+  const names: unknown[] = Array.from(scopes);
+  if (!names.every((name) => SCOPES.some((scope) => scope === name))) {
+    return [`its agent scopes name one there isn't: only ${SCOPES.join(', ')}`];
+  }
+  return new Set(names).size === names.length ? [] : ['its agent scopes name one twice'];
 }
 
 /**
@@ -182,9 +249,27 @@ const passkeyMissing = (amr: readonly string[], access: readonly Principal[]): b
 /** A signed-in person the route doesn't answer. */
 const forbidden = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 403, 'FORBIDDEN', request.id);
 
-/** No one the route names: the challenge says how to sign in. */
-const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
-  sendErrorBody(reply.header('www-authenticate', SESSION_CHALLENGE), 401, 'UNAUTHENTICATED', request.id);
+/** No one the route names: the challenges say how to sign in, or send a key. */
+const unauthenticated = (request: FastifyRequest, reply: FastifyReply, access: readonly Principal[]) =>
+  sendErrorBody(reply.header('www-authenticate', challengeFor(access)), 401, 'UNAUTHENTICATED', request.id);
+
+/** A key refused, for whatever reason: the one answer, which tells the caller nothing of why (RFC 6750 §3.1). */
+const keyRefused = (request: FastifyRequest, reply: FastifyReply) =>
+  sendErrorBody(
+    reply.header('www-authenticate', `${AGENT_CHALLENGE}, error="invalid_token"`),
+    401,
+    'UNAUTHENTICATED',
+    request.id,
+  );
+
+/** A key accepted, without every scope the route needs: the challenge names them all (RFC 6750 §3.1). */
+const scopeMissing = (request: FastifyRequest, reply: FastifyReply, needed: readonly Scope[]) =>
+  sendErrorBody(
+    reply.header('www-authenticate', `${AGENT_CHALLENGE}, error="insufficient_scope", scope="${needed.join(' ')}"`),
+    403,
+    'INSUFFICIENT_SCOPE',
+    request.id,
+  );
 
 /**
  * Refuses every request to a route that doesn't name its caller, before the
@@ -193,37 +278,69 @@ const unauthenticated = (request: FastifyRequest, reply: FastifyReply) =>
  * `findMembership` reads a person's membership; without it no one holds a role.
  * `restrictedUntil` reads whether a person is in the 7 days after a second
  * factor removed; without it no one has an admin's or approver's powers.
+ * `checkKey` checks an agent's key; without it no agent is let in.
  *
  * In callback style, calling done() only to let a request through: an async
  * hook that returned the refusal would be waited on until the answer ended,
  * and a client hanging up before then ends it too, letting the route run. A
- * failure to look the session up is a failure on our side (done with the error).
+ * failure to look the session or the key up is a failure on our side (done
+ * with the error).
  */
 export function registerAccess(
   app: FastifyInstance,
-  findSession: FindSession | undefined,
-  findMembership: FindMembership | undefined,
-  restrictedUntil: RemovalRestriction | undefined,
+  {
+    findSession,
+    findMembership,
+    restrictedUntil,
+    checkKey,
+  }: {
+    readonly findSession: FindSession | undefined;
+    readonly findMembership: FindMembership | undefined;
+    readonly restrictedUntil: RemovalRestriction | undefined;
+    readonly checkKey: CheckAgentKey | undefined;
+  },
 ): void {
   app.decorateRequest('person', null);
   app.decorateRequest('member', null);
+  app.decorateRequest('agent', null);
   app.addHook('onRequest', (request, reply, done) => {
-    const access = request.routeOptions.config.access ?? [];
+    const { access = [], agentScopes = [] } = request.routeOptions.config;
     if (request.is404 || access.includes('public')) {
       done();
-      return;
-    }
-    const cookie = cookieValue(request.headers.cookie, SESSION_COOKIE);
-    if (findSession === undefined || cookie === undefined) {
-      void unauthenticated(request, reply);
       return;
     }
     const failed = (error: unknown) => {
       done(error instanceof Error ? error : new Error('the access lookup failed', { cause: error }));
     };
+    const { authorization } = request.headers;
+    if (authorization !== undefined) {
+      // An agent's request, never a person's: the cookie isn't read.
+      if (!access.includes('agent')) {
+        void forbidden(request, reply);
+      } else if (checkKey === undefined) {
+        void keyRefused(request, reply);
+      } else {
+        checkKey(bearerToken(authorization), request.id).then((checked) => {
+          if (checked.outcome !== 'accepted') {
+            void keyRefused(request, reply);
+          } else if (!agentScopes.every((scope) => checked.key.scopes.includes(scope))) {
+            void scopeMissing(request, reply, agentScopes);
+          } else {
+            request.agent = checked.key;
+            done();
+          }
+        }, failed);
+      }
+      return;
+    }
+    const cookie = cookieValue(request.headers.cookie, SESSION_COOKIE);
+    if (findSession === undefined || cookie === undefined) {
+      void unauthenticated(request, reply, access);
+      return;
+    }
     findSession(cookie).then((session) => {
       if (session === undefined) {
-        void unauthenticated(request, reply);
+        void unauthenticated(request, reply, access);
       } else if (access.includes('person')) {
         request.person = session;
         done();

@@ -183,7 +183,13 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
 
     expect(await check(text)).toEqual({
       outcome: 'accepted',
-      key: { orgId: org, agentId: agent, keyId: id, scopes: ['requests:read'] },
+      key: {
+        orgId: org,
+        agentId: agent,
+        keyId: id,
+        scopes: ['requests:read'],
+        expiresAt: new Date(START.getTime() + 90 * DAY_MS),
+      },
     });
     expect(lines('agent_key.refused')).toEqual([]);
     expect(lines('audit.integrity_failed')).toEqual([]);

@@ -6,7 +6,11 @@ import { describe, expect, it } from 'vitest';
 import { logAborted, REQUEST_ABORTED, REQUEST_COMPLETED, REQUEST_RATE_LIMITED, RequestLog } from './request-log.ts';
 
 /** `route: null` stands for a request that matched no route. */
-function setup(status = 200, route: string | null = '/health') {
+function setup(
+  status = 200,
+  route: string | null = '/health',
+  agent: { agentId: string; keyId: string } | null = null,
+) {
   const capture = new LogCapture();
   const logger = createLogger({
     service: 'api',
@@ -15,7 +19,7 @@ function setup(status = 200, route: string | null = '/health') {
   });
   // Only the fields the log reads.
   const routeOptions = route === null ? {} : { url: route };
-  const request = { id: 'c-1', method: 'GET', routeOptions } as unknown as FastifyRequest;
+  const request = { id: 'c-1', method: 'GET', routeOptions, agent } as unknown as FastifyRequest;
   const reply = { statusCode: status, elapsedTime: 12.6 } as unknown as FastifyReply;
   return { logger, log: new RequestLog(logger), request, reply, lines: () => capture.lines() };
 }
@@ -35,6 +39,30 @@ describe('ADR-011 §7 the request log controller', () => {
         durationMs: 13,
       }),
     ]);
+  });
+
+  it("C2-1 names an agent's request's agent and key by their IDs, never the key itself", () => {
+    const agent = { agentId: '0199a0f0-0000-7000-8000-0000000000a1', keyId: '0199a0f0-0000-7000-8000-0000000000b1' };
+    const { log, request, reply, lines } = setup(200, '/v1/agent', agent);
+    log.requestCompleted(null, request, reply);
+    expect(lines()).toEqual([
+      expect.objectContaining({ route: '/v1/agent', agentId: agent.agentId, agentKeyId: agent.keyId }),
+    ]);
+  });
+
+  it('names no agent on a request the router never set one up for (a malformed address)', () => {
+    const { log, reply, lines } = setup(400, null);
+    const request = { id: 'c-1', method: 'GET', routeOptions: {} } as unknown as FastifyRequest;
+    log.requestCompleted(null, request, reply);
+    expect(lines()).toEqual([expect.objectContaining({ status: 400, route: null })]);
+    expect(lines()[0]).not.toHaveProperty('agentId');
+  });
+
+  it('names no agent on a request that is not one', () => {
+    const { log, request, reply, lines } = setup();
+    log.requestCompleted(null, request, reply);
+    expect(lines()[0]).not.toHaveProperty('agentId');
+    expect(lines()[0]).not.toHaveProperty('agentKeyId');
   });
 
   it('writes a response that failed on the way out as a warning, with its error', () => {

@@ -106,6 +106,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'DELETE /test/nested/things/{id}',
       'GET /health',
       'GET /test/items/{ref}',
+      'GET /v1/agent',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
       'GET /v1/auth/callback',
@@ -118,6 +119,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/registered-contacts',
       'HEAD /health',
       'HEAD /test/items/{ref}',
+      'HEAD /v1/agent',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
       'HEAD /v1/auth/callback',
@@ -1128,8 +1130,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
-    // five (B6-3b), with each GET's HEAD.
-    expect(answers.length).toBe(54);
+    // five (B6-3b), the agent's own (C2-1), with each GET's HEAD.
+    expect(answers.length).toBe(56);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1142,6 +1144,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'AgentKeyChangeAsked',
       'AgentReactivationAsked',
       'AgentRegistrationAsked',
+      'AgentSelf',
       'ConfirmationAsked',
       'Error',
       'FactorReset',

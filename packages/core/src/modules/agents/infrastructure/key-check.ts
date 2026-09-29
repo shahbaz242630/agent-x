@@ -52,6 +52,8 @@ export interface AcceptedKey {
   readonly keyId: string;
   /** Those both the key's and its agent's scopes hold, in SCOPES' order. */
   readonly scopes: readonly Scope[];
+  /** When the key stops working, so an agent can rotate it in time. */
+  readonly expiresAt: Date;
 }
 
 /** Why a key was refused: for the log alone, never an answer. */
@@ -125,6 +127,7 @@ export async function agentKeyAt(
       agentId: agent.id,
       keyId: key.id,
       scopes: key.scopes.filter((scope) => agent.scopes.includes(scope)),
+      expiresAt: key.expiresAt,
     },
   };
 }

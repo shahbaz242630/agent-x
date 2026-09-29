@@ -3,11 +3,12 @@
 // 1. gets its correlation ID (from the caller if it's a UUID) and the security headers
 // 2. is counted against its client address's rate limit (ADR-011 §4); a
 //    refusal is noted as a security event (B2-5b)
-// 3. is refused if it can change something but didn't come from our own origin (SEC-WEB-01)
+// 3. is refused if it can change something but didn't come from our own origin
+//    (SEC-WEB-01), unless it is an agent's, with its key (C2-1)
 // 4. is refused if its route doesn't name its caller (access.ts, BR-04): a
 //    signed-in person is found by their session cookie (B2-4b), and on a
 //    route naming roles, their membership in the organisation the request
-//    names (B4-2a)
+//    names (B4-2a); an agent by its key (C2-1)
 // 5. a signed-in person's request is counted against their own rate limit
 //    too (B2-5c); a refusal is noted as a security event with the person
 // 6. a write is refused without a well-formed Idempotency-Key header
@@ -34,14 +35,14 @@ import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
 import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 
-import { type FindMembership, registerAccess } from './access.ts';
+import { type CheckAgentKey, type FindMembership, registerAccess } from './access.ts';
 import { answerClientError } from './client-errors.ts';
 import { BODY_LIMIT_BYTES, NOT_FOUND_CHECKS, registerContract } from './contract.ts';
 import { CORRELATION_HEADER, correlationIdFrom } from './correlation.ts';
 import { responseFor, sendErrorBody } from './errors.ts';
 import { frameworkLogger } from './framework-logger.ts';
 import { type HealthCheck, registerHealth } from './health.ts';
-import { isForeignWrite } from './origin-check.ts';
+import { isAgentsRequest, isForeignWrite } from './origin-check.ts';
 import { createCounter, createPersonCounter, proxyTrust, RATE_LIMIT_HEADERS, registerRateLimit } from './rate-limit.ts';
 import { logAborted, logCompleted, REQUEST_FAILED, RequestLog } from './request-log.ts';
 import { SECURITY_HEADERS } from './security-headers.ts';
@@ -52,6 +53,7 @@ import { registerInvitations } from './invitations.ts';
 import type { AgentChanges } from './agent-changes.ts';
 import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
+import { registerAgentSelf } from './agent-self.ts';
 import { registerAgents } from './agents.ts';
 import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
@@ -72,6 +74,8 @@ export interface ServerOptions {
   readonly findMembership?: FindMembership | undefined;
   /** Reads until when a person, a second factor of theirs removed, has no admin's or approver's powers (access.ts); without it, no one has them. */
   readonly restrictedUntil?: RemovalRestriction | undefined;
+  /** Checks an agent's key (access.ts); without it, no agent is let in. */
+  readonly checkAgentKey?: CheckAgentKey | undefined;
   /** Reads an organisation's members (members.ts); without it, no one reaches the list, as no one holds a role. */
   readonly listMembers?: ListMembers | undefined;
   /** Inviting members (the identity module's inviting.ts); without it, no one reaches the invitation routes, as no one holds a role. */
@@ -204,7 +208,10 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   // done() only for a request let through, as in access.ts: a refusal the client
   // hangs up on must not go on to the route.
   app.addHook('onRequest', (request, reply, done) => {
-    if (isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)) {
+    if (
+      !isAgentsRequest(request.headers.authorization, request.routeOptions.config.access ?? []) &&
+      isForeignWrite(request.method, request.headers.origin, config.http.publicOrigin)
+    ) {
       void sendErrorBody(reply, 403, 'ORIGIN_REFUSED', request.id);
       return;
     }
@@ -212,12 +219,12 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
-  registerAccess(
-    app,
-    signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
-    options.findMembership,
-    options.restrictedUntil,
-  );
+  registerAccess(app, {
+    findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
+    findMembership: options.findMembership,
+    restrictedUntil: options.restrictedUntil,
+    checkKey: options.checkAgentKey,
+  });
   // After the access hook, which finds the person.
   app.addHook(
     'onRequest',
@@ -243,6 +250,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
+  registerAgentSelf(app);
   registerAgents(app, {
     registrations: options.agentRegistrations,
     changes: options.agentChanges,

@@ -150,8 +150,8 @@ async function withRoutes(
       return { ok: true };
     },
   );
-  app.get('/v1/test-agents', { ...answer, config: { access: ['agent'] } }, () => ({ ok: true }));
-  app.get('/v1/test-shared', { ...answer, config: { access: ['admin', 'agent'] } }, (request) => {
+  app.get('/v1/test-agents', { ...answer, config: { access: ['agent'], agentScopes: [] } }, () => ({ ok: true }));
+  app.get('/v1/test-shared', { ...answer, config: { access: ['admin'] } }, (request) => {
     reached.push({ member: request.member, person: request.person });
     return { ok: true };
   });
@@ -295,7 +295,7 @@ describe('BR-04 a route naming roles answers a member of the organisation the re
     expect(lookup.asked).toEqual([]);
   });
 
-  it('lets an admin through on a route that names agents beside roles, and refuses another role there', async () => {
+  it("lets an admin through on an admin's read, and refuses another role there", async () => {
     const admin = await withRoutes(ACTIVE('admin'));
     const viewer = await withRoutes(ACTIVE('viewer'));
 
