@@ -205,18 +205,16 @@ function signInProblems(
   internalOrigin: string | undefined,
   allowedOrigins: readonly string[],
 ): string[] {
-  const set = [issuer !== undefined, clientId !== undefined, secretSet];
-  if (set.every((one) => !one)) {
+  if (issuer === undefined && clientId === undefined && !secretSet) {
     return internalOrigin === undefined
       ? []
       : ['AGENTX_OIDC_INTERNAL_ORIGIN: set only with AGENTX_OIDC_ISSUER, where it says how to reach it'];
   }
-  if (!set.every(Boolean)) {
+  if (issuer === undefined || clientId === undefined || !secretSet) {
     return [
       'AGENTX_OIDC_ISSUER, AGENTX_OIDC_CLIENT_ID and AGENTX_OIDC_CLIENT_SECRET: set all three, or none (sign-in is off without them)',
     ];
   }
-  if (issuer === undefined) return [];
   const [called, name] =
     internalOrigin === undefined
       ? [issuer, 'AGENTX_OIDC_ISSUER' as const]
@@ -246,23 +244,21 @@ function emailProblems(
   signInSet: boolean,
   allowedOrigins: readonly string[],
 ): string[] {
-  const set = [endpoint !== undefined, sender !== undefined, accessKey !== undefined, directoryToken !== undefined];
-  if (set.every((one) => !one)) return [];
-  if (!set.every(Boolean)) {
+  if (endpoint === undefined && sender === undefined && accessKey === undefined && directoryToken === undefined) {
+    return [];
+  }
+  if (endpoint === undefined || sender === undefined || accessKey === undefined || directoryToken === undefined) {
     return [
       'AGENTX_EMAIL_ENDPOINT, AGENTX_EMAIL_SENDER, AGENTX_EMAIL_ACCESS_KEY and AGENTX_DIRECTORY_TOKEN: set all four, or none (no notice is sent without them)',
     ];
   }
-  if (endpoint === undefined) return [];
   return [
     ...(signInSet
       ? []
       : ['AGENTX_EMAIL_ENDPOINT: set only with sign-in (AGENTX_OIDC_ISSUER), whose login service gives the addresses']),
     ...plainHttpProblems('AGENTX_EMAIL_ENDPOINT', environment, [endpoint]),
-    ...(accessKey !== undefined && BASE64_KEY.test(accessKey)
-      ? []
-      : ['AGENTX_EMAIL_ACCESS_KEY: must be the key as Azure gives it, in base64']),
-    ...(directoryToken !== undefined && VISIBLE_TOKEN.test(directoryToken)
+    ...(BASE64_KEY.test(accessKey) ? [] : ['AGENTX_EMAIL_ACCESS_KEY: must be the key as Azure gives it, in base64']),
+    ...(VISIBLE_TOKEN.test(directoryToken)
       ? []
       : ['AGENTX_DIRECTORY_TOKEN: must be 1 to 4096 visible ASCII characters, as the login service gives it']),
     ...(allowedOrigins.includes(endpoint)

@@ -40,7 +40,11 @@ export const PURPOSES = Object.keys(KEY_PURPOSES) as readonly KeyPurpose[];
 
 export const isKeyPurpose = (name: string): name is KeyPurpose => Object.hasOwn(KEY_PURPOSES, name);
 
-/** A value for every purpose, each made by `make`. */
+/**
+ * A value for every purpose, each made by `make`. Only tests use it (key
+ * material for every purpose); it stays beside the list it walks rather than
+ * making the testing package depend on this one for three lines (S64 sweep).
+ */
 export function byPurpose<T>(make: (purpose: KeyPurpose) => T): Record<KeyPurpose, T> {
   // Built from PURPOSES, so every purpose is there; the compiler can't follow fromEntries.
   return Object.fromEntries(PURPOSES.map((purpose) => [purpose, make(purpose)])) as Record<KeyPurpose, T>;

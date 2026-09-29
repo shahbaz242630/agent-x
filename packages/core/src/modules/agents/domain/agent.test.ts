@@ -22,7 +22,6 @@ import {
   scopesOf,
   ScopesRefused,
   scopesText,
-  scopesWithin,
 } from './agent.ts';
 
 describe('an agent’s name (C1-2)', () => {
@@ -198,12 +197,6 @@ describe('scopes', () => {
     expect(isScope('sources:read')).toBe(true);
     expect(isScope('sources:write')).toBe(false);
     expect(isScope(1)).toBe(false);
-  });
-
-  it('a key’s are within its agent’s only if every one is', () => {
-    expect(scopesWithin(['requests:read'], ['requests:read', 'suppliers:read'])).toBe(true);
-    expect(scopesWithin([], ['requests:read'])).toBe(true);
-    expect(scopesWithin(['requests:read', 'requests:write'], ['requests:read'])).toBe(false);
   });
 });
 

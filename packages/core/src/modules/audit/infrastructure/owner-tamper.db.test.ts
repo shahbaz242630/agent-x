@@ -206,7 +206,13 @@ afterAll(async () => {
 beforeEach(async () => {
   capture = new LogCapture();
   found = [];
-  states = createSignedStates({ keys, trail, logger: loggerFor(capture), onTamper: (finding) => found.push(finding) });
+  states = createSignedStates({
+    keys,
+    trail,
+    logger: loggerFor(capture),
+    onTamper: (finding) => found.push(finding),
+    unrecorded: () => undefined,
+  });
   org = newId();
   owner = await tamperAsOwner(database, AGENTS, org);
   // Every case starts from a schema the guard is happy with, so a leftover can't hide a miss.

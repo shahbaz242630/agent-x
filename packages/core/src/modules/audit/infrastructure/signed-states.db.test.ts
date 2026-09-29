@@ -121,7 +121,13 @@ function loggerFor(destination: LogCapture) {
 let found: TamperFinding[];
 
 const statesWith = (using: AuditTrail): SignedStates =>
-  createSignedStates({ keys, trail: using, logger: loggerFor(capture), onTamper: (finding) => found.push(finding) });
+  createSignedStates({
+    keys,
+    trail: using,
+    logger: loggerFor(capture),
+    onTamper: (finding) => found.push(finding),
+    unrecorded: () => undefined,
+  });
 
 let number = 0;
 /** A new UUID, so no two tests share an organisation or a row. */
