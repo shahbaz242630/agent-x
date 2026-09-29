@@ -34,3 +34,4 @@ export {
   type FakeRailOptions,
   USUAL_CONTROLS,
 } from './infrastructure/fake-rail.ts';
+export { type RailAccount, SANDBOX_ACCOUNTS } from './infrastructure/sandbox-accounts.ts';

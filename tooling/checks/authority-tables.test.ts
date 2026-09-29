@@ -18,6 +18,7 @@ import {
   type AuthorityTableEntry,
 } from '../../packages/core/src/authority-tables.ts';
 import * as agents from '../../packages/core/src/modules/agents/index.ts';
+import * as fundingSources from '../../packages/core/src/modules/funding-sources/index.ts';
 import {
   FACTOR_RESET,
   FACTOR_RESETS,
@@ -98,9 +99,9 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys.
-    const [organizations, invitations, memberships, contacts, resets, agentRows, agentKeys, ...others] =
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), and a funding source (D2-2)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then funding sources.
+    const [organizations, invitations, memberships, contacts, resets, agentRows, agentKeys, sources, ...others] =
       PRODUCT_AUTHORITY_TABLES;
 
     expect(organizations).toBe(ORGANIZATIONS);
@@ -110,6 +111,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(resets).toBe(FACTOR_RESETS);
     expect(agentRows).toBe(agents.AGENTS);
     expect(agentKeys).toBe(agents.AGENT_KEYS);
+    expect(sources).toBe(fundingSources.SOURCES);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -155,6 +157,12 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: agents.AGENT_KEYS.fields,
         status: agents.AGENT_KEY,
       },
+      {
+        table: fundingSources.SOURCES.table,
+        subject: fundingSources.SOURCES.subject,
+        fields: fundingSources.SOURCES.fields,
+        status: fundingSources.FUNDING_SOURCE,
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -170,6 +178,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[5]?.status).toBe(agents.AGENT);
     expect(AUTHORITY_TABLES[6]?.fields).toBe(agents.AGENT_KEYS.fields);
     expect(AUTHORITY_TABLES[6]?.status).toBe(agents.AGENT_KEY);
+    expect(AUTHORITY_TABLES[7]?.fields).toBe(fundingSources.SOURCES.fields);
+    expect(AUTHORITY_TABLES[7]?.status).toBe(fundingSources.FUNDING_SOURCE);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {
