@@ -8,7 +8,13 @@ import { describe, expect, it } from 'vitest';
 
 import { AccountNumberLeak } from '../domain/account-numbers.ts';
 import { type FundingSourceState, type LinkOutcome, RailUnavailable, type SourceLookup } from '../domain/rail.ts';
-import { createFakeRail, type FakeRailOptions, USUAL_CONTROLS } from './fake-rail.ts';
+import {
+  createFakeRail,
+  type FakeBankRefusal,
+  FakeBankRefused,
+  type FakeRailOptions,
+  USUAL_CONTROLS,
+} from './fake-rail.ts';
 import { type RailAccount, SANDBOX_ACCOUNTS } from './sandbox-accounts.ts';
 
 const ORG = '00000000-0000-7000-8000-00000000aaaa';
@@ -161,6 +167,46 @@ describe('confirming a link, server to server (D1-1)', () => {
     const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
     await expect(bank.approve(ORG, session.sessionRef, 'someone-else-acct-01')).rejects.toThrow('no such account');
     await expect(bank.approve(ORG, 'fake-link-unknown', ACCOUNT)).rejects.toThrow('No link waiting');
+  });
+});
+
+describe('the bank’s steps, as the staging demo asks them (D2-3c)', () => {
+  const refusal = async (step: Promise<unknown>): Promise<FakeBankRefusal> => {
+    const error: unknown = await step.then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    if (!(error instanceof FakeBankRefused)) throw new Error('the step was not refused by the bank');
+    return error.reason;
+  };
+
+  it('lists the accounts the bank offers, with the safe summary alone', () => {
+    const { bank } = setUp();
+    const accounts = bank.accounts();
+    expect(accounts.map((account) => account.accountId)).toEqual(SANDBOX_ACCOUNTS.map((each) => each.AccountId));
+    expect(accounts[0]).toEqual({
+      accountId: ACCOUNT,
+      summary: { holderName: 'Jasmine AI FZ-LLC', accountType: 'sme', currency: 'AED', hint: 'AE…6026' },
+    });
+    expect(findLeaks(text(accounts), IBANS)).toEqual([]);
+  });
+
+  it('says why it refused, and checks the account before the session', async () => {
+    const { rail, bank } = setUp();
+    const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
+    expect(await refusal(bank.approve(ORG, 'fake-link-unknown', 'someone-else-acct-01'))).toBe('no_such_account');
+    expect(await refusal(bank.approve(ORG, 'fake-link-unknown', ACCOUNT))).toBe('no_link_waiting');
+    expect(await refusal(bank.reject(ORG, 'fake-link-unknown'))).toBe('no_link_waiting');
+    await bank.reject(ORG, session.sessionRef);
+    expect(await refusal(bank.reject(ORG, session.sessionRef))).toBe('no_link_waiting');
+  });
+
+  it('finds no session of another organisation’s, to approve or turn down (SEC-PTR-08)', async () => {
+    const { rail, bank } = setUp();
+    const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
+    expect(await refusal(bank.approve(OTHER_ORG, session.sessionRef, ACCOUNT))).toBe('no_link_waiting');
+    expect(await refusal(bank.reject(OTHER_ORG, session.sessionRef))).toBe('no_link_waiting');
+    expect(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK })).toEqual({ kind: 'waiting' });
   });
 });
 

@@ -379,6 +379,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   // An agent's key, checked before its request goes on (C2-1).
   const keyCheck = createAgentKeyCheck({ database, keys, ids: uuidV7Ids, clock: systemClock, logger });
+  // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
+  const rail = railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids });
   const server = await buildServer({
     config,
     logger,
@@ -469,11 +471,12 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       keys,
       ids: uuidV7Ids,
       clock: systemClock,
-      // ADR-014 §4: the fake, over its own records in this database, where the config says so; otherwise none.
-      rail: railFor(config.partner, { database, clock: systemClock, ids: uuidV7Ids }),
+      rail,
       partner: partnerName(config.partner),
       logger,
     }),
+    // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
+    fakeBank: rail?.bank,
   });
   try {
     await server.listen({ host: config.http.host, port: config.http.port });

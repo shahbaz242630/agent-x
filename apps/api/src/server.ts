@@ -31,6 +31,7 @@ import type {
   ResetChanges,
   SignIn,
 } from '@agentx/core/modules/identity';
+import type { FakeBank } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
 import type { Logger } from '@agentx/platform/observability';
@@ -64,6 +65,7 @@ import type { AgentRegistrations } from './agent-registering.ts';
 import { registerAgentSelf } from './agent-self.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceLinks } from './funding-source-links.ts';
+import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import { registerFactorResets } from './factor-resets.ts';
 import { type ListContacts, registerRegisteredContacts } from './registered-contacts.ts';
@@ -116,6 +118,8 @@ export interface ServerOptions {
   readonly agentKeyChanges?: AgentKeyChanges | undefined;
   /** Linking the organisation's bank account (funding-source-links.ts); without it, no one reaches those routes. */
   readonly fundingSourceLinks?: FundingSourceLinks | undefined;
+  /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
+  readonly fakeBank?: FakeBank | undefined;
 }
 
 /** How long a client may take to send a whole request (Fastify's advice where no proxy guards the server). */
@@ -277,6 +281,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     keyChanges: options.agentKeyChanges,
   });
   registerFundingSources(app, { links: options.fundingSourceLinks });
+  registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,
     acceptance: options.invitationAcceptance,

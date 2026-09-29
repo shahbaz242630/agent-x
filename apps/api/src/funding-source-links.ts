@@ -53,6 +53,7 @@ import {
   createDatabaseRecords,
   createFakeRail,
   type FakePartnerTables,
+  type FakeRail,
   type FinancialRailAdapter,
   type LinkOutcome,
   RailUnavailable,
@@ -125,7 +126,8 @@ const DAY_MS = 86_400_000;
 
 /**
  * The partner the config names (ADR-014 §4): the fake, over its own records in
- * the app's database, or none, when every link answers PARTNER_UNAVAILABLE.
+ * the app's database, its bank for the staging demo's steps (fake-bank.ts), or
+ * none, when every link answers PARTNER_UNAVAILABLE.
  */
 export function railFor(
   partner: { readonly mode: 'fake' } | undefined,
@@ -134,7 +136,7 @@ export function railFor(
     clock,
     ids,
   }: { readonly database: Database<FakePartnerTables>; readonly clock: Clock; readonly ids: IdGenerator },
-): FinancialRailAdapter | undefined {
+): FakeRail | undefined {
   return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
 }
 

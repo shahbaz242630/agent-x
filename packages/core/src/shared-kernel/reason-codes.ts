@@ -26,6 +26,10 @@ export const REASON_CODES = {
   ALREADY_A_MEMBER:
     "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
   BAD_REQUEST: "The request is malformed, so it can't be read.",
+  BANK_ACCOUNT_UNKNOWN:
+    "The staging bank holds no account by this ID, so nothing was approved. List the bank's accounts and pick one of them.",
+  BANK_LINK_NOT_WAITING:
+    "No link of this organisation's is waiting at the staging bank under this session: it was approved or turned down already, or it ran out. Nothing was changed. Start a new link if one is still needed.",
   CONTACTS_FULL:
     'The organisation already has as many registered contacts as it may, so no other can be added. Remove one first.',
   CONTACT_ADDS_SPENT:

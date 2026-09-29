@@ -115,6 +115,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/auth/sign-in',
       'GET /v1/auth/step-up',
       'GET /v1/factor-resets',
+      'GET /v1/fake-bank/accounts',
       'GET /v1/integrity-hold',
       'GET /v1/members',
       'GET /v1/registered-contacts',
@@ -128,6 +129,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/auth/sign-in',
       'HEAD /v1/auth/step-up',
       'HEAD /v1/factor-resets',
+      'HEAD /v1/fake-bank/accounts',
       'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
       'HEAD /v1/registered-contacts',
@@ -145,6 +147,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/factor-resets/confirm',
       'POST /v1/factor-resets/{id}/cancel',
       'POST /v1/factor-resets/{id}/confirm',
+      'POST /v1/fake-bank/sessions/{sessionRef}/approve',
+      'POST /v1/fake-bank/sessions/{sessionRef}/reject',
       'POST /v1/funding-sources/link-sessions',
       'POST /v1/funding-sources/link-sessions/{linkId}/confirm',
       'POST /v1/integrity-hold/clear',
@@ -1133,8 +1137,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     );
     // The test's route, /health, the five sign-in routes, the members list, the six invitation routes, the four
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
-    // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), with each GET's HEAD.
-    expect(answers.length).toBe(58);
+    // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c), with each GET's HEAD.
+    expect(answers.length).toBe(62);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1155,6 +1159,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'FactorResetConfirmed',
       'FactorResetDrafted',
       'FactorResets',
+      'FakeBankAccount',
       'FundingSource',
       'FundingSourceLink',
       'HoldClearingAsked',
