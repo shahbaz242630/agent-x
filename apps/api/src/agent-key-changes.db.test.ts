@@ -8,10 +8,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import {
   addAgent,
   addAgentKey,
+  agentOf,
   AGENTS,
   agentKeyText,
   type AgentsTables,
   createAgentKeyCheck,
+  handAgentOver,
   keySecretMessage,
   MOST_KEYS_ISSUED_A_DAY,
   parseAgentKey,
@@ -477,6 +479,28 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     // The owner still may.
     expect(await rotated(owner, key)).toMatchObject({ outcome: 'rotated' });
     expect(await revoked(other, key)).toMatchObject({ outcome: 'revoked' });
+  });
+
+  it('lets the member an agent was handed to rotate its key, and no longer the member who had it (the S68 audit)', async () => {
+    const org = await organization();
+    const leaving = await member(org, 'developer');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, leaving);
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const read = await agentOf(tx, states, { orgId: org, id: key.agentId }, 'change');
+      if (read.outcome !== 'found') throw new Error('the agent was not found');
+      await handAgentOver(tx, states, {
+        orgId: org,
+        agent: read.agent,
+        state: read.state,
+        owner: next.membershipId,
+        actor: OPERATOR,
+        details: {},
+      });
+    });
+
+    expect(await rotate(leaving, key)).toEqual(refusal(403, 'FORBIDDEN'));
+    expect(await rotated(next, key)).toMatchObject({ outcome: 'rotated' });
   });
 
   it('lets an admin rotate the key of an agent a developer owns, with a passkey (the S68 audit)', async () => {

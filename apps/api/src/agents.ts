@@ -19,6 +19,13 @@
 //   step-up's ID (C1-3): an admin gives a suspended agent its authority back,
 //   signing in again with a passkey: 202 with the step-up, then 200 with the
 //   agent, ACTIVE. 409 AGENT_NOT_SUSPENDED for one that isn't suspended.
+// - `POST /v1/agents/:id/owner` with the new owner's membership, then
+//   `…/owner/confirm` with it and the step-up's ID (the S68 audit's question
+//   A): an admin hands the agent to another member, signing in again with a
+//   passkey: 202 with the step-up, then 200 with the agent, its status,
+//   scopes and keys as they were. 409 AGENT_OWNER_NOT_ELIGIBLE unless the
+//   member is an active admin or developer of the organisation,
+//   AGENT_OWNER_UNCHANGED for the agent's owner already.
 // - `POST /v1/agents/:id/keys/:keyId/rotate`, then `…/rotate/confirm` with the
 //   step-up's ID (C1-4b): a new key, shown this once, and the old one kept
 //   working for the overlap (24 hours): 202 with the step-up, then 201 with
@@ -50,6 +57,9 @@ import type { AgentWithKeys } from './agent-writes.ts';
 import {
   type AgentChanges,
   type AgentChangeWrite,
+  HAND_OVER_CONFIRM_OPERATION,
+  HAND_OVER_OPERATION,
+  HANDING_OVER_ROLES,
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
   REACTIVATING_ROLES,
@@ -183,6 +193,8 @@ const CONFIRM_SCHEMA = {
 const NOTHING_BODY_LIMIT = 64;
 /** The most a reactivation's confirm may be: a step-up's ID, with room to spare. */
 const CHALLENGE_BODY_LIMIT = 128;
+/** The most a handover's ask or confirm may be: a membership's ID and a step-up's, with room to spare. */
+const HAND_OVER_BODY_LIMIT = 256;
 
 const AGENT_ID = z.object({ id: z.uuid().describe('The agent, by its ID.') });
 
@@ -225,6 +237,40 @@ const REACTIVATE_CONFIRM_SCHEMA = {
   body: z
     .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
     .describe('The step-up signed in again for.'),
+  response: { 200: AGENT_CHANGED },
+};
+
+const NEW_OWNER = z
+  .uuid()
+  .describe('The membership of the member taking the agent over: an active admin or developer.');
+
+const HAND_OVER_ASKED = z
+  .object({
+    stepUpChallengeId: z
+      .uuid()
+      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'AgentHandOverAsked',
+    description: 'Handing an agent to another owner, waiting for the admin to sign in again.',
+  });
+
+const HAND_OVER_SCHEMA = {
+  summary: 'Ask to hand an agent to another owner',
+  params: AGENT_ID,
+  body: z.strictObject({ owner: NEW_OWNER }).describe('The member taking the agent over.'),
+  response: { 202: HAND_OVER_ASKED },
+};
+
+const HAND_OVER_CONFIRM_SCHEMA = {
+  summary: 'Hand the agent over, once signed in again for it',
+  params: AGENT_ID,
+  body: z
+    .strictObject({
+      owner: NEW_OWNER,
+      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+    })
+    .describe('The same member as asked, and the step-up signed in again for.'),
   response: { 200: AGENT_CHANGED },
 };
 
@@ -486,6 +532,48 @@ export function registerAgents(
       return answerChange(written, request, reply);
     },
   );
+
+  routes.post(
+    '/v1/agents/:id/owner',
+    {
+      schema: HAND_OVER_SCHEMA,
+      bodyLimit: HAND_OVER_BODY_LIMIT,
+      config: { access: [...HANDING_OVER_ROLES], operation: HAND_OVER_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await changesOf().handOver(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.owner,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/agents/:id/owner/confirm',
+    {
+      schema: HAND_OVER_CONFIRM_SCHEMA,
+      bodyLimit: HAND_OVER_BODY_LIMIT,
+      config: { access: [...HANDING_OVER_ROLES], operation: HAND_OVER_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await changesOf().handOverConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.owner,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
   /** Answers a key change: the agent as it now stands (with the new key, once), a step-up asked, or a refusal. */
   const answerKeyChange = (written: AgentKeyChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
     if (written.outcome === 'rotated') {

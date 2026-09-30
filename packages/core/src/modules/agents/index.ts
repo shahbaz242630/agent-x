@@ -45,6 +45,7 @@ export {
   agentsPage,
   agentsShown,
   type AgentsTransaction,
+  handAgentOver,
   MOST_AGENTS_A_PAGE,
   oneAgentAddAtATime,
 } from './infrastructure/agents.ts';
