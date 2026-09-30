@@ -41,7 +41,7 @@ import {
   updateFromPartner,
 } from '@agentx/core/modules/funding-sources';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import type { FinancialRailAdapter, SourceLookup } from '@agentx/core/modules/providers';
+import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -180,10 +180,12 @@ export function createFundingSourceChanges({
         );
         if (asking === 'unavailable') return PARTNER_UNAVAILABLE;
         // An answer about another source or organisation is the partner's fault: believed in nothing, and told.
+        // So is one whose limits are in another currency than the account's (the S68 audit).
         if (
           asking.kind === 'found' &&
           (asking.source.externalRef !== source.externalRef ||
-            asking.source.organizationId.toLowerCase() !== member.orgId.toLowerCase())
+            asking.source.organizationId.toLowerCase() !== member.orgId.toLowerCase() ||
+            !limitsInAccountCurrency(asking.source))
         ) {
           logger
             .child({ correlationId, orgId: member.orgId })

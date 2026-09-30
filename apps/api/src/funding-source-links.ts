@@ -60,6 +60,7 @@ import {
   isPartnerPage,
   type FakeRail,
   type FinancialRailAdapter,
+  limitsInAccountCurrency,
   type LinkOutcome,
 } from '@agentx/core/modules/providers';
 import { createHash } from 'node:crypto';
@@ -251,6 +252,12 @@ export function createFundingSourceLinks({
     if (outcome.kind === 'waiting') throw new StillWaiting();
     if (outcome.kind === 'refused') {
       await settleLink(tx, key, { outcome: outcome.reason }, now);
+      return 200;
+    }
+    // Limits in another currency than the account's (the S68 audit): kept, they'd show agents the wrong one.
+    if (!limitsInAccountCurrency(outcome.source)) {
+      logger.error('funding_sources.currency_mismatch', { linkId: link.id });
+      await settleLink(tx, key, { outcome: 'rejected' }, now);
       return 200;
     }
     // Gone at the partner before Agent X confirmed it: never added, and linking again makes a new one.

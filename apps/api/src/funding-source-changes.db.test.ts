@@ -21,6 +21,7 @@ import {
   type FakePartnerTables,
   type FakeRail,
   type FinancialRailAdapter,
+  USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -287,6 +288,31 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toEqual([
       expect.objectContaining({ level: 'error', orgId: org, correlationId: CORRELATION, sourceId: source.id }),
     ]);
+  });
+
+  it('believes nothing of an answer whose limits are in another currency than the account’s (the S68 audit)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { source } = await linked(admin);
+    // The bank renews the consent with limits in dollars on the dirham account.
+    await rail.bank.renew(org, source.externalRef, { ...USUAL_CONTROLS, currency: 'USD' });
+    const capture = new LogCapture();
+    const changes = createFundingSourceChanges({
+      database: app,
+      keys,
+      ids,
+      rail,
+      challenges: createStepUpChallenges({ ids, clock }),
+      logger: loggerFor(capture),
+    });
+
+    expect(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect(await events(org, source.id)).toHaveLength(1);
+    expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toHaveLength(1);
   });
 
   it('answers a retry of the same write as the first did', async () => {

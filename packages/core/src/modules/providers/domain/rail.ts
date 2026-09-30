@@ -225,3 +225,13 @@ export function isPartnerPage(url: string, origin: string): boolean {
   const page = new URL(url);
   return page.protocol === 'https:' && page.origin === origin && page.username === '' && page.password === '';
 }
+
+/**
+ * Whether the bank's limits are in the account's own currency (the S68
+ * audit): Agent X keeps one currency for a source, the limits', and shows it
+ * to agents as the source's; an answer whose limits are in another currency
+ * than the account's is one Agent X can't keep truthfully, so it is refused,
+ * never stored.
+ */
+export const limitsInAccountCurrency = (source: Pick<FundingSourceState, 'controls' | 'summary'>): boolean =>
+  source.controls.currency === source.summary.currency;
