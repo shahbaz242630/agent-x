@@ -44,6 +44,7 @@ describe('withoutAccountNumbers (D1-1)', () => {
     ['dashes', '-'],
     ['dots', '.'],
     ['slashes', '/'],
+    ['backslashes', '\\'],
     ['underscores', '_'],
     ['tabs', '\t'],
     ['non-breaking spaces', '\u00a0'],

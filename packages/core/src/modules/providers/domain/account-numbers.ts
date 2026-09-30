@@ -22,8 +22,8 @@ const RUN = 8;
  */
 const IBAN = /(?=([A-Z]{2}\d{2}(?: ?[A-Z\d]){11,30}))/g;
 const UAE_IBAN_LENGTH = 23;
-/** What may stand between an account number's groups: any space, an invisible joiner, a dash, a dot, a slash, an underscore. */
-const SEPARATORS = /[\s\p{Z}\p{Cf}\p{Pd}._/\\]+/gu;
+/** What may stand between an account number's groups: any space (`\s` is every Unicode one), an invisible joiner, a dash, a dot, a slash either way, an underscore. */
+const SEPARATORS = /[\s\p{Cf}\p{Pd}._/\\]+/gu;
 
 /** The text as the checks read it: compatibility forms folded, upper case, each run of separators one space. */
 const readable = (text: string): string => text.normalize('NFKC').toUpperCase().replaceAll(SEPARATORS, ' ');
