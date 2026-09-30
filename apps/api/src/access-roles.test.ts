@@ -68,7 +68,7 @@ interface Lookup {
  */
 async function withRoutes(
   check: MembershipCheck | Error | undefined,
-  options: { signIn?: boolean; restricted?: Date | Error | null } = {},
+  options: { signIn?: boolean; restricted?: Date | Error | null; perUser?: number } = {},
 ) {
   const lookup: Lookup = { asked: [], restrictionAsked: [] };
   const { restricted } = options;
@@ -94,7 +94,7 @@ async function withRoutes(
       publicOrigin: PUBLIC_ORIGIN,
       trustedProxies: [],
       rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
+      rateLimitPerUserPerMinute: options.perUser ?? 1000,
       rateLimitPerAgentPerMinute: 1000,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
@@ -178,6 +178,61 @@ const ACTIVE = (role: 'admin' | 'approver' | 'developer' | 'viewer'): Membership
   outcome: 'active',
   id: MEMBERSHIP,
   role,
+});
+
+describe('the S68 audit: a person refused once known still counts against their own limit', () => {
+  it.each<[string, MembershipCheck, Partial<InjectOptions> & { org?: string | null }, number, string]>([
+    ['a role the route doesn’t name', ACTIVE('viewer'), { url: '/v1/test-approvals' }, 403, 'FORBIDDEN'],
+    ['an agents’ route', ACTIVE('admin'), { url: '/v1/test-agents' }, 403, 'FORBIDDEN'],
+    [
+      'an organisation header that isn’t one',
+      ACTIVE('admin'),
+      { org: 'not-an-organisation' },
+      400,
+      'ORGANIZATION_INVALID',
+    ],
+    ['no membership there', { outcome: 'none' }, {}, 403, 'FORBIDDEN'],
+    [
+      'an app code where a passkey is needed',
+      ACTIVE('admin'),
+      { url: '/v1/test-shared', headers: { cookie: `${SESSION_COOKIE}=${APP_COOKIE}` } },
+      403,
+      'PASSKEY_REQUIRED',
+    ],
+  ])('counts %s, then answers RATE_LIMITED past the limit', async (_what, check, request, status, code) => {
+    const { app, reached } = await withRoutes(check, { perUser: 3 });
+
+    for (let each = 0; each < 3; each += 1) {
+      const refused = await app.inject(signedIn(request));
+      expect([refused.statusCode, refused.json<{ error: { code: string } }>().error.code]).toEqual([status, code]);
+    }
+    const over = await app.inject(signedIn(request));
+
+    expect(over.statusCode).toBe(429);
+    expect(over.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
+    expect(reached).toEqual([]);
+  });
+
+  it('counts a person refused for a factor removed in the last 7 days too', async () => {
+    const { app } = await withRoutes(ACTIVE('admin'), { perUser: 2, restricted: new Date('2099-01-01T00:00:00Z') });
+
+    const answers = [];
+    for (let each = 0; each < 3; each += 1)
+      answers.push((await app.inject(signedIn({ url: '/v1/test-shared' }))).statusCode);
+
+    expect(answers).toEqual([403, 403, 429]);
+  });
+
+  it('shares one count between refused and allowed requests: two refused, then one allowed, is the limit', async () => {
+    const { app } = await withRoutes(ACTIVE('viewer'), { perUser: 3 });
+
+    const answers = [];
+    for (const url of ['/v1/test-approvals', '/v1/test-approvals', '/v1/test-reads', '/v1/test-reads']) {
+      answers.push((await app.inject(signedIn({ url }))).statusCode);
+    }
+
+    expect(answers).toEqual([403, 403, 200, 429]);
+  });
 });
 
 describe('BR-04 a route naming roles answers a member of the organisation the request names, in one of them', () => {

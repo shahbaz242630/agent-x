@@ -241,27 +241,25 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   });
 
   const signIn = options.signIn?.service;
+  const personCounter = createPersonCounter(app, config.http.rateLimitPerUserPerMinute, trust, (ip, userId) => {
+    securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
+  });
+  // The security events keep people, not agents: the refused request's line names the agent (request-log.ts).
+  const agentCounter = createAgentCounter(app, config.http.rateLimitPerAgentPerMinute, trust, (ip) => {
+    securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip });
+  });
   registerAccess(app, {
     findSession: signIn === undefined ? undefined : (cookie) => signIn.signedIn(cookie),
     findMembership: options.findMembership,
     restrictedUntil: options.restrictedUntil,
     checkKey: options.checkAgentKey,
+    // A request refused once its caller is known is counted there; one let through, by the hooks below.
+    counters: { person: personCounter, agent: agentCounter },
   });
   // After the access hook, which finds the person.
-  app.addHook(
-    'onRequest',
-    createPersonCounter(app, config.http.rateLimitPerUserPerMinute, trust, (ip, userId) => {
-      securityEvents.note({ kind: 'rate_limited', reason: 'per_user', ip, userId });
-    }),
-  );
-  // After the access hook too, which finds the agent. The security events keep people, not
-  // agents: the refused request's line names the agent (request-log.ts).
-  app.addHook(
-    'onRequest',
-    createAgentCounter(app, config.http.rateLimitPerAgentPerMinute, trust, (ip) => {
-      securityEvents.note({ kind: 'rate_limited', reason: 'per_agent', ip });
-    }),
-  );
+  app.addHook('onRequest', personCounter);
+  // After the access hook too, which finds the agent.
+  app.addHook('onRequest', agentCounter);
   // After the caller is known and counted, before the body is read.
   registerIdempotencyKeys(app);
 
