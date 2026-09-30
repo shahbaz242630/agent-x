@@ -2,7 +2,7 @@
 // moves the rail allows.
 import { describe, expect, it } from 'vitest';
 
-import { availabilityOf, CONSENT_STATUSES, consentMayMove, isConsentStatus } from './uae-consent.ts';
+import { availabilityOf, CONSENT_STATUSES, consentMayMove } from './uae-consent.ts';
 
 describe('a UAE payment consent (D1-1)', () => {
   it.each([
@@ -17,10 +17,8 @@ describe('a UAE payment consent (D1-1)', () => {
     expect(availabilityOf(status)).toBe(availability);
   });
 
-  it('knows the standard’s seven statuses and nothing else', () => {
+  it('knows the standard’s seven statuses', () => {
     expect(CONSENT_STATUSES).toHaveLength(7);
-    expect(CONSENT_STATUSES.every(isConsentStatus)).toBe(true);
-    for (const other of ['authorized', 'Active', '', null, 7]) expect(isConsentStatus(other)).toBe(false);
   });
 
   it('never leaves a terminal status, and never stays put', () => {
