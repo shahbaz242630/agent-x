@@ -1166,6 +1166,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       without(DNS_RULE),
       changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
       changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow')),
+      changed(DNS_RULE, (rule) => delete inside(rule, 'properties', 'action').actionType),
+      // The rule sits under a policy the network isn't linked to.
+      changed(DNS_RULE, (rule) => (rule.id = String(rule.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
       changed(DNS_RULE, (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = elsewhere)),
       changed(DNS_NAMES, (names) => (properties(names).domains = ['example.com.'])),
     ]) {

@@ -1290,7 +1290,6 @@ const EVERY_NAME = '.';
  * Rule `resource-logs` sends what the policy sees to the workspace.
  */
 const dnsWatch: Check = (snapshot, _expected, add) => {
-  const policies = new Set(ofType(snapshot, TYPES.dnsPolicy).map((policy) => policy.id));
   const everyName = new Set(
     ofType(snapshot, TYPES.dnsDomainList)
       .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
@@ -1307,8 +1306,8 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
   for (const network of ofType(snapshot, TYPES.network)) {
     const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
       .filter((link) => at(link.properties, 'virtualNetwork', 'id') === network.id)
-      .map((link) => link.id.slice(0, link.id.lastIndexOf('/virtualNetworkLinks/')))
-      .filter((policy) => policies.has(policy));
+      // A policy this deployment doesn't create has no rules in the snapshot, so it judges nothing.
+      .map((link) => link.id.slice(0, link.id.lastIndexOf('/virtualNetworkLinks/')));
     const judged = linkedTo.some((policy) => {
       const rules = rulesOf(policy);
       return (
