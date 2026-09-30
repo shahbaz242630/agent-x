@@ -93,6 +93,11 @@ describe('withoutAccountNumbers (D1-1)', () => {
     );
   });
 
+  it('finds an IBAN grouped as an ID is, 8-4-4-4-12, when its letters aren’t an ID’s (hex)', () => {
+    const shaped = `${IBAN.slice(0, 8)}-${IBAN.slice(8, 12)}-${IBAN.slice(12, 16)}-${IBAN.slice(16, 20)}-${IBAN.slice(20)}ZZZZZZZZZ`;
+    expect(leaks({ note: shaped })).toBe(true);
+  });
+
   it('still finds an IBAN beside an ID', () => {
     expect(leaks({ note: `0199a0f0-0000-7000-8000-0000000000aa ${IBAN}` })).toBe(true);
     expect(leaks({ note: `${IBAN.slice(0, 8)}-0000-7000-8000-0000000000aa` }, [IBAN])).toBe(true);
