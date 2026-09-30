@@ -1,25 +1,34 @@
 // Suppliers and their versions (0032). Both are authority tables (ADR-012
-// §2), so a supplier's status, its current and pending version, its
-// cooling-off, its verifier and its payee key, and everything a version says
-// (its supplier and number, its name, which contacts it holds, the
-// independent source, who entered it and when, and its payee reference) must
-// equal the row's latest signed event, and every read goes through the audit
-// module's verifiedState with the descriptions below. Both are on the
-// product's authority-table list (packages/core/src/authority-tables.ts), at
-// the supplier's level in the lock order (ADR-006 §6: 6), the supplier before
-// its versions.
+// §2), so a supplier's status, its current, pending and verified versions,
+// its cooling-off, its verifier and its payee key, and everything a version
+// says (its supplier and number, its name, which contacts it holds and since
+// when its phone is the one it has, the independent source, who entered it
+// and when, and its payee reference) must equal the row's latest signed
+// event, and every read goes through the audit module's verifiedState with
+// the descriptions below. Both are on the product's authority-table list
+// (packages/core/src/authority-tables.ts), at the supplier's level in the
+// lock order (ADR-006 §6: 6), the supplier before its versions.
 //
 // A supplier is added in one transaction, withSignedStates' for its
 // organisation, with its first version: both rows, then the supplier's first
-// signed state, then the version's. The inserts are the only queries on
+// signed state, then the version's. A later version is added the same way,
+// its supplier read for change first. The inserts are the only queries on
 // these tables outside the audit module's steps but for reading a version's
 // encrypted contacts and the rows' IDs and creation times, as for an agent's
 // row (agents.ts says why a plain insert is safe). The seals are MACs, so no
-// name or contact is ever put in an event.
+// name or contact is ever put in an event. A version is made once: 0032's
+// `made_once` refuses any change to one after its first signed state.
 //
-// A version's contacts are encrypted with the organisation, the supplier,
-// the version and the contact's kind as associated data (ADR-011 §2), and
-// opened only from a version the caller read through its signed state.
+// A supplier is VERIFIED only on the version verified, with no change
+// waiting (0032's `verified_rests_on_its_version`; the domain's
+// stillVerified): verifying records the verifier and that version first,
+// unverifying clears them after, and one suspended comes back verified only
+// while it is still verified.
+//
+// A version's contacts are encrypted under one key version with the
+// organisation, the version and the contact's kind as associated data
+// (ADR-011 §2), and opened only from a version the caller read through its
+// signed state.
 import type { SignedStateTable } from '@agentx/platform/db';
 import { KeyError, type KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
@@ -35,6 +44,7 @@ import type {
 } from '../../audit/index.ts';
 import {
   contactsHeld,
+  reactivationOf,
   type SourceKind,
   SOURCE_KINDS,
   SUPPLIER,
@@ -55,13 +65,14 @@ export const SUPPLIERS = {
     { column: 'pending_version_id', type: 'uuid' },
     { column: 'cooling_off_until', type: 'timestamptz' },
     { column: 'verified_by', type: 'uuid' },
+    { column: 'verified_version_id', type: 'uuid' },
     { column: 'payee_key', type: 'text' },
     { column: 'payee_key_version', type: 'integer' },
   ],
   rules: SUPPLIER,
 } as const satisfies SignedStateTable & { readonly rules: typeof SUPPLIER };
 
-/** A supplier version's row, as the signed state reads and records it: made once, never moved. */
+/** A supplier version's row, as the signed state reads and records it: made once, never moved (0032's `made_once`). */
 export const SUPPLIER_VERSIONS = {
   table: 'suppliers.supplier_versions',
   subject: 'supplier_version',
@@ -70,6 +81,7 @@ export const SUPPLIER_VERSIONS = {
     { column: 'version', type: 'integer' },
     { column: 'display_name', type: 'text' },
     { column: 'contacts', type: 'text' },
+    { column: 'phone_since', type: 'timestamptz' },
     { column: 'source_kind', type: 'text' },
     { column: 'source_ref', type: 'text' },
     { column: 'entered_by', type: 'uuid' },
@@ -78,10 +90,16 @@ export const SUPPLIER_VERSIONS = {
     { column: 'beneficiary_ref', type: 'text' },
     { column: 'payee_hint', type: 'text' },
   ],
-} as const satisfies SignedStateTable;
+  madeOnce: true,
+} as const satisfies SignedStateTable & { readonly madeOnce: true };
 
 /** A transaction on the tables suppliers are added and read in, opened by withSignedStates for their organisation. */
 export type SuppliersTransaction = Transaction<SuppliersTables & AuditTables>;
+
+interface SupplierKey {
+  readonly orgId: string;
+  readonly id: string;
+}
 
 /** The kinds of contact a version keeps encrypted, each in a column of its own (`<kind>_ciphertext`). */
 type ContactKind = 'phone' | 'email' | 'licence';
@@ -93,25 +111,28 @@ type ContactKind = 'phone' | 'email' | 'licence';
 const contactAssociatedData = (key: { readonly orgId: string; readonly versionId: string }, kind: ContactKind) =>
   [`suppliers.supplier_versions.${kind}`, key.orgId.toLowerCase(), key.versionId.toLowerCase()] as const;
 
-/** Each contact given, encrypted for its own version and kind, with the key's version. */
+/**
+ * Each contact given, encrypted for its own version and kind, all under one
+ * key version, which the row keeps once: a rotation landing between two of
+ * them would leave one that never opens, so that is refused.
+ */
 function sealContacts(
   keys: KeyProvider,
   key: { readonly orgId: string; readonly versionId: string },
   contacts: SupplierContacts,
 ) {
-  const seal = (kind: ContactKind, value: string | null): Buffer | null =>
-    value === null
-      ? null
-      : keys.encrypt('field-encryption', Buffer.from(value, 'utf8'), contactAssociatedData(key, kind)).ciphertext;
-  const phone = keys.encrypt(
-    'field-encryption',
-    Buffer.from(contacts.phone, 'utf8'),
-    contactAssociatedData(key, 'phone'),
-  );
+  const seal = (kind: ContactKind, value: string) =>
+    keys.encrypt('field-encryption', Buffer.from(value, 'utf8'), contactAssociatedData(key, kind));
+  const phone = seal('phone', contacts.phone);
+  const email = contacts.email === null ? null : seal('email', contacts.email);
+  const licence = contacts.tradeLicence === null ? null : seal('licence', contacts.tradeLicence);
+  if ([email, licence].some((sealed) => sealed !== null && sealed.keyVersion !== phone.keyVersion)) {
+    throw new Error("A version's contacts were sealed under two key versions");
+  }
   return {
     phone_ciphertext: phone.ciphertext,
-    email_ciphertext: seal('email', contacts.email),
-    licence_ciphertext: seal('licence', contacts.tradeLicence),
+    email_ciphertext: email?.ciphertext ?? null,
+    licence_ciphertext: licence?.ciphertext ?? null,
     contacts_key_version: phone.keyVersion,
   };
 }
@@ -136,13 +157,18 @@ export interface NewVersion {
 }
 
 /** The version's row, checked: its sealed fields, its encrypted contacts, and the facts its event names. */
-function versionRow(keys: KeyProvider, { orgId, id, supplierId, version, supplier, enteredBy, enteredAt }: NewVersion) {
+function versionRow(
+  keys: KeyProvider,
+  { orgId, id, supplierId, version, supplier, enteredBy, enteredAt }: NewVersion,
+  phoneSince: Date,
+) {
   const kept = supplierDetails(supplier);
   const fields = {
     supplier_id: supplierId,
     version,
     display_name: kept.displayName,
     contacts: contactsHeld(kept.contacts),
+    phone_since: phoneSince,
     source_kind: kept.source.kind,
     source_ref: kept.source.ref,
     entered_by: enteredBy,
@@ -158,13 +184,10 @@ function versionRow(keys: KeyProvider, { orgId, id, supplierId, version, supplie
   };
 }
 
+type VersionRow = ReturnType<typeof versionRow>;
+
 /** Adds the version's row, as versionRow made it. Signed by `recordVersion`, in the same transaction. */
-async function insertVersion(
-  tx: SuppliersTransaction,
-  orgId: string,
-  id: string,
-  row: ReturnType<typeof versionRow>,
-): Promise<void> {
+async function insertVersion(tx: SuppliersTransaction, orgId: string, id: string, row: VersionRow): Promise<void> {
   await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') in the same transaction (see the top of this file)
     .insertInto(SUPPLIER_VERSIONS.table)
@@ -176,7 +199,7 @@ const recordVersion = (
   tx: SuppliersTransaction,
   states: SignedStates,
   { orgId, id, actor, details = {} }: NewVersion,
-  row: ReturnType<typeof versionRow>,
+  row: VersionRow,
 ): Promise<RecordedState> =>
   states.record(tx, SUPPLIER_VERSIONS, { orgId, id }, 'new', row.fields, {
     actor,
@@ -188,16 +211,23 @@ const recordVersion = (
  * Makes a later version of a supplier's details (E2, E3), in the caller's
  * transaction, which must be withSignedStates' for its organisation and read
  * the supplier with `change` first (the lock order: the supplier, then its
- * versions). Pointing the supplier at it is the caller's. Details it can't
- * have are `SupplierDetailsRefused`, before any SQL runs.
+ * versions). `follows` is the version it follows, as the caller read it:
+ * while the phone stays the same its `phone_since` is carried over, and from
+ * a new phone it is the new version's own time, so the call-back's
+ * "unchanged for 30 days" (E3) reads one field. Pointing the supplier at it
+ * is the caller's. Details it can't have are `SupplierDetailsRefused`,
+ * before any SQL runs.
  */
 export async function addVersion(
   tx: SuppliersTransaction,
   states: SignedStates,
   keys: KeyProvider,
-  version: NewVersion,
+  version: NewVersion & { readonly follows: VersionRecord },
 ): Promise<RecordedState> {
-  const row = versionRow(keys, version);
+  // Checked before any SQL runs, as the row is made below.
+  const { phone } = supplierDetails(version.supplier).contacts;
+  const before = await contactsOf(tx, keys, version.orgId, version.follows);
+  const row = versionRow(keys, version, before.phone === phone ? version.follows.phoneSince : version.enteredAt);
   await insertVersion(tx, version.orgId, version.id, row);
   return recordVersion(tx, states, version, row);
 }
@@ -242,13 +272,15 @@ export async function addSupplier(
     actor,
     details,
   };
-  const row = versionRow(keys, first);
+  // Its first phone is the supplier's from when it was entered.
+  const row = versionRow(keys, first, createdAt);
   const supplierFields = {
     status: SUPPLIER.initial,
     current_version_id: versionId,
     pending_version_id: null,
     cooling_off_until: null,
     verified_by: null,
+    verified_version_id: null,
     payee_key: null,
     payee_key_version: null,
   };
@@ -276,8 +308,9 @@ export interface SupplierRecord {
   /** A change waiting for its step-up and verification, or null. */
   readonly pendingVersionId: string | null;
   readonly coolingOffUntil: Date | null;
-  /** The verifier's membership, or null. */
+  /** The verifier's membership, and the version they verified, or null. */
   readonly verifiedBy: string | null;
+  readonly verifiedVersionId: string | null;
   /** The payee key (ADR-014 §3) and its key's version, or null; the version is null for a partner's own identity. */
   readonly payeeKey: string | null;
   readonly payeeKeyVersion: number | null;
@@ -295,36 +328,37 @@ const oneOf = <const Word extends string>(words: readonly Word[], value: string 
 
 const WHOLE = /^[1-9][0-9]{0,9}$/;
 
-/** A field as it is kept: text, or null; undefined for one the fields don't hold at all. */
-const fieldOf = (fields: ReadonlyMap<string, string | null>, column: string): string | null | undefined =>
-  fields.get(column);
+/** A field's value as text or null, or undefined for one the fields don't hold at all. */
+type Field = string | null | undefined;
 
-const timeOf = (value: string | null | undefined): Date | null | undefined => {
+const timeOf = (value: Field): Date | null | undefined => {
   if (value === null || value === undefined) return value;
   const time = new Date(value);
   return Number.isNaN(time.getTime()) ? undefined : time;
 };
 
-const wholeOf = (value: string | null | undefined): number | null | undefined => {
+const wholeOf = (value: Field): number | null | undefined => {
   if (value === null || value === undefined) return value;
   return WHOLE.test(value) ? Number(value) : undefined;
 };
 
 /** The supplier's record from its verified fields, or undefined when one isn't of its kind. */
 function supplierRecordOf(id: string, fields: ReadonlyMap<string, string | null>): SupplierRecord | undefined {
-  const status = oneOf(SUPPLIER.states, fieldOf(fields, 'status'));
-  const currentVersionId = fieldOf(fields, 'current_version_id');
-  const pendingVersionId = fieldOf(fields, 'pending_version_id');
-  const coolingOffUntil = timeOf(fieldOf(fields, 'cooling_off_until'));
-  const verifiedBy = fieldOf(fields, 'verified_by');
-  const payeeKey = fieldOf(fields, 'payee_key');
-  const payeeKeyVersion = wholeOf(fieldOf(fields, 'payee_key_version'));
+  const status = oneOf(SUPPLIER.states, fields.get('status'));
+  const currentVersionId = fields.get('current_version_id');
+  const pendingVersionId = fields.get('pending_version_id');
+  const coolingOffUntil = timeOf(fields.get('cooling_off_until'));
+  const verifiedBy = fields.get('verified_by');
+  const verifiedVersionId = fields.get('verified_version_id');
+  const payeeKey = fields.get('payee_key');
+  const payeeKeyVersion = wholeOf(fields.get('payee_key_version'));
   if (
     status === undefined ||
     typeof currentVersionId !== 'string' ||
     pendingVersionId === undefined ||
     coolingOffUntil === undefined ||
     verifiedBy === undefined ||
+    verifiedVersionId === undefined ||
     payeeKey === undefined ||
     payeeKeyVersion === undefined
   ) {
@@ -337,6 +371,7 @@ function supplierRecordOf(id: string, fields: ReadonlyMap<string, string | null>
     pendingVersionId,
     coolingOffUntil,
     verifiedBy,
+    verifiedVersionId,
     payeeKey,
     payeeKeyVersion,
   };
@@ -352,7 +387,7 @@ function supplierRecordOf(id: string, fields: ReadonlyMap<string, string | null>
 export async function supplierOf(
   tx: SuppliersTransaction,
   states: SignedStates,
-  key: { readonly orgId: string; readonly id: string },
+  key: SupplierKey,
   lock: 'share' | 'change',
 ): Promise<SupplierCheck> {
   const state = await states.verifiedState(tx, SUPPLIERS, key, lock);
@@ -363,6 +398,122 @@ export async function supplierOf(
   return { outcome: 'found', supplier, state };
 }
 
+/** Who moves a supplier, and the facts their events name. */
+interface SupplierChange {
+  readonly actor: AuditActor;
+  readonly details?: AuditDetails;
+}
+
+/** The supplier read again for change, in this transaction, after a step moved it: it is there, or something past the app is at work. */
+async function againForChange(tx: SuppliersTransaction, states: SignedStates, key: SupplierKey) {
+  const read = await supplierOf(tx, states, key, 'change');
+  if (read.outcome !== 'found') throw new Error(`A supplier moved in this transaction is gone: ${key.id}`);
+  return read;
+}
+
+/** Moves the supplier by `event`, which its machine must allow from where it stands; the caller decided it may. */
+async function move(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  event: 'verify' | 'unverify' | 'reactivate' | 'reactivate_verified',
+  { actor, details = {} }: SupplierChange,
+): Promise<void> {
+  const moved = await states.changeStatus(tx, SUPPLIERS, key, event, {
+    actor,
+    action: `supplier.${event}`,
+    details,
+  });
+  if (moved.outcome !== 'changed') throw new RangeError(`A supplier can't ${event} from where it stands: ${key.id}`);
+}
+
+/**
+ * Verifies the supplier (E3), in the caller's transaction, which read it with
+ * `change` (`found`): first the verifier and the version they verified (its
+ * current one), then UNVERIFIED > VERIFIED. One with a change waiting, or
+ * not UNVERIFIED, is refused (RangeError) before any SQL runs. Gives the
+ * supplier as it now stands.
+ */
+export async function verifySupplier(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
+  { verifiedBy, ...change }: SupplierChange & { readonly verifiedBy: string },
+): Promise<SupplierRecord> {
+  const { supplier } = found;
+  if (supplier.status !== 'UNVERIFIED' || supplier.pendingVersionId !== null) {
+    throw new RangeError('Only an unverified supplier with no change waiting is verified');
+  }
+  const verified = { verified_by: verifiedBy, verified_version_id: supplier.currentVersionId };
+  await states.record(tx, SUPPLIERS, key, found.state, verified, {
+    actor: change.actor,
+    action: 'supplier.verifier_recorded',
+    details: { ...change.details, verifiedVersionId: supplier.currentVersionId },
+  });
+  await move(tx, states, key, 'verify', change);
+  return (await againForChange(tx, states, key)).supplier;
+}
+
+/**
+ * Takes the supplier back to UNVERIFIED (a change of its details, E3), in the
+ * caller's transaction, which read it with `change` (`found`): the move, then
+ * the verifier and the version they verified cleared, so nothing verified is
+ * left to come back to. Gives the supplier as it now stands.
+ */
+export async function unverifySupplier(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord },
+  change: SupplierChange,
+): Promise<SupplierRecord> {
+  if (found.supplier.status !== 'VERIFIED') throw new RangeError('Only a verified supplier is unverified');
+  await move(tx, states, key, 'unverify', change);
+  return clearVerification(tx, states, key, change);
+}
+
+/** The verifier and the version they verified cleared, recorded; the supplier as it now stands. */
+async function clearVerification(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  { actor, details = {} }: SupplierChange,
+): Promise<SupplierRecord> {
+  const read = await againForChange(tx, states, key);
+  if (read.supplier.verifiedVersionId === null && read.supplier.verifiedBy === null) return read.supplier;
+  await states.record(
+    tx,
+    SUPPLIERS,
+    key,
+    read.state,
+    { verified_by: null, verified_version_id: null },
+    { actor, action: 'supplier.verification_cleared', details },
+  );
+  return { ...read.supplier, verifiedBy: null, verifiedVersionId: null };
+}
+
+/**
+ * Lets a suspended supplier off its brake, in the caller's transaction,
+ * which read it with `change` (`found`): back VERIFIED only while it is still
+ * verified (stillVerified), otherwise UNVERIFIED with anything once verified
+ * cleared. One not SUSPENDED is refused (RangeError) before any SQL runs.
+ * Gives the supplier as it now stands.
+ */
+export async function reactivateSupplier(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord },
+  change: SupplierChange,
+): Promise<SupplierRecord> {
+  if (found.supplier.status !== 'SUSPENDED') throw new RangeError('Only a suspended supplier is reactivated');
+  const event = reactivationOf(found.supplier);
+  await move(tx, states, key, event, change);
+  if (event === 'reactivate_verified') return (await againForChange(tx, states, key)).supplier;
+  return clearVerification(tx, states, key, change);
+}
+
 /** A version of a supplier's details, as its signed state says: never its contacts, which contactsOf opens. */
 export interface VersionRecord {
   readonly id: string;
@@ -371,6 +522,8 @@ export interface VersionRecord {
   readonly displayName: string;
   /** Which contacts it holds: `phone`, then `email` and `licence` when given. */
   readonly contacts: string;
+  /** Since when its phone is the supplier's: carried over from version to version while it is the same. */
+  readonly phoneSince: Date;
   readonly source: { readonly kind: SourceKind; readonly ref: string };
   /** The membership of the member who entered it, and when. */
   readonly enteredBy: string;
@@ -389,22 +542,24 @@ export type VersionCheck =
 
 /** The version's record from its verified fields, or undefined when one isn't of its kind. */
 function versionRecordOf(id: string, fields: ReadonlyMap<string, string | null>): VersionRecord | undefined {
-  const supplierId = fieldOf(fields, 'supplier_id');
-  const version = wholeOf(fieldOf(fields, 'version'));
-  const displayName = fieldOf(fields, 'display_name');
-  const contacts = fieldOf(fields, 'contacts');
-  const sourceKind = oneOf(SOURCE_KINDS, fieldOf(fields, 'source_kind'));
-  const sourceRef = fieldOf(fields, 'source_ref');
-  const enteredBy = fieldOf(fields, 'entered_by');
-  const enteredAt = timeOf(fieldOf(fields, 'entered_at'));
-  const registrationId = fieldOf(fields, 'registration_id');
-  const beneficiaryRef = fieldOf(fields, 'beneficiary_ref');
-  const payeeHint = fieldOf(fields, 'payee_hint');
+  const supplierId = fields.get('supplier_id');
+  const version = wholeOf(fields.get('version'));
+  const displayName = fields.get('display_name');
+  const contacts = fields.get('contacts');
+  const phoneSince = timeOf(fields.get('phone_since'));
+  const sourceKind = oneOf(SOURCE_KINDS, fields.get('source_kind'));
+  const sourceRef = fields.get('source_ref');
+  const enteredBy = fields.get('entered_by');
+  const enteredAt = timeOf(fields.get('entered_at'));
+  const registrationId = fields.get('registration_id');
+  const beneficiaryRef = fields.get('beneficiary_ref');
+  const payeeHint = fields.get('payee_hint');
   if (
     typeof supplierId !== 'string' ||
     typeof version !== 'number' ||
     typeof displayName !== 'string' ||
     typeof contacts !== 'string' ||
+    !(phoneSince instanceof Date) ||
     sourceKind === undefined ||
     typeof sourceRef !== 'string' ||
     typeof enteredBy !== 'string' ||
@@ -421,6 +576,7 @@ function versionRecordOf(id: string, fields: ReadonlyMap<string, string | null>)
     version,
     displayName,
     contacts,
+    phoneSince,
     source: { kind: sourceKind, ref: sourceRef },
     enteredBy,
     enteredAt,
@@ -441,7 +597,7 @@ function versionRecordOf(id: string, fields: ReadonlyMap<string, string | null>)
 export async function versionOf(
   tx: SuppliersTransaction,
   states: SignedStates,
-  key: { readonly orgId: string; readonly id: string },
+  key: SupplierKey,
   supplierId: string,
 ): Promise<VersionCheck> {
   const state = await states.verifiedState(tx, SUPPLIER_VERSIONS, key, 'share');

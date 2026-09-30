@@ -128,6 +128,7 @@ async function checkSchema<Schema>({
         ownerRole: OWNER_ROLE,
         authorityTables: AUTHORITY_TABLES,
         statusGuardedTables: AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table),
+        madeOnceTables: AUTHORITY_TABLES.filter((table) => table.madeOnce === true).map(({ table }) => table),
       }),
     );
     // Handled here too, so a read that finishes after its deadline never goes unhandled.

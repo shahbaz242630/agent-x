@@ -2,6 +2,7 @@
 // the app role. A supplier is added UNVERIFIED with its first version, both
 // sealed; its contacts are kept encrypted for their own row and kind, and
 // opened only from a verified version; it is found by no other organisation;
+// it is VERIFIED only on the version verified; a version is made once;
 // pages of suppliers give each with its current version's name; and the
 // tables hold the app to adding rows and moving only what the seal covers.
 // What the owner can do past the app is suppliers-tamper.db.test.ts.
@@ -27,10 +28,14 @@ import {
   addVersion,
   contactsOf,
   MOST_SUPPLIERS_A_PAGE,
+  reactivateSupplier,
+  SUPPLIER_VERSIONS,
   SUPPLIERS,
   suppliersAddedSince,
   suppliersPage,
   supplierOf,
+  unverifySupplier,
+  verifySupplier,
   versionOf,
 } from './suppliers.ts';
 import type { SuppliersTables } from './tables.ts';
@@ -148,6 +153,7 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
         pendingVersionId: null,
         coolingOffUntil: null,
         verifiedBy: null,
+        verifiedVersionId: null,
         payeeKey: null,
         payeeKeyVersion: null,
       },
@@ -160,6 +166,7 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
         version: 1,
         displayName: 'Gulf Office Supplies LLC',
         contacts: 'phone email licence',
+        phoneSince: clock.now(),
         source: { kind: 'registry', ref: 'DED-REG-88112' },
         enteredBy,
         enteredAt: clock.now(),
@@ -264,54 +271,184 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
     ).rejects.toBeInstanceOf(SupplierDetailsRefused);
     expect(await read(org, id)).toEqual({ outcome: 'missing' });
   });
+});
 
-  it('moves as its machine says: verified, back to unverified, suspended and reactivated verified', async () => {
+/** Work on one supplier read for change, in one transaction: what E3's use cases will do. */
+const onSupplier = <T>(
+  orgId: string,
+  id: string,
+  work: (
+    tx: Parameters<typeof supplierOf>[0],
+    states: Parameters<typeof supplierOf>[1],
+    found: Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>,
+  ) => Promise<T>,
+) =>
+  withSignedStates(app, orgId, services(), async (tx, states) => {
+    const found = await supplierOf(tx, states, { orgId, id }, 'change');
+    if (found.outcome !== 'found') throw new Error(`No supplier: ${found.outcome}`);
+    return work(tx, states, found);
+  });
+
+const VERIFIER = 'e1100000-0000-7000-8000-00000000cafe';
+
+const verify = (orgId: string, id: string) =>
+  onSupplier(orgId, id, (tx, states, found) =>
+    verifySupplier(tx, states, { orgId, id }, found, { verifiedBy: VERIFIER, actor: OPERATOR }),
+  );
+
+const suspend = (orgId: string, id: string) =>
+  onSupplier(orgId, id, (tx, states) =>
+    states.changeStatus(tx, SUPPLIERS, { orgId, id }, 'suspend', {
+      actor: OPERATOR,
+      action: 'supplier.suspended',
+      details: {},
+    }),
+  );
+
+const reactivate = (orgId: string, id: string) =>
+  onSupplier(orgId, id, (tx, states, found) =>
+    reactivateSupplier(tx, states, { orgId, id }, found, { actor: OPERATOR }),
+  );
+
+/** A later version of the supplier, made after reading it for change and following its current one, as a change will. */
+const later = (orgId: string, supplierId: string, version: number, supplier: SupplierDetails) =>
+  onSupplier(orgId, supplierId, async (tx, states, found) => {
+    const follows = await versionOf(tx, states, { orgId, id: found.supplier.currentVersionId }, supplierId);
+    if (follows.outcome !== 'found') throw new Error(`No current version: ${follows.outcome}`);
+    const id = ids.next();
+    const recorded = await addVersion(tx, states, keys, {
+      orgId,
+      id,
+      supplierId,
+      version,
+      supplier,
+      enteredBy: ids.next(),
+      enteredAt: clock.now(),
+      actor: OPERATOR,
+      follows: follows.version,
+    });
+    return { id, recorded };
+  });
+
+/** Sets the supplier's sealed fields `set`, recorded from its state read for change: what the table's checks must hold. */
+const recordOn = (orgId: string, id: string, set: Record<string, string | number | null>) =>
+  onSupplier(orgId, id, (tx, states, found) =>
+    states.record(tx, SUPPLIERS, { orgId, id }, found.state, set, {
+      actor: OPERATOR,
+      action: 'supplier.test_change',
+      details: {},
+    }),
+  );
+
+describe(`a supplier's verification (E1-1's review, Postgres ${server.version})`, () => {
+  it('is recorded with its verifier and the version verified, then VERIFIED', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+
+    expect(await verify(org, id)).toMatchObject({
+      status: 'VERIFIED',
+      verifiedBy: VERIFIER,
+      verifiedVersionId: versionId,
+    });
+    expect((await eventsAbout(org, id)).map(({ action }) => action)).toEqual([
+      'supplier.added',
+      'supplier.verifier_recorded',
+      'supplier.verify',
+    ]);
+  });
+
+  it('is cleared when the supplier is unverified, so nothing verified is left to come back to', async () => {
     const org = await organization();
     const { id } = await added(org);
-    const move = (event: 'verify' | 'unverify' | 'suspend' | 'reactivate' | 'reactivate_verified') =>
-      withSignedStates(app, org, services(), (tx, states) =>
-        states.changeStatus(tx, SUPPLIERS, { orgId: org, id }, event, {
+    await verify(org, id);
+
+    expect(
+      await onSupplier(org, id, (tx, states, found) =>
+        unverifySupplier(tx, states, { orgId: org, id }, found, { actor: OPERATOR }),
+      ),
+    ).toMatchObject({ status: 'UNVERIFIED', verifiedBy: null, verifiedVersionId: null });
+    await suspend(org, id);
+    expect(await reactivate(org, id)).toMatchObject({ status: 'UNVERIFIED' });
+  });
+
+  it('comes back VERIFIED from its brake while it is still verified', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+    await verify(org, id);
+    await suspend(org, id);
+
+    expect(await reactivate(org, id)).toMatchObject({ status: 'VERIFIED', verifiedVersionId: versionId });
+  });
+
+  it('comes back UNVERIFIED when suspended before it was ever verified: the table refuses VERIFIED outright', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    await suspend(org, id);
+
+    await expect(
+      onSupplier(org, id, (tx, states) =>
+        states.changeStatus(tx, SUPPLIERS, { orgId: org, id }, 'reactivate_verified', {
           actor: OPERATOR,
-          action: `supplier.${event}`,
+          action: 'supplier.reactivate_verified',
           details: {},
         }),
-      );
+      ),
+    ).rejects.toThrow(/verified_rests_on_its_version/);
+    expect(await reactivate(org, id)).toMatchObject({ status: 'UNVERIFIED', verifiedVersionId: null });
+  });
 
-    for (const [event, status] of [
-      ['verify', 'VERIFIED'],
-      ['unverify', 'UNVERIFIED'],
-      ['suspend', 'SUSPENDED'],
-      ['reactivate', 'UNVERIFIED'],
-      ['verify', 'VERIFIED'],
-      ['suspend', 'SUSPENDED'],
-      ['reactivate_verified', 'VERIFIED'],
-    ] as const) {
-      expect(await move(event)).toMatchObject({ outcome: 'changed' });
-      expect(await read(org, id)).toMatchObject({ supplier: { status } });
-    }
-    expect(await move('reactivate')).toMatchObject({ outcome: 'refused' });
+  it('comes back UNVERIFIED, its verification cleared, when a new version became current while it was suspended', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    await verify(org, id);
+    await suspend(org, id);
+    const second = await later(org, id, 2, DETAILS);
+    await recordOn(org, id, { current_version_id: second.id });
+
+    expect(await reactivate(org, id)).toMatchObject({
+      status: 'UNVERIFIED',
+      currentVersionId: second.id,
+      verifiedBy: null,
+      verifiedVersionId: null,
+    });
+  });
+
+  it('holds while VERIFIED: a new current version, or a change waiting, is refused by the table', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    await verify(org, id);
+    const second = await later(org, id, 2, DETAILS);
+
+    await expect(recordOn(org, id, { current_version_id: second.id })).rejects.toThrow(/verified_rests_on_its_version/);
+    await expect(recordOn(org, id, { pending_version_id: second.id })).rejects.toThrow(/verified_rests_on_its_version/);
+  });
+
+  it('refuses to verify one with a change waiting, or one not UNVERIFIED, before any SQL runs', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    const second = await later(org, id, 2, DETAILS);
+    await recordOn(org, id, { pending_version_id: second.id });
+
+    await expect(verify(org, id)).rejects.toBeInstanceOf(RangeError);
+    const other = await added(org);
+    await suspend(org, other.id);
+    await expect(verify(org, other.id)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('refuses to unverify one not VERIFIED, and to reactivate one not SUSPENDED', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(
+      onSupplier(org, id, (tx, states, found) =>
+        unverifySupplier(tx, states, { orgId: org, id }, found, { actor: OPERATOR }),
+      ),
+    ).rejects.toBeInstanceOf(RangeError);
+    await expect(reactivate(org, id)).rejects.toBeInstanceOf(RangeError);
   });
 });
 
 describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres ${server.version})`, () => {
-  /** A version `version` of the supplier, made after reading it for change, as a change will. */
-  const later = (orgId: string, supplierId: string, version: number, supplier: SupplierDetails) =>
-    withSignedStates(app, orgId, services(), async (tx, states) => {
-      expect(await supplierOf(tx, states, { orgId, id: supplierId }, 'change')).toMatchObject({ outcome: 'found' });
-      const id = ids.next();
-      const recorded = await addVersion(tx, states, keys, {
-        orgId,
-        id,
-        supplierId,
-        version,
-        supplier,
-        enteredBy: ids.next(),
-        enteredAt: clock.now(),
-        actor: OPERATOR,
-      });
-      return { id, recorded };
-    });
-
   it('is made sealed, its contacts encrypted for itself, and the supplier left as it was', async () => {
     const org = await organization();
     const { id, versionId } = await added(org);
@@ -329,6 +466,19 @@ describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres
     expect(await read(org, id)).toMatchObject({ supplier: { currentVersionId: versionId, pendingVersionId: null } });
   });
 
+  it('carries its phone’s time over while the phone is the same, and starts it again from a new phone', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    const first = clock.now();
+    clock.advanceBy(HOUR_MS);
+    const kept = await later(org, id, 2, { ...DETAILS, displayName: 'Gulf Office Supplies FZE' });
+    clock.advanceBy(HOUR_MS);
+    const moved = await later(org, id, 3, { ...DETAILS, contacts: { ...DETAILS.contacts, phone: '+971509876543' } });
+
+    expect(await readVersion(org, kept.id, id)).toMatchObject({ version: { phoneSince: first } });
+    expect(await readVersion(org, moved.id, id)).toMatchObject({ version: { phoneSince: clock.now() } });
+  });
+
   it('is refused a number the supplier already has, by the table’s key', async () => {
     const org = await organization();
     const { id } = await added(org);
@@ -343,6 +493,31 @@ describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres
     await expect(
       later(org, id, 2, { ...DETAILS, source: { kind: 'registry', ref: 'has a space' } }),
     ).rejects.toBeInstanceOf(SupplierDetailsRefused);
+  });
+
+  it('is made once: the app changes nothing in a version after its first signed state (made_once)', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+    const change = (statement: () => Promise<unknown>) => expect(statement()).rejects.toThrow(/made once/);
+
+    await change(() =>
+      withSignedStates(app, org, services(), (tx) =>
+        tx
+          .updateTable(SUPPLIER_VERSIONS.table)
+          .set({ display_name: 'Someone Else LLC' })
+          .where('id', '=', versionId)
+          .execute(),
+      ),
+    );
+    await change(() =>
+      withSignedStates(app, org, services(), (tx) =>
+        tx.updateTable(SUPPLIER_VERSIONS.table).set({ state_version: 2 }).where('id', '=', versionId).execute(),
+      ),
+    );
+    expect(await readVersion(org, versionId, id)).toMatchObject({
+      outcome: 'found',
+      version: { displayName: 'Gulf Office Supplies LLC' },
+    });
   });
 });
 
@@ -435,44 +610,115 @@ describe(`what the app may do to the tables (E1-1, Postgres ${server.version})`,
     );
   });
 
+  /** A supplier's row put in by the app past addSupplier, naming `current` in `status`: what the table itself refuses. */
+  const plant = (orgId: string, current: string, status: string) =>
+    withSignedStates(app, orgId, services(), (tx) =>
+      tx
+        .insertInto(SUPPLIERS.table)
+        .values({ org_id: orgId, id: ids.next(), status, current_version_id: current, created_at: clock.now() })
+        .execute(),
+    );
+
   it('refuses a supplier added in any status but UNVERIFIED (the status guard)', async () => {
     const org = await organization();
     const { versionId } = await added(org);
 
-    await expect(
-      withSignedStates(app, org, services(), (tx) =>
-        tx
-          .insertInto(SUPPLIERS.table)
-          .values({
-            org_id: org,
-            id: ids.next(),
-            status: 'VERIFIED',
-            current_version_id: versionId,
-            created_at: clock.now(),
-          })
-          .execute(),
-      ),
-    ).rejects.toThrow();
+    await expect(plant(org, versionId, 'VERIFIED')).rejects.toThrow(/must start as UNVERIFIED/);
   });
 
-  it('refuses a supplier whose current version is another supplier’s, or none, at commit', async () => {
+  it('refuses a supplier whose current version is another supplier’s, or none, at commit (current_is_its_own)', async () => {
     const org = await organization();
     const { versionId } = await added(org);
-    const plant = (current: string) =>
-      withSignedStates(app, org, services(), (tx) =>
-        tx
-          .insertInto(SUPPLIERS.table)
-          .values({
-            org_id: org,
-            id: ids.next(),
-            status: 'UNVERIFIED',
-            current_version_id: current,
-            created_at: clock.now(),
-          })
-          .execute(),
-      );
 
-    await expect(plant(versionId)).rejects.toThrow(/current_is_its_own/);
-    await expect(plant(ids.next())).rejects.toThrow(/current_is_its_own/);
+    await expect(plant(org, versionId, 'UNVERIFIED')).rejects.toThrow(/current_is_its_own/);
+    await expect(plant(org, ids.next(), 'UNVERIFIED')).rejects.toThrow(/current_is_its_own/);
+  });
+
+  it('refuses a pending or verified version of another supplier (pending_is_its_own, verified_is_its_own)', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    const other = await added(org);
+
+    await expect(recordOn(org, id, { pending_version_id: other.versionId })).rejects.toThrow(/pending_is_its_own/);
+    await expect(recordOn(org, id, { verified_version_id: other.versionId })).rejects.toThrow(/verified_is_its_own/);
+  });
+
+  it('refuses a pending version that is the current one (pending_is_not_current)', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+
+    await expect(recordOn(org, id, { pending_version_id: versionId })).rejects.toThrow(/pending_is_not_current/);
+  });
+
+  it('refuses a payee key version with no payee key (a_key_version_with_its_key)', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(recordOn(org, id, { payee_key_version: 1 })).rejects.toThrow(/a_key_version_with_its_key/);
+    await recordOn(org, id, { payee_key: 'fake-payee-1', payee_key_version: 1 });
+    expect(await read(org, id)).toMatchObject({ supplier: { payeeKey: 'fake-payee-1', payeeKeyVersion: 1 } });
+  });
+
+  /** A version's row put in by the app past addVersion, with `overrides`: what the table itself refuses. */
+  const plantVersion = (orgId: string, supplierId: string, overrides: Record<string, unknown>) =>
+    withSignedStates(app, orgId, services(), (tx) =>
+      tx
+        .insertInto(SUPPLIER_VERSIONS.table)
+        .values({
+          org_id: orgId,
+          id: ids.next(),
+          supplier_id: supplierId,
+          version: 9,
+          display_name: 'Planted LLC',
+          contacts: 'phone',
+          phone_ciphertext: Buffer.alloc(40),
+          email_ciphertext: null,
+          licence_ciphertext: null,
+          contacts_key_version: 1,
+          phone_since: clock.now(),
+          source_kind: 'registry',
+          source_ref: 'planted',
+          entered_by: ids.next(),
+          entered_at: clock.now(),
+          registration_id: null,
+          beneficiary_ref: null,
+          payee_hint: null,
+          ...overrides,
+        })
+        .execute(),
+    );
+
+  it('refuses a version of no supplier (of_a_supplier)', async () => {
+    const org = await organization();
+
+    await expect(plantVersion(org, ids.next(), {})).rejects.toThrow(/of_a_supplier/);
+  });
+
+  it('refuses a payee reference with no registration, or a hint with no reference (a_reference_with_its_registration)', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(plantVersion(org, id, { beneficiary_ref: 'fake-beneficiary-1' })).rejects.toThrow(
+      /a_reference_with_its_registration/,
+    );
+    await expect(plantVersion(org, id, { payee_hint: 'AE…0000' })).rejects.toThrow(/a_reference_with_its_registration/);
+  });
+
+  it('refuses a phone held since after the version was entered (phone_since_it_was_entered)', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(plantVersion(org, id, { phone_since: new Date(clock.now().getTime() + HOUR_MS) })).rejects.toThrow(
+      /phone_since_it_was_entered/,
+    );
+  });
+
+  it('keys each version by its supplier too, which a supplier’s own versions rest on (its_suppliers_own)', async () => {
+    const [key] = await database.as('owner').query<{ definition: string }>(
+      `select pg_catalog.pg_get_constraintdef(oid) as definition from pg_catalog.pg_constraint
+          where conrelid = 'suppliers.supplier_versions'::regclass and conname = 'its_suppliers_own'`,
+    );
+
+    expect(key?.definition).toBe('UNIQUE (org_id, supplier_id, id)');
   });
 });

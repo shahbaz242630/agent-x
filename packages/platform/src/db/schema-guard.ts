@@ -92,6 +92,24 @@ const PINNED_FUNCTION_CONFIG = 'search_path=pg_catalog';
 const STATUS_GUARD_BODY = '52692e2d94ac490ceb626cc10024e4bb75fff4484ebd80fdf518cd34405cf246';
 
 /**
+ * The other trigger our schema is allowed: the made-once guard (0032, E1-1),
+ * on an authority table whose rows are made once and never changed (a
+ * supplier's version). It refuses any update to a row whose first signed
+ * state is recorded. It fires BEFORE UPDATE, FOR EACH ROW (1 + 2 + 16 = 19),
+ * with no arguments, and its body is held by hash, as the status guard's is.
+ */
+const MADE_ONCE = 'made_once';
+const MADE_ONCE_FUNCTION = 'state_rules.guard_made_once';
+const MADE_ONCE_TYPE = 19;
+const MADE_ONCE_BODY = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
+
+/** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
+const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
+  [STATUS_GUARD_FUNCTION, STATUS_GUARD_BODY],
+  [MADE_ONCE_FUNCTION, MADE_ONCE_BODY],
+]);
+
+/**
  * Whether the status guard's arguments are the shape 0004 gives it: the status
  * a row is born in, then one FROM>TO for each move the machine allows.
  *
@@ -228,6 +246,11 @@ export interface SchemaGuardOptions {
    * default.
    */
   readonly statusGuardedTables?: readonly string[];
+  /**
+   * The tables whose rows are made once (0032's `made_once`): each must carry
+   * the made-once guard, firing. None by default.
+   */
+  readonly madeOnceTables?: readonly string[];
 }
 
 /**
@@ -794,7 +817,14 @@ function retentionProblems(table: string, found: readonly PolicyRow[], sweep: Fi
 
 export async function liveSchemaProblems<Schema>(
   db: Kysely<Schema>,
-  { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [], statusGuardedTables = [] }: SchemaGuardOptions,
+  {
+    appRole,
+    ownerRole,
+    policy = SCHEMA_POLICY,
+    authorityTables = [],
+    statusGuardedTables = [],
+    madeOnceTables = [],
+  }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const problems: SchemaProblem[] = [];
   const version = await serverVersion(db);
@@ -912,17 +942,16 @@ export async function liveSchemaProblems<Schema>(
   );
   if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
 
-  // Functions: the status guard is the only one our schemas hold, and it must
-  // still be the function 0004 wrote, running with its caller's rights and
-  // looking names up where 0004 pinned them.
+  // Functions: the status guard and the made-once guard are the only ones our
+  // schemas hold, and each must still be the function its migration wrote,
+  // running with its caller's rights and looking names up where it pinned them.
   for (const fn of allFunctions) {
     if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
     if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
     if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
-    if (fn.name === STATUS_GUARD_FUNCTION && fn.body !== STATUS_GUARD_BODY) {
-      problems.push(`${fn.name} is not the function the migration wrote`);
-    }
-    if (fn.name !== STATUS_GUARD_FUNCTION) problems.push(`${fn.name} is a function our schemas should not hold`);
+    const body = GUARD_BODIES.get(fn.name);
+    if (body === undefined) problems.push(`${fn.name} is a function our schemas should not hold`);
+    else if (fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
   }
 
   // A rewrite rule can turn any statement into a different one, silently.
@@ -930,12 +959,20 @@ export async function liveSchemaProblems<Schema>(
     problems.push(`${rule.table} carries the rewrite rule ${quoted(rule.name)}`);
   }
 
-  // The only trigger our schema has is the status guard 0004 installs, and it
-  // must still be the guard: a planted trigger given that name would otherwise
-  // pass on its name alone. A switched-off guard is drift too — Postgres keeps
-  // the row and stops running it, which is tampering that leaves no trace in
-  // the table.
+  // The only triggers our schema has are the status guard 0004 installs and
+  // the made-once guard 0032 installs, and each must still be that guard: a
+  // planted trigger given its name would otherwise pass on its name alone. A
+  // switched-off guard is drift too — Postgres keeps the row and stops running
+  // it, which is tampering that leaves no trace in the table.
   for (const trigger of allTriggers) {
+    if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) {
+      // One that fires at other times, or is handed arguments, is not the guard 0032 wrote.
+      if (trigger.type !== MADE_ONCE_TYPE || !trigger.definition.endsWith(`${MADE_ONCE_FUNCTION}()`)) {
+        problems.push(`${trigger.table}'s ${MADE_ONCE} fires at other times`);
+      }
+      if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
+      continue;
+    }
     if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
       problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
       continue;
@@ -951,12 +988,17 @@ export async function liveSchemaProblems<Schema>(
     if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
   }
   // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
-  for (const table of statusGuardedTables) {
-    const relation = allRelations.find((each) => each.plain === table);
-    // Any other trigger is reported above as a trigger our schema should not hold.
-    const guards = allTriggers.filter((trigger) => trigger.table === relation?.name);
-    if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${STATUS_GUARD}`);
-  }
+  // The same for each table whose rows are made once.
+  const carries = (tables: readonly string[], name: string): void => {
+    for (const table of tables) {
+      const relation = allRelations.find((each) => each.plain === table);
+      // Any trigger by another name is reported above as a trigger our schema should not hold.
+      const guards = allTriggers.filter((trigger) => trigger.table === relation?.name && trigger.name === name);
+      if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${name}`);
+    }
+  };
+  carries(statusGuardedTables, STATUS_GUARD);
+  carries(madeOnceTables, MADE_ONCE);
 
   // Indexes. A plain index missing is a matter of speed, so it is not checked
   // here; a **unique** one is a wall. An invalid one enforces nothing while

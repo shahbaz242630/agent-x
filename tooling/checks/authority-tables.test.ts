@@ -183,11 +183,12 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: suppliers.SUPPLIERS.fields,
         status: suppliers.SUPPLIER,
       },
-      // A version is made once and never moved: no status of its own.
+      // A version is made once and never moved: no status of its own, and the made-once guard.
       {
         table: suppliers.SUPPLIER_VERSIONS.table,
         subject: suppliers.SUPPLIER_VERSIONS.subject,
         fields: suppliers.SUPPLIER_VERSIONS.fields,
+        madeOnce: true,
       },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);

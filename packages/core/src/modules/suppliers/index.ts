@@ -5,8 +5,10 @@
 // registered with the partner through the providers module's adapter (E2).
 export {
   contactsHeld,
+  reactivationOf,
   SOURCE_KINDS,
   type SourceKind,
+  stillVerified,
   SUPPLIER,
   type SupplierContacts,
   type SupplierDetails,
@@ -21,6 +23,7 @@ export {
   MOST_SUPPLIERS_A_PAGE,
   type NewSupplier,
   type NewVersion,
+  reactivateSupplier,
   SUPPLIER_VERSIONS,
   type SupplierCheck,
   SupplierContactsUnreadable,
@@ -31,8 +34,10 @@ export {
   suppliersPage,
   supplierOf,
   type SuppliersTransaction,
+  unverifySupplier,
   type VersionCheck,
   type VersionRecord,
+  verifySupplier,
   versionOf,
 } from './infrastructure/suppliers.ts';
 export type { SuppliersTables } from './infrastructure/tables.ts';

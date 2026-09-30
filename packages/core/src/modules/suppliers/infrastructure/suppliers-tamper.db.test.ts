@@ -122,8 +122,6 @@ const suspend = (id: string) =>
     }),
   );
 
-const guard = (): Promise<string[]> => liveSchemaProblems(app, { ...ROLES, authorityTables: AUTHORITY_TABLES });
-
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
 /** Denied with the alarm on the row, and the organisation held for it. */
@@ -160,14 +158,39 @@ async function plantedVersion(supplierId: string): Promise<string> {
   const id = ids.next();
   await owner.query(
     `insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts, phone_ciphertext,
-       contacts_key_version, source_kind, source_ref, entered_by, entered_at)
-     select org_id, $2, supplier_id, 2, 'Planted Payee LLC', 'phone', phone_ciphertext, contacts_key_version, source_kind,
-       source_ref, entered_by, entered_at
+       contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
+     select org_id, $2, supplier_id, 2, 'Planted Payee LLC', 'phone', phone_ciphertext, contacts_key_version, phone_since,
+       source_kind, source_ref, entered_by, entered_at
        from suppliers.supplier_versions where org_id = $1 and supplier_id = $3 and version = 1`,
     [org, id, supplierId],
   );
   return id;
 }
+
+/**
+ * The made-once guard refuses the owner's rewrites of a version too, so an
+ * owner at a version switches it off first, as a real one would have to: each
+ * case below runs with it off, and it is back on before the live guard's
+ * check after each (which would name it switched off, or dropped). What the
+ * guard itself refuses, and the live guard seeing it tampered with, are cases
+ * of their own.
+ */
+const MADE_ONCE_OFF = 'alter table suppliers.supplier_versions disable trigger made_once';
+const MADE_ONCE_ON = 'alter table suppliers.supplier_versions enable trigger made_once';
+
+/** 0032's check that a version's ciphertexts are the contacts it says it holds, put back after a case drops it. */
+const RESTORE_CONTACTS_AS_HELD = `alter table suppliers.supplier_versions add constraint contacts_as_held check (
+  (email_ciphertext IS NOT NULL) = (contacts IN ('phone email', 'phone email licence'))
+  AND (licence_ciphertext IS NOT NULL) = (contacts IN ('phone licence', 'phone email licence')))`;
+
+/** The live guard as the product runs it: every authority table, and each guard the list says a table carries. */
+const product = () =>
+  liveSchemaProblems(app, {
+    ...ROLES,
+    authorityTables: AUTHORITY_TABLES,
+    statusGuardedTables: AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table),
+    madeOnceTables: AUTHORITY_TABLES.filter((table) => table.madeOnce === true).map(({ table }) => table),
+  });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -187,19 +210,24 @@ beforeEach(async () => {
   );
   owner = await tamperAsOwner(database, SUPPLIERS, org);
   ownerOfVersions = await tamperAsOwner(database, SUPPLIER_VERSIONS, org);
-  expect(await guard()).toEqual([]);
+  expect(await product()).toEqual([]);
+  await ownerOfVersions.query(MADE_ONCE_OFF);
 });
 
 afterEach(async () => {
+  await ownerOfVersions.query(MADE_ONCE_ON);
   await owner.end();
   await ownerOfVersions.end();
-  expect(await guard()).toEqual([]);
+  expect(await product()).toEqual([]);
 });
 
 describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and held (Postgres ${server.version})`, () => {
-  it('verified past the app, with the status guard switched off for it', async () => {
+  it('verified past the app, on its current version, as the table’s check asks', async () => {
     const { id } = await addedSupplier();
-    await owner.setColumn(id, 'status', 'VERIFIED');
+    await owner.query(
+      'update suppliers.suppliers set status = $2, verified_version_id = current_version_id where id = $1',
+      [id, 'VERIFIED'],
+    );
 
     await supplierDenied(id, 'seal');
   });
@@ -235,6 +263,13 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
   ] as const)('its %s set', async (column, value) => {
     const { id } = await addedSupplier();
     await owner.setColumn(id, column, value);
+
+    await supplierDenied(id, 'seal');
+  });
+
+  it('given its own version as the one verified, past the app', async () => {
+    const { id, versionId } = await addedSupplier();
+    await owner.setColumn(id, 'verified_version_id', versionId);
 
     await supplierDenied(id, 'seal');
   });
@@ -277,9 +312,9 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
          insert into suppliers.suppliers (org_id, id, status, current_version_id, created_at)
          values ($1, $2, 'UNVERIFIED', $3, now()) returning org_id)
        insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts,
-         phone_ciphertext, contacts_key_version, source_kind, source_ref, entered_by, entered_at)
+         phone_ciphertext, contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
        select org_id, $3, $2, 1, 'Planted Payee LLC', 'phone', pg_catalog.decode(pg_catalog.repeat('00', 40), 'hex'), 1,
-         'registry', 'planted', $2, now() from supplier`,
+         now(), 'registry', 'planted', $2, now() from supplier`,
       [org, id, versionId],
     );
 
@@ -296,7 +331,10 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
   it('a page holding one supplier rewritten: the whole page refused, not the rest shown', async () => {
     await addedSupplier();
     const { id } = await addedSupplier();
-    await owner.setColumn(id, 'status', 'VERIFIED');
+    await owner.query(
+      'update suppliers.suppliers set status = $2, verified_version_id = current_version_id where id = $1',
+      [id, 'VERIFIED'],
+    );
 
     const page = await withSignedStates(app, org, services(), (tx, states) =>
       suppliersPage(tx, states, org, { after: null, limit: 50 }),
@@ -308,12 +346,6 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
 
   it('the live guard sees DELETE granted on the suppliers, and their status guard dropped outright', async () => {
     const asOwner = database.as('owner');
-    const product = () =>
-      liveSchemaProblems(app, {
-        ...ROLES,
-        authorityTables: AUTHORITY_TABLES,
-        statusGuardedTables: AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table),
-      });
     const [trigger] = await asOwner.query<{ definition: string }>(
       `select pg_catalog.pg_get_triggerdef(oid) as definition from pg_catalog.pg_trigger
         where tgrelid = 'suppliers.suppliers'::regclass and tgname = 'status_guard'`,
@@ -329,7 +361,30 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
       // eslint-disable-next-line agentx/no-string-built-sql -- the trigger's own definition, as Postgres wrote it
       await asOwner.query(trigger?.definition ?? '');
     }
+    expect(await product()).toEqual(["suppliers.supplier_versions's made_once is switched off"]);
+  });
+
+  it('the live guard sees the made-once guard switched off, dropped, or put back firing at other times', async () => {
+    const asOwner = database.as('owner');
+    await asOwner.query(MADE_ONCE_ON);
     expect(await product()).toEqual([]);
+    await asOwner.query(MADE_ONCE_OFF);
+    expect(await product()).toContain("suppliers.supplier_versions's made_once is switched off");
+    await asOwner.query('drop trigger made_once on suppliers.supplier_versions');
+    try {
+      expect(await product()).toContain('suppliers.supplier_versions carries no made_once');
+      await asOwner.query(
+        'create trigger made_once before insert on suppliers.supplier_versions for each row execute function state_rules.guard_made_once()',
+      );
+      expect(await product()).toContain("suppliers.supplier_versions's made_once fires at other times");
+      await asOwner.query('drop trigger made_once on suppliers.supplier_versions');
+    } finally {
+      await asOwner.query(
+        'create trigger made_once before update on suppliers.supplier_versions for each row execute function state_rules.guard_made_once()',
+      );
+    }
+    // Left off, as the other cases have it: afterEach puts it back on.
+    await asOwner.query(MADE_ONCE_OFF);
   });
 });
 
@@ -339,7 +394,8 @@ describe(`FX-TAMPER as the owner on a supplier's version: denied by the row chec
     ['source_kind', 'registry'],
     ['source_ref', 'https://planted.example'],
     ['entered_by', '01a0f26d-573c-719c-a913-601fdf758b66'],
-    ['entered_at', '2026-08-01T00:00:00Z'],
+    ['entered_at', '2026-12-01T00:00:00Z'],
+    ['phone_since', '2026-08-01T00:00:00Z'],
     ['version', 7],
   ] as const)('its %s changed', async (column, value) => {
     const { id, versionId } = await addedSupplier();
@@ -474,7 +530,10 @@ describe(`a contact moved past the app won't open (SEC-DB-01, Postgres ${server.
     const later = ids.next();
     await withSignedStates(app, org, quiet(), async (tx, states) => {
       await supplierOf(tx, states, { orgId: org, id }, 'change');
+      const follows = await versionOf(tx, states, { orgId: org, id: versionId }, id);
+      if (follows.outcome !== 'found') throw new Error(`No version: ${follows.outcome}`);
       await addVersion(tx, states, keys, {
+        follows: follows.version,
         orgId: org,
         id: later,
         supplierId: id,
@@ -508,11 +567,7 @@ describe(`a contact moved past the app won't open (SEC-DB-01, Postgres ${server.
         'update suppliers.supplier_versions set email_ciphertext = licence_ciphertext where id = $1 and email_ciphertext is null',
         [versionId],
       );
-      await ownerOfVersions.query(
-        `alter table suppliers.supplier_versions add constraint contacts_as_held check (
-           (email_ciphertext IS NOT NULL) = (contacts IN ('phone email', 'phone email licence'))
-           AND (licence_ciphertext IS NOT NULL) = (contacts IN ('phone licence', 'phone email licence')))`,
-      );
+      await ownerOfVersions.query(RESTORE_CONTACTS_AS_HELD);
     }
   });
 
@@ -533,11 +588,7 @@ describe(`a contact moved past the app won't open (SEC-DB-01, Postgres ${server.
       await ownerOfVersions.query('update suppliers.supplier_versions set email_ciphertext = null where id = $1', [
         versionId,
       ]);
-      await ownerOfVersions.query(
-        `alter table suppliers.supplier_versions add constraint contacts_as_held check (
-           (email_ciphertext IS NOT NULL) = (contacts IN ('phone email', 'phone email licence'))
-           AND (licence_ciphertext IS NOT NULL) = (contacts IN ('phone licence', 'phone email licence')))`,
-      );
+      await ownerOfVersions.query(RESTORE_CONTACTS_AS_HELD);
     }
   });
 });

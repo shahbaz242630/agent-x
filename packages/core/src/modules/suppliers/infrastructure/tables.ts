@@ -15,6 +15,8 @@ interface SuppliersTable {
   cooling_off_until: Date | null;
   /** The verifier's membership. */
   verified_by: string | null;
+  /** The version that was verified. */
+  verified_version_id: string | null;
   payee_key: string | null;
   payee_key_version: number | null;
   created_at: Date;
@@ -35,6 +37,8 @@ interface SupplierVersionsTable {
   email_ciphertext: Buffer | null;
   licence_ciphertext: Buffer | null;
   contacts_key_version: number;
+  /** Since when its phone is the supplier's. */
+  phone_since: Date;
   source_kind: string;
   source_ref: string;
   /** The membership of the member who entered it. */

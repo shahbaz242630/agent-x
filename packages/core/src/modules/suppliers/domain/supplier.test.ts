@@ -2,7 +2,15 @@
 // status, and the details a version may hold.
 import { describe, expect, it } from 'vitest';
 
-import { contactsHeld, SUPPLIER, type SupplierDetails, SupplierDetailsRefused, supplierDetails } from './supplier.ts';
+import {
+  contactsHeld,
+  reactivationOf,
+  stillVerified,
+  SUPPLIER,
+  type SupplierDetails,
+  SupplierDetailsRefused,
+  supplierDetails,
+} from './supplier.ts';
 
 const DETAILS: SupplierDetails = {
   displayName: 'Gulf Office Supplies LLC',
@@ -33,13 +41,37 @@ describe('a supplier’s status (E1-1)', () => {
     ]);
   });
 
-  it('is verified only from UNVERIFIED: a suspended supplier is never verified past its brake', () => {
+  it('takes the verify event only from UNVERIFIED; a suspended one comes back VERIFIED only by reactivate_verified', () => {
     expect(SUPPLIER.transition('SUSPENDED', 'verify')).toEqual({
       ok: false,
       problem: 'not_allowed',
       from: 'SUSPENDED',
     });
     expect(SUPPLIER.transition('UNVERIFIED', 'verify')).toEqual({ ok: true, from: 'UNVERIFIED', to: 'VERIFIED' });
+  });
+});
+
+describe('whether a supplier is still verified, and how a suspended one comes back (E1-1’s review)', () => {
+  const V1 = 'v1';
+  const V2 = 'v2';
+
+  it('is, and comes back VERIFIED, when the version verified is current and nothing is waiting', () => {
+    const supplier = { currentVersionId: V1, pendingVersionId: null, verifiedVersionId: V1 };
+
+    expect(stillVerified(supplier)).toBe(true);
+    expect(reactivationOf(supplier)).toBe('reactivate_verified');
+  });
+
+  it.each([
+    ['never verified', { currentVersionId: V1, pendingVersionId: null, verifiedVersionId: null }],
+    [
+      'verified on a version no longer current',
+      { currentVersionId: V2, pendingVersionId: null, verifiedVersionId: V1 },
+    ],
+    ['with a change waiting', { currentVersionId: V1, pendingVersionId: V2, verifiedVersionId: V1 }],
+  ] as const)('is not, and comes back UNVERIFIED, when %s', (_case, supplier) => {
+    expect(stillVerified(supplier)).toBe(false);
+    expect(reactivationOf(supplier)).toBe('reactivate');
   });
 });
 

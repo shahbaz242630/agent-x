@@ -31,6 +31,28 @@ export const SUPPLIER = defineStateMachine({
 
 export type SupplierStatus = (typeof SUPPLIER.states)[number];
 
+/** What a supplier's coming back from its brake rests on: the version verified, if any, and what is current and waiting. */
+interface VerifiedState {
+  readonly currentVersionId: string;
+  readonly pendingVersionId: string | null;
+  readonly verifiedVersionId: string | null;
+}
+
+/**
+ * Whether a supplier is still verified: the version that was verified is the
+ * current one, with no change waiting. Only then may it be VERIFIED (0032's
+ * `verified_rests_on_its_version` holds the same), so a supplier suspended
+ * before it was verified, or changed since, comes back UNVERIFIED.
+ */
+export const stillVerified = (supplier: VerifiedState): boolean =>
+  supplier.verifiedVersionId !== null &&
+  supplier.verifiedVersionId === supplier.currentVersionId &&
+  supplier.pendingVersionId === null;
+
+/** The event a suspended supplier comes back by: verified again only if it is still verified. */
+export const reactivationOf = (supplier: VerifiedState): 'reactivate' | 'reactivate_verified' =>
+  stillVerified(supplier) ? 'reactivate_verified' : 'reactivate';
+
 /** Where the details were checked (ADR-012 §1): the trade or company registry, or the supplier's official website. */
 export const SOURCE_KINDS = ['registry', 'official_website'] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];

@@ -46,6 +46,16 @@ const RESTORE_GUARD =
 /** The hash schema-guard.ts compares the status guard's body with. */
 const GUARD_BODY_HASH = '52692e2d94ac490ceb626cc10024e4bb75fff4484ebd80fdf518cd34405cf246';
 
+/** 0032's made-once guard, read from the migration in the same way, and the hash schema-guard.ts holds its body to. */
+const MADE_ONCE_FUNCTION_SQL =
+  /CREATE OR REPLACE FUNCTION state_rules\.guard_made_once\(\)[\s\S]*?\$\$;/.exec(
+    readFileSync(new URL('../../../../db/migrations/0032_suppliers.sql', import.meta.url), 'utf8').replace(
+      'CREATE FUNCTION state_rules.guard_made_once()',
+      'CREATE OR REPLACE FUNCTION state_rules.guard_made_once()',
+    ),
+  )?.[0] ?? '';
+const MADE_ONCE_BODY_HASH = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
+
 const problems = async (): Promise<string[]> => liveSchemaProblems(app, ROLES);
 
 beforeAll(async () => {
@@ -109,6 +119,38 @@ describe('the status guard function', () => {
     expect(rows[0]?.config).toBe('search_path=pg_catalog');
     expect(rows[0]?.definer).toBe(false);
     expect(rows[0]?.body).toBe(GUARD_BODY_HASH);
+  });
+});
+
+describe('the made-once guard function (0032, E1-1’s review)', () => {
+  const read = () =>
+    owner.query<{ body: string; config: string; definer: boolean }>(
+      `select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc, 'UTF8')), 'hex') as body,
+              pg_catalog.array_to_string(p.proconfig, ',') as config,
+              p.prosecdef as definer
+       from pg_catalog.pg_proc p
+       join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'state_rules' and p.proname = 'guard_made_once'`,
+    );
+
+  it('is the body the migration wrote, pinned, and running with its caller’s rights', async () => {
+    const [fn] = await read();
+
+    expect(fn?.config).toBe('search_path=pg_catalog');
+    expect(fn?.definer).toBe(false);
+    expect(fn?.body).toBe(MADE_ONCE_BODY_HASH);
+  });
+
+  it('is seen replaced by one that lets every change through', async () => {
+    await owner.query(`create or replace function state_rules.guard_made_once() returns trigger
+      language plpgsql set search_path = pg_catalog as $$ begin return new; end; $$`);
+    try {
+      expect(await problems()).toContain('state_rules.guard_made_once is not the function the migration wrote');
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- 0032's own statement, read from the migration
+      await owner.query(MADE_ONCE_FUNCTION_SQL);
+    }
+    expect((await read())[0]?.body).toBe(MADE_ONCE_BODY_HASH);
   });
 });
 

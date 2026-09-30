@@ -34,6 +34,8 @@ export interface AuthorityStatusRules {
 /** An authority table, with its status machine when it has a status. */
 export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
+  /** Its rows are made once and never changed (a supplier's version): the made-once guard holds them (0032). */
+  readonly madeOnce?: true;
 }
 
 /**

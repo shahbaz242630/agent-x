@@ -263,7 +263,10 @@ const TRIGGERS = `
   order by n.nspname, c.relname, t.tgname collate "C"
 `;
 
-/** The check constraints on those tables, and whether each covers the status column. */
+/**
+ * The check constraints on those tables, whether each covers the status
+ * column, and whether it covers the status alone.
+ */
 const CHECKS = `
   select pg_catalog.concat_ws('.', n.nspname, c.relname) as table, con.conname::text as name,
          pg_catalog.pg_get_constraintdef(con.oid) as definition,
@@ -271,7 +274,8 @@ const CHECKS = `
            select 1 from pg_catalog.unnest(con.conkey) as k(attnum)
            join pg_catalog.pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.attnum
            where a.attname = 'status'
-         ) as on_status
+         ) as on_status,
+         pg_catalog.cardinality(con.conkey) = 1 as alone
   from pg_catalog.pg_constraint con
   join pg_catalog.pg_class c on c.oid = con.conrelid
   join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -375,6 +379,8 @@ interface Check {
   name: string;
   definition: string;
   on_status: boolean;
+  /** It covers one column only. */
+  alone: boolean;
 }
 
 /** One machine's reference objects as this server prints them, on the reference table they were built on. */
@@ -807,9 +813,15 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
   return problems;
 }
 
-/** Exactly one check constraint over the status, written as the machine's states. */
+/**
+ * Exactly one check constraint over the status alone, written as the
+ * machine's states: the values it may hold. A check over the status with
+ * other columns (a supplier VERIFIED only on the version verified, 0032) is
+ * a condition on when a state is held, not another list of states, so it is
+ * left to the table's own tests.
+ */
 function statusCheckProblems(machine: AuthorityMachine, checks: readonly Check[], reference: Reference): string[] {
-  const onStatus = checks.filter((check) => check.on_status);
+  const onStatus = checks.filter((check) => check.on_status && check.alone);
   const [only, ...others] = onStatus;
   // The reference constraint, as this server prints it: the same shape the
   // real one is printed in, so the two halves of the message can be read
@@ -818,7 +830,7 @@ function statusCheckProblems(machine: AuthorityMachine, checks: readonly Check[]
   const wanted = reference.checkDefinition;
   if (only === undefined || others.length > 0) {
     return [
-      `has ${onStatus.length} check constraints over ${STATUS}; it has exactly one, listing the ${machine.name} machine's states: ${wanted}`,
+      `has ${onStatus.length} check constraints over ${STATUS} alone; it has exactly one, listing the ${machine.name} machine's states: ${wanted}`,
     ];
   }
   return only.definition === wanted
