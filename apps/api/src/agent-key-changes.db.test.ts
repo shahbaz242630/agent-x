@@ -466,6 +466,28 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     expect(await revokeConfirm(someone, key, ids.next())).toEqual(refusal(403, 'FORBIDDEN'));
   });
 
+  it('refuses a developer a new key for an agent another member owns, asking and confirming; revoking it they may (the S68 audit)', async () => {
+    const org = await organization();
+    const owner = await member(org, 'developer');
+    const other = await member(org, 'developer');
+    const key = await agentWithKey(org, owner);
+
+    expect(await rotate(other, key)).toEqual(refusal(403, 'FORBIDDEN'));
+    expect(await rotateConfirm(other, key, ids.next())).toEqual(refusal(403, 'FORBIDDEN'));
+    // The owner still may.
+    expect(await rotated(owner, key)).toMatchObject({ outcome: 'rotated' });
+    expect(await revoked(other, key)).toMatchObject({ outcome: 'revoked' });
+  });
+
+  it('lets an admin rotate the key of an agent a developer owns, with a passkey (the S68 audit)', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const admin = await member(org, 'admin');
+    const key = await agentWithKey(org, developer);
+
+    expect(await rotated(admin, key)).toMatchObject({ outcome: 'rotated' });
+  });
+
   it('asks an admin for a passkey: an app code’s step-up fails, a developer’s passes', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
