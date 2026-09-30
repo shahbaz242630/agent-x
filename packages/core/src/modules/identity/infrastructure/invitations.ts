@@ -39,7 +39,13 @@ import type {
   TamperSign,
 } from '../../audit/index.ts';
 import { type DirectoryTables, registerInvite } from '../../directory/index.ts';
-import { INVITATION, invitationEmail, invitationEnds, needsConfirmation } from '../domain/invitation.ts';
+import {
+  confirmationEnds,
+  INVITATION,
+  invitationEmail,
+  invitationEnds,
+  needsConfirmation,
+} from '../domain/invitation.ts';
 import { isRole, type Role } from '../domain/membership.ts';
 import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -421,8 +427,10 @@ export async function inviteFirstAdmin(
  * is locked until the transaction ends) and verified, in the caller's
  * transaction, which must be withSignedStates' for its organisation: with the
  * invited address decrypted, for the caller to match against the accepting
- * person's verified one; or why it can't be accepted: missing, tampered
- * with, or closed (not OPEN, or past its end at `now`).
+ * person's verified one, and the membership of the admin who asked (null for
+ * the operator's first admin), for the caller to check they still are one;
+ * or why it can't be accepted: missing, tampered with, or closed (not OPEN,
+ * or past its end at `now`).
  */
 export async function invitationToAccept(
   tx: InvitationsTransaction,
@@ -431,7 +439,12 @@ export async function invitationToAccept(
   { orgId, id, now }: { orgId: string; id: string; now: Date },
 ): Promise<
   Found<
-    | { readonly outcome: 'open'; readonly invitation: InvitationRecord; readonly email: string }
+    | {
+        readonly outcome: 'open';
+        readonly invitation: InvitationRecord;
+        readonly email: string;
+        readonly invitedBy: string | null;
+      }
     | { readonly outcome: 'closed' }
   >
 > {
@@ -439,7 +452,9 @@ export async function invitationToAccept(
   if (state.outcome !== 'verified') return state;
   const invitation = recordOf(id.toLowerCase(), state.fields);
   if (invitation.status !== 'OPEN' || invitation.expiresAt.getTime() <= now.getTime()) return { outcome: 'closed' };
-  return { outcome: 'open', invitation, email: await invitedEmail(tx, keys, orgId, id) };
+  // recordOf held it to a UUID's text or null.
+  const invitedBy = state.fields.get('invited_by') ?? null;
+  return { outcome: 'open', invitation, email: await invitedEmail(tx, keys, orgId, id), invitedBy };
 }
 
 /** An invitation that didn't take its acceptance: the caller read it as OPEN first, so this is a failure on our side. */
@@ -457,9 +472,10 @@ export class InvitationNotAccepted extends Error {
  * Accepts the open invitation `invitationToAccept` read in this same
  * transaction for `userId`, who the caller has matched to it: who accepted is
  * recorded and sealed, then it moves to ACCEPTED, or, for a role an admin
- * must confirm (admin, approver), to AWAITING_CONFIRMATION. The membership of
- * a role that joins at once is the caller's to add, in the same transaction.
- * Anything but those moves throws InvitationNotAccepted, so nothing is kept.
+ * must confirm (admin, approver) or a person deactivated there before, to
+ * AWAITING_CONFIRMATION. The membership of a role that joins at once is the
+ * caller's to add, in the same transaction. Anything but those moves throws
+ * InvitationNotAccepted, so nothing is kept.
  */
 export async function acceptInvitation(
   tx: InvitationsTransaction,
@@ -470,6 +486,7 @@ export async function acceptInvitation(
     userId,
     actor,
     noMembers = false,
+    rejoining = false,
   }: {
     orgId: string;
     id: string;
@@ -477,6 +494,8 @@ export async function acceptInvitation(
     actor: AuditActor;
     /** The organisation has no members at all: the operator's first admin then joins at once (B4-6a). */
     noMembers?: boolean;
+    /** The person was deactivated there: an admin confirms their return, whatever the role (the S68 audit). */
+    rejoining?: boolean;
   },
 ): Promise<{ readonly outcome: 'accepted' | 'awaiting_confirmation'; readonly role: Role }> {
   const key = { orgId, id };
@@ -497,7 +516,7 @@ export async function acceptInvitation(
     },
   );
   // The first admin has no one to confirm them: the operator's command asked, for an organisation no one belongs to.
-  const waits = needsConfirmation(role) && !(byOperator && noMembers);
+  const waits = (needsConfirmation(role) || rejoining) && !(byOperator && noMembers);
   const moved = await states.changeStatus(tx, INVITATIONS, key, waits ? 'await' : 'accept', {
     actor,
     action: waits ? 'invitation.awaiting_confirmation' : 'invitation.accepted',
@@ -512,15 +531,21 @@ export async function acceptInvitation(
  * it (`change`, so it is locked until the transaction ends) and verified, in
  * the caller's transaction, which must be withSignedStates' for its
  * organisation: waiting for confirmation, with the version its signed state
- * has reached (a confirmation's step-up binds to it, B4-4d); or why not.
+ * has reached (a confirmation's step-up binds to it, B4-4d), and whether it
+ * has waited past `confirmationEnds` at `now`; or why not.
  */
 export async function invitationToConfirm(
   tx: InvitationsTransaction,
   states: SignedStates,
-  { orgId, id }: { orgId: string; id: string },
+  { orgId, id, now }: { orgId: string; id: string; now: Date },
 ): Promise<
   Found<
-    | { readonly outcome: 'waiting'; readonly invitation: InvitationRecord; readonly version: number }
+    | {
+        readonly outcome: 'waiting';
+        readonly invitation: InvitationRecord;
+        readonly version: number;
+        readonly ended: boolean;
+      }
     | { readonly outcome: 'not_waiting' }
   >
 > {
@@ -528,5 +553,6 @@ export async function invitationToConfirm(
   if (state.outcome !== 'verified') return state;
   const invitation = recordOf(id.toLowerCase(), state.fields);
   if (invitation.status !== 'AWAITING_CONFIRMATION') return { outcome: 'not_waiting' };
-  return { outcome: 'waiting', invitation, version: state.version };
+  const ended = confirmationEnds(invitation.expiresAt).getTime() <= now.getTime();
+  return { outcome: 'waiting', invitation, version: state.version, ended };
 }

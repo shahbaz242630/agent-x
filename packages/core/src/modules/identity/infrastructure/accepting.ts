@@ -13,19 +13,20 @@
 //    (otherwise 409 INVITATION_CLOSED), with the invited address decrypted.
 // 3. The person's session must hold a verified address (B4-4a) equal to the
 //    invited one; a session with none, or another, is INVITATION_INVALID.
-// 4. The person must not be an active member already (409 ALREADY_A_MEMBER).
-//    Two of their invitations there accepted at the same moment: the second
-//    finds the directory's key taken, and is refused the same way.
+// 4. The admin who asked must still be an active admin there (otherwise 409
+//    INVITATION_CLOSED; the S68 audit), and the person must not be an active
+//    member already (409 ALREADY_A_MEMBER). Two of their invitations there
+//    accepted at the same moment: the second finds the directory's key
+//    taken, and is refused the same way.
 // 5. The invitation is accepted: a developer or viewer joins now, the
-//    membership added in the same transaction, or, for a person deactivated
-//    there, their membership brought back with the invitation's role and
-//    today's start (B4-5c); an admin or finance approver waits for an
-//    existing admin to confirm who accepted (B4-4d), who brings them back
-//    the same way. The operator's invitation of an organisation's first
-//    admin, accepted while no one is listed there, joins at once: there is
-//    no admin to confirm them (B4-6a). A person rejoining this way, or
-//    anyone joining as an admin, is told to the organisation's admins
-//    through the outbox, in the same transaction (B5-1b).
+//    membership added in the same transaction; an admin or finance approver,
+//    or anyone deactivated there before whatever the role (the S68 audit),
+//    waits for an existing admin to confirm who accepted (B4-4d), who adds
+//    them or brings their membership back (B4-5c). The operator's invitation
+//    of an organisation's first admin, accepted while no one is listed
+//    there, joins at once: there is no admin to confirm them (B4-6a). Anyone
+//    joining as an admin is told to the organisation's admins through the
+//    outbox, in the same transaction (B5-1b).
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
@@ -36,8 +37,8 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
-import { type AuditTables, withSignedStates } from '../../audit/index.ts';
-import { type DirectoryTables, listedInvite, listedMembers } from '../../directory/index.ts';
+import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
+import { type DirectoryTables, listedInvite, listedMembers, listedMembership } from '../../directory/index.ts';
 import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import {
   acceptInvitation,
@@ -47,7 +48,14 @@ import {
   inviteTokenHash,
 } from './invitations.ts';
 import { tellAdminsOfGrant } from './grant-notices.ts';
-import { addMembership, isMembershipTaken, membershipOf, reactivateMembership } from './memberships.ts';
+import {
+  addMembership,
+  isMembershipTaken,
+  type MembershipCheck,
+  membershipOf,
+  type MembershipsTransaction,
+  memberOf,
+} from './memberships.ts';
 import { sessionEmailOf } from './session-emails.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -61,13 +69,57 @@ export const ACCEPT_OPERATION = 'invitations.accept';
  * empty, and both join unconfirmed; so each first takes a lock for the
  * organisation's first admin, held to the end of its transaction, and the
  * second, waiting, reads the list once the first has committed (B4-6a
- * review). Only those acceptances take it, after the invitation and before
- * any membership.
+ * review). Only those acceptances take it, after the invitation and the
+ * person's membership are read, and before any membership is added.
  */
 async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: string): Promise<boolean> {
   const key = `agentx.first-admin:${orgId.toLowerCase()}`;
   await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
   return (await listedMembers(tx, orgId, 1)).length === 0;
+}
+
+/**
+ * The accepting person's membership there, read for the change, as
+ * membershipOf gives it; and, for a member's invitation, the membership of
+ * the admin who asked, read to decide: they must still be an active admin
+ * there, or the invitation is closed (the S68 audit: an admin about to be
+ * removed can't leave links behind that bring anyone in once they're gone).
+ * The two in order of membership ID (ADR-006 §6 level 2a), as a member's role
+ * change takes them. (The admin's is only shared, so no change waits on it
+ * backwards today; the order is kept so none ever can.)
+ */
+async function membershipsRead(
+  tx: MembershipsTransaction,
+  states: SignedStates,
+  orgId: string,
+  userId: string,
+  invitedBy: string | null,
+): Promise<MembershipCheck> {
+  const theirs = () => membershipOf(tx, states, orgId, userId, 'change');
+  if (invitedBy === null) return theirs();
+  const inviterId = invitedBy.toLowerCase();
+  const stillAdmin = async () => {
+    const inviter = await memberOf(tx, states, { orgId, id: inviterId }, 'share');
+    if (inviter.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
+    if (inviter.outcome === 'missing' || inviter.member.status !== 'ACTIVE' || inviter.member.role !== 'admin') {
+      throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
+    }
+  };
+  const theirId = await listedMembership(tx, orgId, userId);
+  if (theirId === inviterId) {
+    // The admin who asked is accepting it: their own membership, read once for the change, decides both.
+    // Still active, they are refused as ALREADY_A_MEMBER; listed but not theirs, the directory's key refuses it.
+    const read = await theirs();
+    if (read.outcome === 'deactivated') throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
+    return read;
+  }
+  if (theirId !== undefined && theirId < inviterId) {
+    const read = await theirs();
+    await stillAdmin();
+    return read;
+  }
+  await stillAdmin();
+  return theirs();
 }
 
 /** Who is accepting: a signed-in person, by their session. */
@@ -124,7 +176,7 @@ export function createInvitationAcceptance({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
-  /** Where the admins' notices of a rejoin or an admin joining are written (B5-1b). */
+  /** Where the admins' notices of an admin joining are written (B5-1b); a rejoin is told on its confirmation. */
   readonly outbox: Outbox;
   readonly logger: Logger;
 }): InvitationAcceptance {
@@ -148,7 +200,7 @@ export function createInvitationAcceptance({
             if (read.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
             if (read.outcome === 'closed') throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
             if (address === undefined || address !== read.email) throw new AcceptanceRefused(403, 'INVITATION_INVALID');
-            const membership = await membershipOf(tx, states, orgId, person.userId, 'change');
+            const membership = await membershipsRead(tx, states, orgId, person.userId, read.invitedBy);
             if (membership.outcome === 'tampered') throw new AcceptanceRefused(503, 'INTEGRITY_FAILED');
             if (membership.outcome === 'active') throw new AcceptanceRefused(409, 'ALREADY_A_MEMBER');
             const actor = { type: 'user' as const, id: person.userId };
@@ -161,22 +213,10 @@ export function createInvitationAcceptance({
                 userId: person.userId,
                 actor,
                 noMembers,
+                // A person deactivated there comes back only once an admin confirms it (the S68 audit).
+                rejoining: membership.outcome === 'deactivated',
               });
-              if (accepted.outcome === 'accepted' && membership.outcome === 'deactivated') {
-                await reactivateMembership(tx, states, {
-                  orgId,
-                  id: membership.id,
-                  role: accepted.role,
-                  joinedAt: now,
-                  actor,
-                });
-                await tellAdminsOfGrant(tx, outbox, {
-                  orgId,
-                  membershipId: membership.id,
-                  role: accepted.role,
-                  rejoined: true,
-                });
-              } else if (accepted.outcome === 'accepted') {
+              if (accepted.outcome === 'accepted') {
                 const joined = ids.next();
                 await addMembership(tx, states, {
                   orgId,

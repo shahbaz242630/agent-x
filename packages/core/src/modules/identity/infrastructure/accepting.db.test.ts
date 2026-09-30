@@ -290,6 +290,21 @@ describe(`accepting an invitation (B4-4c, SEC-HA-08, Postgres ${server.version})
     expect(other).toEqual({ outcome: 'conflict' });
   });
 
+  it('refuses an invitation whose admin’s membership was tampered with, as INTEGRITY_FAILED (the S68 audit)', async () => {
+    const who = await organization();
+    const { token } = await invitation(who, 'developer');
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.setColumn(who.admin, 'role', 'viewer');
+    } finally {
+      await owner.end();
+    }
+    const invitee = await person();
+
+    expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await membershipOfPerson(who.org, invitee.userId)).toEqual({ outcome: 'none' });
+  });
+
   it('withholds a retry’s answer when the invitation was tampered with since, as INTEGRITY_FAILED', async () => {
     const who = await organization();
     const { id, token } = await invitation(who, 'viewer');
@@ -481,72 +496,140 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     return membershipId;
   }
 
-  it('brings a person deactivated there back as a developer: the same membership, the invitation’s role, a new start (B4-5c)', async () => {
+  it.each(['developer', 'viewer'] as const)(
+    'keeps a person deactivated there waiting, invited as a %s, until an admin confirms them (the S68 audit)',
+    async (role) => {
+      const who = await organization();
+      const member = await person();
+      const membershipId = await deactivatedIn(who.org, member);
+      const { id, token } = await invitation(who, role);
+
+      expect(await accept(member, token)).toMatchObject({
+        outcome: 'accepted',
+        invitation: { id, role, status: 'AWAITING_CONFIRMATION', acceptedBy: member.userId },
+      });
+      expect(await membershipOfPerson(who.org, member.userId)).toEqual({ outcome: 'deactivated', id: membershipId });
+      // No membership moved: confirming.ts brings it back, and tells the admins then.
+      const events = await database
+        .as('backup')
+        .query<{ action: string }>('select action from audit.events where subject_id = $1 order by seq', [
+          membershipId,
+        ]);
+      expect(events.map(({ action }) => action)).toEqual(['membership.created', 'membership.deactivated']);
+      expect(await noticesIn(who.org)).toEqual([]);
+    },
+  );
+
+  it('checks the admin who asked when the person’s membership has the lower ID: waiting while they are an admin, closed once gone', async () => {
     const who = await organization();
     const member = await person();
     const membershipId = await deactivatedIn(who.org, member);
-    const { id, token } = await invitation(who, 'developer');
-    clock.advanceBy(86_400_000);
+    // An admin added after them, so the person's membership has the lower ID.
+    const { userId: laterUser } = await person(null);
+    const laterAdmin = ids.next();
+    await withSignedStates(app, who.org, services(), (tx, states) =>
+      addMembership(tx, states, {
+        orgId: who.org,
+        id: laterAdmin,
+        userId: laterUser,
+        role: 'admin',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    expect(membershipId < laterAdmin).toBe(true);
+    const { token } = await invitation({ org: who.org, admin: laterAdmin, adminUser: laterUser }, 'viewer');
 
-    expect(await accept(member, token)).toMatchObject({ outcome: 'accepted', invitation: { id, status: 'ACCEPTED' } });
-    expect(await membershipOfPerson(who.org, member.userId)).toEqual({
-      outcome: 'active',
-      id: membershipId,
-      role: 'developer',
+    expect(await accept(member, token)).toMatchObject({
+      outcome: 'accepted',
+      invitation: { status: 'AWAITING_CONFIRMATION' },
     });
-    const list = await membersFor(app, services(), who.org);
-    expect(list).toMatchObject({
-      outcome: 'listed',
-      members: expect.arrayContaining([
-        expect.objectContaining({ id: membershipId, joinedAt: clock.now() }),
-      ]) as unknown,
+    // Once that admin is gone, the same kind of link is closed.
+    const second = await invitation({ org: who.org, admin: laterAdmin, adminUser: laterUser }, 'viewer');
+    await adminMoved({ org: who.org, admin: laterAdmin }, 'deactivated');
+    expect(await accept(member, second.token, 'accept-2')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'INVITATION_CLOSED',
     });
-    const events = await database
-      .as('backup')
-      .query<{ action: string; details: string }>(
-        'select action, details from audit.events where subject_id = $1 order by seq',
-        [membershipId],
-      );
-    expect(events.map(({ action }) => action)).toEqual([
-      'membership.created',
-      'membership.deactivated',
-      'membership.renewed',
-      'membership.reactivated',
-    ]);
-    expect(JSON.parse(events[2]?.details ?? '{}')).toMatchObject({ roleFrom: 'viewer', roleTo: 'developer' });
-    expect(JSON.parse(events[3]?.details ?? '{}')).toMatchObject({
-      role: 'developer',
-      statusFrom: 'DEACTIVATED',
-      statusTo: 'ACTIVE',
-    });
-    // Still one entry, one membership.
-    const entries = await database
-      .as('backup')
-      .query('select 1 from directory.members where user_id = $1', [member.userId]);
-    expect(entries).toHaveLength(1);
-    // B5-1b: the admins are told of the rejoin, in the same transaction.
-    expect(await noticesIn(who.org)).toEqual([{ to: null, kind: 'member_rejoined', membershipId, role: 'developer' }]);
   });
 
-  it('brings a person deactivated there back once when two of their invitations are accepted at the same moment (B4-5c)', async () => {
-    const who = await organization();
-    const member = await person();
-    const membershipId = await deactivatedIn(who.org, member);
-    const first = await invitation(who, 'viewer');
-    const second = await invitation(who, 'developer');
+  /** Moves the admin who asked: deactivated, or no longer an admin. */
+  async function adminMoved(who: { org: string; admin: string }, how: 'deactivated' | 'demoted'): Promise<void> {
+    await withSignedStates(app, who.org, services(), async (tx, states) => {
+      const key = { orgId: who.org, id: who.admin };
+      if (how === 'deactivated') {
+        await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
+          actor: OPERATOR,
+          action: 'membership.deactivated',
+          details: {},
+        });
+        return;
+      }
+      const state = await states.verifiedState(tx, MEMBERSHIPS, key, 'change');
+      if (state.outcome !== 'verified') throw new Error('the admin’s membership is not verified');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        key,
+        state,
+        { role: 'developer' },
+        {
+          actor: OPERATOR,
+          action: 'membership.role_changed',
+          details: {},
+        },
+      );
+    });
+  }
 
-    const answers = await Promise.all([
-      accept(member, first.token, 'accept-a'),
-      accept(member, second.token, 'accept-b'),
-    ]);
+  it.each(['deactivated', 'demoted'] as const)(
+    'closes an invitation whose admin has been %s since: nothing is accepted (the S68 audit)',
+    async (how) => {
+      const who = await organization();
+      const { id, token } = await invitation(who, 'developer');
+      await adminMoved(who, how);
+      const invitee = await person();
 
-    expect(answers.map((answer) => answer.outcome).sort()).toEqual(['accepted', 'refused']);
-    expect(answers).toContainEqual({ outcome: 'refused', status: 409, code: 'ALREADY_A_MEMBER' });
-    expect(await membershipOfPerson(who.org, member.userId)).toMatchObject({ outcome: 'active', id: membershipId });
-    const reactivations = await database
-      .as('backup')
-      .query("select 1 from audit.events where subject_id = $1 and action = 'membership.reactivated'", [membershipId]);
-    expect(reactivations).toHaveLength(1);
+      expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 409, code: 'INVITATION_CLOSED' });
+      expect(await membershipOfPerson(who.org, invitee.userId)).toEqual({ outcome: 'none' });
+      const read = await withSignedStates(app, who.org, services(), (tx, states) =>
+        invitationRecord(tx, states, who.org, id),
+      );
+      expect(read).toMatchObject({ outcome: 'found', invitation: { status: 'OPEN', acceptedBy: null } });
+    },
+  );
+
+  it('refuses an admin who invited themselves, once deactivated, their own link back in (the S68 audit)', async () => {
+    // The admin signs in with the address they invite, before they are removed.
+    const self = await person();
+    const org = ids.next();
+    const admin = ids.next();
+    await withSignedStates(app, org, services(), async (tx, states) => {
+      await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
+      await addMembership(tx, states, {
+        orgId: org,
+        id: admin,
+        userId: self.userId,
+        role: 'admin',
+        joinedAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    const { token } = await invitation({ org, admin, adminUser: self.userId }, 'developer');
+    expect(await accept(self, token, 'accept-while-admin')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'ALREADY_A_MEMBER',
+    });
+    await adminMoved({ org, admin }, 'deactivated');
+
+    expect(await accept(self, token, 'accept-once-removed')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'INVITATION_CLOSED',
+    });
+    expect(await membershipOfPerson(org, self.userId)).toEqual({ outcome: 'deactivated', id: admin });
   });
 
   it('keeps a person deactivated there waiting, invited as an admin, until an admin confirms them (B4-5c)', async () => {

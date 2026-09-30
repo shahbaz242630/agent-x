@@ -16,12 +16,14 @@
 //    the token from the link: the directory names the organisation, the
 //    invitation must still be open, and the person's verified email (B4-4a)
 //    must be the invited one. A developer or viewer joins now; an admin or
-//    approver waits for an existing admin's confirmation (B4-4d). 200 with the
-//    organisation and the invitation; 403 INVITATION_INVALID for a token not
-//    known or another address alike, 409 INVITATION_CLOSED, 409
-//    ALREADY_A_MEMBER.
-// 4. B4-4d: an admin or approver who accepted waits for an existing admin
-//    (ADR-005 §6). `POST /v1/members/invitations/{id}/approve` opens a
+//    approver, or anyone deactivated there before (the S68 audit), waits for
+//    an existing admin's confirmation (B4-4d). 200 with the organisation and
+//    the invitation; 403 INVITATION_INVALID for a token not known or another
+//    address alike, 409 INVITATION_CLOSED (also when the admin who asked is
+//    no longer one), 409 ALREADY_A_MEMBER.
+// 4. B4-4d: an admin or approver who accepted, or anyone rejoining, waits
+//    for an existing admin (ADR-005 §6), at most 72 hours past the
+//    invitation's end. `POST /v1/members/invitations/{id}/approve` opens a
 //    step-up bound to who accepted and the role (202 with its ID);
 //    `.../approve/confirm` with that ID, once signed in again, adds the
 //    membership (200); `.../decline` refuses them (200, no step-up: it grants
@@ -73,7 +75,11 @@ const INVITATION = z
       .describe(
         'DRAFT until the admin who asked signs in again and confirms it; OPEN once confirmed; ACCEPTED once the invited person has joined; AWAITING_CONFIRMATION while an accepted admin or approver waits for an admin to confirm them, then ACCEPTED or DECLINED.',
       ),
-    expiresAt: z.iso.datetime().describe('When it ends, 72 hours after it was asked for, whatever its status.'),
+    expiresAt: z.iso
+      .datetime()
+      .describe(
+        'When it ends, 72 hours after it was asked for, whatever its status; an acceptance may wait for an admin’s confirmation 72 hours past it.',
+      ),
   })
   .register(API_SCHEMAS, { id: 'Invitation', description: 'An invitation to join the organisation.' });
 
