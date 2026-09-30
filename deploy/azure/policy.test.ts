@@ -1148,6 +1148,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(changed(named(/^logs-to-workspace$/), change))).toEqual(['resource-logs']);
     }
+    for (const change of [
+      (entry: Mutable) => (inside(entry, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
+      (entry: Mutable) => (first(at(entry, 'properties', 'logs')).enabled = false),
+    ]) {
+      expect(brokenRules(changed(DNS_LOGS, change))).toEqual(['resource-logs']);
+    }
     expect(
       brokenRules(
         changed(named(/^logs-to-workspace$/), (entry) => (inside(entry, 'properties').workspaceId = elsewhere)),
@@ -1165,6 +1171,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       changed(DNS_LINK, (link) => (link.id = String(link.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
       without(DNS_RULE),
       changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
+      changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'disabled')),
       changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow')),
       changed(DNS_RULE, (rule) => delete inside(rule, 'properties', 'action').actionType),
       // The rule sits under a policy the network isn't linked to.
@@ -1181,9 +1188,20 @@ describe('SEC-OPS-09 each rule can fail', () => {
     inside(allowAll, 'properties').priority = 100;
     inside(allowAll, 'properties', 'action').actionType = 'Allow';
     expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch']);
+    inside(allowAll, 'properties', 'action').actionType = 'allow';
+    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch']);
     // Blocking every name still sees each lookup.
     expect(
       brokenRules(changed(DNS_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
+    ).toEqual([]);
+    // Azure reads the action and the state without regard to case.
+    expect(
+      brokenRules(
+        changed(DNS_RULE, (entry) => {
+          inside(entry, 'properties', 'action').actionType = 'block';
+          properties(entry).dnsSecurityRuleState = 'enabled';
+        }),
+      ),
     ).toEqual([]);
     expect(brokenRules(changed(DNS_POLICY, (policy) => (policy.location = 'westeurope')))).toEqual(['in-country']);
   });

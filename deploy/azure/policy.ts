@@ -1285,9 +1285,14 @@ const EVERY_NAME = '.';
  * apps subnet's rules must let out and so can't filter. The network is linked
  * to one of the deployment's policies, which holds an enabled rule over every
  * name, in a list of this deployment, that alerts on or blocks each lookup,
- * so a name no rule above it names is still seen; and no rule allows every
- * name, which would let each lookup through before that rule is reached.
- * Rule `resource-logs` sends what the policy sees to the workspace.
+ * so a name no rule above it names is still judged; and no rule allows every
+ * name, which would let each lookup through before that rule is reached (it
+ * would still be logged, Allow logs too, but never blocked once that rule
+ * blocks). A broad Allow short of every name (`com.`) would shadow it the
+ * same way: the allowlist that comes with Block must refuse those too. Azure
+ * reads the state and the action without regard to case, so they are
+ * compared that way. Rule `resource-logs` sends what the policy sees to the
+ * workspace.
  */
 const dnsWatch: Check = (snapshot, _expected, add) => {
   const everyName = new Set(
@@ -1297,11 +1302,12 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
   );
   const rulesOf = (policy: string): readonly PredictedResource[] =>
     ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+  const actionOf = (rule: PredictedResource): string => text(at(rule.properties, 'action', 'actionType')).toLowerCase();
   const coversEveryName = (rule: PredictedResource): boolean =>
     list(at(rule.properties, 'dnsResolverDomainLists')).some((domains) => everyName.has(text(at(domains, 'id'))));
   const watches = (rule: PredictedResource): boolean =>
-    at(rule.properties, 'dnsSecurityRuleState') !== 'Disabled' &&
-    ['Alert', 'Block'].includes(text(at(rule.properties, 'action', 'actionType'))) &&
+    text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled' &&
+    ['alert', 'block'].includes(actionOf(rule)) &&
     coversEveryName(rule);
   for (const network of ofType(snapshot, TYPES.network)) {
     const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
@@ -1310,10 +1316,7 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
       .map((link) => link.id.slice(0, link.id.lastIndexOf('/virtualNetworkLinks/')));
     const judged = linkedTo.some((policy) => {
       const rules = rulesOf(policy);
-      return (
-        rules.some(watches) &&
-        !rules.some((rule) => at(rule.properties, 'action', 'actionType') === 'Allow' && coversEveryName(rule))
-      );
+      return rules.some(watches) && !rules.some((rule) => actionOf(rule) === 'allow' && coversEveryName(rule));
     });
     if (!judged) {
       add({
