@@ -58,6 +58,8 @@ const clock = new FixedClock(new Date('2026-09-26T09:00:00Z'));
 const challenges = () => createStepUpChallenges({ ids, clock });
 const sessions = () => createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
 let clearings: HoldClearings;
+/** What the clearings log. */
+const capture = new LogCapture();
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
@@ -195,7 +197,7 @@ beforeAll(async () => {
     keys,
     ids,
     challenges: challenges(),
-    logger: loggerFor(new LogCapture()),
+    logger: loggerFor(capture),
     authorityTables: AUTHORITY_TABLES,
   });
 });
@@ -341,6 +343,24 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     // Put back as it was signed, the same step-up still clears it: the refusal kept nothing.
     await row.restore();
     expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+  });
+
+  it('refuses while the audit chain is broken, as INTEGRITY_FAILED: an event deleted before the latest signed ones (the S68 audit)', async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    // Someone who owns the database deletes an early event: every record's latest signed event is still whole.
+    await database.as('admin').query('delete from audit.events where org_id = $1 and seq = 2', [org]);
+
+    expect(await confirm(investigationId, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+    expect(await hold()).toMatchObject({ outcome: 'held' });
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'integrity_hold.chain_still_broken', reason: 'gap', seq: '2' }),
+    );
   });
 
   it('refuses to confirm once the hold was cleared since, as NOT_ON_HOLD', async () => {

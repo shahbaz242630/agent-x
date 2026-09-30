@@ -70,7 +70,7 @@ interface RequiredForeignKey {
 interface FillInTable {
   /** Why the app needs no more: what a row deleted, or another column changed, would allow. */
   readonly reason: string;
-  /** Exactly the columns the app is granted UPDATE on, each on its own (CI-06 checks it). */
+  /** Exactly the columns the app is granted UPDATE on, each on its own (CI-06 checks it); none: rows are only added. */
   readonly columns: readonly string[];
   /**
    * When the app may also delete a row (B1e): once its `column` is `days` whole
@@ -300,6 +300,23 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['result_status', 'result_id'],
       // The retention sweep (B1e, 0009); ADR-014 §3's default.
       sweptAfter: { column: 'created_at', days: IDEMPOTENCY_RETENTION_DAYS },
+    },
+    // The S68 audit: these three were held to no narrower rights than any tenant table's, so a wider
+    // grant a later migration slipped in went unseen by CI-06 and the live guard alike.
+    'identity.factor_reset_confirmations': {
+      reason:
+        "A contact's confirmation of a reset (0025): added once, never changed or deleted. One deleted would drop a confirmation a reset counts; one changed would put it down to another contact",
+      columns: [],
+    },
+    'funding_sources.links': {
+      reason:
+        "A link Agent X started with the partner (0029): the app settles it once, from the partner's own answer. A link deleted would hide a start from the day's budget; its session, partner or starter changed would point it at another's",
+      columns: ['outcome', 'source_id', 'settled_at'],
+    },
+    'fake_partner.records': {
+      reason:
+        "The fake partner's own records on staging (0028): it moves a link's or a payee's state and keeps an alias; never a record deleted, nor its reference or organisation changed",
+      columns: ['alias', 'body'],
     },
   },
   requiredForeignKeys: [
