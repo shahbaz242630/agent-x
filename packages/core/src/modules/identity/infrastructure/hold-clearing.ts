@@ -14,7 +14,11 @@
 //    authority object of the organisation verified against the log, in the
 //    lock order (ADR-006 §6: the organisation, then its invitations and
 //    memberships), so a hold is never cleared over a record still tampered
-//    with; the admin read again; the hold's HELD state, its event bound into
+//    with; then the organisation's whole audit chain checked (the S68 audit:
+//    every link, hash, MAC and its head), so a hold set for a chain found
+//    broken, an event deleted, say, is never cleared while it stays broken:
+//    a broken chain is an operator's restore (Incident playbook), never an
+//    admin's button; the admin read again; the hold's HELD state, its event bound into
 //    the hash; the challenge consumed only for this session, action and hash;
 //    then the audit module clears it, reading the hold with the chain head's
 //    lock, last of all, and refusing a hold set or cleared since.
@@ -28,7 +32,13 @@ import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql } from 'kysely';
 
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
-import { type AuditTables, type HoldRecord, type SignedStates, withSignedStates } from '../../audit/index.ts';
+import {
+  type AuditTables,
+  createAuditTrail,
+  type HoldRecord,
+  type SignedStates,
+  withSignedStates,
+} from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { membershipOf, type MembershipsTransaction } from './memberships.ts';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
@@ -117,6 +127,7 @@ export function createHoldClearings({
   readonly objectsChecked?: number;
 }): HoldClearings {
   if (authorityTables.length === 0) throw new RangeError('Clearing checks every authority table first');
+  const trail = createAuditTrail({ keys, ids });
 
   /** The person's membership, read again for this decision: active and an admin, or a refusal. */
   const mustBeAdmin = async (tx: MembershipsTransaction, states: SignedStates, admin: ClearingAdmin): Promise<void> => {
@@ -185,6 +196,15 @@ export function createHoldClearings({
         const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked);
         if (whole.outcome === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
         if (whole.outcome === 'too_many') throw new Error(`more ${whole.subjectType} records than clearing checks`);
+        // The chain itself, whole: the latest signed events verified above say nothing of one deleted before them.
+        const chain = await trail.verify(tx, admin.orgId, undefined);
+        if (!chain.ok) {
+          logger.child({ correlationId }).error('integrity_hold.chain_still_broken', {
+            reason: chain.problem.reason,
+            seq: String(chain.problem.seq),
+          });
+          throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+        }
         await mustBeAdmin(tx, states, admin);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
         const consumed = await challenges.consume(

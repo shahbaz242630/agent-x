@@ -9,14 +9,23 @@ import { createLogger } from '@agentx/platform/observability';
 
 const guard = vi.hoisted(() => ({
   result: (): Promise<string[]> => Promise.resolve([]),
+  /** What the check asked the guard to hold, each time. */
+  asked: [] as unknown[],
 }));
 
 vi.mock('@agentx/platform/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentx/platform/db')>();
-  return { ...actual, liveSchemaProblems: () => guard.result() };
+  return {
+    ...actual,
+    liveSchemaProblems: (_database: unknown, asked: unknown) => {
+      guard.asked.push(asked);
+      return guard.result();
+    },
+  };
 });
 
 const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
+const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
 
 function logger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
   const capture = new LogCapture();
@@ -41,6 +50,21 @@ beforeEach(() => {
 });
 
 describe('at start-up', () => {
+  it('asks the guard to hold every authority table, and a status guard on each with a status (the S68 audit)', async () => {
+    await schemaSoundAtStart(options(logger()));
+
+    const statuses = AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table);
+    expect(statuses).toEqual(
+      expect.arrayContaining(['identity.memberships', 'agents.agent_keys', 'funding_sources.sources']),
+    );
+    expect(guard.asked.at(-1)).toEqual({
+      appRole: 'agentx_app',
+      ownerRole: OWNER_ROLE,
+      authorityTables: AUTHORITY_TABLES,
+      statusGuardedTables: statuses,
+    });
+  });
+
   it('lets the process go on when the live schema matches, and says so', async () => {
     const log = logger();
     expect(await schemaSoundAtStart(options(log))).toBe(true);

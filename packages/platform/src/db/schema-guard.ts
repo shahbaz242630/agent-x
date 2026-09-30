@@ -221,6 +221,13 @@ export interface SchemaGuardOptions {
    * by default.
    */
   readonly authorityTables?: readonly SignedStateTable[];
+  /**
+   * The tables whose status the guard 0004 installs must hold (the authority
+   * tables with a status machine): each must carry it. A guard dropped
+   * outright is drift as a switched-off one is (the S68 audit). None by
+   * default.
+   */
+  readonly statusGuardedTables?: readonly string[];
 }
 
 /**
@@ -787,7 +794,7 @@ function retentionProblems(table: string, found: readonly PolicyRow[], sweep: Fi
 
 export async function liveSchemaProblems<Schema>(
   db: Kysely<Schema>,
-  { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [] }: SchemaGuardOptions,
+  { appRole, ownerRole, policy = SCHEMA_POLICY, authorityTables = [], statusGuardedTables = [] }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const problems: SchemaProblem[] = [];
   const version = await serverVersion(db);
@@ -942,6 +949,13 @@ export async function liveSchemaProblems<Schema>(
     // Postgres keeps a switched-off trigger's row and stops running it, which
     // is tampering that leaves no trace in the table itself.
     if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
+  }
+  // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
+  for (const table of statusGuardedTables) {
+    const relation = allRelations.find((each) => each.plain === table);
+    // Any other trigger is reported above as a trigger our schema should not hold.
+    const guards = allTriggers.filter((trigger) => trigger.table === relation?.name);
+    if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${STATUS_GUARD}`);
   }
 
   // Indexes. A plain index missing is a matter of speed, so it is not checked

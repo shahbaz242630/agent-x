@@ -928,7 +928,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter(statements)).toEqual([`column idempotency.keys.request_hash: agentx_app ${unlisted}`]);
     });
 
-    it('fails an entry with no reason or no column, for a missing or global table, in an append-only schema, or naming a column the table lacks', async () => {
+    it('fails an entry with no reason, for a missing or global table, in an append-only schema, or naming a column the table lacks; one with no column may still change none', async () => {
       const policy: SchemaPolicy = {
         ...POLICY,
         fillInTables: {
@@ -942,7 +942,6 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter(KEYS, policy)).toEqual([
         "idempotency.keys: the fill-in list names column result_body, which the table doesn't have",
         't.keys: the fill-in list gives no reason for it',
-        't.keys: the fill-in list names no column the app may change',
         't.gone: is on the fill-in list, but no such table exists',
         'migrations.applied: is on the fill-in list, but it is a global table',
         "migrations.applied: the fill-in list names column name, which agentx_app isn't granted UPDATE on",
