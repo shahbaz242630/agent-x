@@ -13,6 +13,7 @@ export {
   type ConsentControls,
   type FinancialRailAdapter,
   type FundingSourceState,
+  isPartnerPage,
   type LinkContext,
   type LinkOutcome,
   type PartnerLinkSession,

@@ -5,7 +5,7 @@
 // tables themselves are the funding-sources module's own tests.
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type FundingSourcesTables, MOST_LINKS_STARTED_A_DAY } from '@agentx/core/modules/funding-sources';
+import { addLink, type FundingSourcesTables, MOST_LINKS_STARTED_A_DAY } from '@agentx/core/modules/funding-sources';
 import {
   addMembership,
   type IdentityTables,
@@ -42,6 +42,7 @@ import {
   LINK_CONFIRM_OPERATION,
   LINK_START_OPERATION,
   type LinkConfirmWrite,
+  linkIdFor,
   type LinkingMember,
   type LinkStartWrite,
 } from './funding-source-links.ts';
@@ -330,25 +331,100 @@ describe(`failures passed on, never answered as refusals (D2-3b, Postgres ${serv
     await expect(confirm(admin, 'not-a-uuid')).rejects.toThrow();
   });
 
-  it('answers PARTNER_UNAVAILABLE to a retry whose link the partner can’t give again, the link kept', async () => {
+  /** The fake partner's link sessions for the organisation: how many it was asked to open. */
+  const partnerSessions = (org: string) =>
+    withTenant(app, org, (tx) =>
+      tx.selectFrom('fake_partner.records').select('ref').where('kind', '=', 'link').execute(),
+    );
+
+  it('asks the partner under the same link for a request sent again, so it opens one session, not one a send (the S68 audit)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+
+    const answers = [await start(admin, 'again'), await start(admin, 'again'), await start(admin, 'again')];
+
+    expect(new Set(answers.map((answer) => JSON.stringify(answer))).size).toBe(1);
+    expect(await partnerSessions(org)).toHaveLength(1);
+    expect((await rows(org)).links).toHaveLength(1);
+  });
+
+  it('makes the link’s ID from the key and whose it is: another key, or another admin’s same key, another link', async () => {
+    const org = await organization();
+    const first = await member(org, 'admin');
+    const second = await member(org, 'admin');
+
+    const made = [
+      startedOf(await start(first, 'shared')).link.id,
+      startedOf(await start(first, 'other')).link.id,
+      startedOf(await start(second, 'shared')).link.id,
+    ];
+
+    expect(new Set(made).size).toBe(3);
+    // RFC 9562's version 8, as the routes' UUIDs take.
+    for (const id of made) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await partnerSessions(org)).toHaveLength(3);
+  });
+
+  it('answers PARTNER_UNAVAILABLE to a retry while the partner doesn’t answer, the link kept', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const { link } = startedOf(await start(admin, 'retried'));
-    let calls = 0;
-    // The retry's own session is given; the first write's, asked for again, isn't.
-    const flaky = over('fake', {
-      startSourceLink: (input) => {
-        calls += 1;
-        return calls === 1 ? rail.startSourceLink(input) : Promise.reject(new RailUnavailable());
-      },
-    });
+    const down = over('fake', { startSourceLink: () => Promise.reject(new RailUnavailable()) });
 
-    expect(await flaky.start(admin, keyed(admin, LINK_START_OPERATION, 'retried'), CORRELATION)).toEqual({
+    expect(await down.start(admin, keyed(admin, LINK_START_OPERATION, 'retried'), CORRELATION)).toEqual({
       outcome: 'refused',
       status: 503,
       code: 'PARTNER_UNAVAILABLE',
     });
     expect((await rows(org)).links).toEqual([{ id: link.id, outcome: null, source_id: null }]);
+  });
+
+  it.each([
+    ['a script', 'javascript:alert(1)'],
+    ['data', 'data:text/html,<p>your bank</p>'],
+    ['plain HTTP', 'http://bank.fake-partner.invalid/authorise/x'],
+    ['another host', 'https://bank.fake-partner.invalid.example/authorise/x'],
+    ['a name in it', 'https://someone@bank.fake-partner.invalid/authorise/x'],
+    ['a password in it', 'https://:words@bank.fake-partner.invalid/authorise/x'],
+    ['no address at all', 'not a page'],
+  ])('never sends a person to a partner’s page that is %s, adding nothing (the S68 audit)', async (_what, page) => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const odd = over('fake', {
+      startSourceLink: async (input) => ({ ...(await rail.startSourceLink(input)), authoriseUrl: page }),
+    });
+
+    expect(await odd.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect((await rows(org)).links).toEqual([]);
+  });
+
+  it('refuses a key used again once its record was swept, its link taken: IDEMPOTENCY_KEY_REUSED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    // What a start with this key left 30 days ago, its key's record swept since: the link its key names.
+    const request = keyed(admin, LINK_START_OPERATION, 'swept');
+    await withTenant(app, org, (tx) =>
+      addLink(tx, {
+        orgId: org,
+        id: linkIdFor(request),
+        startedBy: admin.membershipId,
+        partner: 'fake',
+        sessionRef: 'fake-link-from-long-ago',
+        expiresAt: new Date(clock.now().getTime() - 29 * 86_400_000),
+        createdAt: new Date(clock.now().getTime() - 30 * 86_400_000),
+      }),
+    );
+
+    expect(await links.start(admin, request, CORRELATION)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect((await rows(org)).links).toHaveLength(1);
   });
 });
 

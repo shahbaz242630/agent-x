@@ -50,7 +50,9 @@ import { type RailAccount, SANDBOX_ACCOUNTS } from './sandbox-accounts.ts';
 const PARTNER_KEY = /^[^\s]{1,40}$/;
 const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
-const AUTHORISE_BASE = 'https://bank.fake-partner.invalid/authorise/';
+/** The fake partner's pages: its own origin, which every `authoriseUrl` it gives is on. */
+const AUTHORISE_ORIGIN = 'https://bank.fake-partner.invalid';
+const AUTHORISE_BASE = `${AUTHORISE_ORIGIN}/authorise/`;
 
 /** The controls a business approves unless a test says otherwise: AED 50,000 a payment, AED 200,000 and 100 payments a month. */
 export const USUAL_CONTROLS: ConsentControls = {
@@ -346,6 +348,8 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
 
   return {
     bank,
+
+    authoriseOrigin: AUTHORISE_ORIGIN,
 
     capabilities: () =>
       answer(() => Promise.resolve({ beneficiaryRoutes: [...beneficiaryRoutes], stablePayeeIdentity })),
