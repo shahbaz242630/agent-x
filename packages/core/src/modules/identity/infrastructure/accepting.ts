@@ -85,7 +85,8 @@ async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: strin
  * there, or the invitation is closed (the S68 audit: an admin about to be
  * removed can't leave links behind that bring anyone in once they're gone).
  * The two in order of membership ID (ADR-006 §6 level 2a), as a member's role
- * change takes them.
+ * change takes them. (The admin's is only shared, so no change waits on it
+ * backwards today; the order is kept so none ever can.)
  */
 async function membershipsRead(
   tx: MembershipsTransaction,
@@ -107,9 +108,9 @@ async function membershipsRead(
   const theirId = await listedMembership(tx, orgId, userId);
   if (theirId === inviterId) {
     // The admin who asked is accepting it: their own membership, read once for the change, decides both.
+    // Still active, they are refused as ALREADY_A_MEMBER; listed but not theirs, the directory's key refuses it.
     const read = await theirs();
-    if (read.outcome === 'deactivated' || read.outcome === 'none')
-      throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
+    if (read.outcome === 'deactivated') throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
     return read;
   }
   if (theirId !== undefined && theirId < inviterId) {

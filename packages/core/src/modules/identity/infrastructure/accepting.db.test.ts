@@ -290,6 +290,21 @@ describe(`accepting an invitation (B4-4c, SEC-HA-08, Postgres ${server.version})
     expect(other).toEqual({ outcome: 'conflict' });
   });
 
+  it('refuses an invitation whose admin’s membership was tampered with, as INTEGRITY_FAILED (the S68 audit)', async () => {
+    const who = await organization();
+    const { token } = await invitation(who, 'developer');
+    const owner = await tamperAsOwner(database, MEMBERSHIPS, who.org);
+    try {
+      await owner.setColumn(who.admin, 'role', 'viewer');
+    } finally {
+      await owner.end();
+    }
+    const invitee = await person();
+
+    expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await membershipOfPerson(who.org, invitee.userId)).toEqual({ outcome: 'none' });
+  });
+
   it('withholds a retry’s answer when the invitation was tampered with since, as INTEGRITY_FAILED', async () => {
     const who = await organization();
     const { id, token } = await invitation(who, 'viewer');
