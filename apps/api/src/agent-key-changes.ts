@@ -6,7 +6,10 @@
 //
 // - `rotate` (`agents.keys.rotate`), then its confirm: a new key for the
 //   agent, and the old one kept working to the end of the overlap
-//   (KEY_OVERLAP_HOURS), so the agent can switch without a gap. The ask: the
+//   (KEY_OVERLAP_HOURS), so the agent can switch without a gap. A developer
+//   rotates only the agents they own; an admin, any (the S68 audit: a new
+//   key is a working credential for the agent, so another member's agent
+//   isn't a developer's to take). The ask: the
 //   key claimed first; the member read again; the agent and the key, read
 //   for change; the key the agent's, and live (AGENT_KEY_NOT_LIVE for one
 //   revoked or expired); fewer than MOST_LIVE_KEYS of the agent's keys live
@@ -186,6 +189,15 @@ export function createAgentKeyChanges({
     return read;
   };
 
+  /**
+   * Refuses a developer's rotation of an agent they don't own (FORBIDDEN, as
+   * any other role check): the new key would be theirs to use as the agent.
+   * Revoking isn't held to the owner: it only stops a key, as the brake does.
+   */
+  const mayRotate = (role: string, membershipId: string, owner: string): void => {
+    if (role !== 'admin' && owner !== membershipId.toLowerCase()) throw new AgentRefused(403, 'FORBIDDEN');
+  };
+
   /** A key that may be revoked: not revoked already. */
   const keyToRevoke = async (tx: AgentTx, states: SignedStates, orgId: string, named: KeyNamed) => {
     const read = await keyToChange(tx, states, orgId, named);
@@ -246,8 +258,9 @@ export function createAgentKeyChanges({
     async rotate(member, idempotent, named, correlationId) {
       return asked(
         await work.write(member, idempotent, correlationId, async (tx, states) => {
-          await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
-          const { state } = await keyToRotate(tx, states, member.orgId, named, clock.now());
+          const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
+          const { state, agent } = await keyToRotate(tx, states, member.orgId, named, clock.now());
+          mayRotate(role, membershipId, agent.owner);
           return ask(tx, member, ROTATE_OPERATION, state.eventId);
         }),
       );
@@ -257,12 +270,13 @@ export function createAgentKeyChanges({
       let key: string | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneKeyIssueAtATime(tx, member.orgId);
-        const { role } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
+        const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
         const now = clock.now();
         if ((await keysIssuedSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_KEYS_ISSUED_A_DAY) {
           throw new AgentRefused(409, 'AGENT_KEYS_SPENT');
         }
         const old = await keyToRotate(tx, states, member.orgId, named, now);
+        mayRotate(role, membershipId, old.agent.owner);
         const consumed = await steppedUp(tx, member, role, ROTATE_OPERATION, old.state.eventId, stepUpChallengeId);
         const actor = { type: 'user' as const, id: member.userId };
         const keyId = ids.next();
