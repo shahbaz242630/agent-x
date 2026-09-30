@@ -78,6 +78,11 @@ async function server({ perAddress = 100, perAgent = 10 } = {}) {
     config: { access: ['agent'], agentScopes: [] },
     schema: { response: { 200: z.object({ supplierId: z.uuid(), name: z.string() }) } },
   };
+  // A route asking for a scope no key here holds: every request refused once the agent is known.
+  app.get('/test/payments', { ...answer, config: { access: ['agent'], agentScopes: ['requests:write'] } }, () => ({
+    supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
+    name: 'Gulf Supplies LLC',
+  }));
   app.get('/test/supplier', answer, () => ({
     supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
     name: 'Gulf Supplies LLC',
@@ -114,6 +119,20 @@ describe("SEC-AG-06 C2-2 each agent's own rate limit, beside its address's", () 
     for (let i = 0; i < 10; i += 1) await app.inject(asAgent(i % 2 === 0 ? 'a' : 'c'));
 
     expect((await app.inject(asAgent('c'))).statusCode).toBe(429);
+    expect((await app.inject(asAgent('a'))).statusCode).toBe(429);
+  });
+
+  it('counts an agent refused for a scope it lacks, then answers RATE_LIMITED past its limit (the S68 audit)', async () => {
+    const { app } = await server();
+    const statuses = [];
+    for (let i = 0; i < 11; i += 1) {
+      statuses.push(
+        (await app.inject({ ...asAgent('a', `198.51.100.${String(i)}`), url: '/test/payments' })).statusCode,
+      );
+    }
+
+    expect(statuses).toEqual([...Array.from({ length: 10 }, () => 403), 429]);
+    // One count: the refusals used the agent's minute up, for its allowed requests too.
     expect((await app.inject(asAgent('a'))).statusCode).toBe(429);
   });
 
