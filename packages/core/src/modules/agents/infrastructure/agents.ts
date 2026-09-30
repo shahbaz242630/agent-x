@@ -148,6 +148,45 @@ export async function agentOf(
   };
 }
 
+/**
+ * Hands the agent to another owner, a membership the use case checked may
+ * own it and isn't its owner already, in the caller's transaction, which
+ * must be withSignedStates' for its organisation: `state` is the one agentOf
+ * gave for change there. Only the owner changes; the agent's status, scopes
+ * and keys stay as they are.
+ */
+export async function handAgentOver(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  {
+    orgId,
+    agent,
+    state,
+    owner,
+    actor,
+    details,
+  }: {
+    readonly orgId: string;
+    readonly agent: AgentRecord;
+    readonly state: VerifiedState;
+    /** The membership taking it over. */
+    readonly owner: string;
+    readonly actor: AuditActor;
+    /** More facts for its event, such as the step-up it was confirmed with. */
+    readonly details: AuditDetails;
+  },
+): Promise<RecordedState> {
+  const to = owner.toLowerCase();
+  return states.record(
+    tx,
+    AGENTS,
+    { orgId, id: agent.id },
+    state,
+    { owner: to },
+    { actor, action: 'agent.owner_changed', details: { ...details, ownerFrom: agent.owner, ownerTo: to } },
+  );
+}
+
 /** An agent as a list or an answer shows it: its signed state, with its name and when it was added. */
 export interface AgentShown extends AgentRecord {
   readonly name: string;

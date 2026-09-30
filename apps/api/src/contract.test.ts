@@ -146,6 +146,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/agents/{id}/keys/{keyId}/revoke/confirm',
       'POST /v1/agents/{id}/keys/{keyId}/rotate',
       'POST /v1/agents/{id}/keys/{keyId}/rotate/confirm',
+      'POST /v1/agents/{id}/owner',
+      'POST /v1/agents/{id}/owner/confirm',
       'POST /v1/agents/{id}/reactivate',
       'POST /v1/agents/{id}/reactivate/confirm',
       'POST /v1/agents/{id}/suspend',
@@ -1149,8 +1151,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
     // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
-    // with each GET's HEAD.
-    expect(answers.length).toBe(72);
+    // an agent's handover and its confirm (the S68 audit), with each GET's HEAD.
+    expect(answers.length).toBe(74);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1160,6 +1162,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     expect(Object.keys(document.components.schemas).sort()).toEqual([
       'Agent',
       'AgentFundingSource',
+      'AgentHandOverAsked',
       'AgentKey',
       'AgentKeyChangeAsked',
       'AgentReactivationAsked',

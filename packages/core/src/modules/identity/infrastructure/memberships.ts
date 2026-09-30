@@ -302,3 +302,28 @@ export async function memberOf(
     state,
   };
 }
+
+/**
+ * Locks the organisation's memberships among `ids` for a decision (`share`),
+ * all in one statement in order of ID (ADR-006 §6: a level's set at once), in
+ * the caller's transaction, which must be withSignedStates' for it. Locks
+ * alone: nothing is read, verified or decided here, so a caller may be
+ * checked before another member's membership is verified, each then read
+ * through its signed state (`share` again). An ID the organisation doesn't
+ * have locks nothing.
+ */
+export async function lockMemberships(
+  tx: MembershipsTransaction,
+  orgId: string,
+  ids: readonly string[],
+): Promise<void> {
+  await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- locks alone; each membership is then read through its signed state
+    .selectFrom(MEMBERSHIPS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('id', 'in', ids)
+    .orderBy('id')
+    .forShare()
+    .execute();
+}

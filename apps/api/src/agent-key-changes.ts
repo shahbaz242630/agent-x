@@ -34,22 +34,13 @@
 // confirm), the member's membership (2a), the agent (3), the key (3a) and
 // then the agent's other keys (3a, by ID), the step-up challenge, the chain
 // head last.
-import { randomBytes } from 'node:crypto';
-
 import {
-  addAgentKey,
   agentKeyOf,
   agentKeysOf,
-  agentKeyText,
   agentOf,
   AGENT_KEYS,
   bringKeyExpiryForward,
   isLiveKey,
-  KEY_SECRET_BYTES,
-  keyExpiresAt,
-  keySecretMessage,
-  keysIssuedSince,
-  MOST_KEYS_ISSUED_A_DAY,
   MOST_LIVE_KEYS,
   oneKeyIssueAtATime,
   rotatedKeyExpiresAt,
@@ -130,8 +121,6 @@ export interface AgentKeyChanges {
     correlationId: string,
   ): Promise<AgentKeyChangeWrite>;
 }
-
-const DAY_MS = 86_400_000;
 
 /**
  * The pending change's SHA-256: the organisation and the key's latest
@@ -272,25 +261,16 @@ export function createAgentKeyChanges({
         await oneKeyIssueAtATime(tx, member.orgId);
         const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
         const now = clock.now();
-        if ((await keysIssuedSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_KEYS_ISSUED_A_DAY) {
-          throw new AgentRefused(409, 'AGENT_KEYS_SPENT');
-        }
+        await work.keyBudgetLeft(tx, member.orgId, now);
         const old = await keyToRotate(tx, states, member.orgId, named, now);
         mayRotate(role, membershipId, old.agent.owner);
         const consumed = await steppedUp(tx, member, role, ROTATE_OPERATION, old.state.eventId, stepUpChallengeId);
         const actor = { type: 'user' as const, id: member.userId };
-        const keyId = ids.next();
-        const secret = randomBytes(KEY_SECRET_BYTES);
-        const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, secret));
-        await addAgentKey(tx, states, {
+        const issued = await work.issueKey(tx, states, {
           orgId: member.orgId,
-          id: keyId,
           agentId: old.agent.id,
           scopes: old.key.scopes.filter((scope) => old.agent.scopes.includes(scope)),
-          secretMac: mac,
-          secretKeyVersion: keyVersion,
-          expiresAt: keyExpiresAt(now),
-          createdAt: now,
+          now,
           actor,
           details: { ...stepUpDetails(consumed), rotates: old.key.id },
         });
@@ -301,9 +281,9 @@ export function createAgentKeyChanges({
           expiresAt: rotatedKeyExpiresAt(old.key.expiresAt, now),
           actor,
           action: 'agent_key.rotated',
-          details: { rotatedTo: keyId },
+          details: { rotatedTo: issued.id },
         });
-        key = agentKeyText(keyId, secret);
+        key = issued.text;
         return { status: 201, resourceId: old.agent.id };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;

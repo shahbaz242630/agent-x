@@ -184,9 +184,9 @@ export class TooManyAgentKeys extends Error {
 
 /**
  * The agent's keys, revoked and expired ones included, in order of ID, each
- * read (`share`) and verified, in the caller's transaction, which must be
- * withSignedStates' for its organisation and have read the agent first; or
- * tampered with, at the first key that is. One statement for the IDs, then
+ * read (`share`, or `change` for a change to them) and verified, in the
+ * caller's transaction, which must be withSignedStates' for its organisation
+ * and have read the agent first; or tampered with, at the first key that is. One statement for the IDs, then
  * each key's own read: the row's agent is only where to look, and a key
  * whose sealed agent is another is left out.
  */
@@ -195,6 +195,7 @@ export async function agentKeysOf(
   states: SignedStates,
   orgId: string,
   agentId: string,
+  lock: 'share' | 'change' = 'share',
 ): Promise<
   | { readonly outcome: 'listed'; readonly keys: readonly AgentKeyRecord[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
@@ -211,7 +212,7 @@ export async function agentKeysOf(
   if (rows.length > MOST_KEYS_LISTED) throw new TooManyAgentKeys();
   const keys: AgentKeyRecord[] = [];
   for (const { id } of rows) {
-    const read = await agentKeyOf(tx, states, { orgId, id }, 'share');
+    const read = await agentKeyOf(tx, states, { orgId, id }, lock);
     if (read.outcome === 'tampered') return read;
     if (read.outcome === 'missing' || read.key.agentId !== agentId.toLowerCase()) continue;
     keys.push(read.key);
@@ -220,9 +221,9 @@ export async function agentKeysOf(
 }
 
 /**
- * Takes the organisation's lock for issuing keys by rotation until the
- * transaction ends, so two rotations at once can't both take the last of the
- * day's budget. Taken right after the idempotency key's claim, before any row lock.
+ * Takes the organisation's lock for issuing keys by rotation or by a
+ * handover until the transaction ends, so two issues at once can't both take
+ * the last of the day's budget. Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneKeyIssueAtATime(tx: AgentsTransaction, orgId: string): Promise<void> {
   const key = `agentx.agent_keys:${orgId.toLowerCase()}`;

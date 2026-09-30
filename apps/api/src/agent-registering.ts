@@ -21,18 +21,11 @@
 // Lock order (ADR-006 §6): the idempotency key, the add lock, the member's
 // membership (2a), the step-up challenge, the agent (3), its key (3a), the
 // chain head last.
-import { randomBytes } from 'node:crypto';
-
 import {
   addAgent,
-  addAgentKey,
-  agentKeyText,
   agentsAddedSince,
   type AgentShown,
   agentsPage,
-  KEY_SECRET_BYTES,
-  keyExpiresAt,
-  keySecretMessage,
   MOST_AGENTS_ADDED_A_DAY,
   oneAgentAddAtATime,
   type Scope,
@@ -188,21 +181,8 @@ export function createAgentRegistrations({
           actor,
           details: stepUpDetails(consumed),
         });
-        const keyId = ids.next();
-        const secret = randomBytes(KEY_SECRET_BYTES);
-        const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, secret));
-        await addAgentKey(tx, states, {
-          orgId: member.orgId,
-          id: keyId,
-          agentId,
-          scopes: asked.scopes,
-          secretMac: mac,
-          secretKeyVersion: keyVersion,
-          expiresAt: keyExpiresAt(now),
-          createdAt: now,
-          actor,
-        });
-        key = agentKeyText(keyId, secret);
+        key = (await work.issueKey(tx, states, { orgId: member.orgId, agentId, scopes: asked.scopes, now, actor }))
+          .text;
         return { status: 201, resourceId: agentId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;

@@ -1,6 +1,7 @@
 // C1-3 (BR-03, ADR-012 §5, SEC-AG-01's suspended key's precondition):
 // suspending an agent (the kill switch) and reactivating it with an admin's
-// step-up, through the use case the routes call, on the real migrated schema,
+// step-up, and handing it to another owner (the S68 audit's question A),
+// through the use case the routes call, on the real migrated schema,
 // as the app role. The routes' answers are agents.test.ts.
 import { createHash } from 'node:crypto';
 
@@ -12,6 +13,8 @@ import {
   createSessions,
   createStepUpChallenges,
   type IdentityTables,
+  memberOf,
+  MEMBERSHIPS,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
@@ -25,13 +28,23 @@ import {
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
   type AgentChanges,
   type AgentChangeWrite,
   createAgentChanges,
+  HAND_OVER_CONFIRM_OPERATION,
+  HAND_OVER_OPERATION,
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
   SUSPEND_OPERATION,
@@ -145,6 +158,25 @@ const confirm = (who: AgentMember, agentId: string, challengeId: string) =>
     CORRELATION,
   );
 
+const handOver = (who: AgentMember, agentId: string, owner: string, key?: IdempotentRequest) =>
+  changes.handOver(who, key ?? keyed(who, HAND_OVER_OPERATION, `${agentId} ${owner}`), agentId, owner, CORRELATION);
+
+const handOverConfirm = (
+  who: AgentMember,
+  agentId: string,
+  owner: string,
+  challengeId: string,
+  key?: IdempotentRequest,
+) =>
+  changes.handOverConfirm(
+    who,
+    key ?? keyed(who, HAND_OVER_CONFIRM_OPERATION, `${agentId} ${owner} ${challengeId}`),
+    agentId,
+    owner,
+    challengeId,
+    CORRELATION,
+  );
+
 /** The member signs in again for the challenge: its evidence recorded, as the step-up's return does. */
 const stepUp = (who: AgentMember, challengeId: string, amr: readonly string[] = PASSKEY) =>
   challenges().recordEvidence(app, challengeId, who.sessionId, {
@@ -156,6 +188,11 @@ const stepUp = (who: AgentMember, challengeId: string, amr: readonly string[] = 
 
 const changedOf = (write: AgentChangeWrite) => {
   if (write.outcome !== 'changed') throw new Error(`not changed: ${JSON.stringify(write)}`);
+  return write.agent;
+};
+
+const handedOf = (write: AgentChangeWrite) => {
+  if (write.outcome !== 'handedOver') throw new Error(`not handed over: ${JSON.stringify(write)}`);
   return write.agent;
 };
 
@@ -192,6 +229,7 @@ beforeEach(() => {
     database: app,
     keys,
     ids,
+    clock,
     challenges: challenges(),
     logger: loggerFor(new LogCapture()),
   });
@@ -389,5 +427,357 @@ describe('reactivating a suspended agent, with an admin’s step-up (C1-3)', () 
 
     expect(await confirm(admin, agent, earlier)).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
     expect((await eventsAbout(org, agent)).at(-1)?.action).toBe('agent.suspended');
+  });
+});
+
+describe('handing an agent to another owner, with an admin’s step-up (the S68 audit’s question A)', () => {
+  /** Asks, signs in again with `amr`, and confirms: the confirm's answer. */
+  const handedOver = async (admin: Member, agentId: string, owner: string, amr: readonly string[] = PASSKEY) => {
+    const challengeId = askedFor(await handOver(admin, agentId, owner));
+    await stepUp(admin, challengeId, amr);
+    return handOverConfirm(admin, agentId, owner, challengeId);
+  };
+
+  const deactivate = (org: string, who: Member) =>
+    withSignedStates(app, org, quiet(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: who.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+
+  /** The member's role changed to `role`, as an admin's role change records it. */
+  const demote = (org: string, who: Member, role: Role) =>
+    withSignedStates(app, org, quiet(), async (tx, states) => {
+      const read = await memberOf(tx, states, { orgId: org, id: who.membershipId }, 'change');
+      if (read.outcome !== 'found') throw new Error('the membership was not found');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        { orgId: org, id: who.membershipId },
+        read.state,
+        { role },
+        {
+          actor: OPERATOR,
+          action: 'membership.role_changed',
+          details: {},
+        },
+      );
+    });
+
+  it.each<Role>(['developer', 'admin'])(
+    'hands it to a %s once the admin signed in again with a passkey: the owner alone changes, recorded with both',
+    async (role) => {
+      const org = await organization();
+      const admin = await member(org, 'admin');
+      const leaving = await member(org, 'developer');
+      const next = await member(org, role);
+      const agent = await agentOf(org, leaving);
+      const challengeId = askedFor(await handOver(admin, agent, next.membershipId.toUpperCase()));
+      await stepUp(admin, challengeId);
+
+      const done = handedOf(await handOverConfirm(admin, agent, next.membershipId, challengeId));
+
+      expect(done.agent).toMatchObject({
+        id: agent,
+        owner: next.membershipId,
+        status: 'ACTIVE',
+        scopes: ['requests:read'],
+      });
+      const events = await eventsAbout(org, agent);
+      expect(events.map((event) => [event.action, event.actor_id])).toEqual([
+        ['agent.created', 'test-operator'],
+        ['agent.owner_changed', admin.userId],
+      ]);
+      expect(JSON.parse(events[1]?.details ?? '{}')).toMatchObject({
+        ownerFrom: leaving.membershipId,
+        ownerTo: next.membershipId,
+        stepUpChallengeId: challengeId,
+        methods: PASSKEY.join(' '),
+      });
+    },
+  );
+
+  it('hands over a suspended agent, which stays suspended: a removed member’s agent stopped first', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const leaving = await member(org, 'developer');
+    const agent = await agentOf(org, leaving);
+    changedOf(await suspend(admin, agent));
+    await deactivate(org, leaving);
+
+    const done = handedOf(await handedOver(admin, agent, admin.membershipId));
+
+    expect(done.agent).toMatchObject({ owner: admin.membershipId, status: 'SUSPENDED' });
+  });
+
+  it('answers a retry of the same confirm as the first, handing over once', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const challengeId = askedFor(await handOver(admin, agent, next.membershipId));
+    await stepUp(admin, challengeId);
+    const key = keyed(admin, HAND_OVER_CONFIRM_OPERATION, `${agent} ${next.membershipId} ${challengeId}`);
+
+    const first = await handOverConfirm(admin, agent, next.membershipId, challengeId, key);
+    const retried = await handOverConfirm(admin, agent, next.membershipId, challengeId, key);
+
+    expect(first).toMatchObject({ outcome: 'handedOver', key: expect.stringMatching(/^axk_/) as unknown });
+    expect(retried).toEqual({ ...first, key: null });
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual([
+      'agent.created',
+      'agent.owner_changed',
+    ]);
+  });
+
+  it.each<Role>(['developer', 'approver', 'viewer'])('refuses a %s: FORBIDDEN, asking or confirming', async (role) => {
+    const org = await organization();
+    const them = await member(org, role);
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, them);
+
+    const refused = { outcome: 'refused', status: 403, code: 'FORBIDDEN' };
+    expect(await handOver(them, agent, next.membershipId)).toEqual(refused);
+    expect(await handOverConfirm(them, agent, next.membershipId, ids.next())).toEqual(refused);
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it.each<[string, (org: string, who: Member) => Promise<unknown>]>([
+    ['removed', (org, who) => deactivate(org, who)],
+    ['made a developer', (org, who) => demote(org, who, 'developer')],
+  ])('refuses the ask of an admin %s: FORBIDDEN, with no step-up opened', async (_, change) => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    await change(org, admin);
+
+    expect(await handOver(admin, agent, next.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses a caller who is no admin before the new owner’s membership is verified: FORBIDDEN, never its 503', async () => {
+    const org = await organization();
+    // The new owner's ID comes first, so a read in order of ID alone would reach it before the caller's.
+    const next = await member(org, 'viewer');
+    const caller = await member(org, 'admin');
+    const agent = await agentOf(org, caller);
+    await demote(org, caller, 'developer');
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'developer' }).where('id', '=', next.membershipId).execute(),
+    );
+
+    expect(await handOver(caller, agent, next.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses a step-up opened in another admin’s session: STEP_UP_FAILED, the owner kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const other = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const theirs = askedFor(await handOver(other, agent, next.membershipId));
+    await stepUp(other, theirs);
+
+    expect(await handOverConfirm(admin, agent, next.membershipId, theirs)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it('refuses an admin removed since: FORBIDDEN', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const challengeId = askedFor(await handOver(admin, agent, next.membershipId));
+    await stepUp(admin, challengeId);
+    await deactivate(org, admin);
+
+    expect(await handOverConfirm(admin, agent, next.membershipId, challengeId)).toMatchObject({
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses a new owner who may not own an agent: AGENT_OWNER_NOT_ELIGIBLE, one answer for each', async () => {
+    const org = await organization();
+    const other = await organization();
+    const admin = await member(org, 'admin');
+    const agent = await agentOf(org, admin);
+    const approver = await member(org, 'approver');
+    const viewer = await member(org, 'viewer');
+    const removed = await member(org, 'developer');
+    await deactivate(org, removed);
+    const elsewhere = await member(other, 'developer');
+
+    const refused = { outcome: 'refused', status: 409, code: 'AGENT_OWNER_NOT_ELIGIBLE' };
+    const owners = [approver, viewer, removed, elsewhere].map((who) => who.membershipId).concat(ids.next());
+    for (const owner of owners) {
+      expect(await handOver(admin, agent, owner)).toEqual(refused);
+      expect(await handOverConfirm(admin, agent, owner, ids.next())).toEqual(refused);
+    }
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it('refuses the owner it has already: AGENT_OWNER_UNCHANGED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agent = await agentOf(org, admin);
+
+    const refused = { outcome: 'refused', status: 409, code: 'AGENT_OWNER_UNCHANGED' };
+    expect(await handOver(admin, agent, admin.membershipId)).toEqual(refused);
+    expect(await handOverConfirm(admin, agent, admin.membershipId, ids.next())).toEqual(refused);
+  });
+
+  it('answers NOT_FOUND for another organisation’s agent, leaving its owner', async () => {
+    const org = await organization();
+    const other = await organization();
+    const theirs = await agentOf(other, await member(other, 'developer'));
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+
+    const missing = { outcome: 'refused', status: 404, code: 'NOT_FOUND' };
+    expect(await handOver(admin, theirs, next.membershipId)).toEqual(missing);
+    expect(await handOverConfirm(admin, theirs, next.membershipId, ids.next())).toEqual(missing);
+    expect((await eventsAbout(other, theirs)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it('refuses an admin who signed in again without a passkey: STEP_UP_FAILED, the owner kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+
+    expect(await handedOver(admin, agent, next.membershipId, APP_CODE)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it('refuses a step-up asked for another new owner, another agent, or a reactivation: STEP_UP_FAILED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const someoneElse = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const another = await agentOf(org, admin);
+    const forSomeoneElse = askedFor(await handOver(admin, agent, someoneElse.membershipId));
+    const forAnother = askedFor(await handOver(admin, another, next.membershipId));
+    changedOf(await suspend(admin, another));
+    const forReactivating = askedFor(await reactivate(admin, another));
+    const asked = [forSomeoneElse, forAnother, forReactivating];
+    for (const challengeId of asked) await stepUp(admin, challengeId);
+
+    for (const challengeId of asked) {
+      expect(await handOverConfirm(admin, agent, next.membershipId, challengeId)).toMatchObject({
+        code: 'STEP_UP_FAILED',
+      });
+    }
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it('refuses a step-up asked before the agent changed: it hands over the agent exactly as it stood', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const challengeId = askedFor(await handOver(admin, agent, next.membershipId));
+    await stepUp(admin, challengeId);
+    changedOf(await suspend(admin, agent));
+
+    expect(await handOverConfirm(admin, agent, next.membershipId, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
+    expect((await eventsAbout(org, agent)).at(-1)?.action).toBe('agent.suspended');
+  });
+
+  it('refuses a new owner’s membership tampered with: INTEGRITY_FAILED, never a handover over it', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const viewer = await member(org, 'viewer');
+    const agent = await agentOf(org, admin);
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'developer' }).where('id', '=', viewer.membershipId).execute(),
+    );
+
+    expect(await handOver(admin, agent, viewer.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
+  });
+
+  /**
+   * Holds the lower of the two memberships' IDs for change, as a role change
+   * of it would; starts the handover; waits until it waits on that lock; then
+   * takes the higher one at once (NOWAIT). Read in order of ID (ADR-006 §6
+   * level 2a), the handover waited before touching the higher one, so it is
+   * free; read the other way, it already holds it and the NOWAIT fails.
+   */
+  it.each<[string, boolean]>([
+    ['the admin’s membership first when its ID comes first', true],
+    ['the new owner’s membership first when its ID comes first', false],
+  ])('reads %s, before the other (a forced lock order)', async (_, adminFirst) => {
+    const org = await organization();
+    const [lower, higher] = [
+      await member(org, adminFirst ? 'admin' : 'developer'),
+      await member(org, adminFirst ? 'developer' : 'admin'),
+    ];
+    const [admin, next] = adminFirst ? [lower, higher] : [higher, lower];
+    const agent = await agentOf(org, admin);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        org,
+        lower.membershipId,
+      ]);
+      const asking = within(20_000, handOver(admin, agent, next.membershipId), 'the handover');
+      await waitUntilQueued(database.as('admin'), 1);
+
+      const taken = await holder.query(
+        'select id from identity.memberships where org_id = $1 and id = $2 for no key update nowait',
+        [org, higher.membershipId],
+      );
+      await holder.query('rollback');
+
+      expect(taken).toHaveLength(1);
+      expect((await asking).outcome).toBe('asked');
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it('refuses an agent tampered with: INTEGRITY_FAILED', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('agents.agents').set({ owner: next.membershipId }).where('id', '=', agent).execute(),
+    );
+
+    expect(await handOver(admin, agent, next.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'INTEGRITY_FAILED',
+    });
   });
 });

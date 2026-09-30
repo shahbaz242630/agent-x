@@ -1,4 +1,4 @@
-// C1-2, C1-3, C1-4b: the agents' routes, answering a member with each
+// C1-2, C1-3, C1-4b and the S68 audit's handover: the agents' routes, answering a member with each
 // outcome of the registration, the reads and the changes. Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
 // agent-registering.db.test.ts.
@@ -112,6 +112,8 @@ interface Call {
     | 'suspend'
     | 'reactivate'
     | 'reactivateConfirm'
+    | 'handOver'
+    | 'handOverConfirm'
     | 'rotate'
     | 'rotateConfirm'
     | 'revoke'
@@ -167,6 +169,14 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
     },
     reactivateConfirm: (member, keyed, agentId, challengeId) => {
       calls.push({ kind: 'reactivateConfirm', member, keyed, subject: [agentId, challengeId] });
+      return changed();
+    },
+    handOver: (member, keyed, agentId, owner) => {
+      calls.push({ kind: 'handOver', member, keyed, subject: [agentId, owner] });
+      return changed();
+    },
+    handOverConfirm: (member, keyed, agentId, owner, challengeId) => {
+      calls.push({ kind: 'handOverConfirm', member, keyed, subject: [agentId, owner, challengeId] });
       return changed();
     },
   };
@@ -487,6 +497,96 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
     const { app } = await withAgents({ change: answer }, 'admin');
 
     const response = await app.inject(change('/reactivate'));
+
+    expect(response.statusCode).toBe(status);
+    expect(response.json()).toMatchObject({ error: { code } });
+  });
+});
+
+describe('POST /v1/agents/:id/owner, handing an agent to another owner with a step-up (the S68 audit)', () => {
+  const NEW_OWNER = '0199a0f0-0000-7000-8000-000000000044';
+  const HANDED = { ...AGENT, owner: NEW_OWNER };
+  const change = (path: string, payload?: unknown): InjectOptions => ({
+    method: 'POST',
+    url: `/v1/agents/${AGENT_ID}${path}`,
+    headers: {
+      ...headers,
+      'idempotency-key': 'k-1',
+      ...(payload !== undefined && { 'content-type': 'application/json' }),
+    },
+    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+  });
+
+  it('asks a step-up for the new owner: 202, then hands it over with the step-up’s ID: 201 with its new key', async () => {
+    const asked = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
+    const confirmed = await withAgents(
+      { change: { outcome: 'handedOver', agent: { agent: HANDED, keys: [KEY] }, key: THE_KEY } },
+      'admin',
+    );
+    const retried = await withAgents(
+      { change: { outcome: 'handedOver', agent: { agent: HANDED, keys: [KEY] }, key: null } },
+      'admin',
+    );
+
+    const ask = await asked.app.inject(change('/owner', { owner: NEW_OWNER }));
+    const confirm = await confirmed.app.inject(
+      change('/owner/confirm', { owner: NEW_OWNER, stepUpChallengeId: CHALLENGE }),
+    );
+
+    expect(ask.statusCode).toBe(202);
+    expect(ask.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked.calls).toEqual([
+      {
+        kind: 'handOver',
+        member: REGISTERING,
+        keyed: expect.objectContaining({ operation: 'agents.owner' }) as unknown,
+        subject: [AGENT_ID, NEW_OWNER],
+      },
+    ]);
+    expect(confirm.statusCode).toBe(201);
+    expect(confirm.json()).toEqual({
+      ...AGENT_ANSWERED,
+      agent: { ...AGENT_ANSWERED.agent, owner: NEW_OWNER },
+      key: THE_KEY,
+    });
+    const again = await retried.app.inject(
+      change('/owner/confirm', { owner: NEW_OWNER, stepUpChallengeId: CHALLENGE }),
+    );
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toMatchObject({ key: null });
+    expect(confirmed.calls).toEqual([
+      {
+        kind: 'handOverConfirm',
+        member: REGISTERING,
+        keyed: expect.objectContaining({ operation: 'agents.owner.confirm' }) as unknown,
+        subject: [AGENT_ID, NEW_OWNER, CHALLENGE],
+      },
+    ]);
+  });
+
+  it.each<[string, InjectOptions]>([
+    ['an ask with no owner', change('/owner', {})],
+    ['an ask with no body', change('/owner')],
+    ['an owner that isn’t an ID', change('/owner', { owner: 'someone' })],
+    ['an ask with more than the owner', change('/owner', { owner: NEW_OWNER, role: 'admin' })],
+    ['a confirm with no step-up', change('/owner/confirm', { owner: NEW_OWNER })],
+    ['a confirm with no owner', change('/owner/confirm', { stepUpChallengeId: CHALLENGE })],
+  ])('refuses %s with 400, never reaching the use case', async (_, request) => {
+    const { app, calls } = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
+
+    expect((await app.inject(request)).statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each<[AgentChangeWrite, number, string]>([
+    [{ outcome: 'refused', status: 409, code: 'AGENT_OWNER_NOT_ELIGIBLE' }, 409, 'AGENT_OWNER_NOT_ELIGIBLE'],
+    [{ outcome: 'refused', status: 409, code: 'AGENT_OWNER_UNCHANGED' }, 409, 'AGENT_OWNER_UNCHANGED'],
+    [{ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' }, 403, 'STEP_UP_FAILED'],
+    [{ outcome: 'conflict' }, 409, 'IDEMPOTENCY_KEY_REUSED'],
+  ])('answers a refusal as its status and code: %j', async (answer, status, code) => {
+    const { app } = await withAgents({ change: answer }, 'admin');
+
+    const response = await app.inject(change('/owner', { owner: NEW_OWNER }));
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
