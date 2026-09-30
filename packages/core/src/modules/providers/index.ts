@@ -14,6 +14,7 @@ export {
   type FinancialRailAdapter,
   type FundingSourceState,
   isPartnerPage,
+  limitsInAccountCurrency,
   type LinkContext,
   type LinkOutcome,
   type PartnerLinkSession,

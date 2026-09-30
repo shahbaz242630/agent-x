@@ -2,7 +2,7 @@
 // the partner's own, over HTTPS, naming no one's credentials.
 import { describe, expect, it } from 'vitest';
 
-import { isPartnerPage } from './rail.ts';
+import { isPartnerPage, limitsInAccountCurrency } from './rail.ts';
 
 const ORIGIN = 'https://bank.partner.example';
 
@@ -25,5 +25,25 @@ describe('isPartnerPage (the S68 audit)', () => {
 
   it('refuses plain HTTP even from an adapter that names a plain-HTTP origin by mistake', () => {
     expect(isPartnerPage('http://bank.partner.example/authorise', 'http://bank.partner.example')).toBe(false);
+  });
+});
+
+describe('limitsInAccountCurrency (the S68 audit)', () => {
+  const summary = { holderName: 'Jasmine AI FZ-LLC', accountType: 'sme', currency: 'USD', hint: 'AE…7727' } as const;
+  const controls = {
+    currency: 'USD',
+    period: 'month',
+    maxPaymentMinor: 1n,
+    maxPeriodMinor: 2n,
+    maxPeriodPayments: 3,
+  } as const;
+
+  it('takes limits in the account’s own currency, and refuses any other', () => {
+    expect(limitsInAccountCurrency({ summary, controls })).toBe(true);
+    expect(limitsInAccountCurrency({ summary, controls: { ...controls, currency: 'AED' } })).toBe(false);
+  });
+
+  it('compares the codes exactly: a lower-case one from an adapter fails safe', () => {
+    expect(limitsInAccountCurrency({ summary, controls: { ...controls, currency: 'usd' } })).toBe(false);
   });
 });
