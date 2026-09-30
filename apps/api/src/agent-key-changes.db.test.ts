@@ -820,6 +820,49 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(done.agent.keys.find((listed) => listed.id === key.keyId)?.status).toBe('REVOKED');
   });
 
+  it('gives the new key only the scopes its agent holds, whatever the key it replaces held', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin, {
+      scopes: ['requests:read'],
+      keyScopes: ['requests:read', 'requests:write'],
+    });
+
+    const done = await handedOver(admin, key.agentId, next.membershipId);
+
+    expect(done.agent.keys.find((listed) => listed.status === 'ACTIVE')?.scopes).toEqual(['requests:read']);
+  });
+
+  it('confirms only once it holds the organisation’s lock for issuing keys, so two can’t both take the day’s last', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    // Another issue of the organisation's, part-way: its lock taken, not yet committed.
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
+        `agentx.agent_keys:${org}`,
+      ]);
+      const confirming = within(
+        20_000,
+        handOverConfirm(admin, key.agentId, next.membershipId, challengeId),
+        'the handover',
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'handedOver' });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it('answers a retry of the same confirm as the first, with the key as null: shown once, handed over once', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

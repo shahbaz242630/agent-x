@@ -71,7 +71,7 @@ export interface AgentWithKeys {
 }
 
 /** A new key for an agent, as issueKey takes it. */
-export interface KeyToIssue {
+interface KeyToIssue {
   readonly orgId: string;
   readonly agentId: string;
   readonly scopes: readonly Scope[];
