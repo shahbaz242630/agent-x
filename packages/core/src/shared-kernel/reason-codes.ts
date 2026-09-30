@@ -21,6 +21,9 @@ export const REASON_CODES = {
   AGENT_KEY_NOT_LIVE: 'The key is revoked or expired, so there is nothing to rotate. Nothing was changed.',
   AGENT_KEY_REVOKED: 'The key is revoked already. Nothing was changed.',
   AGENT_NOT_SUSPENDED: 'The agent is active, so there is no suspension to lift. Nothing was changed.',
+  AGENT_OWNER_NOT_ELIGIBLE:
+    "The member can't own an agent: they must be an active admin or developer of the organisation. Nothing was changed.",
+  AGENT_OWNER_UNCHANGED: 'The member already owns the agent, so nothing was changed.',
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
