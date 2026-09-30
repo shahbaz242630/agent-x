@@ -16,9 +16,6 @@ export const CONSENT_STATUSES = [
 ] as const;
 export type ConsentStatus = (typeof CONSENT_STATUSES)[number];
 
-export const isConsentStatus = (value: unknown): value is ConsentStatus =>
-  CONSENT_STATUSES.some((status) => status === value);
-
 const AVAILABILITY: Readonly<Record<ConsentStatus, SourceAvailability>> = {
   AwaitingAuthorization: 'PENDING',
   Authorized: 'ACTIVE',
