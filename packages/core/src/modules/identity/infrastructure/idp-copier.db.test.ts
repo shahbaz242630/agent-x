@@ -622,6 +622,24 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     },
   );
 
+  it('leaves a person’s own key removed free when the key added before was more than 7 days before', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
+    await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toHaveLength(1);
+    clock.advanceBy(WEEK_MS + 1);
+    const removed = event('user.human.passwordless.token.removed', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toEqual([
+      expect.not.objectContaining({ counts: 'yes' }),
+    ]);
+    // The tests after this one start after its clock: each starts a day on per person made.
+    for (let day = 0; day < 9; day += 1) zitadelId();
+  });
+
   it('leaves a person’s own key removed free when no key was added in the 7 days before', async () => {
     const who = await person();
     await organization(who.userId, 'admin');
@@ -695,11 +713,17 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await sessionsOf(who.userId)).toBe(0);
     const copies = await platformCopies(`user:${who.subject}:${changed.sequence}`);
     expect(copies).toHaveLength(2);
-    expect(copies.filter((copy) => copy.signInsEnded === 2)).toHaveLength(1);
-    // Signed in again since: the same event read again ends nothing.
+    // Ended once, on the first organisation's copy: the other's records none.
+    expect(copies.filter((copy) => 'signInsEnded' in copy)).toEqual([expect.objectContaining({ signInsEnded: 2 })]);
+    // Signed in again since, and joined another organisation: the same event read again, and copied
+    // there for the first time, ends nothing.
     await signIn(who.userId);
+    const joined = await organization(who.userId);
     clock.advanceBy(60_000);
     await copierWith(feed, holding(1)).run();
+    expect(await platformCopies(`user:${who.subject}:${changed.sequence}`)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ org: joined })]) as unknown,
+    );
     expect(await sessionsOf(who.userId)).toBe(1);
   });
 
