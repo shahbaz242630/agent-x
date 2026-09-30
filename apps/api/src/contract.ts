@@ -119,6 +119,9 @@ const isSuccessStatus = (status: string): boolean => /^[1-3](?:[0-9][0-9]|xx)$/i
  */
 const BYPASSES = ['attachValidation', 'validatorCompiler', 'serializerCompiler', 'errorHandler'] as const;
 
+/** The query a write that names none takes: none at all. */
+const NO_QUERY = z.strictObject({});
+
 /** A route as its onRoute hook sees it. */
 type AddedRoute = RouteOptions & { readonly routePath: string; readonly prefix: string };
 
@@ -593,6 +596,10 @@ export async function registerContract(app: FastifyInstance): Promise<void> {
         ...(route.config.operation !== undefined && { [OPERATION_ID_KEY]: route.config.operation }),
         ...(takesBody(route) && route.bodyLimit !== undefined && { [BODY_LIMIT_KEY]: route.bodyLimit }),
         response: { ...responsesOf(route), ...ERROR_RESPONSES },
+        // A write takes no query it doesn't name (the S68 audit, SEC-WEB-06): a stray `?_=…` a
+        // retry added would change the idempotency key's hash, and be refused as REUSED.
+        ...(route.config.operation !== undefined &&
+          route.schema?.querystring === undefined && { querystring: NO_QUERY }),
       };
     if (route.config.operation !== undefined || namesRole(access)) {
       // Fastify lays the checked headers over those sent, so every other header stays.

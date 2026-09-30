@@ -1,6 +1,7 @@
 // Telling an organisation's admins of a role granted (ADR-003 §10; B5-1b): a
 // member made an admin or a finance approver, whether by a role change or by
-// joining, and anyone rejoining, whatever their role. One notice to the
+// joining, and anyone rejoining, whatever their role; and since the S68 audit
+// of one taken away: any member removed, an admin or approver demoted. One notice to the
 // organisation's admins, written to the outbox in the change's own
 // transaction, so it commits or rolls back with the change.
 //
@@ -38,5 +39,32 @@ export async function tellAdminsOfGrant(
   if (kind === undefined) return;
   await outbox.add(tx, [
     { orgId: grant.orgId, recipientUserId: null, kind, membershipId: grant.membershipId, role: grant.role },
+  ]);
+}
+
+/** What was taken away: a membership deactivated, with the role it held; or a role changed, with the one it lost. */
+export interface Removal {
+  readonly orgId: string;
+  readonly membershipId: string;
+  readonly kind: 'deactivated' | 'demoted';
+  readonly role: Role;
+}
+
+/**
+ * Writes a notice of the removal to the organisation's admins (the S68
+ * audit): any member removed, whatever their role, since their agents keep
+ * running; an admin's or finance approver's role taken away. A developer's or
+ * viewer's role changed is not told, as its grant isn't.
+ */
+export async function tellAdminsOfRemoval(
+  tx: Transaction<NotificationsTables>,
+  outbox: Outbox,
+  removal: Removal,
+): Promise<void> {
+  const kind: NoticeKind | undefined =
+    removal.kind === 'deactivated' ? 'member_removed' : TOLD_OF.includes(removal.role) ? 'role_removed' : undefined;
+  if (kind === undefined) return;
+  await outbox.add(tx, [
+    { orgId: removal.orgId, recipientUserId: null, kind, membershipId: removal.membershipId, role: removal.role },
   ]);
 }

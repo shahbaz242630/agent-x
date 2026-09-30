@@ -65,6 +65,18 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       `Someone removed from one of your Agent X organisations rejoined it, as ${article(role)} ${role}.`,
     check: MEMBERS_CHECK,
   },
+  member_removed: {
+    subject: (role) => `Agent X: ${article(role)} ${role} was removed from your organisation`,
+    firstLine: (role) =>
+      `A member of one of your Agent X organisations, ${article(role)} ${role}, was removed: their sessions ended. Any AI agents they own keep running until an admin hands them to someone else or suspends them.`,
+    check: MEMBERS_CHECK,
+  },
+  role_removed: {
+    subject: (role) => `Agent X: a member of your organisation is no longer ${article(role)} ${role}`,
+    firstLine: (role) =>
+      `A member of one of your Agent X organisations had the ${role} role taken away: their sessions ended.`,
+    check: MEMBERS_CHECK,
+  },
   contact_added: {
     subject: () => 'Agent X: a registered contact was added to your organisation',
     firstLine: () =>

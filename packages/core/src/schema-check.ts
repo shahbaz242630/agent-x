@@ -123,7 +123,12 @@ async function checkSchema<Schema>({
   try {
     // The authority tables are the product's own list, the one CI checks the migrations against (A3f-2).
     const reading = Promise.resolve().then(() =>
-      liveSchemaProblems(database, { appRole, ownerRole: OWNER_ROLE, authorityTables: AUTHORITY_TABLES }),
+      liveSchemaProblems(database, {
+        appRole,
+        ownerRole: OWNER_ROLE,
+        authorityTables: AUTHORITY_TABLES,
+        statusGuardedTables: AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table),
+      }),
     );
     // Handled here too, so a read that finishes after its deadline never goes unhandled.
     void reading.catch(() => undefined);

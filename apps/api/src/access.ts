@@ -67,6 +67,7 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import type { CountRequest } from './rate-limit.ts';
 import { cookieValue, SESSION_COOKIE } from './sign-in.ts';
 
 /**
@@ -293,11 +294,20 @@ export function registerAccess(
     findMembership,
     restrictedUntil,
     checkKey,
+    counters,
   }: {
     readonly findSession: FindSession | undefined;
     readonly findMembership: FindMembership | undefined;
     readonly restrictedUntil: RemovalRestriction | undefined;
     readonly checkKey: CheckAgentKey | undefined;
+    /**
+     * The person's and the agent's own limits (rate-limit.ts), counted here
+     * for a request refused once its caller is known (the S68 audit): a
+     * request let through is counted by their hooks, after this one, and a
+     * refused one never reaches them. Refused over the limit, it is the
+     * limit's 429 instead.
+     */
+    readonly counters: { readonly person: CountRequest; readonly agent: CountRequest };
   },
 ): void {
   app.decorateRequest('person', null);
@@ -312,6 +322,10 @@ export function registerAccess(
     const failed = (error: unknown) => {
       done(error instanceof Error ? error : new Error('the access lookup failed', { cause: error }));
     };
+    /** A refusal of a caller now known: counted against their own limit first. */
+    const refusedAfter = (count: CountRequest, refuse: () => void) => {
+      count(request, reply).then(refuse, failed);
+    };
     const { authorization } = request.headers;
     if (authorization !== undefined) {
       // An agent's request, never a person's: the cookie isn't read.
@@ -324,7 +338,9 @@ export function registerAccess(
           if (checked.outcome !== 'accepted') {
             void keyRefused(request, reply);
           } else if (!agentScopes.every((scope) => checked.key.scopes.includes(scope))) {
-            void scopeMissing(request, reply, agentScopes);
+            // Known, and refused: counted as the agent (its line names it too, request-log.ts).
+            request.agent = checked.key;
+            refusedAfter(counters.agent, () => void scopeMissing(request, reply, agentScopes));
           } else {
             request.agent = checked.key;
             done();
@@ -341,24 +357,31 @@ export function registerAccess(
     findSession(cookie).then((session) => {
       if (session === undefined) {
         void unauthenticated(request, reply, access);
-      } else if (access.includes('person')) {
+        return;
+      }
+      /** The signed-in person refused: counted as them, though from many addresses (the S68 audit). */
+      const refuse = (send: () => void) => {
+        request.person = session;
+        refusedAfter(counters.person, send);
+      };
+      if (access.includes('person')) {
         request.person = session;
         done();
       } else if (!namesRole(access)) {
         // Agents' and operators' routes: a person is neither.
-        void forbidden(request, reply);
+        refuse(() => void forbidden(request, reply));
       } else {
         const orgId = request.headers[ORGANIZATION_HEADER];
         if (!isOrganizationId(orgId)) {
-          void sendErrorBody(reply, 400, 'ORGANIZATION_INVALID', request.id);
+          refuse(() => void sendErrorBody(reply, 400, 'ORGANIZATION_INVALID', request.id));
         } else if (findMembership === undefined) {
-          void forbidden(request, reply);
+          refuse(() => void forbidden(request, reply));
         } else {
           findMembership(orgId, session.userId, request.id).then((membership) => {
             if (membership.outcome !== 'active' || !access.includes(membership.role)) {
-              void forbidden(request, reply);
+              refuse(() => void forbidden(request, reply));
             } else if (passkeyMissing(session.amr, access)) {
-              void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id);
+              refuse(() => void sendErrorBody(reply, 403, 'PASSKEY_REQUIRED', request.id));
             } else {
               const through = () => {
                 request.person = session;
@@ -368,11 +391,11 @@ export function registerAccess(
               if (!needsPowers(access)) {
                 through();
               } else if (restrictedUntil === undefined) {
-                void forbidden(request, reply);
+                refuse(() => void forbidden(request, reply));
               } else {
                 restrictedUntil(session.userId).then((until) => {
                   if (until === undefined) through();
-                  else void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id);
+                  else refuse(() => void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id));
                 }, failed);
               }
             }

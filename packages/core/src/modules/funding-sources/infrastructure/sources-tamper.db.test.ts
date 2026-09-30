@@ -171,6 +171,32 @@ describe(`FX-TAMPER as the owner on a funding source: denied by the row check, a
     await deniedAndHeld(id, 'seal');
   });
 
+  it('the live guard sees a wider grant on the links, and the sources’ status guard dropped outright (the S68 audit)', async () => {
+    const asOwner = database.as('owner');
+    const product = () =>
+      liveSchemaProblems(app, {
+        ...ROLES,
+        authorityTables: AUTHORITY_TABLES,
+        statusGuardedTables: AUTHORITY_TABLES.filter((table) => table.rules !== undefined).map(({ table }) => table),
+      });
+    const [trigger] = await asOwner.query<{ definition: string }>(
+      `select pg_catalog.pg_get_triggerdef(oid) as definition from pg_catalog.pg_trigger
+        where tgrelid = 'funding_sources.sources'::regclass and tgname = 'status_guard'`,
+    );
+    await asOwner.query('grant delete on funding_sources.links to agentx_app');
+    await asOwner.query('drop trigger status_guard on funding_sources.sources');
+    try {
+      const found = await product();
+      expect(found).toContainEqual(expect.stringMatching(/DELETE on funding_sources\.links/));
+      expect(found).toContain('funding_sources.sources carries no status_guard');
+    } finally {
+      await asOwner.query('revoke delete on funding_sources.links from agentx_app');
+      // eslint-disable-next-line agentx/no-string-built-sql -- the trigger's own definition, as Postgres wrote it
+      await asOwner.query(trigger?.definition ?? '');
+    }
+    expect(await product()).toEqual([]);
+  });
+
   it('the partner’s availability rewritten', async () => {
     const id = await linkedSource();
     await owner.setColumn(id, 'availability', 'SUSPENDED');

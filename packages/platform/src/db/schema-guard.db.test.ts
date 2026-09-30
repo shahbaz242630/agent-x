@@ -431,6 +431,23 @@ it('sees the status guard switched off, which Postgres keeps but stops running',
   }
 });
 
+it('sees the status guard dropped outright from a table whose status it must hold (the S68 audit)', async () => {
+  const guarded = () => liveSchemaProblems(app, { ...ROLES, statusGuardedTables: ['audit.events'] });
+  // No guard at all: nothing to find among the triggers, so it's the list that says one is missing.
+  expect(await guarded()).toContain('audit.events carries no status_guard');
+  await owner.query(
+    `create trigger status_guard before insert or update on audit.events for each row
+       execute function state_rules.guard_status('new', 'new>done')`,
+  );
+  try {
+    expect(await guarded()).not.toContain('audit.events carries no status_guard');
+    // A table not on the list is never asked for one.
+    expect(await problems()).not.toContain('audit.events carries no status_guard');
+  } finally {
+    await owner.query('drop trigger status_guard on audit.events');
+  }
+});
+
 it('sees a unique key that only INCLUDEs org_id, which separates nothing', async () => {
   // The payload of an INCLUDE is not part of the key: this index still makes
   // id unique across every organisation. The first draft matched org_id

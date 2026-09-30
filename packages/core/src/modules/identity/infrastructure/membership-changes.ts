@@ -50,7 +50,7 @@ import {
   MEMBERSHIPS,
   type MembershipsTransaction,
 } from './memberships.ts';
-import { tellAdminsOfGrant } from './grant-notices.ts';
+import { tellAdminsOfGrant, tellAdminsOfRemoval } from './grant-notices.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { changeHashOf, lockChallengesOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
@@ -291,6 +291,13 @@ export function createMembershipChanges({
             role: change.role,
             rejoined: false,
           });
+          // An admin or approver given a lesser role: told too (the S68 audit), with the role taken away.
+          await tellAdminsOfRemoval(tx, outbox, {
+            orgId: admin.orgId,
+            membershipId: member.id,
+            kind: 'demoted',
+            role: member.role,
+          });
         } else {
           const moved = await states.changeStatus(tx, MEMBERSHIPS, key, 'deactivate', {
             actor,
@@ -299,6 +306,13 @@ export function createMembershipChanges({
           });
           if (moved.outcome !== 'changed')
             throw new Error(`a membership read as active did not move: ${moved.outcome}`);
+          // Told to the admins (the S68 audit): who is removed, with the role they held.
+          await tellAdminsOfRemoval(tx, outbox, {
+            orgId: admin.orgId,
+            membershipId: member.id,
+            kind: 'deactivated',
+            role: member.role,
+          });
         }
         return { status: 200, resourceId: member.id };
       });

@@ -756,16 +756,16 @@ function appendOnlyListProblems(policy: SchemaPolicy, facts: Facts): string[] {
 }
 
 /**
- * Every fill-in table has a reason and at least one column, names a tenant
- * table that exists outside the append-only schemas, and lists exactly the
- * columns the app is granted UPDATE on, each once: a column listed but not
- * granted would be one the live schema guard lets a later grant open unseen.
+ * Every fill-in table has a reason, names a tenant table that exists outside
+ * the append-only schemas, and lists exactly the columns the app is granted
+ * UPDATE on, each once: a column listed but not granted would be one the live
+ * schema guard lets a later grant open unseen. None listed is a table added
+ * to and read, never changed (the S68 audit: a reset's confirmations).
  */
 function fillInListProblems(policy: SchemaPolicy, facts: Facts, roles: RoleNames): string[] {
   return Object.entries(policy.fillInTables).flatMap(([name, entry]) => {
     const problems: string[] = [];
     if (entry.reason.trim() === '') problems.push(`${name}: the fill-in list gives no reason for it`);
-    if (entry.columns.length === 0) problems.push(`${name}: the fill-in list names no column the app may change`);
     if (new Set(entry.columns).size !== entry.columns.length) {
       problems.push(`${name}: the fill-in list names a column twice`);
     }
