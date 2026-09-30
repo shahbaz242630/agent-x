@@ -1,7 +1,15 @@
 // B6-2b: which of the login service's events we copy, and what each means.
 import { describe, expect, it } from 'vitest';
 
-import { classOfIdpEvent, isToldToThePerson, MOST_WATCHED_TYPES, WATCHED_IDP_EVENTS } from './idp-event.ts';
+import {
+  classOfIdpEvent,
+  endsSessions,
+  isToldToThePerson,
+  MOST_WATCHED_TYPES,
+  PASSKEY_ADDED_EVENTS,
+  PASSKEY_REMOVED_EVENTS,
+  WATCHED_IDP_EVENTS,
+} from './idp-event.ts';
 
 describe('the login service’s events we copy (B6-2b)', () => {
   it('names no more types than one search takes', () => {
@@ -44,6 +52,22 @@ describe('the login service’s events we copy (B6-2b)', () => {
     ]) {
       expect(classOfIdpEvent(type)).toBeUndefined();
     }
+  });
+
+  it('ends sessions on a factor added or removed, a password or email changed, or a login blocked; not on one restored (the S68 audit)', () => {
+    const ending = [...new Set(Object.values(WATCHED_IDP_EVENTS))].filter(endsSessions).sort();
+    expect(ending).toEqual([
+      'password_changed',
+      'second_factor_added',
+      'second_factor_removed',
+      'sign_in_blocked',
+      'sign_in_email_changed',
+    ]);
+  });
+
+  it('knows a key added and a key removed as copied types, each a factor’s', () => {
+    for (const type of PASSKEY_ADDED_EVENTS) expect(classOfIdpEvent(type)).toBe('second_factor_added');
+    for (const type of PASSKEY_REMOVED_EVENTS) expect(classOfIdpEvent(type)).toBe('second_factor_removed');
   });
 
   it('tells the person and the admins of a change to a sign-in, and no one of a token, impersonation or rights', () => {

@@ -34,6 +34,8 @@ export const lastCountedRemoval = (db: Kysely<PlatformControlsTables>, userId: s
       oneOf: { type: SECOND_FACTOR_REMOVED_EVENTS },
       noneOf: { by: ['self'] },
     },
+    // A security key or passkey added that counts (the S68 audit; idp-copier.ts decides it).
+    { action: IDP_EVENT_COPIED, facts: { person, counts: 'yes' } },
     { action: SECOND_FACTORS_REMOVED, facts: { person } },
   ]);
 };
