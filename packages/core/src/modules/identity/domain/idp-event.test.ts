@@ -13,6 +13,11 @@ describe('the login service’s events we copy (B6-2b)', () => {
     ['user.human.mfa.u2f.token.removed', 'second_factor_removed'],
     ['user.human.passwordless.token.removed', 'second_factor_removed'],
     ['user.human.mfa.recoverycode.removed', 'second_factor_removed'],
+    ['user.human.mfa.otp.verified', 'second_factor_added'],
+    ['user.human.mfa.otp.sms.added', 'second_factor_added'],
+    ['user.human.mfa.otp.email.added', 'second_factor_added'],
+    ['user.human.mfa.u2f.token.verified', 'second_factor_added'],
+    ['user.human.passwordless.token.verified', 'second_factor_added'],
     ['user.human.password.changed', 'password_changed'],
     ['user.human.password.code.added', 'password_changed'],
     ['user.human.email.changed', 'sign_in_email_changed'],
@@ -27,10 +32,12 @@ describe('the login service’s events we copy (B6-2b)', () => {
     expect(classOfIdpEvent(type)).toBe(eventClass);
   });
 
-  it('copies no other type: not a sign-in, not a factor added, not an inherited name', () => {
+  it('copies no other type: not a sign-in, not a factor still to be verified, not an inherited name', () => {
     for (const type of [
       'user.human.password.check.succeeded',
       'user.human.mfa.otp.added',
+      'user.human.mfa.u2f.token.added',
+      'user.human.passwordless.token.added',
       'toString',
       '__proto__',
       '',
@@ -43,6 +50,7 @@ describe('the login service’s events we copy (B6-2b)', () => {
     const told = [...new Set(Object.values(WATCHED_IDP_EVENTS))].filter(isToldToThePerson).sort();
     expect(told).toEqual([
       'password_changed',
+      'second_factor_added',
       'second_factor_removed',
       'sign_in_blocked',
       'sign_in_email_changed',

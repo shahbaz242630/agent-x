@@ -6,7 +6,8 @@
 //
 // - a change to a person's sign-in, told to them and their organisations'
 //   admins: a second factor removed (an authenticator app, a security key, a
-//   passkey, recovery codes), a password changed or a reset asked for, the
+//   passkey, recovery codes) or added (once ready to use: an app or a key
+//   verified, an SMS or email code added; the S68 audit), a password changed or a reset asked for, the
 //   login's email changed, the login locked, deactivated or removed, or it
 //   unlocked or reactivated;
 // - a token issued for a login (a machine user's): recorded, and logged;
@@ -20,6 +21,7 @@
 /** What a copied event means for us. The first five are the sign-in notices' kinds (0024). */
 export type IdpEventClass =
   | 'second_factor_removed'
+  | 'second_factor_added'
   | 'password_changed'
   | 'sign_in_email_changed'
   | 'sign_in_blocked'
@@ -37,6 +39,15 @@ const BY_CLASS: Readonly<Record<IdpEventClass, readonly string[]>> = {
     'user.human.mfa.u2f.token.removed',
     'user.human.passwordless.token.removed',
     'user.human.mfa.recoverycode.removed',
+  ],
+  // Zitadel v4.17.3's own names (internal/repository/user/human_mfa_*.go): an app, a security key or a
+  // passkey counts once verified, as it can be used from then; an SMS or email code has no verify step.
+  second_factor_added: [
+    'user.human.mfa.otp.verified',
+    'user.human.mfa.otp.sms.added',
+    'user.human.mfa.otp.email.added',
+    'user.human.mfa.u2f.token.verified',
+    'user.human.passwordless.token.verified',
   ],
   password_changed: ['user.human.password.changed', 'user.human.password.code.added'],
   sign_in_email_changed: ['user.human.email.changed'],
