@@ -12,9 +12,10 @@
 const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined'] as const;
 /** The kinds about a registered contact (B6-1b). */
 const CONTACT_NOTICE_KINDS = ['contact_added', 'contact_removed'] as const;
-/** The kinds about a person's sign-in, changed at the login service (B6-2a, 0024). */
+/** The kinds about a person's sign-in, changed at the login service (B6-2a, 0024; a factor added since the S68 audit, 0030). */
 export const SIGN_IN_NOTICE_KINDS = [
   'second_factor_removed',
+  'second_factor_added',
   'password_changed',
   'sign_in_email_changed',
   'sign_in_blocked',

@@ -247,6 +247,32 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 1, records: 2 })]);
   });
 
+  it.each([
+    'user.human.mfa.u2f.token.verified',
+    'user.human.passwordless.token.verified',
+    'user.human.mfa.otp.verified',
+  ])(
+    'records a factor added (%s) and tells the person and the admins, even one they added themselves (the S68 audit)',
+    async (type) => {
+      const who = await person();
+      const org = await organization(who.userId);
+      const added = event(type, who.subject, { editorUserId: who.subject });
+      const { feed } = feedOf(() => [added]);
+
+      await copierWith(feed).run();
+
+      expect(await orgRecords(org)).toMatchObject([
+        { action: 'person.sign_in_changed', subject_id: who.userId, details: expect.stringContaining(type) as unknown },
+      ]);
+      expect(await noticesOf(org)).toEqual([
+        { recipient_user_id: who.userId, kind: 'second_factor_added', about_id: who.userId },
+        { recipient_user_id: null, kind: 'second_factor_added', about_id: who.userId },
+      ]);
+      const key = `user:${who.subject}:${added.sequence}`;
+      expect(await platformCopies(key)).toEqual([expect.objectContaining({ org, by: 'self', type })]);
+    },
+  );
+
   it('copies nothing twice: a second run, or the same time read again, records nothing', async () => {
     const who = await person();
     const org = await organization(who.userId);

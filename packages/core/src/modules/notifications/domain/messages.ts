@@ -82,6 +82,12 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       'An authenticator app, a security key or a passkey was removed from the login of a person in one of your Agent X organisations.',
     check: SIGN_IN_CHECK,
   },
+  second_factor_added: {
+    subject: () => "Agent X: a second factor was added to a person's login",
+    firstLine: () =>
+      'A second factor (an authenticator app, a security key, a passkey, or a code sent by SMS or email) was added to the login of a person in one of your Agent X organisations.',
+    check: SIGN_IN_CHECK,
+  },
   password_changed: {
     subject: () => "Agent X: a person's password was changed or a reset was asked for",
     firstLine: () =>
