@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 
 /** Where the hook reads the names on a developer's machine. */
-export const PRIVATE_NAMES_FILE = '.tools/private-names';
+const PRIVATE_NAMES_FILE = '.tools/private-names';
 
 /** The shortest name checked: a shorter one would match ordinary words. */
 const SHORTEST = 6;
