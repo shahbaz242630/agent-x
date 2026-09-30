@@ -195,7 +195,7 @@ export function createAgentKeyChanges({
    * Revoking isn't held to the owner: it only stops a key, as the brake does.
    */
   const mayRotate = (role: string, membershipId: string, owner: string): void => {
-    if (role !== 'admin' && owner !== membershipId.toLowerCase()) throw new AgentRefused(403, 'FORBIDDEN');
+    if (role !== 'admin' && owner !== membershipId) throw new AgentRefused(403, 'FORBIDDEN');
   };
 
   /** A key that may be revoked: not revoked already. */
