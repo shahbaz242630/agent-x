@@ -5,7 +5,8 @@
 // prints a matched secret. CI checks the same rules over every tracked file.
 import { spawnSync } from 'node:child_process';
 
-import { describeProblem, lineProblems, pathProblems, type Problem } from './rules.ts';
+import { knownPrivateNames, linesNaming } from './private-names.ts';
+import { describeProblem, lineProblems, PRIVATE_NAME_MESSAGE, pathProblems, type Problem } from './rules.ts';
 
 export interface AddedLine {
   readonly file: string;
@@ -67,11 +68,19 @@ export function addedLines(diff: string): AddedLine[] {
   return added;
 }
 
-/** Every rule broken by the staged paths and the lines they add. */
-export function stagedProblems(files: readonly string[], diff: string): Problem[] {
+/** Every rule broken by the staged paths and the lines they add; a line naming one of `privateNames` too. */
+export function stagedProblems(
+  files: readonly string[],
+  diff: string,
+  privateNames: readonly string[] = [],
+): Problem[] {
+  const added = addedLines(diff);
   return [
     ...files.flatMap(pathProblems),
-    ...addedLines(diff).flatMap(({ file, line, text }) => lineProblems(file, line, text)),
+    ...added.flatMap(({ file, line, text }) => lineProblems(file, line, text)),
+    ...added
+      .filter(({ text }) => linesNaming(text, privateNames).length > 0)
+      .map(({ file, line }) => ({ rule: 'private-name' as const, file, line, message: PRIVATE_NAME_MESSAGE })),
   ];
 }
 
@@ -139,7 +148,7 @@ export async function preCommit(git: Git = runGit, log: (line: string) => void =
     '--diff-filter=ACMT',
     '--no-renames',
   ]);
-  const problems = stagedProblems(files, diff);
+  const problems = stagedProblems(files, diff, knownPrivateNames());
   const formatting = await unformatted(files, (file) => git(['show', `:${file}`]));
 
   if (problems.length === 0 && formatting.length === 0) return 0;

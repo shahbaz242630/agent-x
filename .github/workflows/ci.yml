@@ -139,6 +139,10 @@ jobs:
 
       - name: Tests, gate proofs and coverage
         run: pnpm test:coverage
+        env:
+          # The staging origin, for the check that its domain is in no tracked file (the S68 audit);
+          # a repository variable, never written in the repository.
+          STAGING_APP_ORIGIN: ${{ vars.STAGING_APP_ORIGIN }}
 
   dependency-review:
     name: Dependency review

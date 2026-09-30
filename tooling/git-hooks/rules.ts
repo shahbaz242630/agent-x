@@ -6,10 +6,20 @@
 // - text the secret scanners take for a secret (S4, S10): each such find
 //   forced a fresh PR to clear the history
 // - invisible characters an editor slipped into source (S5, S10)
+// - a private name, the staging domain (private-names.ts; the S68 audit)
 // Messages name the rule and the place, never the matched text.
 
 export type RuleId =
-  'forbidden-file' | 'private-key' | 'provider-token' | 'scanner-bait' | 'placeholder-message' | 'invisible-character';
+  | 'forbidden-file'
+  | 'private-key'
+  | 'provider-token'
+  | 'scanner-bait'
+  | 'placeholder-message'
+  | 'invisible-character'
+  | 'private-name';
+
+/** What a private name's problem says: never the name. */
+export const PRIVATE_NAME_MESSAGE = 'a private name, the staging domain, never goes in the repository (Rule Book §7)';
 
 export interface Problem {
   readonly rule: RuleId;
