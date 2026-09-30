@@ -27,7 +27,15 @@ import {
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -634,6 +642,48 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+
+  /**
+   * Holds the lower of the two memberships' IDs for change, as a role change
+   * of it would; starts the handover; waits until it waits on that lock; then
+   * takes the higher one at once (NOWAIT). Read in order of ID (ADR-006 §6
+   * level 2a), the handover waited before touching the higher one, so it is
+   * free; read the other way, it already holds it and the NOWAIT fails.
+   */
+  it.each<[string, boolean]>([
+    ['the admin’s membership first when its ID comes first', true],
+    ['the new owner’s membership first when its ID comes first', false],
+  ])('reads %s, before the other (a forced lock order)', async (_, adminFirst) => {
+    const org = await organization();
+    const [lower, higher] = [
+      await member(org, adminFirst ? 'admin' : 'developer'),
+      await member(org, adminFirst ? 'developer' : 'admin'),
+    ];
+    const [admin, next] = adminFirst ? [lower, higher] : [higher, lower];
+    const agent = await agentOf(org, admin);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        org,
+        lower.membershipId,
+      ]);
+      const asking = within(20_000, handOver(admin, agent, next.membershipId), 'the handover');
+      await waitUntilQueued(database.as('admin'), 1);
+
+      const taken = await holder.query(
+        'select id from identity.memberships where org_id = $1 and id = $2 for no key update nowait',
+        [org, higher.membershipId],
+      );
+      await holder.query('rollback');
+
+      expect(taken).toHaveLength(1);
+      expect((await asking).outcome).toBe('asked');
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('refuses an agent tampered with: INTEGRITY_FAILED', async () => {

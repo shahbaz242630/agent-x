@@ -29,8 +29,8 @@
 //   owner an active admin or developer (AGENT_OWNER_NOT_ELIGIBLE otherwise,
 //   one answer whether the membership is missing, another organisation's,
 //   removed or of another role), and not its owner already
-//   (AGENT_OWNER_UNCHANGED); a challenge bound to the organisation, the
-//   agent's latest event and the new owner, so it hands over exactly this
+//   (AGENT_OWNER_UNCHANGED); a challenge bound to the agent's latest event
+//   (so its organisation too) and the new owner, so it hands over exactly this
 //   agent, as it stood, to exactly that member. The confirm, with the
 //   challenge: the same reads; the challenge consumed; then the owner
 //   changed, its event naming both owners and the step-up's evidence. Its
@@ -124,14 +124,14 @@ export interface AgentChanges {
 }
 
 /**
- * The pending handover's SHA-256: the organisation, the agent's latest event
- * and the new owner's membership, IDs in lower case. That event is the
- * agent's own, read from its signed state, so it names the agent as it stood
- * when asked: any change to it since (another handover, a suspension) makes
- * the step-up another change's.
+ * The pending handover's SHA-256: the agent's latest event and the new
+ * owner's membership, as their verified states give them (in lower case).
+ * That event is the agent's own, read from its signed state, so it names the
+ * agent, and so its organisation, as it stood when asked: any change to it
+ * since (another handover, a suspension) makes the step-up another change's.
  */
-const handOverHash = (orgId: string, agentEvent: string, owner: string): Buffer =>
-  changeHashOf([HAND_OVER_OPERATION, orgId.toLowerCase(), agentEvent.toLowerCase(), owner.toLowerCase()]);
+const handOverHash = (agentEvent: string, owner: string): Buffer =>
+  changeHashOf([HAND_OVER_OPERATION, agentEvent.toLowerCase(), owner]);
 
 /**
  * The pending change's SHA-256: the organisation and the event that suspended
@@ -172,10 +172,10 @@ export function createAgentChanges({
   };
 
   /**
-   * The admin's membership and the new owner's, each read (`share`) once, in
-   * order of membership ID (ADR-006 §6 level 2a), then the agent for change
-   * (3): the admin an active admin (FORBIDDEN otherwise), the new owner an
-   * active admin or developer of the organisation (AGENT_OWNER_NOT_ELIGIBLE
+   * The admin's membership and the new owner's, each read (`share`) in order
+   * of membership ID (ADR-006 §6 level 2a), then the agent for change (3):
+   * the admin an active admin (FORBIDDEN otherwise), the new owner an active
+   * admin or developer of the organisation (AGENT_OWNER_NOT_ELIGIBLE
    * otherwise) and not the agent's owner already (AGENT_OWNER_UNCHANGED).
    */
   const handOverRead = async (
@@ -186,26 +186,18 @@ export function createAgentChanges({
     owner: string,
   ) => {
     const adminId = await listedMembership(tx, member.orgId, member.userId);
-    if (adminId === undefined) throw new AgentRefused(403, 'FORBIDDEN');
     const ownerId = owner.toLowerCase();
-    const ordered = [...new Set([adminId, ownerId])].sort();
-    const reads = new Map<string, Awaited<ReturnType<typeof memberOf>>>();
-    for (const id of ordered) reads.set(id, await memberOf(tx, states, { orgId: member.orgId, id }, 'share'));
-    const admin = reads.get(adminId);
-    const next = reads.get(ownerId);
-    if (admin?.outcome === 'tampered' || next?.outcome === 'tampered') {
-      throw new AgentRefused(503, 'INTEGRITY_FAILED');
-    }
-    if (
-      admin?.outcome !== 'found' ||
-      admin.member.userId !== member.userId.toLowerCase() ||
-      admin.member.status !== 'ACTIVE' ||
-      !(HANDING_OVER_ROLES as readonly string[]).includes(admin.member.role)
-    ) {
-      throw new AgentRefused(403, 'FORBIDDEN');
-    }
+    const readOwner = async () => {
+      const read = await memberOf(tx, states, { orgId: member.orgId, id: ownerId }, 'share');
+      if (read.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
+      return read;
+    };
+    // The new owner's first when its ID comes before the admin's; an admin with no membership is refused either way.
+    const ownerFirst = adminId !== undefined && ownerId < adminId ? await readOwner() : undefined;
+    await work.memberIn(tx, states, member, HANDING_OVER_ROLES);
+    const next = ownerFirst ?? (await readOwner());
     const read = await agentToChange(tx, states, member.orgId, agentId);
-    if (next?.outcome !== 'found' || next.member.status !== 'ACTIVE' || !OWNING_ROLES.includes(next.member.role)) {
+    if (next.outcome !== 'found' || next.member.status !== 'ACTIVE' || !OWNING_ROLES.includes(next.member.role)) {
       throw new AgentRefused(409, 'AGENT_OWNER_NOT_ELIGIBLE');
     }
     if (read.agent.owner === next.member.id) throw new AgentRefused(409, 'AGENT_OWNER_UNCHANGED');
@@ -296,7 +288,7 @@ export function createAgentChanges({
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: HAND_OVER_OPERATION,
-          changeHash: handOverHash(member.orgId, read.state.eventId, read.owner),
+          changeHash: handOverHash(read.state.eventId, read.owner),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
@@ -315,7 +307,7 @@ export function createAgentChanges({
           {
             sessionId: member.sessionId,
             action: HAND_OVER_OPERATION,
-            changeHash: handOverHash(member.orgId, read.state.eventId, read.owner),
+            changeHash: handOverHash(read.state.eventId, read.owner),
           },
           // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
