@@ -39,7 +39,7 @@ import { type Kysely, sql } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
-import { type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
+import { AUTH_TIME_TOLERANCE_SECONDS, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
@@ -196,7 +196,9 @@ export function createSignIn({
   return {
     async begin(returnTo = HOME_PATH) {
       if (!isReturnPath(returnTo)) throw new RangeError('the return path is not a path on our own origin');
-      const { url, flow } = await oidc.start();
+      // Always a fresh sign-in (the S68 audit): signing out of Agent X leaves the login service's own
+      // session, and on a shared computer that would sign the next person straight back in.
+      const { url, flow } = await oidc.start({ prompt: 'login' });
       const flowId = await limited((tx) => flows.save(tx, flow, returnTo));
       return { url, flowId };
     },
@@ -220,6 +222,11 @@ export function createSignIn({
         return completeStepUp(taken.stepUpChallengeId, taken, { code, state }, previousCookie);
       }
       const { subject, evidence, verifiedEmail } = await oidc.finish(taken.flow, { code, state });
+      // The sign-in asked for was a fresh one: a login service that answered with one it kept is refused.
+      const earliest = Math.floor(taken.startedAt.getTime() / 1000) * 1000 - AUTH_TIME_TOLERANCE_SECONDS * 1000;
+      if (evidence.authTime.getTime() < earliest) {
+        throw new SignInFailed('stale_authentication', 'the sign-in was made before the flow began');
+      }
       return limited(async (tx) => {
         const userId = await userForSubject(tx, subject, { ids, clock });
         if (previousCookie !== undefined) await sessions.end(tx, previousCookie);

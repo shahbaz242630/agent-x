@@ -23,7 +23,8 @@ const START = new Date('2026-09-24T09:00:00Z');
 const ISSUER = 'https://auth.example.test';
 const evidence: SignInEvidence = {
   idpSessionId: 'V1_338719472394810051',
-  authTime: new Date('2026-09-24T08:59:30Z'),
+  // As the flow begins: every sign-in asks for a fresh one (the S68 audit).
+  authTime: new Date('2026-09-24T09:00:00Z'),
   amr: ['pwd', 'otp', 'mfa'],
 };
 
@@ -144,6 +145,56 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     const [user] = await app.selectFrom('identity.users').selectAll().where('id', '=', done.userId).execute();
     expect(user).toMatchObject({ issuer: ISSUER, subject: client.subject });
     expect(client.finished).toEqual([expect.objectContaining({ code: 'a-code' })]);
+  });
+
+  it('asks the login service for a fresh sign-in every time, so one it kept never signs anyone in (the S68 audit)', async () => {
+    await roundTrip();
+    await roundTrip();
+
+    expect(client.startedWith).toEqual([{ prompt: 'login' }, { prompt: 'login' }]);
+  });
+
+  it('refuses a sign-in made before the flow began, beyond 5 seconds, opening no session (the S68 audit)', async () => {
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_001) };
+
+    await expect(signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined })).rejects.toThrow(
+      expect.objectContaining({ failure: 'stale_authentication' }),
+    );
+    const users = await app.selectFrom('identity.users').select('id').where('subject', '=', client.subject).execute();
+    expect(users).toEqual([]);
+  });
+
+  it('takes a sign-in made within 5 seconds before the flow began, as clocks drift', async () => {
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_000) };
+
+    const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+
+    expect(await sessions.use(app, done.cookie)).toMatchObject({ userId: done.userId });
+  });
+
+  it('counts the 5 seconds from the start of the flow’s second, as a sign-in’s time is in whole seconds', async () => {
+    clock = new FixedClock(new Date(START.getTime() + 900));
+    signIn = createSignIn({
+      db: app,
+      oidc: client,
+      flows: createLoginFlows({ clock }),
+      sessions,
+      challenges,
+      ids: new SequentialIds(0x5000 + subjects * 0x100 + 0x80),
+      clock,
+      keys,
+    });
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_000) };
+
+    const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+
+    expect(done.userId).toEqual(expect.any(String));
   });
 
   it('sends the browser home when it asked for nowhere', async () => {
@@ -380,9 +431,9 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
       'other_person',
     ],
     [
-      'the old authentication of the session',
+      'an authentication from before the challenge',
       ({ done, challenge }) => {
-        client.proves = evidence;
+        client.proves = { ...evidence, authTime: new Date(START.getTime() - 60_000) };
         return stepUp(done.sessionId, challenge.challengeId, done.cookie);
       },
       'stale_authentication',
