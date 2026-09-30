@@ -1,6 +1,7 @@
 // Agent X on Azure (ADR-002; ADR-002 Amendment G1): one deployment per
 // environment, each in its own subscription, everything in UAE North (ADR-009).
-// This is the foundation: the private network, the database server, the key
+// This is the foundation: the private network and the DNS policy watching its
+// lookups, the database server, the key
 // vault, the log workspace with its cap and alerts, the Container Apps
 // environment with one identity per app and job, CI's identity and role (G4),
 // the email service (B5-2), the activity log and the budget. The secrets (secrets.bicep), the apps and
@@ -101,6 +102,7 @@ resource group 'Microsoft.Resources/resourceGroups@2025-04-01' = {
 var ids = {
   workspace: resourceId(subscription().subscriptionId, group.name, 'Microsoft.OperationalInsights/workspaces', names.workspace)
   actionGroup: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Insights/actionGroups', names.actionGroup)
+  network: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks', names.network)
   appsSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'apps')
   databaseSubnet: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/virtualNetworks/subnets', names.network, 'database')
   databaseZone: resourceId(subscription().subscriptionId, group.name, 'Microsoft.Network/privateDnsZones', names.databaseZone)
@@ -131,6 +133,26 @@ module network 'modules/network.bicep' = {
     tags: tags
     addressSpace: networkAddressSpace
   }
+}
+
+// Every lookup the network makes, watched in the workspace (S68 audit finding 14).
+module dnsPolicy 'modules/dns-policy.bicep' = {
+  scope: group
+  params: {
+    location: location
+    // Named here, not in names.bicep, as the budget is: only the foundation
+    // uses them, and a change there asks every hand deploy to run again.
+    policyName: 'dnspr-agentx-${environment}'
+    domainListName: 'dnsdl-agentx-${environment}-every-name'
+    tags: tags
+    networkId: ids.network
+    workspaceId: ids.workspace
+  }
+  // The network and the workspace must exist first.
+  dependsOn: [
+    network
+    monitoring
+  ]
 }
 
 module vault 'modules/keyvault.bicep' = {
