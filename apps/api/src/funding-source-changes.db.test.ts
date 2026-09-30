@@ -21,6 +21,7 @@ import {
   type FakePartnerTables,
   type FakeRail,
   type FinancialRailAdapter,
+  USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -287,6 +288,41 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toEqual([
       expect.objectContaining({ level: 'error', orgId: org, correlationId: CORRELATION, sourceId: source.id }),
     ]);
+  });
+
+  it('suspends a source whose limits the bank now answers in another currency than its account’s, recording none of it (the S68 audit)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { source } = await linked(admin);
+    // The bank renews the consent with limits in dollars on the dirham account.
+    await rail.bank.renew(org, source.externalRef, { ...USUAL_CONTROLS, currency: 'USD' });
+    const capture = new LogCapture();
+    const changes = createFundingSourceChanges({
+      database: app,
+      keys,
+      ids,
+      rail,
+      challenges: createStepUpChallenges({ ids, clock }),
+      logger: loggerFor(capture),
+    });
+
+    const answered = refreshed(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION));
+
+    // Suspended by Agent X, the limits kept as they were: an admin reactivates it with a passkey once put right.
+    expect(answered).toMatchObject({ status: 'SUSPENDED', controls: source.controls });
+    const recorded = await events(org, source.id);
+    expect(recorded).toHaveLength(2);
+    expect(recorded.at(-1)).toMatchObject({ action: 'funding_source.suspended', actor_id: 'api' });
+    expect(capture.lines().filter((line) => line.event === 'funding_sources.currency_mismatch')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, sourceId: source.id }),
+    ]);
+    // Refreshed again while it stays wrong: already stopped, and answered as it is.
+    expect(
+      refreshed(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)),
+    ).toMatchObject({
+      status: 'SUSPENDED',
+    });
+    expect(await events(org, source.id)).toHaveLength(2);
   });
 
   it('answers a retry of the same write as the first did', async () => {

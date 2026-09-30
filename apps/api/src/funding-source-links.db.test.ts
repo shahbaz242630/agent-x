@@ -20,6 +20,7 @@ import {
   type FakePartnerTables,
   type FakeRail,
   RailUnavailable,
+  USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -435,6 +436,33 @@ describe(`confirming a link with the partner (D2-3b, Postgres ${server.version})
     const { link } = startedOf(await start(admin));
 
     expect(confirmedOf(await confirm(admin, link.id))).toMatchObject({ link: { outcome: 'open' }, source: null });
+  });
+
+  it('keeps a dollar account’s source in dollars: the bank’s limits are in its own currency (the S68 audit)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), 'sme-rak-trading-emirati-acct-02');
+
+    const { source } = confirmedOf(await confirm(admin, link.id));
+
+    // The one currency kept for a source, and shown to agents as its own.
+    expect(source).toMatchObject({ controls: { currency: 'USD' }, summary: { hint: 'AE…7727' } });
+  });
+
+  it('turns down a link whose limits are in another currency than the account’s, adding nothing (the S68 audit)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const { link, authoriseUrl } = startedOf(await start(admin));
+    await rail.bank.approve(org, sessionOf(authoriseUrl), 'sme-rak-trading-emirati-acct-02', {
+      controls: USUAL_CONTROLS,
+    });
+
+    const { link: settled, source } = confirmedOf(await confirm(admin, link.id));
+
+    expect(settled).toMatchObject({ outcome: 'rejected', sourceId: null });
+    expect(source).toBeNull();
+    expect((await rows(org)).sources).toEqual([]);
   });
 
   it('adds the source the partner confirms, ACTIVE, and settles the link with it, once', async () => {

@@ -250,10 +250,11 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
     accounts: () => accounts.map((account) => ({ accountId: account.AccountId, summary: summaryOf(account) })),
     approve: (organizationId, sessionRef, accountId, approval = {}) =>
       records.within(organizationId, async (held) => {
-        const { controls = USUAL_CONTROLS, awaitingOtherAuthorisers = false } = approval;
-        if (!accounts.some((each) => each.AccountId === accountId)) {
-          throw new FakeBankRefused('no_such_account', 'The bank has no such account');
-        }
+        const account = accounts.find((each) => each.AccountId === accountId);
+        if (account === undefined) throw new FakeBankRefused('no_such_account', 'The bank has no such account');
+        // The usual limits, in the account's own currency (the S68 audit), unless a test names others.
+        const { controls = { ...USUAL_CONTROLS, currency: account.Currency }, awaitingOtherAuthorisers = false } =
+          approval;
         const session = await openSession(held, sessionRef);
         const externalRef = `fake-source-${ids.next()}`;
         const { consentId, body } = newConsent(
