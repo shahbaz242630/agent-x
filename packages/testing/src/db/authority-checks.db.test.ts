@@ -690,7 +690,7 @@ describe('A3c each rule fails on a broken fixture', () => {
       expect(outOfOrder).toContain(wanted);
     });
 
-    it('fails a table with no check over its status, or with two', async () => {
+    it('fails a table with no check over its status alone, or with two', async () => {
       const none = [...SOUND, 'alter table t.agents drop constraint status_is_a_state'];
       const two = [...SOUND, 'alter table t.agents add constraint status_is_short check (length(status) < 20)'];
       // The message quotes the reference constraint as this server prints it,
@@ -698,9 +698,29 @@ describe('A3c each rule fails on a broken fixture', () => {
       const wanted = "it has exactly one, listing the agent machine's states: CHECK ((status = ANY (ARRAY[";
       const [missing] = await problemsAfter(none);
       const [twice] = await problemsAfter(two);
-      expect(missing).toContain(`t.agents: has 0 check constraints over status; ${wanted}`);
+      expect(missing).toContain(`t.agents: has 0 check constraints over status alone; ${wanted}`);
       expect(missing).toContain("'ACTIVE'");
-      expect(twice).toContain(`t.agents: has 2 check constraints over status; ${wanted}`);
+      expect(twice).toContain(`t.agents: has 2 check constraints over status alone; ${wanted}`);
+    });
+
+    it('fails a check over the status with another column the registry doesn’t name: it could forbid a state, a brake with it (the #220 review)', async () => {
+      const narrowing = [
+        ...SOUND,
+        "alter table t.agents add constraint no_revoking check (status <> 'REVOKED' or org_id is null)",
+      ];
+
+      expect(await problemsAfter(narrowing)).toEqual([
+        "t.agents: the check constraint no_revoking holds status with other columns, and the registry names no such condition for it: CHECK (((status <> 'REVOKED'::text) OR (org_id IS NULL)))",
+      ]);
+    });
+
+    it('passes one the registry names for the table: when a state is held, not which states there are (0032)', async () => {
+      const conditional = [
+        ...SOUND,
+        "alter table t.agents add constraint revoked_expires check (status <> 'REVOKED' or expires_at is not null)",
+      ];
+
+      expect(await problemsAfter(conditional, [{ ...AGENTS, statusConditions: ['revoked_expires'] }])).toEqual([]);
     });
 
     it('fails a missing guard, and one that carries other rules than the machine', async () => {

@@ -62,6 +62,8 @@ describe('at start-up', () => {
       ownerRole: OWNER_ROLE,
       authorityTables: AUTHORITY_TABLES,
       statusGuardedTables: statuses,
+      // And the made-once guard on each whose rows are made once (E1-1's review).
+      madeOnceTables: ['suppliers.supplier_versions'],
     });
   });
 
