@@ -490,6 +490,33 @@ it('sees the status guard dropped outright from a table whose status it must hol
   }
 });
 
+it('takes neither guard for the other: a table given only the made-once guard still carries no status guard (0032)', async () => {
+  const guarded = () =>
+    liveSchemaProblems(app, { ...ROLES, statusGuardedTables: ['audit.events'], madeOnceTables: ['audit.events'] });
+  await owner.query(
+    `create trigger made_once before update on audit.events for each row
+       execute function state_rules.guard_made_once()`,
+  );
+  try {
+    const found = await guarded();
+    expect(found).toContain('audit.events carries no status_guard');
+    expect(found).not.toContain('audit.events carries no made_once');
+  } finally {
+    await owner.query('drop trigger made_once on audit.events');
+  }
+  await owner.query(
+    `create trigger status_guard before insert or update on audit.events for each row
+       execute function state_rules.guard_status('new', 'new>done')`,
+  );
+  try {
+    const found = await guarded();
+    expect(found).toContain('audit.events carries no made_once');
+    expect(found).not.toContain('audit.events carries no status_guard');
+  } finally {
+    await owner.query('drop trigger status_guard on audit.events');
+  }
+});
+
 it('sees a unique key that only INCLUDEs org_id, which separates nothing', async () => {
   // The payload of an INCLUDE is not part of the key: this index still makes
   // id unique across every organisation. The first draft matched org_id
