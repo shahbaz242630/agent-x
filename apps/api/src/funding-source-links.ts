@@ -6,16 +6,20 @@
 //
 // 1. `start` (`funding-sources.link.start`), an admin: the member and the
 //    day's budget checked first, so no session is asked of the partner for a
-//    start that would be refused; our link ID made; the partner asked for a
-//    session under it (the partner's idempotency key); then, in one
+//    start that would be refused; our link ID, made from the write's own
+//    idempotency key (the S68 audit: a retry, or a request sent again, asks
+//    the partner for the same session, never another); the partner asked for
+//    a session under it (the partner's idempotency key), and its page held to
+//    the partner's own origin over HTTPS (`isPartnerPage`); then, in one
 //    transaction, the key claimed, the organisation's lock for starting links,
 //    the member read again, the day's budget again (LINK_STARTS_SPENT, the
 //    check that counts), and the link added. The partner is never called
 //    inside the transaction: a network call must not hold its locks, and the
 //    fake partner's own records are another transaction. A retry of the same
 //    write answers the link the first one added; the session the retry asked
-//    for goes unused and runs out at the partner, as an unapproved link does,
-//    and a retry while the partner is down answers PARTNER_UNAVAILABLE.
+//    is the same one, and a retry while the partner is down answers
+//    PARTNER_UNAVAILABLE. The same key used again after its 30 days, once
+//    swept, finds its link taken: 409 IDEMPOTENCY_KEY_REUSED.
 // 2. The business approves at its bank, through the partner's page. Nothing
 //    that comes back through the browser is believed.
 // 3. `confirm` (`funding-sources.link.confirm`), an admin: the link must be
@@ -50,10 +54,13 @@ import {
   createDatabaseRecords,
   createFakeRail,
   type FakePartnerTables,
+  isPartnerPage,
   type FakeRail,
   type FinancialRailAdapter,
   type LinkOutcome,
 } from '@agentx/core/modules/providers';
+import { createHash } from 'node:crypto';
+
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -113,6 +120,38 @@ export interface FundingSourceLinks {
 }
 
 const DAY_MS = 86_400_000;
+
+/**
+ * The link's ID, made from the write's idempotency key and whose it is (the
+ * S68 audit): the same request sent again names the same link, so the
+ * partner, asked under it, answers the same session. A UUID (version 8, RFC
+ * 9562) of the key's SHA-256; the key is the client's, so the ID is no
+ * secret, and it is only ever looked up within its organisation.
+ */
+export function linkIdFor(request: IdempotentRequest): string {
+  const hash = createHash('sha256')
+    .update(
+      JSON.stringify([
+        request.orgId.toLowerCase(),
+        request.client.kind,
+        request.client.id,
+        request.operation,
+        request.key,
+      ]),
+    )
+    .digest();
+  hash[6] = ((hash[6] ?? 0) & 0x0f) | 0x80;
+  hash[8] = ((hash[8] ?? 0) & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Whether a link's insert found its ID taken: the same key, used again once its record was swept. */
+const isLinkTaken = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  (error as { code?: unknown }).code === '23505' &&
+  (error as { constraint?: unknown }).constraint === 'links_pkey';
 
 /**
  * The partner the config names (ADR-014 §4): the fake, over its own records in
@@ -240,39 +279,46 @@ export function createFundingSourceLinks({
         return {};
       });
       if ('outcome' in early) return early;
-      const linkId = ids.next();
+      const linkId = linkIdFor(idempotent);
       const session = await asked(() => rail.startSourceLink({ organizationId: member.orgId, linkId }));
       if (session === 'unavailable') return PARTNER_UNAVAILABLE;
+      // A page a person is sent to: the partner's own, over HTTPS, or none at all.
+      if (!isPartnerPage(session.authoriseUrl, rail.authoriseOrigin)) {
+        logger.child({ correlationId }).error('funding_sources.partner_page_refused', { partner });
+        return PARTNER_UNAVAILABLE;
+      }
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         await oneLinkStartAtATime(tx, member.orgId);
         const { id: startedBy } = await adminIn(tx, states, member, LINKING_ROLES);
         await withinBudget(tx, member.orgId);
-        await addLink(tx, {
-          orgId: member.orgId,
-          id: linkId,
-          startedBy,
-          partner,
-          sessionRef: session.sessionRef,
-          expiresAt: session.expiresAt,
-          createdAt: clock.now(),
-        });
+        try {
+          await addLink(tx, {
+            orgId: member.orgId,
+            id: linkId,
+            startedBy,
+            partner,
+            sessionRef: session.sessionRef,
+            expiresAt: session.expiresAt,
+            createdAt: clock.now(),
+          });
+        } catch (error) {
+          if (isLinkTaken(error)) throw new FundingSourceRefused(409, 'IDEMPOTENCY_KEY_REUSED');
+          throw error;
+        }
         return { status: 201, resourceId: linkId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
       // Only a confirm can find its link still waiting.
       if (done.outcome === 'waiting') throw new Error('a link start answered as still waiting');
       const { resourceId } = done.result;
-      // A retry answers the first write's link: the partner gives its session again, by the same ID.
-      const answer =
-        resourceId === linkId
-          ? session
-          : await asked(() => rail.startSourceLink({ organizationId: member.orgId, linkId: resourceId }));
-      if (answer === 'unavailable') return PARTNER_UNAVAILABLE;
+      // Named by the key, a retry's link is this one: the partner gave its session again, by the same ID.
+      if (resourceId !== linkId)
+        throw new Error(`a link start answered another link than its key names: ${resourceId}`);
       const link = await inOrganisation(member.orgId, correlationId, (tx) =>
         linkOf(tx, { orgId: member.orgId, id: resourceId }, 'share'),
       );
       if (link === undefined) throw new Error(`a link just added isn't there: ${resourceId}`);
-      return { outcome: 'started', link, authoriseUrl: answer.authoriseUrl };
+      return { outcome: 'started', link, authoriseUrl: session.authoriseUrl };
     },
 
     async confirm(member, idempotent, linkId, correlationId) {

@@ -40,6 +40,30 @@ describe('withoutAccountNumbers (D1-1)', () => {
     }
   });
 
+  it.each([
+    ['dashes', '-'],
+    ['dots', '.'],
+    ['slashes', '/'],
+    ['underscores', '_'],
+    ['tabs', '\t'],
+    ['non-breaking spaces', '\u00a0'],
+    ['narrow no-break spaces', '\u202f'],
+    ['an en dash', '\u2013'],
+    ['zero-width spaces', '\u200b'],
+    ['a dash and a space', '- '],
+  ])('finds an IBAN grouped with %s, known or not (the S68 audit)', (_what, separator) => {
+    const grouped = IBAN.replace(/(.{4})(?!$)/g, `$1${separator}`);
+    expect(leaks({ holderName: `Current A/C ${grouped}` })).toBe(true);
+    expect(leaks({ holderName: grouped.slice(4) }, [IBAN])).toBe(true);
+  });
+
+  it('finds an IBAN written in full-width letters and digits (the S68 audit)', () => {
+    const wide = IBAN.replace(/[0-9A-Z]/g, (character) =>
+      String.fromCodePoint((character.codePointAt(0) ?? 0) + 0xfee0),
+    );
+    expect(leaks({ note: wide })).toBe(true);
+  });
+
   it('finds the documentation IBANs the log checks plant', () => {
     for (const text of [SENSITIVE_SAMPLES.uaeIban, SENSITIVE_SAMPLES.spacedUaeIban, SENSITIVE_SAMPLES.lowercaseIban]) {
       expect(leaks(text)).toBe(true);

@@ -203,6 +203,8 @@ export interface BeneficiaryRef {
 
 /** The adapter every partner implements, and its fake (Rule Book §6: both pass the same contract tests). */
 export interface FinancialRailAdapter {
+  /** The origin of the partner's own pages: an `authoriseUrl` must be on it (the S68 audit). */
+  readonly authoriseOrigin: string;
   capabilities(): Promise<RailCapabilities>;
   startSourceLink(input: LinkContext): Promise<PartnerLinkSession>;
   confirmSourceLink(input: LinkContext): Promise<LinkOutcome>;
@@ -210,4 +212,16 @@ export interface FinancialRailAdapter {
   /** Registering again with the same ID answers as the first did, whatever details come with it. */
   registerBeneficiary(input: BeneficiaryRegistration): Promise<BeneficiaryOutcome>;
   getBeneficiaryState(ref: BeneficiaryRef): Promise<BeneficiaryOutcome>;
+}
+
+/**
+ * Whether a partner's `authoriseUrl` may be sent to a person's browser (the
+ * S68 audit): a page of the partner's own, over HTTPS, naming no one's
+ * credentials. Anything else (`javascript:`, `data:`, plain HTTP, another
+ * host) a person is never sent to, whatever the partner answered.
+ */
+export function isPartnerPage(url: string, origin: string): boolean {
+  if (!URL.canParse(url)) return false;
+  const page = new URL(url);
+  return page.protocol === 'https:' && page.origin === origin && page.username === '' && page.password === '';
 }

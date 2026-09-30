@@ -6,6 +6,12 @@
 // answers field by field from what it may keep, then the check refuses any
 // answer still holding an IBAN (any country's, with valid check digits) or
 // any 8 characters in a row of an account number the partner gave it.
+//
+// Text is read as a person would read it (the S68 audit): its Unicode
+// compatibility forms folded (full-width digits are digits), and any run of
+// separators (whitespace of any kind, invisible joiners, dashes, dots,
+// slashes, underscores) read as one space, so `AE12-9991-…` or an IBAN
+// grouped with non-breaking spaces is found as one grouped with spaces.
 
 /** The characters of a known account number that, in a row, count as the number itself. */
 const RUN = 8;
@@ -16,6 +22,11 @@ const RUN = 8;
  */
 const IBAN = /(?=([A-Z]{2}\d{2}(?: ?[A-Z\d]){11,30}))/g;
 const UAE_IBAN_LENGTH = 23;
+/** What may stand between an account number's groups: any space, an invisible joiner, a dash, a dot, a slash, an underscore. */
+const SEPARATORS = /[\s\p{Z}\p{Cf}\p{Pd}._/\\]+/gu;
+
+/** The text as the checks read it: compatibility forms folded, upper case, each run of separators one space. */
+const readable = (text: string): string => text.normalize('NFKC').toUpperCase().replaceAll(SEPARATORS, ' ');
 
 /** An answer held an account number; the message never says which, or where. */
 export class AccountNumberLeak extends Error {
@@ -25,7 +36,11 @@ export class AccountNumberLeak extends Error {
   }
 }
 
-const compact = (text: string): string => text.replaceAll(' ', '').toUpperCase();
+/** The text compacted for finding a number: read as a person would, every separator gone. */
+const compact = (text: string): string => readable(text).replaceAll(' ', '');
+
+/** An account number as given, compacted strictly: spaces and case aside, nothing else forgiven. */
+const strictly = (text: string): string => text.replaceAll(' ', '').toUpperCase();
 
 /** ISO 13616: the IBAN, its first four characters moved to the end and letters as numbers, is 1 mod 97. */
 function checksumHolds(iban: string): boolean {
@@ -45,7 +60,7 @@ function checksumHolds(iban: string): boolean {
  * these few, so a long reference that isn't an IBAN rarely passes by chance.
  */
 function holdsAnIban(text: string): boolean {
-  return [...text.toUpperCase().matchAll(IBAN)].some(([, found = '']) => {
+  return [...readable(text).matchAll(IBAN)].some(([, found = '']) => {
     const candidates = [found, ...[...found.matchAll(/ /g)].map(({ index }) => found.slice(0, index))].map(compact);
     if (found.startsWith('AE')) candidates.push(compact(found).slice(0, UAE_IBAN_LENGTH));
     return candidates.some((candidate) => candidate.length >= 15 && checksumHolds(candidate));
@@ -90,7 +105,7 @@ export function withoutAccountNumbers<T>(answer: T, accountNumbers: readonly str
 
 /** Whether a text is a UAE IBAN (AE and 21 digits, spaces and case aside) with valid check digits: an account the rail can pay. */
 export function isUaeIban(text: string): boolean {
-  const number = compact(text);
+  const number = strictly(text);
   return /^AE\d{21}$/.test(number) && checksumHolds(number);
 }
 
@@ -100,7 +115,7 @@ export function isUaeIban(text: string): boolean {
  * (PRD §3's masked hint).
  */
 export function accountHint(accountNumber: string): string {
-  const number = compact(accountNumber);
+  const number = strictly(accountNumber);
   if (!/^[A-Z]{2}[A-Z\d]{9,32}$/.test(number)) throw new RangeError('Not an account number an adapter can hint at');
   return `${number.slice(0, 2)}…${number.slice(-4)}`;
 }
