@@ -183,6 +183,7 @@ const ACTIVE = (role: 'admin' | 'approver' | 'developer' | 'viewer'): Membership
 describe('the S68 audit: a person refused once known still counts against their own limit', () => {
   it.each<[string, MembershipCheck, Partial<InjectOptions> & { org?: string | null }, number, string]>([
     ['a role the route doesn’t name', ACTIVE('viewer'), { url: '/v1/test-approvals' }, 403, 'FORBIDDEN'],
+    ['an agents’ route', ACTIVE('admin'), { url: '/v1/test-agents' }, 403, 'FORBIDDEN'],
     [
       'an organisation header that isn’t one',
       ACTIVE('admin'),

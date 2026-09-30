@@ -145,6 +145,17 @@ describe('SEC-DP-07 a write carries its idempotency key', () => {
     expect((await app.inject(signedInWrite('k'))).statusCode).toBe(200);
   });
 
+  it('keeps the query a write names itself, refusing only what it doesn’t name', async () => {
+    const { app, reached } = await withWrite({
+      ...WRITE,
+      schema: { ...WRITE.schema, querystring: z.strictObject({ dryRun: z.enum(['true', 'false']).optional() }) },
+    });
+
+    expect((await app.inject(signedInWrite('k', { url: '/v1/profile?dryRun=true' }))).statusCode).toBe(200);
+    expect((await app.inject(signedInWrite('j', { url: '/v1/profile?dryRun=true&_=1' }))).statusCode).toBe(400);
+    expect(reached).toHaveLength(1);
+  });
+
   it('refuses before the body is read, so a body over the limit is still IDEMPOTENCY_KEY_INVALID', async () => {
     const { app } = await withWrite();
     const response = await app.inject(
