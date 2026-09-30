@@ -21,6 +21,8 @@ interface TakenFlow {
   readonly returnTo: string;
   /** The step-up challenge it was started for (0014), if it is a step-up. */
   readonly stepUpChallengeId: string | undefined;
+  /** When it was started: a sign-in must have been made after it (the S68 audit). */
+  readonly startedAt: Date;
 }
 
 export interface LoginFlows {
@@ -76,13 +78,14 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
       const row = await db
         .deleteFrom('identity.login_flows')
         .where('cookie_hash', '=', hashOf(flowId))
-        .returning(['state', 'nonce', 'verifier', 'return_to', 'ends_at', 'step_up_challenge_id'])
+        .returning(['state', 'nonce', 'verifier', 'return_to', 'ends_at', 'step_up_challenge_id', 'created_at'])
         .executeTakeFirst();
       if (row === undefined || row.ends_at <= clock.now()) return undefined;
       return {
         flow: { state: row.state, nonce: row.nonce, verifier: row.verifier },
         returnTo: row.return_to,
         stepUpChallengeId: row.step_up_challenge_id ?? undefined,
+        startedAt: row.created_at,
       };
     },
 

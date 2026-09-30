@@ -49,7 +49,7 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
     const flowId = await store.save(app, flow, '/agents?tab=keys');
 
     expect(flowId).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expect(await store.take(app, flowId)).toEqual({ flow, returnTo: '/agents?tab=keys' });
+    expect(await store.take(app, flowId)).toEqual({ flow, returnTo: '/agents?tab=keys', startedAt: START });
     expect(await store.take(app, flowId)).toBeUndefined();
   });
 
@@ -63,6 +63,7 @@ describe(`the sign-in flows under way (Postgres ${server.version})`, () => {
       flow,
       returnTo: '/members/confirm',
       stepUpChallengeId: challengeId,
+      startedAt: START,
     });
   });
 

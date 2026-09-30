@@ -102,7 +102,12 @@ export type SignInFailure =
   /** The ID token failed a check. */
   | 'token_invalid'
   /** The login service's break-glass admin, who never signs in here (B4-6c). */
-  | 'break_glass';
+  | 'break_glass'
+  /**
+   * The login service answered with a sign-in made before this flow began:
+   * one it kept, not the fresh one asked for (`prompt=login`; the S68 audit).
+   */
+  | 'stale_authentication';
 
 export class SignInFailed extends Error {
   override readonly name = 'SignInFailed';
