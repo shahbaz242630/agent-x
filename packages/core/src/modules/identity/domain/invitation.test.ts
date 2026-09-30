@@ -2,6 +2,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CONFIRMATION_HOURS,
+  confirmationEnds,
   EMAIL_MAX,
   INVITATION,
   INVITATION_HOURS,
@@ -32,6 +34,11 @@ describe('an invitation (B4-3a)', () => {
   it('ends 72 hours after it was asked for', () => {
     expect(INVITATION_HOURS).toBe(72);
     expect(invitationEnds(new Date('2026-09-25T09:00:00.123Z'))).toEqual(new Date('2026-09-28T09:00:00.123Z'));
+  });
+
+  it('lets an acceptance wait for an admin 72 hours past the invitation’s end (the S68 audit)', () => {
+    expect(CONFIRMATION_HOURS).toBe(72);
+    expect(confirmationEnds(new Date('2026-09-28T09:00:00.123Z'))).toEqual(new Date('2026-10-01T09:00:00.123Z'));
   });
 });
 

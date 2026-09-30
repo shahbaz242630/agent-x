@@ -8,7 +8,9 @@
 // asked for, whatever its status. Accepted (B4-4b, 0018) by the person whose
 // verified email it names: a developer or viewer joins at once (OPEN>ACCEPTED);
 // an admin or finance approver waits for an existing admin to confirm who
-// accepted (OPEN>AWAITING_CONFIRMATION, then ACCEPTED or DECLINED; ADR-005 §6).
+// accepted (OPEN>AWAITING_CONFIRMATION, then ACCEPTED or DECLINED; ADR-005 §6),
+// and so does anyone deactivated there before, whatever the role (the S68
+// audit: a removed member never comes back by a link alone).
 // The database's status guard holds the same moves (0018).
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 
@@ -36,6 +38,18 @@ export const INVITATION_HOURS = 72;
 
 /** When an invitation asked for at `createdAt` ends. */
 export const invitationEnds = (createdAt: Date): Date => new Date(createdAt.getTime() + INVITATION_HOURS * 3_600_000);
+
+/**
+ * How long past its end an acceptance may wait for an admin to confirm it:
+ * accepted in the invitation's last hour, it still gets as long as the
+ * invitation had. Past that, it is closed (the S68 audit: never confirmable
+ * months later, by an admin who may not know why it was asked).
+ */
+export const CONFIRMATION_HOURS = 72;
+
+/** Until when an acceptance of an invitation ending at `expiresAt` may be confirmed. */
+export const confirmationEnds = (expiresAt: Date): Date =>
+  new Date(expiresAt.getTime() + CONFIRMATION_HOURS * 3_600_000);
 
 /** The longest email address there is (RFC 5321's path limit, less its brackets). */
 export const EMAIL_MAX = 254;
