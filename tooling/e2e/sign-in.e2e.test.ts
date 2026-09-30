@@ -141,9 +141,11 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
     expect((await sessions()).count).toBe(1);
   });
 
-  it('signs in again without a question (the login still knows the person), with a new cookie and the old session ended', async () => {
+  it('asks again at the next sign-in, password and app code, though the login still knows the person (the S68 audit), with a new cookie and the old session ended', async () => {
     const { shown, session } = await signIn();
-    expect(shown).toEqual(['callback']);
+    // Every sign-in asks for a fresh one (`prompt=login`): a session the login service kept never signs anyone in.
+    expect(shown).toEqual(expect.arrayContaining(['password', 'otp']));
+    expect(shown.at(-1)).toBe('callback');
     expect(session.value).not.toBe(first.value);
     expect((await sessions()).count).toBe(1);
   });
