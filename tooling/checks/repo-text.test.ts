@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { knownPrivateNames, linesNaming } from '../git-hooks/private-names.ts';
+import { linesNaming } from '../git-hooks/private-names.ts';
 import { describeProblem, pathProblems, PRIVATE_NAME_MESSAGE, textProblems } from '../git-hooks/rules.ts';
 
 const NUL = String.fromCharCode(0);
@@ -34,13 +34,10 @@ describe('Security-Handoff §7: what the pre-commit hook refuses, CI refuses too
   });
 
   it('names no private name, the staging domain, in any text file (the S68 audit)', () => {
-    const names = knownPrivateNames();
-    // In CI the name comes from the repository variable: a run without it would check nothing.
-    if (process.env.CI === 'true') expect(names.length).toBeGreaterThan(0);
     const found = tracked.flatMap((file) => {
       const bytes = readFileSync(file);
       return isText(bytes)
-        ? linesNaming(bytes.toString('utf8'), names).map((line) => `${file}:${String(line)} ${PRIVATE_NAME_MESSAGE}`)
+        ? linesNaming(bytes.toString('utf8')).map((line) => `${file}:${String(line)} ${PRIVATE_NAME_MESSAGE}`)
         : [];
     });
     expect(found).toEqual([]);

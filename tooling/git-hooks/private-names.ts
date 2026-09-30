@@ -1,64 +1,41 @@
 // Names that must never reach the public repository (Rule Book §7; the S68
 // audit): the staging domain, which slipped into one commit's comment (#112)
-// and stays in the history. The names themselves are never written here: the
-// pre-commit hook reads them from `.tools/private-names` (one a line; `.tools/`
-// is never committed), and CI from the repository variable STAGING_APP_ORIGIN,
-// whose host's registrable part it takes (`app.example.com` gives
-// `example.com`). A match is reported by file and line, never by the text.
-import { existsSync, readFileSync } from 'node:fs';
+// and stays in the history. The names themselves are never written here, nor
+// passed to CI (a repository variable is printed in public logs): each is
+// kept as the SHA-256 of its lower-case form, and every domain-like word of a
+// text is hashed and compared, with each of its parent domains
+// (`auth.example.com` is checked as itself and as `example.com`). A match is
+// reported by file and line, never by the text. A hash only confirms a guess;
+// the hosts are in public certificate logs anyway.
+import { createHash } from 'node:crypto';
 
-/** Where the hook reads the names on a developer's machine. */
-const PRIVATE_NAMES_FILE = '.tools/private-names';
+/** The SHA-256 of each private name, in lower case: the staging domain. */
+export const PRIVATE_NAME_FINGERPRINTS: readonly string[] = [
+  '0e3982851bc02063ec91b560200802639649c2fc17d79de14352f29cc7bf2ad3',
+];
 
-/** The shortest name checked: a shorter one would match ordinary words. */
-const SHORTEST = 6;
+/** A word shaped like a domain: labels of letters, digits and dashes, joined by dots. */
+const DOMAIN_LIKE = /[\p{L}\p{Nd}-]+(?:\.[\p{L}\p{Nd}-]+)+/gu;
 
-/** The registrable part of an origin's host: its last two labels (`app.example.com` gives `example.com`). */
-export function domainOf(origin: string): string | undefined {
-  if (!URL.canParse(origin)) return undefined;
-  const labels = new URL(origin).hostname.split('.').filter((label) => label !== '');
-  return labels.length >= 2 ? labels.slice(-2).join('.') : undefined;
+const fingerprintOf = (name: string): string => createHash('sha256').update(name, 'utf8').digest('hex');
+
+/** Whether a line names one of the private names: a domain-like word, or a parent of one, whose fingerprint is listed. */
+function names(line: string, fingerprints: ReadonlySet<string>): boolean {
+  for (const [word] of line.toLowerCase().matchAll(DOMAIN_LIKE)) {
+    const labels = word.split('.');
+    for (let start = 0; start + 2 <= labels.length; start += 1) {
+      if (fingerprints.has(fingerprintOf(labels.slice(start).join('.')))) return true;
+    }
+  }
+  return false;
 }
 
-/**
- * The private names known here, in lower case: the lines of `file` (blank
- * lines and `#` comments aside) and the domain of `origin`. Names shorter than
- * 6 characters are dropped: they would match ordinary text.
- */
-export function privateNames({
-  fileText,
-  origin,
-}: {
-  readonly fileText?: string | undefined;
-  readonly origin?: string | undefined;
-}): string[] {
-  const fromFile = (fileText ?? '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== '' && !line.startsWith('#'));
-  const fromOrigin = origin === undefined || origin === '' ? [] : [domainOf(origin)];
-  return [
-    ...new Set(
-      [...fromFile, ...fromOrigin]
-        .filter((name): name is string => name !== undefined && name.length >= SHORTEST)
-        .map((name) => name.toLowerCase()),
-    ),
-  ];
-}
-
-/** The private names this process knows: the file, if there is one, and STAGING_APP_ORIGIN, if set. */
-export function knownPrivateNames(env: NodeJS.ProcessEnv = process.env): string[] {
-  const fileText = existsSync(PRIVATE_NAMES_FILE) ? readFileSync(PRIVATE_NAMES_FILE, 'utf8') : undefined;
-  return privateNames({ fileText, origin: env.STAGING_APP_ORIGIN });
-}
-
-/** The 1-based lines of `text` holding any of `names`, whatever their case. */
-export function linesNaming(text: string, names: readonly string[]): number[] {
-  if (names.length === 0) return [];
+/** The 1-based lines of `text` naming a private name, whatever their case. */
+export function linesNaming(text: string, fingerprints: readonly string[] = PRIVATE_NAME_FINGERPRINTS): number[] {
+  const known = new Set(fingerprints);
   const lines: number[] = [];
   text.split('\n').forEach((line, index) => {
-    const lower = line.toLowerCase();
-    if (names.some((name) => lower.includes(name))) lines.push(index + 1);
+    if (names(line, known)) lines.push(index + 1);
   });
   return lines;
 }
