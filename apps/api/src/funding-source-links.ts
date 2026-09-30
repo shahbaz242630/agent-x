@@ -8,7 +8,10 @@
 //    day's budget checked first, so no session is asked of the partner for a
 //    start that would be refused; our link ID, made from the write's own
 //    idempotency key (the S68 audit: a retry, or a request sent again, asks
-//    the partner for the same session, never another); the partner asked for
+//    the partner for the same session, never another; requests with fresh
+//    keys sent at once can each still open one before the budget's count
+//    in the transaction refuses all but the day's last, bounded by the
+//    per-person rate limit, Carry-Forward); the partner asked for
 //    a session under it (the partner's idempotency key), and its page held to
 //    the partner's own origin over HTTPS (`isPartnerPage`); then, in one
 //    transaction, the key claimed, the organisation's lock for starting links,

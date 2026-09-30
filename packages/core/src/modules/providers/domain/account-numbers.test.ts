@@ -58,6 +58,46 @@ describe('withoutAccountNumbers (D1-1)', () => {
     expect(leaks({ holderName: grouped.slice(4) }, [IBAN])).toBe(true);
   });
 
+  it.each([
+    ['colons', ':'],
+    ['commas', ','],
+    ['pipes', '|'],
+    ['a combining mark', '\u0301'],
+    ['a control character', '\u0001'],
+  ])('finds an IBAN broken up by %s, known or not (the S68 review)', (_what, separator) => {
+    const broken = IBAN.replace(/(.{4})(?!$)/g, `$1${separator}`);
+    expect(leaks({ note: broken })).toBe(true);
+    expect(leaks({ note: broken.slice(4) }, [IBAN])).toBe(true);
+  });
+
+  it('finds an IBAN written with Arabic-Indic or Persian digits, or Cyrillic letters for its country (the S68 review)', () => {
+    const arabic = IBAN.replace(/\d/g, (digit) => String.fromCodePoint(0x0660 + Number(digit)));
+    const persian = IBAN.replace(/\d/g, (digit) => String.fromCodePoint(0x06f0 + Number(digit)));
+    const cyrillic = IBAN.replace('AE', '\u0410\u0415');
+    for (const text of [arabic, persian, cyrillic]) expect(leaks({ note: text })).toBe(true);
+    expect(leaks({ note: arabic.slice(10) }, [IBAN])).toBe(true);
+  });
+
+  it('reads a digit of a script whose digits run past 10 in a row by its place (mathematical bold 7 is 7)', () => {
+    const bold = IBAN.replace(/\d/g, (digit) => String.fromCodePoint(0x1d7ce + Number(digit)));
+    expect(leaks({ note: bold })).toBe(true);
+  });
+
+  it('never takes an ID in the UUID form for an IBAN, alone or in a reference, however its groups fall (the S68 review)', () => {
+    fc.assert(
+      fc.property(fc.uuid(), fc.boolean(), (id, upper) => {
+        const shown = upper ? id.toUpperCase() : id;
+        return !leaks({ id: shown, sessionRef: `fake-link-${shown}`, note: `link ${shown}.` });
+      }),
+      { numRuns: 5000 },
+    );
+  });
+
+  it('still finds an IBAN beside an ID', () => {
+    expect(leaks({ note: `0199a0f0-0000-7000-8000-0000000000aa ${IBAN}` })).toBe(true);
+    expect(leaks({ note: `${IBAN.slice(0, 8)}-0000-7000-8000-0000000000aa` }, [IBAN])).toBe(true);
+  });
+
   it('finds an IBAN written in full-width letters and digits (the S68 audit)', () => {
     const wide = IBAN.replace(/[0-9A-Z]/g, (character) =>
       String.fromCodePoint((character.codePointAt(0) ?? 0) + 0xfee0),
