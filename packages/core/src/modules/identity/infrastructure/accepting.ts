@@ -69,8 +69,8 @@ export const ACCEPT_OPERATION = 'invitations.accept';
  * empty, and both join unconfirmed; so each first takes a lock for the
  * organisation's first admin, held to the end of its transaction, and the
  * second, waiting, reads the list once the first has committed (B4-6a
- * review). Only those acceptances take it, after the invitation and before
- * any membership.
+ * review). Only those acceptances take it, after the invitation and the
+ * person's membership are read, and before any membership is added.
  */
 async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: string): Promise<boolean> {
   const key = `agentx.first-admin:${orgId.toLowerCase()}`;
@@ -176,7 +176,7 @@ export function createInvitationAcceptance({
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
-  /** Where the admins' notices of a rejoin or an admin joining are written (B5-1b). */
+  /** Where the admins' notices of an admin joining are written (B5-1b); a rejoin is told on its confirmation. */
   readonly outbox: Outbox;
   readonly logger: Logger;
 }): InvitationAcceptance {

@@ -520,7 +520,7 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     },
   );
 
-  it('reads the two memberships in order of ID when the person’s comes first: an admin made since invites them back', async () => {
+  it('checks the admin who asked when the person’s membership has the lower ID: waiting while they are an admin, closed once gone', async () => {
     const who = await organization();
     const member = await person();
     const membershipId = await deactivatedIn(who.org, member);
