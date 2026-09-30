@@ -176,6 +176,27 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await sessions.use(app, done.cookie)).toMatchObject({ userId: done.userId });
   });
 
+  it('counts the 5 seconds from the start of the flow’s second, as a sign-in’s time is in whole seconds', async () => {
+    clock = new FixedClock(new Date(START.getTime() + 900));
+    signIn = createSignIn({
+      db: app,
+      oidc: client,
+      flows: createLoginFlows({ clock }),
+      sessions,
+      challenges,
+      ids: new SequentialIds(0x5000 + subjects * 0x100 + 0x80),
+      clock,
+      keys,
+    });
+    const { url, flowId } = await signIn.begin();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    client.proves = { ...evidence, authTime: new Date(START.getTime() - 5_000) };
+
+    const done = await signIn.complete({ flowId, code: 'a-code', state, previousCookie: undefined });
+
+    expect(done.userId).toEqual(expect.any(String));
+  });
+
   it('sends the browser home when it asked for nowhere', async () => {
     expect((await roundTrip()).returnTo).toBe('/');
   });
