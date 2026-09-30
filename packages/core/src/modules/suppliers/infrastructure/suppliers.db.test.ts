@@ -486,14 +486,14 @@ describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres
     const other = await added(org);
     const second = await later(org, id, 2, DETAILS);
     await recordOn(org, id, { current_version_id: second.id });
-    const following = (versionIdToFollow: string, ofSupplier: string, supplierId: string) =>
+    const following = (versionIdToFollow: string, ofSupplier: string, supplierId: string, forSupplier = ofSupplier) =>
       onSupplier(org, ofSupplier, async (tx, states, found) => {
         const follows = await versionOf(tx, states, { orgId: org, id: versionIdToFollow }, supplierId);
         if (follows.outcome !== 'found') throw new Error(`No version: ${follows.outcome}`);
         return addVersion(tx, states, keys, {
           orgId: org,
           id: ids.next(),
-          supplierId: ofSupplier,
+          supplierId: forSupplier,
           version: 3,
           supplier: DETAILS,
           enteredBy: ids.next(),
@@ -510,6 +510,8 @@ describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres
     await expect(following(other.versionId, id, other.id)).rejects.toBeInstanceOf(RangeError);
     // This supplier's version, made for another supplier's read.
     await expect(following(second.id, other.id, id)).rejects.toBeInstanceOf(RangeError);
+    // This supplier's own current version followed, for a version of another supplier: its phone's time would cross over.
+    await expect(following(second.id, id, id, other.id)).rejects.toBeInstanceOf(RangeError);
     expect(await readVersion(org, second.id, id)).toMatchObject({ outcome: 'found' });
   });
 

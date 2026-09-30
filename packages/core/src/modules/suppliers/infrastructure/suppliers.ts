@@ -232,11 +232,8 @@ export async function addVersion(
   version: NewVersion & { readonly of: { readonly supplier: SupplierRecord }; readonly follows: VersionRecord },
 ): Promise<RecordedState> {
   const { supplier } = version.of;
-  if (
-    supplier.id !== version.supplierId.toLowerCase() ||
-    version.follows.supplierId !== supplier.id ||
-    version.follows.id !== supplier.currentVersionId
-  ) {
+  // Its supplier's current version is that supplier's own (0032's key), so following it is following the same supplier.
+  if (supplier.id !== version.supplierId.toLowerCase() || version.follows.id !== supplier.currentVersionId) {
     throw new RangeError("A later version follows its own supplier's current version");
   }
   // Checked before any SQL runs, as the row is made below.
