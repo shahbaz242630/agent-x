@@ -171,6 +171,11 @@ const RULES = type('Microsoft.Network/networkSecurityGroups');
 const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-database');
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
 const NETWORK = type('Microsoft.Network/virtualNetworks');
+const DNS_POLICY = type('Microsoft.Network/dnsResolverPolicies');
+const DNS_RULE = type('Microsoft.Network/dnsResolverPolicies/dnsSecurityRules');
+const DNS_LINK = type('Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks');
+const DNS_NAMES = type('Microsoft.Network/dnsResolverDomainLists');
+const DNS_LOGS = named(/^lookups-to-workspace$/);
 const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
 const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
 const APP_LOGS = named(/^app-logs-to-workspace$/);
@@ -378,6 +383,11 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Network/virtualNetworks vnet-agentx-staging',
       'Microsoft.Network/privateDnsZones agentx-staging.private.postgres.database.azure.com',
       'Microsoft.Network/privateDnsZones/virtualNetworkLinks agentx-staging.private.postgres.database.azure.com/vnet-agentx-staging',
+      'Microsoft.Network/dnsResolverPolicies dnspr-agentx-staging',
+      'Microsoft.Network/dnsResolverDomainLists dnsdl-agentx-staging-every-name',
+      'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules dnspr-agentx-staging/watch-every-lookup',
+      'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks dnspr-agentx-staging/network',
+      'Microsoft.Insights/diagnosticSettings lookups-to-workspace',
       expect.stringMatching(/^Microsoft\.KeyVault\/vaults kv-agentx-stg-[a-z0-9]{6}$/),
       'Microsoft.Insights/diagnosticSettings audit-to-workspace',
       expect.stringMatching(/^Microsoft\.DBforPostgreSQL\/flexibleServers psql-agentx-stg-[a-z0-9]{6}$/),
@@ -548,6 +558,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ).toEqual(['required']);
     expect(brokenRules(without((resource) => NETWORK(resource) || RULES(resource)))).toContain('required');
     expect(brokenRules(without(WORKSPACE))).toContain('required');
+    // Without the policy, no rule of ours judges the network's lookups.
+    expect(
+      brokenRules(
+        without((resource) => resource.type.startsWith('Microsoft.Network/dnsResolver') || DNS_LOGS(resource)),
+      ),
+    ).toEqual(['required', 'dns-watch']);
     expect(brokenRules(without(ACTION_GROUP))).toContain('required');
     const workspace = staging.predictedResources.find(WORKSPACE);
     // A second workspace also has no quota alerts of its own.
@@ -1118,9 +1134,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
     }
   });
 
-  it("resource-logs: a vault or server whose logs stay out of this deployment's workspace", () => {
+  it("resource-logs: a vault, server or DNS policy whose logs stay out of this deployment's workspace", () => {
     const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.OperationalInsights/workspaces/elsewhere';
     expect(brokenRules(without(named(/^audit-to-workspace$/)))).toEqual(['resource-logs']);
+    expect(brokenRules(without(DNS_LOGS))).toEqual(['resource-logs']);
+    expect(
+      brokenRules(changed(DNS_LOGS, (entry) => (first(at(entry, 'properties', 'logs')).category = 'Other'))),
+    ).toEqual(['resource-logs']);
     for (const change of [
       (entry: Mutable) => (inside(entry, 'properties').logAnalyticsDestinationType = 'AzureDiagnostics'),
       (entry: Mutable) => (first(at(entry, 'properties', 'logs')).enabled = false),
@@ -1133,6 +1153,36 @@ describe('SEC-OPS-09 each rule can fail', () => {
         changed(named(/^logs-to-workspace$/), (entry) => (inside(entry, 'properties').workspaceId = elsewhere)),
       ),
     ).toEqual(['resource-logs', 'log-destinations']);
+  });
+
+  it('dns-watch: a network no policy of ours watches, or whose every-name rule is off, allows, or covers less', () => {
+    const elsewhere = '/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/dnsResolverDomainLists/elsewhere';
+    const properties = (resource: Mutable): Mutable => inside(resource, 'properties');
+    for (const broken of [
+      without(DNS_LINK),
+      changed(DNS_LINK, (link) => (inside(link, 'properties', 'virtualNetwork').id = `${String(link.id)}-other`)),
+      // Linked to a policy this deployment doesn't create.
+      changed(DNS_LINK, (link) => (link.id = String(link.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
+      without(DNS_RULE),
+      changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
+      changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow')),
+      changed(DNS_RULE, (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = elsewhere)),
+      changed(DNS_NAMES, (names) => (properties(names).domains = ['example.com.'])),
+    ]) {
+      expect(brokenRules(broken)).toEqual(['dns-watch']);
+    }
+    // A rule above it that allows every name lets each lookup through first.
+    const rule = staging.predictedResources.find(DNS_RULE);
+    const allowAll = structuredClone(rule) as unknown as Mutable;
+    allowAll.id = `${String(rule?.id)}-allow`;
+    inside(allowAll, 'properties').priority = 100;
+    inside(allowAll, 'properties', 'action').actionType = 'Allow';
+    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch']);
+    // Blocking every name still sees each lookup.
+    expect(
+      brokenRules(changed(DNS_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
+    ).toEqual([]);
+    expect(brokenRules(changed(DNS_POLICY, (policy) => (policy.location = 'westeurope')))).toEqual(['in-country']);
   });
 
   it('SEC-DATA-09 log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {

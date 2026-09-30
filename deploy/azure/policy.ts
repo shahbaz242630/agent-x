@@ -43,6 +43,7 @@ export type RuleId =
   | 'apps-environment'
   | 'apps-network'
   | 'apps-egress'
+  | 'dns-watch'
   | 'apps-logs'
   | 'app-errors-alert'
   | 'audit-integrity-alert'
@@ -82,6 +83,10 @@ const TYPES = {
   diagnostics: 'Microsoft.Insights/diagnosticSettings',
   dnsLink: 'Microsoft.Network/privateDnsZones/virtualNetworkLinks',
   dnsZone: 'Microsoft.Network/privateDnsZones',
+  dnsPolicy: 'Microsoft.Network/dnsResolverPolicies',
+  dnsPolicyRule: 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules',
+  dnsPolicyLink: 'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks',
+  dnsDomainList: 'Microsoft.Network/dnsResolverDomainLists',
   environment: 'Microsoft.App/managedEnvironments',
   app: 'Microsoft.App/containerApps',
   door: 'Microsoft.App/managedEnvironments/httpRouteConfigs',
@@ -742,6 +747,7 @@ const required: Check = (snapshot, _expected, add) => {
     ['the log workspace', TYPES.workspace, 1, 1],
     ['an action group', TYPES.actionGroup, 1, Infinity],
     ['the network', TYPES.network, 1, 1],
+    ['the DNS policy', TYPES.dnsPolicy, 1, 1],
     ['the key vault', TYPES.vault, 1, Infinity],
     ['the Postgres server', TYPES.server, 1, Infinity],
     ['the Container Apps environment', TYPES.environment, 1, 1],
@@ -1270,6 +1276,57 @@ const appsEgress: Check = (snapshot, _expected, add) => {
   }
 };
 
+/** Every name, in a DNS domain list (Microsoft: a rule on the '.' domain applies to all domains). */
+const EVERY_NAME = '.';
+
+/**
+ * Every lookup the network makes is judged by a DNS policy of this deployment
+ * (S68 audit finding 14): its rules see what Azure's DNS answers, which the
+ * apps subnet's rules must let out and so can't filter. The network is linked
+ * to one of the deployment's policies, which holds an enabled rule over every
+ * name, in a list of this deployment, that alerts on or blocks each lookup,
+ * so a name no rule above it names is still seen; and no rule allows every
+ * name, which would let each lookup through before that rule is reached.
+ * Rule `resource-logs` sends what the policy sees to the workspace.
+ */
+const dnsWatch: Check = (snapshot, _expected, add) => {
+  const policies = new Set(ofType(snapshot, TYPES.dnsPolicy).map((policy) => policy.id));
+  const everyName = new Set(
+    ofType(snapshot, TYPES.dnsDomainList)
+      .filter((domains) => list(at(domains.properties, 'domains')).includes(EVERY_NAME))
+      .map((domains) => domains.id),
+  );
+  const rulesOf = (policy: string): readonly PredictedResource[] =>
+    ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
+  const coversEveryName = (rule: PredictedResource): boolean =>
+    list(at(rule.properties, 'dnsResolverDomainLists')).some((domains) => everyName.has(text(at(domains, 'id'))));
+  const watches = (rule: PredictedResource): boolean =>
+    at(rule.properties, 'dnsSecurityRuleState') !== 'Disabled' &&
+    ['Alert', 'Block'].includes(text(at(rule.properties, 'action', 'actionType'))) &&
+    coversEveryName(rule);
+  for (const network of ofType(snapshot, TYPES.network)) {
+    const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
+      .filter((link) => at(link.properties, 'virtualNetwork', 'id') === network.id)
+      .map((link) => link.id.slice(0, link.id.lastIndexOf('/virtualNetworkLinks/')))
+      .filter((policy) => policies.has(policy));
+    const judged = linkedTo.some((policy) => {
+      const rules = rulesOf(policy);
+      return (
+        rules.some(watches) &&
+        !rules.some((rule) => at(rule.properties, 'action', 'actionType') === 'Allow' && coversEveryName(rule))
+      );
+    });
+    if (!judged) {
+      add({
+        rule: 'dns-watch',
+        resource: network.name,
+        message:
+          "must be linked to this deployment's DNS policy, with an enabled rule alerting on or blocking every name ('.') and none allowing every name, so each lookup it makes is seen",
+      });
+    }
+  }
+};
+
 /** Where the apps may run, and the only subnet the database and the key vault let in. */
 const appsSubnetIds = (snapshot: Snapshot): ReadonlySet<unknown> =>
   new Set(
@@ -1422,6 +1479,7 @@ const resourceLogs: Check = (snapshot, _expected, add) => {
   const wanted: readonly (readonly [string, (log: unknown) => boolean])[] = [
     [TYPES.vault, (log) => at(log, 'categoryGroup') === 'audit' || at(log, 'categoryGroup') === 'allLogs'],
     [TYPES.server, (log) => at(log, 'category') === 'PostgreSQLLogs'],
+    [TYPES.dnsPolicy, (log) => at(log, 'category') === 'DnsResponse'],
   ];
   for (const [type, isTheLog] of wanted) {
     for (const resource of ofType(snapshot, type)) {
@@ -2548,6 +2606,7 @@ const CHECKS: readonly Check[] = [
   databaseNetwork,
   appsNetwork,
   appsEgress,
+  dnsWatch,
   vault,
   workspaceAndQuota,
   alertRules,
