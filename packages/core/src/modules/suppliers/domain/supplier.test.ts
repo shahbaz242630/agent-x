@@ -94,6 +94,9 @@ describe('a version’s details (E1-1)', () => {
     expect(refused({ ...longest, contacts: { ...longest.contacts, email: `${'a'.repeat(65)}@b` } })).toEqual([
       'the email is not one address',
     ]);
+    expect(refused({ ...longest, contacts: { ...longest.contacts, email: `a@${'b'.repeat(190)}` } })).toEqual([
+      'the email is not one address',
+    ]);
   });
 });
 

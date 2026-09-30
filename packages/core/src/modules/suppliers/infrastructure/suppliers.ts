@@ -86,17 +86,121 @@ export type SuppliersTransaction = Transaction<SuppliersTables & AuditTables>;
 /** The kinds of contact a version keeps encrypted, each in a column of its own (`<kind>_ciphertext`). */
 type ContactKind = 'phone' | 'email' | 'licence';
 
-/** A contact's associated data: the row and the kind it belongs to, so it opens nowhere else. */
-const contactAssociatedData = (
-  key: { readonly orgId: string; readonly supplierId: string; readonly versionId: string },
-  kind: ContactKind,
-) =>
-  [
-    `suppliers.supplier_versions.${kind}`,
-    key.orgId.toLowerCase(),
-    key.supplierId.toLowerCase(),
-    key.versionId.toLowerCase(),
-  ] as const;
+/**
+ * A contact's associated data: the organisation, the version (whose ID names
+ * one version of one supplier) and the kind, so it opens nowhere else.
+ */
+const contactAssociatedData = (key: { readonly orgId: string; readonly versionId: string }, kind: ContactKind) =>
+  [`suppliers.supplier_versions.${kind}`, key.orgId.toLowerCase(), key.versionId.toLowerCase()] as const;
+
+/** Each contact given, encrypted for its own version and kind, with the key's version. */
+function sealContacts(
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly versionId: string },
+  contacts: SupplierContacts,
+) {
+  const seal = (kind: ContactKind, value: string | null): Buffer | null =>
+    value === null
+      ? null
+      : keys.encrypt('field-encryption', Buffer.from(value, 'utf8'), contactAssociatedData(key, kind)).ciphertext;
+  const phone = keys.encrypt(
+    'field-encryption',
+    Buffer.from(contacts.phone, 'utf8'),
+    contactAssociatedData(key, 'phone'),
+  );
+  return {
+    phone_ciphertext: phone.ciphertext,
+    email_ciphertext: seal('email', contacts.email),
+    licence_ciphertext: seal('licence', contacts.tradeLicence),
+    contacts_key_version: phone.keyVersion,
+  };
+}
+
+/** A version of a supplier's details, as a use case makes it. */
+export interface NewVersion {
+  readonly orgId: string;
+  /** Its ID, made by the server. */
+  readonly id: string;
+  readonly supplierId: string;
+  /** Its number: the supplier's next. A number the supplier has already is refused by the table's key. */
+  readonly version: number;
+  /** Its name, contacts and independent source, as supplierDetails keeps them (checked again here). */
+  readonly supplier: SupplierDetails;
+  /** The membership of the member who entered them, checked active by the use case. */
+  readonly enteredBy: string;
+  readonly enteredAt: Date;
+  /** Who is making it. */
+  readonly actor: AuditActor;
+  /** More facts for its event, such as the step-up it was confirmed with. */
+  readonly details?: AuditDetails;
+}
+
+/** The version's row, checked: its sealed fields, its encrypted contacts, and the facts its event names. */
+function versionRow(keys: KeyProvider, { orgId, id, supplierId, version, supplier, enteredBy, enteredAt }: NewVersion) {
+  const kept = supplierDetails(supplier);
+  const fields = {
+    supplier_id: supplierId,
+    version,
+    display_name: kept.displayName,
+    contacts: contactsHeld(kept.contacts),
+    source_kind: kept.source.kind,
+    source_ref: kept.source.ref,
+    entered_by: enteredBy,
+    entered_at: enteredAt,
+    registration_id: null,
+    beneficiary_ref: null,
+    payee_hint: null,
+  };
+  return {
+    fields,
+    sealed: sealContacts(keys, { orgId, versionId: id }, kept.contacts),
+    facts: { supplierId, version, contacts: fields.contacts, sourceKind: kept.source.kind },
+  };
+}
+
+/** Adds the version's row, as versionRow made it. Signed by `recordVersion`, in the same transaction. */
+async function insertVersion(
+  tx: SuppliersTransaction,
+  orgId: string,
+  id: string,
+  row: ReturnType<typeof versionRow>,
+): Promise<void> {
+  await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') in the same transaction (see the top of this file)
+    .insertInto(SUPPLIER_VERSIONS.table)
+    .values({ org_id: orgId, id, ...row.fields, ...row.sealed })
+    .execute();
+}
+
+const recordVersion = (
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  { orgId, id, actor, details = {} }: NewVersion,
+  row: ReturnType<typeof versionRow>,
+): Promise<RecordedState> =>
+  states.record(tx, SUPPLIER_VERSIONS, { orgId, id }, 'new', row.fields, {
+    actor,
+    action: 'supplier_version.made',
+    details: { ...details, ...row.facts },
+  });
+
+/**
+ * Makes a later version of a supplier's details (E2, E3), in the caller's
+ * transaction, which must be withSignedStates' for its organisation and read
+ * the supplier with `change` first (the lock order: the supplier, then its
+ * versions). Pointing the supplier at it is the caller's. Details it can't
+ * have are `SupplierDetailsRefused`, before any SQL runs.
+ */
+export async function addVersion(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  version: NewVersion,
+): Promise<RecordedState> {
+  const row = versionRow(keys, version);
+  await insertVersion(tx, version.orgId, version.id, row);
+  return recordVersion(tx, states, version, row);
+}
 
 export interface NewSupplier {
   readonly orgId: string;
@@ -125,9 +229,20 @@ export async function addSupplier(
   tx: SuppliersTransaction,
   states: SignedStates,
   keys: KeyProvider,
-  { orgId, id, versionId, supplier: given, enteredBy, createdAt, actor, details = {} }: NewSupplier,
+  { orgId, id, versionId, supplier, enteredBy, createdAt, actor, details = {} }: NewSupplier,
 ): Promise<{ readonly supplier: RecordedState; readonly version: RecordedState }> {
-  const kept = supplierDetails(given);
+  const first: NewVersion = {
+    orgId,
+    id: versionId,
+    supplierId: id,
+    version: 1,
+    supplier,
+    enteredBy,
+    enteredAt: createdAt,
+    actor,
+    details,
+  };
+  const row = versionRow(keys, first);
   const supplierFields = {
     status: SUPPLIER.initial,
     current_version_id: versionId,
@@ -137,64 +252,19 @@ export async function addSupplier(
     payee_key: null,
     payee_key_version: null,
   };
-  const versionFields = {
-    supplier_id: id,
-    version: 1,
-    display_name: kept.displayName,
-    contacts: contactsHeld(kept.contacts),
-    source_kind: kept.source.kind,
-    source_ref: kept.source.ref,
-    entered_by: enteredBy,
-    entered_at: createdAt,
-    registration_id: null,
-    beneficiary_ref: null,
-    payee_hint: null,
-  };
-  const sealed = sealContacts(keys, { orgId, supplierId: id, versionId }, kept.contacts);
   await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') just below (see the top of this file)
     .insertInto(SUPPLIERS.table)
     .values({ org_id: orgId, id, ...supplierFields, created_at: createdAt })
     .execute();
-  await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a new row, a plain insert, signed by record('new') just below (see the top of this file)
-    .insertInto(SUPPLIER_VERSIONS.table)
-    .values({ org_id: orgId, id: versionId, ...versionFields, ...sealed })
-    .execute();
-  const supplier = await states.record(tx, SUPPLIERS, { orgId, id }, 'new', supplierFields, {
+  await insertVersion(tx, orgId, versionId, row);
+  // The supplier before its version, as the lock order has them.
+  const recorded = await states.record(tx, SUPPLIERS, { orgId, id }, 'new', supplierFields, {
     actor,
     action: 'supplier.added',
     details: { ...details, versionId },
   });
-  const version = await states.record(tx, SUPPLIER_VERSIONS, { orgId, id: versionId }, 'new', versionFields, {
-    actor,
-    action: 'supplier_version.made',
-    details: { ...details, supplierId: id, version: 1, contacts: versionFields.contacts, sourceKind: kept.source.kind },
-  });
-  return { supplier, version };
-}
-
-/** Each contact given, encrypted for its own row and kind, with the key's version. */
-function sealContacts(
-  keys: KeyProvider,
-  key: { readonly orgId: string; readonly supplierId: string; readonly versionId: string },
-  contacts: SupplierContacts,
-) {
-  const seal = (kind: ContactKind, value: string | null): Buffer | null =>
-    value === null
-      ? null
-      : keys.encrypt('field-encryption', Buffer.from(value, 'utf8'), contactAssociatedData(key, kind)).ciphertext;
-  const phone = keys.encrypt(
-    'field-encryption',
-    Buffer.from(contacts.phone, 'utf8'),
-    contactAssociatedData(key, 'phone'),
-  );
-  return {
-    phone_ciphertext: phone.ciphertext,
-    email_ciphertext: seal('email', contacts.email),
-    licence_ciphertext: seal('licence', contacts.tradeLicence),
-    contacts_key_version: phone.keyVersion,
-  };
+  return { supplier: recorded, version: await recordVersion(tx, states, first, row) };
 }
 
 /** A supplier, as its signed state says. */
@@ -395,9 +465,11 @@ export class SupplierContactsUnreadable extends Error {
 
 /**
  * The version's contacts, decrypted, from a version the caller read through
- * its signed state (versionOf) in this transaction: each contact its sealed
- * `contacts` says it holds, and only those. One that won't open, or a
- * contact the row holds past what it says, throws SupplierContactsUnreadable.
+ * its signed state (versionOf) in this transaction. A contact its sealed
+ * `contacts` says it holds but the row has lost, or one that won't open,
+ * throws SupplierContactsUnreadable. (One planted where it says none needs
+ * no check of its own: nothing was ever encrypted for that version and kind,
+ * so it doesn't open.)
  */
 export async function contactsOf(
   tx: SuppliersTransaction,
@@ -412,14 +484,13 @@ export async function contactsOf(
     .where('org_id', '=', orgId)
     .where('id', '=', version.id)
     .executeTakeFirstOrThrow();
-  const key = { orgId, supplierId: version.supplierId, versionId: version.id };
+  const key = { orgId, versionId: version.id };
   const held = new Set(version.contacts.split(' '));
   const open = (kind: ContactKind, ciphertext: Buffer | null): string | null => {
     if (ciphertext === null) {
       if (held.has(kind)) throw new SupplierContactsUnreadable(version.id);
       return null;
     }
-    if (!held.has(kind)) throw new SupplierContactsUnreadable(version.id);
     try {
       return keys
         .decrypt(

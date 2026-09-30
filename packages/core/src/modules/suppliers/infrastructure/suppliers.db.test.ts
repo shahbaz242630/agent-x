@@ -24,6 +24,7 @@ import { createOrganization } from '../../organizations/index.ts';
 import { type SupplierDetails, SupplierDetailsRefused } from '../domain/supplier.ts';
 import {
   addSupplier,
+  addVersion,
   contactsOf,
   MOST_SUPPLIERS_A_PAGE,
   SUPPLIERS,
@@ -289,6 +290,59 @@ describe(`a supplier (E1-1, Postgres ${server.version})`, () => {
       expect(await read(org, id)).toMatchObject({ supplier: { status } });
     }
     expect(await move('reactivate')).toMatchObject({ outcome: 'refused' });
+  });
+});
+
+describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres ${server.version})`, () => {
+  /** A version `version` of the supplier, made after reading it for change, as a change will. */
+  const later = (orgId: string, supplierId: string, version: number, supplier: SupplierDetails) =>
+    withSignedStates(app, orgId, services(), async (tx, states) => {
+      expect(await supplierOf(tx, states, { orgId, id: supplierId }, 'change')).toMatchObject({ outcome: 'found' });
+      const id = ids.next();
+      const recorded = await addVersion(tx, states, keys, {
+        orgId,
+        id,
+        supplierId,
+        version,
+        supplier,
+        enteredBy: ids.next(),
+        enteredAt: clock.now(),
+        actor: OPERATOR,
+      });
+      return { id, recorded };
+    });
+
+  it('is made sealed, its contacts encrypted for itself, and the supplier left as it was', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+    const changed = { ...DETAILS, contacts: { phone: '+971509876543', email: null, tradeLicence: LICENCE } };
+
+    const second = await later(org, id, 2, changed);
+
+    expect(second.recorded.version).toBe(1);
+    expect(await readVersion(org, second.id, id)).toMatchObject({
+      outcome: 'found',
+      version: { supplierId: id, version: 2, contacts: 'phone licence' },
+    });
+    expect(await contacts(org, second.id, id)).toEqual({ phone: '+971509876543', email: null, tradeLicence: LICENCE });
+    expect(await contacts(org, versionId, id)).toEqual({ phone: PHONE, email: EMAIL, tradeLicence: LICENCE });
+    expect(await read(org, id)).toMatchObject({ supplier: { currentVersionId: versionId, pendingVersionId: null } });
+  });
+
+  it('is refused a number the supplier already has, by the table’s key', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(later(org, id, 1, DETAILS)).rejects.toThrow(/one_number_a_version/);
+  });
+
+  it('refuses details it can’t have before any SQL runs', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+
+    await expect(
+      later(org, id, 2, { ...DETAILS, source: { kind: 'registry', ref: 'has a space' } }),
+    ).rejects.toBeInstanceOf(SupplierDetailsRefused);
   });
 });
 

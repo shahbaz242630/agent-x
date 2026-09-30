@@ -16,9 +16,11 @@ export {
 } from './domain/supplier.ts';
 export {
   addSupplier,
+  addVersion,
   contactsOf,
   MOST_SUPPLIERS_A_PAGE,
   type NewSupplier,
+  type NewVersion,
   SUPPLIER_VERSIONS,
   type SupplierCheck,
   SupplierContactsUnreadable,

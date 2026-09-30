@@ -33,6 +33,7 @@ import { createOrganization } from '../../organizations/index.ts';
 import type { SupplierDetails } from '../domain/supplier.ts';
 import {
   addSupplier,
+  addVersion,
   contactsOf,
   SupplierContactsUnreadable,
   SUPPLIER_VERSIONS,
@@ -466,6 +467,53 @@ describe(`a contact moved past the app won't open (SEC-DB-01, Postgres ${server.
     );
 
     await expect(open(versionId, id)).rejects.toBeInstanceOf(SupplierContactsUnreadable);
+  });
+
+  it('an earlier version’s phone copied into a later one of the same supplier: its version is in its associated data', async () => {
+    const { id, versionId } = await addedSupplier();
+    const later = ids.next();
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      await supplierOf(tx, states, { orgId: org, id }, 'change');
+      await addVersion(tx, states, keys, {
+        orgId: org,
+        id: later,
+        supplierId: id,
+        version: 2,
+        supplier: { ...DETAILS, contacts: { ...DETAILS.contacts, phone: '+971508888888' } },
+        enteredBy: ids.next(),
+        enteredAt: clock.now(),
+        actor: OPERATOR,
+      });
+    });
+    await ownerOfVersions.query(
+      `update suppliers.supplier_versions set phone_ciphertext =
+         (select phone_ciphertext from suppliers.supplier_versions where id = $2) where id = $1`,
+      [later, versionId],
+    );
+
+    await expect(open(later, id)).rejects.toBeInstanceOf(SupplierContactsUnreadable);
+  });
+
+  it('an email the version says it holds lost, with the table’s check dropped: refused, not shown as none', async () => {
+    const { id, versionId } = await addedSupplier();
+    await ownerOfVersions.query('alter table suppliers.supplier_versions drop constraint contacts_as_held');
+    try {
+      await ownerOfVersions.query('update suppliers.supplier_versions set email_ciphertext = null where id = $1', [
+        versionId,
+      ]);
+
+      await expect(open(versionId, id)).rejects.toBeInstanceOf(SupplierContactsUnreadable);
+    } finally {
+      await ownerOfVersions.query(
+        'update suppliers.supplier_versions set email_ciphertext = licence_ciphertext where id = $1 and email_ciphertext is null',
+        [versionId],
+      );
+      await ownerOfVersions.query(
+        `alter table suppliers.supplier_versions add constraint contacts_as_held check (
+           (email_ciphertext IS NOT NULL) = (contacts IN ('phone email', 'phone email licence'))
+           AND (licence_ciphertext IS NOT NULL) = (contacts IN ('phone licence', 'phone email licence')))`,
+      );
+    }
   });
 
   it('an email planted where the version says it holds none: refused, not shown', async () => {
