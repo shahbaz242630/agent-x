@@ -221,9 +221,9 @@ export async function agentKeysOf(
 }
 
 /**
- * Takes the organisation's lock for issuing keys by rotation until the
- * transaction ends, so two rotations at once can't both take the last of the
- * day's budget. Taken right after the idempotency key's claim, before any row lock.
+ * Takes the organisation's lock for issuing keys by rotation or by a
+ * handover until the transaction ends, so two issues at once can't both take
+ * the last of the day's budget. Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneKeyIssueAtATime(tx: AgentsTransaction, orgId: string): Promise<void> {
   const key = `agentx.agent_keys:${orgId.toLowerCase()}`;

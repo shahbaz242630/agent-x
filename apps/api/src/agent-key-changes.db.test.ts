@@ -758,6 +758,9 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     const next = await member(org, 'developer');
     const first = await agentWithKey(org, leaving, { scopes: ['requests:read', 'requests:write'] });
     const newer = await keyFor(org, first.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    // Revoked already, and the newest: left as it is, its revocation its own.
+    const gone = await keyFor(org, first.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    await revoked(leaving, { agentId: first.agentId, keyId: gone.keyId });
     expect(await check(first.text)).toMatchObject({ outcome: 'accepted' });
 
     const done = await handedOver(admin, first.agentId, next.membershipId);
@@ -771,7 +774,11 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     });
     const fresh = done.agent.keys.find((key) => key.status === 'ACTIVE');
     expect(done.agent.agent.owner).toBe(next.membershipId);
-    expect(done.agent.keys.map((key) => key.status).sort()).toEqual(['ACTIVE', 'REVOKED', 'REVOKED']);
+    expect(done.agent.keys.map((key) => key.status).sort()).toEqual(['ACTIVE', 'REVOKED', 'REVOKED', 'REVOKED']);
+    expect((await eventsAbout(org, gone.keyId)).map((event) => event.action)).toEqual([
+      'agent_key.issued',
+      'agent_key.revoked',
+    ]);
     // Expiring as a registered agent's first key does: 90 days from now.
     expect(fresh?.expiresAt).toEqual(new Date(START.getTime() + 90 * DAY_MS));
     for (const keyId of [first.keyId, newer.keyId]) {
