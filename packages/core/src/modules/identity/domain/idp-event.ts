@@ -70,6 +70,31 @@ const BY_CLASS: Readonly<Record<IdpEventClass, readonly string[]>> = {
 /** The event types of a second factor removed (B6-3d reads them). */
 export const SECOND_FACTOR_REMOVED_EVENTS: readonly string[] = BY_CLASS.second_factor_removed;
 
+/** A security key or a passkey, once usable: what passes the passkey rule (SEC-HA-12), so a new one may restrict (the S68 audit). */
+export const PASSKEY_ADDED_EVENTS: readonly string[] = [
+  'user.human.mfa.u2f.token.verified',
+  'user.human.passwordless.token.verified',
+];
+
+/** A security key or a passkey removed. */
+export const PASSKEY_REMOVED_EVENTS: readonly string[] = [
+  'user.human.mfa.u2f.token.removed',
+  'user.human.passwordless.token.removed',
+];
+
+/**
+ * Whether a change of this class ends every Agent X session the person has
+ * (the S68 audit): a second factor added or removed, the password or the
+ * login's email changed, or the login blocked. A session opened before the
+ * change never outlives it, whoever holds it.
+ */
+export const endsSessions = (eventClass: IdpEventClass): boolean =>
+  eventClass === 'second_factor_removed' ||
+  eventClass === 'second_factor_added' ||
+  eventClass === 'password_changed' ||
+  eventClass === 'sign_in_email_changed' ||
+  eventClass === 'sign_in_blocked';
+
 /** Every event type copied, and what it means. */
 export const WATCHED_IDP_EVENTS: Readonly<Record<string, IdpEventClass>> = Object.freeze(
   Object.fromEntries(

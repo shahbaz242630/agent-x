@@ -63,12 +63,23 @@ const STATES: ReadonlySet<string> = new Set([
   'AUTH_FACTOR_STATE_REMOVED',
 ]);
 const REMOVED = 'AUTH_FACTOR_STATE_REMOVED';
+const READY = 'AUTH_FACTOR_STATE_READY';
 
 export class IdpFactorsUnavailable extends Error {
   override readonly name = 'IdpFactorsUnavailable';
   constructor(step: string) {
     super(`the login service's second factors couldn't be removed: ${step}`);
   }
+}
+
+/** How many passkey-grade factors a person holds at the login service (the S68 audit). */
+export interface PasskeysHeld {
+  /**
+   * The security keys and passkeys of the login service's user `subject`
+   * that are ready to use. Throws IdpFactorsUnavailable for an answer it
+   * can't judge.
+   */
+  passkeysHeld(subject: string): Promise<number>;
 }
 
 export interface SecondFactorRemover {
@@ -133,7 +144,7 @@ export function createSecondFactorRemover({
   readonly internalOrigin: string | undefined;
   readonly token: string;
   readonly fetch: OutboundFetch;
-}): SecondFactorRemover {
+}): SecondFactorRemover & PasskeysHeld {
   if (!URL.canParse(issuer) || new URL(issuer).origin !== issuer) throw new RangeError('the issuer must be an origin');
   if (!TOKEN.test(token)) throw new RangeError('the token must be 1 to 4096 visible ASCII characters');
 
@@ -220,6 +231,24 @@ export function createSecondFactorRemover({
   };
 
   return {
+    async passkeysHeld(subject) {
+      if (!ZITADEL_ID.test(subject)) throw new RangeError("the subject must be the login service's user ID");
+      const factors = listIn(
+        await read(subject, '/authentication_factors/_search', 'POST', { states: [READY] }, 'reading the factors'),
+        'result',
+        'reading the factors',
+      );
+      const passkeys = listIn(
+        await read(subject, '/passkeys/_search', 'POST', {}, 'reading the passkeys'),
+        'result',
+        'reading the passkeys',
+      );
+      const keys = factors.filter(
+        (factor) => field(factor, 'u2f') !== undefined && stateOf(factor, 'a factor') === READY,
+      );
+      return keys.length + passkeys.filter((passkey) => stateOf(passkey, 'a passkey') === READY).length;
+    },
+
     async removeAll(subject) {
       if (!ZITADEL_ID.test(subject)) throw new RangeError("the subject must be the login service's user ID");
       const { removals } = await secondFactorsOf(subject);

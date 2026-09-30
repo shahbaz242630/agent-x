@@ -41,6 +41,20 @@
 // so a run that stops part-way, or reads the same time again, copies nothing
 // twice. The first run starts a day back.
 //
+// The S68 audit added two rules, decided once per event, on its first copy:
+// - A change that ends sessions (idp-event.ts `endsSessions`: a second factor
+//   added or removed, the password or the login's email changed, the login
+//   blocked) ends every Agent X session of the person, in the first copy's
+//   transaction, before anything else is locked (ADR-006 §6 level 0b).
+// - A security key or passkey added counts toward B6-3d's restriction, 7
+//   days without an admin's or approver's powers (`counts: 'yes'` on the
+//   platform chain's record), when the person now holds two or more, or had
+//   one removed in the 7 days before: so a phished session can't enrol its
+//   own key and pass the passkey rule at once, nor remove the person's key
+//   first and add its own. A person's first key doesn't count. When the
+//   count can't be read (no reset token set, or the login service's answer
+//   can't be judged), it counts: the rule fails closed.
+//
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. A run
 // never throws: a feed that can't be read, or a record that can't be written,
@@ -57,11 +71,15 @@ import type { Notice, NotificationsTables, Outbox } from '../../notifications/in
 import {
   createPlatformChain,
   latestPlatformTime,
+  latestPlatformTimeOf,
   platformEventWith,
   type PlatformControlsTables,
 } from '../../platform-controls/index.ts';
-import { isToldToThePerson } from '../domain/idp-event.ts';
+import { endsSessions, isToldToThePerson, PASSKEY_ADDED_EVENTS, PASSKEY_REMOVED_EVENTS } from '../domain/idp-event.ts';
+import { REMOVAL_RESTRICTION_DAYS } from '../domain/removal-restriction.ts';
+import type { PasskeysHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
+import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userOfSubject } from './users.ts';
 
@@ -111,6 +129,7 @@ export function createIdpEventCopier({
   clock,
   issuer,
   outbox,
+  passkeys,
   logger,
 }: {
   readonly database: Kysely<Tables>;
@@ -121,33 +140,78 @@ export function createIdpEventCopier({
   /** The login service the feed is read from: its subjects are its user IDs. */
   readonly issuer: string;
   readonly outbox: Outbox;
+  /** How many keys a person holds (the reset token's reader); undefined: every key added counts. */
+  readonly passkeys?: PasskeysHeld | undefined;
   readonly logger: Logger;
 }): IdpEventCopier {
   const trail = createAuditTrail({ keys, ids });
   const platform = createPlatformChain({ keys, ids });
 
-  /** Records the event for one organisation, or for none, in one transaction; false if it was already. */
-  const copyOnce = async (event: IdpEvent, person: string | undefined, orgId: string | null): Promise<boolean> => {
+  /**
+   * Whether a key added counts toward the restriction: the person holds two
+   * or more now, or had one removed in the 7 days before; and when that
+   * can't be read, it counts.
+   */
+  const keyAddedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
+    const removed = await latestPlatformTimeOf(database, 'at', [
+      { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: PASSKEY_REMOVED_EVENTS } },
+    ]);
+    const weekBefore = event.createdAt.getTime() - REMOVAL_RESTRICTION_DAYS * 86_400_000;
+    if (removed !== undefined && removed.getTime() >= weekBefore) return true;
+    if (passkeys === undefined) return true;
+    try {
+      return (await passkeys.passkeysHeld(event.aggregateId)) >= 2;
+    } catch (error) {
+      logger.warn('idp_events.keys_unread', { err: error });
+      return true;
+    }
+  };
+
+  /** Ends every session of the person, locking them first (level 0b); how many ended. */
+  const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string): Promise<number> => {
+    await lockSessionsOf(tx, [person]);
+    return endSessionsOf(tx, person);
+  };
+
+  /**
+   * Records the event for one organisation, or for none, in one transaction;
+   * false if it was already. `first` carries the decisions made on the
+   * event's first copy: whether to end the person's sessions here, and
+   * whether a key added counts.
+   */
+  const copyOnce = async (
+    event: IdpEvent,
+    person: string | undefined,
+    orgId: string | null,
+    first: { readonly endSessions: boolean; readonly counts: boolean },
+  ): Promise<boolean> => {
     const key = keyOf(event);
     const org = orgId ?? 'none';
     if (await platformEventWith(database, IDP_EVENT_COPIED, { event: key, org })) return false;
-    const platformEvent = {
+    const details = {
+      event: key,
+      org,
+      type: event.type,
+      at: event.createdAt.toISOString(),
+      by: byWhom(event),
+      person: person ?? null,
+      ...(first.counts && { counts: 'yes' }),
+    };
+    const platformEvent = (signInsEnded: number | undefined) => ({
       actor: ACTOR,
       action: IDP_EVENT_COPIED,
-      details: {
-        event: key,
-        org,
-        type: event.type,
-        at: event.createdAt.toISOString(),
-        by: byWhom(event),
-        person: person ?? null,
-      },
-    };
+      details: signInsEnded === undefined ? details : { ...details, signInsEnded },
+    });
+    const ending = first.endSessions && person !== undefined ? person : undefined;
     if (orgId === null || person === undefined) {
-      await database.transaction().execute((tx) => platform.record(tx, platformEvent));
+      await database.transaction().execute(async (tx) => {
+        const ended = ending === undefined ? undefined : await endSessions(tx, ending);
+        await platform.record(tx, platformEvent(ended));
+      });
       return true;
     }
     await withTenant(database, orgId, async (tx) => {
+      const ended = ending === undefined ? undefined : await endSessions(tx, ending);
       await trail.record(tx, orgId, {
         actor: ACTOR,
         action: SIGN_IN_CHANGED,
@@ -162,7 +226,7 @@ export function createIdpEventCopier({
         ];
         await outbox.add(tx, notices);
       }
-      await platform.record(tx, platformEvent);
+      await platform.record(tx, platformEvent(ended));
     });
     return true;
   };
@@ -174,9 +238,16 @@ export function createIdpEventCopier({
         ? await userOfSubject(database, { issuer, subject: event.aggregateId })
         : undefined;
     const orgs = person === undefined ? [] : await organizationsOf(database, person);
+    // Decided once, on the event's first copy: a run that stopped part-way decides nothing again.
+    const copiedBefore = await platformEventWith(database, IDP_EVENT_COPIED, { event: keyOf(event) });
+    const counts =
+      !copiedBefore && person !== undefined && PASSKEY_ADDED_EVENTS.includes(event.type)
+        ? await keyAddedCounts(event, person)
+        : false;
     let written = 0;
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
-      if (await copyOnce(event, person, orgId)) written += 1;
+      const first = { endSessions: !copiedBefore && written === 0 && endsSessions(event.eventClass), counts };
+      if (await copyOnce(event, person, orgId, first)) written += 1;
     }
     if (written > 0) {
       const facts = { eventType: event.type, by: byWhom(event), organisations: orgs.length };

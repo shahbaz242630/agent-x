@@ -343,3 +343,45 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
     ).toThrow(RangeError);
   });
 });
+
+describe('counting a person’s security keys and passkeys (the S68 audit)', () => {
+  it('counts the security keys and passkeys ready to use, and nothing else, reading nothing but the two lists', async () => {
+    const person = everyKind();
+    person.factors.push({ state: 'AUTH_FACTOR_STATE_NOT_READY', u2f: { id: '312000000000000102', name: 'new' } });
+    person.passkeys.push({ id: '312000000000000202', state: 'AUTH_FACTOR_STATE_REMOVED' });
+    person.passkeys.push({ id: '312000000000000203', state: READY });
+    const { fetch, asked } = zitadel(person);
+
+    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(3);
+    expect(asked.map(({ method, url }) => `${method} ${url}`)).toEqual([
+      `POST ${USER}/authentication_factors/_search`,
+      `POST ${USER}/passkeys/_search`,
+    ]);
+    expect(JSON.parse(String(asked[0]?.init.body))).toEqual({ states: [READY] });
+    expect(new Headers(asked[0]?.init.headers).get('authorization')).toBe(`Bearer ${WORDS}`);
+  });
+
+  it('counts none for a person with an app code alone', async () => {
+    const { fetch } = zitadel({ factors: [{ state: READY, otp: {} }], passkeys: [], methods: [] });
+
+    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(0);
+  });
+
+  it.each([
+    ['an answer not 200', () => json({}, 403), failure('reading the factors: it answered 403')],
+    ['a key of a state it doesn’t know', undefined, failure('a factor has no state we know')],
+  ])('throws on %s, never a count', async (_what, answer, thrown) => {
+    const person = everyKind();
+    if (answer === undefined) person.factors.push({ state: 'SOMETHING_ELSE', u2f: { id: '1' } });
+    const { fetch } = zitadel(person, answer === undefined ? undefined : () => answer());
+
+    await expect(removerWith(fetch).passkeysHeld(SUBJECT)).rejects.toThrow(thrown);
+  });
+
+  it('refuses a subject that isn’t the login service’s user ID, asking nothing', async () => {
+    const { fetch, asked } = zitadel(everyKind());
+
+    await expect(removerWith(fetch).passkeysHeld('../users')).rejects.toThrow(RangeError);
+    expect(asked).toEqual([]);
+  });
+});

@@ -16,8 +16,11 @@ import { createOrganization, type OrganizationsTables } from '../../organization
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import { classOfIdpEvent } from '../domain/idp-event.ts';
 import { createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
+import { IdpFactorsUnavailable, type PasskeysHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
+import { createRemovalRestriction } from './removal-restriction.ts';
+import { createSessions } from './sessions.ts';
 import type { IdentityTables } from './tables.ts';
 import { userForSubject } from './users.ts';
 
@@ -119,7 +122,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
   return { feed, asked };
 }
 
-const copierWith = (feed: IdpEventFeed) =>
+const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
   createIdpEventCopier({
     database: app,
     feed,
@@ -128,6 +131,7 @@ const copierWith = (feed: IdpEventFeed) =>
     clock,
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
+    passkeys,
     logger: loggerFor(capture),
   });
 
@@ -515,5 +519,157 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
     await copierWith(feed).run();
 
     expect(asked).toEqual([]);
+  });
+});
+
+describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`, () => {
+  /** A stand-in for the reset token's reader: the person holds this many keys, or it can't be read. */
+  const holding = (held: number | Error): PasskeysHeld => ({
+    passkeysHeld: () => (held instanceof Error ? Promise.reject(held) : Promise.resolve(held)),
+  });
+  const restrictedUntil = (userId: string) => createRemovalRestriction({ database: app, clock })(userId);
+  const sessionsOf = async (userId: string) =>
+    (await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute()).length;
+  const signIn = (userId: string) =>
+    createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } }).open(app, userId, {
+      idpSessionId: 'V1_1',
+      authTime: clock.now(),
+      amr: ['pwd', 'user', 'mfa'],
+    });
+  const WEEK_MS = 7 * 86_400_000;
+
+  it.each(['user.human.mfa.u2f.token.verified', 'user.human.passwordless.token.verified'])(
+    'leaves a person’s first key (%s) free: no restriction',
+    async (type) => {
+      const who = await person();
+      await organization(who.userId, 'admin');
+      const added = event(type, who.subject, { editorUserId: who.subject });
+
+      await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+
+      expect(await restrictedUntil(who.userId)).toBeUndefined();
+      expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+        expect.not.objectContaining({ counts: 'yes' }),
+      ]);
+    },
+  );
+
+  it('restricts a person for 7 days from a second key added, even by themselves', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added]).feed, holding(2)).run();
+
+    expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+      expect.objectContaining({ counts: 'yes', by: 'self' }),
+    ]);
+  });
+
+  it('restricts a key added within 7 days of a key removed, even their only one: removing theirs, then adding one’s own', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const removed = event('user.human.mfa.u2f.token.removed', who.subject, {
+      editorUserId: who.subject,
+      createdAt: new Date(clock.now().getTime() - 20 * 60_000),
+    });
+    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
+
+    expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
+  });
+
+  it('leaves a key added more than 7 days after a removal free, if it is the only one', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const now = clock.now();
+    // The removal, copied by a run just after it, more than 7 days before the key.
+    clock = new FixedClock(new Date(now.getTime() - WEEK_MS - 5 * 60_000));
+    const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
+    await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
+    clock = new FixedClock(now);
+    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+      expect.not.objectContaining({ counts: 'yes' }),
+    ]);
+  });
+
+  it.each([
+    ['no reset token to read them with', undefined],
+    ['an answer it can’t judge', holding(new IdpFactorsUnavailable('reading the factors: it answered 500'))],
+  ])('counts a key added when the keys can’t be read (%s): the rule fails closed', async (_why, passkeys) => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added]).feed, passkeys).run();
+
+    expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
+    expect(lines('idp_events.keys_unread')).toHaveLength(passkeys === undefined ? 0 : 1);
+  });
+
+  it('never counts an app code added, whatever the person holds', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const added = event('user.human.mfa.otp.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added]).feed, holding(5)).run();
+
+    expect(await restrictedUntil(who.userId)).toBeUndefined();
+  });
+
+  it.each([
+    'user.human.mfa.u2f.token.verified',
+    'user.human.mfa.otp.removed',
+    'user.human.password.changed',
+    'user.human.email.changed',
+    'user.locked',
+  ])('ends every Agent X session of the person on %s, once, whatever organisations they belong to', async (type) => {
+    const who = await person();
+    await organization(who.userId);
+    await organization(who.userId, 'admin');
+    await signIn(who.userId);
+    await signIn(who.userId);
+    const changed = event(type, who.subject);
+    const { feed } = feedOf(() => [changed]);
+
+    await copierWith(feed, holding(1)).run();
+
+    expect(await sessionsOf(who.userId)).toBe(0);
+    const copies = await platformCopies(`user:${who.subject}:${changed.sequence}`);
+    expect(copies).toHaveLength(2);
+    expect(copies.filter((copy) => copy.signInsEnded === 2)).toHaveLength(1);
+    // Signed in again since: the same event read again ends nothing.
+    await signIn(who.userId);
+    clock.advanceBy(60_000);
+    await copierWith(feed, holding(1)).run();
+    expect(await sessionsOf(who.userId)).toBe(1);
+  });
+
+  it('ends the sessions of a person in no organisation too', async () => {
+    const who = await person();
+    await signIn(who.userId);
+    const locked = event('user.locked', who.subject);
+
+    await copierWith(feedOf(() => [locked]).feed).run();
+
+    expect(await sessionsOf(who.userId)).toBe(0);
+  });
+
+  it('ends no session on a login unlocked or a token issued', async () => {
+    const who = await person();
+    await organization(who.userId);
+    await signIn(who.userId);
+
+    await copierWith(
+      feedOf(() => [event('user.unlocked', who.subject), event('user.token.added', who.subject)]).feed,
+    ).run();
+
+    expect(await sessionsOf(who.userId)).toBe(1);
   });
 });
