@@ -357,7 +357,7 @@ describe('counting a person’s security keys and passkeys (the S68 audit)', () 
       `POST ${USER}/authentication_factors/_search`,
       `POST ${USER}/passkeys/_search`,
     ]);
-    expect(JSON.parse(String(asked[0]?.init.body))).toEqual({ states: [READY] });
+    expect(JSON.parse(asked[0]?.init.body as string)).toEqual({ states: [READY] });
     expect(new Headers(asked[0]?.init.headers).get('authorization')).toBe(`Bearer ${WORDS}`);
   });
 
