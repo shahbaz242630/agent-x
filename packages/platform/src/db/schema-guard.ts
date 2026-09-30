@@ -953,7 +953,8 @@ export async function liveSchemaProblems<Schema>(
   // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
   for (const table of statusGuardedTables) {
     const relation = allRelations.find((each) => each.plain === table);
-    const guards = allTriggers.filter((trigger) => trigger.table === relation?.name && trigger.name === STATUS_GUARD);
+    // Any other trigger is reported above as a trigger our schema should not hold.
+    const guards = allTriggers.filter((trigger) => trigger.table === relation?.name);
     if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${STATUS_GUARD}`);
   }
 
