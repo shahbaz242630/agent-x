@@ -3,13 +3,14 @@
 // active only once an existing admin confirms who accepted, with step-up.
 //
 // 1. `ask` (`members.approve`): the key claimed first; the invitation read,
-//    AWAITING_CONFIRMATION; the admin read again, active and still an admin;
+//    AWAITING_CONFIRMATION and not past `confirmationEnds` (the S68 audit:
+//    an acceptance is never confirmable months later); the admin read again, active and still an admin;
 //    the pending change's SHA-256 (the organisation, the invitation, who
 //    accepted it, the role, the version its signed state has reached) bound
 //    into a step-up challenge for the admin's own session. The challenge is
 //    the write's resource, so a retry answers with the same challenge.
 // 2. `confirm` (`members.approve.confirm`): the key claimed first; the
-//    invitation read for the change, still waiting; the admin's membership
+//    invitation read for the change, still waiting and in time; the admin's membership
 //    and that of who accepted (read for change) in order of membership ID;
 //    the hash worked out again; the challenge consumed only for this session,
 //    action and hash, verified and in time; who accepted must not be an
@@ -18,7 +19,7 @@
 //    and the membership is added with the invitation's role, or brought back
 //    with it, in the same transaction.
 // 3. `decline` (`members.decline`): the key claimed first; the invitation,
-//    waiting; the admin read again; it moves to DECLINED. No step-up:
+//    waiting, in time or not; the admin read again; it moves to DECLINED. No step-up:
 //    declining grants nothing (ADR-003 §8's list is of changes that grant or
 //    restore).
 //
@@ -165,17 +166,23 @@ export function createAcceptanceConfirmations({
     return readTheirs();
   };
 
-  /** The invitation, read for the change, still waiting for confirmation, with its signed state's version. */
+  /**
+   * The invitation, read for the change, still waiting for confirmation, with
+   * its signed state's version. One waiting past its time is closed to a
+   * grant; declining it is still allowed, as that grants nothing.
+   */
   const waiting = async (
     tx: InvitationsTransaction,
     states: SignedStates,
     orgId: string,
     id: string,
+    { toGrant }: { toGrant: boolean },
   ): Promise<{ invitation: InvitationRecord; version: number }> => {
-    const read = await invitationToConfirm(tx, states, { orgId, id });
+    const read = await invitationToConfirm(tx, states, { orgId, id, now: clock.now() });
     if (read.outcome === 'missing') throw new ConfirmationRefused(404, 'NOT_FOUND');
     if (read.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'not_waiting') throw new ConfirmationRefused(409, 'INVITATION_CLOSED');
+    if (toGrant && read.ended) throw new ConfirmationRefused(409, 'INVITATION_CLOSED');
     return { invitation: read.invitation, version: read.version };
   };
 
@@ -220,7 +227,7 @@ export function createAcceptanceConfirmations({
   return {
     async ask(admin, idempotent, invitationId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
-        const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId);
+        const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: true });
         await adminOf(tx, states, admin);
         const challenge = await challenges.open(tx, {
           sessionId: admin.sessionId,
@@ -239,7 +246,7 @@ export function createAcceptanceConfirmations({
     async confirm(admin, idempotent, invitationId, stepUpChallengeId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
         // The invitation first, as accepting reads it, for who accepted; then the two memberships.
-        const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId);
+        const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: true });
         const { acceptedBy, role } = invitation;
         if (acceptedBy === null) throw new Error('an invitation waiting for confirmation names no one who accepted it');
         const already = await bothMemberships(tx, states, admin, acceptedBy);
@@ -314,7 +321,7 @@ export function createAcceptanceConfirmations({
 
     async decline(admin, idempotent, invitationId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
-        const { invitation } = await waiting(tx, states, admin.orgId, invitationId);
+        const { invitation } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: false });
         await adminOf(tx, states, admin);
         const moved = await states.changeStatus(tx, INVITATIONS, { orgId: admin.orgId, id: invitationId }, 'decline', {
           actor: { type: 'user', id: admin.userId },

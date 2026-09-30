@@ -24,6 +24,7 @@ import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
+import { CONFIRMATION_HOURS, INVITATION_HOURS } from '../domain/invitation.ts';
 import type { Role } from '../domain/membership.ts';
 import {
   type AcceptanceConfirmations,
@@ -438,6 +439,26 @@ describe(`confirming who accepted an admin's or approver's invitation (B4-4d, SE
 
     expect(await ask(who.admin, openId)).toEqual({ outcome: 'refused', status: 409, code: 'INVITATION_CLOSED' });
     expect(await ask(who.admin, ids.next(), 'ask-2')).toEqual({ outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+  });
+
+  it('closes an acceptance to a grant once it has waited 72 hours past the invitation’s end, but still declines it (the S68 audit)', async () => {
+    const who = await organization();
+    const { id, invitee } = await accepted(who);
+    clock.advanceBy((INVITATION_HOURS + CONFIRMATION_HOURS) * 3_600_000 - 1);
+    // An admin signed in days later; in time, just: a step-up opens.
+    const later = await member(who.org, 'admin');
+    const challengeId = await asked(later, id);
+    await stepUp(later, challengeId);
+    clock.advanceBy(1);
+
+    expect(await confirm(later, id, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'INVITATION_CLOSED',
+    });
+    expect(await ask(later, id, 'ask-2')).toEqual({ outcome: 'refused', status: 409, code: 'INVITATION_CLOSED' });
+    expect(await membershipFor(app, services(), who.org, invitee)).toEqual({ outcome: 'none' });
+    expect(await decline(later, id)).toMatchObject({ outcome: 'written', invitation: { id, status: 'DECLINED' } });
   });
 
   it('declines, with no step-up: DECLINED, no membership, and no confirmation after', async () => {
