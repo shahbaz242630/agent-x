@@ -302,6 +302,10 @@ interface TriggerRow {
   readonly type: number;
   /** The whole CREATE TRIGGER, which carries the arguments the guard is given. */
   readonly definition: string;
+  /** It fires on an update of the columns it names only (`UPDATE OF …`), not of any. */
+  readonly on_columns: boolean;
+  /** It fires only when its WHEN condition holds. */
+  readonly conditional: boolean;
 }
 
 interface FunctionRow {
@@ -468,7 +472,9 @@ async function triggers<Schema>(db: Kysely<Schema>): Promise<TriggerRow[]> {
            pg_catalog.format('%I.%I', fn.nspname, f.proname) as function,
            t.tgenabled as enabled,
            t.tgtype as type,
-           pg_catalog.pg_get_triggerdef(t.oid) as definition
+           pg_catalog.pg_get_triggerdef(t.oid) as definition,
+           pg_catalog.cardinality(t.tgattr::pg_catalog.int2[]) > 0 as on_columns,
+           t.tgqual is not null as conditional
     from pg_catalog.pg_trigger t
     join pg_catalog.pg_class c on c.oid = t.tgrelid
     join pg_catalog.pg_namespace n on n.oid = c.relnamespace
@@ -964,12 +970,20 @@ export async function liveSchemaProblems<Schema>(
   // planted trigger given its name would otherwise pass on its name alone. A
   // switched-off guard is drift too — Postgres keeps the row and stops running
   // it, which is tampering that leaves no trace in the table.
+  // A guard put back to fire on some columns only (`UPDATE OF …`), or only
+  // when a WHEN condition holds, keeps its name, function and events while
+  // leaving every other change unchecked (the #220 review).
+  const narrowed = (trigger: TriggerRow, name: string): void => {
+    if (trigger.on_columns) problems.push(`${trigger.table}'s ${name} fires on some columns only`);
+    if (trigger.conditional) problems.push(`${trigger.table}'s ${name} fires only when a condition holds`);
+  };
   for (const trigger of allTriggers) {
     if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) {
       // One that fires at other times, or is handed arguments, is not the guard 0032 wrote.
       if (trigger.type !== MADE_ONCE_TYPE || !trigger.definition.endsWith(`${MADE_ONCE_FUNCTION}()`)) {
         problems.push(`${trigger.table}'s ${MADE_ONCE} fires at other times`);
       }
+      narrowed(trigger, MADE_ONCE);
       if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
       continue;
     }
@@ -977,6 +991,7 @@ export async function liveSchemaProblems<Schema>(
       problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
       continue;
     }
+    narrowed(trigger, STATUS_GUARD);
     // A guard that fires on fewer events than 0004 installs leaves the moves it
     // no longer sees unchecked, while still passing on its name.
     if (trigger.type !== STATUS_GUARD_TYPE) problems.push(`${trigger.table}'s ${STATUS_GUARD} fires at other times`);

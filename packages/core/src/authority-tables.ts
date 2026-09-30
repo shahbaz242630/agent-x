@@ -36,6 +36,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
   /** Its rows are made once and never changed (a supplier's version): the made-once guard holds them (0032). */
   readonly madeOnce?: true;
+  /** The checks over its status with other columns its migration writes, by name, which CI's A3c allows it alone. */
+  readonly statusConditions?: readonly string[];
 }
 
 /**

@@ -325,6 +325,7 @@ const later = (orgId: string, supplierId: string, version: number, supplier: Sup
       enteredBy: ids.next(),
       enteredAt: clock.now(),
       actor: OPERATOR,
+      of: found,
       follows: follows.version,
     });
     return { id, recorded };
@@ -477,6 +478,39 @@ describe(`a later version of a supplier's details (E1-1, for E2 and E3; Postgres
 
     expect(await readVersion(org, kept.id, id)).toMatchObject({ version: { phoneSince: first } });
     expect(await readVersion(org, moved.id, id)).toMatchObject({ version: { phoneSince: clock.now() } });
+  });
+
+  it('follows only its own supplier’s current version: an older one, or another supplier’s, is refused before any SQL runs (the #220 review)', async () => {
+    const org = await organization();
+    const { id, versionId } = await added(org);
+    const other = await added(org);
+    const second = await later(org, id, 2, DETAILS);
+    await recordOn(org, id, { current_version_id: second.id });
+    const following = (versionIdToFollow: string, ofSupplier: string, supplierId: string) =>
+      onSupplier(org, ofSupplier, async (tx, states, found) => {
+        const follows = await versionOf(tx, states, { orgId: org, id: versionIdToFollow }, supplierId);
+        if (follows.outcome !== 'found') throw new Error(`No version: ${follows.outcome}`);
+        return addVersion(tx, states, keys, {
+          orgId: org,
+          id: ids.next(),
+          supplierId: ofSupplier,
+          version: 3,
+          supplier: DETAILS,
+          enteredBy: ids.next(),
+          enteredAt: clock.now(),
+          actor: OPERATOR,
+          of: found,
+          follows: follows.version,
+        });
+      });
+
+    // Its first version, no longer current: an older phone's time can't be carried.
+    await expect(following(versionId, id, id)).rejects.toBeInstanceOf(RangeError);
+    // Another supplier's current version, followed for this one.
+    await expect(following(other.versionId, id, other.id)).rejects.toBeInstanceOf(RangeError);
+    // This supplier's version, made for another supplier's read.
+    await expect(following(second.id, other.id, id)).rejects.toBeInstanceOf(RangeError);
+    expect(await readVersion(org, second.id, id)).toMatchObject({ outcome: 'found' });
   });
 
   it('is refused a number the supplier already has, by the table’s key', async () => {

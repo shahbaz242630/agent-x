@@ -79,6 +79,13 @@ export interface AuthorityTable {
   readonly fields: readonly AuthorityField[];
   /** The status machine, when the table has a status. */
   readonly status?: AuthorityMachine;
+  /**
+   * The check constraints over the status with other columns its migration
+   * writes, by name (0032's `verified_rests_on_its_version`): a condition on
+   * when a state is held. Any other such check is refused, since one could
+   * forbid a state the machine allows, and with it a brake.
+   */
+  readonly statusConditions?: readonly string[];
 }
 
 /** Names from our migrations: the shapes @agentx/platform/db accepts (signed-rows.ts, status.ts). */
@@ -808,7 +815,7 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
   const reference = facts.references.get(table.table);
   if (reference === undefined) throw new Error(`No reference objects were read for ${table.table}`);
   const checks = facts.checks.filter((check) => check.table === table.table);
-  problems.push(...statusCheckProblems(machine, checks, reference));
+  problems.push(...statusCheckProblems(machine, checks, reference, table.statusConditions ?? []));
   problems.push(...guardProblems(relation.printed, machine, triggers, reference));
   return problems;
 }
@@ -817,10 +824,28 @@ function statusProblems(table: AuthorityTable, columns: readonly Column[], facts
  * Exactly one check constraint over the status alone, written as the
  * machine's states: the values it may hold. A check over the status with
  * other columns (a supplier VERIFIED only on the version verified, 0032) is
- * a condition on when a state is held, not another list of states, so it is
- * left to the table's own tests.
+ * a condition on when a state is held: allowed only when the registry names
+ * it for the table, since an arbitrary one (`status <> 'REVOKED' OR …`)
+ * could forbid a state the machine allows. What each named one holds is the
+ * table's own tests'.
  */
-function statusCheckProblems(machine: AuthorityMachine, checks: readonly Check[], reference: Reference): string[] {
+function statusCheckProblems(
+  machine: AuthorityMachine,
+  checks: readonly Check[],
+  reference: Reference,
+  conditions: readonly string[],
+): string[] {
+  const unnamed = checks
+    .filter((check) => check.on_status && !check.alone && !conditions.includes(check.name))
+    .map(
+      (check) =>
+        `the check constraint ${check.name} holds ${STATUS} with other columns, and the registry names no such condition for it: ${check.definition}`,
+    );
+  return [...unnamed, ...statusListProblems(machine, checks, reference)];
+}
+
+/** Exactly one check constraint over the status alone, written as the machine's states. */
+function statusListProblems(machine: AuthorityMachine, checks: readonly Check[], reference: Reference): string[] {
   const onStatus = checks.filter((check) => check.on_status && check.alone);
   const [only, ...others] = onStatus;
   // The reference constraint, as this server prints it: the same shape the

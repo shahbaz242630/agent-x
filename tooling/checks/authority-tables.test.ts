@@ -182,6 +182,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         subject: suppliers.SUPPLIERS.subject,
         fields: suppliers.SUPPLIERS.fields,
         status: suppliers.SUPPLIER,
+        statusConditions: ['verified_rests_on_its_version'],
       },
       // A version is made once and never moved: no status of its own, and the made-once guard.
       {

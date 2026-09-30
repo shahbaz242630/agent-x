@@ -529,10 +529,11 @@ describe(`a contact moved past the app won't open (SEC-DB-01, Postgres ${server.
     const { id, versionId } = await addedSupplier();
     const later = ids.next();
     await withSignedStates(app, org, quiet(), async (tx, states) => {
-      await supplierOf(tx, states, { orgId: org, id }, 'change');
+      const of = await supplierOf(tx, states, { orgId: org, id }, 'change');
       const follows = await versionOf(tx, states, { orgId: org, id: versionId }, id);
-      if (follows.outcome !== 'found') throw new Error(`No version: ${follows.outcome}`);
+      if (of.outcome !== 'found' || follows.outcome !== 'found') throw new Error('No supplier or version');
       await addVersion(tx, states, keys, {
+        of,
         follows: follows.version,
         orgId: org,
         id: later,

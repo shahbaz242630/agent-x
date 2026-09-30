@@ -703,13 +703,24 @@ describe('A3c each rule fails on a broken fixture', () => {
       expect(twice).toContain(`t.agents: has 2 check constraints over status alone; ${wanted}`);
     });
 
-    it('passes a check over the status with another column: when a state is held, not which states there are (0032)', async () => {
+    it('fails a check over the status with another column the registry doesn’t name: it could forbid a state, a brake with it (the #220 review)', async () => {
+      const narrowing = [
+        ...SOUND,
+        "alter table t.agents add constraint no_revoking check (status <> 'REVOKED' or org_id is null)",
+      ];
+
+      expect(await problemsAfter(narrowing)).toEqual([
+        "t.agents: the check constraint no_revoking holds status with other columns, and the registry names no such condition for it: CHECK (((status <> 'REVOKED'::text) OR (org_id IS NULL)))",
+      ]);
+    });
+
+    it('passes one the registry names for the table: when a state is held, not which states there are (0032)', async () => {
       const conditional = [
         ...SOUND,
         "alter table t.agents add constraint revoked_expires check (status <> 'REVOKED' or expires_at is not null)",
       ];
 
-      expect(await problemsAfter(conditional)).toEqual([]);
+      expect(await problemsAfter(conditional, [{ ...AGENTS, statusConditions: ['revoked_expires'] }])).toEqual([]);
     });
 
     it('fails a missing guard, and one that carries other rules than the machine', async () => {

@@ -490,6 +490,52 @@ it('sees the status guard dropped outright from a table whose status it must hol
   }
 });
 
+it.each([
+  [
+    'the status guard on some columns only',
+    `create trigger status_guard before insert or update of org_id on audit.events for each row
+       execute function state_rules.guard_status('new', 'new>done')`,
+    "audit.events's status_guard fires on some columns only",
+    'status_guard',
+  ],
+  [
+    'the status guard only when a condition holds',
+    `create trigger status_guard before insert or update on audit.events for each row
+       when (new.org_id is not null) execute function state_rules.guard_status('new', 'new>done')`,
+    "audit.events's status_guard fires only when a condition holds",
+    'status_guard',
+  ],
+  [
+    'the made-once guard on some columns only',
+    `create trigger made_once before update of org_id on audit.events for each row
+       execute function state_rules.guard_made_once()`,
+    "audit.events's made_once fires on some columns only",
+    'made_once',
+  ],
+  [
+    'the made-once guard only when a condition holds',
+    `create trigger made_once before update on audit.events for each row
+       when (old.org_id is distinct from new.org_id) execute function state_rules.guard_made_once()`,
+    "audit.events's made_once fires only when a condition holds",
+    'made_once',
+  ],
+])(
+  'sees %s: its name, function and events kept, every other change unchecked (the #220 review)',
+  async (_case, create, problem, name) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
+    await owner.query(create);
+    try {
+      const found = await problems();
+      expect(found).toContain(problem);
+      // Nothing else about it is wrong: this is the one thing the check sees.
+      expect(found.filter((each) => each.startsWith(`audit.events's ${name}`))).toEqual([problem]);
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- the trigger's own name, one of the two fixed above
+      await owner.query(`drop trigger ${name} on audit.events`);
+    }
+  },
+);
+
 it('takes neither guard for the other: a table given only the made-once guard still carries no status guard (0032)', async () => {
   const guarded = () =>
     liveSchemaProblems(app, { ...ROLES, statusGuardedTables: ['audit.events'], madeOnceTables: ['audit.events'] });

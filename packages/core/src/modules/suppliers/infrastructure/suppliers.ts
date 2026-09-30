@@ -70,7 +70,12 @@ export const SUPPLIERS = {
     { column: 'payee_key_version', type: 'integer' },
   ],
   rules: SUPPLIER,
-} as const satisfies SignedStateTable & { readonly rules: typeof SUPPLIER };
+  // VERIFIED only on the version verified, with nothing pending (0032): CI's A3c allows this one check over the status with other columns.
+  statusConditions: ['verified_rests_on_its_version'],
+} as const satisfies SignedStateTable & {
+  readonly rules: typeof SUPPLIER;
+  readonly statusConditions: readonly string[];
+};
 
 /** A supplier version's row, as the signed state reads and records it: made once, never moved (0032's `made_once`). */
 export const SUPPLIER_VERSIONS = {
@@ -210,20 +215,30 @@ const recordVersion = (
 /**
  * Makes a later version of a supplier's details (E2, E3), in the caller's
  * transaction, which must be withSignedStates' for its organisation and read
- * the supplier with `change` first (the lock order: the supplier, then its
- * versions). `follows` is the version it follows, as the caller read it:
- * while the phone stays the same its `phone_since` is carried over, and from
- * a new phone it is the new version's own time, so the call-back's
- * "unchanged for 30 days" (E3) reads one field. Pointing the supplier at it
- * is the caller's. Details it can't have are `SupplierDetailsRefused`,
- * before any SQL runs.
+ * the supplier with `change` first (`of`; the lock order: the supplier, then
+ * its versions). `follows` is the version it follows, as the caller read it:
+ * the supplier's current version, and nothing else (RangeError otherwise, as
+ * for another supplier's), so `phone_since` is carried over only from the
+ * phone payments use now, while it stays the same; from a new phone it is
+ * the new version's own time, so the call-back's "unchanged for 30 days"
+ * (E3) reads one field. Pointing the supplier at it is the caller's. Details
+ * it can't have are `SupplierDetailsRefused`; both are refused before any
+ * SQL runs.
  */
 export async function addVersion(
   tx: SuppliersTransaction,
   states: SignedStates,
   keys: KeyProvider,
-  version: NewVersion & { readonly follows: VersionRecord },
+  version: NewVersion & { readonly of: { readonly supplier: SupplierRecord }; readonly follows: VersionRecord },
 ): Promise<RecordedState> {
+  const { supplier } = version.of;
+  if (
+    supplier.id !== version.supplierId.toLowerCase() ||
+    version.follows.supplierId !== supplier.id ||
+    version.follows.id !== supplier.currentVersionId
+  ) {
+    throw new RangeError("A later version follows its own supplier's current version");
+  }
   // Checked before any SQL runs, as the row is made below.
   const { phone } = supplierDetails(version.supplier).contacts;
   const before = await contactsOf(tx, keys, version.orgId, version.follows);
