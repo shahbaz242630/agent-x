@@ -256,7 +256,7 @@ export function createFundingSourceLinks({
     }
     // Limits in another currency than the account's (the S68 audit): kept, they'd show agents the wrong one.
     if (!limitsInAccountCurrency(outcome.source)) {
-      logger.error('funding_sources.currency_mismatch', { linkId: link.id });
+      logger.child({ orgId: member.orgId }).error('funding_sources.currency_mismatch', { linkId: link.id });
       await settleLink(tx, key, { outcome: 'rejected' }, now);
       return 200;
     }

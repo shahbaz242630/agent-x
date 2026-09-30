@@ -174,31 +174,51 @@ export function createFundingSourceChanges({
       if ('outcome' in known && known.outcome === 'refused') return known;
       const { source } = known;
       let lookup: SourceLookup | undefined;
+      // The source's limits answered in another currency than its account's (the S68 audit).
+      let currencyMismatch = false;
       if (source.status !== 'ENDED') {
         const asking = await asked(() =>
           rail.getSourceState({ organizationId: member.orgId, externalRef: source.externalRef }),
         );
         if (asking === 'unavailable') return PARTNER_UNAVAILABLE;
         // An answer about another source or organisation is the partner's fault: believed in nothing, and told.
-        // So is one whose limits are in another currency than the account's (the S68 audit).
         if (
           asking.kind === 'found' &&
           (asking.source.externalRef !== source.externalRef ||
-            asking.source.organizationId.toLowerCase() !== member.orgId.toLowerCase() ||
-            !limitsInAccountCurrency(asking.source))
+            asking.source.organizationId.toLowerCase() !== member.orgId.toLowerCase())
         ) {
           logger
             .child({ correlationId, orgId: member.orgId })
             .error('funding_sources.partner_answer_mismatch', { sourceId });
           return PARTNER_UNAVAILABLE;
         }
-        lookup = asking;
+        // One about this source whose limits are in another currency than the account's can't be kept truthfully,
+        // and the limits kept may no longer hold: nothing of it recorded, and the source suspended by Agent X (the
+        // S68 audit and its review), for an admin to reactivate with a passkey once the bank has put it right.
+        if (asking.kind === 'found' && !limitsInAccountCurrency(asking.source)) {
+          logger.child({ correlationId, orgId: member.orgId }).error('funding_sources.currency_mismatch', { sourceId });
+          currencyMismatch = true;
+        } else {
+          lookup = asking;
+        }
       }
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REFRESHING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
         const found = await work.sourceIn(tx, states, key, 'change');
         const actor = { type: 'user' as const, id: member.userId };
+        if (currencyMismatch) {
+          if (found.source.status === 'ACTIVE') {
+            const moved = await states.changeStatus(tx, SOURCES, key, 'suspend', {
+              actor: { type: 'system', id: 'api' },
+              action: 'funding_source.suspended',
+              details: { reason: 'currency_mismatch' },
+            });
+            if (moved.outcome !== 'changed')
+              throw new Error(`a source read as ACTIVE didn't suspend: ${moved.outcome}`);
+          }
+          return { status: 200, resourceId: sourceId };
+        }
         if (lookup === undefined || found.source.status === 'ENDED') return { status: 200, resourceId: sourceId };
         if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, found, actor);
         else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor });

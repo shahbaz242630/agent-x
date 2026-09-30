@@ -231,7 +231,8 @@ export function isPartnerPage(url: string, origin: string): boolean {
  * audit): Agent X keeps one currency for a source, the limits', and shows it
  * to agents as the source's; an answer whose limits are in another currency
  * than the account's is one Agent X can't keep truthfully, so it is refused,
- * never stored.
+ * never stored. Codes are compared exactly: an adapter gives ISO 4217's own
+ * upper-case codes, and one that doesn't fails safe (refused, logged).
  */
 export const limitsInAccountCurrency = (source: Pick<FundingSourceState, 'controls' | 'summary'>): boolean =>
   source.controls.currency === source.summary.currency;

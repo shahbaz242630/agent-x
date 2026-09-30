@@ -290,7 +290,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     ]);
   });
 
-  it('believes nothing of an answer whose limits are in another currency than the account’s (the S68 audit)', async () => {
+  it('suspends a source whose limits the bank now answers in another currency than its account’s, recording none of it (the S68 audit)', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const { source } = await linked(admin);
@@ -306,13 +306,23 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       logger: loggerFor(capture),
     });
 
-    expect(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)).toEqual({
-      outcome: 'refused',
-      status: 503,
-      code: 'PARTNER_UNAVAILABLE',
+    const answered = refreshed(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION));
+
+    // Suspended by Agent X, the limits kept as they were: an admin reactivates it with a passkey once put right.
+    expect(answered).toMatchObject({ status: 'SUSPENDED', controls: source.controls });
+    const recorded = await events(org, source.id);
+    expect(recorded).toHaveLength(2);
+    expect(recorded.at(-1)).toMatchObject({ action: 'funding_source.suspended', actor_id: 'api' });
+    expect(capture.lines().filter((line) => line.event === 'funding_sources.currency_mismatch')).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, sourceId: source.id }),
+    ]);
+    // Refreshed again while it stays wrong: already stopped, and answered as it is.
+    expect(
+      refreshed(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)),
+    ).toMatchObject({
+      status: 'SUSPENDED',
     });
-    expect(await events(org, source.id)).toHaveLength(1);
-    expect(capture.lines().filter((line) => line.event === 'funding_sources.partner_answer_mismatch')).toHaveLength(1);
+    expect(await events(org, source.id)).toHaveLength(2);
   });
 
   it('answers a retry of the same write as the first did', async () => {

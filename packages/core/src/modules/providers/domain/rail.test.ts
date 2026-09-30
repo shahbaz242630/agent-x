@@ -42,4 +42,8 @@ describe('limitsInAccountCurrency (the S68 audit)', () => {
     expect(limitsInAccountCurrency({ summary, controls })).toBe(true);
     expect(limitsInAccountCurrency({ summary, controls: { ...controls, currency: 'AED' } })).toBe(false);
   });
+
+  it('compares the codes exactly: a lower-case one from an adapter fails safe', () => {
+    expect(limitsInAccountCurrency({ summary, controls: { ...controls, currency: 'usd' } })).toBe(false);
+  });
 });
