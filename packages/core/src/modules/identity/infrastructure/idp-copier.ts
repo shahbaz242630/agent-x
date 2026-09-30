@@ -54,6 +54,10 @@
 //   first and add its own. A person's first key doesn't count. When the
 //   count can't be read (no reset token set, or the login service's answer
 //   can't be judged), it counts: the rule fails closed.
+// - A security key or passkey removed, even by the person, counts too when a
+//   key was added in the 7 days before (the S68 review): adding one's own key
+//   and then removing the person's, within one run, leaves one key when the
+//   addition is judged, so the removal is what shows the swap.
 //
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. A run
@@ -167,6 +171,27 @@ export function createIdpEventCopier({
     }
   };
 
+  /**
+   * Whether a key removed counts toward the restriction, whoever removed it:
+   * a key was added in the 7 days before (a swap of the person's key for
+   * another's). The addition is copied first, as the feed gives events in
+   * time order.
+   */
+  const keyRemovedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
+    const added = await latestPlatformTimeOf(database, 'at', [
+      { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: PASSKEY_ADDED_EVENTS } },
+    ]);
+    const weekBefore = event.createdAt.getTime() - REMOVAL_RESTRICTION_DAYS * 86_400_000;
+    return added !== undefined && added.getTime() >= weekBefore;
+  };
+
+  /** Whether the event counts toward the restriction: a key added or removed, as above; nothing else. */
+  const counted = (event: IdpEvent, person: string): Promise<boolean> | boolean => {
+    if (PASSKEY_ADDED_EVENTS.includes(event.type)) return keyAddedCounts(event, person);
+    if (PASSKEY_REMOVED_EVENTS.includes(event.type)) return keyRemovedCounts(event, person);
+    return false;
+  };
+
   /** Ends every session of the person, locking them first (level 0b); how many ended. */
   const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string): Promise<number> => {
     await lockSessionsOf(tx, [person]);
@@ -240,10 +265,7 @@ export function createIdpEventCopier({
     const orgs = person === undefined ? [] : await organizationsOf(database, person);
     // Decided once, on the event's first copy: a run that stopped part-way decides nothing again.
     const copiedBefore = await platformEventWith(database, IDP_EVENT_COPIED, { event: keyOf(event) });
-    const counts =
-      !copiedBefore && person !== undefined && PASSKEY_ADDED_EVENTS.includes(event.type)
-        ? await keyAddedCounts(event, person)
-        : false;
+    const counts = !copiedBefore && person !== undefined ? await counted(event, person) : false;
     let written = 0;
     for (const orgId of orgs.length === 0 ? [null] : orgs) {
       const first = { endSessions: !copiedBefore && written === 0 && endsSessions(event.eventClass), counts };

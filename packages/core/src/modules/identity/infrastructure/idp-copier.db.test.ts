@@ -559,12 +559,25 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await organization(who.userId, 'admin');
     const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added]).feed, holding(2)).run();
+    let reads = 0;
+    const counting: PasskeysHeld = {
+      passkeysHeld: () => {
+        reads += 1;
+        return Promise.resolve(2);
+      },
+    };
+    const { feed } = feedOf(() => [added]);
+
+    await copierWith(feed, counting).run();
 
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
     expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
       expect.objectContaining({ counts: 'yes', by: 'self' }),
     ]);
+    // Decided once: the same event read again asks the login service nothing.
+    clock.advanceBy(60_000);
+    await copierWith(feed, counting).run();
+    expect(reads).toBe(1);
   });
 
   it('restricts a key added within 7 days of a key removed, even their only one: removing theirs, then adding one’s own', async () => {
@@ -581,22 +594,61 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
   });
 
+  it.each([
+    ['in one run', true],
+    ['in two runs', false],
+  ])(
+    'restricts a swap: one’s own key added, then the person’s removed by them, %s (the S68 review)',
+    async (_how, together) => {
+      const who = await person();
+      await organization(who.userId, 'admin');
+      const added = event('user.human.mfa.u2f.token.verified', who.subject, {
+        editorUserId: who.subject,
+        createdAt: new Date(clock.now().getTime() - 20 * 60_000),
+      });
+      const removed = event('user.human.passwordless.token.removed', who.subject, { editorUserId: who.subject });
+      // Read live, the count is one: the person's key is gone by the time the addition is judged.
+      if (together) {
+        await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+      } else {
+        await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+        await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+      }
+
+      expect(await restrictedUntil(who.userId)).toEqual(new Date(removed.createdAt.getTime() + WEEK_MS));
+      expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toEqual([
+        expect.objectContaining({ counts: 'yes', by: 'self' }),
+      ]);
+    },
+  );
+
+  it('leaves a person’s own key removed free when no key was added in the 7 days before', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [removed]).feed, holding(1)).run();
+
+    expect(await restrictedUntil(who.userId)).toBeUndefined();
+  });
+
   it('leaves a key added more than 7 days after a removal free, if it is the only one', async () => {
     const who = await person();
     await organization(who.userId, 'admin');
-    const now = clock.now();
-    // The removal, copied by a run just after it, more than 7 days before the key.
-    clock = new FixedClock(new Date(now.getTime() - WEEK_MS - 5 * 60_000));
+    // The removal, copied now; the key, a moment past 7 days later. (The copier reads only forward, so the clock moves on.)
     const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
     await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
-    clock = new FixedClock(now);
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
+    clock.advanceBy(WEEK_MS + 1);
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
 
     expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
       expect.not.objectContaining({ counts: 'yes' }),
     ]);
+    // The tests after this one start after its clock: each starts a day on per person made.
+    for (let day = 0; day < 9; day += 1) zitadelId();
   });
 
   it.each([
