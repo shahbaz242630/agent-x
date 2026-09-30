@@ -9,7 +9,8 @@
 // asks a contact to confirm a reset names the reset (0026).
 
 /** The kinds about a membership. */
-const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined'] as const;
+/** The kinds about a membership: a role given, a rejoin, and since the S68 audit a removal and a role taken away (0031). */
+const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined', 'member_removed', 'role_removed'] as const;
 /** The kinds about a registered contact (B6-1b). */
 const CONTACT_NOTICE_KINDS = ['contact_added', 'contact_removed'] as const;
 /** The kinds about a person's sign-in, changed at the login service (B6-2a, 0024; a factor added since the S68 audit, 0030). */

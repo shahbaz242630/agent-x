@@ -54,6 +54,17 @@ describe('a notice’s email (B5-1b)', () => {
     expect(rejoined.text).toContain('rejoined it, as a viewer.');
   });
 
+  it('tells of a member removed, and that their agents keep running, and of a role taken away (the S68 audit)', () => {
+    const removed = messageFor({ ...NOTICE, kind: 'member_removed', role: 'admin' }, 'a@example.test');
+    expect(removed.subject).toBe('Agent X: an admin was removed from your organisation');
+    expect(removed.text).toContain('Any AI agents they own keep running');
+    expect(removed.text).toContain("This email can't approve or change anything.");
+
+    const demoted = messageFor({ ...NOTICE, kind: 'role_removed', role: 'approver' }, 'a@example.test');
+    expect(demoted.subject).toBe('Agent X: a member of your organisation is no longer a finance approver');
+    expect(`${demoted.subject} ${demoted.text}`).not.toMatch(/https?:|token/i);
+  });
+
   it('B6-1b tells of a registered contact added, by its ID, and when it starts to count', () => {
     const message = messageFor(aboutAContact('contact_added', false), 'admin@example.test');
 

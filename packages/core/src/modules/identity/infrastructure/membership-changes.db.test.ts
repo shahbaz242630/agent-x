@@ -62,6 +62,7 @@ const sessions = () => createSessions({ ids, clock, timeouts: { idleSeconds: 180
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 const TO_DEVELOPER: MembershipChange = { kind: 'role', role: 'developer' };
+const TO_VIEWER: MembershipChange = { kind: 'role', role: 'viewer' };
 const DEACTIVATE: MembershipChange = { kind: 'deactivate' };
 const TO_APPROVER = { kind: 'role', role: 'approver' } as const satisfies MembershipChange;
 const TO_ADMIN = { kind: 'role', role: 'admin' } as const satisfies MembershipChange;
@@ -439,7 +440,7 @@ describe(`telling the admins of a role granted (B5-1b, ADR-003 §10, Postgres ${
     expect(await noticesIn(who.org)).toHaveLength(1);
   });
 
-  it('tells no one of a member made a developer or a viewer, or deactivated', async () => {
+  it('tells the admins of an approver made a developer and of a member removed, each with the role they had (the S68 audit)', async () => {
     const who = await organization();
     await member(who.org, 'admin');
     const approver = await member(who.org, 'approver');
@@ -460,6 +461,39 @@ describe(`telling the admins of a role granted (B5-1b, ADR-003 §10, Postgres ${
     );
 
     expect(await membershipFor(app, services(), who.org, approver.userId)).toMatchObject({ role: 'developer' });
+    expect(await noticesIn(who.org)).toEqual([
+      { to: null, kind: 'role_removed', membershipId: approver.membershipId, role: 'approver' },
+      { to: null, kind: 'member_removed', membershipId: viewer.membershipId, role: 'viewer' },
+    ]);
+  });
+
+  it('tells the admins of an admin removed, as the one thing a compromised admin would do quietly (the S68 audit)', async () => {
+    const who = await organization();
+    const other = await member(who.org, 'admin');
+
+    await confirm(
+      who.admin,
+      other.membershipId,
+      DEACTIVATE,
+      await steppedUp(who.admin, other.membershipId, DEACTIVATE),
+    );
+
+    expect(await noticesIn(who.org)).toEqual([
+      { to: null, kind: 'member_removed', membershipId: other.membershipId, role: 'admin' },
+    ]);
+  });
+
+  it('tells no one of a developer made a viewer, as its grant isn’t either', async () => {
+    const who = await organization();
+    const developer = await member(who.org, 'developer');
+
+    await confirm(
+      who.admin,
+      developer.membershipId,
+      TO_VIEWER,
+      await steppedUp(who.admin, developer.membershipId, TO_VIEWER),
+    );
+
     expect(await noticesIn(who.org)).toEqual([]);
   });
 
