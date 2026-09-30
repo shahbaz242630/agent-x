@@ -5028,7 +5028,7 @@
         ],
         "x-body-limit": 256,
         "responses": {
-          "200": {
+          "201": {
             "description": "Default Response",
             "content": {
               "application/json": {
@@ -5043,11 +5043,18 @@
                       "items": {
                         "$ref": "#/components/schemas/AgentKey"
                       }
+                    },
+                    "key": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
                     "agent",
-                    "keys"
+                    "keys",
+                    "key"
                   ],
                   "additionalProperties": false
                 }

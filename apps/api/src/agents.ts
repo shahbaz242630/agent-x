@@ -22,10 +22,11 @@
 // - `POST /v1/agents/:id/owner` with the new owner's membership, then
 //   `…/owner/confirm` with it and the step-up's ID (the S68 audit's question
 //   A): an admin hands the agent to another member, signing in again with a
-//   passkey: 202 with the step-up, then 200 with the agent, its status,
-//   scopes and keys as they were. 409 AGENT_OWNER_NOT_ELIGIBLE unless the
-//   member is an active admin or developer of the organisation,
-//   AGENT_OWNER_UNCHANGED for the agent's owner already.
+//   passkey, and its keys are replaced: 202 with the step-up, then 201 with
+//   the agent, its keys (every one before it revoked) and its new key, shown
+//   this once. 409 AGENT_OWNER_NOT_ELIGIBLE unless the member is an active
+//   admin or developer of the organisation, AGENT_OWNER_UNCHANGED for the
+//   agent's owner already, AGENT_KEYS_SPENT past the day's key budget.
 // - `POST /v1/agents/:id/keys/:keyId/rotate`, then `…/rotate/confirm` with the
 //   step-up's ID (C1-4b): a new key, shown this once, and the old one kept
 //   working for the overlap (24 hours): 202 with the step-up, then 201 with
@@ -271,7 +272,16 @@ const HAND_OVER_CONFIRM_SCHEMA = {
       stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
     })
     .describe('The same member as asked, and the step-up signed in again for.'),
-  response: { 200: AGENT_CHANGED },
+  response: {
+    201: AGENT_WITH_KEYS.extend({
+      key: z
+        .string()
+        .nullable()
+        .describe(
+          'The agent’s new key, `axk_<keyId>_<secret>`, shown this once: give it to the agent, as every key before it is revoked. Null on a retry of the same request.',
+        ),
+    }).describe('The agent, handed over: its keys, every one before the handover revoked, and its new key.'),
+  },
 };
 
 const KEY_NAMED = z.object({
@@ -470,6 +480,9 @@ export function registerAgents(
   /** Answers a change: the agent as it now stands, a step-up asked, or a refusal. */
   const answerChange = (written: AgentChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
     if (written.outcome === 'changed') return reply.code(200).send(withKeysOf(written.agent));
+    if (written.outcome === 'handedOver') {
+      return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
+    }
     if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
     if (written.outcome === 'refused') return refused(written, request, reply);
     return answerRefusedWrite(written, request, reply);

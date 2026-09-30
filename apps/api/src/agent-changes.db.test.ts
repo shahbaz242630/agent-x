@@ -13,6 +13,7 @@ import {
   createSessions,
   createStepUpChallenges,
   type IdentityTables,
+  memberOf,
   MEMBERSHIPS,
   type Role,
   userForSubject,
@@ -190,6 +191,11 @@ const changedOf = (write: AgentChangeWrite) => {
   return write.agent;
 };
 
+const handedOf = (write: AgentChangeWrite) => {
+  if (write.outcome !== 'handedOver') throw new Error(`not handed over: ${JSON.stringify(write)}`);
+  return write.agent;
+};
+
 const askedFor = (write: AgentChangeWrite): string => {
   if (write.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(write)}`);
   return write.stepUpChallengeId;
@@ -223,6 +229,7 @@ beforeEach(() => {
     database: app,
     keys,
     ids,
+    clock,
     challenges: challenges(),
     logger: loggerFor(new LogCapture()),
   });
@@ -440,6 +447,25 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
       }),
     );
 
+  /** The member's role changed to `role`, as an admin's role change records it. */
+  const demote = (org: string, who: Member, role: Role) =>
+    withSignedStates(app, org, quiet(), async (tx, states) => {
+      const read = await memberOf(tx, states, { orgId: org, id: who.membershipId }, 'change');
+      if (read.outcome !== 'found') throw new Error('the membership was not found');
+      await states.record(
+        tx,
+        MEMBERSHIPS,
+        { orgId: org, id: who.membershipId },
+        read.state,
+        { role },
+        {
+          actor: OPERATOR,
+          action: 'membership.role_changed',
+          details: {},
+        },
+      );
+    });
+
   it.each<Role>(['developer', 'admin'])(
     'hands it to a %s once the admin signed in again with a passkey: the owner alone changes, recorded with both',
     async (role) => {
@@ -451,7 +477,7 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
       const challengeId = askedFor(await handOver(admin, agent, next.membershipId.toUpperCase()));
       await stepUp(admin, challengeId);
 
-      const done = changedOf(await handOverConfirm(admin, agent, next.membershipId, challengeId));
+      const done = handedOf(await handOverConfirm(admin, agent, next.membershipId, challengeId));
 
       expect(done.agent).toMatchObject({
         id: agent,
@@ -481,7 +507,7 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
     changedOf(await suspend(admin, agent));
     await deactivate(org, leaving);
 
-    const done = changedOf(await handedOver(admin, agent, admin.membershipId));
+    const done = handedOf(await handedOver(admin, agent, admin.membershipId));
 
     expect(done.agent).toMatchObject({ owner: admin.membershipId, status: 'SUSPENDED' });
   });
@@ -495,10 +521,11 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
     await stepUp(admin, challengeId);
     const key = keyed(admin, HAND_OVER_CONFIRM_OPERATION, `${agent} ${next.membershipId} ${challengeId}`);
 
-    const first = changedOf(await handOverConfirm(admin, agent, next.membershipId, challengeId, key));
-    const retried = changedOf(await handOverConfirm(admin, agent, next.membershipId, challengeId, key));
+    const first = await handOverConfirm(admin, agent, next.membershipId, challengeId, key);
+    const retried = await handOverConfirm(admin, agent, next.membershipId, challengeId, key);
 
-    expect(retried).toEqual(first);
+    expect(first).toMatchObject({ outcome: 'handedOver', key: expect.stringMatching(/^axk_/) as unknown });
+    expect(retried).toEqual({ ...first, key: null });
     expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual([
       'agent.created',
       'agent.owner_changed',
@@ -514,6 +541,58 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
     const refused = { outcome: 'refused', status: 403, code: 'FORBIDDEN' };
     expect(await handOver(them, agent, next.membershipId)).toEqual(refused);
     expect(await handOverConfirm(them, agent, next.membershipId, ids.next())).toEqual(refused);
+    expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
+  });
+
+  it.each<[string, (org: string, who: Member) => Promise<unknown>]>([
+    ['removed', (org, who) => deactivate(org, who)],
+    ['made a developer', (org, who) => demote(org, who, 'developer')],
+  ])('refuses the ask of an admin %s: FORBIDDEN, with no step-up opened', async (_, change) => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    await change(org, admin);
+
+    expect(await handOver(admin, agent, next.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses a caller who is no admin before the new owner’s membership is verified: FORBIDDEN, never its 503', async () => {
+    const org = await organization();
+    // The new owner's ID comes first, so a read in order of ID alone would reach it before the caller's.
+    const next = await member(org, 'viewer');
+    const caller = await member(org, 'admin');
+    const agent = await agentOf(org, caller);
+    await demote(org, caller, 'developer');
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'developer' }).where('id', '=', next.membershipId).execute(),
+    );
+
+    expect(await handOver(caller, agent, next.membershipId)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+  });
+
+  it('refuses a step-up opened in another admin’s session: STEP_UP_FAILED, the owner kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const other = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const theirs = askedFor(await handOver(other, agent, next.membershipId));
+    await stepUp(other, theirs);
+
+    expect(await handOverConfirm(admin, agent, next.membershipId, theirs)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'STEP_UP_FAILED',
+    });
     expect((await eventsAbout(org, agent)).map((event) => event.action)).toEqual(['agent.created']);
   });
 

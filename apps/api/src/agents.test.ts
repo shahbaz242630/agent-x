@@ -517,10 +517,14 @@ describe('POST /v1/agents/:id/owner, handing an agent to another owner with a st
     ...(payload !== undefined && { payload: JSON.stringify(payload) }),
   });
 
-  it('asks a step-up for the new owner: 202, then hands it over with the step-up’s ID: 200', async () => {
+  it('asks a step-up for the new owner: 202, then hands it over with the step-up’s ID: 201 with its new key', async () => {
     const asked = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
     const confirmed = await withAgents(
-      { change: { outcome: 'changed', agent: { agent: HANDED, keys: [KEY] } } },
+      { change: { outcome: 'handedOver', agent: { agent: HANDED, keys: [KEY] }, key: THE_KEY } },
+      'admin',
+    );
+    const retried = await withAgents(
+      { change: { outcome: 'handedOver', agent: { agent: HANDED, keys: [KEY] }, key: null } },
       'admin',
     );
 
@@ -539,8 +543,17 @@ describe('POST /v1/agents/:id/owner, handing an agent to another owner with a st
         subject: [AGENT_ID, NEW_OWNER],
       },
     ]);
-    expect(confirm.statusCode).toBe(200);
-    expect(confirm.json()).toEqual({ ...AGENT_ANSWERED, agent: { ...AGENT_ANSWERED.agent, owner: NEW_OWNER } });
+    expect(confirm.statusCode).toBe(201);
+    expect(confirm.json()).toEqual({
+      ...AGENT_ANSWERED,
+      agent: { ...AGENT_ANSWERED.agent, owner: NEW_OWNER },
+      key: THE_KEY,
+    });
+    const again = await retried.app.inject(
+      change('/owner/confirm', { owner: NEW_OWNER, stepUpChallengeId: CHALLENGE }),
+    );
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toMatchObject({ key: null });
     expect(confirmed.calls).toEqual([
       {
         kind: 'handOverConfirm',

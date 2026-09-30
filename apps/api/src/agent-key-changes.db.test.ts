@@ -45,6 +45,12 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
+  type AgentChangeWrite,
+  createAgentChanges,
+  HAND_OVER_CONFIRM_OPERATION,
+  HAND_OVER_OPERATION,
+} from './agent-changes.ts';
+import {
   type AgentKeyChanges,
   type AgentKeyChangeWrite,
   createAgentKeyChanges,
@@ -695,5 +701,158 @@ describe('revoking a key (C1-4b)', () => {
 
     expect(await revokeConfirm(developer, key, challengeId)).toEqual(refusal(403, 'STEP_UP_FAILED'));
     expect(await revoked(developer, key)).toMatchObject({ outcome: 'revoked' });
+  });
+});
+
+describe('a handover replaces the agent’s keys (the partner’s decision on the S68 audit’s question A)', () => {
+  const handing = () =>
+    createAgentChanges({
+      database: app,
+      keys,
+      ids,
+      clock,
+      challenges: challenges(),
+      logger: loggerFor(new LogCapture()),
+    });
+
+  const handOverAsk = (who: AgentMember, agentId: string, owner: string) =>
+    handing().handOver(who, keyed(who, HAND_OVER_OPERATION, `${agentId} ${owner}`), agentId, owner, CORRELATION);
+
+  const handOverConfirm = (
+    who: AgentMember,
+    agentId: string,
+    owner: string,
+    challengeId: string,
+    idempotent?: IdempotentRequest,
+  ) =>
+    handing().handOverConfirm(
+      who,
+      idempotent ?? keyed(who, HAND_OVER_CONFIRM_OPERATION, `${agentId} ${owner} ${challengeId}`),
+      agentId,
+      owner,
+      challengeId,
+      CORRELATION,
+    );
+
+  const askedForHandOver = (write: AgentChangeWrite): string => {
+    if (write.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(write)}`);
+    return write.stepUpChallengeId;
+  };
+
+  const handedOf = (write: AgentChangeWrite) => {
+    if (write.outcome !== 'handedOver') throw new Error(`not handed over: ${JSON.stringify(write)}`);
+    return write;
+  };
+
+  /** Asks, steps up and confirms a handover. */
+  async function handedOver(admin: Member, agentId: string, owner: string) {
+    const challengeId = askedForHandOver(await handOverAsk(admin, agentId, owner));
+    await stepUp(admin, challengeId);
+    return handedOf(await handOverConfirm(admin, agentId, owner, challengeId));
+  }
+
+  it('revokes every key at once, so none works, and issues one new key that does, with the newest live key’s scopes', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const leaving = await member(org, 'developer');
+    const next = await member(org, 'developer');
+    const first = await agentWithKey(org, leaving, { scopes: ['requests:read', 'requests:write'] });
+    const newer = await keyFor(org, first.agentId, ['requests:read'], new Date(START.getTime() + 30 * DAY_MS));
+    expect(await check(first.text)).toMatchObject({ outcome: 'accepted' });
+
+    const done = await handedOver(admin, first.agentId, next.membershipId);
+
+    expect(await check(first.text)).toEqual({ outcome: 'refused' });
+    expect(await check(newer.text)).toEqual({ outcome: 'refused' });
+    expect(done.key).toMatch(/^axk_/);
+    expect(await check(done.key ?? '')).toMatchObject({
+      outcome: 'accepted',
+      key: { agentId: first.agentId, scopes: ['requests:read'] },
+    });
+    const fresh = done.agent.keys.find((key) => key.status === 'ACTIVE');
+    expect(done.agent.agent.owner).toBe(next.membershipId);
+    expect(done.agent.keys.map((key) => key.status).sort()).toEqual(['ACTIVE', 'REVOKED', 'REVOKED']);
+    // Expiring as a registered agent's first key does: 90 days from now.
+    expect(fresh?.expiresAt).toEqual(new Date(START.getTime() + 90 * DAY_MS));
+    for (const keyId of [first.keyId, newer.keyId]) {
+      const events = await eventsAbout(org, keyId);
+      expect(events.at(-1)).toMatchObject({ action: 'agent_key.revoked', actor_id: admin.userId });
+      expect(JSON.parse(events.at(-1)?.details ?? '{}')).toMatchObject({ reason: 'handed_over' });
+    }
+    expect(JSON.parse((await eventsAbout(org, fresh?.id ?? ''))[0]?.details ?? '{}')).toMatchObject({
+      handedOverTo: next.membershipId,
+    });
+  });
+
+  it('replaces a suspended agent’s keys too, which stays suspended', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const key = await agentWithKey(org, await member(org, 'developer'));
+    const agentChanges = handing();
+    await agentChanges.suspend(admin, keyed(admin, 'agents.suspend', key.agentId), key.agentId, CORRELATION);
+
+    const done = await handedOver(admin, key.agentId, admin.membershipId);
+
+    expect(done.agent.agent.status).toBe('SUSPENDED');
+    expect(done.agent.keys.find((listed) => listed.id === key.keyId)?.status).toBe('REVOKED');
+    expect(done.agent.keys.filter((listed) => listed.status === 'ACTIVE')).toHaveLength(1);
+  });
+
+  it('gives the new key the agent’s scopes when none of its keys was live', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, await member(org, 'developer'), {
+      scopes: ['requests:read', 'requests:write'],
+      keyScopes: ['requests:read'],
+      expiresAt: new Date(START.getTime() + HOUR_MS),
+    });
+    clock.advanceBy(2 * HOUR_MS);
+    const again = await signedInAgain(admin);
+
+    const done = await handedOver(again, key.agentId, next.membershipId);
+
+    expect(await check(done.key ?? '')).toMatchObject({
+      outcome: 'accepted',
+      key: { scopes: ['requests:read', 'requests:write'] },
+    });
+    // The expired key, still ACTIVE, is revoked with the rest: none from before the handover is left.
+    expect(done.agent.keys.find((listed) => listed.id === key.keyId)?.status).toBe('REVOKED');
+  });
+
+  it('answers a retry of the same confirm as the first, with the key as null: shown once, handed over once', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    const idempotent = keyed(admin, HAND_OVER_CONFIRM_OPERATION, `${key.agentId} ${next.membershipId} ${challengeId}`);
+
+    const first = handedOf(await handOverConfirm(admin, key.agentId, next.membershipId, challengeId, idempotent));
+    const retried = handedOf(await handOverConfirm(admin, key.agentId, next.membershipId, challengeId, idempotent));
+
+    expect(first.key).toMatch(/^axk_/);
+    expect(retried).toEqual({ ...first, key: null });
+    expect(await keysIn(org)).toBe(2);
+  });
+
+  it(`past ${String(MOST_KEYS_ISSUED_A_DAY)} keys in 24 hours: AGENT_KEYS_SPENT, asking or confirming, nothing changed`, async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const key = await agentWithKey(org, admin);
+    const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
+    await stepUp(admin, challengeId);
+    for (let count = 1; count < MOST_KEYS_ISSUED_A_DAY; count += 1) {
+      await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() + 90 * DAY_MS));
+    }
+
+    expect(await handOverConfirm(admin, key.agentId, next.membershipId, challengeId)).toEqual(
+      refusal(409, 'AGENT_KEYS_SPENT'),
+    );
+    expect(await handOverAsk(admin, key.agentId, next.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_SPENT'));
+    expect(await keysIn(org)).toBe(MOST_KEYS_ISSUED_A_DAY);
+    expect(await check(key.text)).toMatchObject({ outcome: 'accepted' });
   });
 });

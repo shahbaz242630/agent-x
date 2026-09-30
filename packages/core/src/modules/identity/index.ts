@@ -122,6 +122,7 @@ export {
 } from './infrastructure/membership-changes.ts';
 export {
   addMembership,
+  lockMemberships,
   type MemberCheck,
   memberOf,
   type MemberRecord,
