@@ -82,6 +82,29 @@ interface FillInTable {
   readonly sweptAfter?: { readonly column: string; readonly days: number };
 }
 
+/**
+ * A unique index that holds only where its condition does (E2-1a): one the
+ * policy lists exactly, since any other partial key enforces nothing outside
+ * its condition and is refused by CI-06 and the live guard alike.
+ */
+interface PartialUniqueIndex {
+  /** Why it is partial, and what it still holds. */
+  readonly reason: string;
+  /** The table it is on, by schema-qualified name as Postgres quotes it. */
+  readonly table: string;
+  /** Its name. */
+  readonly name: string;
+  /** Its key columns, in order. */
+  readonly columns: readonly string[];
+  /**
+   * Its condition exactly as Postgres prints it (`pg_get_expr` of `indpred`),
+   * brackets and all. Name only columns and pg_catalog's own: a name from our
+   * schemas prints qualified for CI-06 but may not on the app's search path,
+   * and the live guard would then raise a false alarm.
+   */
+  readonly predicate: string;
+}
+
 export interface SchemaPolicy {
   /**
    * The global tables, by schema-qualified name as Postgres quotes it
@@ -109,6 +132,11 @@ export interface SchemaPolicy {
    * checks the running database still holds it.
    */
   readonly requiredForeignKeys: readonly RequiredForeignKey[];
+  /**
+   * The only unique indexes that may be partial, each with its reason: its
+   * table, name, key columns and condition must all be as listed (E2-1a).
+   */
+  readonly partialUniqueIndexes: readonly PartialUniqueIndex[];
 }
 
 export const SCHEMA_POLICY: SchemaPolicy = {
@@ -327,6 +355,17 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id'],
       references: 'directory.orgs',
       referencedColumns: ['org_id'],
+    },
+  ],
+  partialUniqueIndexes: [
+    {
+      reason:
+        "One supplier per payee key in an organisation, suspended suppliers included (0033, partner S71). Partial so payee_key is never a key column: Postgres counts only a full unique index's columns as keys, and a full one would turn the signed state's no-key write of the key into a key update (ADR-006 §6)",
+      table: 'suppliers.suppliers',
+      name: 'one_supplier_a_payee',
+      columns: ['org_id', 'payee_key'],
+      // As Postgres prints `WHERE payee_key IS NOT NULL` (ruleutils puts a NullTest in brackets), on 16 to 18.
+      predicate: '(payee_key IS NOT NULL)',
     },
   ],
 };
