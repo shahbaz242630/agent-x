@@ -59,6 +59,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
@@ -98,11 +99,14 @@ import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
+import { createSupplierChanges } from './supplier-changes.ts';
+import { createSupplierRegistry } from './supplier-registry.ts';
 
 /** Every table the API reaches, module by module. */
 type ApiTables = PlatformControlsTables &
   AgentsTables &
   FundingSourcesTables &
+  SuppliersTables &
   FakePartnerTables &
   DirectoryTables &
   AuditTables &
@@ -479,6 +483,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
+    supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });

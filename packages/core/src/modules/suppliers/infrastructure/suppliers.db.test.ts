@@ -34,6 +34,7 @@ import {
   suppliersAddedSince,
   suppliersPage,
   supplierOf,
+  suspendSupplier,
   unverifySupplier,
   verifySupplier,
   versionOf,
@@ -297,13 +298,7 @@ const verify = (orgId: string, id: string) =>
   );
 
 const suspend = (orgId: string, id: string) =>
-  onSupplier(orgId, id, (tx, states) =>
-    states.changeStatus(tx, SUPPLIERS, { orgId, id }, 'suspend', {
-      actor: OPERATOR,
-      action: 'supplier.suspended',
-      details: {},
-    }),
-  );
+  onSupplier(orgId, id, (tx, states, found) => suspendSupplier(tx, states, { orgId, id }, found, { actor: OPERATOR }));
 
 const reactivate = (orgId: string, id: string) =>
   onSupplier(orgId, id, (tx, states, found) =>
@@ -434,6 +429,17 @@ describe(`a supplier's verification (E1-1's review, Postgres ${server.version})`
     const other = await added(org);
     await suspend(org, other.id);
     await expect(verify(org, other.id)).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it('keeps its verification while suspended, and refuses to suspend one already SUSPENDED (E1-2)', async () => {
+    const org = await organization();
+    const { id } = await added(org);
+    await verify(org, id);
+
+    await suspend(org, id);
+
+    expect(await read(org, id)).toMatchObject({ supplier: { status: 'SUSPENDED', verifiedBy: VERIFIER } });
+    await expect(suspend(org, id)).rejects.toBeInstanceOf(RangeError);
   });
 
   it('refuses to unverify one not VERIFIED, and to reactivate one not SUSPENDED', async () => {

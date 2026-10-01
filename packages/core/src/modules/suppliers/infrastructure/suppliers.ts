@@ -428,7 +428,7 @@ async function move(
   tx: SuppliersTransaction,
   states: SignedStates,
   key: SupplierKey,
-  event: 'verify' | 'unverify' | 'reactivate' | 'reactivate_verified',
+  event: 'verify' | 'unverify' | 'suspend' | 'reactivate' | 'reactivate_verified',
   { actor, details = {} }: SupplierChange,
 ): Promise<void> {
   const moved = await states.changeStatus(tx, SUPPLIERS, key, event, {
@@ -503,6 +503,25 @@ async function clearVerification(
     { actor, action: 'supplier.verification_cleared', details },
   );
   return { ...read.supplier, verifiedBy: null, verifiedVersionId: null };
+}
+
+/**
+ * Puts the business's brake on the supplier (E1-2), in the caller's
+ * transaction, which read it with `change` (`found`): UNVERIFIED or VERIFIED
+ * > SUSPENDED, its verification kept for reactivateSupplier to weigh. One
+ * SUSPENDED already is refused by its machine (RangeError): the use case
+ * answers a brake pressed twice as it is. Gives nothing: the use case answers
+ * from the supplier read again, so a second read here would be thrown away
+ * (#221's review: few calls a request).
+ */
+export async function suspendSupplier(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord },
+  change: SupplierChange,
+): Promise<void> {
+  await move(tx, states, key, 'suspend', change);
 }
 
 /**
@@ -741,6 +760,19 @@ export async function suppliersPage(
   // One more than the page was there: the next page starts after this one's last.
   const next = rows.length > limit ? last : null;
   return { outcome: 'listed', suppliers: found, next };
+}
+
+/** The most suppliers an organisation may add in any 24 hours (partner, S69): their records are never retired (the B8-1 lesson). */
+export const MOST_SUPPLIERS_ADDED_A_DAY = 20;
+
+/**
+ * Takes the organisation's lock for adding suppliers until the transaction
+ * ends, so two adds at once can't both take the last of the day's budget.
+ * Taken right after the idempotency key's claim, before any row lock.
+ */
+export async function oneSupplierAddAtATime(tx: SuppliersTransaction, orgId: string): Promise<void> {
+  const key = `agentx.suppliers:${orgId.toLowerCase()}`;
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
 }
 
 /** How many suppliers the organisation added after `since`: the day's budget's count (E1-2), in one statement. */

@@ -109,6 +109,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /test/items/{ref}',
       'GET /v1/agent',
       'GET /v1/agent/funding-sources',
+      'GET /v1/agent/suppliers',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
       'GET /v1/auth/callback',
@@ -122,10 +123,13 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/integrity-hold',
       'GET /v1/members',
       'GET /v1/registered-contacts',
+      'GET /v1/suppliers',
+      'GET /v1/suppliers/{id}',
       'HEAD /health',
       'HEAD /test/items/{ref}',
       'HEAD /v1/agent',
       'HEAD /v1/agent/funding-sources',
+      'HEAD /v1/agent/suppliers',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
       'HEAD /v1/auth/callback',
@@ -139,6 +143,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/integrity-hold',
       'HEAD /v1/members',
       'HEAD /v1/registered-contacts',
+      'HEAD /v1/suppliers',
+      'HEAD /v1/suppliers/{id}',
       'POST /test/both',
       'POST /v1/agents',
       'POST /v1/agents/confirm',
@@ -181,6 +187,10 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/registered-contacts/{id}/confirm',
       'POST /v1/registered-contacts/{id}/remove',
       'POST /v1/registered-contacts/{id}/remove/confirm',
+      'POST /v1/suppliers',
+      'POST /v1/suppliers/{id}/reactivate',
+      'POST /v1/suppliers/{id}/reactivate/confirm',
+      'POST /v1/suppliers/{id}/suspend',
       'PUT /test/both',
     ]);
   });
@@ -1151,8 +1161,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
     // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
-    // an agent's handover and its confirm (the S68 audit), with each GET's HEAD.
-    expect(answers.length).toBe(74);
+    // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), with each GET's HEAD.
+    expect(answers.length).toBe(84);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1168,6 +1178,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'AgentReactivationAsked',
       'AgentRegistrationAsked',
       'AgentSelf',
+      'AgentSupplier',
       'ConfirmationAsked',
       'Error',
       'FactorReset',
@@ -1197,6 +1208,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'RegisteredContactRemovalAsked',
       'RegisteredContacts',
       'Session',
+      'Supplier',
+      'SupplierDetails',
+      'SupplierReactivationAsked',
     ]);
   });
 
