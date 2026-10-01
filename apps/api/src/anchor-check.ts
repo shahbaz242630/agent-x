@@ -307,23 +307,29 @@ export function createAnchorCheck({
     firstSeen.set(orgId, clock.now().getTime());
   };
 
+  /** A run with no list to go by: the alarm if the list has gone unread too long, and each organisation already seen counted as not checked. */
+  const checkUnlisted = async (
+    from: OrganisationChains,
+    read: 'refused' | 'failed',
+    signal: AbortSignal | undefined,
+  ): Promise<Outcome[]> => {
+    // A list never read for three intervals is the alarm in its own right,
+    // since after a restart no organisation is known yet.
+    if (read === 'failed' && clock.now().getTime() - (listRead ?? started) >= staleAfterMs) {
+      logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'list' });
+    }
+    const outcomes: Outcome[] = [];
+    for (const orgId of seen) {
+      outcomes.push(missed(orgId, 'unchecked'));
+      await settle(from, orgId, signal);
+    }
+    return outcomes;
+  };
+
   const checkOrganizations = async (from: OrganisationChains, signal: AbortSignal | undefined): Promise<Outcome[]> => {
     const read = await listOrganizations(from, signal);
     if (read === 'stopped') return [];
-    if (typeof read === 'string') {
-      // No list to go by. A list never read for three intervals is the alarm
-      // in its own right, since after a restart no organisation is known yet.
-      if (read === 'failed' && clock.now().getTime() - (listRead ?? started) >= staleAfterMs) {
-        logger.error('audit.integrity_failed', { chain: 'organisation', check: 'anchor', reason: 'list' });
-      }
-      // Each organisation already seen counts as not checked this run.
-      const outcomes: Outcome[] = [];
-      for (const orgId of seen) {
-        outcomes.push(missed(orgId, 'unchecked'));
-        await settle(from, orgId, signal);
-      }
-      return outcomes;
-    }
+    if (typeof read === 'string') return checkUnlisted(from, read, signal);
     const now = new Set(read.listed);
     for (const orgId of read.recorded) remember(orgId);
     const outcomes: Outcome[] = [];

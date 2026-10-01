@@ -793,12 +793,6 @@ async function roleSettings<Schema>(db: Kysely<Schema>, roles: readonly string[]
 
 const quoted = (name: string): string => `"${name}"`;
 
-/**
- * Everything about the live database that differs from what the migrations
- * built. An empty list means no drift. It never throws for a difference: a
- * database that refuses the read throws, and the caller treats that as a failed
- * check in its own right.
- */
 type FillInSweep = NonNullable<SchemaPolicy['fillInTables'][string]['sweptAfter']>;
 
 /**
@@ -821,6 +815,422 @@ function retentionProblems(table: string, found: readonly PolicyRow[], sweep: Fi
   return problems;
 }
 
+/** Each table's columns, in the order the rows list them. */
+function columnsByTable(rows: readonly ColumnRow[]): Map<string, string[]> {
+  const byTable = new Map<string, string[]>();
+  for (const { table, column } of rows) byTable.set(table, [...(byTable.get(table) ?? []), column]);
+  return byTable;
+}
+
+/** Two column lists alike, in order. */
+const same = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((each, index) => each === b[index]);
+
+/** Each of our schemas owned by a role other than ours. */
+function schemaOwnerProblems(allSchemas: readonly SchemaRow[], ownerRole: string): SchemaProblem[] {
+  // `public` is Postgres's own schema, not one our migrations make: since
+  // version 15 it belongs to the built-in `pg_database_owner`, which *is* the
+  // database's owner by definition. 0001_baseline.sql takes every right on it
+  // away from PUBLIC and no module uses it, and the pinned search_path means
+  // nothing unqualified reaches it either way.
+  const OWNS = new Set([ownerRole, 'pg_database_owner']);
+  return allSchemas
+    .filter((schema) => !OWNS.has(schema.owner))
+    .map((schema) => `schema ${quoted(schema.name)} is owned by another role`);
+}
+
+/** A table's own shape: a plain table, ours, and walled by row-level security unless it is a global table. */
+function relationProblems(relation: RelationRow, ownerRole: string, isGlobal: boolean): SchemaProblem[] {
+  const name = relation.name;
+  const problems: SchemaProblem[] = [];
+  // A view or a foreign table in place of a table means every read now goes
+  // somewhere else, with the policies of whatever it points at.
+  if (relation.kind !== 'r') problems.push(`${name} is no longer a plain table`);
+  if (relation.partitioned) problems.push(`${name} is partitioned`);
+  if (relation.inherits) problems.push(`${name} is in an inheritance tree`);
+  if (relation.owner !== ownerRole) problems.push(`${name} is owned by another role`);
+  if (isGlobal) return problems;
+  if (!relation.rls) problems.push(`${name} does not have row-level security enabled`);
+  // Without FORCE, the table's owner is not subject to its own policies.
+  if (!relation.forced) problems.push(`${name} does not have row-level security forced`);
+  return problems;
+}
+
+/**
+ * Policies: a tenant table has exactly the tenant policy, and its expression
+ * is the one ADR-005 §2 gives. A fill-in table with a retention has its
+ * retention policy too, exactly as its entry says, and no other (B1e).
+ */
+function policyProblems(
+  allRelations: readonly RelationRow[],
+  allPolicies: readonly PolicyRow[],
+  globalTables: ReadonlySet<string>,
+  sweptAfter: (table: string) => FillInSweep | undefined,
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const retentionPolicies = new Set<PolicyRow>();
+  const byTable = new Map<string, PolicyRow[]>();
+  for (const one of allPolicies) byTable.set(one.table, [...(byTable.get(one.table) ?? []), one]);
+  for (const relation of allRelations) {
+    const forTable = byTable.get(relation.name) ?? [];
+    const isGlobal = globalTables.has(relation.name);
+    const sweep = isGlobal ? undefined : sweptAfter(relation.name);
+    if (sweep !== undefined) {
+      for (const one of forTable) if (one.name === RETENTION_POLICY) retentionPolicies.add(one);
+    }
+    problems.push(...tablePolicyProblems(relation.name, forTable, isGlobal, sweep));
+  }
+
+  // Every tenant policy is also compared with the others. This needs no
+  // constant and so no version to be right about: rewriting one table's wall
+  // makes it differ from the rest, which is the attack as it would really
+  // happen.
+  const expressions = new Set(
+    allPolicies
+      .filter((one) => !globalTables.has(one.table) && !retentionPolicies.has(one))
+      .map((one) => one.expression ?? ''),
+  );
+  if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
+  return problems;
+}
+
+/** One table's policies: none on a global table; otherwise its retention policy if it is swept, and the tenant policy. */
+function tablePolicyProblems(
+  table: string,
+  found: readonly PolicyRow[],
+  isGlobal: boolean,
+  sweep: FillInSweep | undefined,
+): SchemaProblem[] {
+  if (isGlobal) return found.length > 0 ? [`${table} is a global table but carries a policy`] : [];
+  if (sweep === undefined) return tenantPolicyProblems(table, found);
+  const retention = found.filter((one) => one.name === RETENTION_POLICY);
+  const rest = found.filter((one) => one.name !== RETENTION_POLICY);
+  return [...retentionProblems(table, retention, sweep), ...tenantPolicyProblems(table, rest)];
+}
+
+/** A tenant table's one policy: the tenant policy, for every command and every role, reading as ADR-005 §2 gives. */
+function tenantPolicyProblems(table: string, found: readonly PolicyRow[]): SchemaProblem[] {
+  if (found.length !== 1) return [`${table} does not have exactly one row-security policy`];
+  const [one] = found as readonly [PolicyRow];
+  const problems: SchemaProblem[] = [];
+  if (one.name !== TENANT_POLICY) problems.push(`${table}'s policy is not ${TENANT_POLICY}`);
+  // '*' is ALL: one policy covering select, insert, update and delete alike.
+  if (one.command !== '*') problems.push(`${table}'s policy no longer covers every command`);
+  if (!one.everyone) problems.push(`${table}'s policy is limited to named roles`);
+  if (one.expression !== TENANT_POLICY_EXPRESSION) problems.push(`${table}'s policy reads differently`);
+  if (one.check_expression !== null && one.check_expression !== TENANT_POLICY_EXPRESSION) {
+    problems.push(`${table}'s policy writes differently`);
+  }
+  return problems;
+}
+
+/**
+ * Functions: the status guard and the made-once guard are the only ones our
+ * schemas hold, and each must still be the function its migration wrote,
+ * running with its caller's rights and looking names up where it pinned them.
+ */
+function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
+  if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
+  if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
+  const body = GUARD_BODIES.get(fn.name);
+  if (body === undefined) problems.push(`${fn.name} is a function our schemas should not hold`);
+  else if (fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
+  return problems;
+}
+
+/**
+ * The only triggers our schema has are the status guard 0004 installs and
+ * the made-once guard 0032 installs, and each must still be that guard: a
+ * planted trigger given its name would otherwise pass on its name alone. A
+ * switched-off guard is drift too — Postgres keeps the row and stops running
+ * it, which is tampering that leaves no trace in the table.
+ */
+function triggerProblems(trigger: TriggerRow): SchemaProblem[] {
+  if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) return madeOnceProblems(trigger);
+  if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
+    return [`${trigger.table} carries the trigger ${quoted(trigger.name)}`];
+  }
+  return statusGuardProblems(trigger);
+}
+
+/**
+ * A guard put back to fire on some columns only (`UPDATE OF …`), or only
+ * when a WHEN condition holds, keeps its name, function and events while
+ * leaving every other change unchecked (the #220 review).
+ */
+function narrowedProblems(trigger: TriggerRow, name: string): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  if (trigger.on_columns) problems.push(`${trigger.table}'s ${name} fires on some columns only`);
+  if (trigger.conditional) problems.push(`${trigger.table}'s ${name} fires only when a condition holds`);
+  return problems;
+}
+
+/** The made-once guard, still as 0032 wrote it and firing. */
+function madeOnceProblems(trigger: TriggerRow): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  // One that fires at other times, or is handed arguments, is not the guard 0032 wrote.
+  if (trigger.type !== MADE_ONCE_TYPE || !trigger.definition.endsWith(`${MADE_ONCE_FUNCTION}()`)) {
+    problems.push(`${trigger.table}'s ${MADE_ONCE} fires at other times`);
+  }
+  problems.push(...narrowedProblems(trigger, MADE_ONCE));
+  if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
+  return problems;
+}
+
+/** The status guard, still as 0004 installs it and firing. */
+function statusGuardProblems(trigger: TriggerRow): SchemaProblem[] {
+  const problems = narrowedProblems(trigger, STATUS_GUARD);
+  // A guard that fires on fewer events than 0004 installs leaves the moves it
+  // no longer sees unchecked, while still passing on its name.
+  if (trigger.type !== STATUS_GUARD_TYPE) problems.push(`${trigger.table}'s ${STATUS_GUARD} fires at other times`);
+  else if (!guardArgumentsWellFormed(trigger.definition)) {
+    problems.push(`${trigger.table}'s ${STATUS_GUARD} is given other arguments`);
+  }
+  // Postgres keeps a switched-off trigger's row and stops running it, which
+  // is tampering that leaves no trace in the table itself.
+  if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
+  return problems;
+}
+
+/** Each listed table that is there but carries no trigger by the guard's name. */
+function missingGuardProblems(
+  tables: readonly string[],
+  name: string,
+  allRelations: readonly RelationRow[],
+  allTriggers: readonly TriggerRow[],
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  for (const table of tables) {
+    const relation = allRelations.find((each) => each.plain === table);
+    // Any trigger by another name is reported above as a trigger our schema should not hold.
+    const guards = allTriggers.filter((trigger) => trigger.table === relation?.name && trigger.name === name);
+    if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${name}`);
+  }
+  return problems;
+}
+
+/**
+ * Indexes. A plain index missing is a matter of speed, so it is not checked
+ * here; a **unique** one is a wall. An invalid one enforces nothing while
+ * still being listed, a partial one enforces nothing outside its condition,
+ * and a unique key that leaves org_id out would make two organisations
+ * collide (SEC-TEN-05, which CI-06 checks at migration time — this is the
+ * same rule on the running database).
+ */
+function indexProblems(index: IndexRow, isGlobal: boolean): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
+  if (!index.is_unique) return problems;
+  if (index.partial) problems.push(`${index.table}'s unique index ${quoted(index.name)} is partial`);
+  if (!isGlobal && !index.covers_org) {
+    problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
+  }
+  return problems;
+}
+
+/**
+ * Tables held to narrower rights than a tenant table's, by the name the rest
+ * of this check uses, each with the columns the app may change:
+ * - an authority table (A3f-2): its sealed fields and its two signed-state
+ *   columns, which is all record writes. Listed by its plain name, as the
+ *   module wrote it and as CI's A3c-1 check matches it;
+ * - a fill-in table (A5b): the columns the schema policy lists, by the name
+ *   Postgres quotes. CI-06 checks the list itself (a reason, a tenant table
+ *   outside the append-only schemas, only columns granted), and the policy
+ *   reaches a server only through CI, so it is taken as it stands here.
+ * A table on both lists may change only in the columns both allow.
+ */
+function narrowTables(
+  allRelations: readonly RelationRow[],
+  authorityTables: readonly SignedStateTable[],
+  fillInTables: SchemaPolicy['fillInTables'],
+  known: ReadonlySet<string>,
+): { narrow: Map<string, ReadonlySet<string>>; problems: SchemaProblem[] } {
+  const problems: SchemaProblem[] = [];
+  const byPlainName = new Map(allRelations.map((relation) => [relation.plain, relation.name]));
+  const narrow = new Map<string, ReadonlySet<string>>();
+  for (const table of authorityTables) {
+    const name = byPlainName.get(table.table);
+    if (name === undefined) problems.push(`${table.table} is listed as an authority table but is not there`);
+    else narrow.set(name, new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]));
+  }
+  for (const [name, entry] of Object.entries(fillInTables)) {
+    const asAuthority = narrow.get(name);
+    if (!known.has(name)) {
+      problems.push(`${name} is listed as a fill-in table but is not there`);
+    } else if (asAuthority === undefined) {
+      narrow.set(name, new Set(entry.columns));
+    } else {
+      problems.push(`${name} is listed as both an authority table and a fill-in table`);
+      narrow.set(name, new Set(entry.columns.filter((column) => asAuthority.has(column))));
+    }
+  }
+  return { narrow, problems };
+}
+
+/** The rights a table not held narrower may hold: its global-table entry's, or its schema's kind's. */
+function allowedRights(
+  relation: RelationRow,
+  entry: SchemaPolicy['globalTables'][string] | undefined,
+  appendOnly: ReadonlySet<string>,
+  exceptions: ReadonlySet<string>,
+): Set<string> {
+  if (entry?.appMay !== undefined) {
+    // A table changed in part only may hold UPDATE on its listed columns, checked below.
+    return new Set<string>(entry.appMayUpdate === undefined ? entry.appMay : [...entry.appMay, 'UPDATE']);
+  }
+  if (!appendOnly.has(relation.schema)) return new Set<string>(APP_ROW_RIGHTS);
+  return new Set<string>(exceptions.has(relation.name) ? EXCEPTION_RIGHTS : APPEND_ONLY_RIGHTS);
+}
+
+/** Each right the app role holds on a table not held narrower that its allow-list leaves out. */
+function heldRightsProblems(
+  allRelations: readonly RelationRow[],
+  narrow: ReadonlyMap<string, ReadonlySet<string>>,
+  allGrants: readonly GrantRow[],
+  policy: SchemaPolicy,
+  appRole: string,
+): SchemaProblem[] {
+  const held = new Map<string, Set<string>>();
+  for (const grant of allGrants) {
+    held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
+  }
+  const appendOnly = new Set(policy.appendOnlySchemas);
+  const exceptions = new Set(Object.keys(policy.appendOnlyExceptions));
+  const problems: SchemaProblem[] = [];
+  for (const relation of allRelations) {
+    // Held to their own list, below.
+    if (narrow.has(relation.name)) continue;
+    // A global table that names its rights is held to them, on the table and
+    // on each column alike (B1d-1): the directory's list is added to and read.
+    const entry = Object.hasOwn(policy.globalTables, relation.name) ? policy.globalTables[relation.name] : undefined;
+    const allowed = allowedRights(relation, entry, appendOnly, exceptions);
+    for (const right of held.get(relation.name) ?? []) {
+      if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * A narrow table: rows added and read, and changed only in the columns it
+ * may change, each granted on its own.
+ */
+function narrowRightsProblems(
+  name: string,
+  mayChange: ReadonlySet<string>,
+  allGrants: readonly GrantRow[],
+  writableColumns: readonly string[],
+  sweep: FillInSweep | undefined,
+  appRole: string,
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const grantsOn = allGrants.filter((grant) => grant.table === name);
+  const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
+  // A fill-in table with a retention may be deleted from too: its retention policy holds each DELETE (B1e).
+  const tableMay: readonly string[] = sweep === undefined ? NARROW_RIGHTS : [...NARROW_RIGHTS, 'DELETE'];
+  for (const right of onTable) {
+    if (!tableMay.includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
+  }
+  for (const grant of grantsOn) {
+    // A right on the whole table shows on its columns too; it is named once, above.
+    if (grant.level !== 'column' || onTable.has(grant.privilege)) continue;
+    if (!(NARROW_COLUMN_RIGHTS as readonly string[]).includes(grant.privilege)) {
+      problems.push(`${appRole} may ${grant.privilege} on columns of ${name}`);
+    }
+  }
+  for (const column of writableColumns) {
+    if (!mayChange.has(column)) problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
+  }
+  return problems;
+}
+
+/**
+ * A global table changed in part only (B2-1): UPDATE on its listed columns,
+ * each granted on its own, never on the whole table or any other column.
+ */
+function partialUpdateProblems(
+  globalEntries: SchemaPolicy['globalTables'],
+  allGrants: readonly GrantRow[],
+  writableIn: ReadonlyMap<string, readonly string[]>,
+  appRole: string,
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  for (const [name, entry] of Object.entries(globalEntries)) {
+    if (entry.appMayUpdate === undefined) continue;
+    if (allGrants.some((grant) => grant.table === name && grant.level === 'table' && grant.privilege === 'UPDATE')) {
+      problems.push(`${appRole} may UPDATE on ${name}`);
+    }
+    for (const column of writableIn.get(name) ?? []) {
+      if (!entry.appMayUpdate.includes(column))
+        problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Global tables are listed with their exact columns, so a new one is a
+ * reviewed change rather than something that appears. Every other table has
+ * an org_id.
+ */
+function columnProblems(
+  allColumns: readonly ColumnRow[],
+  globalEntries: SchemaPolicy['globalTables'],
+  allRelations: readonly RelationRow[],
+  globalTables: ReadonlySet<string>,
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const columnsOf = columnsByTable(allColumns);
+  for (const [name, entry] of Object.entries(globalEntries)) {
+    const live = columnsOf.get(name);
+    if (live === undefined) continue;
+    if (live.join(',') !== [...entry.columns].join(',')) problems.push(`${name} no longer has exactly its columns`);
+  }
+  for (const relation of allRelations) {
+    if (globalTables.has(relation.name)) continue;
+    if (!(columnsOf.get(relation.name) ?? []).includes('org_id')) problems.push(`${relation.name} has no org_id`);
+  }
+  return problems;
+}
+
+/**
+ * A foreign key something rests on: still there, from exactly its columns to
+ * exactly the ones it points at, and holding. Any number of keys may match;
+ * one that holds is enough. Its columns must be NOT NULL too: a key lets a row
+ * with a null column through unchecked.
+ */
+function requiredKeyProblems(
+  required: SchemaPolicy['requiredForeignKeys'][number],
+  keys: readonly ForeignKey[],
+): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const named = `${required.table}'s foreign key to ${required.references}`;
+  const matching = keys.filter(
+    (key) =>
+      key.table === required.table &&
+      key.target === required.references &&
+      same(key.columns, required.columns) &&
+      same(key.targetColumns, required.referencedColumns),
+  );
+  const [first] = matching;
+  if (first === undefined) problems.push(`${named} is not there`);
+  else if (!matching.some(({ holds }) => holds.validated && holds.triggers_on)) {
+    if (!first.holds.validated) problems.push(`${named} is not validated`);
+    if (!first.holds.triggers_on) problems.push(`${named} has its triggers missing or switched off`);
+  }
+  if (first !== undefined && !first.notNull) problems.push(`${named} has a column that may be null`);
+  return problems;
+}
+
+/**
+ * Everything about the live database that differs from what the migrations
+ * built. An empty list means no drift. It never throws for a difference: a
+ * database that refuses the read throws, and the caller treats that as a failed
+ * check in its own right.
+ */
 export async function liveSchemaProblems<Schema>(
   db: Kysely<Schema>,
   {
@@ -832,7 +1242,6 @@ export async function liveSchemaProblems<Schema>(
     madeOnceTables = [],
   }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
-  const problems: SchemaProblem[] = [];
   const version = await serverVersion(db);
   const [
     allRelations,
@@ -866,308 +1275,44 @@ export async function liveSchemaProblems<Schema>(
     foreignKeys(db),
   ]);
 
-  // `public` is Postgres's own schema, not one our migrations make: since
-  // version 15 it belongs to the built-in `pg_database_owner`, which *is* the
-  // database's owner by definition. 0001_baseline.sql takes every right on it
-  // away from PUBLIC and no module uses it, and the pinned search_path means
-  // nothing unqualified reaches it either way.
-  const OWNS = new Set([ownerRole, 'pg_database_owner']);
-  for (const schema of allSchemas) {
-    if (!OWNS.has(schema.owner)) problems.push(`schema ${quoted(schema.name)} is owned by another role`);
-  }
-
   const globalTables = new Set(Object.keys(policy.globalTables));
-  const appendOnly = new Set(policy.appendOnlySchemas);
-  const exceptions = new Set(Object.keys(policy.appendOnlyExceptions));
-
-  for (const relation of allRelations) {
-    const name = relation.name;
-    // A view or a foreign table in place of a table means every read now goes
-    // somewhere else, with the policies of whatever it points at.
-    if (relation.kind !== 'r') problems.push(`${name} is no longer a plain table`);
-    if (relation.partitioned) problems.push(`${name} is partitioned`);
-    if (relation.inherits) problems.push(`${name} is in an inheritance tree`);
-    if (relation.owner !== ownerRole) problems.push(`${name} is owned by another role`);
-
-    if (!globalTables.has(name)) {
-      if (!relation.rls) problems.push(`${name} does not have row-level security enabled`);
-      // Without FORCE, the table's owner is not subject to its own policies.
-      if (!relation.forced) problems.push(`${name} does not have row-level security forced`);
-    }
-  }
-
   const known = new Set(allRelations.map((relation) => relation.name));
-  for (const listed of globalTables) {
-    if (!known.has(listed)) problems.push(`${listed} is listed as a global table but is not there`);
-  }
-
-  // Policies: a tenant table has exactly the tenant policy, and its expression
-  // is the one ADR-005 §2 gives. A fill-in table with a retention has its
-  // retention policy too, exactly as its entry says, and no other (B1e).
   const sweptAfter = (table: string): FillInSweep | undefined =>
     Object.hasOwn(policy.fillInTables, table) ? policy.fillInTables[table]?.sweptAfter : undefined;
-  const retentionPolicies = new Set<PolicyRow>();
-  const byTable = new Map<string, PolicyRow[]>();
-  for (const one of allPolicies) byTable.set(one.table, [...(byTable.get(one.table) ?? []), one]);
-  for (const relation of allRelations) {
-    let forTable = byTable.get(relation.name) ?? [];
-    if (globalTables.has(relation.name)) {
-      if (forTable.length > 0) problems.push(`${relation.name} is a global table but carries a policy`);
-      continue;
-    }
-    const sweep = sweptAfter(relation.name);
-    if (sweep !== undefined) {
-      const retention = forTable.filter((one) => one.name === RETENTION_POLICY);
-      forTable = forTable.filter((one) => one.name !== RETENTION_POLICY);
-      for (const one of retention) retentionPolicies.add(one);
-      problems.push(...retentionProblems(relation.name, retention, sweep));
-    }
-    if (forTable.length !== 1) {
-      problems.push(`${relation.name} does not have exactly one row-security policy`);
-      continue;
-    }
-    const [one] = forTable as [PolicyRow];
-    if (one.name !== TENANT_POLICY) problems.push(`${relation.name}'s policy is not ${TENANT_POLICY}`);
-    // '*' is ALL: one policy covering select, insert, update and delete alike.
-    if (one.command !== '*') problems.push(`${relation.name}'s policy no longer covers every command`);
-    if (!one.everyone) problems.push(`${relation.name}'s policy is limited to named roles`);
-    if (one.expression !== TENANT_POLICY_EXPRESSION) problems.push(`${relation.name}'s policy reads differently`);
-    if (one.check_expression !== null && one.check_expression !== TENANT_POLICY_EXPRESSION) {
-      problems.push(`${relation.name}'s policy writes differently`);
-    }
-  }
-
-  // Every tenant policy is also compared with the others. This needs no
-  // constant and so no version to be right about: rewriting one table's wall
-  // makes it differ from the rest, which is the attack as it would really
-  // happen.
-  const expressions = new Set(
-    allPolicies
-      .filter((one) => !globalTables.has(one.table) && !retentionPolicies.has(one))
-      .map((one) => one.expression ?? ''),
-  );
-  if (expressions.size > 1) problems.push('the tenant policies no longer all read the same way');
-
-  // Functions: the status guard and the made-once guard are the only ones our
-  // schemas hold, and each must still be the function its migration wrote,
-  // running with its caller's rights and looking names up where it pinned them.
-  for (const fn of allFunctions) {
-    if (fn.definer) problems.push(`${fn.name} runs with its owner's rights`);
-    if (fn.owner !== ownerRole) problems.push(`${fn.name} is owned by another role`);
-    if (fn.config !== PINNED_FUNCTION_CONFIG) problems.push(`${fn.name} does not pin its search_path`);
-    const body = GUARD_BODIES.get(fn.name);
-    if (body === undefined) problems.push(`${fn.name} is a function our schemas should not hold`);
-    else if (fn.body !== body) problems.push(`${fn.name} is not the function the migration wrote`);
-  }
-
-  // A rewrite rule can turn any statement into a different one, silently.
-  for (const rule of allRules) {
-    problems.push(`${rule.table} carries the rewrite rule ${quoted(rule.name)}`);
-  }
-
-  // The only triggers our schema has are the status guard 0004 installs and
-  // the made-once guard 0032 installs, and each must still be that guard: a
-  // planted trigger given its name would otherwise pass on its name alone. A
-  // switched-off guard is drift too — Postgres keeps the row and stops running
-  // it, which is tampering that leaves no trace in the table.
-  // A guard put back to fire on some columns only (`UPDATE OF …`), or only
-  // when a WHEN condition holds, keeps its name, function and events while
-  // leaving every other change unchecked (the #220 review).
-  const narrowed = (trigger: TriggerRow, name: string): void => {
-    if (trigger.on_columns) problems.push(`${trigger.table}'s ${name} fires on some columns only`);
-    if (trigger.conditional) problems.push(`${trigger.table}'s ${name} fires only when a condition holds`);
-  };
-  for (const trigger of allTriggers) {
-    if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) {
-      // One that fires at other times, or is handed arguments, is not the guard 0032 wrote.
-      if (trigger.type !== MADE_ONCE_TYPE || !trigger.definition.endsWith(`${MADE_ONCE_FUNCTION}()`)) {
-        problems.push(`${trigger.table}'s ${MADE_ONCE} fires at other times`);
-      }
-      narrowed(trigger, MADE_ONCE);
-      if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
-      continue;
-    }
-    if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
-      problems.push(`${trigger.table} carries the trigger ${quoted(trigger.name)}`);
-      continue;
-    }
-    narrowed(trigger, STATUS_GUARD);
-    // A guard that fires on fewer events than 0004 installs leaves the moves it
-    // no longer sees unchecked, while still passing on its name.
-    if (trigger.type !== STATUS_GUARD_TYPE) problems.push(`${trigger.table}'s ${STATUS_GUARD} fires at other times`);
-    else if (!guardArgumentsWellFormed(trigger.definition)) {
-      problems.push(`${trigger.table}'s ${STATUS_GUARD} is given other arguments`);
-    }
-    // Postgres keeps a switched-off trigger's row and stops running it, which
-    // is tampering that leaves no trace in the table itself.
-    if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${STATUS_GUARD} is switched off`);
-  }
-  // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
-  // The same for each table whose rows are made once.
-  const carries = (tables: readonly string[], name: string): void => {
-    for (const table of tables) {
-      const relation = allRelations.find((each) => each.plain === table);
-      // Any trigger by another name is reported above as a trigger our schema should not hold.
-      const guards = allTriggers.filter((trigger) => trigger.table === relation?.name && trigger.name === name);
-      if (relation !== undefined && guards.length === 0) problems.push(`${relation.name} carries no ${name}`);
-    }
-  };
-  carries(statusGuardedTables, STATUS_GUARD);
-  carries(madeOnceTables, MADE_ONCE);
-
-  // Indexes. A plain index missing is a matter of speed, so it is not checked
-  // here; a **unique** one is a wall. An invalid one enforces nothing while
-  // still being listed, a partial one enforces nothing outside its condition,
-  // and a unique key that leaves org_id out would make two organisations
-  // collide (SEC-TEN-05, which CI-06 checks at migration time — this is the
-  // same rule on the running database).
-  for (const index of allIndexes) {
-    if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
-    if (!index.is_unique) continue;
-    if (index.partial) problems.push(`${index.table}'s unique index ${quoted(index.name)} is partial`);
-    if (!globalTables.has(index.table) && !index.covers_org) {
-      problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
-    }
-  }
-
-  // Rights: an allow-list, so a privilege nobody thought about is a problem
-  // rather than an omission.
-  const held = new Map<string, Set<string>>();
-  for (const grant of allGrants) {
-    held.set(grant.table, (held.get(grant.table) ?? new Set()).add(grant.privilege));
-  }
-  // Tables held to narrower rights than a tenant table's, by the name the rest
-  // of this check uses, each with the columns the app may change:
-  // - an authority table (A3f-2): its sealed fields and its two signed-state
-  //   columns, which is all record writes. Listed by its plain name, as the
-  //   module wrote it and as CI's A3c-1 check matches it;
-  // - a fill-in table (A5b): the columns the schema policy lists, by the name
-  //   Postgres quotes. CI-06 checks the list itself (a reason, a tenant table
-  //   outside the append-only schemas, only columns granted), and the policy
-  //   reaches a server only through CI, so it is taken as it stands here.
-  // A table on both lists may change only in the columns both allow.
-  const byPlainName = new Map(allRelations.map((relation) => [relation.plain, relation.name]));
-  const narrow = new Map<string, ReadonlySet<string>>();
-  for (const table of authorityTables) {
-    const name = byPlainName.get(table.table);
-    if (name === undefined) problems.push(`${table.table} is listed as an authority table but is not there`);
-    else narrow.set(name, new Set([...table.fields.map((field) => field.column), ...OWN_COLUMNS]));
-  }
-  for (const [name, entry] of Object.entries(policy.fillInTables)) {
-    const asAuthority = narrow.get(name);
-    if (!known.has(name)) {
-      problems.push(`${name} is listed as a fill-in table but is not there`);
-    } else if (asAuthority === undefined) {
-      narrow.set(name, new Set(entry.columns));
-    } else {
-      problems.push(`${name} is listed as both an authority table and a fill-in table`);
-      narrow.set(name, new Set(entry.columns.filter((column) => asAuthority.has(column))));
-    }
-  }
-  for (const relation of allRelations) {
-    // Held to their own list, below.
-    if (narrow.has(relation.name)) continue;
-    // A global table that names its rights is held to them, on the table and
-    // on each column alike (B1d-1): the directory's list is added to and read.
-    const entry = globalTables.has(relation.name) ? policy.globalTables[relation.name] : undefined;
-    // A table changed in part only may hold UPDATE on its listed columns, checked below.
-    const listed =
-      entry?.appMay === undefined
-        ? undefined
-        : entry.appMayUpdate === undefined
-          ? entry.appMay
-          : [...entry.appMay, 'UPDATE'];
-    const allowed = new Set<string>(
-      listed ??
-        (appendOnly.has(relation.schema)
-          ? exceptions.has(relation.name)
-            ? EXCEPTION_RIGHTS
-            : APPEND_ONLY_RIGHTS
-          : APP_ROW_RIGHTS),
-    );
-    for (const right of held.get(relation.name) ?? []) {
-      if (!allowed.has(right)) problems.push(`${appRole} may ${right} on ${relation.name}`);
-    }
-  }
-  // A narrow table: rows added and read, and changed only in the columns it
-  // may change, each granted on its own.
-  const writableIn = new Map<string, string[]>();
-  for (const { table, column } of writable) writableIn.set(table, [...(writableIn.get(table) ?? []), column]);
-  for (const [name, mayChange] of narrow) {
-    const grantsOn = allGrants.filter((grant) => grant.table === name);
-    const onTable = new Set(grantsOn.filter((grant) => grant.level === 'table').map((grant) => grant.privilege));
-    // A fill-in table with a retention may be deleted from too: its retention policy holds each DELETE (B1e).
-    const tableMay: readonly string[] = sweptAfter(name) === undefined ? NARROW_RIGHTS : [...NARROW_RIGHTS, 'DELETE'];
-    for (const right of onTable) {
-      if (!tableMay.includes(right)) problems.push(`${appRole} may ${right} on ${name}`);
-    }
-    for (const grant of grantsOn) {
-      // A right on the whole table shows on its columns too; it is named once, above.
-      if (grant.level !== 'column' || onTable.has(grant.privilege)) continue;
-      if (!(NARROW_COLUMN_RIGHTS as readonly string[]).includes(grant.privilege)) {
-        problems.push(`${appRole} may ${grant.privilege} on columns of ${name}`);
-      }
-    }
-    for (const column of writableIn.get(name) ?? []) {
-      if (!mayChange.has(column)) problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
-    }
-  }
-  // A global table changed in part only (B2-1): UPDATE on its listed columns,
-  // each granted on its own, never on the whole table or any other column.
-  for (const [name, entry] of Object.entries(policy.globalTables)) {
-    if (entry.appMayUpdate === undefined) continue;
-    if (allGrants.some((grant) => grant.table === name && grant.level === 'table' && grant.privilege === 'UPDATE')) {
-      problems.push(`${appRole} may UPDATE on ${name}`);
-    }
-    for (const column of writableIn.get(name) ?? []) {
-      if (!entry.appMayUpdate.includes(column))
-        problems.push(`${appRole} may UPDATE ${name}'s column ${quoted(column)}`);
-    }
-  }
-  // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
-  // role holds reaches the app as well, and reaches every role made later.
-  for (const grant of forPublic) {
-    problems.push(`PUBLIC may ${grant.privilege} on ${grant.table}`);
-  }
-
-  // Global tables are listed with their exact columns, so a new one is a
-  // reviewed change rather than something that appears.
-  const columnsOf = new Map<string, string[]>();
-  for (const column of allColumns) columnsOf.set(column.table, [...(columnsOf.get(column.table) ?? []), column.column]);
-  for (const [name, entry] of Object.entries(policy.globalTables)) {
-    const live = columnsOf.get(name);
-    if (live === undefined) continue;
-    if (live.join(',') !== [...entry.columns].join(',')) problems.push(`${name} no longer has exactly its columns`);
-  }
-  for (const relation of allRelations) {
-    if (globalTables.has(relation.name)) continue;
-    if (!(columnsOf.get(relation.name) ?? []).includes('org_id')) problems.push(`${relation.name} has no org_id`);
-  }
-
-  // The foreign keys something rests on: each still there, from exactly its
-  // columns to exactly the ones it points at, and holding. Any number of keys
-  // may match; one that holds is enough. Its columns must be NOT NULL too: a
-  // key lets a row with a null column through unchecked.
+  const { narrow, problems: listing } = narrowTables(allRelations, authorityTables, policy.fillInTables, known);
+  const writableIn = columnsByTable(writable);
   const keys = wholeKeys(allForeignKeys);
-  const same = (a: readonly string[], b: readonly string[]): boolean =>
-    a.length === b.length && a.every((each, index) => each === b[index]);
-  for (const required of policy.requiredForeignKeys) {
-    const named = `${required.table}'s foreign key to ${required.references}`;
-    const matching = keys.filter(
-      (key) =>
-        key.table === required.table &&
-        key.target === required.references &&
-        same(key.columns, required.columns) &&
-        same(key.targetColumns, required.referencedColumns),
-    );
-    const [first] = matching;
-    if (first === undefined) problems.push(`${named} is not there`);
-    else if (!matching.some(({ holds }) => holds.validated && holds.triggers_on)) {
-      if (!first.holds.validated) problems.push(`${named} is not validated`);
-      if (!first.holds.triggers_on) problems.push(`${named} has its triggers missing or switched off`);
-    }
-    if (first !== undefined && !first.notNull) problems.push(`${named} has a column that may be null`);
-  }
+
+  const problems: SchemaProblem[] = [
+    ...schemaOwnerProblems(allSchemas, ownerRole),
+    ...allRelations.flatMap((relation) => relationProblems(relation, ownerRole, globalTables.has(relation.name))),
+    ...[...globalTables]
+      .filter((listed) => !known.has(listed))
+      .map((listed) => `${listed} is listed as a global table but is not there`),
+    ...policyProblems(allRelations, allPolicies, globalTables, sweptAfter),
+    ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole)),
+    // A rewrite rule can turn any statement into a different one, silently.
+    ...allRules.map((rule) => `${rule.table} carries the rewrite rule ${quoted(rule.name)}`),
+    ...allTriggers.flatMap(triggerProblems),
+    // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
+    // The same for each table whose rows are made once.
+    ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
+    ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
+    ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table))),
+    // Rights: an allow-list, so a privilege nobody thought about is a problem
+    // rather than an omission.
+    ...listing,
+    ...heldRightsProblems(allRelations, narrow, allGrants, policy, appRole),
+    ...[...narrow].flatMap(([name, mayChange]) =>
+      narrowRightsProblems(name, mayChange, allGrants, writableIn.get(name) ?? [], sweptAfter(name), appRole),
+    ),
+    ...partialUpdateProblems(policy.globalTables, allGrants, writableIn, appRole),
+    // Nothing in our schemas is PUBLIC's, whatever the privilege: a right every
+    // role holds reaches the app as well, and reaches every role made later.
+    ...forPublic.map((grant) => `PUBLIC may ${grant.privilege} on ${grant.table}`),
+    ...columnProblems(allColumns, policy.globalTables, allRelations, globalTables),
+    ...policy.requiredForeignKeys.flatMap((required) => requiredKeyProblems(required, keys)),
+  ];
 
   if (casts) problems.push('the database carries a cast Postgres did not ship');
   if (settings) problems.push('a setting is pinned to this database or to a role');

@@ -213,6 +213,16 @@ export function createNoticeSender({
     logger.info('notification.sent', { noticeId: notice.id, kind: notice.kind, attempt: notice.attempts + 1 });
   };
 
+  /** Fans out a notice to no one in particular, or sends one to its recipient; says whether it fanned out. */
+  const deliver = async (notice: ClaimedNotice): Promise<boolean> => {
+    if (notice.recipientUserId === null && notice.recipientContactId === null) {
+      await fanOut(notice);
+      return true;
+    }
+    await sendOne(notice);
+    return false;
+  };
+
   return {
     async run(signal) {
       try {
@@ -232,12 +242,7 @@ export function createNoticeSender({
       let fannedOut = false;
       for (const notice of due) {
         if (stopped()) return;
-        if (notice.recipientUserId === null && notice.recipientContactId === null) {
-          await fanOut(notice);
-          fannedOut = true;
-        } else {
-          await sendOne(notice);
-        }
+        if (await deliver(notice)) fannedOut = true;
       }
       // A full batch may have left more due, and a fan-out has just made some.
       if (due.length < NOTICES_A_RUN && !fannedOut) return;

@@ -237,6 +237,17 @@ export function createResetRemovals({
     });
   };
 
+  /** Carries out one due reset and logs how it ended, or that it failed. */
+  const carryOutLogged = async (log: Logger, orgId: string, resetId: string): Promise<void> => {
+    try {
+      const outcome = await carryOut(orgId, resetId);
+      if (outcome === 'removed_after_cancel') log.error('factor_resets.removed_after_cancel', { resetId });
+      else if (outcome !== 'not_due') log.info(`factor_resets.${outcome}`, { resetId });
+    } catch (error) {
+      log.error('factor_resets.removal_failed', { resetId, err: error });
+    }
+  };
+
   return {
     async run(signal) {
       let orgs: string[];
@@ -258,13 +269,7 @@ export function createResetRemovals({
         }
         for (const resetId of due) {
           if (signal?.aborted === true) return;
-          try {
-            const outcome = await carryOut(orgId, resetId);
-            if (outcome === 'removed_after_cancel') log.error('factor_resets.removed_after_cancel', { resetId });
-            else if (outcome !== 'not_due') log.info(`factor_resets.${outcome}`, { resetId });
-          } catch (error) {
-            log.error('factor_resets.removal_failed', { resetId, err: error });
-          }
+          await carryOutLogged(log, orgId, resetId);
         }
       }
     },

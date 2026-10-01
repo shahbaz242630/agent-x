@@ -170,13 +170,20 @@ function unnamedParts(schema: z.core.$ZodType, at: string, seen: Set<z.core.$Zod
   }
   // The inner schema zod caches and parses with, not a fresh call of its getter, which could differ.
   if (schema instanceof z.ZodLazy) return walk(schema._zod.innerType, at);
-  if (schema instanceof z.ZodRecord) {
-    const { keyType, valueType } = schema._zod.def;
-    const loose = 'mode' in schema._zod.def && schema._zod.def.mode === 'loose';
-    const fixedKeys = (keyType instanceof z.ZodEnum || keyType instanceof z.ZodLiteral) && !loose;
-    return [...(fixedKeys ? [] : [`${at} (a map whose keys aren't a fixed list)`]), ...walk(valueType, `${at}.*`)];
-  }
+  if (schema instanceof z.ZodRecord) return recordParts(schema, at, walk);
   return NAMED_LEAVES.has(schema._zod.def.type) ? [] : [`${at} (${schema._zod.def.type})`];
+}
+
+/** A map's unnamed parts (unnamedParts): its keys, unless a fixed list, and its values. */
+function recordParts(
+  schema: z.ZodRecord,
+  at: string,
+  walk: (child: z.core.$ZodType, where: string) => string[],
+): string[] {
+  const { keyType, valueType } = schema._zod.def;
+  const loose = 'mode' in schema._zod.def && schema._zod.def.mode === 'loose';
+  const fixedKeys = (keyType instanceof z.ZodEnum || keyType instanceof z.ZodLiteral) && !loose;
+  return [...(fixedKeys ? [] : [`${at} (a map whose keys aren't a fixed list)`]), ...walk(valueType, `${at}.*`)];
 }
 
 /**
@@ -373,15 +380,35 @@ function responseSchemas(response: unknown): unknown[] {
  * later hook that rebuilt the schema would drop it from the document.
  */
 function routeProblems(route: AddedRoute, instance: FastifyInstance, written: boolean): string[] {
-  const problems: string[] = [];
   const schema = route.schema ?? {};
   const keys = new Map<string, unknown>(Object.entries(schema));
   const declared = new Map<string, unknown>(Object.entries(responsesOf(route)));
+  const problems = [
+    ...inputSchemaProblems(schema),
+    ...responseProblems(route),
+    ...hookProblems(route, declared, written),
+    ...answerProblems(declared),
+    ...limitAndAccessProblems(route, keys, written),
+    ...operationHeaderProblems(route, keys, written),
+    ...bypassProblems(route, instance),
+  ];
+  return problems.map((problem) => `${methodsOf(route).join(',')} ${route.url}: ${problem}`);
+}
+
+/** Input parts (body, query, params, headers) whose schema is not zod's. */
+function inputSchemaProblems(schema: NonNullable<RouteOptions['schema']>): string[] {
+  const problems: string[] = [];
   for (const part of ['body', 'querystring', 'params', 'headers'] as const) {
     if (schema[part] !== undefined && !(schema[part] instanceof z.ZodType)) {
       problems.push(`its ${part} schema is not a zod schema`);
     }
   }
+  return problems;
+}
+
+/** Response entries that aren't zod, name no content type, or give an error status a body of their own. */
+function responseProblems(route: RouteOptions): string[] {
+  const problems: string[] = [];
   for (const [status, response] of Object.entries(responsesOf(route))) {
     const schemas = responseSchemas(response);
     if (isErrorRange(status)) {
@@ -396,6 +423,12 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
       problems.push(`its ${status} answer is not the one error body, which is what the API sends for ${status}`);
     }
   }
+  return problems;
+}
+
+/** Error answers that aren't the contract's, its last hooks not last, or a hook that rewrites answers after they are written. */
+function hookProblems(route: RouteOptions, declared: ReadonlyMap<string, unknown>, written: boolean): string[] {
+  const problems: string[] = [];
   if (written && ![...OUR_ERROR_RESPONSES].every((ours) => [...declared.values()].includes(ours))) {
     problems.push("its error answers are not the contract's");
   }
@@ -412,6 +445,12 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (!ownSendHooks.every((hook) => headsOnly && isHeadEmptier(hook))) {
     problems.push('it rewrites its answers after they are written (onSend)');
   }
+  return problems;
+}
+
+/** A route's own answers that could let through what they don't name, or no answer for success. */
+function answerProblems(declared: ReadonlyMap<string, unknown>): string[] {
+  const problems: string[] = [];
   // Allowlisted answers: every answer a route declares, but the one error body, names all it
   // carries, so nothing it doesn't name leaves: a success, or a 5xx of its own (health's 503).
   const answers = [...declared].filter(([status]) => !isErrorRange(status) && !isErrorPathStatus(status));
@@ -427,6 +466,12 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
     if (unnamed.length > 0)
       problems.push(`its ${status} answer lets through what it doesn't name: ${unnamed.join(', ')}`);
   }
+  return problems;
+}
+
+/** A body taken without a limit, and a body limit, access or agent scopes its document shows that are not its own. */
+function limitAndAccessProblems(route: RouteOptions, keys: ReadonlyMap<string, unknown>, written: boolean): string[] {
+  const problems: string[] = [];
   if (takesBody(route) && !isBodyLimit(route.bodyLimit)) {
     problems.push(`it takes a body but sets no limit of its own for it (bodyLimit, 1 to ${BODY_LIMIT_BYTES} bytes)`);
   }
@@ -446,13 +491,19 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if ((written || keys.has(AGENT_SCOPES_KEY)) && keys.get(AGENT_SCOPES_KEY) !== route.config?.agentScopes) {
     problems.push('the agent scopes its document shows are not its own (x-agent-scopes)');
   }
+  return problems;
+}
+
+/** An operation or roles its headers schema can't carry, or that its document doesn't show as its own. */
+function operationHeaderProblems(route: RouteOptions, keys: ReadonlyMap<string, unknown>, written: boolean): string[] {
+  const problems: string[] = [];
   const operation = route.config?.operation;
   problems.push(...operationProblems(operation, methodsOf(route), route.config?.access));
   // One method, so the document shows the name on one operation, as OpenAPI requires.
   if (operation !== undefined && methodsOf(route).length !== 1) {
     problems.push('it names an operation but serves more than one method: make a route for each');
   }
-  const headers: unknown = schema.headers;
+  const headers: unknown = route.schema?.headers;
   if (operation !== undefined && headers !== undefined && !(headers instanceof z.ZodObject)) {
     problems.push('it names an operation, but its headers schema is not an object to carry the idempotency key');
   }
@@ -478,6 +529,12 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if ((written || keys.has(OPERATION_ID_KEY)) && keys.get(OPERATION_ID_KEY) !== operation) {
     problems.push('the operation its document shows is not its own (operationId)');
   }
+  return problems;
+}
+
+/** Ways a route could check, answer or be served other than as its document shows. */
+function bypassProblems(route: AddedRoute, instance: FastifyInstance): string[] {
+  const problems: string[] = [];
   // A route of its own transform could show the document another schema than the one it runs.
   if (route.config !== undefined && 'swaggerTransform' in route.config) {
     problems.push('it changes how the document shows it (swaggerTransform)');
@@ -499,7 +556,7 @@ function routeProblems(route: AddedRoute, instance: FastifyInstance, written: bo
   if (route.prefix !== '' && route.routePath === '' && (route.prefixTrailingSlash ?? 'both') === 'both') {
     problems.push("it sits at its prefix's root: set prefixTrailingSlash to 'no-slash' or 'slash'");
   }
-  return problems.map((problem) => `${methodsOf(route).join(',')} ${route.url}: ${problem}`);
+  return problems;
 }
 
 /**
