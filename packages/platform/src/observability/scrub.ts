@@ -269,12 +269,17 @@ function cardEnd(tokens: readonly string[], start: number): number {
 function cleanDigitGroups(run: string): string {
   const tokens = run.split(/([ -])/);
   let cleaned = '';
-  for (let index = 0; index < tokens.length; index += 2) {
+  let index = 0;
+  while (index < tokens.length) {
     const end = cardEnd(tokens, index);
-    // A card's groups become one label; the separator after the last group stays.
-    cleaned +=
-      end === -1 ? tokens.slice(index, index + 2).join('') : LABELS.card + tokens.slice(end + 1, end + 2).join('');
-    if (end !== -1) index = end;
+    if (end === -1) {
+      cleaned += tokens.slice(index, index + 2).join('');
+      index += 2;
+    } else {
+      // A card's groups become one label; the separator after the last group stays.
+      cleaned += LABELS.card + tokens.slice(end + 1, end + 2).join('');
+      index = end + 2;
+    }
   }
   return cleaned;
 }

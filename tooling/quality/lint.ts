@@ -10,16 +10,19 @@ import { ESLint } from 'eslint';
 export const BLOCKING: ReadonlySet<string> = new Set<string>([
   'sonarjs/anchor-precedence',
   'sonarjs/class-name',
+  'sonarjs/cognitive-complexity',
   'sonarjs/existing-groups',
   'sonarjs/misplaced-loop-counter',
   'sonarjs/no-identical-functions',
   'sonarjs/no-inverted-boolean-check',
   'sonarjs/no-misleading-array-reverse',
   'sonarjs/no-nested-assignment',
+  'sonarjs/no-nested-functions',
   'sonarjs/no-nested-template-literals',
   'sonarjs/parameterized-tests',
   'sonarjs/prefer-specific-assertions',
   'sonarjs/super-linear-regex',
+  'sonarjs/updated-loop-counter',
 ]);
 
 /** One finding, as ESLint gives it. */

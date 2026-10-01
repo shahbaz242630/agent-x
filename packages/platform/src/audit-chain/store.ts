@@ -18,7 +18,9 @@ import {
   type Chain,
   type ChainHead,
   type ChainLink,
+  type ChainProblem,
   type ChainReport,
+  type ChainVerifier,
   createChainVerifier,
   GENESIS_HASH,
   genesisHead,
@@ -154,6 +156,33 @@ export async function appendEvent(
 /** Events with no usable head: the head row was removed, or can't be read. */
 const NO_HEAD: ChainReport = Object.freeze({ ok: false, problem: Object.freeze({ reason: 'head', seq: 0n }) });
 
+/** The report on a chain with no head row, given how many events are stored and the last anchor. */
+function headlessReport(stored: bigint, anchor: AnchorPoint | undefined): ChainReport {
+  // A chain that was never started is empty, unless it had been anchored; events with no head mean the head was removed.
+  if (stored !== 0n) return NO_HEAD;
+  return anchor !== undefined && anchor.seq > 0n
+    ? { ok: false, problem: { reason: 'anchor', seq: anchor.seq } }
+    : { ok: true, seq: 0n, hash: GENESIS_HASH };
+}
+
+/** The next batch of events after `after`, up to the head: a store giving more than were asked for is failing. */
+async function readBatch(
+  reader: ChainReader,
+  after: bigint,
+  upTo: bigint,
+): Promise<readonly (StoredEntry | undefined)[]> {
+  const batch = await reader.events(after, upTo, BATCH);
+  if (batch.length > BATCH)
+    throw new ChainStoreError(`it gave ${batch.length} events where at most ${BATCH} were asked for`);
+  return batch;
+}
+
+/** The verifier's problem with an event, if any: one past the head the store was asked to read up to is its failure. */
+function entryProblem(verifier: ChainVerifier, entry: StoredEntry, upTo: bigint): ChainProblem | undefined {
+  if (entry.seq > upTo) throw new ChainStoreError('it gave an event past the head it was asked to read up to');
+  return verifier.check(entry);
+}
+
 /**
  * Checks the whole chain up to its head (SEC-EVD-02), and, given the last
  * anchor, that the chain still holds it (ADR-012 §2, SEC-DB-11). The head and
@@ -167,27 +196,18 @@ export async function verifyChain(
   anchor: AnchorPoint | undefined,
 ): Promise<ChainReport> {
   const { head, stored } = await reader.state();
-  if (head === 'none') {
-    // A chain that was never started is empty, unless it had been anchored; events with no head mean the head was removed.
-    if (stored !== 0n) return NO_HEAD;
-    return anchor !== undefined && anchor.seq > 0n
-      ? { ok: false, problem: { reason: 'anchor', seq: anchor.seq } }
-      : { ok: true, seq: 0n, hash: GENESIS_HASH };
-  }
+  if (head === 'none') return headlessReport(stored, anchor);
   if (head === 'unreadable') return NO_HEAD;
 
   const verifier = createChainVerifier(keys, chain, { head, stored, anchor });
   // Reads until the head is reached; every batch that isn't empty moves `after` on, and an empty one ends the reading.
   let after = 0n;
   while (after < head.seq) {
-    const batch = await reader.events(after, head.seq, BATCH);
+    const batch = await readBatch(reader, after, head.seq);
     if (batch.length === 0) break;
-    if (batch.length > BATCH)
-      throw new ChainStoreError(`it gave ${batch.length} events where at most ${BATCH} were asked for`);
     for (const entry of batch) {
       if (entry === undefined) return { ok: false, problem: verifier.unreadable() };
-      if (entry.seq > head.seq) throw new ChainStoreError('it gave an event past the head it was asked to read up to');
-      const problem = verifier.check(entry);
+      const problem = entryProblem(verifier, entry, head.seq);
       if (problem !== undefined) return { ok: false, problem };
       after = entry.seq;
     }

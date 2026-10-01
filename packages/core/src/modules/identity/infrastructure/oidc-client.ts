@@ -47,7 +47,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type { OutboundFetch } from '@agentx/platform/outbound';
-import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, jwtVerify } from 'jose';
+import { createLocalJWKSet, errors as joseErrors, type JSONWebKeySet, type JWTPayload, jwtVerify } from 'jose';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { isBreakGlassLogin } from '../domain/break-glass.ts';
@@ -330,9 +330,11 @@ export function createOidcClient({
     return fetchKeys();
   }
 
-  /** The ID token's claims, checked; a key not held sends for the keys again, at most once a minute. */
-  async function verified(idToken: string, nonce: string): Promise<Omit<VerifiedSignIn, 'verifiedEmail'>> {
-    const now = clock.now();
+  /**
+   * The ID token's claims, its signature and standard claims checked as of
+   * `now`; a key not held sends for the keys again, at most once a minute.
+   */
+  async function checkedToken(idToken: string, now: Date): Promise<JWTPayload> {
     const verify = (set: ReturnType<typeof createLocalJWKSet>) =>
       jwtVerify(idToken, set, {
         issuer,
@@ -360,17 +362,30 @@ export function createOidcClient({
       const code = error instanceof joseErrors.JOSEError ? error.code : 'unreadable';
       throw new SignInFailed('token_invalid', `the ID token failed its check: ${code}`);
     }
+    return result.payload;
+  }
 
-    const { payload } = result;
+  /** Throws unless the token names its authorized party where it must, and that party is us. */
+  function checkAuthorizedParty(payload: JWTPayload): void {
+    // OIDC Core §3.1.3.7: with more than one audience the authorized party must be named, and it must be us.
+    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (audiences.length > 1 && payload.azp === undefined) {
+      throw new SignInFailed('token_invalid', 'the token has several audiences and no authorized party');
+    }
+    if (payload.azp !== undefined && payload.azp !== clientId) {
+      throw new SignInFailed('token_invalid', 'the authorized party is another client');
+    }
+  }
+
+  /** The ID token's claims, checked, down to the sign-in they name. */
+  async function verified(idToken: string, nonce: string): Promise<Omit<VerifiedSignIn, 'verifiedEmail'>> {
+    const now = clock.now();
+    const payload = await checkedToken(idToken, now);
     const invalid = (why: string): never => {
       throw new SignInFailed('token_invalid', why);
     };
     if (typeof payload.nonce !== 'string' || !sameText(payload.nonce, nonce)) invalid('the nonce is not the flow’s');
-    // OIDC Core §3.1.3.7: with more than one audience the authorized party must be named, and it must be us.
-    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (audiences.length > 1 && payload.azp === undefined)
-      invalid('the token has several audiences and no authorized party');
-    if (payload.azp !== undefined && payload.azp !== clientId) invalid('the authorized party is another client');
+    checkAuthorizedParty(payload);
     const authTime = payload.auth_time;
     if (typeof authTime !== 'number' || !Number.isFinite(authTime)) invalid('the authentication time is not a number');
     if ((authTime as number) * 1000 > now.getTime() + CLOCK_TOLERANCE_SECONDS * 1000) {

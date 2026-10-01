@@ -152,17 +152,31 @@ export function keyMaterialProblems(material: KeyMaterial, held: readonly KeyPur
         `${purpose} is never rotated in place (ADR-014 §3): only its version 1 may exist, and it stays current`,
       );
     }
-    for (const [version, key] of versions) {
-      const name = `key-${purpose}-v${version}`;
-      if (key.length !== KEY_BYTES) {
-        problems.push(`${name} must be ${KEY_BYTES} bytes`);
-        continue;
-      }
-      const check = checkValue(key);
-      const twin = seen.get(check);
-      if (twin === undefined) seen.set(check, name);
-      else problems.push(`${name} holds the same key as ${twin}: every key must be its own`);
+    problems.push(...versionProblems(purpose, versions, seen));
+  }
+  return problems;
+}
+
+/**
+ * Why one purpose's keys can't be used, or nothing: each is 32 bytes, and
+ * none is a copy of a key in `seen` (by check value), which each joins.
+ */
+function versionProblems(
+  purpose: KeyPurpose,
+  versions: ReadonlyMap<number, Uint8Array>,
+  seen: Map<string, string>,
+): string[] {
+  const problems: string[] = [];
+  for (const [version, key] of versions) {
+    const name = `key-${purpose}-v${version}`;
+    if (key.length !== KEY_BYTES) {
+      problems.push(`${name} must be ${KEY_BYTES} bytes`);
+      continue;
     }
+    const check = checkValue(key);
+    const twin = seen.get(check);
+    if (twin === undefined) seen.set(check, name);
+    else problems.push(`${name} holds the same key as ${twin}: every key must be its own`);
   }
   return problems;
 }

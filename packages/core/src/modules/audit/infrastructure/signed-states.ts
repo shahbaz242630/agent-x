@@ -537,6 +537,17 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'verified', version: row.version, eventId, fields: new Map(row.fields) });
   };
 
+  /** Throws if locking the row now would break the lock order: a shared lock raised to change, or a row after the head. */
+  const checkLockOrder = (tx: AuditTransaction, held: Held | undefined, lock: RowLock): void => {
+    if (held?.lock === 'share' && lock === 'change') throw lockOrder();
+    if (held === undefined && headLocked.has(tx)) {
+      throw new SignedStateFailed(
+        'lock_order',
+        "A row is locked before the chain head, never after it (ADR-006 §6): read the integrity hold with lock 'head' last",
+      );
+    }
+  };
+
   const verifiedState = async (
     tx: AuditTransaction,
     table: SignedStateTable,
@@ -547,13 +558,7 @@ export function createSignedStates({
     const rows = heldIn(tx);
     const name = rowName(table, key);
     const held = rows.get(name);
-    if (held?.lock === 'share' && lock === 'change') throw lockOrder();
-    if (held === undefined && headLocked.has(tx)) {
-      throw new SignedStateFailed(
-        'lock_order',
-        "A row is locked before the chain head, never after it (ADR-006 §6): read the integrity hold with lock 'head' last",
-      );
-    }
+    checkLockOrder(tx, held, lock);
     let row = await readSignedRow(tx, table, key, lock);
     rows.set(name, { lock: held?.lock ?? lock, ...(lock === 'share' && held?.from ? { from: held.from } : {}) });
     if (row.outcome === 'unreadable') return alarm(table.subject, key, 'row');
@@ -574,6 +579,42 @@ export function createSignedStates({
   };
 
   /**
+   * Locks a row being created for change, once it is as the app inserts one:
+   * at version 1, pointing at no event, in its first status, with nothing
+   * signed for it in the log yet.
+   */
+  const lockNewRow = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    key: SignedRowKey,
+    set: SignedFieldValues,
+    rows: Map<string, Held>,
+    name: string,
+  ): Promise<void> => {
+    if (rows.get(name)?.lock === 'share') throw lockOrder();
+    const read = await readSignedRow(tx, table, key, 'change');
+    if (read.outcome === 'unreadable') {
+      alarm(table.subject, key, 'row');
+      throw new SignedStateFailed('tampered', 'A row being created is not as the app writes one');
+    }
+    if (read.outcome !== 'found' || read.version !== 1 || read.eventId !== null) {
+      throw new SignedStateFailed('basis', 'A new signed row is at version 1 and points at no event yet');
+    }
+    // The status guard let the row in only in its machine's first status;
+    // any other would be a move no machine decided. (A status is text, so
+    // its canonical text is the value itself.)
+    const inserted = new Map(read.fields).get(STATUS);
+    if (Object.hasOwn(set, STATUS) && set[STATUS] !== inserted) {
+      throw new RangeError('A new row keeps the status it was inserted in; it moves only through changeStatus');
+    }
+    if ((await latestOf(tx, table, key)).kind !== 'none') {
+      alarm(table.subject, key, 'log');
+      throw new SignedStateFailed('tampered', 'The log already holds a signed state for a row being created');
+    }
+    rows.set(name, { lock: 'change' });
+  };
+
+  /**
    * Writes the change and gives back the row at its new version, once it
    * holds exactly the state it was verified in (or, for a new row, nothing
    * yet) with the values written.
@@ -589,27 +630,7 @@ export function createSignedStates({
     const rows = heldIn(tx);
     const name = rowName(table, key);
     if (from === 'new') {
-      if (rows.get(name)?.lock === 'share') throw lockOrder();
-      const read = await readSignedRow(tx, table, key, 'change');
-      if (read.outcome === 'unreadable') {
-        alarm(table.subject, key, 'row');
-        throw new SignedStateFailed('tampered', 'A row being created is not as the app writes one');
-      }
-      if (read.outcome !== 'found' || read.version !== 1 || read.eventId !== null) {
-        throw new SignedStateFailed('basis', 'A new signed row is at version 1 and points at no event yet');
-      }
-      // The status guard let the row in only in its machine's first status;
-      // any other would be a move no machine decided. (A status is text, so
-      // its canonical text is the value itself.)
-      const inserted = new Map(read.fields).get(STATUS);
-      if (Object.hasOwn(set, STATUS) && set[STATUS] !== inserted) {
-        throw new RangeError('A new row keeps the status it was inserted in; it moves only through changeStatus');
-      }
-      if ((await latestOf(tx, table, key)).kind !== 'none') {
-        alarm(table.subject, key, 'log');
-        throw new SignedStateFailed('tampered', 'The log already holds a signed state for a row being created');
-      }
-      rows.set(name, { lock: 'change' });
+      await lockNewRow(tx, table, key, set, rows, name);
     } else {
       const held = rows.get(name);
       if (held?.from?.state !== from || held.from.table !== table) {
