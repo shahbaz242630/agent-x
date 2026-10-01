@@ -601,6 +601,9 @@ const PENDING: Receiver = { ...CONFIRMED, verificationStatus: 'VerificationPendi
 
 const ACTION_GROUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.Insights/actionGroups/ag-agentx-stg?api-version=2026-03-01-preview`;
 
+/** An az call that succeeded, answering with the value as JSON. */
+const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+
 /** An Azure CLI that answers from the options and records every call. */
 class RecordingAz implements Az {
   readonly calls: Call[] = [];
@@ -622,7 +625,6 @@ class RecordingAz implements Az {
 
   run(args: readonly string[]): AzResult {
     this.calls.push({ args });
-    const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
     switch (args.slice(0, 2).join(' ')) {
       case 'account show':
         return json({ name: 'Azure subscription 1', id: SUBSCRIPTION });
@@ -651,60 +653,72 @@ class RecordingAz implements Az {
         return json([{ name: 'ca-agentx-stg-api', state: 'Succeeded' }]);
       case 'containerapp job':
         return json([{ name: 'job-agentx-stg-db-setup', state: 'Succeeded' }]);
-      case 'tag update': {
-        const record = this.options.record ?? 'kept';
-        if (record === 'no job') {
-          return {
-            status: 3,
-            stdout: '',
-            stderr: `ERROR: (ResourceNotFound) The Resource 'Microsoft.App/jobs/job-agentx-stg-migrate' under resource group 'rg-agentx-staging' was not found.\nCode: ResourceNotFound\n`,
-          };
-        }
-        if (record === 'refused') {
-          return { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) The client may not write tags.\n' };
-        }
-        const [name, value] = (args[args.indexOf('--tags') + 1] ?? '').split('=');
-        if (record === 'kept' && name !== undefined) this.tags[name] = value;
-        return json({ properties: { tags: this.tags } });
-      }
+      case 'tag update':
+        return this.#tagUpdate(args);
       case 'tag list':
         return json({ properties: { tags: this.tags } });
-      case 'rest --method': {
-        const url = args[args.indexOf('--url') + 1] ?? '';
-        if (url === `${ENVIRONMENT_URL}?api-version=2026-01-01`) {
-          return json(this.options.environment ?? { properties: ENVIRONMENT_DNS_PROPERTIES });
-        }
-        if (url === `${ENVIRONMENT_URL}/managedCertificates?api-version=2026-01-01`) {
-          return json({ value: this.options.certificates ?? [] });
-        }
-        if (url.includes('/actionGroups/')) {
-          if (url !== ACTION_GROUP_URL) throw new Error(`unexpected action group read ${url}`);
-          const readings = this.options.receivers ?? [[CONFIRMED]];
-          const reading = readings[Math.min(this.#readings, readings.length - 1)];
-          this.#readings += 1;
-          const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
-          return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
-        }
-        // Unless a test says otherwise, the vault holds what apps needs: the API's client secret (B2-6), its
-        // directory token and the email key (B5-3), its reset token (B6-3c).
-        const names = (this.#deployed ? this.options.after : this.options.before) ?? [
-          'api-oidc-client-secret',
-          'zitadel-directory-token',
-          'zitadel-reset-token',
-          'acs-access-key',
-        ];
-        const pages = this.options.pages ?? {};
-        const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
-        const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
-        if (token === undefined && pages.emptyFirst === true) return json({ value: [], nextLink: link('0') });
-        const from = token === undefined || token === 'first' ? 0 : Number(token);
-        const page = names.slice(from, from + 3).map(listed);
-        if (pages.endless === true) return json({ value: page, nextLink: link('first') });
-        return json(from + 3 <= names.length ? { value: page, nextLink: link(String(from + 3)) } : { value: page });
-      }
+      case 'rest --method':
+        return this.#rest(args[args.indexOf('--url') + 1] ?? '');
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
     }
+  }
+
+  /** A write of the migration job's tags, as the options say Azure takes it. */
+  #tagUpdate(args: readonly string[]): AzResult {
+    const record = this.options.record ?? 'kept';
+    if (record === 'no job') {
+      return {
+        status: 3,
+        stdout: '',
+        stderr: `ERROR: (ResourceNotFound) The Resource 'Microsoft.App/jobs/job-agentx-stg-migrate' under resource group 'rg-agentx-staging' was not found.\nCode: ResourceNotFound\n`,
+      };
+    }
+    if (record === 'refused') {
+      return { status: 1, stdout: '', stderr: 'ERROR: (AuthorizationFailed) The client may not write tags.\n' };
+    }
+    const [name, value] = (args[args.indexOf('--tags') + 1] ?? '').split('=');
+    if (record === 'kept' && name !== undefined) this.tags[name] = value;
+    return json({ properties: { tags: this.tags } });
+  }
+
+  /** A Resource Manager read: the environment, its certificates, the action group, or a page of the vault's secrets. */
+  #rest(url: string): AzResult {
+    if (url === `${ENVIRONMENT_URL}?api-version=2026-01-01`) {
+      return json(this.options.environment ?? { properties: ENVIRONMENT_DNS_PROPERTIES });
+    }
+    if (url === `${ENVIRONMENT_URL}/managedCertificates?api-version=2026-01-01`) {
+      return json({ value: this.options.certificates ?? [] });
+    }
+    if (url.includes('/actionGroups/')) {
+      if (url !== ACTION_GROUP_URL) throw new Error(`unexpected action group read ${url}`);
+      const readings = this.options.receivers ?? [[CONFIRMED]];
+      const reading = readings[Math.min(this.#readings, readings.length - 1)];
+      this.#readings += 1;
+      const enabled = 'groupEnabled' in this.options ? this.options.groupEnabled : true;
+      return json({ name: 'ag-agentx-stg', properties: { enabled, emailReceivers: reading } });
+    }
+    return this.#vaultPage(url);
+  }
+
+  /** A page of the vault's secrets, as the options say the vault pages them. */
+  #vaultPage(url: string): AzResult {
+    // Unless a test says otherwise, the vault holds what apps needs: the API's client secret (B2-6), its
+    // directory token and the email key (B5-3), its reset token (B6-3c).
+    const names = (this.#deployed ? this.options.after : this.options.before) ?? [
+      'api-oidc-client-secret',
+      'zitadel-directory-token',
+      'zitadel-reset-token',
+      'acs-access-key',
+    ];
+    const pages = this.options.pages ?? {};
+    const token = /[?&]\$skiptoken=(\d+|first)$/.exec(url)?.[1];
+    const link = (next: string) => pages.nextLink ?? `${url.replace(/&\$skiptoken=.*$/, '')}&$skiptoken=${next}`;
+    if (token === undefined && pages.emptyFirst === true) return json({ value: [], nextLink: link('0') });
+    const from = token === undefined || token === 'first' ? 0 : Number(token);
+    const page = names.slice(from, from + 3).map(listed);
+    if (pages.endless === true) return json({ value: page, nextLink: link('first') });
+    return json(from + 3 <= names.length ? { value: page, nextLink: link(String(from + 3)) } : { value: page });
   }
 
   /** The commands, by their first two words, in the order they ran. */

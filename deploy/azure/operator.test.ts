@@ -247,6 +247,9 @@ interface Settling {
   readonly apply: () => void;
 }
 
+/** An az call that succeeded, answering with the value as JSON. */
+const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+
 /**
  * Azure as the runner meets it: the job and the API, and every call recorded.
  * A change to the job made while another is still going is refused, as Azure
@@ -280,39 +283,8 @@ class FakeAzure implements Az {
 
   run(args: readonly string[]): AzResult {
     this.calls.push(args);
-    const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
     const script = this.#script;
-    if (args[0] === 'rest') {
-      const method = args[args.indexOf('--method') + 1];
-      const url = args[args.indexOf('--url') + 1];
-      if (method === 'patch') return this.#patch(args, url);
-      if (method === 'get' && url === JOB_URL) return json(this.#job());
-      if (method === 'get' && url === API_URL) {
-        return json({
-          properties: {
-            provisioningState: 'Succeeded',
-            template: {
-              containers: [
-                apiContainer(
-                  script.apiImage ?? image('b'),
-                  script.apiBuild ?? commit('b'),
-                  script.noOrigin === true ? null : (script.origin ?? ORIGIN),
-                ),
-              ],
-            },
-          },
-          tags: {},
-        });
-      }
-      if (method === 'get' && url === WORKSPACE_URL) return json({ properties: { customerId: WORKSPACE_ID } });
-      if (method === 'post' && url === `https://api.loganalytics.azure.com/v1/workspaces/${WORKSPACE_ID}/query`) {
-        if (script.logRefused === true) {
-          return { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"InsufficientAccessError"}})' };
-        }
-        return json(this.#log());
-      }
-      throw new Error(`unexpected az ${args.join(' ')}`);
-    }
+    if (args[0] === 'rest') return this.#rest(args);
     const words = args.filter((arg) => !arg.startsWith('-')).slice(0, 4);
     switch (words.join(' ')) {
       case 'account show json':
@@ -338,6 +310,44 @@ class FakeAzure implements Az {
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
     }
+  }
+
+  /** A REST call: a PATCH of the job, a GET of the job, the API or the workspace, or the log query. */
+  #rest(args: readonly string[]): AzResult {
+    const script = this.#script;
+    const method = args[args.indexOf('--method') + 1];
+    const url = args[args.indexOf('--url') + 1];
+    if (method === 'patch') return this.#patch(args, url);
+    if (method === 'get' && url === JOB_URL) return json(this.#job());
+    if (method === 'get' && url === API_URL) return json(this.#api());
+    if (method === 'get' && url === WORKSPACE_URL) return json({ properties: { customerId: WORKSPACE_ID } });
+    if (method === 'post' && url === `https://api.loganalytics.azure.com/v1/workspaces/${WORKSPACE_ID}/query`) {
+      if (script.logRefused === true) {
+        return { status: 1, stdout: '', stderr: 'ERROR: Forbidden({"error":{"code":"InsufficientAccessError"}})' };
+      }
+      return json(this.#log());
+    }
+    throw new Error(`unexpected az ${args.join(' ')}`);
+  }
+
+  /** The API as a GET gives it: its image, build and public origin as the script says. */
+  #api(): Record<string, unknown> {
+    const script = this.#script;
+    return {
+      properties: {
+        provisioningState: 'Succeeded',
+        template: {
+          containers: [
+            apiContainer(
+              script.apiImage ?? image('b'),
+              script.apiBuild ?? commit('b'),
+              script.noOrigin === true ? null : (script.origin ?? ORIGIN),
+            ),
+          ],
+        },
+      },
+      tags: {},
+    };
   }
 
   /** The job as a GET gives it: never a secret's value, and a change being settled shown as Azure shows it. */

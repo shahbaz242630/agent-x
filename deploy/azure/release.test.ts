@@ -1047,6 +1047,12 @@ interface Write {
 
 const TENANT = '00000000-0000-0000-0000-00000000000c';
 
+/** An az call that succeeded, answering with the value as JSON. */
+const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+
+/** An az call that succeeded and printed nothing. */
+const AZ_DONE: AzResult = { status: 0, stdout: '', stderr: '' };
+
 /** An error as `az rest` prints it: the HTTP reason, then Azure's answer, which names the subscription and quotes the host. */
 const azRestError = (reason: string, code: string): string => {
   const message = `The client may not perform action(s) on /subscriptions/${SUBSCRIPTION}/x with https://${HOST}`;
@@ -1298,9 +1304,70 @@ class Staging {
     };
   }
 
+  /** A write recorded, then refused if the test says so; or a read failed, once it has been made as often as the test says. */
+  private refusal(
+    method: string,
+    url: string,
+    flag: string | undefined,
+    body: string | undefined,
+  ): AzResult | undefined {
+    if (method !== 'get') {
+      this.writes.push({
+        method,
+        url,
+        body: flag === '--body' ? (JSON.parse(String(body)) as unknown) : undefined,
+      });
+      if (this.refuse?.method === method) return { status: 1, stdout: '', stderr: this.refuse.stderr };
+    } else if (this.failRead?.what.test(url) === true) {
+      const seen = this.calls.filter((call) => call.includes(url)).length;
+      if (seen >= this.failRead.from)
+        return { status: 1, stdout: '', stderr: azRestError('Too Many Requests', 'TooManyRequests') };
+    }
+    return undefined;
+  }
+
+  /** A call on the migration job's runs: the list, a start, or a run's reading; undefined for any other. */
+  private migrateCall(method: string, url: string, jobBase: string, query: string): AzResult | undefined {
+    if (method === 'get' && url === `${jobBase}/executions${query}`) {
+      this.lists += 1;
+      const listed = this.runs.filter(
+        (run) => run.polls >= 0 && (this.lists > this.listLag || !run.name.includes('new')),
+      );
+      return json({ value: listed.map(({ name, status }) => ({ name, properties: { status } })) });
+    }
+    if (method === 'post' && url === `${jobBase}/start${query}`) return this.startMigrate();
+    const run = this.runs.find((each) => url === `${jobBase}/executions/${each.name}${query}`);
+    if (method === 'get' && run !== undefined) {
+      if (run.polls > 0) run.polls -= 1;
+      else if (run.status === 'Running') run.status = this.runEndsAs;
+      return json({
+        name: run.name,
+        properties: { status: run.status, template: { containers: [{ name: 'migrate', image: run.image }] } },
+      });
+    }
+    return undefined;
+  }
+
+  /** A start of the migration job: the new runs listed, and the name the start gives as the test says. */
+  private startMigrate(): AzResult {
+    this.lists = 0;
+    const made: string[] = [];
+    for (let index = 0; index < this.newRuns; index += 1) {
+      const name = this.newRunName ?? `job-agentx-stg-migrate-new${String(index)}x`;
+      made.push(name);
+      this.runs.unshift({
+        name,
+        status: 'Running',
+        image: this.runImage ?? this.job.image,
+        polls: this.runPolls,
+      });
+    }
+    if (this.startNames === 'its run') return json({ name: made[0] });
+    if (this.startNames === 'another') return json({ name: 'job-agentx-stg-migrate-other1' });
+    return AZ_DONE;
+  }
+
   az(): Az {
-    const answer = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
-    const done: AzResult = { status: 0, stdout: '', stderr: '' };
     const query = `?api-version=${JOBS_API}`;
     const jobBase = workloadUrl(SUBSCRIPTION, 'migrate').replace(query, '');
     const appBase = workloadUrl(SUBSCRIPTION, 'api').replace(query, '');
@@ -1310,66 +1377,25 @@ class Staging {
       },
       run: (args) => {
         this.calls.push([...args]);
-        if (args[0] === 'account') return answer(this.account);
+        if (args[0] === 'account') return json(this.account);
         const [, , method = '', , url = '', flag, body] = args;
-        if (method !== 'get') {
-          this.writes.push({
-            method,
-            url,
-            body: flag === '--body' ? (JSON.parse(String(body)) as unknown) : undefined,
-          });
-          if (this.refuse?.method === method) return { status: 1, stdout: '', stderr: this.refuse.stderr };
-        } else if (this.failRead?.what.test(url) === true) {
-          const seen = this.calls.filter((call) => call.includes(url)).length;
-          if (seen >= this.failRead.from)
-            return { status: 1, stdout: '', stderr: azRestError('Too Many Requests', 'TooManyRequests') };
-        }
+        const refused = this.refusal(method, url, flag, body);
+        if (refused !== undefined) return refused;
         const workload = ORDER.find((each) => url === workloadUrl(SUBSCRIPTION, each));
         if (method === 'get' && workload !== undefined) {
           if (this.calls.filter((call) => call.includes(url)).length === 2) this.meddle?.(this);
-          return answer(this.resource(workload));
+          return json(this.resource(workload));
         }
         if (method === 'patch' && workload !== undefined) {
           this.patched(workload, body);
-          return done;
+          return AZ_DONE;
         }
-        if (method === 'get' && url === `${jobBase}/executions${query}`) {
-          this.lists += 1;
-          const listed = this.runs.filter(
-            (run) => run.polls >= 0 && (this.lists > this.listLag || !run.name.includes('new')),
-          );
-          return answer({ value: listed.map(({ name, status }) => ({ name, properties: { status } })) });
-        }
-        if (method === 'post' && url === `${jobBase}/start${query}`) {
-          this.lists = 0;
-          const made: string[] = [];
-          for (let index = 0; index < this.newRuns; index += 1) {
-            const name = this.newRunName ?? `job-agentx-stg-migrate-new${String(index)}x`;
-            made.push(name);
-            this.runs.unshift({
-              name,
-              status: 'Running',
-              image: this.runImage ?? this.job.image,
-              polls: this.runPolls,
-            });
-          }
-          if (this.startNames === 'its run') return answer({ name: made[0] });
-          if (this.startNames === 'another') return answer({ name: 'job-agentx-stg-migrate-other1' });
-          return done;
-        }
-        const run = this.runs.find((each) => url === `${jobBase}/executions/${each.name}${query}`);
-        if (method === 'get' && run !== undefined) {
-          if (run.polls > 0) run.polls -= 1;
-          else if (run.status === 'Running') run.status = this.runEndsAs;
-          return answer({
-            name: run.name,
-            properties: { status: run.status, template: { containers: [{ name: 'migrate', image: run.image }] } },
-          });
-        }
+        const migrate = this.migrateCall(method, url, jobBase, query);
+        if (migrate !== undefined) return migrate;
         const revision = /\/revisions\/([^?]+)\?/.exec(url)?.[1];
         if (method === 'get' && url.startsWith(`${appBase}/revisions/`) && revision !== undefined) {
           const found = this.revision(revision);
-          if (found !== undefined) return answer(found);
+          if (found !== undefined) return json(found);
         }
         return { status: 1, stdout: '', stderr: `unexpected: az ${args.join(' ')}` };
       },

@@ -394,6 +394,27 @@ export type Decision =
     };
 
 /**
+ * What one file changed since a running release means: a reason for a hand
+ * deploy, a line saying which recorded deploys sent it, or nothing when no
+ * person deploys it.
+ */
+function changedFile(
+  file: string,
+  release: string,
+  readers: Readers | undefined,
+  recordFor: (deployment: Deployment, file: string) => string | undefined,
+): { readonly kind: 'reason' | 'deployed'; readonly line: string } | undefined {
+  const area = handDeployed(file);
+  if (area === undefined) return undefined;
+  const deployments = readers?.get(file.toLowerCase());
+  if (deployments === undefined) return { kind: 'reason', line: `${file} changed since ${release}: ${area.why}` };
+  const unrecorded = deployments.filter((deployment) => recordFor(deployment, file) === undefined);
+  if (unrecorded.length > 0) return { kind: 'reason', line: `${file} changed since ${release}: ${toRun(unrecorded)}` };
+  const sent = deployments.map((deployment) => `${deployment} from ${String(recordFor(deployment, file))}`);
+  return { kind: 'deployed', line: `${file} changed since ${release}: deployed by hand, ${sent.join(', ')}` };
+}
+
+/**
  * What a release of `commit` would do, given what each workload runs: nothing
  * when both already run it, or both run a later commit that has it (a release
  * run again after a newer one); a hand deploy when what either runs isn't in
@@ -442,20 +463,9 @@ export function decide(
       continue;
     }
     for (const file of history.changedFiles(release, commit)) {
-      const area = handDeployed(file);
-      if (area === undefined) continue;
-      const deployments = readers?.get(file.toLowerCase());
-      if (deployments === undefined) {
-        reasons.add(`${file} changed since ${release}: ${area.why}`);
-        continue;
-      }
-      const unrecorded = deployments.filter((deployment) => recordFor(deployment, file) === undefined);
-      if (unrecorded.length > 0) {
-        reasons.add(`${file} changed since ${release}: ${toRun(unrecorded)}`);
-        continue;
-      }
-      const sent = deployments.map((deployment) => `${deployment} from ${String(recordFor(deployment, file))}`);
-      deployed.add(`${file} changed since ${release}: deployed by hand, ${sent.join(', ')}`);
+      const found = changedFile(file, release, readers, recordFor);
+      if (found?.kind === 'reason') reasons.add(found.line);
+      if (found?.kind === 'deployed') deployed.add(found.line);
     }
   }
   if (reasons.size > 0) return { kind: 'by-hand', reasons: [...reasons] };
@@ -838,6 +848,14 @@ function idle(steps: ReleaseSteps, subscription: string): Run[] {
   return listed;
 }
 
+/** Azure's own name for the new run, held to the job's runs (and to the name the start gave) before it goes into a URL. */
+function checkStartedRun(listed: string, named: string | undefined): void {
+  if (!isRunOf('migrate', listed) || (named !== undefined && named !== listed)) {
+    const andStarted = named === undefined ? '' : ` and started "${named}"`;
+    throw new Error(`Azure listed migrate's new run as "${listed}"${andStarted}, which isn't this release's run.`);
+  }
+}
+
 /**
  * Starts the migration job as it is now deployed, with no template of its own
  * (a POST with no body), once none of its runs is still going. Azure may take
@@ -860,13 +878,7 @@ async function startMigration(steps: ReleaseSteps, subscription: string): Promis
       );
     }
     if (started !== undefined) {
-      // Azure's own name for it, held to the job's runs before it goes into a URL.
-      if (!isRunOf('migrate', started.name) || (named !== undefined && named !== started.name)) {
-        const andStarted = named === undefined ? '' : ` and started "${named}"`;
-        throw new Error(
-          `Azure listed migrate's new run as "${started.name}"${andStarted}, which isn't this release's run.`,
-        );
-      }
+      checkStartedRun(started.name, named);
       steps.say(`Started ${started.name}.`);
       return started.name;
     }

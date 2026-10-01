@@ -665,16 +665,9 @@ function relationProblems(relation: Relation): string[] {
   return problems;
 }
 
-/** The row's identity, the two signed-state columns, and every declared field's column. */
-function columnProblems(table: AuthorityTable, columns: readonly Column[]): string[] {
+/** The two signed-state columns: the version its latest signed event made, and the pointer at that event. */
+function signedStateProblems(of: (column: string) => Column | undefined): string[] {
   const problems: string[] = [];
-  const of = (column: string): Column | undefined => columns.find((one) => one.column === column);
-  for (const column of KEY) {
-    const found = of(column);
-    if (found === undefined)
-      problems.push(`has no ${column} column; an authority row is named by its organisation and its own ID`);
-    else if (!isType(found, 'uuid') || !found.not_null) problems.push(`${column} must be uuid NOT NULL`);
-  }
   const version = of(VERSION);
   if (version === undefined)
     problems.push(`has no ${VERSION} column, which holds the version its latest signed event made`);
@@ -689,6 +682,20 @@ function columnProblems(table: AuthorityTable, columns: readonly Column[]): stri
   else if (pointer.not_null) {
     problems.push(`${POINTER} must take a null: a row is written before the event it will point at is recorded`);
   }
+  return problems;
+}
+
+/** The row's identity, the two signed-state columns, and every declared field's column. */
+function columnProblems(table: AuthorityTable, columns: readonly Column[]): string[] {
+  const problems: string[] = [];
+  const of = (column: string): Column | undefined => columns.find((one) => one.column === column);
+  for (const column of KEY) {
+    const found = of(column);
+    if (found === undefined)
+      problems.push(`has no ${column} column; an authority row is named by its organisation and its own ID`);
+    else if (!isType(found, 'uuid') || !found.not_null) problems.push(`${column} must be uuid NOT NULL`);
+  }
+  problems.push(...signedStateProblems(of));
   for (const field of table.fields) {
     const found = of(field.column);
     if (found === undefined) problems.push(`has no ${field.column} column, which it declares as an authority field`);
