@@ -423,14 +423,16 @@ export async function registrationsStartedSince(
 
 /**
  * The ID of one of the supplier's registrations still open (STARTED or
- * UNKNOWN), or null, in one statement: where to look alone, so a start
- * carries on with it rather than opening another (E2-2a's review). The caller
- * reads it through its signed state before deciding anything of it.
+ * UNKNOWN) with this partner, or null, in one statement: where
+ * to look alone, so a start carries on with it rather than opening another
+ * (E2-2a's review); one with another partner, which this one is never asked
+ * about, is never carried on with. The caller reads it through its signed
+ * state before deciding anything of it.
  */
 export async function openRegistrationOf(
   tx: RegistrationsTransaction,
   orgId: string,
-  supplierId: string,
+  { supplierId, partner }: { readonly supplierId: string; readonly partner: string },
 ): Promise<string | null> {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; the registration is then read through its signed state
@@ -439,6 +441,7 @@ export async function openRegistrationOf(
     .where('org_id', '=', orgId)
     .where('supplier_id', '=', supplierId)
     .where('status', 'in', ['STARTED', 'UNKNOWN'])
+    .where('partner', '=', partner)
     .orderBy('created_at')
     .executeTakeFirst();
   return row?.id ?? null;

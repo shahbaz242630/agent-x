@@ -461,6 +461,40 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(second.form).toEqual(first.form);
   });
 
+  it('carries on only with one still open, of this partner: past ended ones, and never another partner’s', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const elsewhere = answered(await start(admin, id, undefined, payeesWith(rail, { partner: 'another' })), 'started');
+    const ended = answered(await start(admin, id), 'started');
+    expect(ended.registration.id).not.toBe(elsewhere.registration.id);
+    clock.advanceBy(31 * MINUTE_MS);
+    expect(answered(await check(admin, id, ended.registration.id), 'checked').registration.status).toBe('FAILED');
+
+    const next = answered(await start(admin, id), 'started');
+    const again = answered(await start(admin, id), 'started');
+
+    expect([elsewhere.registration.id, ended.registration.id]).not.toContain(next.registration.id);
+    expect(again.registration.id).toBe(next.registration.id);
+  });
+
+  it('ends one carried on with whose form ran out, so the next start opens another', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const first = answered(await start(admin, id), 'started');
+    clock.advanceBy(31 * MINUTE_MS);
+
+    const carried = answered(await start(admin, id), 'started');
+    expect(carried).toMatchObject({
+      registration: { id: first.registration.id, status: 'FAILED', failure: 'expired' },
+      form: null,
+    });
+    const next = answered(await start(admin, id), 'started');
+    expect(next.registration.id).not.toBe(first.registration.id);
+    expect(next.form).not.toBeNull();
+  });
+
   it('refuses another start, and stages no second change, while one is waiting', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -628,13 +662,16 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
       status: 503,
       code: 'PARTNER_UNAVAILABLE',
     });
-    const unknown = answered(await start(admin, id, 'down-key', failing), 'started');
-    expect(unknown).toMatchObject({ registration: { status: 'UNKNOWN' }, form: null });
-
-    expect(answered(await check(admin, id, unknown.registration.id), 'checked').registration).toMatchObject({
-      status: 'FAILED',
-      failure: 'unknown',
-    });
+    // The start sent again asks the partner by its ID: unknown there, so it ends, and the next start opens another.
+    const ended = answered(await start(admin, id, 'down-key', failing), 'started');
+    expect(ended).toMatchObject({ registration: { status: 'FAILED', failure: 'unknown' }, form: null });
+    expect(await actionsAbout(org, 'beneficiary_registration', ended.registration.id)).toEqual([
+      'beneficiary_registration.started',
+      'beneficiary_registration.lost',
+      'beneficiary_registration.refused',
+      'beneficiary_registration.failed',
+    ]);
+    expect(answered(await start(admin, id), 'started').registration.id).not.toBe(ended.registration.id);
   });
 
   it('answers PARTNER_UNAVAILABLE where no partner is set up, and PAYEE_ROUTE_NOT_OFFERED where its form can’t be used', async () => {
@@ -710,6 +747,28 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
       expect.objectContaining({ event: 'suppliers.partner_answer_refused', registrationId: started.registration.id }),
     );
     expect(findLeaks(logs.text + JSON.stringify(checked), IBANS)).toEqual([]);
+  });
+
+  it('ends FAILED one whose partner, offering a stable identity, gave none that can be kept', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const started = answered(await start(admin, id), 'started');
+    await filled(org, started);
+    const broken: FakeRail = {
+      ...rail,
+      getBeneficiaryState: async (ref) => {
+        const outcome = await rail.getBeneficiaryState(ref);
+        return outcome.kind === 'registered'
+          ? { ...outcome, beneficiary: { ...outcome.beneficiary, payeeIdentity: 'not one' } }
+          : outcome;
+      },
+    };
+
+    const checked = answered(await check(admin, id, started.registration.id, undefined, payeesWith(broken)), 'checked');
+
+    expect(checked.registration).toMatchObject({ status: 'FAILED', failure: 'unknown' });
+    expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
   });
 
   it('never asks one partner about a registration started with another', async () => {

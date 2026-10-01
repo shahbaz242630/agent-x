@@ -26,6 +26,14 @@ export function noAccountNumberIn(text: string): string {
   return text;
 }
 
+/** A partner with a stable payee identity gave none that can be kept: its answer breaks its contract. */
+export class UnusablePayeeIdentity extends Error {
+  constructor() {
+    super('A partner with a stable payee identity gave none that can be kept');
+    this.name = 'UnusablePayeeIdentity';
+  }
+}
+
 /** A payee key and its key's version: null for a partner's own identity, and both null where there is none. */
 export interface PayeeKey {
   readonly key: string | null;
@@ -86,7 +94,7 @@ export function payeeKeyOf(
   }
   const identity = beneficiary.payeeIdentity;
   if (identity === null || !PAYEE_KEY.test(identity)) {
-    throw new Error('A partner with a stable payee identity gave none that can be kept');
+    throw new UnusablePayeeIdentity();
   }
   return { key: noAccountNumberIn(identity), keyVersion: null };
 }

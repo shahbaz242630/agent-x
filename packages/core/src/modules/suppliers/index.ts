@@ -61,7 +61,13 @@ export {
   verifySupplier,
   versionOf,
 } from './infrastructure/suppliers.ts';
-export { normalisedIban, payeeFingerprint, type PayeeKey, payeeKeyOf } from './infrastructure/payee-key.ts';
+export {
+  normalisedIban,
+  payeeFingerprint,
+  type PayeeKey,
+  payeeKeyOf,
+  UnusablePayeeIdentity,
+} from './infrastructure/payee-key.ts';
 export {
   BENEFICIARY_REGISTRATIONS,
   isPayeeTaken,
