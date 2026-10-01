@@ -515,10 +515,12 @@ describe('CI-06 each rule fails on a broken fixture', () => {
           'create unique index one_supplier_a_payee on suppliers.suppliers (payee_key, org_id) where payee_key is not null';
         const widerKey =
           'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key, id) where payee_key is not null';
+        const narrowerKey =
+          'create unique index one_supplier_a_payee on suppliers.suppliers (org_id) where payee_key is not null';
         expect(await problemsAfter([widened])).toEqual([
           'suppliers.suppliers: unique index one_supplier_a_payee is partial on another condition than the schema policy lists',
         ]);
-        for (const statement of [reordered, widerKey]) {
+        for (const statement of [reordered, widerKey, narrowerKey]) {
           expect(await problemsAfter([statement])).toEqual([
             'suppliers.suppliers: unique index one_supplier_a_payee is partial on other columns than the schema policy lists',
           ]);

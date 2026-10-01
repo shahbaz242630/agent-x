@@ -455,14 +455,17 @@ describe('a partial unique index the schema policy lists (E2-1a)', () => {
     expect(await problemsWith(widened, dropListed)).toEqual([`${NAMED} is partial on another condition than listed`]);
   });
 
-  it('sees it on other columns, or the same ones in another order', async () => {
-    const other =
+  it('sees it on more columns, fewer, or the same ones in another order', async () => {
+    const more =
       'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key, id) where payee_key is not null';
+    const fewer =
+      'create unique index one_supplier_a_payee on suppliers.suppliers (org_id) where payee_key is not null';
     const reordered =
       'create unique index one_supplier_a_payee on suppliers.suppliers (payee_key, org_id) where payee_key is not null';
     const differs = [`${NAMED} is partial on other columns than listed`];
-    expect(await problemsWith(other, dropListed)).toEqual(differs);
-    expect(await problemsWith(reordered, dropListed)).toEqual(differs);
+    for (const statement of [more, fewer, reordered]) {
+      expect(await problemsWith(statement, dropListed)).toEqual(differs);
+    }
   });
 
   it('sees one by another name, or the listed name on another table', async () => {
