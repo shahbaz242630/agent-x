@@ -31,6 +31,11 @@ function headerPath(header: string): string {
   return unquoted.startsWith('b/') ? unquoted.slice(2) : unquoted;
 }
 
+/** The staged file a `+++` header names, or none for a deleted file's `/dev/null`. */
+function stagedFile(header: string): string | undefined {
+  return header === '+++ /dev/null' ? undefined : headerPath(header);
+}
+
 /**
  * The added lines of `git diff --cached --unified=0`, numbered as in the
  * staged file. Headers are read only between `diff --git` and the first hunk,
@@ -54,7 +59,7 @@ export function addedLines(diff: string): AddedLine[] {
       continue;
     }
     if (inHeader) {
-      if (raw.startsWith('+++ ')) file = raw === '+++ /dev/null' ? undefined : headerPath(raw);
+      if (raw.startsWith('+++ ')) file = stagedFile(raw);
       continue;
     }
     if (file === undefined) continue;

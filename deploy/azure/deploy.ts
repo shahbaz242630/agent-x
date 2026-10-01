@@ -225,41 +225,49 @@ export function parseArguments(argv: readonly string[]): Request {
   if (command !== 'secrets') {
     throw new UsageError(`say foundation, secrets, apps, alerts, dns or certificates, not ${command ?? 'nothing'}`);
   }
-  const [mode, ...names] = rest;
+  return { command, plan: parseSecretPlan(rest) };
+}
+
+/** The plan a secrets run's options ask for, or a UsageError saying why it can't be done. */
+function parseSecretPlan(options: readonly string[]): SecretPlan {
+  const [mode, ...names] = options;
   if (mode === '--all') {
     if (names.length > 0) throw new UsageError('--all takes no names: it writes every secret');
-    return { command, plan: { kind: 'all' } };
+    return { kind: 'all' };
   }
   if (mode === '--keys') {
     if (names.length > 0)
       throw new UsageError('--keys takes no names: it creates every key in app-keys.json the vault lacks');
-    return { command, plan: { kind: 'keys' } };
+    return { kind: 'keys' };
   }
   if (mode !== '--rotate') {
     throw new UsageError('secrets needs --all (the first run), --rotate <names> or --keys');
   }
   if (names.length === 0) throw new UsageError('--rotate needs at least one secret name');
-  for (const name of names) {
-    if (APP_KEYS.includes(name)) {
-      throw new UsageError(
-        `${name} is never written again: what it sealed or signed needs it as it was. A key rotates by a new version in app-keys.json, then secrets --keys (Azure.md)`,
-      );
-    }
-    const secret = VAULT_SECRETS[name];
-    if (secret === undefined) {
-      throw new UsageError(`${name} isn't a secret the vault holds: ${Object.keys(VAULT_SECRETS).join(', ')}`);
-    }
-    if (secret.source === 'once') {
-      throw new UsageError(
-        `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
-      );
-    }
-  }
+  for (const name of names) refuseUnrotatable(name);
   // The key pair is one thing: a new private half with the old public one would stop every sign-in.
   const pair = Object.keys(VAULT_SECRETS).filter((name) => VAULT_SECRETS[name]?.source === 'pair');
   const rotated = new Set(names);
   if (pair.some((name) => rotated.has(name))) for (const name of pair) rotated.add(name);
-  return { command, plan: { kind: 'rotate', names: rotated } };
+  return { kind: 'rotate', names: rotated };
+}
+
+/** A UsageError if `--rotate` can't write the name: an app key, no vault secret, or the master key. */
+function refuseUnrotatable(name: string): void {
+  if (APP_KEYS.includes(name)) {
+    throw new UsageError(
+      `${name} is never written again: what it sealed or signed needs it as it was. A key rotates by a new version in app-keys.json, then secrets --keys (Azure.md)`,
+    );
+  }
+  const secret = VAULT_SECRETS[name];
+  if (secret === undefined) {
+    throw new UsageError(`${name} isn't a secret the vault holds: ${Object.keys(VAULT_SECRETS).join(', ')}`);
+  }
+  if (secret.source === 'once') {
+    throw new UsageError(
+      `${name} is never rotated: Zitadel can't read what it encrypted with another key (ADR-002 Amendment G2c)`,
+    );
+  }
 }
 
 /** Whether a run writes the secret: `--all` writes all but an issued one, which only its name writes. */
@@ -296,29 +304,36 @@ export function secretValues(
     : undefined;
   const values: Record<string, string> = {};
   for (const [name, secret] of Object.entries(VAULT_SECRETS)) {
-    const written = planIncludes(plan, name);
-    switch (secret.source) {
-      case 'person':
-      case 'issued': {
-        const given = people[name];
-        if (written && given === undefined) throw new Error(`${name} was to be written but nobody gave it`);
-        values[secret.variable] = written ? (given ?? '') : '';
-        break;
-      }
-      case 'machine':
-        values[secret.variable] = written ? newPassword(makers.random) : '';
-        break;
-      case 'pair':
-        values[secret.variable] =
-          pair === undefined ? '' : name === 'login-client-private-key' ? pair.privatePem : pair.publicPem;
-        break;
-      case 'once':
-        values[secret.variable] = newMasterKey(makers.random);
-        break;
-    }
+    values[secret.variable] = secretValue(name, secret.source, planIncludes(plan, name), people, pair, makers.random);
   }
   values[APP_KEYS_VARIABLE] = newAppKeys(makers.random);
   return values;
+}
+
+/** The value a secrets run sets for one secret, by who makes it: empty for one the run leaves as it is. */
+function secretValue(
+  name: string,
+  source: (typeof VAULT_SECRETS)[string]['source'],
+  written: boolean,
+  people: Readonly<Record<string, string>>,
+  pair: ReturnType<KeyPair> | undefined,
+  random: Random,
+): string {
+  switch (source) {
+    case 'person':
+    case 'issued': {
+      const given = people[name];
+      if (written && given === undefined) throw new Error(`${name} was to be written but nobody gave it`);
+      return written ? (given ?? '') : '';
+    }
+    case 'machine':
+      return written ? newPassword(random) : '';
+    case 'pair':
+      if (pair === undefined) return '';
+      return name === 'login-client-private-key' ? pair.privatePem : pair.publicPem;
+    case 'once':
+      return newMasterKey(random);
+  }
 }
 
 /** One line per secret: what the run does with it. Names only, never a value. */
@@ -1091,20 +1106,23 @@ export function secretsRunFor(missing: readonly string[]): string {
   return issued.length > 0 ? `secrets --rotate ${issued.join(' ')}` : 'secrets --keys';
 }
 
+/** An --all run on a vault that holds secrets goes on only once the operator types that it rotates everything. */
+async function confirmRotateEverything(steps: Steps, held: number): Promise<void> {
+  steps.terminal.say(
+    `The vault already holds ${String(held)} secrets. --all replaces every one but the master key: every login changes, so run the set-up job straight after.`,
+  );
+  if ((await steps.terminal.ask('Type "rotate everything" to go on: ')) !== 'rotate everything') {
+    throw new Cancelled();
+  }
+}
+
 async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   const commit = sentFrom(steps, 'secrets');
   const subscription = await confirmSubscription(steps);
   confirmBicep(steps);
   const vault = vaultIn(steps, subscription);
   const existing = secretsInVault(steps, subscription, vault);
-  if (plan.kind === 'all' && existing.length > 0) {
-    steps.terminal.say(
-      `The vault already holds ${String(existing.length)} secrets. --all replaces every one but the master key: every login changes, so run the set-up job straight after.`,
-    );
-    if ((await steps.terminal.ask('Type "rotate everything" to go on: ')) !== 'rotate everything') {
-      throw new Cancelled();
-    }
-  }
+  if (plan.kind === 'all' && existing.length > 0) await confirmRotateEverything(steps, existing.length);
   steps.terminal.say('This run:');
   for (const line of describePlan(plan)) steps.terminal.say(line);
   const people: Record<string, string> = {};
@@ -1418,6 +1436,21 @@ async function deployCertificates(steps: Steps): Promise<number> {
   return recorded ? 0 : 1;
 }
 
+/**
+ * The apps are stamped with the release, and CI's release job takes the stamp
+ * to say which commit Azure's set-up was built from (release.ts): so the
+ * Bicep sent must be that commit's, exactly.
+ */
+function confirmCheckoutIs(steps: Steps, release: string): void {
+  if (steps.checkout === undefined) throw new Error('No way to read this folder was given.');
+  const here = steps.checkout();
+  if (here.head !== release || !here.clean) {
+    throw new Error(
+      `This folder is at ${here.head}${here.clean ? '' : ' with changes not committed'}, but the image is for ${release}. apps sends this folder's Bicep and stamps the apps with ${release}, so the two must be the same commit, with nothing changed (git switch main, then git pull). Nothing was deployed.`,
+    );
+  }
+}
+
 async function deployApps(steps: Steps, commit: string | undefined, keepRunning: boolean): Promise<number> {
   const images = steps.images;
   if (images === undefined) throw new Error('No way to find the image was given.');
@@ -1437,16 +1470,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
   }
   const release = commit ?? (await images.latestCommit());
   if (!COMMIT.test(release)) throw new Error(`GitHub gave ${release} as main's newest commit, which isn't one.`);
-  // The apps are stamped with the release, and CI's release job takes the stamp
-  // to say which commit Azure's set-up was built from (release.ts): so the
-  // Bicep sent must be that commit's, exactly.
-  if (steps.checkout === undefined) throw new Error('No way to read this folder was given.');
-  const here = steps.checkout();
-  if (here.head !== release || !here.clean) {
-    throw new Error(
-      `This folder is at ${here.head}${here.clean ? '' : ' with changes not committed'}, but the image is for ${release}. apps sends this folder's Bicep and stamps the apps with ${release}, so the two must be the same commit, with nothing changed (git switch main, then git pull). Nothing was deployed.`,
-    );
-  }
+  confirmCheckoutIs(steps, release);
   const digest = await images.digestOf(release);
   if (!DIGEST.test(digest)) throw new Error(`ghcr.io gave ${digest} as the image's digest, which isn't one.`);
   const image = `${IMAGE_REPOSITORY}@${digest}`;

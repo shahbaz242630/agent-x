@@ -691,24 +691,28 @@ function globalListProblems(policy: SchemaPolicy, facts: Facts): string[] {
     } else if (table.appMay !== undefined && new Set(table.appMay).size !== table.appMay.length) {
       problems.push(`${name}: the global-table list names one of the app's rights twice`);
     }
-    const partly = table.appMayUpdate;
-    if (partly !== undefined) {
-      if (appendOnly)
-        problems.push(`${name}: the global-table list names columns the app may change, but its schema is append-only`);
-      if (table.appMay?.includes('UPDATE') === true) {
-        problems.push(
-          `${name}: the global-table list lets the app UPDATE it whole and names the columns it may change`,
-        );
-      }
-      if (partly.length === 0 || new Set(partly).size !== partly.length) {
-        problems.push(`${name}: the global-table list must name each column the app may change once, and at least one`);
-      }
-      for (const column of partly.filter((column) => !table.columns.includes(column))) {
-        problems.push(`${name}: the app may change column ${column}, which the global-table list doesn't name`);
-      }
-    }
+    problems.push(...appMayUpdateProblems(name, table, appendOnly));
     return problems;
   });
+}
+
+/** The columns a global table's entry lets the app change, if it names any (B2-1). */
+function appMayUpdateProblems(name: string, table: GlobalTable, appendOnly: boolean): string[] {
+  const partly = table.appMayUpdate;
+  if (partly === undefined) return [];
+  const problems: string[] = [];
+  if (appendOnly)
+    problems.push(`${name}: the global-table list names columns the app may change, but its schema is append-only`);
+  if (table.appMay?.includes('UPDATE') === true) {
+    problems.push(`${name}: the global-table list lets the app UPDATE it whole and names the columns it may change`);
+  }
+  if (partly.length === 0 || new Set(partly).size !== partly.length) {
+    problems.push(`${name}: the global-table list must name each column the app may change once, and at least one`);
+  }
+  for (const column of partly.filter((column) => !table.columns.includes(column))) {
+    problems.push(`${name}: the app may change column ${column}, which the global-table list doesn't name`);
+  }
+  return problems;
 }
 
 /**
@@ -946,15 +950,8 @@ function foreignKeyProblems(key: ForeignKey, isTenant: ReadonlySet<string>): str
   return [];
 }
 
-/**
- * Default privileges are checked for PUBLIC only: what they give the backup or
- * app role shows up on each object once it is created, and is checked there.
- */
-function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): string[] {
-  if (grant.to_public) return [`${grant.object}: PUBLIC has ${grant.privilege} (ADR-005 §8)`];
-  if (grant.grantee === roles.backup && grant.kind !== 'default' && !BACKUP_MAY[grant.kind].includes(grant.privilege)) {
-    return [`${grant.object}: ${roles.backup} has ${grant.privilege}; it may only read (ADR-005 §3)`];
-  }
+/** The app's grant on an append-only table or exception, or undefined when it breaks no append-only rule. */
+function appendOnlyGrantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): string[] | undefined {
   // A sequence in an append-only schema is fine: drawing a number changes no row.
   const inAppendOnly = grant.relation !== '' && policy.appendOnlySchemas.includes(grant.schema);
   // Only inside an append-only schema, as the live guard reads it; an exception
@@ -970,14 +967,19 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
       `${grant.object}: ${roles.app} has ${grant.privilege} on an append-only exception; it may only INSERT, SELECT and UPDATE (SEC-EVD-01)`,
     ];
   }
-  // A global table that names the app's rights holds it to them, whole or
-  // column by column. Only a table's or a column's grant names a table.
-  const listed = Object.hasOwn(policy.globalTables, grant.relation)
-    ? policy.globalTables[grant.relation]?.appMay
-    : undefined;
-  const partly = Object.hasOwn(policy.globalTables, grant.relation)
-    ? policy.globalTables[grant.relation]?.appMayUpdate
-    : undefined;
+  return undefined;
+}
+
+/**
+ * A global table that names the app's rights holds it to them, whole or
+ * column by column: [] when a listed column's UPDATE settles it, undefined
+ * when it breaks no global-table rule. Only a table's or a column's grant
+ * names a table.
+ */
+function globalGrantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): string[] | undefined {
+  const global = Object.hasOwn(policy.globalTables, grant.relation) ? policy.globalTables[grant.relation] : undefined;
+  const listed = global?.appMay;
+  const partly = global?.appMayUpdate;
   if (partly !== undefined && grant.grantee === roles.app && grant.privilege === 'UPDATE') {
     if (grant.kind === 'column' && partly.includes(grant.attribute)) return [];
     return [`${grant.object}: ${roles.app} may UPDATE a global table other than in the columns listed (B2-1)`];
@@ -986,26 +988,50 @@ function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): st
     const may = listed.length === 0 ? 'it may hold nothing on it' : `it may only ${listed.join(', ')}`;
     return [`${grant.object}: ${roles.app} has ${grant.privilege} on a global table; ${may} (B1d-1)`];
   }
+  return undefined;
+}
+
+/**
+ * The app's grant on a fill-in table, or undefined when it breaks no fill-in
+ * rule. What a fill-in table allows is also what any tenant table allows, so
+ * the rights that pass here go on to grantProblems' last check and pass it too.
+ */
+function fillInGrantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): string[] | undefined {
   const fillIn = Object.hasOwn(policy.fillInTables, grant.relation) ? policy.fillInTables[grant.relation] : undefined;
-  // What a fill-in table allows is also what any tenant table allows, so the
-  // rights that pass here go on to the check below and pass it too.
-  if (fillIn !== undefined && grant.grantee === roles.app) {
-    // A retention allows DELETE, which its policy holds to rows past it (B1e).
-    const swept = fillIn.sweptAfter !== undefined && grant.privilege === 'DELETE';
-    if (grant.kind === 'relation' && !swept && !FILL_IN_APP_MAY.includes(grant.privilege)) {
-      return [
-        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed`,
-      ];
-    }
-    if (grant.kind === 'column' && !FILL_IN_COLUMN_MAY.includes(grant.privilege)) {
-      return [
-        `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed`,
-      ];
-    }
-    if (grant.kind === 'column' && grant.privilege === 'UPDATE' && !fillIn.columns.includes(grant.attribute)) {
-      return [`${grant.object}: ${roles.app} may UPDATE a column the fill-in list doesn't name`];
-    }
+  if (fillIn === undefined || grant.grantee !== roles.app) return undefined;
+  // A retention allows DELETE, which its policy holds to rows past it (B1e).
+  const swept = fillIn.sweptAfter !== undefined && grant.privilege === 'DELETE';
+  if (grant.kind === 'relation' && !swept && !FILL_IN_APP_MAY.includes(grant.privilege)) {
+    return [
+      `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table; it may only INSERT and SELECT, and UPDATE the columns listed`,
+    ];
   }
+  if (grant.kind === 'column' && !FILL_IN_COLUMN_MAY.includes(grant.privilege)) {
+    return [
+      `${grant.object}: ${roles.app} has ${grant.privilege} on a fill-in table's column; it may only INSERT, SELECT and UPDATE the columns listed`,
+    ];
+  }
+  if (grant.kind === 'column' && grant.privilege === 'UPDATE' && !fillIn.columns.includes(grant.attribute)) {
+    return [`${grant.object}: ${roles.app} may UPDATE a column the fill-in list doesn't name`];
+  }
+  return undefined;
+}
+
+/**
+ * Default privileges are checked for PUBLIC only: what they give the backup or
+ * app role shows up on each object once it is created, and is checked there.
+ */
+function grantProblems(grant: Grant, policy: SchemaPolicy, roles: RoleNames): string[] {
+  if (grant.to_public) return [`${grant.object}: PUBLIC has ${grant.privilege} (ADR-005 §8)`];
+  if (grant.grantee === roles.backup && grant.kind !== 'default' && !BACKUP_MAY[grant.kind].includes(grant.privilege)) {
+    return [`${grant.object}: ${roles.backup} has ${grant.privilege}; it may only read (ADR-005 §3)`];
+  }
+  // Each settles the grant (a problem, or none) or leaves it to the next.
+  const settled =
+    appendOnlyGrantProblems(grant, policy, roles) ??
+    globalGrantProblems(grant, policy, roles) ??
+    fillInGrantProblems(grant, policy, roles);
+  if (settled !== undefined) return settled;
   const onRows = grant.kind === 'column' || (grant.kind === 'relation' && grant.relation !== '');
   if (onRows && grant.grantee === roles.app && !APP_MAY.includes(grant.privilege)) {
     return [

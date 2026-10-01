@@ -66,6 +66,24 @@ export function checkWorkflow(relativePath, contents) {
     );
   }
 
+  checkActions(contents, add);
+  checkPullRequestSecrets(code, contents, add);
+
+  for (const job of collectJobs(contents)) {
+    if (!/^\s+timeout-minutes\s*:\s*\d+/m.test(job.block)) {
+      add('job-timeout', `Job "${job.name}" has no timeout-minutes.`);
+    }
+  }
+
+  for (const line of checkoutStepsKeepingCredentials(contents)) {
+    add('checkout-credentials', `actions/checkout at line ${line} must set persist-credentials: false.`);
+  }
+
+  return violations;
+}
+
+// Each action used must be pinned to a full commit SHA and be on ALLOWED_ACTIONS.
+function checkActions(contents, add) {
   for (const match of contents.matchAll(/^\s*-?\s*uses\s*:\s*['"]?([^\s'"#]+)['"]?/gm)) {
     const ref = match[1];
     if (ref.startsWith('./')) continue; // local composite action
@@ -80,25 +98,15 @@ export function checkWorkflow(relativePath, contents) {
       add('allowed-actions', `${name} is not in the reviewed action allowlist.`);
     }
   }
+}
 
-  if (/\bpull_request\b/.test(code)) {
-    for (const match of contents.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)/g)) {
-      if (match[1] === 'GITHUB_TOKEN') continue;
-      add('no-secrets-on-pull-request', `secrets.${match[1]} is referenced in a workflow that runs on pull_request.`);
-    }
+// A workflow that runs on pull_request may reference no secret but GITHUB_TOKEN.
+function checkPullRequestSecrets(code, contents, add) {
+  if (!/\bpull_request\b/.test(code)) return;
+  for (const match of contents.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)/g)) {
+    if (match[1] === 'GITHUB_TOKEN') continue;
+    add('no-secrets-on-pull-request', `secrets.${match[1]} is referenced in a workflow that runs on pull_request.`);
   }
-
-  for (const job of collectJobs(contents)) {
-    if (!/^\s+timeout-minutes\s*:\s*\d+/m.test(job.block)) {
-      add('job-timeout', `Job "${job.name}" has no timeout-minutes.`);
-    }
-  }
-
-  for (const line of checkoutStepsKeepingCredentials(contents)) {
-    add('checkout-credentials', `actions/checkout at line ${line} must set persist-credentials: false.`);
-  }
-
-  return violations;
 }
 
 // Removes YAML comments: a `#` at the start of a line or after whitespace.

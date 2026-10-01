@@ -86,6 +86,8 @@ const CLEANUP_CONTAINER = {
 
 const CLEANUP_URL = `https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-agentx-staging/providers/Microsoft.App/jobs/job-agentx-stg-zitadel-setup/start?api-version=2026-01-01`;
 
+const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+
 interface Script {
   /** The subscription ID `account show` gives. */
   readonly subscription?: unknown;
@@ -129,24 +131,9 @@ class ScriptedAz implements Az {
 
   run(args: readonly string[]): AzResult {
     this.calls.push(args);
-    const json = (value: unknown): AzResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
     const script = this.#script;
     if (args[0] === 'rest' && args[args.indexOf('--url') + 1]?.includes('/Microsoft.App/jobs/') === true) {
-      expect(args.slice(0, 5)).toEqual(['rest', '--method', 'post', '--url', CLEANUP_URL]);
-      if (script.startStatus !== undefined && script.startStatus !== 0) {
-        return {
-          status: script.startStatus,
-          stdout: '',
-          stderr: 'ERROR: Bad Request({"error":{"code":"InvalidParameter"}})',
-        };
-      }
-      return {
-        status: 0,
-        stdout:
-          script.startAnswer ??
-          JSON.stringify({ id: '/subscriptions/x', name: 'job-agentx-stg-zitadel-setup-c1e2a3n' }),
-        stderr: '',
-      };
+      return this.#cleanupStart(args);
     }
     if (args[0] === 'rest') return json(this.#rest(args));
     const words = args.filter((arg) => !arg.startsWith('-')).slice(0, 4);
@@ -187,6 +174,25 @@ class ScriptedAz implements Az {
       default:
         throw new Error(`unexpected az ${args.join(' ')}`);
     }
+  }
+
+  /** The clean-up run's start, by Resource Manager, as the script says it answers. */
+  #cleanupStart(args: readonly string[]): AzResult {
+    const script = this.#script;
+    expect(args.slice(0, 5)).toEqual(['rest', '--method', 'post', '--url', CLEANUP_URL]);
+    if (script.startStatus !== undefined && script.startStatus !== 0) {
+      return {
+        status: script.startStatus,
+        stdout: '',
+        stderr: 'ERROR: Bad Request({"error":{"code":"InvalidParameter"}})',
+      };
+    }
+    return {
+      status: 0,
+      stdout:
+        script.startAnswer ?? JSON.stringify({ id: '/subscriptions/x', name: 'job-agentx-stg-zitadel-setup-c1e2a3n' }),
+      stderr: '',
+    };
   }
 
   /** The workspace, by Resource Manager, and the log query. */

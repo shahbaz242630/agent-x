@@ -589,20 +589,7 @@ function skipQuoted(query: string, index: number): number | undefined {
   };
   if (rest.startsWith('```')) return endOf('```', index + 3);
   if (rest.startsWith('//')) return endOf('\n', index + 2);
-  if (/^@["']/.test(rest)) {
-    // Verbatim: no escapes but a doubled quote.
-    const quote = rest.charAt(1);
-    let end = index + 2;
-    while (end < query.length) {
-      if (query.charAt(end) === quote) {
-        if (query.charAt(end + 1) !== quote) return end + 1;
-        end += 2;
-      } else {
-        end += 1;
-      }
-    }
-    return query.length;
-  }
+  if (/^@["']/.test(rest)) return verbatimEnd(query, index + 2, rest.charAt(1));
   if (rest.startsWith('"') || rest.startsWith("'")) {
     const quote = rest.charAt(0);
     let end = index + 1;
@@ -610,6 +597,20 @@ function skipQuoted(query: string, index: number): number | undefined {
     return Math.min(end + 1, query.length);
   }
   return undefined;
+}
+
+/** Where a verbatim KQL string ends (one past it), its text starting at `from`: no escapes but a doubled quote. */
+function verbatimEnd(query: string, from: number, quote: string): number {
+  let end = from;
+  while (end < query.length) {
+    if (query.charAt(end) === quote) {
+      if (query.charAt(end + 1) !== quote) return end + 1;
+      end += 2;
+    } else {
+      end += 1;
+    }
+  }
+  return query.length;
 }
 
 /**
@@ -1809,6 +1810,28 @@ const vaultOf = (secret: PredictedResource): string => secret.id.slice(0, secret
 
 const WRITTEN_WHEN_GIVEN = /^\[not\(empty\(parameters\('([^']+)'\)\)\)\]$/;
 
+/** What is wrong with when a secret is written (once, copied every run, or only when given), or nothing. */
+function whenWrittenProblem(snapshot: Snapshot, secret: PredictedResource, name: string): string | undefined {
+  if (CREATED_ONCE.has(name)) {
+    if (secret.condition !== undefined) {
+      return 'is created once (@onlyIfNotExists()), never on a condition a later run could meet';
+    }
+    return undefined;
+  }
+  if (COPIED[name] !== undefined) {
+    if (secret.condition !== undefined || !isCopiedKey(snapshot, secret, at(secret.properties, 'value'))) {
+      return `is copied on every run from the ${COPIED[name]} this deployment creates (its listKeys().primaryKey), on no condition`;
+    }
+    return undefined;
+  }
+  const condition = WRITTEN_WHEN_GIVEN.exec(secret.condition ?? '')?.[1];
+  const value = parameterOf(at(secret.properties, 'value'));
+  if (condition === undefined || (value !== undefined && value !== condition)) {
+    return 'must be written only when its value is given (if (!empty(value))), so a run that rotates another secret leaves this one';
+  }
+  return undefined;
+}
+
 /**
  * The vault holds exactly the secrets the apps read, each once and in a vault
  * of this deployment (ADR-002 Amendment G2c). Each is written only when its
@@ -1831,23 +1854,8 @@ const vaultSecrets: Check = (snapshot, _expected, add) => {
     if (!VAULT_SECRETS.has(name)) {
       problem('is no secret an app or job reads (GRANTS): one nobody needs is one more to leak');
     }
-    const condition = WRITTEN_WHEN_GIVEN.exec(secret.condition ?? '')?.[1];
-    const value = parameterOf(at(secret.properties, 'value'));
-    if (CREATED_ONCE.has(name)) {
-      if (secret.condition !== undefined) {
-        problem('is created once (@onlyIfNotExists()), never on a condition a later run could meet');
-      }
-    } else if (COPIED[name] !== undefined) {
-      if (secret.condition !== undefined || !isCopiedKey(snapshot, secret, at(secret.properties, 'value'))) {
-        problem(
-          `is copied on every run from the ${COPIED[name]} this deployment creates (its listKeys().primaryKey), on no condition`,
-        );
-      }
-    } else if (condition === undefined || (value !== undefined && value !== condition)) {
-      problem(
-        'must be written only when its value is given (if (!empty(value))), so a run that rotates another secret leaves this one',
-      );
-    }
+    const written = whenWrittenProblem(snapshot, secret, name);
+    if (written !== undefined) problem(written);
   }
   for (const name of VAULT_SECRETS) {
     const count = secrets.filter((secret) => secretNameOf(secret) === name).length;
@@ -2028,7 +2036,11 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
   if (trusts.length !== 1) {
     problem('the deployment', `needs one trust, for CI's identity; the snapshot has ${String(trusts.length)}`);
   }
+  releaseRoleProblems(snapshot, problem);
+};
 
+/** CI's custom role, half of `release-identity`: exactly one, named so, given in the resource group alone, allowing RELEASE_ACTIONS and no data action. */
+function releaseRoleProblems(snapshot: Snapshot, problem: (resource: string, message: string) => void): void {
   const groups = ofType(snapshot, TYPES.group).map((group) => group.id);
   const roles = ofType(snapshot, TYPES.roleDefinition);
   const roleName = releaseRoleName(groupOf(snapshot));
@@ -2062,7 +2074,7 @@ const releaseIdentity: Check = (snapshot, expected, add) => {
   if (roles.length !== 1) {
     problem('the deployment', `needs one custom role, CI's; the snapshot has ${String(roles.length)}`);
   }
-};
+}
 
 /** The work a job or an app does, from its name (`job-agentx-stg-migrate`, `ca-agentx-stg-api`). */
 const jobWorkloadOf = (name: string): string => name.replace(/^(?:job|ca)-agentx-[a-z]+-/, '');
@@ -2128,6 +2140,47 @@ const releaseAccess: Check = (snapshot, expected, add) => {
 /** An image named by digest: a tag can be moved to another image, a digest can't (SEC-SC-02). */
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}$/;
 
+/** How a job's configuration says it runs: started by hand, one replica per run, no retry, and a time limit. */
+function runProblems(configuration: unknown, problem: (message: string) => void): void {
+  if (at(configuration, 'triggerType') !== 'Manual') {
+    problem('must be started by hand (triggerType Manual): one that starts itself would use its secrets unwatched');
+  }
+  for (const trigger of ['scheduleTriggerConfig', 'eventTriggerConfig'] as const) {
+    if (at(configuration, trigger) !== undefined) problem(`must have no ${trigger}: it is started by hand`);
+  }
+  for (const setting of ['parallelism', 'replicaCompletionCount'] as const) {
+    if (at(configuration, 'manualTriggerConfig', setting) !== 1) {
+      problem(`must run one replica per run (manualTriggerConfig.${setting} 1): two of them would race`);
+    }
+  }
+  if (at(configuration, 'replicaRetryLimit') !== 0) {
+    problem('must not retry a failed run (replicaRetryLimit 0): a retry hides why the first run failed');
+  }
+  const timeout = at(configuration, 'replicaTimeout');
+  if (typeof timeout !== 'number' || timeout <= 0 || timeout > LONGEST_RUN_SECONDS) {
+    problem(
+      `must give up after 1 to ${String(LONGEST_RUN_SECONDS)} seconds (replicaTimeout); it says ${String(timeout)}`,
+    );
+  }
+}
+
+/** What a job or an app runs, by the same rules for both: one container, no init container, an image named by digest. */
+function containerProblems(workload: PredictedResource, problem: (message: string) => void): void {
+  const containers = containersOf(workload);
+  if (containers.length !== 1) {
+    problem(`must run exactly one container; the snapshot has ${String(containers.length)}`);
+  }
+  if (list(at(workload.properties, 'template', 'initContainers')).length > 0) {
+    problem('must run no init container: the work is the one container, in view of the log');
+  }
+  for (const container of containers) {
+    const image = text(at(container, 'image'));
+    if (!PINNED_IMAGE.test(image)) {
+      problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
+    }
+  }
+}
+
 /**
  * Every job is started by hand, runs one replica per run, gives up rather than
  * retrying, and runs the exact image it names (ADR-002 Amendment G2d). Container
@@ -2151,39 +2204,8 @@ const jobs: Check = (snapshot, _expected, add) => {
     if (at(job.properties, 'workloadProfileName') !== WORKLOAD_PROFILE) {
       problem(`must run on the ${WORKLOAD_PROFILE} workload profile, the only one the environment offers`);
     }
-    if (at(configuration, 'triggerType') !== 'Manual') {
-      problem('must be started by hand (triggerType Manual): one that starts itself would use its secrets unwatched');
-    }
-    for (const trigger of ['scheduleTriggerConfig', 'eventTriggerConfig'] as const) {
-      if (at(configuration, trigger) !== undefined) problem(`must have no ${trigger}: it is started by hand`);
-    }
-    for (const setting of ['parallelism', 'replicaCompletionCount'] as const) {
-      if (at(configuration, 'manualTriggerConfig', setting) !== 1) {
-        problem(`must run one replica per run (manualTriggerConfig.${setting} 1): two of them would race`);
-      }
-    }
-    if (at(configuration, 'replicaRetryLimit') !== 0) {
-      problem('must not retry a failed run (replicaRetryLimit 0): a retry hides why the first run failed');
-    }
-    const timeout = at(configuration, 'replicaTimeout');
-    if (typeof timeout !== 'number' || timeout <= 0 || timeout > LONGEST_RUN_SECONDS) {
-      problem(
-        `must give up after 1 to ${String(LONGEST_RUN_SECONDS)} seconds (replicaTimeout); it says ${String(timeout)}`,
-      );
-    }
-    const containers = containersOf(job);
-    if (containers.length !== 1) {
-      problem(`must run exactly one container; the snapshot has ${String(containers.length)}`);
-    }
-    if (list(at(job.properties, 'template', 'initContainers')).length > 0) {
-      problem('must run no init container: the work is the one container, in view of the log');
-    }
-    for (const container of containers) {
-      const image = text(at(container, 'image'));
-      if (!PINNED_IMAGE.test(image)) {
-        problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
-      }
-    }
+    runProblems(configuration, problem);
+    containerProblems(job, problem);
   }
   for (const workload of JOB_WORKLOADS) {
     const count = found.filter((job) => jobWorkloadOf(job.name) === workload).length;
@@ -2196,6 +2218,21 @@ const jobs: Check = (snapshot, _expected, add) => {
     }
   }
 };
+
+/** An app's scale: at most one replica when `only` says why, at least one it may run, and no more kept than that. */
+function scaleProblems(scale: unknown, only: string | undefined, problem: (message: string) => void): void {
+  const most = at(scale, 'maxReplicas');
+  const fewest = at(scale, 'minReplicas');
+  if (only !== undefined && most !== 1) {
+    problem(`must run at most one replica (maxReplicas 1): ${only}; it says ${String(most)}`);
+  }
+  if (typeof most !== 'number' || most < 1) {
+    problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);
+  }
+  if (typeof fewest !== 'number' || fewest < 0 || (typeof most === 'number' && fewest > most)) {
+    problem(`must keep no more replicas than it may run (minReplicas ${String(fewest)}, maxReplicas ${String(most)})`);
+  }
+}
 
 /**
  * Every app that serves traffic (ADR-002 Amendment G2d): in this deployment's
@@ -2231,34 +2268,8 @@ const apps: Check = (snapshot, _expected, add) => {
     if (at(ingress, 'allowInsecure') !== false) {
       problem('must refuse plain http (allowInsecure false), which peer-to-peer encryption already covers');
     }
-    const scale = at(app.properties, 'template', 'scale');
-    const most = at(scale, 'maxReplicas');
-    const fewest = at(scale, 'minReplicas');
-    const only = ONE_REPLICA[workload];
-    if (only !== undefined && most !== 1) {
-      problem(`must run at most one replica (maxReplicas 1): ${only}; it says ${String(most)}`);
-    }
-    if (typeof most !== 'number' || most < 1) {
-      problem(`must be able to run a replica (maxReplicas at least 1); it says ${String(most)}`);
-    }
-    if (typeof fewest !== 'number' || fewest < 0 || (typeof most === 'number' && fewest > most)) {
-      problem(
-        `must keep no more replicas than it may run (minReplicas ${String(fewest)}, maxReplicas ${String(most)})`,
-      );
-    }
-    const containers = containersOf(app);
-    if (containers.length !== 1) {
-      problem(`must run exactly one container; the snapshot has ${String(containers.length)}`);
-    }
-    if (list(at(app.properties, 'template', 'initContainers')).length > 0) {
-      problem('must run no init container: the work is the one container, in view of the log');
-    }
-    for (const container of containers) {
-      const image = text(at(container, 'image'));
-      if (!PINNED_IMAGE.test(image)) {
-        problem(`must name its image by digest (SEC-SC-02); it runs ${image}`);
-      }
-    }
+    scaleProblems(at(app.properties, 'template', 'scale'), ONE_REPLICA[workload], problem);
+    containerProblems(app, problem);
   }
   for (const workload of APP_WORKLOADS) {
     const count = found.filter((app) => jobWorkloadOf(app.name) === workload).length;
@@ -2317,6 +2328,17 @@ const routingOf = (door: PredictedResource, workloadsByApp: ReadonlyMap<unknown,
     );
   });
 
+/** A door's hosts: exactly one, with a certificate binding that is never plain http alone. */
+function hostProblems(door: PredictedResource, problem: (message: string) => void): void {
+  const hosts = list(at(door.properties, 'customDomains'));
+  if (hosts.length !== 1) problem(`must serve exactly one host; it names ${String(hosts.length)}`);
+  for (const host of hosts) {
+    if (!SECURE_BINDINGS.has(at(host, 'bindingType'))) {
+      problem(`must bind a certificate to ${text(at(host, 'name'))} (Auto or SniEnabled), never plain http alone`);
+    }
+  }
+}
+
 /**
  * The public doors (ADR-002 Amendment G2e), the only way in from the internet.
  * Each is a door of this deployment's environment that `PUBLIC_DOORS` names,
@@ -2342,13 +2364,7 @@ const publicDoors: Check = (snapshot, _expected, add) => {
     if (!environments.some((id) => door.id.startsWith(`${id}/httpRouteConfigs/`))) {
       problem("must be a door of this deployment's Container Apps environment");
     }
-    const hosts = list(at(door.properties, 'customDomains'));
-    if (hosts.length !== 1) problem(`must serve exactly one host; it names ${String(hosts.length)}`);
-    for (const host of hosts) {
-      if (!SECURE_BINDINGS.has(at(host, 'bindingType'))) {
-        problem(`must bind a certificate to ${text(at(host, 'name'))} (Auto or SniEnabled), never plain http alone`);
-      }
-    }
+    hostProblems(door, problem);
     const routing = routingOf(door, workloadsByApp);
     if (listed !== undefined && routing.join('\n') !== listed.join('\n')) {
       problem(
@@ -2462,37 +2478,11 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     const problem = (message: string): void => {
       add({ rule: 'workload-secrets', resource: job.name, message });
     };
-    const assigned = Object.keys(at(job.identity, 'userAssignedIdentities') ?? {});
-    if (at(job.identity, 'type') !== 'UserAssigned') {
-      problem('must run as a user-assigned identity, never a system-assigned one tied to the resource');
-    }
-    const only = assigned[0] ?? '';
-    if (assigned.length !== 1 || workloadOf(only.slice(only.lastIndexOf('/') + 1)) !== workload) {
-      problem(`must run as its own identity alone, the one named for ${workload}`);
-    }
+    const assigned = identityProblems(job, workload, problem);
     const all = list(at(job.properties, 'configuration', 'secrets'));
     const held = HELD[workload];
     const holding = all.filter((secret) => text(at(secret, 'name')) === held?.name);
-    if (held !== undefined) {
-      // None held fails the value; twice held, the second.
-      const [kept, ...again] = holding;
-      const fields = typeof kept === 'object' && kept !== null ? Object.keys(kept) : [];
-      if (
-        again.length > 0 ||
-        at(kept, 'value') !== held.value ||
-        fields.some((field) => field !== 'name' && field !== 'value')
-      ) {
-        problem(`must hold ${held.name} once, as ${held.value} and nothing else: a person writes it before a run`);
-      }
-      const run = JSON.stringify([...held.command, '|', ...held.args]);
-      for (const container of containersOf(job)) {
-        if (JSON.stringify([...list(at(container, 'command')), '|', ...list(at(container, 'args'))]) !== run) {
-          problem(
-            `must run ${held.command.join(' ')} ${held.args.join(' ')} and nothing else: a request in its command or arguments would sit in the deployment and every run's record`,
-          );
-        }
-      }
-    }
+    if (held !== undefined) heldProblems(job, held, holding, problem);
     const declared = all.filter((secret) => !holding.includes(secret));
     const given = all.map((secret) => text(at(secret, 'name')));
     const needed = secretsRead(workload);
@@ -2502,42 +2492,103 @@ const workloadSecrets: Check = (snapshot, _expected, add) => {
     for (const name of [...needed].filter((secret) => !given.includes(secret))) {
       problem(`must be given ${name}, which ${workload} reads (GRANTS)`);
     }
-    for (const secret of declared) {
-      const name = text(at(secret, 'name'));
-      if (at(secret, 'value') !== undefined) {
-        problem(`holds ${name}'s value; a secret is read from the vault, never carried in the deployment`);
-      }
-      const url = urlOfSecret(text(at(secret, 'keyVaultUrl')));
-      if (url === undefined || !vaults.has(url.vault) || url.secret !== name) {
-        problem(`must read ${name} from this deployment's vault by that name and no version, so a rotation reaches it`);
-      }
-      if (!assigned.includes(text(at(secret, 'identity')))) {
-        problem(`must read ${name} through its own identity`);
-      }
-    }
-    const used = secretsUsed(job);
-    for (const volume of list(at(job.properties, 'template', 'volumes'))) {
-      if (at(volume, 'storageType') === 'Secret' && list(at(volume, 'secrets')).length === 0) {
-        problem(`mounts ${text(at(volume, 'name'))} without naming what is in it, which mounts every secret it has`);
-      }
-    }
-    for (const name of given.filter((secret) => ![...used.environment, ...used.files].includes(secret))) {
-      problem(`is given ${name} and never reads it; one nobody needs is one more to leak`);
-    }
-    for (const name of [...used.environment, ...used.files].filter((secret) => !given.includes(secret))) {
-      problem(`reads ${name}, which it is not given`);
-    }
-    for (const container of containersOf(job)) {
-      for (const entry of list(at(container, 'env')).filter((setting) => at(setting, 'secretRef') !== undefined)) {
-        const setting = text(at(entry, 'name'));
-        if (mayTakeSecretInEnvironment(at(container, 'image'), setting)) continue;
-        problem(
-          `takes ${setting} in the environment, which crash output and every child process see; mount it as a file, or list the setting in SECRETS_IN_ENVIRONMENT with why its image can't read one`,
-        );
-      }
-    }
+    for (const secret of declared) declaredSecretProblems(secret, vaults, assigned, problem);
+    secretUseProblems(job, given, problem);
   }
 };
+
+/** The identity a job or an app runs as: user-assigned, and its own alone. Gives back the ids it is assigned. */
+function identityProblems(
+  job: PredictedResource,
+  workload: string,
+  problem: (message: string) => void,
+): readonly string[] {
+  const assigned = Object.keys(at(job.identity, 'userAssignedIdentities') ?? {});
+  if (at(job.identity, 'type') !== 'UserAssigned') {
+    problem('must run as a user-assigned identity, never a system-assigned one tied to the resource');
+  }
+  const only = assigned[0] ?? '';
+  if (assigned.length !== 1 || workloadOf(only.slice(only.lastIndexOf('/') + 1)) !== workload) {
+    problem(`must run as its own identity alone, the one named for ${workload}`);
+  }
+  return assigned;
+}
+
+/** What a job holds as `HELD` says: once, as given there, and its command and arguments exactly HELD's. */
+function heldProblems(
+  job: PredictedResource,
+  held: (typeof HELD)[string],
+  holding: readonly unknown[],
+  problem: (message: string) => void,
+): void {
+  // None held fails the value; twice held, the second.
+  const [kept, ...again] = holding;
+  const fields = typeof kept === 'object' && kept !== null ? Object.keys(kept) : [];
+  if (
+    again.length > 0 ||
+    at(kept, 'value') !== held.value ||
+    fields.some((field) => field !== 'name' && field !== 'value')
+  ) {
+    problem(`must hold ${held.name} once, as ${held.value} and nothing else: a person writes it before a run`);
+  }
+  const run = JSON.stringify([...held.command, '|', ...held.args]);
+  for (const container of containersOf(job)) {
+    if (JSON.stringify([...list(at(container, 'command')), '|', ...list(at(container, 'args'))]) !== run) {
+      problem(
+        `must run ${held.command.join(' ')} ${held.args.join(' ')} and nothing else: a request in its command or arguments would sit in the deployment and every run's record`,
+      );
+    }
+  }
+}
+
+/** One secret a job or an app declares: no value of its own, read from this deployment's vault by name, through its own identity. */
+function declaredSecretProblems(
+  secret: unknown,
+  vaults: ReadonlySet<string>,
+  assigned: readonly string[],
+  problem: (message: string) => void,
+): void {
+  const name = text(at(secret, 'name'));
+  if (at(secret, 'value') !== undefined) {
+    problem(`holds ${name}'s value; a secret is read from the vault, never carried in the deployment`);
+  }
+  const url = urlOfSecret(text(at(secret, 'keyVaultUrl')));
+  if (url === undefined || !vaults.has(url.vault) || url.secret !== name) {
+    problem(`must read ${name} from this deployment's vault by that name and no version, so a rotation reaches it`);
+  }
+  if (!assigned.includes(text(at(secret, 'identity')))) {
+    problem(`must read ${name} through its own identity`);
+  }
+}
+
+/**
+ * How a job or an app reads what it is given: every secret volume names what
+ * is in it, every secret given is read and none read that isn't, and none
+ * reaches the environment but where `SECRETS_IN_ENVIRONMENT` allows it.
+ */
+function secretUseProblems(job: PredictedResource, given: readonly string[], problem: (message: string) => void): void {
+  const used = secretsUsed(job);
+  for (const volume of list(at(job.properties, 'template', 'volumes'))) {
+    if (at(volume, 'storageType') === 'Secret' && list(at(volume, 'secrets')).length === 0) {
+      problem(`mounts ${text(at(volume, 'name'))} without naming what is in it, which mounts every secret it has`);
+    }
+  }
+  for (const name of given.filter((secret) => ![...used.environment, ...used.files].includes(secret))) {
+    problem(`is given ${name} and never reads it; one nobody needs is one more to leak`);
+  }
+  for (const name of [...used.environment, ...used.files].filter((secret) => !given.includes(secret))) {
+    problem(`reads ${name}, which it is not given`);
+  }
+  for (const container of containersOf(job)) {
+    for (const entry of list(at(container, 'env')).filter((setting) => at(setting, 'secretRef') !== undefined)) {
+      const setting = text(at(entry, 'name'));
+      if (mayTakeSecretInEnvironment(at(container, 'image'), setting)) continue;
+      problem(
+        `takes ${setting} in the environment, which crash output and every child process see; mount it as a file, or list the setting in SECRETS_IN_ENVIRONMENT with why its image can't read one`,
+      );
+    }
+  }
+}
 
 /**
  * Nothing a container runs — job or app — sends telemetry out of the UAE

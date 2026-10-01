@@ -73,28 +73,31 @@ function zitadel(
     if (method === 'GET' && path === '/authentication_methods') {
       return Promise.resolve(json({ details: {}, authMethodTypes: person.methods }));
     }
-    if (method === 'DELETE') {
-      const u2f = /^\/u2f\/(\d+)$/.exec(path)?.[1];
-      const passkey = /^\/passkeys\/(\d+)$/.exec(path)?.[1];
-      const kind = { '/totp': 'otp', '/otp_sms': 'otpSms', '/otp_email': 'otpEmail' }[path];
-      if (u2f !== undefined)
-        person.factors = person.factors.filter((each) => (each.u2f as { id?: string } | undefined)?.id !== u2f);
-      else if (passkey !== undefined) person.passkeys = person.passkeys.filter(({ id }) => id !== passkey);
-      else if (kind !== undefined) person.factors = person.factors.filter((each) => each[kind] === undefined);
-      else if (path !== '/recovery_codes') return Promise.resolve(json({ message: 'no such route' }, 404));
-      const method = METHOD_OF[path];
-      if (method !== undefined) person.methods = person.methods.filter((each) => each !== method);
-      if (u2f !== undefined && !person.factors.some((each) => each.u2f !== undefined)) {
-        person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_U2F');
-      }
-      if (passkey !== undefined && person.passkeys.length === 0) {
-        person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_PASSKEY');
-      }
-      return Promise.resolve(json({ details: { sequence: '1' } }));
-    }
+    if (method === 'DELETE') return Promise.resolve(removeAt(person, path));
     return Promise.resolve(json({ message: 'no such route' }, 404));
   };
   return { asked, fetch };
+}
+
+/** A removal at `path` from the stand-in's person: takes the factor away, and its method once none of its kind is left. */
+function removeAt(person: Person, path: string): Response {
+  const u2f = /^\/u2f\/(\d+)$/.exec(path)?.[1];
+  const passkey = /^\/passkeys\/(\d+)$/.exec(path)?.[1];
+  const kind = { '/totp': 'otp', '/otp_sms': 'otpSms', '/otp_email': 'otpEmail' }[path];
+  if (u2f !== undefined)
+    person.factors = person.factors.filter((each) => (each.u2f as { id?: string } | undefined)?.id !== u2f);
+  else if (passkey !== undefined) person.passkeys = person.passkeys.filter(({ id }) => id !== passkey);
+  else if (kind !== undefined) person.factors = person.factors.filter((each) => each[kind] === undefined);
+  else if (path !== '/recovery_codes') return json({ message: 'no such route' }, 404);
+  const method = METHOD_OF[path];
+  if (method !== undefined) person.methods = person.methods.filter((each) => each !== method);
+  if (u2f !== undefined && !person.factors.some((each) => each.u2f !== undefined)) {
+    person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_U2F');
+  }
+  if (passkey !== undefined && person.passkeys.length === 0) {
+    person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_PASSKEY');
+  }
+  return json({ details: { sequence: '1' } });
 }
 
 /** The pauses a remover took between its reads after a removal, each instant here. */

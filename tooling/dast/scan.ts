@@ -309,35 +309,39 @@ export function schemathesisFindings(xml: string): Finding[] {
     if (/<error\b/.test(body)) errored += 1;
     // An element with a body, or an empty one (`<error/>`): each counts.
     for (const match of body.matchAll(/<(failure|error)\b[^>]*>([\s\S]*?)<\/\1>|<(?:failure|error)\b[^>]*\/>/g)) {
-      const text = match[2] ?? '';
-      let checks = 0;
-      for (const failure of unescapeXml(text).split(/^(?=\d+\. Test Case ID:)/m)) {
-        const status = /^\[(\d{3})\] /m.exec(failure)?.[1];
-        for (const [, check = ''] of failure.matchAll(/^- (.+)$/gm)) {
-          checks += 1;
-          findings.push({
-            ...at,
-            rule: ruleOf(check.trim()),
-            title: check.trim(),
-            severity: schemathesisSeverity(check),
-            ...(status !== undefined && { status: Number(status) }),
-          });
-        }
-      }
-      if (checks === 0) {
-        findings.push({
-          ...at,
-          rule: 'schemathesis/unreadable-failure',
-          title: 'A case that failed without a check it names',
-          severity: 'high',
-        });
-      }
+      findings.push(...elementFindings(match[2] ?? '', at));
     }
   }
   if (failed !== counted('failures') || errored !== counted('errors')) {
     throw new Error(
       `Schemathesis's report counts ${String(counted('failures'))} failed and ${String(counted('errors'))} errored test cases, but ${String(failed)} and ${String(errored)} were read`,
     );
+  }
+  return findings;
+}
+
+/** One failure or error element's findings: each check its cases failed, or one high finding when it names none. */
+function elementFindings(text: string, at: Pick<Finding, 'tool' | 'method' | 'path'>): Finding[] {
+  const findings: Finding[] = [];
+  for (const failure of unescapeXml(text).split(/^(?=\d+\. Test Case ID:)/m)) {
+    const status = /^\[(\d{3})\] /m.exec(failure)?.[1];
+    for (const [, check = ''] of failure.matchAll(/^- (.+)$/gm)) {
+      findings.push({
+        ...at,
+        rule: ruleOf(check.trim()),
+        title: check.trim(),
+        severity: schemathesisSeverity(check),
+        ...(status !== undefined && { status: Number(status) }),
+      });
+    }
+  }
+  if (findings.length === 0) {
+    findings.push({
+      ...at,
+      rule: 'schemathesis/unreadable-failure',
+      title: 'A case that failed without a check it names',
+      severity: 'high',
+    });
   }
   return findings;
 }

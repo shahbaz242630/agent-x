@@ -442,6 +442,24 @@ function shown(line: LogLine): string {
   return `  ${time}  ${line.source.padEnd(8)}  ${reason}${line.text}`;
 }
 
+/** Shows a run's log as last read, and says what may be missing from it. */
+function showLog(steps: JobSteps, execution: string, lines: readonly LogLine[], previous: number | undefined): void {
+  const fromContainer = lines.filter((line) => line.source !== 'platform').length;
+  const terminated = lines.some((line) => line.reason === 'ContainerTerminated');
+  steps.say(
+    `${execution}'s log, ${String(lines.length - fromContainer)} from the platform and ${String(fromContainer)} from the container:`,
+  );
+  for (const line of lines) steps.say(shown(line));
+  if (!terminated) {
+    steps.say("Azure logged no end for the container, so these may not be all the run's lines.");
+  } else if (fromContainer === 0) {
+    steps.say('No line from the container reached the workspace.');
+  } else if (previous !== undefined && fromContainer !== previous) {
+    // Late with the lines still changing: a run read long after it ended has had no earlier reading to differ from.
+    steps.say("The container's lines were still arriving 15 minutes after the run ended, so more may be missing.");
+  }
+}
+
 /**
  * Reads a run's log once it has all arrived, shows it, and gives its lines
  * back. It has arrived when the platform has logged the container's end and
@@ -482,18 +500,7 @@ export async function readLog(
     const terminated = lines.some((line) => line.reason === 'ContainerTerminated');
     const late = now >= ended + LOG_DELAY_MS;
     if (late || (terminated && fromContainer > 0 && fromContainer === previous)) {
-      steps.say(
-        `${execution}'s log, ${String(lines.length - fromContainer)} from the platform and ${String(fromContainer)} from the container:`,
-      );
-      for (const line of lines) steps.say(shown(line));
-      if (!terminated) {
-        steps.say("Azure logged no end for the container, so these may not be all the run's lines.");
-      } else if (fromContainer === 0) {
-        steps.say('No line from the container reached the workspace.');
-      } else if (previous !== undefined && fromContainer !== previous) {
-        // Late with the lines still changing: a run read long after it ended has had no earlier reading to differ from.
-        steps.say("The container's lines were still arriving 15 minutes after the run ended, so more may be missing.");
-      }
+      showLog(steps, execution, lines, previous);
       return lines;
     }
     if (reading === 0) {
