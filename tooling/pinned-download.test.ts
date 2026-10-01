@@ -4,7 +4,14 @@ import path from 'node:path';
 
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { downloadPinnedTo, sha256Of, sha256OfFile, type StreamingFetch } from './pinned-download.ts';
+import {
+  downloadPinned,
+  downloadPinnedTo,
+  type Fetch,
+  sha256Of,
+  sha256OfFile,
+  type StreamingFetch,
+} from './pinned-download.ts';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'agentx-pinned-'));
 afterAll(() => {
@@ -27,21 +34,22 @@ describe("hashing an installed tool's file", () => {
   });
 });
 
+/** A release file served in pieces, as a slow line delivers it. */
+const serve =
+  (pieces: readonly Uint8Array[], status = 200): StreamingFetch =>
+  () =>
+    Promise.resolve({
+      ok: status === 200,
+      status,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const piece of pieces) controller.enqueue(piece);
+          controller.close();
+        },
+      }),
+    });
+
 describe('a large download, written as it arrives', () => {
-  /** A release file served in pieces, as a slow line delivers it. */
-  const serve =
-    (pieces: readonly Uint8Array[], status = 200): StreamingFetch =>
-    () =>
-      Promise.resolve({
-        ok: status === 200,
-        status,
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            for (const piece of pieces) controller.enqueue(piece);
-            controller.close();
-          },
-        }),
-      });
   const pieces = Array.from({ length: 40 }, (_, index) =>
     Uint8Array.from({ length: 4099 }, (__, at) => (index + at) % 256),
   );
@@ -107,5 +115,76 @@ describe('a large download, written as it arrives', () => {
     await downloadPinnedTo('https://example.invalid/tool', 'tool', pin, target, recording);
     expect(signals).toHaveLength(1);
     expect(signals[0]).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe('a download GitHub fails now and then (S35, S59, S70)', () => {
+  const file = Uint8Array.from([1, 2, 3, 4]);
+  const pin = sha256Of(file);
+  const ok = { ok: true, status: 200, arrayBuffer: () => Promise.resolve(file.slice().buffer) };
+  const failing = (status: number) => ({ ok: false, status, arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)) });
+  /**
+   * A fetch that gives each answer in turn, counting the calls (an Error is
+   * thrown, as a dropped line is), and a pause that records its length only.
+   */
+  const answering = (...answers: readonly (Awaited<ReturnType<Fetch>> | Error)[]) => {
+    const calls: string[] = [];
+    const waits: number[] = [];
+    const fetchFile: Fetch = (url) => {
+      calls.push(url);
+      const answer = answers[calls.length - 1];
+      if (answer === undefined) return Promise.reject(new Error('asked too often'));
+      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+    };
+    const wait = (ms: number) => {
+      waits.push(ms);
+      return Promise.resolve();
+    };
+    const download = () => downloadPinned('https://example.invalid/tool', 'tool', pin, fetchFile, wait);
+    return { calls, waits, download };
+  };
+
+  it('asks again after a server error or a dropped line, waiting longer each time', async () => {
+    const { calls, waits, download } = answering(failing(500), new TypeError('fetch failed'), ok);
+
+    expect(await download()).toEqual(file);
+    expect(calls).toHaveLength(3);
+    expect(waits).toEqual([2000, 4000]);
+  });
+
+  it.each([
+    ['server errors', [failing(502), failing(503), failing(504)], 'Downloading tool failed: HTTP 504.'],
+    ['dropped lines', [new TypeError('one'), new TypeError('two'), new TypeError('fetch failed')], 'fetch failed'],
+  ])('gives up after three tries, with the last answer: %s', async (_what, answers, last) => {
+    const { calls, download } = answering(...answers);
+
+    await expect(download()).rejects.toThrow(last);
+    expect(calls).toHaveLength(3);
+  });
+
+  it.each([
+    ['a 404', failing(404), 'Downloading tool failed: HTTP 404.'],
+    ['a deadline passed', new DOMException('the deadline passed', 'TimeoutError'), 'the deadline passed'],
+    ['an abort', new DOMException('stopped', 'AbortError'), 'stopped'],
+  ])('never asks again after %s', async (_what, answer, error) => {
+    const { calls, download } = answering(answer, ok);
+
+    await expect(download()).rejects.toThrow(error);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('asks again for a large file too', async () => {
+    const target = path.join(mkdtempSync(path.join(dir, 'retry-')), 'tool');
+    const failed = serve([file], 500);
+    const served = serve([file]);
+    let calls = 0;
+    const streaming: StreamingFetch = (url) => {
+      calls += 1;
+      return calls === 1 ? failed(url) : served(url);
+    };
+
+    await downloadPinnedTo('https://example.invalid/tool', 'tool', pin, target, streaming, () => Promise.resolve());
+    expect(readFileSync(target)).toEqual(Buffer.from(file));
+    expect(calls).toBe(2);
   });
 });

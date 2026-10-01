@@ -132,10 +132,9 @@ jobs:
         run: pnpm knip
 
       # The garbage-code checks (partner, S69): copied blocks outside the
-      # tests, reported only until they are cleaned, then held to a threshold
-      # (jscpd exits 0 on findings while .jscpd.json sets none; CI-05 lets no
-      # Verify step be allowed to fail).
-      - name: Duplicated code (jscpd, report only)
+      # tests, held to .jscpd.json's threshold (S71: 2% of lines, just above
+      # the 1.93% found), so copying can't grow; it is lowered as they are cleaned.
+      - name: Duplicated code (jscpd, threshold in .jscpd.json)
         run: pnpm duplicates
 
       # The deploy/azure checks run the Bicep compiler, and tests download
