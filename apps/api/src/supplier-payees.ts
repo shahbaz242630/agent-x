@@ -578,10 +578,10 @@ export function createSupplierPayees({
     const outcome = await askedAbout(partnerRail, orgId, registration, { route: 'pass_through', payee });
     const fingerprint =
       payeeKeySource(offer, 'pass_through') === 'fingerprint' ? payeeFingerprint(keys, orgId, payee.iban) : null;
-    // A refusal here (the admin's role gone, or another change staged first: SUPPLIER_CHANGE_WAITING, the
-    // registration left open for the same request sent again) is answered, as a check's would be.
+    // A refusal here (another change staged first: SUPPLIER_CHANGE_WAITING, the registration left open for the
+    // same request sent again) is answered, as a check's would be. The admin's role isn't read again: Tx 1 read it
+    // moments ago, and the change stays inert until an admin's passkey confirms it (E2-2b; the mutation pass).
     const kept = await work.answered(orgId, correlationId, async (tx, states) => {
-      const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
       const { supplier } = await work.supplierIn(tx, states, { orgId, id: registration.supplierId }, 'change');
       const found = await registrationIn(tx, states, orgId, supplier.id, registration.id, 'change');
       // `{}`: nothing to answer. Ended meanwhile, by a check of it: as it stands.
@@ -596,7 +596,7 @@ export function createSupplierPayees({
         found,
         outcome,
         offer,
-        enteredBy: admin.id,
+        enteredBy: registration.startedBy,
         correlationId,
         fingerprint,
       });

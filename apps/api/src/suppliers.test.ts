@@ -754,6 +754,8 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
       { name: '   ', iban },
       { name: 'Jasmine AI FZ-LLC', iban, also: 'x' },
       { name: 'Jasmine AI FZ-LLC' },
+      // A valid IBAN, spaced past the 64 its body limit is reckoned on.
+      { name: 'Jasmine AI FZ-LLC', iban: iban.padEnd(65, ' ') },
     ]) {
       const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/pass-through`, body));
       expect(response.statusCode).toBe(400);

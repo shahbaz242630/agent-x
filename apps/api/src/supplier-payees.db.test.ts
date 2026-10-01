@@ -994,6 +994,30 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
     ]);
   });
 
+  it('answers as it stands when a check ended it while the partner was asked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    // The check lands between the pass-through's call to the partner and its answer being kept.
+    const racing: FakeRail = {
+      ...rail,
+      registerBeneficiary: async (input) => {
+        const outcome = await rail.registerBeneficiary(input);
+        answered(await check(admin, id, input.registrationId), 'checked');
+        return outcome;
+      },
+    };
+
+    const done = answered(await passThrough(admin, id, { using: payeesWith(racing) }), 'started');
+
+    expect(done.registration).toMatchObject({ status: 'REGISTERED' });
+    expect(await actionsAbout(org, 'beneficiary_registration', done.registration.id)).toEqual([
+      'beneficiary_registration.started',
+      'beneficiary_registration.answered',
+      'beneficiary_registration.registered',
+    ]);
+  });
+
   it('a form’s start never carries on with a pass-through still open', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
