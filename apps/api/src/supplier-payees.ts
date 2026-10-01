@@ -54,7 +54,10 @@
 //    keyed. A call lost on the way leaves it UNKNOWN; the same request sent
 //    again with the same key (the same IBAN, as its hash holds it) asks the
 //    partner by our ID and keeps the answer. A check can't take our
-//    fingerprint, so one it finds registered ends FAILED, logged by IDs.
+//    fingerprint, so one it finds registered is left open for that request,
+//    logged by IDs. Two at once for one supplier: the second's Tx 2 finds the
+//    first's change waiting (SUPPLIER_CHANGE_WAITING) and leaves its own open,
+//    inert at the partner, as a check does.
 //
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock (a
 // start's alone, for its budget: the supplier's row, read for change by a
@@ -135,10 +138,12 @@ export interface PayeeRegistrationView {
 }
 
 export type PayeeWrite =
-  | ({ readonly outcome: 'started' | 'checked' | 'waiting' } & PayeeRegistrationView)
-  | { readonly outcome: 'conflict' }
-  | { readonly outcome: 'busy' }
-  | Refused;
+  ({ readonly outcome: 'started' | 'checked' | 'waiting' } & PayeeRegistrationView) | PayeeRefusal;
+
+/** A payee write not done: a refusal, or its key's outcome. */
+type PayeeRefusal = { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
+
+const ROUTE_NOT_OFFERED: Refused = { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' };
 
 export interface SupplierPayees {
   start(
@@ -361,12 +366,7 @@ export function createSupplierPayees({
     correlationId: string,
   ): Promise<PayeeForm | null | Refused> => {
     if (!isOpen(registration)) return null;
-    const ref = { organizationId: member.orgId, registrationId: registration.id };
-    const outcome = await asked(() =>
-      registration.status === 'STARTED'
-        ? partnerRail.registerBeneficiary({ route: 'hosted', ...ref })
-        : partnerRail.getBeneficiaryState(ref),
-    );
+    const outcome = await askedAbout(partnerRail, member.orgId, registration, { route: 'hosted' });
     if (outcome !== 'unavailable' && outcome.kind !== 'refused') return formOf(outcome, partnerRail, correlationId);
     // The supplier's row lock serialises this with a check, as with a start.
     await work.inOrganisation(member.orgId, correlationId, async (tx, states) => {
@@ -376,19 +376,46 @@ export function createSupplierPayees({
         if (isOpen(found.registration)) await keepRefusal(tx, states, member, found, outcome);
         return;
       }
-      // Lost twice, or answered by a check meanwhile: as it stands.
-      if (found.registration.status === 'STARTED') {
-        await recordLost(
-          tx,
-          states,
-          { orgId: member.orgId, id: registration.id },
-          {
-            actor: { type: 'user', id: member.userId },
-          },
-        );
-      }
+      await lostIfStarted(tx, states, member, found);
     });
     return outcome === 'unavailable' ? PARTNER_UNAVAILABLE : null;
+  };
+
+  /**
+   * The partner asked about a registration a start added or carried on with:
+   * STARTED, registered under our ID (the same ID answers the same); UNKNOWN,
+   * asked by it alone, never registered blindly again (ADR-014 §3).
+   */
+  const askedAbout = (
+    partnerRail: FinancialRailAdapter,
+    orgId: string,
+    registration: RegistrationRecord,
+    by: { readonly route: 'hosted' } | { readonly route: 'pass_through'; readonly payee: PayeeDetails },
+  ) => {
+    const ref = { organizationId: orgId, registrationId: registration.id };
+    return asked(() =>
+      registration.status === 'STARTED'
+        ? partnerRail.registerBeneficiary({ ...by, ...ref })
+        : partnerRail.getBeneficiaryState(ref),
+    );
+  };
+
+  /** A call lost on the way recorded (STARTED > UNKNOWN); one lost twice, or answered by a check meanwhile, stands. */
+  const lostIfStarted = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    member: SupplierMember,
+    found: RegistrationFound,
+  ) => {
+    if (found.registration.status !== 'STARTED') return;
+    await recordLost(
+      tx,
+      states,
+      { orgId: member.orgId, id: found.registration.id },
+      {
+        actor: { type: 'user', id: member.userId },
+      },
+    );
   };
 
   /**
@@ -449,9 +476,10 @@ export function createSupplierPayees({
     if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
     if (offer === undefined) throw new Error('a registered payee was answered without the partner’s offer');
     if (payeeKeySource(offer, found.registration.route) === 'fingerprint' && fingerprint === null) {
-      // Our fingerprint is taken only in the request that passed the IBAN through: a check never has it (E2-2d).
-      logger.child({ correlationId }).error('suppliers.fingerprint_unavailable', { registrationId: key.id });
-      await recordFailed(tx, states, key, found, { reason: 'unknown', actor });
+      // Our fingerprint is taken only in the request that passed the IBAN through, which a check never has: left
+      // open for that request, sent again with its key, to keep (the review of E2-2d: never ended here, so a payee
+      // the partner holds is never lost).
+      logger.child({ correlationId }).warn('suppliers.fingerprint_unavailable', { registrationId: key.id });
       return;
     }
     try {
@@ -479,7 +507,7 @@ export function createSupplierPayees({
       payeeKeySource(offer, route);
     } catch (error) {
       if (!(error instanceof RangeError)) throw error;
-      return { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' } as const;
+      return ROUTE_NOT_OFFERED;
     }
     return offer;
   };
@@ -495,7 +523,7 @@ export function createSupplierPayees({
     supplierId: string,
     route: RegistrationRoute,
     correlationId: string,
-  ): Promise<RegistrationRecord | Exclude<PayeeWrite, { outcome: 'started' | 'checked' | 'waiting' }>> => {
+  ): Promise<RegistrationRecord | PayeeRefusal> => {
     const done = await write(member, idempotent, correlationId, async (tx, states) => {
       const { orgId } = member;
       await onePayeeChangeAtATime(tx, orgId);
@@ -547,24 +575,19 @@ export function createSupplierPayees({
   ): Promise<Refused | null> => {
     if (!isOpen(registration)) return null;
     const { orgId } = member;
-    const ref = { organizationId: orgId, registrationId: registration.id };
-    const outcome = await asked(() =>
-      registration.status === 'STARTED'
-        ? partnerRail.registerBeneficiary({ route: 'pass_through', ...ref, payee })
-        : partnerRail.getBeneficiaryState(ref),
-    );
+    const outcome = await askedAbout(partnerRail, orgId, registration, { route: 'pass_through', payee });
     const fingerprint =
       payeeKeySource(offer, 'pass_through') === 'fingerprint' ? payeeFingerprint(keys, orgId, payee.iban) : null;
+    // A refusal here (the admin's role gone, or another change staged first: SUPPLIER_CHANGE_WAITING, the
+    // registration left open for the same request sent again) is answered, as a check's would be.
     const kept = await work.answered(orgId, correlationId, async (tx, states) => {
       const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
       const { supplier } = await work.supplierIn(tx, states, { orgId, id: registration.supplierId }, 'change');
       const found = await registrationIn(tx, states, orgId, supplier.id, registration.id, 'change');
-      // Ended meanwhile, by a check of it: as it stands.
+      // `{}`: nothing to answer. Ended meanwhile, by a check of it: as it stands.
       if (!isOpen(found.registration)) return {};
       if (outcome === 'unavailable') {
-        if (found.registration.status === 'STARTED') {
-          await recordLost(tx, states, { orgId, id: registration.id }, { actor: { type: 'user', id: member.userId } });
-        }
+        await lostIfStarted(tx, states, member, found);
         return {};
       }
       if (outcome.kind === 'waiting') throw new Error('A pass-through registration is never left waiting');

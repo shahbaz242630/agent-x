@@ -353,6 +353,12 @@ const get = (path: string): InjectOptions => ({
 
 const SHOWN: SupplierShown = { ...SUPPLIER, displayName: 'Gulf Office Supplies LLC' };
 
+// Every character as a \uXXXX escape (6 bytes), as the longest JSON can write it.
+const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
+// Matched code point by code point: an astral one is two units, each escaped.
+const escaped = (text: string) =>
+  text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
+
 describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   it('answers 201 with the supplier, passing the admin, the key and the details as kept', async () => {
     const asked: Asked[] = [];
@@ -396,11 +402,6 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     expect(asked).toEqual([]);
   });
 
-  // Every character as a \uXXXX escape (6 bytes), as the longest JSON can write it.
-  const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
-  // Matched code point by code point: an astral one is two units, each escaped.
-  const escaped = (text: string) =>
-    text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
   const longestEmail = `${'a'.repeat(64)}@${'b'.repeat(189)}`;
   const longest = (name: string) =>
     `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(longestEmail)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
@@ -718,6 +719,29 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
       },
     ]);
   });
+
+  it.each([
+    ['100 astral characters', String.fromCodePoint(0x1d400).repeat(100)],
+    [
+      '100 characters sent decomposed, 4 code points each',
+      String.fromCodePoint(0x3b1, 0x313, 0x300, 0x345).repeat(100),
+    ],
+  ])(
+    'takes a name of %s and an IBAN of 64 with spaces, each escaped, without a 413 (the B8-3 lesson)',
+    async (_what, name) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({ payee: registered }, asked);
+      const spaced = iban.replace(/(.{4})/g, '$1 ').padEnd(64, ' ');
+
+      const response = await app.inject({
+        ...post(`/${SUPPLIER_ID}/payee-registrations/pass-through`),
+        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}"}`,
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(asked).toHaveLength(1);
+    },
+  );
 
   it('refuses an IBAN that isn’t a UAE one with valid check digits, or a name no one could read, never echoing it', async () => {
     const asked: Asked[] = [];

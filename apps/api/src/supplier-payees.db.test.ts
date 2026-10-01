@@ -165,18 +165,16 @@ const start = (who: SupplierMember, supplierId: string, key?: string, using = pa
 const check = (who: SupplierMember, supplierId: string, registrationId: string, key?: string, using = payees) =>
   using.check(who, keyed(who, PAYEE_CHECK_OPERATION, key), supplierId, registrationId, CORRELATION);
 
+/** A pass-through, its key's payload the body as the route hashes it, so other details under one key conflict. */
 const passThrough = (
   who: SupplierMember,
   supplierId: string,
   { key, using = payees, iban = ibanOf(JASMINE) }: { key?: string; using?: SupplierPayees; iban?: string } = {},
-) =>
-  using.passThrough(
-    who,
-    keyed(who, PAYEE_PASS_THROUGH_OPERATION, key),
-    supplierId,
-    { name: 'Jasmine AI FZ-LLC', iban },
-    CORRELATION,
-  );
+) => {
+  const payee = { name: 'Jasmine AI FZ-LLC', iban };
+  const request = { ...keyed(who, PAYEE_PASS_THROUGH_OPERATION, key), payload: JSON.stringify({ supplierId, payee }) };
+  return using.passThrough(who, request, supplierId, payee, CORRELATION);
+};
 
 const answered = (write: PayeeWrite, outcome: 'started' | 'checked' | 'waiting') => {
   if (write.outcome !== outcome) throw new Error(`not ${outcome}: ${JSON.stringify(write)}`);
@@ -195,14 +193,14 @@ async function registered(admin: SupplierMember, supplierId: string, iban = iban
 }
 
 /** The partner, its first registration call failing: done there and its answer lost, or never done at all. */
-const failingOnce = (lost: boolean): FakeRail => {
+const failingOnce = (lost: boolean, partner: FakeRail = rail): FakeRail => {
   let failed = false;
   return {
-    ...rail,
+    ...partner,
     registerBeneficiary: async (input) => {
-      if (failed) return rail.registerBeneficiary(input);
+      if (failed) return partner.registerBeneficiary(input);
       failed = true;
-      if (lost) await rail.registerBeneficiary(input);
+      if (lost) await partner.registerBeneficiary(input);
       throw new RailUnavailable();
     },
   };
@@ -907,13 +905,7 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
     const admin = await member(org, 'admin');
     const id = await added(admin);
     const partner = fingerprinting();
-    const lost = payeesWith({
-      ...partner,
-      registerBeneficiary: async (input) => {
-        await partner.registerBeneficiary(input);
-        throw new RailUnavailable();
-      },
-    });
+    const lost = payeesWith(failingOnce(true, partner));
 
     expect(await passThrough(admin, id, { key: 'the-same-key', using: lost })).toEqual({
       outcome: 'refused',
@@ -937,30 +929,45 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
     ]);
   });
 
-  it('ends FAILED, logged by IDs, when a check finds registered one it can’t take our fingerprint for', async () => {
+  it('leaves one a check finds registered open, as only the request that passed the IBAN can key it (the review)', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin);
     const partner = fingerprinting();
-    const lost = payeesWith({
-      ...partner,
-      registerBeneficiary: async (input) => {
-        await partner.registerBeneficiary(input);
-        throw new RailUnavailable();
-      },
-    });
-    await passThrough(admin, id, { using: lost });
+    const lost = payeesWith(failingOnce(true, partner));
+    await passThrough(admin, id, { key: 'passed-once', using: lost });
     const open = await withTenant(app, org, (tx) =>
       tx.selectFrom('suppliers.beneficiary_registrations').select('id').where('supplier_id', '=', id).execute(),
     );
 
     const checked = answered(await check(admin, id, open[0]?.id ?? '', undefined, payeesWith(partner)), 'checked');
 
-    expect(checked.registration).toMatchObject({ status: 'FAILED', failure: 'unknown', payeeKey: null });
+    expect(checked.registration).toMatchObject({ status: 'UNKNOWN', payeeKey: null });
     expect(logs.lines().filter(({ event }) => event === 'suppliers.fingerprint_unavailable')).toMatchObject([
-      { level: 'error', registrationId: checked.registration.id },
+      { level: 'warn', registrationId: checked.registration.id },
     ]);
-    expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
+    // The request that passed it through, sent again, keys it by our fingerprint.
+    const again = answered(await passThrough(admin, id, { key: 'passed-once', using: payeesWith(partner) }), 'started');
+    expect(again.registration).toMatchObject({
+      id: checked.registration.id,
+      status: 'REGISTERED',
+      payeeKey: payeeFingerprint(keys, org, ibanOf(JASMINE)).key,
+    });
+  });
+
+  it('ends one the partner refuses FAILED with why, and refuses the same key sent with other details', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const refusing = payeesWith({
+      ...rail,
+      registerBeneficiary: () => Promise.resolve({ kind: 'refused', reason: 'invalid_details' }),
+    });
+
+    const refused = answered(await passThrough(admin, id, { key: 'one-key', using: refusing }), 'started');
+
+    expect(refused.registration).toMatchObject({ status: 'FAILED', failure: 'invalid_details' });
+    expect(await passThrough(admin, id, { key: 'one-key', iban: ibanOf(OTHER) })).toEqual({ outcome: 'conflict' });
   });
 
   it('never carries on with another request’s registration still open, nor a form’s with one passed through', async () => {
@@ -1015,15 +1022,7 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
       status: 403,
       code: 'FORBIDDEN',
     });
-    expect(
-      await payeesWith(undefined).passThrough(
-        admin,
-        keyed(admin, PAYEE_PASS_THROUGH_OPERATION),
-        id,
-        { name: 'x', iban: ibanOf(JASMINE) },
-        CORRELATION,
-      ),
-    ).toEqual({
+    expect(await passThrough(admin, id, { using: payeesWith(undefined) })).toEqual({
       outcome: 'refused',
       status: 503,
       code: 'PARTNER_UNAVAILABLE',

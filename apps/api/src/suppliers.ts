@@ -65,6 +65,7 @@ import {
   REGISTRATION_ROUTES,
   SOURCE_KINDS,
   type SupplierDetails,
+  SUPPLIER_NAME_MOST,
   SupplierDetailsRefused,
   supplierDetails,
   type SupplierRecord,
@@ -376,8 +377,16 @@ const REGISTRATION = z
  * a body past it before the schema is read (the B8-3 lesson).
  */
 const PASS_THROUGH_BODY_LIMIT = 6144;
-/** The most characters a payee's name may be once composed, as a supplier's. */
-const PAYEE_NAME_MOST = 100;
+
+/** The IBAN as the partner is given it (normalisedIban), or null for one that isn't a UAE one with valid check digits. */
+function ibanOrNull(text: string): string | null {
+  try {
+    return normalisedIban(text);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return null;
+  }
+}
 
 /** The details passed through, checked: the name a visible one, the IBAN a UAE one with valid check digits. */
 const PASSED = z
@@ -389,17 +398,13 @@ const PASSED = z
       .describe('The account’s UAE IBAN, spaces allowed: passed to the payment partner, never kept or logged.'),
   })
   .transform((body, context): PayeeDetails => {
-    const name = visibleName(body.name, PAYEE_NAME_MOST);
-    for (const problem of name.problems) context.addIssue({ code: 'custom', message: problem });
-    let iban = '';
-    try {
-      iban = normalisedIban(body.iban);
-    } catch (error) {
-      if (!(error instanceof RangeError)) throw error;
-      // The message never names what was sent.
-      context.addIssue({ code: 'custom', message: 'The IBAN must be a UAE IBAN with valid check digits.' });
-    }
-    return name.problems.length > 0 || iban === '' ? z.NEVER : { name: name.name, iban };
+    const name = visibleName(body.name, SUPPLIER_NAME_MOST);
+    const iban = ibanOrNull(body.iban);
+    // The messages never name what was sent.
+    const problems =
+      iban === null ? [...name.problems, 'The IBAN must be a UAE IBAN with valid check digits.'] : name.problems;
+    for (const message of problems) context.addIssue({ code: 'custom', message });
+    return iban === null || problems.length > 0 ? z.NEVER : { name: name.name, iban };
   })
   .describe('The supplier’s bank details, for the partner alone.');
 

@@ -92,7 +92,8 @@ export class SupplierDetailsRefused extends Error {
 }
 
 /** The most characters a supplier's name may have: the table's own limit. */
-const MAX_NAME = 100;
+/** The most characters a supplier's name, or its payee's, may be once composed. */
+export const SUPPLIER_NAME_MOST = 100;
 
 /** A phone in international form (E.164): a plus, then 8 to 15 digits, the first not 0. */
 const PHONE = /^\+[1-9][0-9]{7,14}$/;
@@ -109,7 +110,7 @@ const SOURCE_REF = /^[!-~]{1,200}$/;
  * checks before anything is written, and the module's floor after it.
  */
 export function supplierDetails(details: SupplierDetails): SupplierDetails {
-  const { name, problems } = visibleName(details.displayName, MAX_NAME);
+  const { name, problems } = visibleName(details.displayName, SUPPLIER_NAME_MOST);
   const { phone, email, tradeLicence } = details.contacts;
   if (!PHONE.test(phone)) problems.push('the phone is not one in international form');
   if (email !== null && !EMAIL.test(email)) problems.push('the email is not one address');
