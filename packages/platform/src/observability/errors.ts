@@ -59,12 +59,15 @@ function stackOf(error: Error): readonly string[] | undefined {
   return frames.length > 0 ? frames : undefined;
 }
 
+/** What was thrown that is not an Error, logged by its message alone. */
+function nonErrorLogged(value: unknown): LoggedError {
+  // Libraries sometimes throw plain objects or strings rather than Errors.
+  const message = typeof value === 'object' && value !== null ? read(value, 'message') : value;
+  return { type: 'NonError', message: asText(message) };
+}
+
 function toLogged(value: unknown, depth: number): LoggedError {
-  if (!(value instanceof Error)) {
-    // Libraries sometimes throw plain objects or strings rather than Errors.
-    const message = typeof value === 'object' && value !== null ? read(value, 'message') : value;
-    return { type: 'NonError', message: asText(message) };
-  }
+  if (!(value instanceof Error)) return nonErrorLogged(value);
   const name = read(value, 'name');
   const code = read(value, 'code');
   const stack = stackOf(value);

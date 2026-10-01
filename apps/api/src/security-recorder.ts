@@ -113,12 +113,8 @@ export function createSecurityRecorder({
     else entry.count += count;
   };
 
-  /**
-   * Takes the counts out whose window began before `before`, and writes them a
-   * batch at a time. Once `stopNow` says so, the batches not yet begun are put
-   * back; the one under way is left to finish, so no count is written twice.
-   */
-  const writeBefore = async (before: number, stopNow: () => boolean): Promise<void> => {
+  /** Takes the counts out whose window began before `before`, and reports any counted without address. */
+  const takeBefore = (before: number): SecurityEvent[] => {
     const taken: SecurityEvent[] = [];
     for (const [key, entry] of held) {
       if (entry.event.windowStart.getTime() >= before) continue;
@@ -129,6 +125,16 @@ export function createSecurityRecorder({
       logger.warn('security.events_unaddressed', { count: unaddressed, mostCounts });
       unaddressed = 0;
     }
+    return taken;
+  };
+
+  /**
+   * Takes the counts out whose window began before `before`, and writes them a
+   * batch at a time. Once `stopNow` says so, the batches not yet begun are put
+   * back; the one under way is left to finish, so no count is written twice.
+   */
+  const writeBefore = async (before: number, stopNow: () => boolean): Promise<void> => {
+    const taken = takeBefore(before);
     for (let start = 0; start < taken.length; start += MOST_EVENTS_A_BATCH) {
       if (stopNow()) {
         for (const event of taken.slice(start)) add(event, event.count);

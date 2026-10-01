@@ -10,6 +10,7 @@ import type { KeySettings } from '../keys/load.ts';
 import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel, type PartnerMode } from './common.ts';
 import {
   checkLocation,
+  type LocationChecks,
   optionalSecretSetting,
   pgVariableProblems,
   secretSetting,
@@ -369,13 +370,9 @@ function signInFrom(
     : Object.freeze({ issuer, clientId, clientSecret, internalOrigin });
 }
 
-/**
- * Reads and checks the config, or throws a ConfigError listing every problem.
- * The app calls this once at start-up and exits if it throws.
- */
-export function loadConfig(env: Env = process.env): Config {
-  const location = checkLocation(env);
-  const checks = {
+/** Every setting the app reads, each checked on its own; the database location comes checked already. */
+function readSettings(env: Env, location: LocationChecks) {
+  return {
     environment: setting(env, 'AGENTX_ENV'),
     release: setting(env, 'AGENTX_RELEASE'),
     logLevel: setting(env, 'AGENTX_LOG_LEVEL'),
@@ -413,16 +410,15 @@ export function loadConfig(env: Env = process.env): Config {
     dbPassword: secretSetting(env, 'AGENTX_DB_PASSWORD'),
     dbPoolMax: setting(env, 'AGENTX_DB_POOL_MAX'),
   };
-  const { environment, release, logLevel, eventCap, httpPort, origin, trustedProxies, rateLimit, allowedOrigins } =
-    checks;
+}
 
-  const problems = [
-    ...tlsProblems(env),
-    ...pgVariableProblems(env),
-    ...unknownSettings(env, 'app'),
-    ...failures(Object.values(checks)),
-    // A rule between settings runs whenever the settings it compares are valid,
-    // so one start reports it alongside any other problem.
+/** The settings, each checked on its own (readSettings). */
+type Settings = ReturnType<typeof readSettings>;
+
+/** Rules between the environment and the HTTP, logging and outbound settings, where those are valid. */
+function httpRuleProblems(checks: Settings): string[] {
+  const { environment, release, logLevel, httpPort, origin, trustedProxies, allowedOrigins } = checks;
+  return [
     ...(environment.ok && allowedOrigins.ok
       ? plainHttpProblems('AGENTX_OUTBOUND_ALLOWED_ORIGINS', environment.value, allowedOrigins.value ?? [])
       : []),
@@ -431,6 +427,13 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && origin.ok ? publicOriginProblems(environment.value, origin.value) : []),
     ...(environment.ok && httpPort.ok ? portProblems(environment.value, httpPort.value) : []),
     ...(environment.ok && trustedProxies.ok ? trustedProxiesProblems(environment.value, trustedProxies.value) : []),
+  ];
+}
+
+/** Each rate limit against the log event cap, where both are valid. */
+function rateLimitRuleProblems(checks: Settings): string[] {
+  const { rateLimit, eventCap } = checks;
+  return [
     ...(rateLimit.ok && eventCap.ok
       ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_MINUTE', rateLimit.value, eventCap.value)
       : []),
@@ -442,6 +445,13 @@ export function loadConfig(env: Env = process.env): Config {
     ...(checks.rateLimitPerAgent.ok && eventCap.ok
       ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent.value, eventCap.value)
       : []),
+  ];
+}
+
+/** Rules between the login, email, factor reset and session settings, where those are valid. */
+function serviceRuleProblems(checks: Settings): string[] {
+  const { environment, allowedOrigins } = checks;
+  return [
     ...(environment.ok &&
     checks.oidcIssuer.ok &&
     checks.oidcClientId.ok &&
@@ -480,6 +490,28 @@ export function loadConfig(env: Env = process.env): Config {
     ...(checks.sessionIdle.ok && checks.sessionAbsolute.ok
       ? sessionProblems(checks.sessionIdle.value, checks.sessionAbsolute.value)
       : []),
+  ];
+}
+
+/**
+ * Reads and checks the config, or throws a ConfigError listing every problem.
+ * The app calls this once at start-up and exits if it throws.
+ */
+export function loadConfig(env: Env = process.env): Config {
+  const location = checkLocation(env);
+  const checks = readSettings(env, location);
+  const { environment } = checks;
+
+  const problems = [
+    ...tlsProblems(env),
+    ...pgVariableProblems(env),
+    ...unknownSettings(env, 'app'),
+    ...failures(Object.values(checks)),
+    // A rule between settings runs whenever the settings it compares are valid,
+    // so one start reports it alongside any other problem.
+    ...httpRuleProblems(checks),
+    ...rateLimitRuleProblems(checks),
+    ...serviceRuleProblems(checks),
     ...(environment.ok && checks.partnerMode.ok
       ? partnerModeProblems(environment.value, checks.partnerMode.value)
       : []),

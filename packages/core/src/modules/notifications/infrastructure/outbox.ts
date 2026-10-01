@@ -120,6 +120,11 @@ function problemWith(notice: Notice): string | undefined {
   if (!isNoticeKind(notice.kind)) return 'its kind is not one we send';
   // Its email carries one contact's own link: never to a group, nor to a person (0026).
   if (notice.kind === RESET_LINK_KIND && contact === null) return "a reset's link goes to one contact";
+  return subjectProblem(notice);
+}
+
+/** Why what a notice is about can't be written, if it can't: a membership, or something else. */
+function subjectProblem(notice: Notice): string | undefined {
   if (isAboutAMembership(notice.kind)) {
     if (!isId(notice.membershipId)) return 'its membership is not a UUID';
     if (!isNoticeRole(notice.role)) return 'its role is not one of the four';
