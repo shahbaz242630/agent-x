@@ -76,11 +76,12 @@ function ibanOf(country: string, account: string): string {
 const BY_FORM = ibanOf('AE', ['033', '1000', '2222', '3333', '4444'].join(''));
 const PASSED = ibanOf('AE', ['035', '5000', '6666', '7777', '8888'].join(''));
 const AFTER_LOSS = ibanOf('AE', ['026', '9000', '1212', '3434', '5656'].join(''));
+const AT_FAILURE = ibanOf('AE', ['033', '4000', '9191', '8282', '7373'].join(''));
 const ELSEWHERE = [
   ibanOf('GB', ['WEST', '1234', '5698', '7654', '32'].join('')),
   ibanOf('DE', ['3705', '0198', '0020', '0001', '23'].join('')),
 ];
-const PLANTED = [BY_FORM, PASSED, AFTER_LOSS, ...ELSEWHERE];
+const PLANTED = [BY_FORM, PASSED, AFTER_LOSS, AT_FAILURE, ...ELSEWHERE];
 
 const grouped = (iban: string) => iban.replace(/(.{4})/g, '$1 ').trim();
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -251,15 +252,18 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
       });
       expect(passed.json()).toMatchObject({ status: 'REGISTERED' });
 
-      // Other countries' accounts, at both doors: refused, and never echoed.
+      // Other countries' accounts, at both doors of a supplier with nothing under way: refused for the account, never echoed.
       for (const iban of ELSEWHERE) {
-        const at = await sent(api, org, `/v1/suppliers/${byForm}/payee-registrations/pass-through`, {
-          name: 'Gulf Office Supplies',
+        const fresh = await supplierOf(api);
+        const at = await sent(api, org, `/v1/suppliers/${fresh}/payee-registrations/pass-through`, {
+          name: 'Gulf',
           iban,
         });
-        expect(at.statusCode).toBe(400);
-        const bank = await sent(api, org, '/v1/fake-bank/payee-forms', { url: form.url, name: 'Gulf', iban });
-        expect(bank.statusCode).toBeGreaterThanOrEqual(400);
+        expect(at.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
+        const open = await sent(api, org, `/v1/suppliers/${fresh}/payee-registrations`, {});
+        const url = open.json<{ form: { url: string } }>().form.url;
+        const bank = await sent(api, org, '/v1/fake-bank/payee-forms', { url, name: 'Gulf', iban });
+        expect(bank.json()).toMatchObject({ error: { code: 'BANK_FORM_REFUSED' } });
       }
     } finally {
       await api.close();
@@ -287,6 +291,22 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
       await losing.close();
     }
 
+    // A partner failing in a way no one planned for: a 500, its error logged, the details in neither.
+    const failing = await serverWith({
+      ...partner,
+      registerBeneficiary: async (input) => {
+        await partner.registerBeneficiary(input);
+        throw new Error('the partner broke');
+      },
+    });
+    try {
+      const url = `/v1/suppliers/${await supplierOf(failing)}/payee-registrations/pass-through`;
+      expect((await sent(failing, org, url, { name: 'Jasmine AI FZ-LLC', iban: AT_FAILURE })).statusCode).toBe(500);
+    } finally {
+      await failing.close();
+    }
+    expect(capture.lines().filter(({ level }) => level === 'error')).not.toEqual([]);
+
     const rows = await everyRow();
     // The scan reads what was written: the registrations, their idempotency keys and the partner's records.
     expect(rows).toContain('beneficiary_registration.registered');
@@ -309,7 +329,14 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
       await api.close();
     }
 
-    const rows = await everyRow();
-    expect(needlesOf(canary).filter((needle) => keptAnywhere(rows).includes(needle.toLowerCase()))).toContain(canary);
+    // A log line holding one of the forms looked for (an IBAN itself the logger blanks).
+    logger.info('scan.canary', { note: sha256(canary) });
+
+    // Each place on its own: the row keeps it, the answer gives it back, the log line holds its hash.
+    const hits = (text: string) =>
+      needlesOf(canary).filter((needle) => text.toLowerCase().includes(needle.toLowerCase()));
+    expect(hits(await everyRow())).toContain(canary);
+    expect(hits(answers.join('\n'))).toContain(canary);
+    expect(hits(capture.text)).toEqual([sha256(canary)]);
   });
 });
