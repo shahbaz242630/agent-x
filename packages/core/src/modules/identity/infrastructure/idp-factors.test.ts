@@ -97,8 +97,22 @@ function zitadel(
   return { asked, fetch };
 }
 
-const removerWith = (fetch: OutboundFetch, internalOrigin?: string) =>
-  createSecondFactorRemover({ issuer: ISSUER, internalOrigin, token: WORDS, fetch });
+/** The pauses a remover took between its reads after a removal, each instant here. */
+let paused: number[] = [];
+
+const removerWith = (fetch: OutboundFetch, internalOrigin?: string) => {
+  paused = [];
+  return createSecondFactorRemover({
+    issuer: ISSUER,
+    internalOrigin,
+    token: WORDS,
+    fetch,
+    pause: (ms) => {
+      paused.push(ms);
+      return Promise.resolve();
+    },
+  });
+};
 
 /** What it throws, for an expectation. */
 const failure = (step: string) => new IdpFactorsUnavailable(step);
@@ -202,8 +216,29 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
     expect(new Headers(asked[0]?.init.headers).get('x-zitadel-instance-host')).toBe('auth.example.test');
   });
 
+  it('waits for the login service to catch up: a factor its search still shows a moment after its removal (the S67 and S70 flake)', async () => {
+    const person = everyKind();
+    let removedTotp = false;
+    let searchesSince = 0;
+    const { fetch } = zitadel(person, (method, path) => {
+      if (method === 'DELETE' && path === '/totp') {
+        removedTotp = true;
+        return json({ details: {} });
+      }
+      // Its search shows the app code for two reads after its removal, then catches up.
+      if (removedTotp && method === 'POST' && path === '/authentication_factors/_search' && ++searchesSince > 2) {
+        person.factors = person.factors.filter((each) => each.otp === undefined);
+        person.methods = person.methods.filter((each) => each !== 'AUTHENTICATION_METHOD_TYPE_TOTP');
+      }
+      return undefined;
+    });
+
+    expect(await removerWith(fetch).removeAll(SUBJECT)).toBe(6);
+    expect(paused).toEqual([400, 400]);
+  });
+
   describe('throws, rather than completing a reset, when a factor may be left', () => {
-    it('a removal that answered yes and left the factor there', async () => {
+    it('a removal that answered yes and left the factor there, through every read after it', async () => {
       const { fetch } = zitadel(everyKind(), (method, path) =>
         method === 'DELETE' && path.startsWith('/u2f/') ? json({ details: {} }) : undefined,
       );
@@ -211,6 +246,8 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
       await expect(removerWith(fetch).removeAll(SUBJECT)).rejects.toThrow(
         failure('a second factor is still there after its removal'),
       );
+      // Read 5 times after the removals, 400 ms apart, before it is called left.
+      expect(paused).toEqual([400, 400, 400, 400]);
     });
 
     it('a security key left, which the methods don’t list (Zitadel lists one the login pages added only with a domain)', async () => {
