@@ -73,7 +73,11 @@ const ENCODED_JSON = /eyJ[A-Za-z0-9_-]{8,4096}(?:\.[A-Za-z0-9_-]{0,4096}){0,2}/g
 const URL_CANDIDATE = /\b[a-z][a-z0-9+.-]{0,40}:\/\/[^\s"'<>`?#]{1,4096}(?:[?#][^\s"<>]{0,4096})?/gi;
 const TRAILING_PUNCTUATION = new Set([')', '.', ',', ';', ':', '!', '?', ']']);
 const URL_CREDENTIALS = /\/\/[^\s]{0,512}@/;
-const URL_QUERY_OR_FRAGMENT = /[?#].*$/s;
+/** The text before its query or fragment: cut at the first `?` or `#`, found in one pass (a `[?#].*$` pattern is quadratic on many of them). */
+const withoutQueryOrFragment = (text: string): string => {
+  const at = text.search(/[?#]/);
+  return at === -1 ? text : text.slice(0, at);
+};
 
 /**
  * A path with a query or fragment (`/callback?code=…`), as a web framework logs
@@ -198,7 +202,7 @@ function cleanUrl(candidate: string): string {
   }
   // The parser refused it. Everything up to the last @ may be credentials, since
   // a password can contain a slash.
-  return body.replace(URL_CREDENTIALS, '//').replace(URL_QUERY_OR_FRAGMENT, '') + trailing;
+  return withoutQueryOrFragment(body.replace(URL_CREDENTIALS, '//')) + trailing;
 }
 
 function cleanOauthParameter(match: string, name: string, value: string): string {
