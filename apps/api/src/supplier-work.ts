@@ -128,7 +128,7 @@ export function createSupplierWork({
    * The supplier with its current version and contacts, read (`share`) in the
    * organisation's transaction: NOT_FOUND for one it doesn't have;
    * INTEGRITY_FAILED for a supplier or version that can't be believed, or
-   * contacts that won't open (logged, never named).
+   * contacts that won't open.
    */
   const viewIn = async (
     tx: SupplierTx,
@@ -136,18 +136,18 @@ export function createSupplierWork({
     orgId: string,
     supplierId: string,
     correlationId: string,
-  ) => {
+  ): Promise<SupplierView> => {
     const { supplier } = await supplierIn(tx, states, { orgId, id: supplierId }, 'share');
     const current = await versionOf(tx, states, { orgId, id: supplier.currentVersionId }, supplier.id);
     if (current.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
-    if (current.outcome === 'missing')
-      throw new Error(`A verified supplier has no current version of its own: ${supplier.id}`);
+    // 0032's key holds a supplier to a current version of its own, and one removed past the app reads as tampered
+    // (its events outlive it; supplier-registry.db.test.ts), so none is missing.
+    if (current.outcome === 'missing') throw new Error(`A supplier has no current version of its own: ${supplier.id}`);
     try {
-      const contacts = await contactsOf(tx, keys, orgId, current.version);
-      return { supplier, version: current.version, contacts } satisfies SupplierView;
+      return { supplier, version: current.version, contacts: await contactsOf(tx, keys, orgId, current.version) };
     } catch (error) {
       if (!(error instanceof SupplierContactsUnreadable)) throw error;
+      // Logged by IDs alone, never a contact.
       logger
         .child({ correlationId, orgId })
         .error('suppliers.contacts_unreadable', { supplierId: supplier.id, versionId: current.version.id });
@@ -155,27 +155,38 @@ export function createSupplierWork({
     }
   };
 
+  /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
+  const write = async (
+    member: SupplierMember,
+    idempotent: IdempotentRequest,
+    correlationId: string,
+    work: (tx: SupplierTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
+  ) => {
+    const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
+    try {
+      return await inOrganisation(member.orgId, correlationId, (tx, states) =>
+        idempotency.run(tx, idempotent, () => work(tx, states)),
+      );
+    } catch (error) {
+      if (error instanceof SupplierRefused) return refused(error.status, error.code);
+      throw error;
+    }
+  };
+
+  /** The supplier as the members' routes show it, in a transaction of its own. */
+  const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
+    answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
+
   return {
     inOrganisation,
-    answered,
     supplierIn,
+    write,
+    view,
 
-    /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
-    write: async (
-      member: SupplierMember,
-      idempotent: IdempotentRequest,
-      correlationId: string,
-      work: (tx: SupplierTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-    ) => {
-      const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
-      try {
-        return await inOrganisation(member.orgId, correlationId, (tx, states) =>
-          idempotency.run(tx, idempotent, () => work(tx, states)),
-        );
-      } catch (error) {
-        if (error instanceof SupplierRefused) return refused(error.status, error.code);
-        throw error;
-      }
+    /** A write's answer: its refusal or its key's outcome as it is, otherwise the supplier it wrote as it now stands (on a retry too). */
+    viewAfter: async (orgId: string, correlationId: string, done: Awaited<ReturnType<typeof write>>) => {
+      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      return view(orgId, done.result.resourceId, correlationId);
     },
 
     /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
@@ -187,9 +198,5 @@ export function createSupplierWork({
       }
       return membership;
     },
-
-    /** The supplier as the members' routes show it, in a transaction of its own: on a retry too. */
-    view: (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
-      answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId)),
   };
 }

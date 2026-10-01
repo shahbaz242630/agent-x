@@ -17,7 +17,10 @@
 // - `usableByAgent`: for an agent with `suppliers:read`, only the VERIFIED
 //   suppliers (a payment rests on no other), each by ID and name alone
 //   (PRD §7.4 `supplier_list`). The page is filtered after it is read, as
-//   the agent's funding sources are, so a page may hold fewer than asked.
+//   the agent's funding sources are, so a page may hold fewer than asked,
+//   and its `next` may be the ID of a supplier the agent isn't shown: an ID
+//   alone, never its name or anything else (#221's review; accepted, as for
+//   the sources).
 //
 // Lock order (ADR-006 §6): the idempotency key, the add lock, the member's
 // membership (2a), the supplier (6), its version, the chain head last.
@@ -65,7 +68,7 @@ export type SupplierAddWrite =
 export type SuppliersListed =
   { readonly outcome: 'listed'; readonly suppliers: readonly SupplierShown[]; readonly next: string | null } | Refused;
 
-type SupplierFound = ({ readonly outcome: 'found' } & SupplierView) | Refused;
+type ShowAnswer = ({ readonly outcome: 'found' } & SupplierView) | Refused;
 
 export interface SupplierRegistry {
   add(
@@ -75,7 +78,7 @@ export interface SupplierRegistry {
     correlationId: string,
   ): Promise<SupplierAddWrite>;
   list(orgId: string, page: SupplierPage, correlationId: string): Promise<SuppliersListed>;
-  show(orgId: string, supplierId: string, correlationId: string): Promise<SupplierFound>;
+  show(orgId: string, supplierId: string, correlationId: string): Promise<ShowAnswer>;
   usableByAgent(orgId: string, page: SupplierPage, correlationId: string): Promise<SuppliersListed>;
 }
 
@@ -127,10 +130,9 @@ export function createSupplierRegistry({
         });
         return { status: 201, resourceId: id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      const view = await work.view(member.orgId, done.result.resourceId, correlationId);
-      if ('outcome' in view) return view;
-      return { outcome: 'added', ...view };
+      const answered = await work.viewAfter(member.orgId, correlationId, done);
+      if ('outcome' in answered) return answered;
+      return { outcome: 'added', ...answered };
     },
 
     list,

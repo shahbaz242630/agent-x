@@ -439,3 +439,12 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
     expect((await eventsAbout(org, id)).at(-1)?.action).toBe('supplier.suspend');
   });
 });
+
+describe(`what isn't a refusal (E1-2, Postgres ${server.version})`, () => {
+  it('a database error inside a write is thrown, not answered, and writes nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+
+    await expect(suspend(admin, 'not-a-uuid')).rejects.toThrow();
+  });
+});

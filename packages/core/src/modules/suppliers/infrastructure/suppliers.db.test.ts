@@ -436,7 +436,9 @@ describe(`a supplier's verification (E1-1's review, Postgres ${server.version})`
     const { id } = await added(org);
     await verify(org, id);
 
-    expect(await suspend(org, id)).toMatchObject({ status: 'SUSPENDED', verifiedBy: VERIFIER });
+    await suspend(org, id);
+
+    expect(await read(org, id)).toMatchObject({ supplier: { status: 'SUSPENDED', verifiedBy: VERIFIER } });
     await expect(suspend(org, id)).rejects.toBeInstanceOf(RangeError);
   });
 

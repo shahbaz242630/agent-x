@@ -118,10 +118,9 @@ export function createSupplierChanges({
     correlationId: string,
     done: Awaited<ReturnType<typeof work.write>>,
   ): Promise<SupplierChangeWrite> => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-    const view = await work.view(orgId, done.result.resourceId, correlationId);
-    if ('outcome' in view) return view;
-    return { outcome: 'changed', ...view };
+    const answered = await work.viewAfter(orgId, correlationId, done);
+    if ('outcome' in answered) return answered;
+    return { outcome: 'changed', ...answered };
   };
 
   return {

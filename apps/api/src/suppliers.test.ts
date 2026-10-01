@@ -285,17 +285,42 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     expect(asked).toEqual([]);
   });
 
-  it('takes the longest body the schema allows, every character escaped, without a 413 (the B8-3 lesson)', async () => {
+  // Every character as a \uXXXX escape (6 bytes), as the longest JSON can write it.
+  const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
+  // Matched code point by code point: an astral one is two units, each escaped.
+  const escaped = (text: string) =>
+    text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
+  const longest = (name: string) =>
+    `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(`${'a'.repeat(64)}@${'b'.repeat(189)}`)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
+
+  it.each([
+    ['100 astral characters', String.fromCodePoint(0x1d400).repeat(100)],
+    // U+1F82 sent decomposed: alpha and 3 marks, Unicode's longest canonical decomposition, kept as 1 (#221's review).
+    [
+      '100 characters sent decomposed, 4 code points each',
+      String.fromCodePoint(0x3b1, 0x313, 0x300, 0x345).repeat(100),
+    ],
+  ])(
+    'takes a name of %s, every field at its longest and escaped, without a 413 (the B8-3 lesson)',
+    async (_what, name) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({ add: { outcome: 'added', ...VIEW } }, asked);
+
+      const response = await app.inject({ ...post(''), payload: longest(name) });
+
+      expect(response.statusCode).toBe(201);
+      expect(asked).toHaveLength(1);
+    },
+  );
+
+  it('refuses a name sent as more than 1,000 UTF-16 units with 400, unread', async () => {
     const asked: Asked[] = [];
-    const app = await withSuppliers({ add: { outcome: 'added', ...VIEW } }, asked);
-    // A name of 100 astral characters, each sent as two \uXXXX escapes; every ASCII field at its longest, escaped.
-    const escaped = (text: string) => text.replace(/./g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-    const payload = `{"displayName":"${'\\ud835\\udc00'.repeat(100)}","phone":"${escaped('+971501234567890')}","email":"${escaped(`${'a'.repeat(64)}@${'b'.repeat(189)}`)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
+    const app = await withSuppliers({}, asked);
 
-    const response = await app.inject({ ...post(''), payload });
+    const response = await app.inject(post('', { ...BODY, displayName: 'x'.repeat(1001) }));
 
-    expect(response.statusCode).toBe(201);
-    expect(asked).toHaveLength(1);
+    expect(response.statusCode).toBe(400);
+    expect(asked).toEqual([]);
   });
 
   it.each([

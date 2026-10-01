@@ -10,6 +10,7 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import {
   MOST_SUPPLIERS_ADDED_A_DAY,
   type SupplierDetails,
+  SUPPLIER_VERSIONS,
   supplierOf,
   type SuppliersTables,
   verifySupplier,
@@ -22,6 +23,7 @@ import {
   FixedClock,
   LogCapture,
   SequentialIds,
+  tamperAsOwner,
   type TestDatabase,
   waitUntilQueued,
   within,
@@ -291,14 +293,16 @@ describe(`reading suppliers (E1-2, Postgres ${server.version})`, () => {
   it('refuses one whose contacts won’t open: INTEGRITY_FAILED, logged without naming them', async () => {
     const org = await organization();
     const added = addedOf(await add(await member(org, 'admin')));
-    // Past the app: the version's phone swapped for its email's ciphertext, which the seals don't cover.
-    const owner = await database.connect('admin');
+    // Past the app, as the database's owner: the email's ciphertext in the phone's place (its kind is in its associated data).
+    const owner = await tamperAsOwner(database, SUPPLIER_VERSIONS, org);
     try {
-      await owner.query(
-        'update suppliers.supplier_versions set phone_ciphertext = email_ciphertext where org_id = $1 and id = $2',
-        [org, added.version.id],
-      );
+      // 0032's `made_once` stops even the owner, unless they switch it off first.
+      await owner.query('alter table suppliers.supplier_versions disable trigger made_once');
+      await owner.query('update suppliers.supplier_versions set phone_ciphertext = email_ciphertext where id = $1', [
+        added.version.id,
+      ]);
     } finally {
+      await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
       await owner.end();
     }
 
@@ -312,6 +316,35 @@ describe(`reading suppliers (E1-2, Postgres ${server.version})`, () => {
     expect(JSON.stringify(capture.lines())).not.toMatch(/\+971501234567|gulfoffice/i);
   });
 
+  it('reads one whose current version was removed past the app as tampered: INTEGRITY_FAILED, the alarm raised (#221’s review)', async () => {
+    const org = await organization();
+    const added = addedOf(await add(await member(org, 'admin')));
+    // As the database's owner: 0032's key dropped, the version removed; then the supplier too, and the key put back.
+    const owner = await tamperAsOwner(database, SUPPLIER_VERSIONS, org);
+    try {
+      await owner.query('alter table suppliers.suppliers drop constraint current_is_its_own');
+      await owner.query('alter table suppliers.supplier_versions disable trigger made_once');
+      await owner.query('delete from suppliers.supplier_versions where id = $1', [added.version.id]);
+
+      expect(await registry.show(org, added.supplier.id, CORRELATION)).toEqual({
+        outcome: 'refused',
+        status: 503,
+        code: 'INTEGRITY_FAILED',
+      });
+      // Its events outlive it, so the audit module finds it removed, not merely missing.
+      const alarms = capture.lines().filter((line) => line.event === 'audit.integrity_failed');
+      expect(alarms).toMatchObject([{ level: 'error', subjectType: 'supplier_version', objectId: added.version.id }]);
+    } finally {
+      await owner.query('delete from suppliers.suppliers where id = $1', [added.supplier.id]);
+      await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
+      await owner.query(
+        `alter table suppliers.suppliers add constraint current_is_its_own foreign key (org_id, id, current_version_id)
+           references suppliers.supplier_versions (org_id, supplier_id, id) deferrable initially deferred`,
+      );
+      await owner.end();
+    }
+  });
+
   it('shows an agent the VERIFIED suppliers alone', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -323,5 +356,43 @@ describe(`reading suppliers (E1-2, Postgres ${server.version})`, () => {
 
     expect(usable).toMatchObject({ outcome: 'listed', suppliers: [{ id: checked.supplier.id, status: 'VERIFIED' }] });
     expect(JSON.stringify(usable)).not.toContain(unverified.supplier.id);
+  });
+});
+
+describe(`what can't be believed refuses the answer (E1-2, Postgres ${server.version})`, () => {
+  it('a membership tampered with: INTEGRITY_FAILED, adding nothing', async () => {
+    const org = await organization();
+    const viewer = await member(org, 'viewer');
+    // Raised to admin past the app: its seal no longer holds.
+    await withTenant(app, org, (tx) =>
+      tx.updateTable('identity.memberships').set({ role: 'admin' }).where('id', '=', viewer.membershipId).execute(),
+    );
+
+    expect(await add(viewer)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await suppliersIn(org)).toBe(0);
+  });
+
+  it('a supplier tampered with: INTEGRITY_FAILED to members and agents alike', async () => {
+    const org = await organization();
+    const added = addedOf(await add(await member(org, 'admin')));
+    // Its cooling-off moved past the app: its seal no longer holds.
+    await withTenant(app, org, (tx) =>
+      tx
+        .updateTable('suppliers.suppliers')
+        .set({ cooling_off_until: clock.now() })
+        .where('id', '=', added.supplier.id)
+        .execute(),
+    );
+
+    const refused = { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
+    expect(await registry.show(org, added.supplier.id, CORRELATION)).toEqual(refused);
+    expect(await registry.list(org, { after: null, limit: 50 }, CORRELATION)).toEqual(refused);
+    expect(await registry.usableByAgent(org, { after: null, limit: 50 }, CORRELATION)).toEqual(refused);
+  });
+
+  it('passes on what isn’t a refusal: a database error is thrown, not answered', async () => {
+    const org = await organization();
+
+    await expect(registry.show(org, 'not-a-uuid', CORRELATION)).rejects.toThrow();
   });
 });

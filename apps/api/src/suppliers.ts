@@ -54,14 +54,23 @@ import type { SupplierView } from './supplier-work.ts';
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /**
- * The most an add's body may be: a name of 100 characters, each sent as the
- * longest JSON can write one (two `\uXXXX` escapes, 12 bytes), a phone, an
- * email of 254 and a trade licence of 50, and a source's reference of 200,
- * each ASCII character escaped at worst to 6 bytes, with room to spare.
- * Fastify refuses a body past it before the schema is read (the B8-3
- * lesson), so it must fit every body the schema allows.
+ * The most UTF-16 units a name may be sent as: it is kept as at most 100
+ * code points once composed (NFC, visibleName), each sent decomposed as at
+ * most 4 (Unicode's longest canonical decomposition), every one astral at
+ * worst: 800, with room to spare. More can't be a name, so it is refused
+ * unread.
  */
-const ADD_BODY_LIMIT = 6144;
+const NAME_UNITS = 1000;
+
+/**
+ * The most an add's body may be: a name of NAME_UNITS, each sent as a
+ * `\uXXXX` escape (6 bytes), a phone of 16, an email of 254, a trade licence
+ * of 50 and a source's reference of 200, each ASCII character escaped too,
+ * with room to spare (the review of #221: a name sent decomposed is longer
+ * than it is kept). Fastify refuses a body past it before the schema is read
+ * (the B8-3 lesson), so it must fit every body the schema allows.
+ */
+const ADD_BODY_LIMIT = 12_288;
 /** The most a bodyless write may be sent with: an empty object, with room to spare. */
 const NOTHING_BODY_LIMIT = 64;
 /** The most a confirm's body may be: a challenge's ID, with room to spare. */
@@ -112,7 +121,7 @@ const SUPPLIER_DETAILS = SUPPLIER.extend({
 /** The details as a version keeps them, or the problems that keep them from being one. */
 const ADDED = z
   .strictObject({
-    displayName: z.string().describe('Its name: 1 to 100 visible characters, with a letter or digit.'),
+    displayName: z.string().max(NAME_UNITS).describe('Its name: 1 to 100 visible characters, with a letter or digit.'),
     phone: z.string().describe('Its phone, in international form, such as +971501234567.'),
     email: z.string().nullish().describe('Its email, if known.'),
     tradeLicence: z.string().nullish().describe('Its trade licence number, if known: letters, digits, - and /.'),
