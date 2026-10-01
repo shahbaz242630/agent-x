@@ -1,0 +1,8 @@
+{
+  "path": ["packages", "apps", "tooling", "deploy"],
+  "format": ["typescript"],
+  "ignore": ["**/node_modules/**", "**/gate-proofs/fixtures/**", "**/*.test.ts"],
+  "reporters": ["consoleFull"],
+  "absolute": false,
+  "gitignore": true
+}
