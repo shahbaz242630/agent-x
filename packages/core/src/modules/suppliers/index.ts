@@ -26,6 +26,7 @@ export {
   stillVerified,
   SUPPLIER,
   type SupplierContacts,
+  SUPPLIER_NAME_MOST,
   type SupplierDetails,
   SupplierDetailsRefused,
   supplierDetails,

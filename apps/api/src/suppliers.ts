@@ -28,6 +28,13 @@
 //   waiting for the admin's confirmation (409 SUPPLIER_PAYEE_TAKEN while
 //   another supplier is paid to that account). Admins. 503
 //   PARTNER_UNAVAILABLE when the partner doesn't answer.
+// - `POST /v1/suppliers/:id/payee-registrations/pass-through`, with the
+//   account holder's name and the IBAN (E2-2d): the details passed to the
+//   payment partner within this request alone, never kept or logged: 201
+//   with the registration, REGISTERED (the new details then waiting for the
+//   admin's confirmation) or FAILED with why. Admins; the same budget and
+//   refusals as the form's, and 503 PARTNER_UNAVAILABLE when the partner's
+//   answer is lost: the same request sent again with the same key asks it.
 // - `POST /v1/suppliers/:id/payee-change/approve`, then `…/approve/confirm`
 //   with the step-up's ID once signed in again (a passkey): 202 with the
 //   step-up, then 200 with the supplier paying the new details, its 24 hours
@@ -48,13 +55,17 @@
 // INTEGRITY_FAILED when the caller's membership, a supplier or its version
 // can't be verified. The use cases are supplier-registry.ts,
 // supplier-changes.ts and supplier-payees.ts.
+import type { PayeeDetails } from '@agentx/core/modules/providers';
+import { visibleName } from '@agentx/core/shared-kernel';
 import {
   MOST_SUPPLIERS_A_PAGE,
   NAME_CHECKS,
+  normalisedIban,
   REGISTRATION_FAILURES,
   REGISTRATION_ROUTES,
   SOURCE_KINDS,
   type SupplierDetails,
+  SUPPLIER_NAME_MOST,
   SupplierDetailsRefused,
   supplierDetails,
   type SupplierRecord,
@@ -77,6 +88,7 @@ import {
 } from './supplier-changes.ts';
 import {
   PAYEE_CHECK_OPERATION,
+  PAYEE_PASS_THROUGH_OPERATION,
   PAYEE_START_OPERATION,
   type PayeeRegistrationView,
   type PayeeWrite,
@@ -358,6 +370,51 @@ const REGISTRATION = z
     description: 'A registration of a supplier’s bank details with the payment partner: never the account number.',
   });
 
+/**
+ * The most a pass-through's body may be: a name as an add's (at most 800
+ * UTF-16 units sent decomposed, each a 6-byte escape) and an IBAN of at most
+ * 64 ASCII characters, each escaped too, with room to spare. Fastify refuses
+ * a body past it before the schema is read (the B8-3 lesson).
+ */
+const PASS_THROUGH_BODY_LIMIT = 6144;
+
+/** The IBAN as the partner is given it (normalisedIban), or null for one that isn't a UAE one with valid check digits. */
+function ibanOrNull(text: string): string | null {
+  try {
+    return normalisedIban(text);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return null;
+  }
+}
+
+/** The details passed through, checked: the name a visible one, the IBAN a UAE one with valid check digits. */
+const PASSED = z
+  .strictObject({
+    name: z.string().describe('The account holder’s name, as the bank holds it: 1 to 100 visible characters.'),
+    iban: z
+      .string()
+      .max(64)
+      .describe('The account’s UAE IBAN, spaces allowed: passed to the payment partner, never kept or logged.'),
+  })
+  .transform((body, context): PayeeDetails => {
+    const name = visibleName(body.name, SUPPLIER_NAME_MOST);
+    const iban = ibanOrNull(body.iban);
+    // The messages never name what was sent.
+    const problems =
+      iban === null ? [...name.problems, 'The IBAN must be a UAE IBAN with valid check digits.'] : name.problems;
+    for (const message of problems) context.addIssue({ code: 'custom', message });
+    return iban === null || problems.length > 0 ? z.NEVER : { name: name.name, iban };
+  })
+  .describe('The supplier’s bank details, for the partner alone.');
+
+const PAYEE_PASS_THROUGH_SCHEMA = {
+  summary: 'Register a supplier’s bank details with the payment partner, passed through within this request',
+  params: SUPPLIER_ID,
+  body: PASSED,
+  response: { 201: REGISTRATION.describe('The registration, as the partner answered it.') },
+};
+
 const PAYEE_START_SCHEMA = {
   summary: 'Start registering a supplier’s bank details with the payment partner, through its own form',
   params: SUPPLIER_ID,
@@ -633,6 +690,26 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.id,
+      );
+      return answerPayee(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-registrations/pass-through',
+    {
+      schema: PAYEE_PASS_THROUGH_SCHEMA,
+      bodyLimit: PASS_THROUGH_BODY_LIMIT,
+      config: { access: [...REGISTERING_ROLES], operation: PAYEE_PASS_THROUGH_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(payees).passThrough(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body,
         request.id,
       );
       return answerPayee(written, request, reply);

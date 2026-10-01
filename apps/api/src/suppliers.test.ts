@@ -212,6 +212,13 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly registrationId?: string;
+    }
+  | {
+      readonly kind: 'payeePassThrough';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly payee: object;
     };
 
 const servers: FastifyInstance[] = [];
@@ -272,6 +279,10 @@ async function withSuppliers(
     },
     check: (member, keyed, supplierId, registrationId) => {
       asked.push({ kind: 'payeeCheck', member, keyed, supplierId, registrationId });
+      return Promise.resolve(answers.payee ?? { outcome: 'busy' });
+    },
+    passThrough: (member, keyed, supplierId, payee) => {
+      asked.push({ kind: 'payeePassThrough', member, keyed, supplierId, payee });
       return Promise.resolve(answers.payee ?? { outcome: 'busy' });
     },
   };
@@ -342,6 +353,12 @@ const get = (path: string): InjectOptions => ({
 
 const SHOWN: SupplierShown = { ...SUPPLIER, displayName: 'Gulf Office Supplies LLC' };
 
+// Every character as a \uXXXX escape (6 bytes), as the longest JSON can write it.
+const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
+// Matched code point by code point: an astral one is two units, each escaped.
+const escaped = (text: string) =>
+  text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
+
 describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   it('answers 201 with the supplier, passing the admin, the key and the details as kept', async () => {
     const asked: Asked[] = [];
@@ -385,11 +402,6 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     expect(asked).toEqual([]);
   });
 
-  // Every character as a \uXXXX escape (6 bytes), as the longest JSON can write it.
-  const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
-  // Matched code point by code point: an astral one is two units, each escaped.
-  const escaped = (text: string) =>
-    text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
   const longestEmail = `${'a'.repeat(64)}@${'b'.repeat(189)}`;
   const longest = (name: string) =>
     `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(longestEmail)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
@@ -670,6 +682,85 @@ describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee th
 
     expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { iban: 'AE07' }))).statusCode).toBe(400);
     expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/not-an-id/check`))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details passed through (E2-2d)', () => {
+  /** A UAE IBAN with valid check digits, built here so no scanner takes it for a real one. */
+  const iban = ['AE07', '0331234567890123456'].join('');
+  const registered = {
+    outcome: 'started' as const,
+    registration: { ...REGISTRATION, status: 'REGISTERED' as const, payeeHint: 'AE…3456', nameCheck: 'match' as const },
+    form: null,
+  };
+
+  it('answers 201 with the registration, passing the name composed and the IBAN compacted, never answering it', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ payee: registered }, asked);
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/payee-registrations/pass-through`, {
+        name: 'Jasmine AI FZ-LLC',
+        iban: iban.toLowerCase().replace(/(.{4})/g, '$1 '),
+      }),
+    );
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({ status: 'REGISTERED', payeeHint: 'AE…3456', form: null });
+    expect(response.body).not.toContain(iban.slice(4));
+    expect(asked).toEqual([
+      {
+        kind: 'payeePassThrough',
+        member: MEMBER,
+        keyed: expect.objectContaining({ operation: 'suppliers.payee.pass-through' }) as unknown,
+        supplierId: SUPPLIER_ID,
+        payee: { name: 'Jasmine AI FZ-LLC', iban },
+      },
+    ]);
+  });
+
+  it.each([
+    ['100 astral characters', String.fromCodePoint(0x1d400).repeat(100)],
+    [
+      '100 characters sent decomposed, 4 code points each',
+      String.fromCodePoint(0x3b1, 0x313, 0x300, 0x345).repeat(100),
+    ],
+  ])(
+    'takes a name of %s and an IBAN of 64 with spaces, each escaped, without a 413 (the B8-3 lesson)',
+    async (_what, name) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({ payee: registered }, asked);
+      const spaced = iban.replace(/(.{4})/g, '$1 ').padEnd(64, ' ');
+
+      const response = await app.inject({
+        ...post(`/${SUPPLIER_ID}/payee-registrations/pass-through`),
+        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}"}`,
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(asked).toHaveLength(1);
+    },
+  );
+
+  it('refuses an IBAN that isn’t a UAE one with valid check digits, or a name no one could read, never echoing it', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ payee: registered }, asked);
+    const wrongDigits = `AE08${iban.slice(4)}`;
+
+    for (const body of [
+      { name: 'Jasmine AI FZ-LLC', iban: wrongDigits },
+      { name: 'Jasmine AI FZ-LLC', iban: `GB82WEST12345698765432` },
+      { name: '   ', iban },
+      { name: 'Jasmine AI FZ-LLC', iban, also: 'x' },
+      { name: 'Jasmine AI FZ-LLC' },
+      // A valid IBAN, spaced past the 64 its body limit is reckoned on.
+      { name: 'Jasmine AI FZ-LLC', iban: iban.padEnd(65, ' ') },
+    ]) {
+      const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/pass-through`, body));
+      expect(response.statusCode).toBe(400);
+      expect(response.body).not.toMatch(/0331234567890123456|12345698765432/);
+    }
     expect(asked).toEqual([]);
   });
 });
