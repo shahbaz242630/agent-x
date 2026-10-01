@@ -39,7 +39,6 @@ import {
   confirmPayeeChange,
   isPayeeTaken,
   PAYEE_COOLING_OFF_MS,
-  registrationOf,
   withdrawPayeeChange,
 } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
@@ -47,11 +46,11 @@ import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { SupplierChangeWrite } from './supplier-changes.ts';
 import { REGISTERING_ROLES } from './supplier-payees.ts';
 import {
   createSupplierWork,
   type SessionMember,
+  type SupplierChangeWrite,
   type SupplierMember,
   SupplierRefused,
   type SupplierTables,
@@ -145,31 +144,11 @@ export function createSupplierPayeeChanges({
     const { pendingVersionId } = found.supplier;
     if (pendingVersionId === null) throw new SupplierRefused(409, 'SUPPLIER_NO_CHANGE_WAITING');
     const version = await work.versionIn(tx, states, orgId, found.supplier.id, pendingVersionId);
+    const registration = await work.registrationFor(tx, states, orgId, version);
     // stagePayeeChange stages only a version made from a registration of its supplier.
-    if (version.registrationId === null) throw new Error(`A payee change waits with no registration: ${version.id}`);
-    const registration = await registrationOf(
-      tx,
-      states,
-      { orgId, id: version.registrationId },
-      found.supplier.id,
-      'share',
-    );
-    if (registration.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    if (registration.outcome === 'missing')
-      throw new Error(`A version names a registration not its supplier's: ${version.id}`);
-    if (registration.registration.startedBy !== admin.id) throw new SupplierRefused(403, 'PAYEE_CHANGE_NOT_YOURS');
-    return { found, version, registration: registration.registration };
-  };
-
-  /** Answers the write: the supplier as it now stands, on a retry too. */
-  const answer = async (
-    orgId: string,
-    correlationId: string,
-    done: Awaited<ReturnType<typeof work.write>>,
-  ): Promise<SupplierChangeWrite> => {
-    const answered = await work.viewAfter(orgId, correlationId, done);
-    if ('outcome' in answered) return answered;
-    return { outcome: 'changed', ...answered };
+    if (registration === null) throw new Error(`A payee change waits with no registration: ${version.id}`);
+    if (registration.startedBy !== admin.id) throw new SupplierRefused(403, 'PAYEE_CHANGE_NOT_YOURS');
+    return { found, version, registration };
   };
 
   return {
@@ -185,8 +164,7 @@ export function createSupplierPayeeChanges({
         if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
+      return work.askedAfter(done);
     },
 
     async approveConfirm(member, idempotent, supplierId, stepUpChallengeId, correlationId) {
@@ -224,22 +202,21 @@ export function createSupplierPayeeChanges({
         if (!isPayeeTaken(error)) throw error;
         return { outcome: 'refused', status: 409, code: 'SUPPLIER_PAYEE_TAKEN' };
       }
-      return answer(member.orgId, correlationId, done);
+      return work.changedAfter(member.orgId, correlationId, done);
     },
 
     async withdraw(member, idempotent, supplierId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, WITHDRAWING_ROLES);
-        const key = { orgId: member.orgId, id: supplierId };
-        const found = await work.supplierIn(tx, states, key, 'change');
+        const found = await work.supplierIn(tx, states, { orgId: member.orgId, id: supplierId }, 'change');
         const { pendingVersionId } = found.supplier;
         if (pendingVersionId === null) throw new SupplierRefused(409, 'SUPPLIER_NO_CHANGE_WAITING');
-        await withdrawPayeeChange(tx, states, { ...key, id: found.supplier.id }, found, pendingVersionId, {
+        await withdrawPayeeChange(tx, states, { orgId: member.orgId, id: found.supplier.id }, found, pendingVersionId, {
           actor: { type: 'user', id: member.userId },
         });
         return { status: 200, resourceId: found.supplier.id };
       });
-      return answer(member.orgId, correlationId, done);
+      return work.changedAfter(member.orgId, correlationId, done);
     },
   };
 }

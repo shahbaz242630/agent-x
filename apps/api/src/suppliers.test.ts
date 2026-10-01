@@ -24,11 +24,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
-import type { SupplierChanges, SupplierChangeWrite } from './supplier-changes.ts';
+import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
-import type { SupplierView } from './supplier-work.ts';
+import type { SupplierChangeWrite, SupplierView } from './supplier-work.ts';
 
 const PUBLIC_ORIGIN = 'https://app.agentx.example';
 const COOKIE = 'S'.repeat(43);

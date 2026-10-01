@@ -15,6 +15,7 @@ import {
   contactsOf,
   type NameCheck,
   registrationOf,
+  type RegistrationRecord,
   type SupplierContacts,
   SupplierContactsUnreadable,
   supplierOf,
@@ -92,6 +93,14 @@ export interface SupplierView {
   readonly pending: { readonly version: VersionRecord; readonly payee: PayeeShown | null } | null;
 }
 
+/** A change of a supplier, as the use cases answer it: the supplier as it now stands, a step-up asked, or a refusal. */
+export type SupplierChangeWrite =
+  | ({ readonly outcome: 'changed' } & SupplierView)
+  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | { readonly outcome: 'conflict' }
+  | { readonly outcome: 'busy' }
+  | Refused;
+
 /** A supplier read for a decision or a change: its record, and the state a change records from. */
 type SupplierFound = Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>;
 
@@ -154,24 +163,36 @@ export function createSupplierWork({
   };
 
   /**
-   * A version's payee, from the registration that gave it (read `share`), or
-   * null for a version with none yet: INTEGRITY_FAILED for a registration
+   * The registration that gave a version its payee, read (`share`) and
+   * verified, or null for a version with none yet: INTEGRITY_FAILED for one
    * that can't be believed. Versions are never locked for change, so reading
    * one before its registration waits on nothing.
    */
+  const registrationFor = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    orgId: string,
+    version: VersionRecord,
+  ): Promise<RegistrationRecord | null> => {
+    if (version.registrationId === null) return null;
+    const read = await registrationOf(tx, states, { orgId, id: version.registrationId }, version.supplierId, 'share');
+    if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    // 0032's key holds a version to a registration, and addVersion to one of its own supplier's.
+    if (read.outcome === 'missing') throw new Error(`A version names a registration not its supplier's: ${version.id}`);
+    return read.registration;
+  };
+
+  /** A version's payee as the partner described it, or null for a version with none yet. */
   const payeeOf = async (
     tx: SupplierTx,
     states: SignedStates,
     orgId: string,
     version: VersionRecord,
   ): Promise<PayeeShown | null> => {
-    if (version.registrationId === null) return null;
-    const read = await registrationOf(tx, states, { orgId, id: version.registrationId }, version.supplierId, 'share');
-    if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    // 0032's key holds a version to a registration, and addVersion to one of its own supplier's.
-    if (read.outcome === 'missing') throw new Error(`A version names a registration not its supplier's: ${version.id}`);
-    const { nameCheck, maskedName } = read.registration;
-    return { registrationId: read.registration.id, payeeHint: version.payeeHint, nameCheck, maskedName };
+    const registration = await registrationFor(tx, states, orgId, version);
+    if (registration === null) return null;
+    const { nameCheck, maskedName } = registration;
+    return { registrationId: registration.id, payeeHint: version.payeeHint, nameCheck, maskedName };
   };
 
   /**
@@ -235,19 +256,37 @@ export function createSupplierWork({
   const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
     answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
 
+  type Written = Awaited<ReturnType<typeof write>>;
+
+  /** A write's refusal, or its key's outcome, answered as it is. */
+  const isAnswered = (done: Written): done is Extract<Written, { outcome: 'refused' | 'conflict' | 'busy' }> =>
+    done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy';
+
+  const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
+    isAnswered(done) ? done : view(orgId, done.result.resourceId, correlationId);
+
   return {
     inOrganisation,
     answered,
     supplierIn,
     versionIn,
+    registrationFor,
     write,
     view,
 
     /** A write's answer: its refusal or its key's outcome as it is, otherwise the supplier it wrote as it now stands (on a retry too). */
-    viewAfter: async (orgId: string, correlationId: string, done: Awaited<ReturnType<typeof write>>) => {
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      return view(orgId, done.result.resourceId, correlationId);
+    viewAfter,
+
+    /** A change's answer: as viewAfter, the supplier `changed`. */
+    changedAfter: async (orgId: string, correlationId: string, done: Written): Promise<SupplierChangeWrite> => {
+      const answered = await viewAfter(orgId, correlationId, done);
+      if ('outcome' in answered) return answered;
+      return { outcome: 'changed', ...answered };
     },
+
+    /** A step-up's ask answered: its refusal or its key's outcome as it is, otherwise the challenge opened (the write's resource). */
+    askedAfter: (done: Written): SupplierChangeWrite =>
+      isAnswered(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
 
     /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
     memberIn: async (tx: SupplierTx, states: SignedStates, member: SupplierMember, roles: readonly Role[]) => {

@@ -72,7 +72,6 @@ import {
   REACTIVATE_OPERATION,
   REACTIVATING_ROLES,
   type SupplierChanges,
-  type SupplierChangeWrite,
   SUSPEND_OPERATION,
   SUSPENDING_ROLES,
 } from './supplier-changes.ts';
@@ -92,7 +91,7 @@ import {
   type SupplierPayeeChanges,
   WITHDRAWING_ROLES,
 } from './supplier-payee-changes.ts';
-import type { PayeeShown, SupplierView } from './supplier-work.ts';
+import type { PayeeShown, SupplierChangeWrite, SupplierView } from './supplier-work.ts';
 
 /** Every member may see the organisation's suppliers. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -422,6 +421,7 @@ const supplierOf = (supplier: SupplierRecord, displayName: string) => ({
   verifiedBy: supplier.verifiedBy,
 });
 
+// Field by field, as the rest of this file's bodies: nothing more of a payee can ever reach an answer.
 const payeeBodyOf = (payee: PayeeShown | null) =>
   payee === null
     ? null

@@ -487,25 +487,27 @@ function contactIdsFor(
 }
 
 /** The organisation's ACTIVE contacts' IDs, counted or not yet: whom a notice to its contacts goes to (B6-1b). */
-export const activeContactsFor = (
+export function activeContactsFor(
   db: Kysely<IdentityTables & AuditTables>,
   services: SignedStatesServices,
   orgId: string,
-): Promise<readonly string[]> => contactIdsFor(db, services, orgId, (contact) => contact.status === 'ACTIVE');
+): Promise<readonly string[]> {
+  return contactIdsFor(db, services, orgId, (contact) => contact.status === 'ACTIVE');
+}
 
 /**
  * The organisation's contacts that count at the clock's now (countsNow): whom
  * a notice about a supplier goes to (E2-2b, ADR-012 §1), as only they may
  * confirm a reset.
  */
-export const countingContactsFor = (
+export function countingContactsFor(
   db: Kysely<IdentityTables & AuditTables>,
   { clock, ...services }: SignedStatesServices & { readonly clock: Clock },
   orgId: string,
-): Promise<readonly string[]> => {
+): Promise<readonly string[]> {
   const now = clock.now();
   return contactIdsFor(db, services, orgId, (contact) => countsNow(contact, now));
-};
+}
 
 /**
  * The contact's address, from its verified row, in a transaction of its own,

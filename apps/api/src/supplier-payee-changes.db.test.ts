@@ -22,17 +22,25 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
   PAYEE_COOLING_OFF_MS,
+  SUPPLIER_VERSIONS,
   type SupplierDetails,
   supplierOf,
   type SuppliersTables,
+  suspendSupplier,
 } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  tamperAsOwner,
+  type TestDatabase,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import type { SupplierChangeWrite } from './supplier-changes.ts';
 import {
   createSupplierPayeeChanges,
   PAYEE_APPROVE_CONFIRM_OPERATION,
@@ -48,7 +56,7 @@ import {
   type SupplierPayees,
 } from './supplier-payees.ts';
 import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './supplier-registry.ts';
-import type { SessionMember } from './supplier-work.ts';
+import type { SessionMember, SupplierChangeWrite } from './supplier-work.ts';
 
 type Tables = IdentityTables &
   SuppliersTables &
@@ -382,6 +390,24 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
     expect(changedOf(await confirmed(admin, id)).supplier.currentVersionId).toBe(again.versionId);
   });
 
+  it('confirms one for a suspended supplier, which stays suspended, its payee changed beneath the brake', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const { versionId } = await waiting(admin, id);
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const found = await supplierOf(tx, states, { orgId: org, id }, 'change');
+      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+      await suspendSupplier(tx, states, { orgId: org, id }, found, { actor: OPERATOR });
+    });
+
+    expect(changedOf(await confirmed(admin, id)).supplier).toMatchObject({
+      status: 'SUSPENDED',
+      currentVersionId: versionId,
+      pendingVersionId: null,
+    });
+  });
+
   it('answers a retry of the same confirmation as it stands, telling no one twice', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -436,6 +462,30 @@ describe(`a registration tampered with (E2-2b, Postgres ${server.version})`, () 
         .where('id', '=', registration.id)
         .execute(),
     );
+
+    const refused = { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
+    expect(await registry.show(org, id, CORRELATION)).toEqual(refused);
+    expect(await approve(admin, id)).toEqual(refused);
+    expect((await supplierNow(org, id)).payeeKey).toBeNull();
+  });
+});
+
+describe(`a version waiting tampered with (E2-2b, Postgres ${server.version})`, () => {
+  it('refuses the supplier’s view and the confirmation: INTEGRITY_FAILED, nothing confirmed', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const { versionId } = await waiting(admin, id);
+    // Past the app, as the database's owner: the hint the call-back reads, changed.
+    const owner = await tamperAsOwner(database, SUPPLIER_VERSIONS, org);
+    try {
+      // 0032's `made_once` stops even the owner, unless they switch it off first.
+      await owner.query('alter table suppliers.supplier_versions disable trigger made_once');
+      await owner.query("update suppliers.supplier_versions set payee_hint = 'AE…9999' where id = $1", [versionId]);
+    } finally {
+      await owner.query('alter table suppliers.supplier_versions enable trigger made_once');
+      await owner.end();
+    }
 
     const refused = { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
     expect(await registry.show(org, id, CORRELATION)).toEqual(refused);

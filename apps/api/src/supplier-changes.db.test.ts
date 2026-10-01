@@ -37,11 +37,10 @@ import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
   type SupplierChanges,
-  type SupplierChangeWrite,
   SUSPEND_OPERATION,
 } from './supplier-changes.ts';
 import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './supplier-registry.ts';
-import type { SessionMember } from './supplier-work.ts';
+import type { SessionMember, SupplierChangeWrite } from './supplier-work.ts';
 
 type Tables = IdentityTables &
   SuppliersTables &

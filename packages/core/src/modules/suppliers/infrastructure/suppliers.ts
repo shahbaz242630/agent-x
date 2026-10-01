@@ -598,8 +598,9 @@ interface PayeeChange {
  * caller unverifies it first), or one whose version wasn't made from the
  * registration: REGISTERED, of this supplier, started for that very version,
  * which names it (a version carrying the payee forward names its follows'),
- * and newer than the supplier's current version, so a change withdrawn or
- * overtaken is never staged or confirmed again.
+ * and newer than the supplier's current version, so a change overtaken is
+ * never staged or confirmed again. A withdrawn one is newer still; the API
+ * never stages it again, as Tx 2 stages only the version it has just made.
  */
 function mayChangePayee(supplier: SupplierRecord, { version, registration, current }: PayeeChange): void {
   if (supplier.status === 'VERIFIED') {
