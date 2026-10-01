@@ -33,6 +33,11 @@ const NOT_TAKEN = {
   'sonarjs/regex-complexity': 'off',
   // A named alias documents what a plain type means (a SchemaProblem is a string that names no value).
   'sonarjs/redundant-type-aliases': 'off',
+  // The validators and scrubbers spell their ASCII classes out ([0-9], [A-Za-z0-9_]) to say what they accept:
+  // `\w` with the `u` and `i` flags together also takes ſ and the Kelvin sign.
+  'sonarjs/concise-regex': 'off',
+  // Under the `i` flag `[A-Za-z]` repeats itself on purpose: the class stays right if the flag is ever dropped.
+  'sonarjs/duplicates-in-character-class': 'off',
   // Slow and covered already (S70: together 44% of the run): @typescript-eslint/no-deprecated is on, SonarJS's
   // assertions-in-test-cases checks what assertions-in-tests does, and there is no AWS code here.
   'sonarjs/deprecation': 'off',

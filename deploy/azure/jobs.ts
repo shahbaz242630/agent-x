@@ -438,7 +438,8 @@ const TIME_OF_DAY = /T(\d{2}:\d{2}:\d{2})/;
 /** A line as the operator reads it: the time, where it came from, what it says. */
 function shown(line: LogLine): string {
   const time = TIME_OF_DAY.exec(line.time)?.[1] ?? line.time;
-  return `  ${time}  ${line.source.padEnd(8)}  ${line.reason === '' ? '' : `${line.reason}: `}${line.text}`;
+  const reason = line.reason === '' ? '' : `${line.reason}: `;
+  return `  ${time}  ${line.source.padEnd(8)}  ${reason}${line.text}`;
 }
 
 /**

@@ -203,7 +203,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
     });
     // Encrypted: nothing of the address is in the row, in either case.
     expect(row.email_ciphertext.toString('latin1').toLowerCase()).not.toContain('sara');
-    expect(row.email_ciphertext.length).toBe(12 + 16 + 'sara.khan@example.test'.length);
+    expect(row.email_ciphertext).toHaveLength(12 + 16 + 'sara.khan@example.test'.length);
     expect(event).toMatchObject({
       actor_type: 'user',
       actor_id: who.adminUser,

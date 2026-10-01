@@ -192,10 +192,9 @@ function columnsOf({ fields }: SignedStateTable): RawBuilder<unknown> {
     sql`target.state_event_id`,
     ...fields.flatMap(({ column, type }, index) => {
       const value = sql.ref(`target.${column}`);
-      return [
-        sql`${canonical(type, value)} as ${sql.id(`f${index.toString()}`)}`,
-        sql`pg_catalog.pg_typeof(${value})::oid as ${sql.id(`t${index.toString()}`)}`,
-      ];
+      // Each field read twice: as canonical text (f0, f1…) and as its type (t0, t1…).
+      const [field, typeOf] = [sql.id('f' + index.toString()), sql.id('t' + index.toString())];
+      return [sql`${canonical(type, value)} as ${field}`, sql`pg_catalog.pg_typeof(${value})::oid as ${typeOf}`];
     }),
   ]);
 }
@@ -310,7 +309,7 @@ export async function writeSignedRow<Schema>(
       ? sql`target.state_version = 1 and target.state_event_id is null`
       : sql`target.state_version = ${from.version} and target.state_event_id = ${from.eventId}`;
   const echoes = values.map(
-    ([{ type }, value], index) => sql`${canonical(type, typed(type, value))} as ${sql.id(`w${index.toString()}`)}`,
+    ([{ type }, value], index) => sql`${canonical(type, typed(type, value))} as ${sql.id('w' + index.toString())}`,
   );
   // The alias keeps the text after the table name from starting with SET,
   // which the lint rule against session-wide settings would take for one.

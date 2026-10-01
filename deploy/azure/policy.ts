@@ -1510,10 +1510,11 @@ const logDestinations: Check = (snapshot, _expected, add) => {
       (key) => !isEmpty(at(setting.properties, key)) && at(setting.properties, key) !== '',
     );
     if (!workspaces.has(at(setting.properties, 'workspaceId')) || elsewhere.length > 0) {
+      const notTo = elsewhere.length > 0 ? `, not to ${elsewhere.join(', ')}` : '';
       add({
         rule: 'log-destinations',
         resource: setting.name,
-        message: `must send to this deployment's workspace only${elsewhere.length > 0 ? `, not to ${elsewhere.join(', ')}` : ''}: logs stay in the UAE (ADR-013)`,
+        message: `must send to this deployment's workspace only${notTo}: logs stay in the UAE (ADR-013)`,
       });
     }
   }

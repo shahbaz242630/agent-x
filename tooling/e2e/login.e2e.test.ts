@@ -242,7 +242,7 @@ describe('SEC-HA-01 a forced re-login asks for the second factor again', () => {
     expect(admins[0]?.preferredLoginName, seen).toBe(`admin@agent-x.${new URL(issuer).hostname}`);
     expect(isBreakGlassLogin(admins[0]?.preferredLoginName, issuer), seen).toBe(true);
     // No one else's login name is refused.
-    expect(everyone.filter(({ preferredLoginName }) => isBreakGlassLogin(preferredLoginName, issuer)).length).toBe(1);
+    expect(everyone.filter(({ preferredLoginName }) => isBreakGlassLogin(preferredLoginName, issuer))).toHaveLength(1);
   });
 });
 

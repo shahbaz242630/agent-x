@@ -34,7 +34,7 @@ const JOINERS = /\p{Join_Control}/gu;
 const READABLE = /[\p{L}\p{N}]/u;
 
 /** A name that starts with a combining mark, or five marks in a row: more than one character carries. */
-const STACKED = /^\p{M}|\p{M}{5}/u;
+const STACKED = /(?:^\p{M})|\p{M}{5}/u;
 
 /**
  * The name as it is kept (composed, NFC), with the problems that keep it from

@@ -117,7 +117,8 @@ export const STATEMENT_SECONDS = 10;
  * first, so the app layer needs no SQL of its own.
  */
 export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<void> {
-  await sql`select pg_catalog.set_config('statement_timeout', ${`${String(STATEMENT_SECONDS)}s`}, true)`.execute(tx);
+  const timeout = `${String(STATEMENT_SECONDS)}s`;
+  await sql`select pg_catalog.set_config('statement_timeout', ${timeout}, true)`.execute(tx);
 }
 
 /**

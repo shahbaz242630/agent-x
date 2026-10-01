@@ -8,11 +8,17 @@ import { ESLint } from 'eslint';
 
 /** The SonarJS rules whose findings are cleaned, so they block like any other. */
 export const BLOCKING: ReadonlySet<string> = new Set<string>([
+  'sonarjs/anchor-precedence',
   'sonarjs/class-name',
+  'sonarjs/existing-groups',
+  'sonarjs/misplaced-loop-counter',
   'sonarjs/no-identical-functions',
   'sonarjs/no-inverted-boolean-check',
   'sonarjs/no-misleading-array-reverse',
   'sonarjs/no-nested-assignment',
+  'sonarjs/no-nested-template-literals',
+  'sonarjs/parameterized-tests',
+  'sonarjs/prefer-specific-assertions',
 ]);
 
 /** One finding, as ESLint gives it. */

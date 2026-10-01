@@ -621,7 +621,7 @@ async function plan(request: Request, steps: CheckSteps): Promise<Plan> {
   steps.say(
     records.size === 0
       ? 'The migration job holds no hand deploy records.'
-      : `The migration job records: ${[...records].map(([deployment, sent]) => `${deployment} sent ${sent}`).join('; ')}.`,
+      : `The migration job records: ${[...records].map(([deployment, sent]) => deployment + ' sent ' + sent).join('; ')}.`,
   );
   const decision = decide(running, request.commit, image, steps.history, readers, records);
   return { subscription, image, reads, running, decision };
@@ -832,7 +832,7 @@ function idle(steps: ReleaseSteps, subscription: string): Run[] {
   const going = listed.filter((run) => !ENDED.has(run.status));
   if (going.length > 0) {
     throw new Error(
-      `migrate has runs that haven't ended (${going.map((run) => `${run.name} ${run.status}`).join(', ')}).`,
+      `migrate has runs that haven't ended (${going.map((run) => run.name + ' ' + run.status).join(', ')}).`,
     );
   }
   return listed;
@@ -862,8 +862,9 @@ async function startMigration(steps: ReleaseSteps, subscription: string): Promis
     if (started !== undefined) {
       // Azure's own name for it, held to the job's runs before it goes into a URL.
       if (!isRunOf('migrate', started.name) || (named !== undefined && named !== started.name)) {
+        const andStarted = named === undefined ? '' : ` and started "${named}"`;
         throw new Error(
-          `Azure listed migrate's new run as "${started.name}"${named === undefined ? '' : ` and started "${named}"`}, which isn't this release's run.`,
+          `Azure listed migrate's new run as "${started.name}"${andStarted}, which isn't this release's run.`,
         );
       }
       steps.say(`Started ${started.name}.`);

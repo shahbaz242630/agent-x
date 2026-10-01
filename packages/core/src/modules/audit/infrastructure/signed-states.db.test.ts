@@ -557,18 +557,25 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
     expect(alarms()).toEqual([alarmFor(id, sign), alarmFor(id, sign)]);
   };
 
-  it('a status flipped along a move the guard allows: the fields no longer match the seal', async () => {
-    const id = await newAgent();
-    await tamper("update probe.agents set status = 'SUSPENDED' where org_id = $1 and id = $2", id);
+  it.each([
+    [
+      'a status flipped along a move the guard allows: the fields no longer match the seal',
+      undefined,
+      "update probe.agents set status = 'SUSPENDED' where org_id = $1 and id = $2",
+      'seal',
+    ],
+    ['a role raised', 'reader', "update probe.agents set role = 'admin' where org_id = $1 and id = $2", 'seal'],
+    [
+      'a pointer cleared',
+      undefined,
+      'update probe.agents set state_event_id = null where org_id = $1 and id = $2',
+      'pointer',
+    ],
+  ] as const)('%s', async (_what, role, statement, sign) => {
+    const id = await newAgent(role);
+    await tamper(statement, id);
 
-    await deniedWith(id, 'seal');
-  });
-
-  it('a role raised', async () => {
-    const id = await newAgent('reader');
-    await tamper("update probe.agents set role = 'admin' where org_id = $1 and id = $2", id);
-
-    await deniedWith(id, 'seal');
+    await deniedWith(id, sign);
   });
 
   it('a row pointed back at an older valid event, its version and status rolled back with it', async () => {
@@ -579,13 +586,6 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
       "update probe.agents set status = 'ACTIVE', state_version = 1, state_event_id = $3 where org_id = $1 and id = $2",
       [org, id, first?.id],
     );
-
-    await deniedWith(id, 'pointer');
-  });
-
-  it('a pointer cleared', async () => {
-    const id = await newAgent();
-    await tamper('update probe.agents set state_event_id = null where org_id = $1 and id = $2', id);
 
     await deniedWith(id, 'pointer');
   });

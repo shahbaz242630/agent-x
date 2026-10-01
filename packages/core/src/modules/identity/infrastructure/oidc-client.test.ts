@@ -268,7 +268,7 @@ describe('finishing a sign-in', () => {
     const headers = new Headers(exchange?.init.headers);
     expect(exchange?.init.method).toBe('POST');
     expect(headers.get('authorization')).toBe(
-      `Basic ${Buffer.from(`${encodeURIComponent(CLIENT)}:${PASS}`).toString('base64')}`,
+      `Basic ${Buffer.from(encodeURIComponent(CLIENT) + ':' + PASS).toString('base64')}`,
     );
     expect(headers.get('content-type')).toBe('application/x-www-form-urlencoded');
     expect(Object.fromEntries(new URLSearchParams(exchange?.init.body as string))).toEqual({
