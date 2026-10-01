@@ -495,6 +495,32 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(next.form).not.toBeNull();
   });
 
+  it('answers a start as it stands when a check ended its registration while the partner was asked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const first = answered(await start(admin, id), 'started');
+    clock.advanceBy(31 * MINUTE_MS);
+    // The check lands between the start's question to the partner and its answer being kept.
+    const racing: FakeRail = {
+      ...rail,
+      registerBeneficiary: async (input) => {
+        const outcome = await rail.registerBeneficiary(input);
+        answered(await check(admin, id, first.registration.id), 'checked');
+        return outcome;
+      },
+    };
+
+    const carried = answered(await start(admin, id, undefined, payeesWith(racing)), 'started');
+
+    expect(carried.registration).toMatchObject({ id: first.registration.id, status: 'FAILED', failure: 'expired' });
+    expect(await actionsAbout(org, 'beneficiary_registration', first.registration.id)).toEqual([
+      'beneficiary_registration.started',
+      'beneficiary_registration.refused',
+      'beneficiary_registration.failed',
+    ]);
+  });
+
   it('refuses another start, and stages no second change, while one is waiting', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
