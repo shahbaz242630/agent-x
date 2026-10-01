@@ -4,12 +4,18 @@
 // member read again for the decision, a supplier read and verified, and a
 // refusal thrown inside a write so everything it did rolls back. A supplier
 // is answered with its current version and that version's contacts, opened
-// only from the version read through its signed state.
+// only from the version read through its signed state, and with its payee
+// and any payee change waiting as the partner described them (E2-2b): what
+// the call-back confirms (ADR-014 §3), never an account number.
 import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import {
   contactsOf,
+  type NameCheck,
+  registrationOf,
+  type RegistrationRecord,
   type SupplierContacts,
   SupplierContactsUnreadable,
   supplierOf,
@@ -29,8 +35,8 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-/** The tables the supplier use cases work on. */
-export type SupplierTables = IdentityTables & SuppliersTables & DirectoryTables & AuditTables;
+/** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
+export type SupplierTables = IdentityTables & SuppliersTables & DirectoryTables & AuditTables & NotificationsTables;
 export type SupplierTx = DatabaseTransaction<SupplierTables>;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */
@@ -66,12 +72,34 @@ export class SupplierRefused extends Error {
   }
 }
 
-/** A supplier as the members' routes show it: its signed state, its current version, and that version's contacts. */
+/** A version's payee as the partner described it (E2): its registration, the masked hint, and the name check's answer. */
+export interface PayeeShown {
+  readonly registrationId: string;
+  readonly payeeHint: string | null;
+  readonly nameCheck: NameCheck | null;
+  readonly maskedName: string | null;
+}
+
+/**
+ * A supplier as the members' routes show it: its signed state, its current
+ * version, that version's contacts and payee, and the payee change waiting
+ * for its admin's confirmation, if any (E2-2b).
+ */
 export interface SupplierView {
   readonly supplier: SupplierRecord;
   readonly version: VersionRecord;
   readonly contacts: SupplierContacts;
+  readonly payee: PayeeShown | null;
+  readonly pending: { readonly version: VersionRecord; readonly payee: PayeeShown | null } | null;
 }
+
+/** A change of a supplier, as the use cases answer it: the supplier as it now stands, a step-up asked, or a refusal. */
+export type SupplierChangeWrite =
+  | ({ readonly outcome: 'changed' } & SupplierView)
+  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+  | { readonly outcome: 'conflict' }
+  | { readonly outcome: 'busy' }
+  | Refused;
 
 /** A supplier read for a decision or a change: its record, and the state a change records from. */
 type SupplierFound = Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>;
@@ -124,11 +152,54 @@ export function createSupplierWork({
     return read;
   };
 
+  /** A version of the supplier's, read and verified: INTEGRITY_FAILED for one that can't be believed. */
+  const versionIn = async (tx: SupplierTx, states: SignedStates, orgId: string, supplierId: string, id: string) => {
+    const read = await versionOf(tx, states, { orgId, id }, supplierId);
+    if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    // 0032's keys hold a supplier to versions of its own, and one removed past the app reads as tampered
+    // (its events outlive it; supplier-registry.db.test.ts), so none is missing.
+    if (read.outcome === 'missing') throw new Error(`A supplier names a version not its own: ${id}`);
+    return read.version;
+  };
+
   /**
-   * The supplier with its current version and contacts, read (`share`) in the
-   * organisation's transaction: NOT_FOUND for one it doesn't have;
-   * INTEGRITY_FAILED for a supplier or version that can't be believed, or
-   * contacts that won't open.
+   * The registration that gave a version its payee, read (`share`) and
+   * verified, or null for a version with none yet: INTEGRITY_FAILED for one
+   * that can't be believed. Versions are never locked for change, so reading
+   * one before its registration waits on nothing.
+   */
+  const registrationFor = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    orgId: string,
+    version: VersionRecord,
+  ): Promise<RegistrationRecord | null> => {
+    if (version.registrationId === null) return null;
+    const read = await registrationOf(tx, states, { orgId, id: version.registrationId }, version.supplierId, 'share');
+    if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    // 0032's key holds a version to a registration, and addVersion to one of its own supplier's.
+    if (read.outcome === 'missing') throw new Error(`A version names a registration not its supplier's: ${version.id}`);
+    return read.registration;
+  };
+
+  /** A version's payee as the partner described it, or null for a version with none yet. */
+  const payeeOf = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    orgId: string,
+    version: VersionRecord,
+  ): Promise<PayeeShown | null> => {
+    const registration = await registrationFor(tx, states, orgId, version);
+    if (registration === null) return null;
+    const { nameCheck, maskedName } = registration;
+    return { registrationId: registration.id, payeeHint: version.payeeHint, nameCheck, maskedName };
+  };
+
+  /**
+   * The supplier with its current version, contacts and payee, and the change
+   * waiting, read (`share`) in the organisation's transaction: NOT_FOUND for
+   * one it doesn't have; INTEGRITY_FAILED for a supplier, version or
+   * registration that can't be believed, or contacts that won't open.
    */
   const viewIn = async (
     tx: SupplierTx,
@@ -138,21 +209,29 @@ export function createSupplierWork({
     correlationId: string,
   ): Promise<SupplierView> => {
     const { supplier } = await supplierIn(tx, states, { orgId, id: supplierId }, 'share');
-    const current = await versionOf(tx, states, { orgId, id: supplier.currentVersionId }, supplier.id);
-    if (current.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    // 0032's key holds a supplier to a current version of its own, and one removed past the app reads as tampered
-    // (its events outlive it; supplier-registry.db.test.ts), so none is missing.
-    if (current.outcome === 'missing') throw new Error(`A supplier has no current version of its own: ${supplier.id}`);
+    const version = await versionIn(tx, states, orgId, supplier.id, supplier.currentVersionId);
+    const pending =
+      supplier.pendingVersionId === null
+        ? null
+        : await versionIn(tx, states, orgId, supplier.id, supplier.pendingVersionId);
+    let contacts: SupplierContacts;
     try {
-      return { supplier, version: current.version, contacts: await contactsOf(tx, keys, orgId, current.version) };
+      contacts = await contactsOf(tx, keys, orgId, version);
     } catch (error) {
       if (!(error instanceof SupplierContactsUnreadable)) throw error;
       // Logged by IDs alone, never a contact.
       logger
         .child({ correlationId, orgId })
-        .error('suppliers.contacts_unreadable', { supplierId: supplier.id, versionId: current.version.id });
+        .error('suppliers.contacts_unreadable', { supplierId: supplier.id, versionId: version.id });
       throw new SupplierRefused(503, 'INTEGRITY_FAILED');
     }
+    return {
+      supplier,
+      version,
+      contacts,
+      payee: await payeeOf(tx, states, orgId, version),
+      pending: pending === null ? null : { version: pending, payee: await payeeOf(tx, states, orgId, pending) },
+    };
   };
 
   /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
@@ -177,18 +256,37 @@ export function createSupplierWork({
   const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
     answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
 
+  type Written = Awaited<ReturnType<typeof write>>;
+
+  /** A write's refusal, or its key's outcome, answered as it is. */
+  const isAnswered = (done: Written): done is Extract<Written, { outcome: 'refused' | 'conflict' | 'busy' }> =>
+    done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy';
+
+  const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
+    isAnswered(done) ? done : view(orgId, done.result.resourceId, correlationId);
+
   return {
     inOrganisation,
     answered,
     supplierIn,
+    versionIn,
+    registrationFor,
     write,
     view,
 
     /** A write's answer: its refusal or its key's outcome as it is, otherwise the supplier it wrote as it now stands (on a retry too). */
-    viewAfter: async (orgId: string, correlationId: string, done: Awaited<ReturnType<typeof write>>) => {
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      return view(orgId, done.result.resourceId, correlationId);
+    viewAfter,
+
+    /** A change's answer: as viewAfter, the supplier `changed`. */
+    changedAfter: async (orgId: string, correlationId: string, done: Written): Promise<SupplierChangeWrite> => {
+      const answered = await viewAfter(orgId, correlationId, done);
+      if ('outcome' in answered) return answered;
+      return { outcome: 'changed', ...answered };
     },
+
+    /** A step-up's ask answered: its refusal or its key's outcome as it is, otherwise the challenge opened (the write's resource). */
+    askedAfter: (done: Written): SupplierChangeWrite =>
+      isAnswered(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
 
     /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
     memberIn: async (tx: SupplierTx, states: SignedStates, member: SupplierMember, roles: readonly Role[]) => {

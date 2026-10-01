@@ -94,13 +94,22 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
     return typed.split(' ')[0] === held.split(' ')[0] ? 'partial' : 'no_match';
   };
 
-  /** The partner's identity for the account within the organisation: the same for the same account, another organisation's never. */
+  /**
+   * The partner's identity for the account within the organisation: the same
+   * for the same account, another organisation's never. Its digest is written
+   * in letters alone (a to p for each hex digit): in hex, one in about a
+   * hundred read as an IBAN with valid check digits, and the answer was
+   * refused as an account number (E2-2b).
+   */
   const identityOf = (organizationId: string, iban: string): string | null => {
     if (!stablePayeeIdentity) return null;
     const digest = createHash('sha256')
       .update(`fake-payee ${organizationId} ${compact(iban)}`)
       .digest('hex');
-    return `fake-payee-${digest.slice(0, 32)}`;
+    const letters = digest
+      .slice(0, 32)
+      .replaceAll(/[\da-f]/g, (digit) => String.fromCodePoint(0x61 + Number.parseInt(digit, 16)));
+    return `fake-payee-${letters}`;
   };
 
   /** The payee registered, or `invalid_details` for an account the rail can't pay or a name no one could read. */

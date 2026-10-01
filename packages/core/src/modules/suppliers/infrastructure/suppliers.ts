@@ -598,8 +598,9 @@ interface PayeeChange {
  * caller unverifies it first), or one whose version wasn't made from the
  * registration: REGISTERED, of this supplier, started for that very version,
  * which names it (a version carrying the payee forward names its follows'),
- * and newer than the supplier's current version, so a change withdrawn or
- * overtaken is never staged or confirmed again.
+ * and newer than the supplier's current version, so a change overtaken is
+ * never staged or confirmed again. A withdrawn one is newer still; the API
+ * never stages it again, as Tx 2 stages only the version it has just made.
  */
 function mayChangePayee(supplier: SupplierRecord, { version, registration, current }: PayeeChange): void {
   if (supplier.status === 'VERIFIED') {
@@ -662,11 +663,13 @@ export async function stagePayeeChange(
  * key (its key's version with it) the supplier's, in one signed state, so
  * the key always moves with the version it pays. 0033's
  * `one_supplier_a_payee` refuses a key another supplier of the organisation
- * holds, a suspended one included (isPayeeTaken). A change that isn't the
- * one waiting, or one mayChangePayee refuses, is refused (RangeError) before
- * any SQL runs. A suspended supplier's verification, if any, stays on the
- * version it was, so it comes back UNVERIFIED (stillVerified). Gives the
- * supplier as it now stands.
+ * holds, a suspended one included (isPayeeTaken). Its cooling-off starts
+ * here, ending `coolingOffUntil` (ADR-014 §3 step 4); a time that isn't one
+ * is refused (RangeError) as it is sealed, before the row is written. A
+ * change that isn't the one waiting, or one mayChangePayee refuses, is
+ * refused (RangeError) before any SQL runs. A suspended supplier's
+ * verification, if any, stays on the version it was, so it comes back
+ * UNVERIFIED (stillVerified). Gives the supplier as it now stands.
  */
 export async function confirmPayeeChange(
   tx: SuppliersTransaction,
@@ -674,7 +677,7 @@ export async function confirmPayeeChange(
   key: SupplierKey,
   found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
   change: PayeeChange,
-  { actor, details = {} }: SupplierChange,
+  { actor, details = {}, coolingOffUntil }: SupplierChange & { readonly coolingOffUntil: Date },
 ): Promise<SupplierRecord> {
   const { version, registration } = change;
   if (found.supplier.pendingVersionId !== version.id) throw new RangeError('Only the change waiting is confirmed');
@@ -682,6 +685,7 @@ export async function confirmPayeeChange(
   const confirmed = {
     current_version_id: version.id,
     pending_version_id: null,
+    cooling_off_until: coolingOffUntil,
     payee_key: registration.payeeKey,
     payee_key_version: registration.payeeKeyVersion,
   };
@@ -694,6 +698,7 @@ export async function confirmPayeeChange(
     ...found.supplier,
     currentVersionId: version.id,
     pendingVersionId: null,
+    coolingOffUntil,
     payeeKey: registration.payeeKey,
     payeeKeyVersion: registration.payeeKeyVersion,
   };

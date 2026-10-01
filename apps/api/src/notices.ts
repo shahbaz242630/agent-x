@@ -35,21 +35,30 @@ export class AudienceTampered extends Error {
 }
 
 /**
- * The active admins in an organisation's verified list, and its ACTIVE
- * registered contacts; a list that can't be believed throws.
+ * The active admins, and every active member (E2-2b), in an organisation's
+ * verified list; its ACTIVE registered contacts, and those that count now
+ * (E2-2b). A list that can't be believed throws.
  */
 export function audienceFrom(
   listMembers: (orgId: string) => Promise<MembersList>,
   listContacts: (orgId: string) => Promise<readonly string[]>,
+  listCountingContacts: (orgId: string) => Promise<readonly string[]>,
 ): Audience {
+  const activeMembers = async (orgId: string) => {
+    const listed = await listMembers(orgId);
+    if (listed.outcome !== 'listed') throw new AudienceTampered();
+    return listed.members.filter((member) => member.status === 'ACTIVE');
+  };
   return {
     contactsOf: listContacts,
+    countingContactsOf: listCountingContacts,
     async adminsOf(orgId): Promise<readonly Admin[]> {
-      const listed = await listMembers(orgId);
-      if (listed.outcome !== 'listed') throw new AudienceTampered();
-      return listed.members
-        .filter((member) => member.role === 'admin' && member.status === 'ACTIVE')
+      return (await activeMembers(orgId))
+        .filter((member) => member.role === 'admin')
         .map((member) => ({ userId: member.userId, membershipId: member.id }));
+    },
+    async membersOf(orgId): Promise<readonly string[]> {
+      return (await activeMembers(orgId)).map((member) => member.userId);
     },
   };
 }
@@ -61,6 +70,7 @@ export function noticeSenderFrom({
   outbox,
   listMembers,
   listContacts,
+  listCountingContacts,
   contactAddress,
   resetLink,
   fetch,
@@ -72,6 +82,8 @@ export function noticeSenderFrom({
   readonly listMembers: (orgId: string) => Promise<MembersList>;
   /** The organisation's ACTIVE registered contacts' IDs, verified (identity's activeContactsFor). */
   readonly listContacts: (orgId: string) => Promise<readonly string[]>;
+  /** Those that count now (identity's countingContactsFor, E2-2b). */
+  readonly listCountingContacts: (orgId: string) => Promise<readonly string[]>;
   /** A contact's address from its verified row (identity's contactAddressFor). */
   readonly contactAddress: (orgId: string, contactId: string) => Promise<string | undefined>;
   /** A contact's link to confirm a reset, from its verified row (identity's resetLinkFor, B6-3b). */
@@ -98,7 +110,7 @@ export function noticeSenderFrom({
     }),
     contactAddresses: { addressOf: contactAddress },
     resetLinks: { linkFor: resetLink },
-    audience: audienceFrom(listMembers, listContacts),
+    audience: audienceFrom(listMembers, listContacts, listCountingContacts),
     logger,
   });
 }

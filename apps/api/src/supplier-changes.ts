@@ -31,13 +31,12 @@ import type { Logger } from '@agentx/platform/observability';
 
 import {
   createSupplierWork,
-  type Refused,
   type SessionMember,
+  type SupplierChangeWrite,
   type SupplierMember,
   SupplierRefused,
   type SupplierTables,
   type SupplierTx,
-  type SupplierView,
 } from './supplier-work.ts';
 
 /** The brake on a supplier. */
@@ -51,13 +50,6 @@ export const REACTIVATE_CONFIRM_OPERATION = 'suppliers.reactivate.confirm';
 export const SUSPENDING_ROLES = ['admin', 'approver'] as const;
 /** Who may lift it: an admin (partner, S69). */
 export const REACTIVATING_ROLES = ['admin'] as const;
-
-export type SupplierChangeWrite =
-  | ({ readonly outcome: 'changed' } & SupplierView)
-  | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
-  | { readonly outcome: 'conflict' }
-  | { readonly outcome: 'busy' }
-  | Refused;
 
 export interface SupplierChanges {
   suspend(
@@ -112,17 +104,6 @@ export function createSupplierChanges({
     return { found, suspendedBy: found.state.eventId };
   };
 
-  /** Answers the write: the supplier as it now stands, on a retry too. */
-  const answer = async (
-    orgId: string,
-    correlationId: string,
-    done: Awaited<ReturnType<typeof work.write>>,
-  ): Promise<SupplierChangeWrite> => {
-    const answered = await work.viewAfter(orgId, correlationId, done);
-    if ('outcome' in answered) return answered;
-    return { outcome: 'changed', ...answered };
-  };
-
   return {
     async suspend(member, idempotent, supplierId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
@@ -135,7 +116,7 @@ export function createSupplierChanges({
         }
         return { status: 200, resourceId: found.supplier.id };
       });
-      return answer(member.orgId, correlationId, done);
+      return work.changedAfter(member.orgId, correlationId, done);
     },
 
     async reactivate(member, idempotent, supplierId, correlationId) {
@@ -151,8 +132,7 @@ export function createSupplierChanges({
         if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
+      return work.askedAfter(done);
     },
 
     async reactivateConfirm(member, idempotent, supplierId, stepUpChallengeId, correlationId) {
@@ -173,7 +153,7 @@ export function createSupplierChanges({
         });
         return { status: 200, resourceId: found.supplier.id };
       });
-      return answer(member.orgId, correlationId, done);
+      return work.changedAfter(member.orgId, correlationId, done);
     },
   };
 }

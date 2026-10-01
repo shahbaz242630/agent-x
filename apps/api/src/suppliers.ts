@@ -28,6 +28,19 @@
 //   waiting for the admin's confirmation (409 SUPPLIER_PAYEE_TAKEN while
 //   another supplier is paid to that account). Admins. 503
 //   PARTNER_UNAVAILABLE when the partner doesn't answer.
+// - `POST /v1/suppliers/:id/payee-change/approve`, then `…/approve/confirm`
+//   with the step-up's ID once signed in again (a passkey): 202 with the
+//   step-up, then 200 with the supplier paying the new details, its 24 hours
+//   of cooling-off begun, and every member and counting contact told. The
+//   admin who registered them alone (403 PAYEE_CHANGE_NOT_YOURS); 409
+//   SUPPLIER_NO_CHANGE_WAITING with none waiting; 409 SUPPLIER_PAYEE_TAKEN
+//   when another supplier was paid to that account first.
+// - `POST /v1/suppliers/:id/payee-change/withdraw`: the change waiting
+//   dropped, at once and with no step-up: 200 with the supplier, its payee
+//   as it was. Admins and finance approvers.
+// A supplier's details show its payee, and the change waiting, as the
+// partner described them (the masked hint, the name check, the masked
+// name): what the call-back confirms, never an account number.
 // - `GET /v1/agent/suppliers?after=&limit=` (SEC-AG-05): for an agent's key
 //   with `suppliers:read`, the VERIFIED suppliers, each by ID and name alone:
 //   never a contact, a source or a payment detail.
@@ -59,7 +72,6 @@ import {
   REACTIVATE_OPERATION,
   REACTIVATING_ROLES,
   type SupplierChanges,
-  type SupplierChangeWrite,
   SUSPEND_OPERATION,
   SUSPENDING_ROLES,
 } from './supplier-changes.ts';
@@ -72,7 +84,14 @@ import {
   type SupplierPayees,
 } from './supplier-payees.ts';
 import { ADD_OPERATION, ADDING_ROLES, type SupplierRegistry } from './supplier-registry.ts';
-import type { SupplierView } from './supplier-work.ts';
+import {
+  PAYEE_APPROVE_CONFIRM_OPERATION,
+  PAYEE_APPROVE_OPERATION,
+  PAYEE_WITHDRAW_OPERATION,
+  type SupplierPayeeChanges,
+  WITHDRAWING_ROLES,
+} from './supplier-payee-changes.ts';
+import type { PayeeShown, SupplierChangeWrite, SupplierView } from './supplier-work.ts';
 
 /** Every member may see the organisation's suppliers. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -117,6 +136,24 @@ const SUPPLIER = z
   })
   .register(API_SCHEMAS, { id: 'Supplier', description: 'A supplier of the organisation, as Agent X holds it.' });
 
+const PAYEE = z
+  .object({
+    registrationId: z.uuid().describe('The registration with the payment partner that gave it.'),
+    payeeHint: z
+      .string()
+      .nullable()
+      .describe('The country and last four characters of the account, as the partner gives them: never the number.'),
+    nameCheck: z
+      .enum(NAME_CHECKS)
+      .nullable()
+      .describe('The partner’s check of the supplier’s name against the account’s holder, or null.'),
+    maskedName: z.string().nullable().describe('The account holder’s name as the bank masks it, or null.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'SupplierPayee',
+    description: 'A supplier’s bank account as the payment partner described it: what the call-back confirms.',
+  });
+
 const SUPPLIER_DETAILS = SUPPLIER.extend({
   version: z.int().describe('Its current details’ version, from 1.'),
   phone: z.string().describe('Its phone, in international form: the call-back contact.'),
@@ -131,6 +168,17 @@ const SUPPLIER_DETAILS = SUPPLIER.extend({
     .describe('The independent source its details were checked against.'),
   enteredBy: z.uuid().describe('The membership of the member who entered its current details.'),
   enteredAt: z.iso.datetime().describe('When they were entered.'),
+  payee: PAYEE.nullable().describe('The bank account it is paid to, or null before one is registered.'),
+  pendingChange: z
+    .object({
+      version: z.int().describe('The details’ version waiting.'),
+      enteredAt: z.iso.datetime().describe('When it was made.'),
+      payee: PAYEE.nullable().describe('The bank account it would be paid to.'),
+    })
+    .nullable()
+    .describe(
+      'A change of its bank details waiting for the admin who registered them to confirm it, or null. Nothing is paid to it.',
+    ),
 }).register(API_SCHEMAS, {
   id: 'SupplierDetails',
   description: 'A supplier with its current details: never a payment detail.',
@@ -239,6 +287,44 @@ const REACTIVATE_CONFIRM_SCHEMA = {
   response: { 200: SUPPLIER_CHANGED },
 };
 
+const PAYEE_APPROVE_SCHEMA = {
+  summary: 'Ask to confirm a supplier’s new bank details, waiting since you registered them',
+  params: SUPPLIER_ID,
+  body: NOTHING,
+  response: {
+    202: z
+      .object({
+        stepUpChallengeId: z
+          .uuid()
+          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+      })
+      .register(API_SCHEMAS, {
+        id: 'SupplierPayeeApprovalAsked',
+        description: 'Confirming a supplier’s new bank details, waiting for the admin to sign in again.',
+      }),
+  },
+};
+
+const PAYEE_APPROVE_CONFIRM_SCHEMA = {
+  summary: 'Confirm a supplier’s new bank details, once signed in again for it',
+  params: SUPPLIER_ID,
+  body: z
+    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
+    .describe('The step-up signed in again for.'),
+  response: {
+    200: SUPPLIER_CHANGED.describe(
+      'The supplier, paying the new details once verified: unverified, its cooling-off begun, and everyone told.',
+    ),
+  },
+};
+
+const PAYEE_WITHDRAW_SCHEMA = {
+  summary: 'Withdraw a supplier’s new bank details waiting: at once, with no step-up',
+  params: SUPPLIER_ID,
+  body: NOTHING,
+  response: { 200: SUPPLIER_CHANGED.describe('The supplier, its bank details as they were.') },
+};
+
 const REGISTRATION = z
   .object({
     id: z.uuid().describe('The registration, by its ID: the partner knows it by this ID too.'),
@@ -335,7 +421,18 @@ const supplierOf = (supplier: SupplierRecord, displayName: string) => ({
   verifiedBy: supplier.verifiedBy,
 });
 
-const detailsOf = ({ supplier, version, contacts }: SupplierView) => ({
+// Field by field, as the rest of this file's bodies: nothing more of a payee can ever reach an answer.
+const payeeBodyOf = (payee: PayeeShown | null) =>
+  payee === null
+    ? null
+    : {
+        registrationId: payee.registrationId,
+        payeeHint: payee.payeeHint,
+        nameCheck: payee.nameCheck,
+        maskedName: payee.maskedName,
+      };
+
+const detailsOf = ({ supplier, version, contacts, payee, pending }: SupplierView) => ({
   ...supplierOf(supplier, version.displayName),
   version: version.version,
   phone: contacts.phone,
@@ -345,6 +442,15 @@ const detailsOf = ({ supplier, version, contacts }: SupplierView) => ({
   source: version.source,
   enteredBy: version.enteredBy,
   enteredAt: version.enteredAt.toISOString(),
+  payee: payeeBodyOf(payee),
+  pendingChange:
+    pending === null
+      ? null
+      : {
+          version: pending.version.version,
+          enteredAt: pending.version.enteredAt.toISOString(),
+          payee: payeeBodyOf(pending.payee),
+        },
 });
 
 const registrationBodyOf = ({ registration, form }: PayeeRegistrationView) => ({
@@ -366,10 +472,12 @@ export function registerSuppliers(
     registry,
     changes,
     payees,
+    payeeChanges,
   }: {
     registry: SupplierRegistry | undefined;
     changes: SupplierChanges | undefined;
     payees: SupplierPayees | undefined;
+    payeeChanges: SupplierPayeeChanges | undefined;
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -548,6 +656,64 @@ export function registerSuppliers(
         request.id,
       );
       return answerPayee(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-change/approve',
+    {
+      schema: PAYEE_APPROVE_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...REGISTERING_ROLES], operation: PAYEE_APPROVE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(payeeChanges).approve(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-change/approve/confirm',
+    {
+      schema: PAYEE_APPROVE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...REGISTERING_ROLES], operation: PAYEE_APPROVE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(payeeChanges).approveConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-change/withdraw',
+    {
+      schema: PAYEE_WITHDRAW_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...WITHDRAWING_ROLES], operation: PAYEE_WITHDRAW_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(payeeChanges).withdraw(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerChange(written, request, reply);
     },
   );
 

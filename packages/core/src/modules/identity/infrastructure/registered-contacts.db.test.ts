@@ -14,6 +14,7 @@ import { addMembership } from './memberships.ts';
 import {
   activateContact,
   activeContactsFor,
+  countingContactsFor,
   contactAddressFor,
   registeredContactsFor,
   ContactNotChanged,
@@ -542,6 +543,27 @@ describe(`the organisation's contacts (B6-1a, Postgres ${server.version})`, () =
     expect(await contactAddressFor(app, services(), who.org, drafted.id)).toBeUndefined();
     expect(await contactAddressFor(app, services(), (await organization()).org, active.id)).toBeUndefined();
     expect(await activeContactsFor(app, services(), (await organization()).org)).toEqual([]);
+    expect(alarms()).toEqual([]);
+  });
+
+  it('E2-2b gives the contacts that count at the clock’s now alone: from 7 days after they are confirmed, never a draft or a removed one', async () => {
+    const who = await organization();
+    await draft(who, { email: 'draft@example.test' });
+    const first = await draft(who, { email: 'first@example.test' });
+    const later = await draft(who, { email: 'later@example.test' });
+    const removed = await draft(who, { email: 'gone@example.test' });
+    await activate(who, first.id);
+    await activate(who, removed.id);
+    await remove(who, removed.id);
+    const countsFrom = contactCountsFrom(clock.now());
+    clock.advanceBy(1);
+    await activate(who, later.id);
+    const at = (now: Date) => countingContactsFor(app, { ...services(), clock: { now: () => now } }, who.org);
+
+    expect(await at(new Date(countsFrom.getTime() - 1))).toEqual([]);
+    expect(await at(countsFrom)).toEqual([first.id]);
+    expect(await at(new Date(countsFrom.getTime() + 1))).toEqual([first.id, later.id]);
+    expect(await countingContactsFor(app, { ...services(), clock }, (await organization()).org)).toEqual([]);
     expect(alarms()).toEqual([]);
   });
 

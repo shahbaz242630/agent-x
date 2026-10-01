@@ -83,7 +83,7 @@ describe('a pass-through registration (D1-2)', () => {
       organizationId: ORG,
       registrationId: REGISTRATION,
       beneficiaryRef: 'fake-beneficiary-00000000-0000-7000-8000-000000000001',
-      payeeIdentity: expect.stringMatching(/^fake-payee-[0-9a-f]{32}$/) as string,
+      payeeIdentity: expect.stringMatching(/^fake-payee-[a-p]{32}$/) as string,
       nameCheck: 'match',
       maskedName: 'J****** A* F*****',
       hint: `AE…${JASMINE.slice(-4)}`,
@@ -237,6 +237,22 @@ describe('the payee identity (ADR-014 §3 source (a), BEN-2)', () => {
     const ours = beneficiaryOf(await rail.registerBeneficiary(passThrough(jasmine, ORG, 'reg-1')));
     const theirs = beneficiaryOf(await rail.registerBeneficiary(passThrough(jasmine, OTHER_ORG, 'reg-1')));
     expect(theirs.payeeIdentity).not.toBe(ours.payeeIdentity);
+  });
+
+  it('is never refused as an account number, for any organisation and account (E2-2b: in hex, about one in a hundred was)', async () => {
+    const { rail } = setUp();
+    const organisations = Array.from(
+      { length: 200 },
+      (_, index) => `00000000-0000-7000-8000-${index.toString(16).padStart(12, '0')}`,
+    );
+    for (const organizationId of organisations) {
+      for (const [index, iban] of IBANS.filter((each) => each.startsWith('AE')).entries()) {
+        const outcome = await rail.registerBeneficiary(
+          passThrough({ ...jasmine, iban }, organizationId, `reg-${String(index)}`),
+        );
+        expect(beneficiaryOf(outcome).payeeIdentity).toMatch(/^fake-payee-[a-p]{32}$/);
+      }
+    }
   });
 
   it('is null from a partner that gives none', async () => {

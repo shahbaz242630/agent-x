@@ -263,20 +263,19 @@ export function createSupplierPayees({
       await unverifySupplier(tx, states, supplierKey, read, { actor });
       read = await work.supplierIn(tx, states, supplierKey, 'change');
     }
-    const current = await versionOf(tx, states, { orgId, id: read.supplier.currentVersionId }, supplierId);
-    if (current.outcome !== 'found') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    const { displayName, source } = current.version;
+    const current = await work.versionIn(tx, states, orgId, supplierId, read.supplier.currentVersionId);
+    const { displayName, source } = current;
     await addVersion(tx, states, keys, {
       orgId,
       id: registration.versionId,
       supplierId,
       version: await nextVersionNumber(tx, orgId, supplierId),
-      supplier: { displayName, contacts: await contactsOf(tx, keys, orgId, current.version), source },
+      supplier: { displayName, contacts: await contactsOf(tx, keys, orgId, current), source },
       enteredBy,
       enteredAt: clock.now(),
       actor,
       of: read,
-      follows: current.version,
+      follows: current,
       registration,
     });
     const made = await versionOf(tx, states, { orgId, id: registration.versionId }, supplierId);
@@ -286,7 +285,7 @@ export function createSupplierPayees({
       states,
       supplierKey,
       read,
-      { version: made.version, registration, current: current.version },
+      { version: made.version, registration, current: current },
       { actor },
     );
   };

@@ -49,6 +49,7 @@ function senderWith(
     outbox: (parts.outbox ?? {}) as never,
     listMembers: () => Promise.reject(new Error('not asked')),
     listContacts: () => Promise.reject(new Error('not asked')),
+    listCountingContacts: () => Promise.reject(new Error('not asked')),
     contactAddress: () => Promise.reject(new Error('not asked')),
     resetLink: () => Promise.reject(new Error('not asked')),
     fetch: parts.fetch ?? (() => Promise.reject(new Error('not called'))),
@@ -84,36 +85,45 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
         return Promise.resolve(listed);
       },
       () => Promise.reject(new Error('not asked')),
+      () => Promise.reject(new Error('not asked')),
     );
     await expect(audience.adminsOf(ORG)).resolves.toEqual([
       { userId: 'user-m1', membershipId: 'm1' },
       { userId: 'user-m6', membershipId: 'm6' },
     ]);
-    expect(asked).toEqual([ORG]);
+    // E2-2b: every active member, whatever their role.
+    await expect(audience.membersOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m4', 'user-m5', 'user-m6']);
+    expect(asked).toEqual([ORG, ORG]);
   });
 
   it('throws for memberships that failed their check, so the notice waits and names nobody', async () => {
     const tampered = { outcome: 'tampered', sign: {} } as unknown as MembersList;
-    await expect(
-      audienceFrom(
-        () => Promise.resolve(tampered),
-        () => Promise.reject(new Error('not asked')),
-      ).adminsOf(ORG),
-    ).rejects.toThrow(AudienceTampered);
+    const audience = audienceFrom(
+      () => Promise.resolve(tampered),
+      () => Promise.reject(new Error('not asked')),
+      () => Promise.reject(new Error('not asked')),
+    );
+    await expect(audience.adminsOf(ORG)).rejects.toThrow(AudienceTampered);
+    await expect(audience.membersOf(ORG)).rejects.toThrow(AudienceTampered);
   });
 
-  it("B6-1b gives an organisation's ACTIVE contacts as identity lists them", async () => {
+  it("B6-1b gives an organisation's ACTIVE contacts, and E2-2b those that count, as identity lists them", async () => {
     const asked: string[] = [];
     const audience = audienceFrom(
       () => Promise.reject(new Error('not asked')),
       (orgId) => {
-        asked.push(orgId);
+        asked.push(`active ${orgId}`);
         return Promise.resolve(['c1', 'c2']);
+      },
+      (orgId) => {
+        asked.push(`counting ${orgId}`);
+        return Promise.resolve(['c1']);
       },
     );
 
     await expect(audience.contactsOf(ORG)).resolves.toEqual(['c1', 'c2']);
-    expect(asked).toEqual([ORG]);
+    await expect(audience.countingContactsOf(ORG)).resolves.toEqual(['c1']);
+    expect(asked).toEqual([`active ${ORG}`, `counting ${ORG}`]);
   });
 
   it('is off without email in the config, and on with it', () => {

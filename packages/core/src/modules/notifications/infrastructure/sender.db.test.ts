@@ -47,14 +47,21 @@ const ADMINS: readonly Admin[] = [
   { userId: OTHER_ADMIN, membershipId: '0199a0f0-0000-7000-8000-00000000b5c2' },
   { userId: MEMBER, membershipId: MEMBERSHIP },
 ];
+/** A viewer of the organisation: a member, but no admin (E2-2b). */
+const VIEWER = '0199a0f0-0000-7000-8000-00000000b5b6';
+/** The organisation's active members, every role (E2-2b). */
+const MEMBERS: readonly string[] = [ADMIN, VIEWER];
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
   [OTHER_ADMIN, 'other.admin@example.test'],
+  [VIEWER, 'viewer@example.test'],
 ]);
 /** The organisation's ACTIVE registered contacts (B6-1b), and the contact the notices are about. */
 const CONTACT = '0199a0f0-0000-7000-8000-00000000b6b1';
 const OTHER_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b2';
 const ABOUT_CONTACT = '0199a0f0-0000-7000-8000-00000000b6b3';
+/** A supplier the notices are about (E2-2b). */
+const SUPPLIER = '0199a0f0-0000-7000-8000-00000000b6b5';
 /** A reset of the member's second factor (B6-3b), and the one link written for CONTACT. */
 const RESET = '0199a0f0-0000-7000-8000-00000000b6b4';
 const LINK: ResetLink = {
@@ -116,20 +123,26 @@ const contactAddresses = (
   },
 });
 
+/** One of the audience's groups, asked of ORG alone: what `find` gives, or its error. */
+const group =
+  <T>(find: () => T | Error) =>
+  (orgId: string): Promise<T> => {
+    expect(orgId).toBe(ORG);
+    const found = find();
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  };
+
 const audience = (
   admins: () => readonly Admin[] | Error = () => ADMINS,
   contacts: () => readonly string[] | Error = () => [CONTACT, OTHER_CONTACT],
+  members: () => readonly string[] | Error = () => MEMBERS,
+  // Of the two ACTIVE contacts, only the first counts yet.
+  counting: () => readonly string[] | Error = () => [CONTACT],
 ): Audience => ({
-  adminsOf: (orgId) => {
-    expect(orgId).toBe(ORG);
-    const found = admins();
-    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
-  },
-  contactsOf: (orgId) => {
-    expect(orgId).toBe(ORG);
-    const found = contacts();
-    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
-  },
+  adminsOf: group(admins),
+  contactsOf: group(contacts),
+  membersOf: group(members),
+  countingContactsOf: group(counting),
 });
 
 const resetLinks = (
@@ -164,6 +177,17 @@ const aboutAContact = (to: { contact?: string; contacts?: boolean }): Notice => 
   membershipId: null,
   role: null,
   aboutId: ABOUT_CONTACT,
+});
+
+/** A notice about the supplier (E2-2b), to every member, or to the contacts. */
+const aboutASupplier = (toContacts: boolean): Notice => ({
+  orgId: ORG,
+  recipientUserId: null,
+  toContacts,
+  kind: 'supplier_payee_changed',
+  membershipId: null,
+  role: null,
+  aboutId: SUPPLIER,
 });
 
 function sender(
@@ -209,6 +233,7 @@ beforeAll(async () => {
     [ADMIN, 'sender-admin'],
     [OTHER_ADMIN, 'sender-other-admin'],
     [MEMBER, 'sender-member'],
+    [VIEWER, 'sender-viewer'],
   ]) {
     await sql`insert into identity.users (id, issuer, subject, created_at)
       values (${id}, 'https://auth.example.test', ${subject}, ${START})`.execute(app);
@@ -472,6 +497,38 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
     expect(capture.lines().find(({ event }) => event === 'notification.fanned_out')).toMatchObject({ notices: 2 });
     expect(JSON.stringify(capture.lines())).not.toMatch(/@example\.test/);
+  });
+
+  it('E2-2b sends a notice about a supplier to every active member, whatever their role, and to the contacts that count now', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    // Not the other admin, who is no member in this audience, nor the contact that doesn't count yet.
+    expect(sent.map(({ to }) => to).sort()).toEqual([
+      'admin@example.test',
+      'finance.office@example.test',
+      'viewer@example.test',
+    ]);
+    expect(sent.every(({ text }) => text.includes(`Supplier: ${SUPPLIER}`))).toBe(true);
+    expect(sent.every(({ subject }) => subject.includes("a supplier's bank details"))).toBe(true);
+  });
+
+  it('E2-2b tries a notice about a supplier again when its members, or its counting contacts, cannot be read', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) => outbox.add(tx, [aboutASupplier(false), aboutASupplier(true)]));
+    const { sent, service } = notifier();
+    const away = () => new Error('tampered');
+
+    await sender(service, addressBook(), audience(undefined, undefined, away, away)).run.run();
+
+    expect(sent).toEqual([]);
+    expect((await rows()).map(({ last_failure }) => last_failure)).toEqual([
+      'audience_unavailable',
+      'audience_unavailable',
+    ]);
   });
 
   it('B6-1b sends a notice to one contact to the address its row gives, and gives it up when it has none', async () => {
