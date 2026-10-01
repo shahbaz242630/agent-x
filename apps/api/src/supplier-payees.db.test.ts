@@ -32,6 +32,8 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -60,6 +62,9 @@ const ids = new SequentialIds(0xe22a_0000_0000);
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000ad';
 const MINUTE_MS = 60_000;
+/** A supplier's row held as a check reads it for change, and as a start reads it to decide. */
+const HOLD_FOR_CHANGE = 'select id from suppliers.suppliers where org_id = $1 and id = $2 for no key update';
+const HOLD_FOR_SHARE = 'select id from suppliers.suppliers where org_id = $1 and id = $2 for share';
 
 const DETAILS: SupplierDetails = {
   displayName: 'Jasmine AI FZ-LLC',
@@ -493,6 +498,33 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     const next = answered(await start(admin, id), 'started');
     expect(next.registration.id).not.toBe(first.registration.id);
     expect(next.form).not.toBeNull();
+  });
+
+  it.each([
+    ['a start waits behind a check’s hold on the supplier', 'change', 'start'],
+    ['a check waits behind a start’s read of the supplier', 'share', 'check'],
+  ] as const)('%s (a forced lock order: the supplier’s row serialises them)', async (_, held, waiting) => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const started = answered(await start(admin, id), 'started');
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await (held === 'change' ? holder.query(HOLD_FOR_CHANGE, [org, id]) : holder.query(HOLD_FOR_SHARE, [org, id]));
+      const asking = within(
+        20_000,
+        waiting === 'start' ? start(admin, id) : check(admin, id, started.registration.id),
+        `the ${waiting}`,
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      await holder.query('rollback');
+
+      expect((await asking).outcome).toBe(waiting === 'start' ? 'started' : 'waiting');
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 
   it('answers a start as it stands when a check ended its registration while the partner was asked', async () => {
