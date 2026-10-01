@@ -45,7 +45,7 @@ const OTHER_SCRIPTS = {
   hooks: 'node tooling/git-hooks/install.ts',
   tools: 'node tooling/bicep/install.ts',
   'tools:cosign': 'node tooling/cosign/install.ts',
-  // The copied-code report (#222): Verify runs it, report only until a threshold is set in .jscpd.json.
+  // The copied-code check (#222): Verify runs it, failing past the threshold in .jscpd.json.
   duplicates: 'jscpd',
 };
 

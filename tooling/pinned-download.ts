@@ -9,6 +9,7 @@ import { chmodSync, closeSync, createWriteStream, mkdirSync, openSync, readSync,
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 /** Where the pinned tools live once installed (git-ignored). */
@@ -57,6 +58,35 @@ export type StreamingFetch = (
 /** Long enough for a 200 MB release file (cosign's for Windows) on a slow line. */
 const LARGE_DOWNLOAD_TIMEOUT_MS = 900_000;
 
+/** Tries in all, and the first pause before another: GitHub's release downloads fail now and then (S35, S59, S70). */
+const ATTEMPTS = 3;
+const RETRY_AFTER_MS = 2000;
+
+/** A pause before trying again; tests pass one that doesn't wait. */
+export type Wait = (ms: number) => Promise<unknown>;
+
+/**
+ * The answer to a request, asked again on a server error (5xx) or a dropped
+ * connection, up to ATTEMPTS in all. A deadline passed or an abort is never asked again,
+ * and any other answer, a 404 among them, is the request's own.
+ */
+async function fetchRetrying<R extends { readonly status: number }>(
+  fetchOnce: () => Promise<R>,
+  wait: Wait,
+): Promise<R> {
+  for (let attempt = 1; ; attempt += 1) {
+    const last = attempt === ATTEMPTS;
+    try {
+      const response = await fetchOnce();
+      if (response.status < 500 || last) return response;
+    } catch (error) {
+      const timedOut = error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      if (timedOut || last) throw error;
+    }
+    await wait(RETRY_AFTER_MS * attempt);
+  }
+}
+
 /**
  * Downloads a pinned file straight to `target`, hashing it as it arrives, so a
  * 200 MB release file is never held in memory (this machine is short of it).
@@ -69,8 +99,12 @@ export async function downloadPinnedTo(
   sha256: string,
   target: string,
   fetchFile: StreamingFetch = fetch,
+  wait: Wait = delay,
 ): Promise<void> {
-  const response = await fetchFile(url, { signal: AbortSignal.timeout(LARGE_DOWNLOAD_TIMEOUT_MS) });
+  const response = await fetchRetrying(
+    () => fetchFile(url, { signal: AbortSignal.timeout(LARGE_DOWNLOAD_TIMEOUT_MS) }),
+    wait,
+  );
   if (!response.ok || response.body === null) {
     throw new Error(`Downloading ${file} failed: HTTP ${String(response.status)}.`);
   }
@@ -105,8 +139,12 @@ export async function downloadPinned(
   file: string,
   sha256: string,
   fetchFile: Fetch = fetch,
+  wait: Wait = delay,
 ): Promise<Uint8Array> {
-  const response = await fetchFile(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+  const response = await fetchRetrying(
+    () => fetchFile(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) }),
+    wait,
+  );
   if (!response.ok) throw new Error(`Downloading ${file} failed: HTTP ${String(response.status)}.`);
   const bytes = new Uint8Array(await response.arrayBuffer());
   const actual = sha256Of(bytes);

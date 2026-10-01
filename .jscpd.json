@@ -4,5 +4,6 @@
   "ignore": ["**/node_modules/**", "**/gate-proofs/fixtures/**", "**/*.test.ts"],
   "reporters": ["consoleFull"],
   "absolute": false,
-  "gitignore": true
+  "gitignore": true,
+  "threshold": 2
 }
