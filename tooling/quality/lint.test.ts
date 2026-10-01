@@ -24,12 +24,12 @@ describe('`pnpm lint` end to end, with the real config (#222’s review)', () =>
   it('only reports a SonarJS finding, counting it, with no fixable count left over', async () => {
     // A rule still reported only: once it blocks, pick another that isn't in BLOCKING.
     const run = await lint(
-      'export const sum = (n) => {\n  let total = 0;\n  for (let i = 0; i < n; i += 1) {\n    total += i;\n    i = total;\n  }\n  return total;\n};\n',
+      'export const f = (n) => {\n  switch (n) {\n    case 1:\n      return 1;\n    default:\n      return 0;\n  }\n};\n',
     );
 
-    expect(BLOCKING.has('sonarjs/updated-loop-counter')).toBe(false);
+    expect(BLOCKING.has('sonarjs/no-small-switch')).toBe(false);
     expect(run.fails).toBe(false);
-    expect(run.reported).toEqual([['sonarjs/updated-loop-counter', 1]]);
+    expect(run.reported).toEqual([['sonarjs/no-small-switch', 1]]);
     expect(run.failing).toMatchObject([{ errorCount: 0, warningCount: 0, fixableErrorCount: 0 }]);
   });
 });
@@ -80,6 +80,9 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
       rules: run.failing.flatMap((result) => result.messages.map((message) => message.ruleId)),
     };
   };
+  // Six ifs, each inside the last: 1 + 2 + … + 6 = 21, past the 15 allowed.
+  let deepest = 'return n;';
+  for (let level = 6; level > 0; level -= 1) deepest = `if (n > ${String(level)}) {\n${deepest}\n}`;
   const twice = (name: string) =>
     `export function ${name}(list) {\n  const kept = list.filter(Boolean);\n  const count = kept.length;\n  return count * 2;\n}\n`;
   // Four tests of one shape, differing only in their literals: the shape the first report found.
@@ -104,6 +107,12 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
 
   it.each([
     ['sonarjs/class-name', 'export class not_a_class_name {}\n'],
+    ['sonarjs/cognitive-complexity', `export const f = (n) => {\n${deepest}\nreturn 0;\n};\n`],
+    ['sonarjs/no-nested-functions', 'export const a = () => () => () => () => () => () => () => 1;\n'],
+    [
+      'sonarjs/updated-loop-counter',
+      'export const sum = (n) => {\n  let total = 0;\n  for (let i = 0; i < n; i += 1) {\n    total += i;\n    i = total;\n  }\n  return total;\n};\n',
+    ],
     ['sonarjs/no-identical-functions', twice('first') + twice('second')],
     ['sonarjs/no-inverted-boolean-check', 'export const notMore = (a, b) => !(a > b);\n'],
     // The shapes the first report found: a sort inside a call, a count bumped inside one.

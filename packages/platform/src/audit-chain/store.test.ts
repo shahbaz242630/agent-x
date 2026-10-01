@@ -232,6 +232,11 @@ describe('checking a chain', () => {
       ok: false,
       problem: { reason: 'anchor', seq: 3n },
     });
+    // Anchored at its first event is anchored all the same.
+    expect(await verifyChain(keys, CHAIN, new MemoryChain(), { seq: 1n, hash: Buffer.alloc(32, 1) })).toEqual({
+      ok: false,
+      problem: { reason: 'anchor', seq: 1n },
+    });
     expect(await verifyChain(keys, CHAIN, new MemoryChain(), { seq: 0n, hash: GENESIS_HASH })).toMatchObject({
       ok: true,
       seq: 0n,

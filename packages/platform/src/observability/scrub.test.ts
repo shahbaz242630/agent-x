@@ -126,6 +126,7 @@ describe('SEC-DATA-01 scrub: personal and payment details', () => {
       'id 7-[card] charged',
     ],
     ['a grouped card number right after a digit and a dash', `id 0-${SAMPLES.card}`, 'id 0-[card]'],
+    ['a grouped card number right before a dash and a digit', `${SAMPLES.card}-5 paid`, '[card]-5 paid'],
     ['a local mobile right after a digit and a dash', 'caller 5-0501234567 phoned', 'caller 5-[phone] phoned'],
     [
       'a card number run together, right before a dash and a digit',

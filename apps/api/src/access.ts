@@ -197,6 +197,13 @@ export function accessProblems(access: unknown, url: string): string[] {
   if (names.includes('agent') && names.length > 1) {
     problems.push('its access names agents beside others: give agents a route of their own');
   }
+  problems.push(...addressProblems(names, url));
+  return problems;
+}
+
+/** Why a route's address can't stand with its access, if it can't. */
+function addressProblems(names: readonly unknown[], url: string): string[] {
+  const problems: string[] = [];
   const operatorAddress = url.startsWith(OPERATOR_PREFIX);
   if (names.includes('operator') && !operatorAddress) {
     problems.push(`its access names operators outside ${OPERATOR_PREFIX}`);
@@ -388,6 +395,8 @@ export function registerAccess(
                 request.member = { orgId: orgId.toLowerCase(), membershipId: membership.id, role: membership.role };
                 done();
               };
+              /** Refuses a person in the 7 days after a second factor of theirs was removed: no admin's or approver's powers yet. */
+              const secondFactorRemoved = () => void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id);
               if (!needsPowers(access)) {
                 through();
               } else if (restrictedUntil === undefined) {
@@ -395,7 +404,7 @@ export function registerAccess(
               } else {
                 restrictedUntil(session.userId).then((until) => {
                   if (until === undefined) through();
-                  else refuse(() => void sendErrorBody(reply, 403, 'SECOND_FACTOR_REMOVED', request.id));
+                  else refuse(secondFactorRemoved);
                 }, failed);
               }
             }
