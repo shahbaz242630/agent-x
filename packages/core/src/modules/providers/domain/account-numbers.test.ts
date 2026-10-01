@@ -5,7 +5,13 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import { SANDBOX_ACCOUNTS } from '../infrastructure/sandbox-accounts.ts';
-import { AccountNumberLeak, accountHint, isUaeIban, withoutAccountNumbers } from './account-numbers.ts';
+import {
+  AccountNumberLeak,
+  accountHint,
+  holdsAnAccountNumber,
+  isUaeIban,
+  withoutAccountNumbers,
+} from './account-numbers.ts';
 
 const IBANS = SANDBOX_ACCOUNTS.flatMap((account) => account.AccountIdentifiers.map((each) => each.Identification));
 const [IBAN = ''] = IBANS;
@@ -182,6 +188,36 @@ describe('isUaeIban (D1-2)', () => {
     expect(leaks({ note: saudi })).toBe(true);
     expect(isUaeIban(saudi)).toBe(false);
     expect(isUaeIban('')).toBe(false);
+  });
+});
+
+describe('holdsAnAccountNumber (E2-1b)', () => {
+  it('finds an IBAN of any country, and ten digits or more standing alone, however grouped or written', () => {
+    for (const text of [
+      IBAN,
+      SENSITIVE_SAMPLES.lowercaseIban,
+      'acct 1234567890',
+      '0123-4567-8901',
+      // Grouped by no-break spaces, as a pasted account number can be.
+      ['1234', '5678', '90'].join(String.fromCharCode(0xa0)),
+      '١٢٣٤٥٦٧٨٩٠',
+      '１２３４５６７８９０',
+    ]) {
+      expect(holdsAnAccountNumber(text), text).toBe(true);
+    }
+  });
+
+  it('lets through a hint, a short run, digits beside letters, and IDs in the UUID form', () => {
+    for (const iban of IBANS) expect(holdsAnAccountNumber(accountHint(iban))).toBe(false);
+    for (const text of [
+      '123456789',
+      'ben-123456789',
+      'p1234567890q',
+      'fake-payee-0123456789abcdef',
+      '12345678-1234-1234-1234-123456789012',
+    ]) {
+      expect(holdsAnAccountNumber(text), text).toBe(false);
+    }
   });
 });
 

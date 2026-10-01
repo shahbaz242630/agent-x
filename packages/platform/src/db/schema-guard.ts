@@ -1053,6 +1053,26 @@ function partialIndexProblems(index: IndexRow, allowedPartial: SchemaPolicy['par
 }
 
 /**
+ * Each partial unique index the schema policy lists, still there as one
+ * (E2-1b): one dropped, or made again whole or not unique, leaves nothing for
+ * the rule above to hold, so the wall it was (one supplier per payee) is gone.
+ */
+function missingPartialProblems(
+  allowedPartial: SchemaPolicy['partialUniqueIndexes'],
+  allIndexes: readonly IndexRow[],
+): SchemaProblem[] {
+  return allowedPartial
+    .filter(
+      (listed) =>
+        !allIndexes.some(
+          (index) =>
+            index.table === listed.table && index.name === listed.name && index.is_unique && index.predicate !== null,
+        ),
+    )
+    .map((listed) => `${listed.table}'s partial unique index ${quoted(listed.name)} is missing`);
+}
+
+/**
  * Tables held to narrower rights than a tenant table's, by the name the rest
  * of this check uses, each with the columns the app may change:
  * - an authority table (A3f-2): its sealed fields and its two signed-state
@@ -1321,6 +1341,7 @@ export async function liveSchemaProblems<Schema>(
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
     ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
+    ...missingPartialProblems(policy.partialUniqueIndexes, allIndexes),
     // Rights: an allow-list, so a privilege nobody thought about is a problem
     // rather than an omission.
     ...listing,

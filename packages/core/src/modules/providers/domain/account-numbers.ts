@@ -121,14 +121,20 @@ function checksumHolds(iban: string): boolean {
 }
 
 /**
+ * The text as the checks read it, IDs in the UUID form read as gaps: so for
+ * an IBAN or a run of digits alone, while the known numbers' runs, matched
+ * exactly, look inside them too.
+ */
+const readableBesideIds = (text: string): string => readable(text.normalize('NFKC').replaceAll(AN_ID, ' '));
+
+/**
  * Whether a run the pattern found is an IBAN with valid check digits: the
  * whole run, the run up to any of its spaces (an IBAN in groups, then a
  * word), or a UAE IBAN's 23 characters (one with text run on after it). Only
  * these few, so a long reference that isn't an IBAN rarely passes by chance.
  */
 function holdsAnIban(text: string): boolean {
-  // IDs in the UUID form read as gaps here alone: the known numbers' runs, matched exactly, look inside them too.
-  return [...readable(text.normalize('NFKC').replaceAll(AN_ID, ' ')).matchAll(IBAN)].some(([, found = '']) => {
+  return [...readableBesideIds(text).matchAll(IBAN)].some(([, found = '']) => {
     const candidates = [found, ...[...found.matchAll(/ /g)].map(({ index }) => found.slice(0, index))].map(compact);
     if (found.startsWith('AE')) candidates.push(compact(found).slice(0, UAE_IBAN_LENGTH));
     return candidates.some((candidate) => candidate.length >= 15 && checksumHolds(candidate));
@@ -169,6 +175,23 @@ export function withoutAccountNumbers<T>(answer: T, accountNumbers: readonly str
     if (holdsAnIban(text) || runs.some((run) => plain.includes(run))) throw new AccountNumberLeak();
   }
   return answer;
+}
+
+/**
+ * Ten digits or more, as the checks read them, in a row or in groups split by
+ * anything else that is neither a letter nor a digit, with neither on either
+ * side: a domestic account number written out, which no IBAN check finds.
+ */
+const DIGIT_RUN = /(?<![\p{L}\d])\d(?: ?\d){9,}(?![\p{L}\d])/u;
+
+/**
+ * Whether a text the partner gave, to be kept as it is (its identity for a
+ * payee, the hint), holds an account number: an IBAN of any country with
+ * valid check digits, or a run of ten digits or more standing alone. IDs in
+ * the UUID form read as gaps, as for an IBAN, so an opaque identity is kept.
+ */
+export function holdsAnAccountNumber(text: string): boolean {
+  return holdsAnIban(text) || DIGIT_RUN.test(readableBesideIds(text));
 }
 
 /** Whether a text is a UAE IBAN (AE and 21 digits, spaces and case aside) with valid check digits: an account the rail can pay. */

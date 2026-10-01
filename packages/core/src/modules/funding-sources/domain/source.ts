@@ -38,9 +38,6 @@ type FundingSourceStatus = (typeof FUNDING_SOURCE.states)[number];
 export const LINK_OUTCOMES = ['linked', 'rejected', 'expired', 'unknown'] as const;
 export type LinkOutcomeKind = (typeof LINK_OUTCOMES)[number];
 
-/** A partner's name, as Agent X keeps it: lower-case words, such as `fake`. */
-export const PARTNER_NAME = /^[a-z][a-z0-9_]{0,31}$/;
-
 /** The partner's word for a source, as the adapter gives it (PENDING, ACTIVE, SUSPENDED, UNAVAILABLE). */
 type SourceAvailability = 'PENDING' | 'ACTIVE' | 'SUSPENDED' | 'UNAVAILABLE';
 

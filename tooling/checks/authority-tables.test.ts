@@ -100,8 +100,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a funding source (D2-2), and a supplier and a supplier version (E1-1)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then funding sources, then suppliers before their versions.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a funding source (D2-2), a supplier and a supplier version (E1-1), and a beneficiary registration (E2-1)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then funding sources, then suppliers, their payee registrations, then their versions.
     const [
       organizations,
       invitations,
@@ -112,6 +112,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       agentKeys,
       sources,
       supplierRows,
+      registrations,
       supplierVersions,
       ...others
     ] = PRODUCT_AUTHORITY_TABLES;
@@ -125,6 +126,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(agentKeys).toBe(agents.AGENT_KEYS);
     expect(sources).toBe(fundingSources.SOURCES);
     expect(supplierRows).toBe(suppliers.SUPPLIERS);
+    expect(registrations).toBe(suppliers.BENEFICIARY_REGISTRATIONS);
     expect(supplierVersions).toBe(suppliers.SUPPLIER_VERSIONS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
@@ -184,6 +186,13 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         status: suppliers.SUPPLIER,
         statusConditions: ['verified_rests_on_its_version'],
       },
+      {
+        table: suppliers.BENEFICIARY_REGISTRATIONS.table,
+        subject: suppliers.BENEFICIARY_REGISTRATIONS.subject,
+        fields: suppliers.BENEFICIARY_REGISTRATIONS.fields,
+        status: suppliers.BENEFICIARY_REGISTRATION,
+        statusConditions: ['registered_with_its_reference', 'failed_with_its_reason'],
+      },
       // A version is made once and never moved: no status of its own, and the made-once guard.
       {
         table: suppliers.SUPPLIER_VERSIONS.table,
@@ -210,8 +219,10 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[7]?.status).toBe(fundingSources.FUNDING_SOURCE);
     expect(AUTHORITY_TABLES[8]?.fields).toBe(suppliers.SUPPLIERS.fields);
     expect(AUTHORITY_TABLES[8]?.status).toBe(suppliers.SUPPLIER);
-    expect(AUTHORITY_TABLES[9]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
-    expect(AUTHORITY_TABLES[9]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[9]?.fields).toBe(suppliers.BENEFICIARY_REGISTRATIONS.fields);
+    expect(AUTHORITY_TABLES[9]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
+    expect(AUTHORITY_TABLES[10]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
+    expect(AUTHORITY_TABLES[10]?.status).toBeUndefined();
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

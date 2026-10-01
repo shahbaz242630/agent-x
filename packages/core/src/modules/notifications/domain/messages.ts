@@ -9,7 +9,7 @@
 // link, read at send time, to a page where confirming takes a press. It
 // confirms that one reset only, and says so; nothing it holds approves a
 // payment (SEC-HA-11 is untouched).
-import { type ClaimedNotice, isAboutAPerson, type NoticeKind, RESET_LINK_KIND } from './notice.ts';
+import { type ClaimedNotice, isAboutAPerson, isAboutASupplier, type NoticeKind, RESET_LINK_KIND } from './notice.ts';
 
 /** An email as the notifier sends it. */
 export interface NoticeMessage {
@@ -50,6 +50,8 @@ const RESET_CHECK =
   "If you didn't expect this, tell the organisation's admins at once: any admin can sign in to Agent X and cancel it until the second factor is removed. Someone may be trying to take over this login.";
 const RESET_CLOSED_CHECK =
   "If you didn't expect this, sign in to Agent X, or ask the organisation's admins, and check the organisation's resets.";
+const SUPPLIERS_CHECK =
+  "If you didn't expect this, sign in to Agent X and check the organisation's suppliers, and tell its admins at once: someone may be trying to redirect its payments.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -159,9 +161,48 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       `The ${SECOND_FACTOR} of a person in one of your Agent X organisations was removed, as a reset a registered contact confirmed asked. They sign in with their password, and set up a new one.`,
     check: SIGN_IN_CHECK,
   },
+  // About a supplier (0033), sent by E2-2 and E3-2.
+  supplier_reactivated: {
+    subject: () => 'Agent X: a suspended supplier was reactivated',
+    firstLine: () =>
+      'An admin reactivated a suspended supplier of one of your Agent X organisations. It is verified again only if nothing about it changed while it was suspended.',
+    check: SUPPLIERS_CHECK,
+  },
+  supplier_payee_changed: {
+    subject: () => "Agent X: a supplier's bank details are being changed",
+    firstLine: () =>
+      'New bank details were registered for a supplier of one of your Agent X organisations. Nothing is paid to them until a second person has called the supplier back and verified the change.',
+    check: SUPPLIERS_CHECK,
+  },
+  supplier_details_changed: {
+    subject: () => "Agent X: a supplier's details were changed",
+    firstLine: () =>
+      'The details of a supplier of one of your Agent X organisations were changed. Nothing is paid to it until a second person verifies it again.',
+    check: SUPPLIERS_CHECK,
+  },
+  supplier_verified: {
+    subject: () => 'Agent X: a supplier was verified',
+    firstLine: () =>
+      "A second person verified a supplier of one of your Agent X organisations: the organisation's AI agents may now ask to pay it.",
+    check: SUPPLIERS_CHECK,
+  },
+  supplier_suspended: {
+    subject: () => 'Agent X: a supplier was suspended',
+    firstLine: () =>
+      'A supplier of one of your Agent X organisations was suspended: nothing is paid to it until an admin reactivates it.',
+    check: SUPPLIERS_CHECK,
+  },
 };
 
 const NEWLINE = '\n';
+
+/** What a notice is about, by its ID alone: a membership, a person, a supplier, or a registered contact. */
+function aboutLine(notice: ClaimedNotice): string {
+  if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
+  const id = notice.aboutId ?? '';
+  if (isAboutAPerson(notice.kind)) return `Person: ${id}`;
+  return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
+}
 
 function article(word: string): string {
   return /^[aeiou]/.test(word) ? 'an' : 'a';
@@ -204,10 +245,6 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
   if (link !== undefined) throw new RangeError("only a reset's link notice carries a link");
   const role = notice.role === null ? '' : ROLE_NAMES[notice.role];
   const wording = WORDING[notice.kind];
-  const about =
-    notice.membershipId !== null
-      ? `Membership: ${notice.membershipId}`
-      : `${isAboutAPerson(notice.kind) ? 'Person' : 'Registered contact'}: ${notice.aboutId ?? ''}`;
   const why =
     notice.recipientContactId !== null
       ? "You're told because this address is one of the organisation's registered contacts."
@@ -224,7 +261,7 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
       wording.check,
       '',
       `Organisation: ${notice.orgId}`,
-      about,
+      aboutLine(notice),
       '',
       `${why} This email can't approve or change anything.`,
     ].join(NEWLINE),
