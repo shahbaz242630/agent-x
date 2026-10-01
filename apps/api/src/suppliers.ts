@@ -347,7 +347,7 @@ const detailsOf = ({ supplier, version, contacts }: SupplierView) => ({
   enteredAt: version.enteredAt.toISOString(),
 });
 
-const registrationOf = ({ registration, form }: PayeeRegistrationView) => ({
+const registrationBodyOf = ({ registration, form }: PayeeRegistrationView) => ({
   id: registration.id,
   supplierId: registration.supplierId,
   route: registration.route,
@@ -398,7 +398,7 @@ export function registerSuppliers(
       return answerRefusedWrite(written, request, reply);
     }
     const status = { started: 201, checked: 200, waiting: 202 }[written.outcome];
-    return reply.code(status).send(registrationOf(written));
+    return reply.code(status).send(registrationBodyOf(written));
   };
 
   const pageOf = (query: { after?: string | undefined; limit?: number | undefined }) => ({

@@ -65,6 +65,16 @@ export class StillWaiting extends Error {
   }
 }
 
+/** A write's outcome, or `waiting` when the partner said StillWaiting inside it: nothing of it kept, the key's claim included. */
+export async function orStillWaiting<T>(run: () => Promise<T>): Promise<T | { readonly outcome: 'waiting' }> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof StillWaiting) return { outcome: 'waiting' };
+    throw error;
+  }
+}
+
 /** The partner's answer, or `unavailable` when it didn't give one. */
 export async function asked<T>(call: () => Promise<T>): Promise<T | 'unavailable'> {
   try {

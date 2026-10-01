@@ -68,6 +68,7 @@ export {
   MOST_PAYEE_REGISTRATIONS_A_DAY,
   type NewRegistration,
   onePayeeChangeAtATime,
+  openRegistrationOf,
   recordFailed,
   recordLost,
   recordRegistered,

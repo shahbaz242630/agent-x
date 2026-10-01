@@ -87,7 +87,7 @@ const loggerFor = (destination: LogCapture) =>
   });
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
-/** The use case over `with`, the partner the test gives, on the same database and clock. */
+/** The use case over `withRail`, the partner the test gives, on the same database and clock. */
 const payeesWith = (
   withRail: FakeRail | undefined,
   { partner = 'fake', formOrigin }: { partner?: string; formOrigin?: string } = {},
@@ -157,10 +157,14 @@ const answered = (write: PayeeWrite, outcome: 'started' | 'checked' | 'waiting')
   return write;
 };
 
+/** The partner's form a start answered, filled in by the admin with the account's details. */
+const filled = (org: string, started: { readonly form: { readonly url: string } | null }, iban = ibanOf(JASMINE)) =>
+  rail.bank.fillForm(org, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban });
+
 /** A registration started, its form filled in with the account's details, and checked: REGISTERED, waiting. */
 async function registered(admin: SupplierMember, supplierId: string, iban = ibanOf(JASMINE)) {
   const started = answered(await start(admin, supplierId), 'started');
-  await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban });
+  await filled(admin.orgId, started, iban);
   return answered(await check(admin, supplierId, started.registration.id), 'checked');
 }
 
@@ -277,7 +281,7 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(waiting.form).toEqual(started.form);
     expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
 
-    await rail.bank.fillForm(org, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(JASMINE) });
+    await filled(org, started);
     const checked = answered(await check(admin, id, started.registration.id, 'same-key'), 'checked');
 
     expect(checked.form).toBeNull();
@@ -343,7 +347,7 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(again.registration.id).toBe(first.registration.id);
     expect(again.form).toEqual(first.form);
 
-    await rail.bank.fillForm(org, first.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(JASMINE) });
+    await filled(org, first);
     const checked = answered(await check(admin, id, first.registration.id), 'checked');
     const later = answered(await check(admin, id, first.registration.id), 'checked');
     expect(later.registration).toEqual(checked.registration);
@@ -367,7 +371,7 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: second.registration.versionId });
   });
 
-  it('refuses a payee another supplier is paid to, a suspended one included, and stages nothing (SEC-PAY-06)', async () => {
+  it('refuses a payee another supplier is paid to, a suspended one included, ending the registration (SEC-PAY-06)', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const first = await added(admin);
@@ -379,17 +383,22 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     const second = await added(admin, { ...DETAILS, displayName: 'Jasmine Trading' });
 
     const started = answered(await start(admin, second), 'started');
-    await rail.bank.fillForm(org, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(JASMINE) });
+    await filled(org, started);
     const refused = await check(admin, second, started.registration.id);
 
     expect(refused).toEqual({ outcome: 'refused', status: 409, code: 'SUPPLIER_PAYEE_TAKEN' });
     expect(await supplierNow(org, second)).toMatchObject({ pendingVersionId: null });
+    // Ended as the partner holds it, with no version made from it: asked again, the same answer, and nothing staged.
     expect(await actionsAbout(org, 'beneficiary_registration', started.registration.id)).toEqual([
       'beneficiary_registration.started',
+      'beneficiary_registration.answered',
+      'beneficiary_registration.registered',
     ]);
+    expect(await check(admin, second, started.registration.id)).toEqual(refused);
+    expect(await actionsAbout(org, 'supplier', second)).toEqual(['supplier.added']);
     // Another account is this supplier's own.
     const other = answered(await start(admin, second), 'started');
-    await rail.bank.fillForm(org, other.form?.url ?? '', { name: 'Gulf Trading LLC', iban: ibanOf(OTHER) });
+    await filled(org, other, ibanOf(OTHER));
     expect(answered(await check(admin, second, other.registration.id), 'checked').registration.status).toBe(
       'REGISTERED',
     );
@@ -440,32 +449,75 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
   });
 
+  it('carries on with a registration still open, rather than opening another', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+
+    const first = answered(await start(admin, id), 'started');
+    const second = answered(await start(admin, id), 'started');
+
+    expect(second.registration.id).toBe(first.registration.id);
+    expect(second.form).toEqual(first.form);
+  });
+
   it('refuses another start, and stages no second change, while one is waiting', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin);
-    const second = answered(await start(admin, id), 'started');
     await registered(admin, id);
+    // One opened before the rule above, or past the app: its answer is kept, and nothing staged.
+    const stale = ids.next();
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      startRegistration(tx, states, {
+        orgId: org,
+        id: stale,
+        supplierId: id,
+        versionId: ids.next(),
+        partner: 'fake',
+        route: 'hosted',
+        startedBy: admin.membershipId,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    const outcome = await rail.registerBeneficiary({ route: 'hosted', organizationId: org, registrationId: stale });
+    await filled(org, { form: outcome.kind === 'waiting' ? { url: outcome.formUrl } : null }, ibanOf(OTHER));
 
     expect(await start(admin, id)).toEqual({ outcome: 'refused', status: 409, code: 'SUPPLIER_CHANGE_WAITING' });
-    await rail.bank.fillForm(org, second.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(OTHER) });
-    expect(await check(admin, id, second.registration.id)).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'SUPPLIER_CHANGE_WAITING',
-    });
+    expect(await check(admin, id, stale)).toEqual({ outcome: 'refused', status: 409, code: 'SUPPLIER_CHANGE_WAITING' });
+  });
+
+  it('answers two checks at once once: one keeps the payee, the other answers it as it stands', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const started = answered(await start(admin, id), 'started');
+    await filled(org, started);
+
+    const both = await Promise.all([
+      check(admin, id, started.registration.id),
+      check(admin, id, started.registration.id),
+    ]);
+
+    expect(both.map((write) => answered(write, 'checked').registration.status)).toEqual(['REGISTERED', 'REGISTERED']);
+    expect((await actionsAbout(org, 'supplier', id)).filter((action) => action.includes('payee'))).toEqual([
+      'supplier.payee_change_staged',
+    ]);
   });
 
   it('refuses past the day’s budget of registrations', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const id = await added(admin);
+    // The day's 100, for another of the organisation's suppliers: the budget is the organisation's.
+    const busy = await added(admin, { ...DETAILS, displayName: 'Gulf Trading LLC' });
     await withSignedStates(app, org, quiet(), async (tx, states) => {
       for (let started = 0; started < 100; started += 1) {
         await startRegistration(tx, states, {
           orgId: org,
           id: ids.next(),
-          supplierId: id,
+          supplierId: busy,
           versionId: ids.next(),
           partner: 'fake',
           route: 'hosted',
@@ -528,7 +580,7 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
     expect(again.registration.status).toBe('UNKNOWN');
     // The partner had it: its form, as it first answered.
     expect(again.form?.url.startsWith('https://payees.fake-partner.invalid/form/')).toBe(true);
-    await rail.bank.fillForm(org, again.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(JASMINE) });
+    await filled(org, again);
     expect(answered(await check(admin, id, again.registration.id), 'checked').registration.status).toBe('REGISTERED');
     expect(await actionsAbout(org, 'beneficiary_registration', again.registration.id)).toEqual([
       'beneficiary_registration.started',
@@ -536,6 +588,33 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
       'beneficiary_registration.answered',
       'beneficiary_registration.registered',
     ]);
+  });
+
+  it('leaves one STARTED the partner doesn’t know yet, which a start then carries on with', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    // Tx 1 committed, the partner not yet asked (a start still on its way, or one that stopped there).
+    const waiting = ids.next();
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      startRegistration(tx, states, {
+        orgId: org,
+        id: waiting,
+        supplierId: id,
+        versionId: ids.next(),
+        partner: 'fake',
+        route: 'hosted',
+        startedBy: admin.membershipId,
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+
+    expect(answered(await check(admin, id, waiting), 'checked').registration.status).toBe('STARTED');
+    const carried = answered(await start(admin, id), 'started');
+
+    expect(carried.registration.id).toBe(waiting);
+    expect(carried.form?.url.startsWith('https://payees.fake-partner.invalid/form/')).toBe(true);
   });
 
   it('records FAILED a registration the partner never got, once it answers again', async () => {
@@ -603,7 +682,7 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
     const admin = await member(org, 'admin');
     const id = await added(admin);
     const started = answered(await start(admin, id), 'started');
-    await rail.bank.fillForm(org, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban: ibanOf(JASMINE) });
+    await filled(org, started);
     const leaking: FakeRail = {
       ...rail,
       // A partner's adapter letting the number through in its hint, past the fake's own check.
@@ -615,14 +694,22 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
       },
     };
 
-    await expect(check(admin, id, started.registration.id, undefined, payeesWith(leaking))).rejects.toMatchObject({
-      name: 'AccountNumberLeak',
-    });
+    const checked = answered(
+      await check(admin, id, started.registration.id, undefined, payeesWith(leaking)),
+      'checked',
+    );
+
+    expect(checked.registration).toMatchObject({ status: 'FAILED', failure: 'unknown', payeeHint: null });
     expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
     expect(await actionsAbout(org, 'beneficiary_registration', started.registration.id)).toEqual([
       'beneficiary_registration.started',
+      'beneficiary_registration.refused',
+      'beneficiary_registration.failed',
     ]);
-    expect(findLeaks(logs.text, IBANS)).toEqual([]);
+    expect(logs.lines()).toContainEqual(
+      expect.objectContaining({ event: 'suppliers.partner_answer_refused', registrationId: started.registration.id }),
+    );
+    expect(findLeaks(logs.text + JSON.stringify(checked), IBANS)).toEqual([]);
   });
 
   it('never asks one partner about a registration started with another', async () => {

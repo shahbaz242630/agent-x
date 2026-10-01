@@ -9,10 +9,11 @@
 //    first (a partner with no hosted form, or one whose payee key must come
 //    from pass-through, PAYEE_ROUTE_NOT_OFFERED). Tx 1: the key claimed; the
 //    organisation's lock for payee changes; the admin read again; the day's
-//    budget (PAYEE_REGISTRATIONS_SPENT: never retired, the B8-1 lesson); the
-//    supplier, with no change already waiting (SUPPLIER_CHANGE_WAITING); then
-//    the registration, STARTED, naming the version Tx 2 will make, with no
-//    bank data. Then the partner, outside any transaction, with our ID as its
+//    supplier, with no change already waiting (SUPPLIER_CHANGE_WAITING); one
+//    of its registrations still open carried on with, rather than another
+//    opened; otherwise the day's budget (PAYEE_REGISTRATIONS_SPENT: never
+//    retired, the B8-1 lesson) and the registration, STARTED, naming the
+//    version Tx 2 will make, with no bank data. Then the partner, outside any transaction, with our ID as its
 //    idempotency key: its form, held to the partner's own form origin over
 //    HTTPS (`isPartnerPage`), is where the admin is sent. A call lost on the
 //    way leaves the registration UNKNOWN, and from then on the partner is
@@ -26,21 +27,26 @@
 //    the lock; the admin read again; the supplier and the registration read
 //    for change; then: still waiting at the form, left as it is (202) and the
 //    key's claim rolled back, so asking again with the same key asks the
-//    partner again; refused, recorded FAILED with why; registered, the
-//    partner's reference recorded with the payee key from the partner's one
-//    source (refused while another supplier holds it, SUPPLIER_PAYEE_TAKEN),
-//    a verified supplier taken back to UNVERIFIED (a supplier is verified only
+//    partner again; refused, recorded FAILED with why (but `unknown` for one
+//    still STARTED: the partner may not have been asked yet, and a start
+//    carries it on); registered, the partner's reference recorded with the
+//    payee key from the partner's one source, and, unless another supplier is
+//    paid to it (then SUPPLIER_PAYEE_TAKEN, the registration ended), a
+//    verified supplier taken back to UNVERIFIED (a supplier is verified only
 //    on the version verified, 0032), the new version made with the current
 //    details and the registration's reference, numbered past any withdrawn
 //    one, and put in waiting: inert, the supplier still paying the version it
 //    paid, until the admin's step-up confirms it (E2-2b). A registration
-//    already ended answers as it stands.
+//    already ended answers as it stands. A partner's answer naming an
+//    account number is never kept: the registration FAILED, logged by IDs.
 //
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock, the
-// member's membership (2a), the supplier (6), its registration, its
-// versions, the chain head last.
+// member's membership (2a), the supplier (6), its registration; the chain
+// head with the first event recorded, after which only new version rows are
+// written, which wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
+  AccountNumberLeak,
   type BeneficiaryOutcome,
   type FinancialRailAdapter,
   isPartnerPage,
@@ -52,6 +58,7 @@ import {
   MOST_PAYEE_REGISTRATIONS_A_DAY,
   nextVersionNumber,
   onePayeeChangeAtATime,
+  openRegistrationOf,
   payeeKeyOf,
   payeeKeySource,
   recordFailed,
@@ -62,6 +69,7 @@ import {
   registrationsStartedSince,
   stagePayeeChange,
   startRegistration,
+  type SupplierRecord,
   supplierWithPayeeKey,
   unverifySupplier,
   versionOf,
@@ -71,7 +79,7 @@ import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { asked, PARTNER_UNAVAILABLE, StillWaiting } from './funding-source-work.ts';
+import { asked, orStillWaiting, PARTNER_UNAVAILABLE, StillWaiting } from './funding-source-work.ts';
 import {
   createSupplierWork,
   type Refused,
@@ -129,6 +137,9 @@ const DAY_MS = 86_400_000;
 const isOpen = (registration: RegistrationRecord): boolean =>
   registration.status === 'STARTED' || registration.status === 'UNKNOWN';
 
+/** A registration read and verified, with the state a change records from. */
+type RegistrationFound = Extract<Awaited<ReturnType<typeof registrationOf>>, { outcome: 'found' }>;
+
 export function createSupplierPayees({
   database,
   keys,
@@ -158,7 +169,7 @@ export function createSupplierPayees({
     supplierId: string,
     registrationId: string,
     lock: 'share' | 'change',
-  ) => {
+  ): Promise<RegistrationFound> => {
     const read = await registrationOf(tx, states, { orgId, id: registrationId }, supplierId, lock);
     if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') throw new SupplierRefused(404, 'NOT_FOUND');
@@ -172,34 +183,27 @@ export function createSupplierPayees({
       return (await registrationIn(tx, states, orgId, supplier.id, registrationId, 'share')).registration;
     });
 
-  /** The form the partner answered, if it may be sent to a person's browser: logged and refused otherwise. */
+  /** The form the partner answered, if it may be sent to a person's browser: logged and PARTNER_UNAVAILABLE otherwise. */
   const formOf = (
     outcome: BeneficiaryOutcome,
     { formOrigin }: FinancialRailAdapter,
     correlationId: string,
-  ): PayeeForm | null | 'refused' => {
+  ): PayeeForm | null | Refused => {
     if (outcome.kind !== 'waiting') return null;
     if (!isPartnerPage(outcome.formUrl, formOrigin)) {
       logger.child({ correlationId }).error('suppliers.partner_page_refused', { partner });
-      return 'refused';
+      return PARTNER_UNAVAILABLE;
     }
     return { url: outcome.formUrl, expiresAt: outcome.expiresAt };
   };
 
   /** A payee change refused inside Tx 2, answered as such; still waiting, answered with nothing of it kept. */
-  const write = async (
+  const write = (
     member: SupplierMember,
     idempotent: IdempotentRequest,
     correlationId: string,
     change: (tx: SupplierTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-  ) => {
-    try {
-      return await work.write(member, idempotent, correlationId, change);
-    } catch (error) {
-      if (error instanceof StillWaiting) return { outcome: 'waiting' as const };
-      throw error;
-    }
-  };
+  ) => orStillWaiting(() => work.write(member, idempotent, correlationId, change));
 
   /** Refused past the day's budget of payee registrations (PAYEE_REGISTRATIONS_SPENT). */
   const withinBudget = async (tx: SupplierTx, orgId: string): Promise<void> => {
@@ -211,9 +215,12 @@ export function createSupplierPayees({
 
   /**
    * The registration's payee, from the partner's registered answer (Tx 2):
-   * its reference and payee key recorded, then the new version made with the
-   * current details and put in waiting. The registration was read for change
-   * after its supplier, as the lock order has it.
+   * its reference and payee key recorded, then, unless another supplier is
+   * paid to that payee (left REGISTERED with no version, which the answer
+   * reads as SUPPLIER_PAYEE_TAKEN), the new version made with the current
+   * details and put in waiting. An answer naming an account number is
+   * refused (AccountNumberLeak) before anything is written. The registration
+   * was read for change after its supplier, as the lock order has it.
    */
   const keepRegistered = async (
     tx: SupplierTx,
@@ -227,7 +234,7 @@ export function createSupplierPayees({
       enteredBy,
     }: {
       readonly supplierId: string;
-      readonly found: Extract<Awaited<ReturnType<typeof registrationOf>>, { outcome: 'found' }>;
+      readonly found: RegistrationFound;
       readonly beneficiary: Extract<BeneficiaryOutcome, { kind: 'registered' }>['beneficiary'];
       readonly offer: RailCapabilities;
       readonly enteredBy: string;
@@ -240,12 +247,12 @@ export function createSupplierPayees({
     const payee = payeeKeyOf(payeeKeySource(offer, found.registration.route), beneficiary, null);
     // The early word: the index refuses the key again at the confirmation, whoever takes it first.
     const holder = payee.key === null ? null : await supplierWithPayeeKey(tx, orgId, payee.key);
-    if (holder !== null && holder !== supplierId) throw new SupplierRefused(409, 'SUPPLIER_PAYEE_TAKEN');
     const registration = await recordRegistered(tx, states, { orgId, id: found.registration.id }, found, {
       beneficiary,
       payee,
       actor,
     });
+    if (holder !== null && holder !== supplierId) return;
     // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
     let read = await work.supplierIn(tx, states, supplierKey, 'change');
     if (read.supplier.status === 'VERIFIED') {
@@ -280,25 +287,37 @@ export function createSupplierPayees({
     );
   };
 
-  /** The answer after a write: the registration as it now stands, with the partner's form if it gave one. */
-  const answer = async (
+  /**
+   * The answer after a write: the registration as it now stands, with the
+   * partner's form if it gave one; a registration REGISTERED with no version
+   * made from it, SUPPLIER_PAYEE_TAKEN (keepRegistered left it so).
+   */
+  const answer = (
     outcome: 'started' | 'checked' | 'waiting',
     member: SupplierMember,
     supplierId: string,
     registrationId: string,
     form: PayeeForm | null,
     correlationId: string,
-  ): Promise<PayeeWrite> => {
-    const registration = await registrationNow(member.orgId, supplierId, registrationId, correlationId);
-    if ('outcome' in registration) return registration;
-    return { outcome, registration, form: isOpen(registration) ? form : null };
-  };
+  ): Promise<PayeeWrite> =>
+    work.answered(member.orgId, correlationId, async (tx, states) => {
+      const { orgId } = member;
+      const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
+      const { registration } = await registrationIn(tx, states, orgId, supplier.id, registrationId, 'share');
+      if (registration.status === 'REGISTERED') {
+        const made = await versionOf(tx, states, { orgId, id: registration.versionId }, supplier.id);
+        if (made.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+        if (made.outcome === 'missing') throw new SupplierRefused(409, 'SUPPLIER_PAYEE_TAKEN');
+      }
+      return { outcome, registration, form: isOpen(registration) ? form : null };
+    });
 
   /**
-   * Asks the partner about a registration Tx 1 added: STARTED, registered
-   * under our ID (the same ID answers the same); UNKNOWN, asked by it alone.
-   * A call lost on the way is recorded (STARTED > UNKNOWN) and answered
-   * PARTNER_UNAVAILABLE. Gives the form to send the admin to, or none.
+   * Asks the partner about a registration Tx 1 added or carried on with:
+   * STARTED, registered under our ID (the same ID answers the same);
+   * UNKNOWN, asked by it alone. A call lost on the way is recorded (STARTED >
+   * UNKNOWN) and answered PARTNER_UNAVAILABLE. Gives the form to send the
+   * admin to, or none.
    */
   const askAfterStart = async (
     partnerRail: FinancialRailAdapter,
@@ -314,10 +333,7 @@ export function createSupplierPayees({
         ? partnerRail.registerBeneficiary({ route: 'hosted', ...ref })
         : partnerRail.getBeneficiaryState(ref),
     );
-    if (outcome !== 'unavailable') {
-      const form = formOf(outcome, partnerRail, correlationId);
-      return form === 'refused' ? PARTNER_UNAVAILABLE : form;
-    }
+    if (outcome !== 'unavailable') return formOf(outcome, partnerRail, correlationId);
     await work.inOrganisation(member.orgId, correlationId, async (tx, states) => {
       await onePayeeChangeAtATime(tx, member.orgId);
       await work.supplierIn(tx, states, { orgId: member.orgId, id: supplierId }, 'share');
@@ -337,6 +353,58 @@ export function createSupplierPayees({
     return PARTNER_UNAVAILABLE;
   };
 
+  /**
+   * Keeps the partner's answer for an open registration (Tx 2), in the
+   * write's transaction: refused, FAILED with why, but an `unknown` for one
+   * STARTED, which the partner may not have been asked about yet (a start
+   * carries it on); registered, its payee kept (keepRegistered), or, for an
+   * answer naming an account number, FAILED and logged by IDs alone.
+   */
+  const keepAnswer = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    member: SupplierMember,
+    {
+      supplier,
+      found,
+      outcome,
+      offer,
+      enteredBy,
+      correlationId,
+    }: {
+      readonly supplier: SupplierRecord;
+      readonly found: RegistrationFound;
+      readonly outcome: Exclude<BeneficiaryOutcome, { kind: 'waiting' }>;
+      readonly offer: RailCapabilities | undefined;
+      readonly enteredBy: string;
+      readonly correlationId: string;
+    },
+  ): Promise<void> => {
+    const key = { orgId: member.orgId, id: found.registration.id };
+    const actor = { type: 'user' as const, id: member.userId };
+    if (outcome.kind === 'refused') {
+      if (outcome.reason === 'unknown' && found.registration.status === 'STARTED') return;
+      await recordFailed(tx, states, key, found, { reason: outcome.reason, actor });
+      return;
+    }
+    if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
+    if (offer === undefined) throw new Error('a registered payee was answered without the partner’s offer');
+    try {
+      await keepRegistered(tx, states, member, {
+        supplierId: supplier.id,
+        found,
+        beneficiary: outcome.beneficiary,
+        offer,
+        enteredBy,
+      });
+    } catch (error) {
+      // Thrown before anything is written (payeeKeyOf, recordRegistered), so the registration's state still holds.
+      if (!(error instanceof AccountNumberLeak)) throw error;
+      logger.child({ correlationId }).error('suppliers.partner_answer_refused', { registrationId: key.id });
+      await recordFailed(tx, states, key, found, { reason: 'unknown', actor });
+    }
+  };
+
   return {
     async start(member, idempotent, supplierId, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
@@ -349,14 +417,23 @@ export function createSupplierPayees({
         return { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' };
       }
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
-        await onePayeeChangeAtATime(tx, member.orgId);
+        const { orgId } = member;
+        await onePayeeChangeAtATime(tx, orgId);
         const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
-        await withinBudget(tx, member.orgId);
-        const { supplier } = await work.supplierIn(tx, states, { orgId: member.orgId, id: supplierId }, 'share');
+        const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
         if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
+        // One open at a time for a supplier: a start carries on with it, starting nothing new.
+        const open = await openRegistrationOf(tx, orgId, supplier.id);
+        if (
+          open !== null &&
+          isOpen((await registrationIn(tx, states, orgId, supplier.id, open, 'share')).registration)
+        ) {
+          return { status: 201, resourceId: open };
+        }
+        await withinBudget(tx, orgId);
         const id = ids.next();
         await startRegistration(tx, states, {
-          orgId: member.orgId,
+          orgId,
           id,
           supplierId: supplier.id,
           versionId: ids.next(),
@@ -397,7 +474,7 @@ export function createSupplierPayees({
           : undefined;
       if (outcome === 'unavailable' || offer === 'unavailable') return PARTNER_UNAVAILABLE;
       const form = outcome === undefined ? null : formOf(outcome, rail, correlationId);
-      if (form === 'refused') return PARTNER_UNAVAILABLE;
+      if (form !== null && 'outcome' in form) return form;
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         await onePayeeChangeAtATime(tx, member.orgId);
         const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
@@ -407,21 +484,7 @@ export function createSupplierPayees({
         // Ended already, by this write's retry or another check (the lock waits for one at once): as it stands.
         if (!isOpen(found.registration) || outcome === undefined) return { status: 200, resourceId };
         if (outcome.kind === 'waiting') throw new StillWaiting();
-        const key = { orgId: member.orgId, id: resourceId };
-        const actor = { type: 'user' as const, id: member.userId };
-        if (outcome.kind === 'refused') {
-          await recordFailed(tx, states, key, found, { reason: outcome.reason, actor });
-          return { status: 200, resourceId };
-        }
-        if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
-        if (offer === undefined) throw new Error('a registered payee was answered without the partner’s offer');
-        await keepRegistered(tx, states, member, {
-          supplierId: supplier.id,
-          found,
-          beneficiary: outcome.beneficiary,
-          offer,
-          enteredBy: admin.id,
-        });
+        await keepAnswer(tx, states, member, { supplier, found, outcome, offer, enteredBy: admin.id, correlationId });
         return { status: 200, resourceId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
