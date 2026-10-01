@@ -135,6 +135,8 @@ jobs:
       # tests, reported only until they are cleaned, then held to a threshold.
       - name: Duplicated code (jscpd, report only)
         run: pnpm duplicates
+        # Report only, a crash of the tool included, until a threshold is set.
+        continue-on-error: true
 
       # The deploy/azure checks run the Bicep compiler, and tests download
       # nothing (Rule Book §6), so the pinned binary is installed here and

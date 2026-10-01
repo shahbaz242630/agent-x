@@ -27,28 +27,44 @@ export function reportByRule(findings: readonly Finding[]): readonly (readonly [
   return [...counts].sort(([a, m], [b, n]) => n - m || (a < b ? -1 : 1));
 }
 
-async function main(): Promise<number> {
-  const eslint = new ESLint({ overrideConfigFile: 'eslint.quality.config.js' });
-  const results = await eslint.lintFiles(['.']);
-  const failing = results.map((result) => ({
-    ...result,
-    messages: result.messages.filter((message) => !reportedOnly(message)),
-  }));
-  // Counts kept with the messages, as the formatter reads them.
-  for (const result of failing) {
-    result.errorCount = result.messages.filter((message) => message.severity === 2).length;
-    result.warningCount = result.messages.length - result.errorCount;
-  }
+/** The config `pnpm lint` runs: the repository's own rules and SonarJS's. */
+export const lintWith = () => new ESLint({ overrideConfigFile: 'eslint.quality.config.js' });
+
+/**
+ * ESLint's results split: those that fail the run (every finding but the
+ * reported-only ones, each result's counts made from what it keeps, as the
+ * formatter reads them), and the reported ones counted by rule.
+ */
+export function split(results: readonly ESLint.LintResult[]) {
+  const failing = results.map((result) => {
+    const messages = result.messages.filter((message) => !reportedOnly(message));
+    const errors = messages.filter((message) => message.severity === 2);
+    const warnings = messages.filter((message) => message.severity !== 2);
+    return {
+      ...result,
+      messages,
+      errorCount: errors.length,
+      warningCount: warnings.length,
+      fixableErrorCount: errors.filter((message) => message.fix !== undefined).length,
+      fixableWarningCount: warnings.filter((message) => message.fix !== undefined).length,
+    };
+  });
   const reported = reportByRule(
     results.flatMap((result) => result.messages.filter((message) => reportedOnly(message))),
   );
+  return { failing, reported, fails: failing.some((result) => result.messages.length > 0) };
+}
+
+async function main(): Promise<number> {
+  const eslint = lintWith();
+  const { failing, reported, fails } = split(await eslint.lintFiles(['.']));
   if (reported.length > 0) {
     console.log('Garbage-code report (SonarJS, not yet blocking):');
     for (const [rule, count] of reported) console.log(`${String(count).padStart(6)}  ${rule}`);
   }
   const formatted = await (await eslint.loadFormatter('stylish')).format(failing);
   if (formatted !== '') console.log(formatted);
-  return failing.some((result) => result.messages.length > 0) ? 1 : 0;
+  return fails ? 1 : 0;
 }
 
 if (import.meta.main) process.exitCode = await main();
