@@ -19,7 +19,7 @@ import type { IdempotentRequest } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, InjectOptions } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import { buildServer } from './server.ts';
@@ -331,6 +331,12 @@ async function withSuppliers(
   await app.ready();
   return app;
 }
+
+// The first server built in a run pays for loading the server's every route and schema: paid here, with time to
+// spare, not by the first test against its 5 s limit (it failed so under load twice in a week, S72 and S73).
+beforeAll(async () => {
+  await withSuppliers({});
+}, 30_000);
 
 const post = (path: string, payload: unknown = {}, key = 'k-1'): InjectOptions => ({
   method: 'POST',
