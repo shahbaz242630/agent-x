@@ -9,9 +9,10 @@
 //   and email codes, security keys (U2F) and passkeys, each by its own call,
 //   and recovery codes when the person's methods list them. The password, and
 //   a link to another login, are not second factors, and stay.
-// - Then read again: anything left but those two throws, so a reset is
-//   completed only once the login service shows none left (a call that said
-//   yes and did nothing can't pass).
+// - Then read again, a few times while the login service catches up:
+//   anything still left but those two throws, so a reset is completed only
+//   once the login service shows none left (a call that said yes and did
+//   nothing can't pass).
 // - A factor already gone (404) is taken as removed: a run that stopped
 //   part-way is run again from the start.
 // - The token goes only to the issuer's origin, through the same route as
@@ -28,6 +29,20 @@ const CALL_TIMEOUT_MS = 10_000;
 
 /** The most one answer may hold. */
 const MOST_ANSWER_BYTES = 256 * 1024;
+
+/**
+ * How many times the factors are read after their removal, and how long to
+ * wait between reads: Zitadel's searches read a projection that can trail a
+ * removal by a moment (the e2e flake of S67 and S70), so one left only that
+ * long isn't one left. A factor still there after the last read throws.
+ */
+const READS_AFTER_REMOVAL = 5;
+const PAUSE_BETWEEN_READS_MS = 400;
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** The most factors, or passkeys, one person may have that a removal reads. */
 const MOST_FACTORS = 100;
@@ -137,6 +152,7 @@ export function createSecondFactorRemover({
   internalOrigin,
   token,
   fetch,
+  pause = sleep,
 }: {
   /** The login service, exactly as its tokens name it. */
   readonly issuer: string;
@@ -144,6 +160,8 @@ export function createSecondFactorRemover({
   readonly internalOrigin: string | undefined;
   readonly token: string;
   readonly fetch: OutboundFetch;
+  /** Waits between the reads after a removal; a test's is instant. */
+  readonly pause?: (ms: number) => Promise<void>;
 }): SecondFactorRemover & PasskeysHeld {
   if (!URL.canParse(issuer) || new URL(issuer).origin !== issuer) throw new RangeError('the issuer must be an origin');
   if (!TOKEN.test(token)) throw new RangeError('the token must be 1 to 4096 visible ASCII characters');
@@ -260,11 +278,14 @@ export function createSecondFactorRemover({
         if (status !== 200) throw new IdpFactorsUnavailable(`removing a factor: it answered ${String(status)}`);
         removed += 1;
       }
-      const left = await secondFactorsOf(subject);
-      if (left.removals.length > 0 || left.otherMethods.length > 0) {
-        throw new IdpFactorsUnavailable('a second factor is still there after its removal');
+      for (let read = 1; ; read += 1) {
+        const left = await secondFactorsOf(subject);
+        if (left.removals.length === 0 && left.otherMethods.length === 0) return removed;
+        if (read === READS_AFTER_REMOVAL) {
+          throw new IdpFactorsUnavailable('a second factor is still there after its removal');
+        }
+        await pause(PAUSE_BETWEEN_READS_MS);
       }
-      return removed;
     },
   };
 }
