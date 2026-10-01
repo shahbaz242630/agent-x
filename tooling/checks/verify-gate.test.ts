@@ -12,7 +12,8 @@ import { parse } from 'yaml';
 /** Each check and the exact command it runs. */
 const CHECKS = {
   'format:check': 'prettier --check .',
-  lint: 'eslint --max-warnings 0 .',
+  // ESLint once with the repository's rules and SonarJS's, failing on every finding but SonarJS's not yet blocking (#222).
+  lint: 'node tooling/quality/lint.ts',
   typecheck: 'tsc --project tsconfig.json',
   boundaries: `depcruise ${['apps', 'packages'].filter((folder) => existsSync(folder)).join(' ')}`,
   knip: 'knip',
@@ -44,6 +45,8 @@ const OTHER_SCRIPTS = {
   hooks: 'node tooling/git-hooks/install.ts',
   tools: 'node tooling/bicep/install.ts',
   'tools:cosign': 'node tooling/cosign/install.ts',
+  // The copied-code report (#222): Verify runs it, report only until a threshold is set in .jscpd.json.
+  duplicates: 'jscpd',
 };
 
 /** Scripts pnpm runs by itself during an install. */
