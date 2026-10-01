@@ -662,11 +662,12 @@ export async function stagePayeeChange(
  * key (its key's version with it) the supplier's, in one signed state, so
  * the key always moves with the version it pays. 0033's
  * `one_supplier_a_payee` refuses a key another supplier of the organisation
- * holds, a suspended one included (isPayeeTaken). A change that isn't the
- * one waiting, or one mayChangePayee refuses, is refused (RangeError) before
- * any SQL runs. A suspended supplier's verification, if any, stays on the
- * version it was, so it comes back UNVERIFIED (stillVerified). Gives the
- * supplier as it now stands.
+ * holds, a suspended one included (isPayeeTaken). Its cooling-off starts
+ * here, ending `coolingOffUntil` (ADR-014 §3 step 4), which must be finite. A
+ * change that isn't the one waiting, or one mayChangePayee refuses, is
+ * refused (RangeError) before any SQL runs. A suspended supplier's
+ * verification, if any, stays on the version it was, so it comes back
+ * UNVERIFIED (stillVerified). Gives the supplier as it now stands.
  */
 export async function confirmPayeeChange(
   tx: SuppliersTransaction,
@@ -674,14 +675,16 @@ export async function confirmPayeeChange(
   key: SupplierKey,
   found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
   change: PayeeChange,
-  { actor, details = {} }: SupplierChange,
+  { actor, details = {}, coolingOffUntil }: SupplierChange & { readonly coolingOffUntil: Date },
 ): Promise<SupplierRecord> {
   const { version, registration } = change;
   if (found.supplier.pendingVersionId !== version.id) throw new RangeError('Only the change waiting is confirmed');
   mayChangePayee(found.supplier, change);
+  if (!Number.isFinite(coolingOffUntil.getTime())) throw new RangeError('A cooling-off ends at a time');
   const confirmed = {
     current_version_id: version.id,
     pending_version_id: null,
+    cooling_off_until: coolingOffUntil,
     payee_key: registration.payeeKey,
     payee_key_version: registration.payeeKeyVersion,
   };
@@ -694,6 +697,7 @@ export async function confirmPayeeChange(
     ...found.supplier,
     currentVersionId: version.id,
     pendingVersionId: null,
+    coolingOffUntil,
     payeeKey: registration.payeeKey,
     payeeKeyVersion: registration.payeeKeyVersion,
   };

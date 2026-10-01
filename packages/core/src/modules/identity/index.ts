@@ -156,6 +156,7 @@ export {
 } from './infrastructure/hold-clearing.ts';
 export {
   activeContactsFor,
+  countingContactsFor,
   contactAddressFor,
   ContactsTampered,
   type ContactWithAddress,

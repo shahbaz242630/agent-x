@@ -49,8 +49,9 @@ import {
   type VerifiedState,
   withSignedStates,
 } from '../../audit/index.ts';
+import type { Clock } from '../../../shared-kernel/index.ts';
 import { invitationEmail } from '../domain/invitation.ts';
-import { REGISTERED_CONTACT } from '../domain/registered-contact.ts';
+import { countsNow, REGISTERED_CONTACT } from '../domain/registered-contact.ts';
 import { changeHashOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -467,23 +468,44 @@ export class ContactsTampered extends Error {
 }
 
 /**
- * The organisation's ACTIVE contacts' IDs, counted or not yet, read and
- * verified in a transaction of their own, withSignedStates' for it: whom a
- * notice to its contacts goes to (B6-1b). Contacts that can't be believed
- * throw ContactsTampered. Each statement is limited to 10 seconds.
+ * The IDs of the organisation's contacts `keep` keeps, read and verified in
+ * a transaction of their own, withSignedStates' for it. Contacts that can't
+ * be believed throw ContactsTampered. Each statement is limited to 10 seconds.
  */
-export function activeContactsFor(
+function contactIdsFor(
   db: Kysely<IdentityTables & AuditTables>,
   services: SignedStatesServices,
   orgId: string,
+  keep: (contact: ContactRecord) => boolean,
 ): Promise<readonly string[]> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
     await sql`set local statement_timeout = '10s'`.execute(tx);
     const listed = await contactsOf(tx, states, services.keys, orgId);
     if (listed.outcome === 'tampered') throw new ContactsTampered(orgId);
-    return listed.contacts.filter((contact) => contact.status === 'ACTIVE').map((contact) => contact.id);
+    return listed.contacts.filter(keep).map((contact) => contact.id);
   });
 }
+
+/** The organisation's ACTIVE contacts' IDs, counted or not yet: whom a notice to its contacts goes to (B6-1b). */
+export const activeContactsFor = (
+  db: Kysely<IdentityTables & AuditTables>,
+  services: SignedStatesServices,
+  orgId: string,
+): Promise<readonly string[]> => contactIdsFor(db, services, orgId, (contact) => contact.status === 'ACTIVE');
+
+/**
+ * The organisation's contacts that count at the clock's now (countsNow): whom
+ * a notice about a supplier goes to (E2-2b, ADR-012 §1), as only they may
+ * confirm a reset.
+ */
+export const countingContactsFor = (
+  db: Kysely<IdentityTables & AuditTables>,
+  { clock, ...services }: SignedStatesServices & { readonly clock: Clock },
+  orgId: string,
+): Promise<readonly string[]> => {
+  const now = clock.now();
+  return contactIdsFor(db, services, orgId, (contact) => countsNow(contact, now));
+};
 
 /**
  * The contact's address, from its verified row, in a transaction of its own,

@@ -70,6 +70,7 @@ import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
+import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { SupplierPayees } from './supplier-payees.ts';
 import type { SupplierRegistry } from './supplier-registry.ts';
 import { registerSuppliers } from './suppliers.ts';
@@ -134,6 +135,8 @@ export interface ServerOptions {
   readonly supplierChanges?: SupplierChanges | undefined;
   /** Registering suppliers' bank details with the partner (supplier-payees.ts); without it, no one reaches those routes. */
   readonly supplierPayees?: SupplierPayees | undefined;
+  /** Confirming or withdrawing a supplier's payee change waiting (supplier-payee-changes.ts); without it, no one reaches those routes. */
+  readonly supplierPayeeChanges?: SupplierPayeeChanges | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
   readonly fakeBank?: FakeBank | undefined;
 }
@@ -303,6 +306,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     registry: options.supplierRegistry,
     changes: options.supplierChanges,
     payees: options.supplierPayees,
+    payeeChanges: options.supplierPayeeChanges,
   });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {

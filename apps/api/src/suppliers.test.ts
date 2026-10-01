@@ -1,9 +1,11 @@
 // E1-2: the suppliers' routes, answering a member or an agent with each
 // outcome of the use cases, and refusing a body that can't be a supplier's
 // before they run; E2-2a: registering a supplier's bank details with the
-// partner. Who reaches them is the access hook's (role-matrix.test.ts); what
-// the use cases do with the database is supplier-registry.db.test.ts,
-// supplier-changes.db.test.ts and supplier-payees.db.test.ts.
+// partner; E2-2b: confirming or withdrawing the change it left waiting, and a
+// supplier's payee shown. Who reaches them is the access hook's
+// (role-matrix.test.ts); what the use cases do with the database is
+// supplier-registry.db.test.ts, supplier-changes.db.test.ts,
+// supplier-payees.db.test.ts and supplier-payee-changes.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import type {
@@ -23,6 +25,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges, SupplierChangeWrite } from './supplier-changes.ts';
+import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
 import type { SupplierView } from './supplier-work.ts';
@@ -91,6 +94,16 @@ const VIEW: SupplierView = {
   supplier: SUPPLIER,
   version: VERSION,
   contacts: { phone: '+971501234567', email: 'accounts@gulfoffice.example', tradeLicence: null },
+  payee: null,
+  pending: null,
+};
+
+/** A payee as the partner described it (E2-2b). */
+const PAYEE = {
+  registrationId: REGISTRATION_ID,
+  payeeHint: 'AE…1234',
+  nameCheck: 'match' as const,
+  maskedName: 'G*** O***** S*******',
 };
 
 const SUPPLIER_ANSWERED = {
@@ -113,6 +126,8 @@ const DETAILS_ANSWERED = {
   source: { kind: 'registry', ref: 'DED-123456' },
   enteredBy: MEMBERSHIP,
   enteredAt: '2026-10-01T08:00:00.000Z',
+  payee: null,
+  pendingChange: null,
 };
 
 const BODY = {
@@ -185,6 +200,13 @@ type Asked =
       readonly stepUpChallengeId?: string;
     }
   | {
+      readonly kind: 'payeeApprove' | 'payeeApproveConfirm' | 'payeeWithdraw';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly stepUpChallengeId?: string;
+    }
+  | {
       readonly kind: 'payeeStart' | 'payeeCheck';
       readonly member: object;
       readonly keyed: IdempotentRequest;
@@ -230,7 +252,7 @@ async function withSuppliers(
     },
   };
   const change =
-    (kind: 'suspend' | 'reactivate') =>
+    (kind: 'suspend' | 'reactivate' | 'payeeApprove' | 'payeeWithdraw') =>
     (member: object, keyed: IdempotentRequest, supplierId: string): Promise<SupplierChangeWrite> => {
       asked.push({ kind, member, keyed, supplierId });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
@@ -251,6 +273,14 @@ async function withSuppliers(
     check: (member, keyed, supplierId, registrationId) => {
       asked.push({ kind: 'payeeCheck', member, keyed, supplierId, registrationId });
       return Promise.resolve(answers.payee ?? { outcome: 'busy' });
+    },
+  };
+  const payeeChanges: SupplierPayeeChanges = {
+    approve: change('payeeApprove'),
+    withdraw: change('payeeWithdraw'),
+    approveConfirm: (member, keyed, supplierId, stepUpChallengeId) => {
+      asked.push({ kind: 'payeeApproveConfirm', member, keyed, supplierId, stepUpChallengeId });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
   const config = {
@@ -284,6 +314,7 @@ async function withSuppliers(
     supplierRegistry: registry,
     supplierChanges: changes,
     supplierPayees: payees,
+    supplierPayeeChanges: payeeChanges,
   });
   servers.push(app);
   await app.ready();
@@ -639,6 +670,118 @@ describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee th
 
     expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { iban: 'AE07' }))).statusCode).toBe(400);
     expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/not-an-id/check`))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/suppliers/:id/payee-change/approve, then /confirm, and /withdraw (E2-2b)', () => {
+  const PENDING_VERSION = { ...VERSION, id: '0199a0f0-0000-7000-8000-0000000000e5', version: 2 };
+
+  it('shows a supplier’s payee and the change waiting as the partner described them, never a reference or key', async () => {
+    const waiting: SupplierView = {
+      ...VIEW,
+      supplier: { ...SUPPLIER, pendingVersionId: PENDING_VERSION.id },
+      payee: { ...PAYEE, nameCheck: 'partial' },
+      pending: { version: PENDING_VERSION, payee: PAYEE },
+    };
+    const app = await withSuppliers({ change: { outcome: 'changed', ...waiting } });
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-change/withdraw`));
+
+    expect(response.json()).toEqual({
+      ...DETAILS_ANSWERED,
+      changeWaiting: true,
+      payee: { ...PAYEE, nameCheck: 'partial' },
+      pendingChange: { version: 2, enteredAt: '2026-10-01T08:00:00.000Z', payee: PAYEE },
+    });
+    expect(response.body).not.toMatch(/a-beneficiary-ref|a-payee-key/);
+  });
+
+  it('answers the ask 202 with the step-up to sign in again for, passing the member in their session', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-change/approve`));
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked).toMatchObject([
+      {
+        kind: 'payeeApprove',
+        member: { ...MEMBER, sessionId: LIVE.sessionId },
+        keyed: { operation: 'suppliers.payee.approve' },
+        supplierId: SUPPLIER_ID,
+      },
+    ]);
+  });
+
+  it('answers the confirm 200 with the supplier, passing the step-up', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/payee-change/approve/confirm`, { stepUpChallengeId: CHALLENGE }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(DETAILS_ANSWERED);
+    expect(asked).toMatchObject([
+      {
+        kind: 'payeeApproveConfirm',
+        member: { ...MEMBER, sessionId: LIVE.sessionId },
+        keyed: { operation: 'suppliers.payee.approve.confirm' },
+        supplierId: SUPPLIER_ID,
+        stepUpChallengeId: CHALLENGE,
+      },
+    ]);
+  });
+
+  it('answers a withdrawal 200 with the supplier, passing the member and the key', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-change/withdraw`));
+
+    expect(response.statusCode).toBe(200);
+    expect(asked).toEqual([
+      {
+        kind: 'payeeWithdraw',
+        member: MEMBER,
+        keyed: expect.objectContaining({ operation: 'suppliers.payee.withdraw', key: 'k-1' }) as unknown,
+        supplierId: SUPPLIER_ID,
+      },
+    ]);
+  });
+
+  it('answers each refusal as the use case gives it', async () => {
+    for (const [status, code] of [
+      [403, 'PAYEE_CHANGE_NOT_YOURS'],
+      [409, 'SUPPLIER_NO_CHANGE_WAITING'],
+      [409, 'SUPPLIER_PAYEE_TAKEN'],
+    ] as const) {
+      const app = await withSuppliers({ change: { outcome: 'refused', status, code } });
+      const response = await app.inject(
+        post(`/${SUPPLIER_ID}/payee-change/approve/confirm`, { stepUpChallengeId: CHALLENGE }),
+      );
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ error: { code } });
+    }
+  });
+
+  it('refuses a body where none belongs, or a confirm without a step-up’s ID, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({}, asked);
+
+    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-change/approve`, { versionId: 'x' }))).statusCode).toBe(400);
+    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-change/withdraw`, { versionId: 'x' }))).statusCode).toBe(400);
+    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-change/approve/confirm`))).statusCode).toBe(400);
+    expect(
+      (
+        await app.inject(
+          post(`/${SUPPLIER_ID}/payee-change/approve/confirm`, { stepUpChallengeId: CHALLENGE, also: 'x' }),
+        )
+      ).statusCode,
+    ).toBe(400);
     expect(asked).toEqual([]);
   });
 });

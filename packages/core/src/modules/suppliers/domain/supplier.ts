@@ -31,6 +31,13 @@ export const SUPPLIER = defineStateMachine({
 
 export type SupplierStatus = (typeof SUPPLIER.states)[number];
 
+/**
+ * How long a supplier's payee change cools off once its admin confirms it
+ * (ADR-012 §1: 24 hours, never less; ADR-014 §3 step 4): no one may verify it
+ * before then (E3).
+ */
+export const PAYEE_COOLING_OFF_MS = 24 * 3_600_000;
+
 /** What a supplier's coming back from its brake rests on: the version verified, if any, and what is current and waiting. */
 interface VerifiedState {
   readonly currentVersionId: string;

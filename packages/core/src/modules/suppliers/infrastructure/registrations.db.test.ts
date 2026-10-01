@@ -84,6 +84,8 @@ const ids = new SequentialIds(0xe210_0000_0000);
 const clock = new FixedClock(new Date('2026-10-02T08:00:00Z'));
 const HOUR_MS = 3_600_000;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
+/** When a confirmed change's cooling-off ends, as the use case gives it (E2-2b). */
+const COOLED_OFF = new Date('2026-10-03T08:00:00Z');
 
 const DETAILS: SupplierDetails = {
   displayName: 'Gulf Office Supplies LLC',
@@ -288,7 +290,7 @@ async function confirmIn(tx: Tx, states: States, orgId: string, supplierId: stri
     { orgId, id: supplierId },
     of,
     { version, registration: found.registration, current },
-    { actor: OPERATOR },
+    { actor: OPERATOR, coolingOffUntil: COOLED_OFF },
   );
 }
 
@@ -992,13 +994,14 @@ describe(`a payee change put in waiting, then confirmed (stagePayeeChange, confi
     });
   };
 
-  /** The supplier read for change (as it stands, but for `as`), then `step` taken with `change`. */
+  /** The supplier read for change (as it stands, but for `as`), then `step` taken with `change`; a confirmation's cooling-off ending `until`. */
   const taking =
-    (step: typeof stagePayeeChange) =>
-    (orgId: string, supplierId: string, change: PayeeChange, as: Partial<SupplierRecord> = {}) =>
+    (step: typeof confirmPayeeChange) =>
+    (orgId: string, supplierId: string, change: PayeeChange, as: Partial<SupplierRecord> = {}, until = COOLED_OFF) =>
       onSupplier(orgId, supplierId, (tx, states, of) =>
         step(tx, states, { orgId, id: supplierId }, { ...of, supplier: { ...of.supplier, ...as } }, change, {
           actor: OPERATOR,
+          coolingOffUntil: until,
         }),
       );
   const staging = taking(stagePayeeChange);
@@ -1098,10 +1101,16 @@ describe(`a payee change put in waiting, then confirmed (stagePayeeChange, confi
       await expect(confirming(org, supplierId, wrong)).rejects.toBeInstanceOf(RangeError);
     }
     await expect(confirming(org, supplierId, change, { status: 'VERIFIED' })).rejects.toBeInstanceOf(RangeError);
+    await expect(confirming(org, supplierId, change, {}, new Date(Number.NaN))).rejects.toBeInstanceOf(RangeError);
     expect(await supplierNow(org, supplierId)).toMatchObject({
-      supplier: { currentVersionId: first, pendingVersionId: change.version.id, payeeKey: null },
+      supplier: { currentVersionId: first, pendingVersionId: change.version.id, payeeKey: null, coolingOffUntil: null },
     });
-    expect(await confirming(org, supplierId, change)).toMatchObject({ currentVersionId: change.version.id });
+    // Its cooling-off starts with the confirmation, signed with the rest.
+    expect(await confirming(org, supplierId, change)).toMatchObject({
+      currentVersionId: change.version.id,
+      coolingOffUntil: COOLED_OFF,
+    });
+    expect(await supplierNow(org, supplierId)).toMatchObject({ supplier: { coolingOffUntil: COOLED_OFF } });
   });
 
   it('never waits behind the KEY SHARE a version’s foreign key holds on its supplier: the payee key is no key column', async () => {

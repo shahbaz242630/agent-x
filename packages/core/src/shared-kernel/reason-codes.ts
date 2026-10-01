@@ -97,6 +97,8 @@ export const REASON_CODES = {
     "The payment partner didn't answer, or none is set up here, so nothing was done at the partner. Try again in a few minutes.",
   PASSKEY_REQUIRED:
     'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
+  PAYEE_CHANGE_NOT_YOURS:
+    'Only the admin who registered these bank details can confirm them, so nothing was changed. Ask them to confirm it, or withdraw the change and register the details again.',
   PAYEE_REGISTRATIONS_SPENT:
     "The organisation has registered as many suppliers' bank details as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
   PAYEE_ROUTE_NOT_OFFERED:
@@ -128,6 +130,8 @@ export const REASON_CODES = {
   SUPPLIER_CHANGE_WAITING:
     "A change of this supplier's bank details is already waiting to be confirmed, so another isn't made. Confirm or withdraw that one first.",
   SUPPLIER_NOT_SUSPENDED: 'The supplier is not suspended, so there is no suspension to lift. Nothing was changed.',
+  SUPPLIER_NO_CHANGE_WAITING:
+    "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
   SUPPLIER_PAYEE_TAKEN:
     "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers.",
   TOO_MANY_CONTACTS:

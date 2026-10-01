@@ -22,6 +22,7 @@ import {
   versionOf,
   withdrawPayeeChange,
 } from '@agentx/core/modules/suppliers';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -47,7 +48,12 @@ import {
 } from './supplier-payees.ts';
 import type { SupplierMember } from './supplier-work.ts';
 
-type Tables = IdentityTables & SuppliersTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables &
+  SuppliersTables &
+  OrganizationsTables &
+  DirectoryTables &
+  AuditTables &
+  NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -233,7 +239,7 @@ const confirmed = (org: string, id: string, registrationId: string) =>
       { orgId: org, id },
       found,
       { version: version.version, registration: registration.registration, current: current.version },
-      { actor: OPERATOR },
+      { actor: OPERATOR, coolingOffUntil: new Date('2026-10-03T08:00:00Z') },
     );
   });
 
@@ -296,7 +302,7 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
       maskedName: 'J****** A* F*****',
       payeeHint: 'AE…6026',
     });
-    expect(checked.registration.payeeKey).toMatch(/^fake-payee-[0-9a-f]{32}$/u);
+    expect(checked.registration.payeeKey).toMatch(/^fake-payee-[a-p]{32}$/u);
     // In waiting, inert: the supplier still pays the version it paid, with the payee key it had.
     const supplier = await supplierNow(org, id);
     expect(supplier).toMatchObject({ pendingVersionId: checked.registration.versionId, payeeKey: null });

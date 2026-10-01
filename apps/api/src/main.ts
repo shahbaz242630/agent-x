@@ -47,6 +47,7 @@ import {
   type LoginFlows,
   membersFor,
   activeContactsFor,
+  countingContactsFor,
   contactAddressFor,
   resetLinkFor,
   membershipFor,
@@ -100,6 +101,7 @@ import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
+import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 
@@ -495,6 +497,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       partner: partnerName(config.partner),
       logger,
     }),
+    supplierPayeeChanges: createSupplierPayeeChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });
@@ -626,6 +637,12 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     listMembers: membersFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     // Its registered contacts, and each one's address, from their verified rows (B6-1b).
     listContacts: activeContactsFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
+    listCountingContacts: countingContactsFor.bind(undefined, database, {
+      keys,
+      ids: uuidV7Ids,
+      logger,
+      clock: systemClock,
+    }),
     contactAddress: contactAddressFor.bind(undefined, database, { keys, ids: uuidV7Ids, logger }),
     // A contact's link to confirm a reset, on the console's origin (B6-3b).
     resetLink: resetLinkFor.bind(

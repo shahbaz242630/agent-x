@@ -25,6 +25,7 @@ import {
   verifySupplier,
   versionOf,
 } from '@agentx/core/modules/suppliers';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -42,7 +43,12 @@ import {
 import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './supplier-registry.ts';
 import type { SessionMember } from './supplier-work.ts';
 
-type Tables = IdentityTables & SuppliersTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables &
+  SuppliersTables &
+  OrganizationsTables &
+  DirectoryTables &
+  AuditTables &
+  NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

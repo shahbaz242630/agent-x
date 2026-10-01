@@ -19,6 +19,7 @@ export {
 } from './domain/registration.ts';
 export {
   contactsHeld,
+  PAYEE_COOLING_OFF_MS,
   reactivationOf,
   SOURCE_KINDS,
   type SourceKind,
