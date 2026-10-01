@@ -7,7 +7,14 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { describe, expect, it } from 'vitest';
 
 import { AccountNumberLeak, SANDBOX_ACCOUNTS } from '../../providers/index.ts';
-import { noAccountNumberIn, normalisedIban, payeeFingerprint, payeeIndexMessage, payeeKeyOf } from './payee-key.ts';
+import {
+  noAccountNumberIn,
+  normalisedIban,
+  payeeFingerprint,
+  payeeIndexMessage,
+  payeeKeyOf,
+  UnusablePayeeIdentity,
+} from './payee-key.ts';
 
 const keys = createKeyProvider(
   Object.fromEntries(
@@ -82,7 +89,7 @@ describe('the payee key a registration keeps (E2-1)', () => {
 
   it('throws for a stable partner that gave none, or one the tables can’t hold', () => {
     for (const payeeIdentity of [null, '', 'has a space', 'x'.repeat(129), 'é']) {
-      expect(() => payeeKeyOf('partner', { payeeIdentity }, fingerprint)).toThrow(/stable payee identity/);
+      expect(() => payeeKeyOf('partner', { payeeIdentity }, fingerprint)).toThrow(UnusablePayeeIdentity);
     }
     expect(payeeKeyOf('partner', { payeeIdentity: '~'.repeat(128) }, null).key).toHaveLength(128);
   });

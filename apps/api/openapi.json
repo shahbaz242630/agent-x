@@ -76,6 +76,16 @@
                   },
                   {
                     "type": "string",
+                    "const": "BANK_FORM_NOT_OPEN",
+                    "description": "No payee form of this organisation's is open at the staging partner under this address: it was filled in already, or it ran out. Nothing was changed. Start a new registration if one is still needed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "BANK_FORM_REFUSED",
+                    "description": "The staging partner's payee form can't take these details: the account must be a UAE IBAN with valid check digits, and the name readable. Nothing was changed. Fix them and send the form again."
+                  },
+                  {
+                    "type": "string",
                     "const": "BANK_LINK_NOT_WAITING",
                     "description": "No link of this organisation's is waiting at the staging bank under this session: it was approved or turned down already, or it ran out. Nothing was changed. Start a new link if one is still needed."
                   },
@@ -236,6 +246,16 @@
                   },
                   {
                     "type": "string",
+                    "const": "PAYEE_REGISTRATIONS_SPENT",
+                    "description": "The organisation has registered as many suppliers' bank details as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once."
+                  },
+                  {
+                    "type": "string",
+                    "const": "PAYEE_ROUTE_NOT_OFFERED",
+                    "description": "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers."
+                  },
+                  {
+                    "type": "string",
                     "const": "PAYLOAD_TOO_LARGE",
                     "description": "The request body is larger than this address accepts, so it is refused."
                   },
@@ -306,8 +326,18 @@
                   },
                   {
                     "type": "string",
+                    "const": "SUPPLIER_CHANGE_WAITING",
+                    "description": "A change of this supplier's bank details is already waiting to be confirmed, so another isn't made. Confirm or withdraw that one first."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_NOT_SUSPENDED",
                     "description": "The supplier is not suspended, so there is no suspension to lift. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_PAYEE_TAKEN",
+                    "description": "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers."
                   },
                   {
                     "type": "string",
@@ -1260,6 +1290,119 @@
         ],
         "additionalProperties": false,
         "description": "Reactivating a supplier, waiting for the admin to sign in again."
+      },
+      "PayeeRegistration": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "supplierId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "hosted",
+              "pass_through"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "STARTED",
+              "REGISTERED",
+              "FAILED",
+              "UNKNOWN"
+            ]
+          },
+          "nameCheck": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "match",
+                  "partial",
+                  "no_match",
+                  "unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maskedName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payeeHint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "invalid_details",
+                  "expired",
+                  "unknown"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "form": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  }
+                },
+                "required": [
+                  "url",
+                  "expiresAt"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "supplierId",
+          "route",
+          "status",
+          "nameCheck",
+          "maskedName",
+          "payeeHint",
+          "failure",
+          "form"
+        ],
+        "additionalProperties": false,
+        "description": "A registration of a supplier’s bank details with the payment partner: never the account number."
       },
       "AgentSupplier": {
         "type": "object",
@@ -7633,6 +7776,214 @@
         }
       }
     },
+    "/v1/suppliers/{id}/payee-registrations": {
+      "post": {
+        "operationId": "suppliers.payee.start",
+        "summary": "Start registering a supplier’s bank details with the payment partner, through its own form",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 64,
+        "responses": {
+          "201": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayeeRegistration"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/suppliers/{id}/payee-registrations/{registrationId}/check": {
+      "post": {
+        "operationId": "suppliers.payee.check",
+        "summary": "Ask the payment partner how a registration of a supplier’s bank details stands, and keep its answer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "registrationId",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 64,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayeeRegistration"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayeeRegistration"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/agent/suppliers": {
       "get": {
         "summary": "The verified suppliers your organisation may pay",
@@ -8119,6 +8470,115 @@
                       "type": "string",
                       "enum": [
                         "rejected"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/fake-bank/payee-forms": {
+      "post": {
+        "operationId": "fake-bank.payee-form",
+        "summary": "Fill in the fake partner’s payee form with a supplier’s bank details (staging only)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "pattern": "^[!-~]+$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "maxLength": 140
+                  },
+                  "iban": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9 ]+$"
+                  }
+                },
+                "required": [
+                  "url",
+                  "name",
+                  "iban"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 2048,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "filled"
                       ]
                     }
                   },

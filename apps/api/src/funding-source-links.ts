@@ -78,7 +78,9 @@ import {
   type FundingSourceTables,
   type FundingSourceTx,
   PARTNER_UNAVAILABLE,
+  orStillWaiting,
   type Refused,
+  StillWaiting,
 } from './funding-source-work.ts';
 
 /** Starting a link. */
@@ -173,14 +175,6 @@ export function railFor(
   return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
 }
 
-/** The link is still waiting at the bank: thrown inside the write, so nothing of it is kept, the key's claim included. */
-class StillWaiting extends Error {
-  constructor() {
-    super('the link is still waiting at the bank');
-    this.name = 'StillWaiting';
-  }
-}
-
 export function createFundingSourceLinks({
   database,
   keys,
@@ -204,19 +198,12 @@ export function createFundingSourceLinks({
   const { inOrganisation, answered } = work;
 
   /** The write with its key claimed first; still waiting at the bank, answered with nothing of it kept. */
-  const write = async (
+  const write = (
     member: LinkingMember,
     idempotent: IdempotentRequest,
     correlationId: string,
     change: (tx: FundingSourceTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-  ) => {
-    try {
-      return await work.write(member, idempotent, correlationId, change);
-    } catch (error) {
-      if (error instanceof StillWaiting) return { outcome: 'waiting' as const };
-      throw error;
-    }
-  };
+  ) => orStillWaiting(() => work.write(member, idempotent, correlationId, change));
 
   const adminIn = work.memberIn;
 

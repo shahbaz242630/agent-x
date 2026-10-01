@@ -15,15 +15,31 @@
 //   step-up's ID once signed in again (a passkey): 202 with the step-up, then
 //   200 with the supplier, VERIFIED again only if nothing changed while it
 //   was suspended. 409 SUPPLIER_NOT_SUSPENDED otherwise. Admins.
+// - `POST /v1/suppliers/:id/payee-registrations`: starts registering the
+//   supplier's bank details with the payment partner, through the partner's
+//   own form: 201 with the registration and the form to send the admin to.
+//   Admins; 100 a day (409 PAYEE_REGISTRATIONS_SPENT); 409
+//   SUPPLIER_CHANGE_WAITING while another change waits; 409
+//   PAYEE_ROUTE_NOT_OFFERED where the partner has no form for it.
+// - `POST /v1/suppliers/:id/payee-registrations/:registrationId/check`,
+//   once the form is filled in: the partner asked how it stands, server to
+//   server: 202 with the form while it waits, otherwise 200 with the
+//   registration, FAILED with why, or REGISTERED, the new details then
+//   waiting for the admin's confirmation (409 SUPPLIER_PAYEE_TAKEN while
+//   another supplier is paid to that account). Admins. 503
+//   PARTNER_UNAVAILABLE when the partner doesn't answer.
 // - `GET /v1/agent/suppliers?after=&limit=` (SEC-AG-05): for an agent's key
 //   with `suppliers:read`, the VERIFIED suppliers, each by ID and name alone:
 //   never a contact, a source or a payment detail.
 // Refusals: 404 NOT_FOUND for a supplier not the organisation's; 503
 // INTEGRITY_FAILED when the caller's membership, a supplier or its version
-// can't be verified. The use cases are supplier-registry.ts and
-// supplier-changes.ts.
+// can't be verified. The use cases are supplier-registry.ts,
+// supplier-changes.ts and supplier-payees.ts.
 import {
   MOST_SUPPLIERS_A_PAGE,
+  NAME_CHECKS,
+  REGISTRATION_FAILURES,
+  REGISTRATION_ROUTES,
   SOURCE_KINDS,
   type SupplierDetails,
   SupplierDetailsRefused,
@@ -47,6 +63,14 @@ import {
   SUSPEND_OPERATION,
   SUSPENDING_ROLES,
 } from './supplier-changes.ts';
+import {
+  PAYEE_CHECK_OPERATION,
+  PAYEE_START_OPERATION,
+  type PayeeRegistrationView,
+  type PayeeWrite,
+  REGISTERING_ROLES,
+  type SupplierPayees,
+} from './supplier-payees.ts';
 import { ADD_OPERATION, ADDING_ROLES, type SupplierRegistry } from './supplier-registry.ts';
 import type { SupplierView } from './supplier-work.ts';
 
@@ -215,6 +239,56 @@ const REACTIVATE_CONFIRM_SCHEMA = {
   response: { 200: SUPPLIER_CHANGED },
 };
 
+const REGISTRATION = z
+  .object({
+    id: z.uuid().describe('The registration, by its ID: the partner knows it by this ID too.'),
+    supplierId: z.uuid().describe('The supplier it registers bank details for.'),
+    route: z.enum(REGISTRATION_ROUTES).describe('How the details reach the partner: its own form, or passed through.'),
+    status: z
+      .enum(['STARTED', 'REGISTERED', 'FAILED', 'UNKNOWN'])
+      .describe(
+        'STARTED until the partner has the details; REGISTERED once it does, the new details then waiting for the admin’s confirmation; FAILED with why; UNKNOWN when the partner’s answer was lost, until it is asked again.',
+      ),
+    nameCheck: z
+      .enum(NAME_CHECKS)
+      .nullable()
+      .describe('The partner’s check of the name against the account’s holder, once registered, else null.'),
+    maskedName: z.string().nullable().describe('The account holder’s name as the bank masks it, or null.'),
+    payeeHint: z
+      .string()
+      .nullable()
+      .describe('The country and last four characters of the account, once registered, else null: never the number.'),
+    failure: z.enum(REGISTRATION_FAILURES).nullable().describe('Why it failed, once FAILED, else null.'),
+    form: z
+      .object({
+        url: z.url().describe('The partner’s own page, where the admin enters the bank details.'),
+        expiresAt: z.iso.datetime().describe('When the form closes.'),
+      })
+      .nullable()
+      .describe('The partner’s form, while the registration waits for it, else null.'),
+  })
+  .register(API_SCHEMAS, {
+    id: 'PayeeRegistration',
+    description: 'A registration of a supplier’s bank details with the payment partner: never the account number.',
+  });
+
+const PAYEE_START_SCHEMA = {
+  summary: 'Start registering a supplier’s bank details with the payment partner, through its own form',
+  params: SUPPLIER_ID,
+  body: NOTHING,
+  response: { 201: REGISTRATION.describe('The registration, started, with the partner’s form.') },
+};
+
+const PAYEE_CHECK_SCHEMA = {
+  summary: 'Ask the payment partner how a registration of a supplier’s bank details stands, and keep its answer',
+  params: SUPPLIER_ID.extend({ registrationId: z.uuid().describe('The registration, by its ID.') }),
+  body: NOTHING,
+  response: {
+    200: REGISTRATION.describe('The registration, as the partner’s answer left it.'),
+    202: REGISTRATION.describe('The registration, still waiting for the partner’s form: nothing was changed.'),
+  },
+};
+
 const AGENT_SUPPLIER = z
   .object({
     id: z.uuid().describe('The supplier, by its ID.'),
@@ -273,10 +347,30 @@ const detailsOf = ({ supplier, version, contacts }: SupplierView) => ({
   enteredAt: version.enteredAt.toISOString(),
 });
 
+const registrationBodyOf = ({ registration, form }: PayeeRegistrationView) => ({
+  id: registration.id,
+  supplierId: registration.supplierId,
+  route: registration.route,
+  status: registration.status,
+  nameCheck: registration.nameCheck,
+  maskedName: registration.maskedName,
+  payeeHint: registration.payeeHint,
+  failure: registration.failure,
+  form: form === null ? null : { url: form.url, expiresAt: form.expiresAt.toISOString() },
+});
+
 /** The routes. Each use case does its own; without one they are still documented, and no one reaches them. */
 export function registerSuppliers(
   app: FastifyInstance,
-  { registry, changes }: { registry: SupplierRegistry | undefined; changes: SupplierChanges | undefined },
+  {
+    registry,
+    changes,
+    payees,
+  }: {
+    registry: SupplierRegistry | undefined;
+    changes: SupplierChanges | undefined;
+    payees: SupplierPayees | undefined;
+  },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   const need = <T>(useCase: T | undefined): T => {
@@ -295,6 +389,16 @@ export function registerSuppliers(
     if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
     if (written.outcome === 'refused') return refused(written, request, reply);
     return answerRefusedWrite(written, request, reply);
+  };
+
+  /** Answers a payee registration: as it now stands, still waiting, or a refusal. */
+  const answerPayee = (written: PayeeWrite, request: FastifyRequest, reply: FastifyReply) => {
+    if (written.outcome === 'refused') return refused(written, request, reply);
+    if (written.outcome === 'conflict' || written.outcome === 'busy') {
+      return answerRefusedWrite(written, request, reply);
+    }
+    const status = { started: 201, checked: 200, waiting: 202 }[written.outcome];
+    return reply.code(status).send(registrationBodyOf(written));
   };
 
   const pageOf = (query: { after?: string | undefined; limit?: number | undefined }) => ({
@@ -405,6 +509,45 @@ export function registerSuppliers(
         request.id,
       );
       return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-registrations',
+    {
+      schema: PAYEE_START_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...REGISTERING_ROLES], operation: PAYEE_START_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(payees).start(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerPayee(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/payee-registrations/:registrationId/check',
+    {
+      schema: PAYEE_CHECK_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...REGISTERING_ROLES], operation: PAYEE_CHECK_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberOf(request);
+      const written = await need(payees).check(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.params.registrationId,
+        request.id,
+      );
+      return answerPayee(written, request, reply);
     },
   );
 

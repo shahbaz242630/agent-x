@@ -947,6 +947,25 @@ export async function suppliersPage(
   return { outcome: 'listed', suppliers: found, next };
 }
 
+/**
+ * The supplier's next version number (E2-2), in one statement: one past the
+ * highest it has, a withdrawn change's included, since a version is made
+ * once and keeps its number (0032's `one_number_a_version`). A
+ * number alone, deciding nothing: a version holding a number taken is
+ * refused by that key, and its payee is staged only past the version paid
+ * now (stagePayeeChange).
+ */
+export async function nextVersionNumber(tx: SuppliersTransaction, orgId: string, supplierId: string): Promise<number> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a number alone, never an authority field; the table's key refuses one taken
+    .selectFrom(SUPPLIER_VERSIONS.table)
+    .select(sql<number>`coalesce(pg_catalog.max(version), 0)::int + 1`.as('next'))
+    .where('org_id', '=', orgId)
+    .where('supplier_id', '=', supplierId)
+    .executeTakeFirstOrThrow();
+  return row.next;
+}
+
 /** The most suppliers an organisation may add in any 24 hours (partner, S71): their records are never retired (the B8-1 lesson). */
 export const MOST_SUPPLIERS_ADDED_A_DAY = 100;
 

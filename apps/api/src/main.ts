@@ -100,6 +100,7 @@ import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
+import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 
 /** Every table the API reaches, module by module. */
@@ -485,6 +486,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
+    supplierPayees: createSupplierPayees({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      rail,
+      partner: partnerName(config.partner),
+      logger,
+    }),
     // D2-3c: the fake bank's steps, for the staging demo; only where the partner is the fake.
     fakeBank: rail?.bank,
   });

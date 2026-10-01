@@ -40,6 +40,7 @@ export {
   MOST_SUPPLIERS_ADDED_A_DAY,
   type NewSupplier,
   type NewVersion,
+  nextVersionNumber,
   oneSupplierAddAtATime,
   reactivateSupplier,
   stagePayeeChange,
@@ -60,13 +61,20 @@ export {
   verifySupplier,
   versionOf,
 } from './infrastructure/suppliers.ts';
-export { normalisedIban, payeeFingerprint, type PayeeKey, payeeKeyOf } from './infrastructure/payee-key.ts';
+export {
+  normalisedIban,
+  payeeFingerprint,
+  type PayeeKey,
+  payeeKeyOf,
+  UnusablePayeeIdentity,
+} from './infrastructure/payee-key.ts';
 export {
   BENEFICIARY_REGISTRATIONS,
   isPayeeTaken,
   MOST_PAYEE_REGISTRATIONS_A_DAY,
   type NewRegistration,
   onePayeeChangeAtATime,
+  openRegistrationOf,
   recordFailed,
   recordLost,
   recordRegistered,

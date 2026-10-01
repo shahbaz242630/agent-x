@@ -208,6 +208,8 @@ export interface BeneficiaryRef {
 export interface FinancialRailAdapter {
   /** The origin of the partner's own pages: an `authoriseUrl` must be on it (the S68 audit). */
   readonly authoriseOrigin: string;
+  /** The origin of the partner's hosted payee form: a `formUrl` must be on it, as an `authoriseUrl` on the other. */
+  readonly formOrigin: string;
   capabilities(): Promise<RailCapabilities>;
   startSourceLink(input: LinkContext): Promise<PartnerLinkSession>;
   confirmSourceLink(input: LinkContext): Promise<LinkOutcome>;
@@ -218,8 +220,8 @@ export interface FinancialRailAdapter {
 }
 
 /**
- * Whether a partner's `authoriseUrl` may be sent to a person's browser (the
- * S68 audit): a page of the partner's own, over HTTPS, naming no one's
+ * Whether a partner's `authoriseUrl` or `formUrl` may be sent to a person's
+ * browser (the S68 audit): a page of the partner's own, on `origin`, over HTTPS, naming no one's
  * credentials. Anything else (`javascript:`, `data:`, plain HTTP, another
  * host) a person is never sent to, whatever the partner answered.
  */

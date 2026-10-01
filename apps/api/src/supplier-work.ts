@@ -179,6 +179,7 @@ export function createSupplierWork({
 
   return {
     inOrganisation,
+    answered,
     supplierIn,
     write,
     view,
