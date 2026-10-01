@@ -664,7 +664,8 @@ export async function stagePayeeChange(
  * the key always moves with the version it pays. 0033's
  * `one_supplier_a_payee` refuses a key another supplier of the organisation
  * holds, a suspended one included (isPayeeTaken). Its cooling-off starts
- * here, ending `coolingOffUntil` (ADR-014 §3 step 4), which must be finite. A
+ * here, ending `coolingOffUntil` (ADR-014 §3 step 4); a time that isn't one
+ * is refused (RangeError) as it is sealed, before the row is written. A
  * change that isn't the one waiting, or one mayChangePayee refuses, is
  * refused (RangeError) before any SQL runs. A suspended supplier's
  * verification, if any, stays on the version it was, so it comes back
@@ -681,7 +682,6 @@ export async function confirmPayeeChange(
   const { version, registration } = change;
   if (found.supplier.pendingVersionId !== version.id) throw new RangeError('Only the change waiting is confirmed');
   mayChangePayee(found.supplier, change);
-  if (!Number.isFinite(coolingOffUntil.getTime())) throw new RangeError('A cooling-off ends at a time');
   const confirmed = {
     current_version_id: version.id,
     pending_version_id: null,

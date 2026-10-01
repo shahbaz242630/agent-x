@@ -360,6 +360,16 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
     expect(await notices(org)).toEqual([]);
   });
 
+  it('refuses a session ended since, as UNAUTHENTICATED, opening no step-up', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    await waiting(admin, id);
+    await app.deleteFrom('identity.sessions').where('id', '=', admin.sessionId).execute();
+
+    expect(await approve(admin, id)).toEqual({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' });
+  });
+
   it('SEC-HA-12 refuses a step-up made with an app code, changing nothing and telling no one', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
