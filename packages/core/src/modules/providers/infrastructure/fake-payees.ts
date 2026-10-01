@@ -25,7 +25,23 @@ import type { RailAccount } from './sandbox-accounts.ts';
 const MINUTE_MS = 60_000;
 /** The longest payee name the fake takes: the rail's creditor name. */
 const MAX_NAME = 140;
-const FORM_BASE = 'https://payees.fake-partner.invalid/form/';
+/** The fake partner's payee form: its own origin, which every `formUrl` it gives is on. */
+export const FORM_ORIGIN = 'https://payees.fake-partner.invalid';
+const FORM_BASE = `${FORM_ORIGIN}/form/`;
+
+/** Why the fake bank or the partner's form refused a step asked of it: nothing was changed. */
+export type FakeBankRefusal = 'no_link_waiting' | 'no_such_account' | 'no_form_open' | 'details_refused';
+
+/** A step the fake bank or the partner's form refused, as the staging demo's routes answer it (D2-3c, E2-2a). */
+export class FakeBankRefused extends Error {
+  readonly reason: FakeBankRefusal;
+
+  constructor(reason: FakeBankRefusal, message: string) {
+    super(message);
+    this.name = 'FakeBankRefused';
+    this.reason = reason;
+  }
+}
 
 export interface FakePayeesOptions {
   readonly clock: Clock;
@@ -167,10 +183,12 @@ export function createFakePayees(options: FakePayeesOptions): FakePayees {
       const registration = await records.byAlias('registration', formRef);
       const form = registration?.body.outcome === 'waiting' ? registration.body.form : null;
       if (registration === undefined || form === null || clock.now() >= new Date(form.expiresAt)) {
-        throw new Error('No form open there');
+        throw new FakeBankRefused('no_form_open', 'No form open there');
       }
       const outcome = registered(records.organizationId, payee);
-      if (outcome === 'invalid_details') throw new Error('The form refuses those details: fix them and send again');
+      if (outcome === 'invalid_details') {
+        throw new FakeBankRefused('details_refused', 'The form refuses those details: fix them and send again');
+      }
       await records.update('registration', { ...registration, body: { form, outcome } });
     },
   };

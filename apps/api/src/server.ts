@@ -70,6 +70,7 @@ import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
+import type { SupplierPayees } from './supplier-payees.ts';
 import type { SupplierRegistry } from './supplier-registry.ts';
 import { registerSuppliers } from './suppliers.ts';
 import { registerFactorResets } from './factor-resets.ts';
@@ -131,6 +132,8 @@ export interface ServerOptions {
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
   readonly supplierChanges?: SupplierChanges | undefined;
+  /** Registering suppliers' bank details with the partner (supplier-payees.ts); without it, no one reaches those routes. */
+  readonly supplierPayees?: SupplierPayees | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
   readonly fakeBank?: FakeBank | undefined;
 }
@@ -296,7 +299,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     reads: options.fundingSourceReads,
     changes: options.fundingSourceChanges,
   });
-  registerSuppliers(app, { registry: options.supplierRegistry, changes: options.supplierChanges });
+  registerSuppliers(app, {
+    registry: options.supplierRegistry,
+    changes: options.supplierChanges,
+    payees: options.supplierPayees,
+  });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

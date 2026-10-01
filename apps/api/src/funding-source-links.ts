@@ -79,6 +79,7 @@ import {
   type FundingSourceTx,
   PARTNER_UNAVAILABLE,
   type Refused,
+  StillWaiting,
 } from './funding-source-work.ts';
 
 /** Starting a link. */
@@ -171,14 +172,6 @@ export function railFor(
   }: { readonly database: Database<FakePartnerTables>; readonly clock: Clock; readonly ids: IdGenerator },
 ): FakeRail | undefined {
   return partner === undefined ? undefined : createFakeRail({ clock, ids, records: createDatabaseRecords(database) });
-}
-
-/** The link is still waiting at the bank: thrown inside the write, so nothing of it is kept, the key's claim included. */
-class StillWaiting extends Error {
-  constructor() {
-    super('the link is still waiting at the bank');
-    this.name = 'StillWaiting';
-  }
 }
 
 export function createFundingSourceLinks({

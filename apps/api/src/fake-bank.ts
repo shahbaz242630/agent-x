@@ -10,6 +10,12 @@
 //   the link waiting under the session (the last part of the link's
 //   `authoriseUrl`) with one of those accounts. Admins.
 // - `POST /v1/fake-bank/sessions/:sessionRef/reject`: turns it down. Admins.
+// - `POST /v1/fake-bank/payee-forms`: an admin fills in the partner's payee
+//   form (E2-2a) at the `url` a registration's start answered, with a
+//   supplier's name and IBAN: the partner then holds the payee, masked, and
+//   Agent X learns of it only from its own check, server to server. The IBAN
+//   reaches no store of Agent X's: the fake keeps its masked parts alone, and
+//   the request is logged without its body.
 //
 // Each step acts only for the caller's organisation: another's session is
 // found as none is (SEC-PTR-08). Agent X believes none of it until its own
@@ -30,12 +36,20 @@ import { sendErrorBody } from './errors.ts';
 const BANK_APPROVE_OPERATION = 'fake-bank.approve';
 /** Turning it down there. */
 const BANK_REJECT_OPERATION = 'fake-bank.reject';
+/** Filling in the partner's payee form. */
+const BANK_FORM_OPERATION = 'fake-bank.payee-form';
 
 /** The roles that may play the business at its bank: the admins who start and confirm its links. */
 const BANK_ROLES = ['admin'] as const;
 
 /** The most a step's body may be: an account's ID and a flag, with room to spare. */
 const STEP_BODY_LIMIT = 256;
+/**
+ * The most a form's body may be: a form's address of at most 200 ASCII
+ * characters, a name of at most 140 UTF-16 units, each sent as a `\uXXXX`
+ * escape (6 bytes), and an IBAN of at most 64; with room to spare.
+ */
+const FORM_BODY_LIMIT = 2048;
 
 const ACCOUNT_ID = z
   .string()
@@ -100,18 +114,47 @@ const REJECT_SCHEMA = {
   response: { 200: DONE('rejected') },
 };
 
+const FORM_SCHEMA = {
+  summary: 'Fill in the fake partner’s payee form with a supplier’s bank details (staging only)',
+  body: z.strictObject({
+    url: z
+      .string()
+      .max(200)
+      .regex(/^[!-~]+$/)
+      .describe('The form’s address, as the registration’s start answered it.'),
+    name: z.string().max(140).describe('The account holder’s name.'),
+    iban: z
+      .string()
+      .max(64)
+      .regex(/^[A-Za-z0-9 ]+$/)
+      .describe('The account’s IBAN: a UAE one, spaces allowed.'),
+  }),
+  response: {
+    200: z
+      .object({ status: z.literal('filled').describe('What the form did.') })
+      .describe('The form, filled in: check the registration to learn how the partner holds it.'),
+  },
+};
+
 /** The caller's organisation: the access hook lets only its members through. */
 function orgOf(request: FastifyRequest): string {
   if (request.member === null) throw new Error('a fake-bank route ran without a member');
   return request.member.orgId;
 }
 
+/** Each refusal of the bank's or its form's, as the routes answer it. */
+const BANK_REFUSALS = {
+  no_such_account: [400, 'BANK_ACCOUNT_UNKNOWN'],
+  no_link_waiting: [409, 'BANK_LINK_NOT_WAITING'],
+  no_form_open: [409, 'BANK_FORM_NOT_OPEN'],
+  details_refused: [400, 'BANK_FORM_REFUSED'],
+} as const;
+
 /** The bank's refusal answered; anything else thrown again. */
 function refusedAtBank(error: unknown, request: FastifyRequest, reply: FastifyReply) {
   if (!(error instanceof FakeBankRefused)) throw error;
-  return error.reason === 'no_such_account'
-    ? sendErrorBody(reply, 400, 'BANK_ACCOUNT_UNKNOWN', request.id)
-    : sendErrorBody(reply, 409, 'BANK_LINK_NOT_WAITING', request.id);
+  const [status, code] = BANK_REFUSALS[error.reason];
+  return sendErrorBody(reply, status, code, request.id);
 }
 
 /** The routes. `bank` is the fake's, where the partner is the fake; without it they are documented and answer 404. */
@@ -166,6 +209,26 @@ export function registerFakeBank(app: FastifyInstance, { bank }: { bank: FakeBan
         return refusedAtBank(error, request, reply);
       }
       return reply.send({ status: 'rejected' as const });
+    },
+  );
+
+  routes.post(
+    '/v1/fake-bank/payee-forms',
+    {
+      schema: FORM_SCHEMA,
+      bodyLimit: FORM_BODY_LIMIT,
+      config: { access: [...BANK_ROLES], operation: BANK_FORM_OPERATION },
+    },
+    async (request, reply) => {
+      const orgId = orgOf(request);
+      if (bank === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+      const { url, name, iban } = request.body;
+      try {
+        await bank.fillForm(orgId, url, { name, iban });
+      } catch (error) {
+        return refusedAtBank(error, request, reply);
+      }
+      return reply.send({ status: 'filled' as const });
     },
   );
 }

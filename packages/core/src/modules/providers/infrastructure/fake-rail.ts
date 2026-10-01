@@ -36,7 +36,7 @@ import {
   type SourceSummary,
 } from '../domain/rail.ts';
 import { availabilityOf, type ConsentStatus, consentMayMove } from '../domain/uae-consent.ts';
-import { createFakePayees } from './fake-payees.ts';
+import { createFakePayees, FakeBankRefused, FORM_ORIGIN } from './fake-payees.ts';
 import {
   createMemoryRecords,
   type FakePartnerStore,
@@ -93,19 +93,7 @@ export interface FakeBankAccount {
   readonly summary: SourceSummary;
 }
 
-/** Why the fake bank refused a step asked of it: nothing was changed. */
-export type FakeBankRefusal = 'no_link_waiting' | 'no_such_account';
-
-/** A step the fake bank refused, as the staging demo's routes answer it (D2-3c). */
-export class FakeBankRefused extends Error {
-  readonly reason: FakeBankRefusal;
-
-  constructor(reason: FakeBankRefusal, message: string) {
-    super(message);
-    this.name = 'FakeBankRefused';
-    this.reason = reason;
-  }
-}
+export { type FakeBankRefusal, FakeBankRefused } from './fake-payees.ts';
 
 /** What happens outside Agent X, at the business's bank and the partner, each for the organisation named. */
 export interface FakeBank {
@@ -351,6 +339,8 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
     bank,
 
     authoriseOrigin: AUTHORISE_ORIGIN,
+
+    formOrigin: FORM_ORIGIN,
 
     capabilities: () =>
       answer(() => Promise.resolve({ beneficiaryRoutes: [...beneficiaryRoutes], stablePayeeIdentity })),

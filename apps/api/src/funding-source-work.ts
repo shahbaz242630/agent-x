@@ -53,6 +53,18 @@ export class FundingSourceRefused extends Error {
   }
 }
 
+/**
+ * The partner says the person hasn't finished yet (at their bank, or at its
+ * payee form): thrown inside the write, so nothing of it is kept, the key's
+ * claim included, and asking again with the same key asks the partner again.
+ */
+export class StillWaiting extends Error {
+  constructor() {
+    super('still waiting at the partner');
+    this.name = 'StillWaiting';
+  }
+}
+
 /** The partner's answer, or `unavailable` when it didn't give one. */
 export async function asked<T>(call: () => Promise<T>): Promise<T | 'unavailable'> {
   try {

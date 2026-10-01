@@ -1,11 +1,18 @@
 // E1-2: the suppliers' routes, answering a member or an agent with each
 // outcome of the use cases, and refusing a body that can't be a supplier's
-// before they run. Who reaches them is the access hook's
-// (role-matrix.test.ts); what the use cases do with the database is
-// supplier-registry.db.test.ts and supplier-changes.db.test.ts.
+// before they run; E2-2a: registering a supplier's bank details with the
+// partner. Who reaches them is the access hook's (role-matrix.test.ts); what
+// the use cases do with the database is supplier-registry.db.test.ts,
+// supplier-changes.db.test.ts and supplier-payees.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
-import type { SupplierDetails, SupplierRecord, SupplierShown, VersionRecord } from '@agentx/core/modules/suppliers';
+import type {
+  RegistrationRecord,
+  SupplierDetails,
+  SupplierRecord,
+  SupplierShown,
+  VersionRecord,
+} from '@agentx/core/modules/suppliers';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -16,6 +23,7 @@ import { ORGANIZATION_HEADER } from './access.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges, SupplierChangeWrite } from './supplier-changes.ts';
+import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
 import type { SupplierView } from './supplier-work.ts';
 
@@ -26,6 +34,7 @@ const SUPPLIER_ID = '0199a0f0-0000-7000-8000-0000000000e1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000e2';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-000000000033';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000e3';
+const REGISTRATION_ID = '0199a0f0-0000-7000-8000-0000000000e4';
 
 const LIVE: LiveSession = {
   sessionId: '0199a0f0-0000-7000-8000-000000000022',
@@ -127,6 +136,42 @@ const AGENT_KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
   [AGENT_KEY_WITHOUT_SUPPLIERS, acceptedKey(['sources:read'])],
 ]);
 
+const REGISTRATION: RegistrationRecord = {
+  id: REGISTRATION_ID,
+  supplierId: SUPPLIER_ID,
+  versionId: '0199a0f0-0000-7000-8000-0000000000e5',
+  partner: 'fake',
+  route: 'hosted',
+  startedBy: MEMBERSHIP,
+  status: 'STARTED',
+  beneficiaryRef: null,
+  payeeKey: null,
+  payeeKeyVersion: null,
+  nameCheck: null,
+  maskedName: null,
+  payeeHint: null,
+  registeredAt: null,
+  failure: null,
+};
+
+const FORM = {
+  url: 'https://payees.fake-partner.invalid/form/fake-form-1',
+  expiresAt: new Date('2026-10-01T08:30:00.000Z'),
+};
+
+/** A registration as the routes answer it: never its reference or payee key. */
+const REGISTRATION_ANSWERED = {
+  id: REGISTRATION_ID,
+  supplierId: SUPPLIER_ID,
+  route: 'hosted',
+  status: 'STARTED',
+  nameCheck: null,
+  maskedName: null,
+  payeeHint: null,
+  failure: null,
+  form: { url: FORM.url, expiresAt: '2026-10-01T08:30:00.000Z' },
+};
+
 /** What the routes asked of the use cases. */
 type Asked =
   | { readonly kind: 'add'; readonly keyed: IdempotentRequest; readonly details: SupplierDetails }
@@ -138,6 +183,13 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly stepUpChallengeId?: string;
+    }
+  | {
+      readonly kind: 'payeeStart' | 'payeeCheck';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly registrationId?: string;
     };
 
 const servers: FastifyInstance[] = [];
@@ -148,7 +200,13 @@ afterEach(async () => {
 
 /** A server whose use cases answer as given, noting what they were asked. */
 async function withSuppliers(
-  answers: { add?: SupplierAddWrite; list?: SuppliersListed; change?: SupplierChangeWrite; found?: boolean },
+  answers: {
+    add?: SupplierAddWrite;
+    list?: SuppliersListed;
+    change?: SupplierChangeWrite;
+    found?: boolean;
+    payee?: PayeeWrite;
+  },
   asked: Asked[] = [],
 ) {
   const registry: SupplierRegistry = {
@@ -185,6 +243,16 @@ async function withSuppliers(
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
+  const payees: SupplierPayees = {
+    start: (member, keyed, supplierId) => {
+      asked.push({ kind: 'payeeStart', member, keyed, supplierId });
+      return Promise.resolve(answers.payee ?? { outcome: 'busy' });
+    },
+    check: (member, keyed, supplierId, registrationId) => {
+      asked.push({ kind: 'payeeCheck', member, keyed, supplierId, registrationId });
+      return Promise.resolve(answers.payee ?? { outcome: 'busy' });
+    },
+  };
   const config = {
     http: {
       host: '127.0.0.1',
@@ -215,6 +283,7 @@ async function withSuppliers(
     },
     supplierRegistry: registry,
     supplierChanges: changes,
+    supplierPayees: payees,
   });
   servers.push(app);
   await app.ready();
@@ -483,6 +552,93 @@ describe('POST /v1/suppliers/:id/reactivate, then /confirm, with a step-up (E1-2
       (await app.inject(post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE, more: 1 })))
         .statusCode,
     ).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee through the partner’s form (E2-2a)', () => {
+  it('answers the start 201 with the registration and the form, passing the member and the key', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ payee: { outcome: 'started', registration: REGISTRATION, form: FORM } }, asked);
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`));
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toEqual(REGISTRATION_ANSWERED);
+    expect(asked).toEqual([
+      {
+        kind: 'payeeStart',
+        member: MEMBER,
+        keyed: expect.objectContaining({ operation: 'suppliers.payee.start' }) as unknown,
+        supplierId: SUPPLIER_ID,
+      },
+    ]);
+  });
+
+  it('answers a check 202 while the form waits, and 200 once the partner has the payee: its hint, never its reference', async () => {
+    const asked: Asked[] = [];
+    const waiting = await withSuppliers(
+      { payee: { outcome: 'waiting', registration: REGISTRATION, form: FORM } },
+      asked,
+    );
+    const path = `/${SUPPLIER_ID}/payee-registrations/${REGISTRATION_ID}/check`;
+
+    const still = await waiting.inject(post(path));
+    expect(still.statusCode).toBe(202);
+    expect(still.json()).toEqual(REGISTRATION_ANSWERED);
+    expect(asked).toEqual([
+      {
+        kind: 'payeeCheck',
+        member: MEMBER,
+        keyed: expect.objectContaining({ operation: 'suppliers.payee.check' }) as unknown,
+        supplierId: SUPPLIER_ID,
+        registrationId: REGISTRATION_ID,
+      },
+    ]);
+
+    const registered: RegistrationRecord = {
+      ...REGISTRATION,
+      status: 'REGISTERED',
+      beneficiaryRef: 'fake-beneficiary-1',
+      payeeKey: 'fake-payee-1',
+      nameCheck: 'partial',
+      maskedName: 'G*** O***',
+      payeeHint: 'AE…6026',
+      registeredAt: new Date('2026-10-01T08:20:00.000Z'),
+    };
+    const done = await withSuppliers({ payee: { outcome: 'checked', registration: registered, form: null } });
+    const answered = await done.inject(post(path));
+    expect(answered.statusCode).toBe(200);
+    expect(answered.json()).toEqual({
+      ...REGISTRATION_ANSWERED,
+      status: 'REGISTERED',
+      nameCheck: 'partial',
+      maskedName: 'G*** O***',
+      payeeHint: 'AE…6026',
+      form: null,
+    });
+    expect(answered.body).not.toContain('fake-beneficiary-1');
+    expect(answered.body).not.toContain('fake-payee-1');
+  });
+
+  it('answers each refusal as the use case gives it, and a key reused as the idempotency store says', async () => {
+    const taken = await withSuppliers({ payee: { outcome: 'refused', status: 409, code: 'SUPPLIER_PAYEE_TAKEN' } });
+    const refusal = await taken.inject(post(`/${SUPPLIER_ID}/payee-registrations/${REGISTRATION_ID}/check`));
+    expect(refusal.statusCode).toBe(409);
+    expect(refusal.json()).toMatchObject({ error: { code: 'SUPPLIER_PAYEE_TAKEN' } });
+
+    const reused = await withSuppliers({ payee: { outcome: 'conflict' } });
+    expect((await reused.inject(post(`/${SUPPLIER_ID}/payee-registrations`))).json()).toMatchObject({
+      error: { code: 'IDEMPOTENCY_KEY_REUSED' },
+    });
+  });
+
+  it('refuses any body, or a registration that isn’t an ID, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({}, asked);
+
+    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { iban: 'AE07' }))).statusCode).toBe(400);
+    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/not-an-id/check`))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
 });

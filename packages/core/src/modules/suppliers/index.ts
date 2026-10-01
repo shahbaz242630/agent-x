@@ -40,6 +40,7 @@ export {
   MOST_SUPPLIERS_ADDED_A_DAY,
   type NewSupplier,
   type NewVersion,
+  nextVersionNumber,
   oneSupplierAddAtATime,
   reactivateSupplier,
   stagePayeeChange,

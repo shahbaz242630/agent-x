@@ -7,7 +7,13 @@
 import { FixedClock, findLeaks, SENSITIVE_SAMPLES, SequentialIds } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { type BeneficiaryOutcome, type BeneficiaryState, type PayeeDetails, RailUnavailable } from '../domain/rail.ts';
+import {
+  type BeneficiaryOutcome,
+  type BeneficiaryState,
+  isPartnerPage,
+  type PayeeDetails,
+  RailUnavailable,
+} from '../domain/rail.ts';
 import { createFakeRail, type FakeRailOptions } from './fake-rail.ts';
 import { SANDBOX_ACCOUNTS } from './sandbox-accounts.ts';
 
@@ -260,7 +266,13 @@ describe('a hosted-form registration (D1-2)', () => {
       nameCheck: 'match',
       hint: `AE…${JASMINE.slice(-4)}`,
     });
-    await expect(bank.fillForm(ORG, waiting.formUrl, jasmine)).rejects.toThrow('No form open there');
+    await expect(bank.fillForm(ORG, waiting.formUrl, jasmine)).rejects.toMatchObject({
+      name: 'FakeBankRefused',
+      reason: 'no_form_open',
+    });
+    // A page a person may be sent to: the partner's own form origin, over HTTPS (E2-2a).
+    expect(isPartnerPage(waiting.formUrl, rail.formOrigin)).toBe(true);
+    expect(isPartnerPage(waiting.formUrl, rail.authoriseOrigin)).toBe(false);
   });
 
   it('keeps the form open when it refuses details, until they are right', async () => {
@@ -268,7 +280,7 @@ describe('a hosted-form registration (D1-2)', () => {
     const formUrl = formUrlOf(await rail.registerBeneficiary(hosted));
     await expect(
       bank.fillForm(ORG, formUrl, { name: 'A Supplier', iban: SENSITIVE_SAMPLES.lowercaseIban }),
-    ).rejects.toThrow('The form refuses those details');
+    ).rejects.toMatchObject({ name: 'FakeBankRefused', reason: 'details_refused' });
     expect((await rail.getBeneficiaryState(ref)).kind).toBe('waiting');
     await bank.fillForm(ORG, formUrl, jasmine);
     expect((await rail.getBeneficiaryState(ref)).kind).toBe('registered');

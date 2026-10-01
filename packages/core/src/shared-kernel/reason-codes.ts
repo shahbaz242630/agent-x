@@ -31,6 +31,10 @@ export const REASON_CODES = {
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   BANK_ACCOUNT_UNKNOWN:
     "The staging bank holds no account by this ID, so nothing was approved. List the bank's accounts and pick one of them.",
+  BANK_FORM_NOT_OPEN:
+    "No payee form of this organisation's is open at the staging partner under this address: it was filled in already, or it ran out. Nothing was changed. Start a new registration if one is still needed.",
+  BANK_FORM_REFUSED:
+    "The staging partner's payee form can't take these details: the account must be a UAE IBAN with valid check digits, and the name readable. Nothing was changed. Fix them and send the form again.",
   BANK_LINK_NOT_WAITING:
     "No link of this organisation's is waiting at the staging bank under this session: it was approved or turned down already, or it ran out. Nothing was changed. Start a new link if one is still needed.",
   CONTACTS_FULL:
@@ -93,6 +97,10 @@ export const REASON_CODES = {
     "The payment partner didn't answer, or none is set up here, so nothing was done at the partner. Try again in a few minutes.",
   PASSKEY_REQUIRED:
     'Your role here is admin or finance approver, which needs a passkey, and this session was signed in without one, so the request is refused. Sign out, then sign in again with your passkey (a security key, or Windows Hello).',
+  PAYEE_REGISTRATIONS_SPENT:
+    "The organisation has registered as many suppliers' bank details as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
+  PAYEE_ROUTE_NOT_OFFERED:
+    "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
@@ -117,7 +125,11 @@ export const REASON_CODES = {
     "The organisation has added as many suppliers as it may in 24 hours, so this one wasn't added. Try again tomorrow; if no one at the organisation added them, tell its admins at once.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
+  SUPPLIER_CHANGE_WAITING:
+    "A change of this supplier's bank details is already waiting to be confirmed, so another isn't made. Confirm or withdraw that one first.",
   SUPPLIER_NOT_SUSPENDED: 'The supplier is not suspended, so there is no suspension to lift. Nothing was changed.',
+  SUPPLIER_PAYEE_TAKEN:
+    "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers.",
   TOO_MANY_CONTACTS:
     "The organisation has more registered contact records than Agent X checks at once, so its contacts can't be read or changed. Contact Agent X support.",
   TOO_MANY_RESETS:

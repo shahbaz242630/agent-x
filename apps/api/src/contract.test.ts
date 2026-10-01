@@ -161,6 +161,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/factor-resets/confirm',
       'POST /v1/factor-resets/{id}/cancel',
       'POST /v1/factor-resets/{id}/confirm',
+      'POST /v1/fake-bank/payee-forms',
       'POST /v1/fake-bank/sessions/{sessionRef}/approve',
       'POST /v1/fake-bank/sessions/{sessionRef}/reject',
       'POST /v1/funding-sources/link-sessions',
@@ -188,6 +189,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/registered-contacts/{id}/remove',
       'POST /v1/registered-contacts/{id}/remove/confirm',
       'POST /v1/suppliers',
+      'POST /v1/suppliers/{id}/payee-registrations',
+      'POST /v1/suppliers/{id}/payee-registrations/{registrationId}/check',
       'POST /v1/suppliers/{id}/reactivate',
       'POST /v1/suppliers/{id}/reactivate/confirm',
       'POST /v1/suppliers/{id}/suspend',
@@ -1161,8 +1164,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // member change routes, the integrity hold's four, the registered contacts' five (B6-1c) and the factor resets'
     // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
-    // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), with each GET's HEAD.
-    expect(answers).toHaveLength(84);
+    // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), a payee's start and check
+    // and the fake partner's form (E2-2a), with each GET's HEAD.
+    expect(answers).toHaveLength(87);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1202,6 +1206,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'MemberChangeAsked',
       'MemberChanged',
       'Members',
+      'PayeeRegistration',
       'RegisteredContact',
       'RegisteredContactChanged',
       'RegisteredContactDrafted',

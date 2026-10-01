@@ -105,6 +105,28 @@ const step = (sessionRef: string, what: 'approve' | 'reject', payload: unknown =
   payload: JSON.stringify(payload),
 });
 
+const REGISTRATION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
+const IBAN = IBANS[0] ?? '';
+
+/** The fake partner, with a payee registration started through its form for ORG: the form's address. */
+async function formOpen() {
+  const rail = createFakeRail({ clock: new FixedClock(new Date('2026-10-01T08:00:00Z')), ids: new SequentialIds() });
+  const outcome = await rail.registerBeneficiary({
+    route: 'hosted',
+    organizationId: ORG,
+    registrationId: REGISTRATION_ID,
+  });
+  if (outcome.kind !== 'waiting') throw new Error('a hosted registration waits for its form');
+  return { rail, url: outcome.formUrl, app: await withBank(rail) };
+}
+
+const fill = (payload: unknown, org = ORG): InjectOptions => ({
+  method: 'POST',
+  url: '/v1/fake-bank/payee-forms',
+  headers: { ...headers(org), 'idempotency-key': crypto.randomUUID(), 'content-type': 'application/json' },
+  payload: JSON.stringify(payload),
+});
+
 const accounts = (org = ORG): InjectOptions => ({
   method: 'GET',
   url: '/v1/fake-bank/accounts',
@@ -248,6 +270,64 @@ describe('POST /v1/fake-bank/sessions/:sessionRef/reject (D2-3c)', () => {
   });
 });
 
+describe('POST /v1/fake-bank/payee-forms: the partner’s payee form (E2-2a)', () => {
+  it('fills in the form, so the partner holds the payee, masked, and the answer names no account', async () => {
+    const { app, rail, url } = await formOpen();
+
+    const response = await app.inject(fill({ url, name: 'Jasmine AI FZ-LLC', iban: IBAN }));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ status: 'filled' });
+    expect(findLeaks(response.body, IBANS)).toEqual([]);
+    expect(await rail.getBeneficiaryState({ organizationId: ORG, registrationId: REGISTRATION_ID })).toMatchObject({
+      kind: 'registered',
+      beneficiary: { nameCheck: 'match', hint: 'AE…6026' },
+    });
+  });
+
+  it('answers 400 BANK_FORM_REFUSED for details the form can’t take, and the form stays open', async () => {
+    const { app, rail, url } = await formOpen();
+
+    const response = await app.inject(fill({ url, name: 'Jasmine AI FZ-LLC', iban: 'AE000000000000000000000' }));
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: 'BANK_FORM_REFUSED' } });
+    expect(await rail.getBeneficiaryState({ organizationId: ORG, registrationId: REGISTRATION_ID })).toMatchObject({
+      kind: 'waiting',
+    });
+  });
+
+  it('answers 409 BANK_FORM_NOT_OPEN once filled in, and for another organisation’s form, which is found as none', async () => {
+    const { app, url } = await formOpen();
+
+    const elsewhere = await app.inject(fill({ url, name: 'Jasmine AI FZ-LLC', iban: IBAN }, OTHER_ORG));
+    expect(elsewhere.statusCode).toBe(409);
+    expect(elsewhere.json()).toMatchObject({ error: { code: 'BANK_FORM_NOT_OPEN' } });
+
+    expect((await app.inject(fill({ url, name: 'Jasmine AI FZ-LLC', iban: IBAN }))).statusCode).toBe(200);
+    const again = await app.inject(fill({ url, name: 'Someone Else LLC', iban: IBAN }));
+    expect(again.statusCode).toBe(409);
+    expect(again.json()).toMatchObject({ error: { code: 'BANK_FORM_NOT_OPEN' } });
+  });
+
+  it.each([
+    {},
+    { url: 'https://payees.fake-partner.invalid/form/x', name: 'A', iban: IBAN, extra: 1 },
+    { url: 'https://payees.fake-partner.invalid/form/x', name: 'A', iban: 'AE07-0331' },
+    { url: 'a url with spaces', name: 'A', iban: IBAN },
+    { url: 'https://payees.fake-partner.invalid/form/x', name: 'A'.repeat(141), iban: IBAN },
+  ])('refuses the body %j as malformed, before the form is asked', async (payload) => {
+    const { app, rail } = await formOpen();
+
+    const response = await app.inject(fill(payload));
+
+    expect(response.statusCode).toBe(400);
+    expect(await rail.getBeneficiaryState({ organizationId: ORG, registrationId: REGISTRATION_ID })).toMatchObject({
+      kind: 'waiting',
+    });
+  });
+});
+
 describe('the fake bank where the partner isn’t the fake (ADR-014 §4)', () => {
   it('answers every step 404 NOT_FOUND', async () => {
     const app = await withBank(undefined);
@@ -256,6 +336,7 @@ describe('the fake bank where the partner isn’t the fake (ADR-014 §4)', () =>
       accounts(),
       step('fake-link-1', 'approve', { accountId: ACCOUNT }),
       step('fake-link-1', 'reject'),
+      fill({ url: 'https://payees.fake-partner.invalid/form/x', name: 'A', iban: IBAN }),
     ]) {
       const response = await app.inject(request);
       expect(response.statusCode).toBe(404);
