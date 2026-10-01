@@ -426,6 +426,61 @@ it('sees a unique key made partial, which enforces nothing outside its condition
   }
 });
 
+describe('a partial unique index the schema policy lists (E2-1a)', () => {
+  /** The listed one, as 0033 makes it: what Postgres prints for it is what the policy holds. */
+  const LISTED =
+    'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
+  const NAMED = `suppliers.suppliers's unique index "one_supplier_a_payee"`;
+  const dropListed = 'drop index suppliers.one_supplier_a_payee';
+
+  /** The problems with the index made, which is dropped again whatever happens. */
+  const problemsWith = async (statement: string, drop: string): Promise<string[]> => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text in the tests below.
+    await owner.query(statement);
+    try {
+      return await problems();
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- As above, for the DROP INDEX that undoes it.
+      await owner.query(drop);
+    }
+  };
+
+  it('accepts it exactly as listed, so the rule is not simply always a problem', async () => {
+    expect(await problemsWith(LISTED, dropListed)).toEqual([]);
+  });
+
+  it('sees it with a wider condition', async () => {
+    const widened =
+      "create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key = 'x'";
+    expect(await problemsWith(widened, dropListed)).toEqual([`${NAMED} is partial on another condition than listed`]);
+  });
+
+  it('sees it on more columns, fewer, or the same ones in another order', async () => {
+    const more =
+      'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key, id) where payee_key is not null';
+    const fewer =
+      'create unique index one_supplier_a_payee on suppliers.suppliers (org_id) where payee_key is not null';
+    const reordered =
+      'create unique index one_supplier_a_payee on suppliers.suppliers (payee_key, org_id) where payee_key is not null';
+    const differs = [`${NAMED} is partial on other columns than listed`];
+    for (const statement of [more, fewer, reordered]) {
+      expect(await problemsWith(statement, dropListed)).toEqual(differs);
+    }
+  });
+
+  it('sees one by another name, or the listed name on another table', async () => {
+    const renamed =
+      'create unique index a_payee_once on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
+    const elsewhere = 'create unique index one_supplier_a_payee on audit.events (org_id, id) where seq > 0';
+    expect(await problemsWith(renamed, 'drop index suppliers.a_payee_once')).toEqual([
+      `suppliers.suppliers's unique index "a_payee_once" is partial`,
+    ]);
+    expect(await problemsWith(elsewhere, 'drop index audit.one_supplier_a_payee')).toEqual([
+      `audit.events's unique index "one_supplier_a_payee" is partial`,
+    ]);
+  });
+});
+
 it('sees the status guard given arguments that are not a machine', async () => {
   // Fires at the right times, calls the right function, but its moves are not
   // moves. Whether they are the *right* moves for that table's machine is

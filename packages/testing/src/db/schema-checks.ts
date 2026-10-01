@@ -14,6 +14,7 @@
 // - a global table: on the global-table list, with a reason and exactly its
 //   columns, so each column is a reviewed entry (SEC-TEN-08). No foreign key
 //   runs from a global table to a tenant table.
+// No unique index is partial but one the schema policy lists exactly (E2-1a).
 // No table has rewrite rules, and no function runs with its owner's rights
 // (SECURITY DEFINER): both would act for the app with the owner's rights.
 // No PUBLIC grant on a table, column, sequence, schema or function in our
@@ -96,6 +97,21 @@ export interface SchemaPolicy {
    * schema guard holds the running database to as well.
    */
   readonly requiredForeignKeys: readonly RequiredForeignKey[];
+  /**
+   * The only unique indexes that may be partial, each with its reason, held
+   * to their table, name, key columns and printed condition (E2-1a).
+   */
+  readonly partialUniqueIndexes: readonly PartialUniqueIndex[];
+}
+
+/** A unique index allowed to be partial, exactly as listed (E2-1a). */
+interface PartialUniqueIndex {
+  readonly reason: string;
+  readonly table: string;
+  readonly name: string;
+  readonly columns: readonly string[];
+  /** Its condition exactly as Postgres prints it (`pg_get_expr` of `indpred`). */
+  readonly predicate: string;
 }
 
 /** A tenant table the app adds rows to and reads, and changes only in the columns named. */
@@ -237,6 +253,27 @@ const KEYS_WITHOUT_ORG = `
             and x.conexclop[k.position] = 'pg_catalog.=(pg_catalog.uuid, pg_catalog.uuid)'::pg_catalog.regoperator
         ))
     )
+  order by n.nspname, c.relname, ic.relname
+`;
+
+/**
+ * Partial unique indexes, which enforce nothing outside their condition, with
+ * their key columns in order and their condition, each as Postgres prints it:
+ * the same reading as the live schema guard's, so the two compare alike.
+ */
+const PARTIAL_KEYS = `
+  select pg_catalog.format('%I.%I', n.nspname, c.relname) as table, ic.relname::text as index,
+         array(
+           select pg_catalog.pg_get_indexdef(i.indexrelid, k.n, true)
+           from pg_catalog.generate_series(1, i.indnkeyatts) as k(n)
+           order by k.n
+         ) as columns,
+         pg_catalog.pg_get_expr(i.indpred, i.indrelid) as predicate
+  from pg_catalog.pg_index i
+  join pg_catalog.pg_class c on c.oid = i.indrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  join pg_catalog.pg_class ic on ic.oid = i.indexrelid
+  where c.relnamespace = any($1::pg_catalog.oid[]) and i.indisunique and i.indpred is not null
   order by n.nspname, c.relname, ic.relname
 `;
 
@@ -410,6 +447,13 @@ interface KeyWithoutOrg {
   exclusion: boolean;
 }
 
+interface PartialKey {
+  table: string;
+  index: string;
+  columns: string[];
+  predicate: string;
+}
+
 interface ForeignKey {
   table: string;
   name: string;
@@ -455,6 +499,7 @@ interface Facts {
   retentionReferences: ReadonlyMap<string, string>;
   policies: Policy[];
   keysWithoutOrg: KeyWithoutOrg[];
+  partialKeys: PartialKey[];
   foreignKeys: ForeignKey[];
   definerRoutines: string[];
   grants: Grant[];
@@ -545,6 +590,7 @@ async function readFacts(client: pg.Client, policy: SchemaPolicy): Promise<Facts
     retentionReferences: await retentionReferences(client, policy),
     policies: await rows<Policy>(client, POLICIES, [schemas]),
     keysWithoutOrg: await rows<KeyWithoutOrg>(client, KEYS_WITHOUT_ORG, [schemas]),
+    partialKeys: await rows<PartialKey>(client, PARTIAL_KEYS, [schemas]),
     foreignKeys: await rows<ForeignKey>(client, FOREIGN_KEYS, [schemas]),
     definerRoutines: (await rows<{ routine: string }>(client, DEFINER_ROUTINES, [schemas])).map((row) => row.routine),
     grants: await rows<Grant>(client, GRANTS, [schemas]),
@@ -610,6 +656,7 @@ const CHECKED_LISTS: readonly string[] = [
   'appendOnlyExceptions',
   'fillInTables',
   'requiredForeignKeys',
+  'partialUniqueIndexes',
 ] satisfies readonly (keyof SchemaPolicy)[];
 
 function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): string[] {
@@ -646,6 +693,10 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
           ? `${key.table}: exclusion constraint ${key.index} doesn't require org_id to be equal, ${LEAKS}`
           : `${key.table}: unique index ${key.index} leaves out org_id, ${LEAKS}`,
       ),
+    ...policy.partialUniqueIndexes
+      .filter((entry) => entry.reason.trim() === '')
+      .map((entry) => `${entry.table}: the partial unique index list gives no reason for ${entry.name}`),
+    ...facts.partialKeys.flatMap((key) => partialKeyProblems(key, policy.partialUniqueIndexes)),
     ...facts.foreignKeys.flatMap((key) => foreignKeyProblems(key, isTenant)),
     ...facts.definerRoutines.map(
       (routine) =>
@@ -715,14 +766,34 @@ function appMayUpdateProblems(name: string, table: GlobalTable, appendOnly: bool
   return problems;
 }
 
+/** Two column lists alike, in order. */
+const same = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((each, index) => each === b[index]);
+
+/**
+ * A partial unique index enforces nothing outside its condition, so it stands
+ * only as the policy lists it (E2-1a): found by its table and name, then held
+ * to the listed key columns, in order, and condition as Postgres prints it.
+ * The live schema guard holds the running database to the same rule.
+ */
+function partialKeyProblems(key: PartialKey, allowed: SchemaPolicy['partialUniqueIndexes']): string[] {
+  const named = `${key.table}: unique index ${key.index} is partial`;
+  const listed = allowed.find((entry) => entry.table === key.table && entry.name === key.index);
+  if (listed === undefined) {
+    return [`${named}, so it enforces nothing outside its condition, and the schema policy doesn't list it`];
+  }
+  const problems: string[] = [];
+  if (!same(key.columns, listed.columns)) problems.push(`${named} on other columns than the schema policy lists`);
+  if (key.predicate !== listed.predicate) problems.push(`${named} on another condition than the schema policy lists`);
+  return problems;
+}
+
 /**
  * Every required foreign key has a reason, and the migrations make it (an
  * entry with no columns, or unpaired ones, matches no key), validated: from exactly its
  * columns to exactly the ones it points at, each of them NOT NULL.
  */
 function requiredForeignKeyProblems(policy: SchemaPolicy, facts: Facts): string[] {
-  const same = (a: readonly string[], b: readonly string[]): boolean =>
-    a.length === b.length && a.every((each, index) => each === b[index]);
   return policy.requiredForeignKeys.flatMap((required) => {
     const named = `${required.table}: the required foreign key to ${required.references}`;
     const problems: string[] = [];

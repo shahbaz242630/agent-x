@@ -326,8 +326,10 @@ interface IndexRow {
   readonly name: string;
   readonly is_unique: boolean;
   readonly is_valid: boolean;
-  readonly partial: boolean;
-  readonly covers_org: boolean;
+  /** Its condition as Postgres prints it, or null for an index that isn't partial. */
+  readonly predicate: string | null;
+  /** Its key columns in order, each as pg_get_indexdef prints it. */
+  readonly key_columns: string[];
 }
 
 interface GrantRow {
@@ -543,15 +545,16 @@ async function indexes<Schema>(db: Kysely<Schema>): Promise<IndexRow[]> {
            ic.relname as name,
            i.indisunique as is_unique,
            i.indisvalid as is_valid,
-           i.indpred is not null as partial,
+           pg_catalog.pg_get_expr(i.indpred, i.indrelid) as predicate,
            -- Key columns only: indkey also holds an INCLUDE payload, and a
            -- payload column separates nothing. A unique index on (id) that
            -- merely INCLUDEs org_id still makes id unique across every
            -- organisation. pg_get_indexdef answers per key column, 1-based.
-           exists (
-             select 1 from pg_catalog.generate_series(1, i.indnkeyatts) as k(n)
-             where pg_catalog.pg_get_indexdef(i.indexrelid, k.n, true) = 'org_id'
-           ) as covers_org
+           array(
+             select pg_catalog.pg_get_indexdef(i.indexrelid, k.n, true)
+             from pg_catalog.generate_series(1, i.indnkeyatts) as k(n)
+             order by k.n
+           ) as key_columns
     from pg_catalog.pg_index i
     join pg_catalog.pg_class c on c.oid = i.indrelid
     join pg_catalog.pg_class ic on ic.oid = i.indexrelid
@@ -1014,19 +1017,38 @@ function missingGuardProblems(
 /**
  * Indexes. A plain index missing is a matter of speed, so it is not checked
  * here; a **unique** one is a wall. An invalid one enforces nothing while
- * still being listed, a partial one enforces nothing outside its condition,
- * and a unique key that leaves org_id out would make two organisations
- * collide (SEC-TEN-05, which CI-06 checks at migration time — this is the
- * same rule on the running database).
+ * still being listed, a partial one enforces nothing outside its condition
+ * (but one the schema policy lists, exactly), and a unique key that leaves
+ * org_id out would make two organisations collide (SEC-TEN-05, which CI-06
+ * checks at migration time — this is the same rule on the running database).
  */
-function indexProblems(index: IndexRow, isGlobal: boolean): SchemaProblem[] {
+function indexProblems(
+  index: IndexRow,
+  isGlobal: boolean,
+  allowedPartial: SchemaPolicy['partialUniqueIndexes'],
+): SchemaProblem[] {
   const problems: SchemaProblem[] = [];
   if (!index.is_valid) problems.push(`${index.table}'s index ${quoted(index.name)} is not valid`);
   if (!index.is_unique) return problems;
-  if (index.partial) problems.push(`${index.table}'s unique index ${quoted(index.name)} is partial`);
-  if (!isGlobal && !index.covers_org) {
+  if (index.predicate !== null) problems.push(...partialIndexProblems(index, allowedPartial));
+  if (!isGlobal && !index.key_columns.includes('org_id')) {
     problems.push(`${index.table}'s unique index ${quoted(index.name)} does not cover org_id`);
   }
+  return problems;
+}
+
+/**
+ * A partial unique index stands only as the schema policy lists it (E2-1a):
+ * found by its table and name, then held to the listed key columns, in order,
+ * and to the listed condition as Postgres prints it.
+ */
+function partialIndexProblems(index: IndexRow, allowedPartial: SchemaPolicy['partialUniqueIndexes']): SchemaProblem[] {
+  const named = `${index.table}'s unique index ${quoted(index.name)}`;
+  const listed = allowedPartial.find((entry) => entry.table === index.table && entry.name === index.name);
+  if (listed === undefined) return [`${named} is partial`];
+  const problems: SchemaProblem[] = [];
+  if (!same(index.key_columns, listed.columns)) problems.push(`${named} is partial on other columns than listed`);
+  if (index.predicate !== listed.predicate) problems.push(`${named} is partial on another condition than listed`);
   return problems;
 }
 
@@ -1298,7 +1320,7 @@ export async function liveSchemaProblems<Schema>(
     // The same for each table whose rows are made once.
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
-    ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table))),
+    ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
     // Rights: an allow-list, so a privilege nobody thought about is a problem
     // rather than an omission.
     ...listing,

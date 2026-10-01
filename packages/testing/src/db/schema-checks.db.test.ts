@@ -32,6 +32,7 @@ const POLICY: SchemaPolicy = {
   appendOnlyExceptions: REAL_EXCEPTIONS,
   fillInTables: SCHEMA_POLICY.fillInTables,
   requiredForeignKeys: SCHEMA_POLICY.requiredForeignKeys,
+  partialUniqueIndexes: SCHEMA_POLICY.partialUniqueIndexes,
 };
 /** The real global tables but the ledger, for the fixtures about the ledger alone. */
 const OTHER_GLOBALS = Object.fromEntries(
@@ -133,6 +134,15 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
           appMay: ['SELECT'],
         },
       },
+      partialUniqueIndexes: [
+        {
+          reason: 'One blank note an item',
+          table: 't.notes',
+          name: 'notes_one_blank_per_item',
+          columns: ['item_id', 'org_id'],
+          predicate: "(body = ''::text)",
+        },
+      ],
     };
     const statements = [
       ...TENANT_TABLE,
@@ -486,6 +496,57 @@ describe('CI-06 each rule fails on a broken fixture', () => {
     it('fails a unique index that only includes org_id as a stored column', async () => {
       const statements = [...TENANT_TABLE, 'create unique index items_label_incl on t.items (label) include (org_id)'];
       expect(await problemsAfter(statements)).toEqual([`t.items: unique index items_label_incl ${LEAKS}`]);
+    });
+
+    describe('a partial unique index (E2-1a)', () => {
+      /** The one the schema policy lists, on suppliers.suppliers, as 0033 makes it. */
+      const LISTED =
+        'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
+      const PARTIAL = "is partial, so it enforces nothing outside its condition, and the schema policy doesn't list it";
+
+      it('passes the listed one, so the rule is not simply always false', async () => {
+        expect(await problemsAfter([LISTED])).toEqual([]);
+      });
+
+      it('fails the listed name with a wider condition, or on other columns', async () => {
+        const widened =
+          "create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key = 'x'";
+        const reordered =
+          'create unique index one_supplier_a_payee on suppliers.suppliers (payee_key, org_id) where payee_key is not null';
+        const widerKey =
+          'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key, id) where payee_key is not null';
+        const narrowerKey =
+          'create unique index one_supplier_a_payee on suppliers.suppliers (org_id) where payee_key is not null';
+        expect(await problemsAfter([widened])).toEqual([
+          'suppliers.suppliers: unique index one_supplier_a_payee is partial on another condition than the schema policy lists',
+        ]);
+        for (const statement of [reordered, widerKey, narrowerKey]) {
+          expect(await problemsAfter([statement])).toEqual([
+            'suppliers.suppliers: unique index one_supplier_a_payee is partial on other columns than the schema policy lists',
+          ]);
+        }
+      });
+
+      it('fails one by another name, or on another table', async () => {
+        const renamed =
+          'create unique index a_payee_once on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
+        const elsewhere = [
+          ...TENANT_TABLE,
+          'create unique index one_supplier_a_payee on t.items (org_id, label) where label is not null',
+        ];
+        expect(await problemsAfter([renamed])).toEqual([`suppliers.suppliers: unique index a_payee_once ${PARTIAL}`]);
+        expect(await problemsAfter(elsewhere)).toEqual([`t.items: unique index one_supplier_a_payee ${PARTIAL}`]);
+      });
+
+      it('fails an entry that gives no reason', async () => {
+        const policy: SchemaPolicy = {
+          ...POLICY,
+          partialUniqueIndexes: POLICY.partialUniqueIndexes.map((entry) => ({ ...entry, reason: ' ' })),
+        };
+        expect(await problemsAfter([LISTED], policy)).toEqual([
+          'suppliers.suppliers: the partial unique index list gives no reason for one_supplier_a_payee',
+        ]);
+      });
     });
 
     it('fails an exclusion constraint without org_id', async () => {
