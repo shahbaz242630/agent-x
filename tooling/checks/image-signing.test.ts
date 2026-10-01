@@ -129,7 +129,7 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       )
       .map(([name]) => name);
     expect(others.length).toBeGreaterThanOrEqual(5);
-    expect([job('image-publish').needs ?? []].flat().sort()).toEqual(others.sort());
+    expect([job('image-publish').needs ?? []].flat().toSorted()).toEqual(others.toSorted());
     expect([job('image-sbom').needs ?? []].flat()).toEqual(['image-publish']);
     expect([job('image-attest').needs ?? []].flat().sort()).toEqual(['image-publish', 'image-sbom']);
     expect([job('release').needs ?? []].flat().sort()).toEqual(['image-attest', 'image-publish']);

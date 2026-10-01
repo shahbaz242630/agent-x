@@ -235,6 +235,18 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
 
 const headers = { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: ORG, origin: PUBLIC_ORIGIN };
 
+/** A change asked of one agent (`/v1/agents/:id<path>`), with a body when given. */
+const change = (path: string, payload?: unknown): InjectOptions => ({
+  method: 'POST',
+  url: `/v1/agents/${AGENT_ID}${path}`,
+  headers: {
+    ...headers,
+    'idempotency-key': 'k-1',
+    ...(payload !== undefined && { 'content-type': 'application/json' }),
+  },
+  ...(payload !== undefined && { payload: JSON.stringify(payload) }),
+});
+
 const post = (path: string, payload: unknown, key = 'k-1'): InjectOptions => ({
   method: 'POST',
   url: `/v1/agents${path}`,
@@ -423,16 +435,6 @@ describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1
 
 describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)', () => {
   const SUSPENDED = { ...AGENT, status: 'SUSPENDED' as const };
-  const change = (path: string, payload?: unknown): InjectOptions => ({
-    method: 'POST',
-    url: `/v1/agents/${AGENT_ID}${path}`,
-    headers: {
-      ...headers,
-      'idempotency-key': 'k-1',
-      ...(payload !== undefined && { 'content-type': 'application/json' }),
-    },
-    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
-  });
 
   it('suspends with no body at all, or an empty one, answering 200 with the agent as the change left it', async () => {
     const { app, calls } = await withAgents({
@@ -506,16 +508,6 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
 describe('POST /v1/agents/:id/owner, handing an agent to another owner with a step-up (the S68 audit)', () => {
   const NEW_OWNER = '0199a0f0-0000-7000-8000-000000000044';
   const HANDED = { ...AGENT, owner: NEW_OWNER };
-  const change = (path: string, payload?: unknown): InjectOptions => ({
-    method: 'POST',
-    url: `/v1/agents/${AGENT_ID}${path}`,
-    headers: {
-      ...headers,
-      'idempotency-key': 'k-1',
-      ...(payload !== undefined && { 'content-type': 'application/json' }),
-    },
-    ...(payload !== undefined && { payload: JSON.stringify(payload) }),
-  });
 
   it('asks a step-up for the new owner: 202, then hands it over with the step-up’s ID: 201 with its new key', async () => {
     const asked = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');

@@ -25,6 +25,14 @@ const NOT_TAKEN = {
   'sonarjs/publicly-writable-directories': 'off',
   'sonarjs/no-os-command-from-path': 'off',
   'sonarjs/hashing': 'off',
+  // Duplicates @typescript-eslint/no-unused-vars, and flags the `_name` the repository leaves unused on purpose.
+  'sonarjs/no-unused-vars': 'off',
+  // Vitest already fails a file with no test; the gate proofs build theirs through a helper this rule can't see.
+  'sonarjs/no-empty-test-file': 'off',
+  // The log scrubber's and the secret checks' patterns are complex by necessity, each held by property tests.
+  'sonarjs/regex-complexity': 'off',
+  // A named alias documents what a plain type means (a SchemaProblem is a string that names no value).
+  'sonarjs/redundant-type-aliases': 'off',
   // Slow and covered already (S70: together 44% of the run): @typescript-eslint/no-deprecated is on, SonarJS's
   // assertions-in-test-cases checks what assertions-in-tests does, and there is no AWS code here.
   'sonarjs/deprecation': 'off',

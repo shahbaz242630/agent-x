@@ -108,7 +108,7 @@ export async function loadMigrations(directory: string): Promise<Migration[]> {
   const migrations: Migration[] = [];
 
   // By UTF-16 code unit, so the order is the same on every machine and locale.
-  for (const entry of entries.sort((a, b) => Number(a.name > b.name) - Number(a.name < b.name))) {
+  for (const entry of entries.toSorted((a, b) => Number(a.name > b.name) - Number(a.name < b.name))) {
     if (!entry.isFile() || !FILE_NAME.test(entry.name)) {
       problems.push(`${entry.name} is not a migration file named like 0001_words.sql`);
       continue;

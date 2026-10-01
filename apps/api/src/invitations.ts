@@ -216,7 +216,8 @@ function adminOf(request: FastifyRequest) {
   return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
 }
 
-const answerRefusal = (written: InvitationWrite, request: FastifyRequest, reply: FastifyReply) => {
+/** Answers an invitation's or a confirmation's refusal; undefined for the route to answer. */
+const answerRefusal = (written: InvitationWrite | ConfirmationWrite, request: FastifyRequest, reply: FastifyReply) => {
   if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
   if (written.outcome === 'conflict' || written.outcome === 'busy') return answerRefusedWrite(written, request, reply);
   return undefined;
@@ -324,13 +325,6 @@ export function registerInvitations(
       };
     },
   );
-  /** Answers a confirmation's refusal; undefined for the route to answer. */
-  const refusalOf = (written: ConfirmationWrite, request: FastifyRequest, reply: FastifyReply) => {
-    if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
-    if (written.outcome === 'conflict' || written.outcome === 'busy')
-      return answerRefusedWrite(written, request, reply);
-    return undefined;
-  };
   const confirmationsOf = (): AcceptanceConfirmations => {
     if (confirmations === undefined) throw new Error('the confirmation routes ran without their writes');
     return confirmations;
@@ -362,7 +356,7 @@ export function registerInvitations(
         request.params.id,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined) return refused;
       if (written.outcome !== 'asked') throw new Error('an ask answered without its challenge');
       return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
@@ -385,7 +379,7 @@ export function registerInvitations(
         request.body.stepUpChallengeId,
         request.id,
       );
-      return refusalOf(written, request, reply) ?? decided(written);
+      return answerRefusal(written, request, reply) ?? decided(written);
     },
   );
 
@@ -404,7 +398,7 @@ export function registerInvitations(
         request.params.id,
         request.id,
       );
-      return refusalOf(written, request, reply) ?? decided(written);
+      return answerRefusal(written, request, reply) ?? decided(written);
     },
   );
 }

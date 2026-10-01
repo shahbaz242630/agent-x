@@ -117,6 +117,17 @@ async function run(argv: readonly string[], env: Record<string, string> = ENV) {
   };
 }
 
+/** Writes request files into `folder`, each holding exactly the bytes given, each under a name of its own. */
+function requestFilesIn(folder: string): (contents: string | Uint8Array) => string {
+  let written = 0;
+  return (contents) => {
+    written += 1;
+    const file = path.join(folder, `request-${String(written)}`);
+    writeFileSync(file, contents);
+    return file;
+  };
+}
+
 describe("B1c what the operator's command refuses before it connects", () => {
   it.each([
     ['nothing', []],
@@ -253,14 +264,7 @@ describe("B1c-2a the request the operator's job reads from its file", () => {
   afterAll(() => {
     rmSync(folder, { recursive: true, force: true });
   });
-  let written = 0;
-  /** A request file holding exactly these bytes. */
-  const requestFile = (contents: string | Uint8Array): string => {
-    written += 1;
-    const file = path.join(folder, `request-${String(written)}`);
-    writeFileSync(file, contents);
-    return file;
-  };
+  const requestFile = requestFilesIn(folder);
   /** A request as deploy/azure/operator.ts writes one (B1c-2b): the words, then the new organisation's ID. */
   const request = (name: string, id: string = NEW_ID): string => createOrganizationRequest(name, id);
   const reached = ['operator.starting', 'operator.database_unavailable'];
@@ -389,13 +393,7 @@ describe("B4-6b the first admin's request, only ever from a file", () => {
   afterAll(() => {
     rmSync(folder, { recursive: true, force: true });
   });
-  let written = 0;
-  const requestFile = (contents: string): string => {
-    written += 1;
-    const file = path.join(folder, `request-${String(written)}`);
-    writeFileSync(file, contents);
-    return file;
-  };
+  const requestFile = requestFilesIn(folder);
   const ADDRESS = 'quartzine.first@example.test';
   const HASH = 'ab'.repeat(32);
   const shape = `the request file holds ${FIRST_ADMIN_USAGE} as a JSON list, and nothing else`;
