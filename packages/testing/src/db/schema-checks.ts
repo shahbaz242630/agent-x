@@ -693,9 +693,7 @@ function checkFacts(facts: Facts, policy: SchemaPolicy, roles: RoleNames): strin
           ? `${key.table}: exclusion constraint ${key.index} doesn't require org_id to be equal, ${LEAKS}`
           : `${key.table}: unique index ${key.index} leaves out org_id, ${LEAKS}`,
       ),
-    ...policy.partialUniqueIndexes
-      .filter((entry) => entry.reason.trim() === '')
-      .map((entry) => `${entry.table}: the partial unique index list gives no reason for ${entry.name}`),
+    ...partialListProblems(policy, facts),
     ...facts.partialKeys.flatMap((key) => partialKeyProblems(key, policy.partialUniqueIndexes)),
     ...facts.foreignKeys.flatMap((key) => foreignKeyProblems(key, isTenant)),
     ...facts.definerRoutines.map(
@@ -769,6 +767,24 @@ function appMayUpdateProblems(name: string, table: GlobalTable, appendOnly: bool
 /** Two column lists alike, in order. */
 const same = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((each, index) => each === b[index]);
+
+/**
+ * The list itself: every entry has a reason, and the migrations make it, as
+ * a partial unique index (E2-1b): one the policy lists but nothing makes is a
+ * wall the live guard would look for in vain.
+ */
+function partialListProblems(policy: SchemaPolicy, facts: Facts): string[] {
+  return policy.partialUniqueIndexes.flatMap((entry) => {
+    const problems: string[] = [];
+    if (entry.reason.trim() === '') {
+      problems.push(`${entry.table}: the partial unique index list gives no reason for ${entry.name}`);
+    }
+    if (!facts.partialKeys.some((key) => key.table === entry.table && key.index === entry.name)) {
+      problems.push(`${entry.table}: the partial unique index ${entry.name} the schema policy lists is missing`);
+    }
+    return problems;
+  });
+}
 
 /**
  * A partial unique index enforces nothing outside its condition, so it stands

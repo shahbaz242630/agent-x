@@ -25,6 +25,13 @@
 // unverifying clears them after, and one suspended comes back verified only
 // while it is still verified.
 //
+// A later version's payee reference comes from a registration of its
+// supplier, registered for it (registrations.ts, E2), or is carried from the
+// version it follows. A payee change waits as the pending version, inert,
+// the supplier keeping the payee key of the version it pays; only the
+// admin's step-up confirmation makes it current, with its payee key, one
+// supplier's alone in the organisation (0033's `one_supplier_a_payee`).
+//
 // A version's contacts are encrypted under one key version with the
 // organisation, the version and the contact's kind as associated data
 // (ADR-011 §2), and opened only from a version the caller read through its
@@ -53,6 +60,8 @@ import {
   supplierDetails,
   type SupplierStatus,
 } from '../domain/supplier.ts';
+import { oneOf, timeOf, wholeOf } from './fields.ts';
+import type { RegistrationRecord } from './registrations.ts';
 import type { SuppliersTables } from './tables.ts';
 
 /** A supplier's row, as the signed state reads, records and moves it. */
@@ -161,11 +170,17 @@ export interface NewVersion {
   readonly details?: AuditDetails;
 }
 
+/** A version's payee reference (E2): the registration that gave it, the reference and the partner's hint, or none. */
+type PayeeReference = Pick<VersionRecord, 'registrationId' | 'beneficiaryRef' | 'payeeHint'>;
+
+const NO_PAYEE: PayeeReference = { registrationId: null, beneficiaryRef: null, payeeHint: null };
+
 /** The version's row, checked: its sealed fields, its encrypted contacts, and the facts its event names. */
 function versionRow(
   keys: KeyProvider,
   { orgId, id, supplierId, version, supplier, enteredBy, enteredAt }: NewVersion,
   phoneSince: Date,
+  payee: PayeeReference,
 ) {
   const kept = supplierDetails(supplier);
   const fields = {
@@ -178,9 +193,9 @@ function versionRow(
     source_ref: kept.source.ref,
     entered_by: enteredBy,
     entered_at: enteredAt,
-    registration_id: null,
-    beneficiary_ref: null,
-    payee_hint: null,
+    registration_id: payee.registrationId,
+    beneficiary_ref: payee.beneficiaryRef,
+    payee_hint: payee.payeeHint,
   };
   return {
     fields,
@@ -213,6 +228,39 @@ const recordVersion = (
   });
 
 /**
+ * The payee reference of a later version: the registration's, which must be
+ * REGISTERED, of the version's supplier and for this very version (each
+ * registration names the version it was started for, 0033's
+ * `one_registration_a_version`); or, with none, the version it follows'.
+ */
+function payeeOf({
+  id,
+  supplierId,
+  follows,
+  registration,
+}: Pick<NewVersion, 'id' | 'supplierId'> & {
+  readonly follows: VersionRecord;
+  readonly registration?: RegistrationRecord;
+}): PayeeReference {
+  if (registration === undefined) {
+    const { registrationId, beneficiaryRef, payeeHint } = follows;
+    return { registrationId, beneficiaryRef, payeeHint };
+  }
+  if (
+    registration.status !== 'REGISTERED' ||
+    registration.supplierId !== supplierId.toLowerCase() ||
+    registration.versionId !== id.toLowerCase()
+  ) {
+    throw new RangeError("A version's payee comes from a registration of its supplier, registered for it");
+  }
+  return {
+    registrationId: registration.id,
+    beneficiaryRef: registration.beneficiaryRef,
+    payeeHint: registration.payeeHint,
+  };
+}
+
+/**
  * Makes a later version of a supplier's details (E2, E3), in the caller's
  * transaction, which must be withSignedStates' for its organisation and read
  * the supplier with `change` first (`of`; the lock order: the supplier, then
@@ -221,25 +269,35 @@ const recordVersion = (
  * for another supplier's), so `phone_since` is carried over only from the
  * phone payments use now, while it stays the same; from a new phone it is
  * the new version's own time, so the call-back's "unchanged for 30 days"
- * (E3) reads one field. Pointing the supplier at it is the caller's. Details
- * it can't have are `SupplierDetailsRefused`; both are refused before any
- * SQL runs.
+ * (E3) reads one field. Its payee reference is `registration`'s (Tx 2,
+ * ADR-014 §3: REGISTERED, of this supplier, for this version, or a
+ * RangeError), or else carried forward from the version it follows, so a
+ * change of details keeps the payee payments use. Putting it in waiting is
+ * stagePayeeChange's, and making it current, with its payee key,
+ * confirmPayeeChange's. Details it can't have are `SupplierDetailsRefused`; each
+ * is refused before any SQL runs.
  */
 export async function addVersion(
   tx: SuppliersTransaction,
   states: SignedStates,
   keys: KeyProvider,
-  version: NewVersion & { readonly of: { readonly supplier: SupplierRecord }; readonly follows: VersionRecord },
+  version: NewVersion & {
+    readonly of: { readonly supplier: SupplierRecord };
+    readonly follows: VersionRecord;
+    readonly registration?: RegistrationRecord;
+  },
 ): Promise<RecordedState> {
   const { supplier } = version.of;
   // Its supplier's current version is that supplier's own (0032's key), so following it is following the same supplier.
   if (supplier.id !== version.supplierId.toLowerCase() || version.follows.id !== supplier.currentVersionId) {
     throw new RangeError("A later version follows its own supplier's current version");
   }
+  const payee = payeeOf(version);
   // Checked before any SQL runs, as the row is made below.
   const { phone } = supplierDetails(version.supplier).contacts;
   const before = await contactsOf(tx, keys, version.orgId, version.follows);
-  const row = versionRow(keys, version, before.phone === phone ? version.follows.phoneSince : version.enteredAt);
+  const phoneSince = before.phone === phone ? version.follows.phoneSince : version.enteredAt;
+  const row = versionRow(keys, version, phoneSince, payee);
   await insertVersion(tx, version.orgId, version.id, row);
   return recordVersion(tx, states, version, row);
 }
@@ -284,8 +342,8 @@ export async function addSupplier(
     actor,
     details,
   };
-  // Its first phone is the supplier's from when it was entered.
-  const row = versionRow(keys, first, createdAt);
+  // Its first phone is the supplier's from when it was entered; its payee comes with a later version (E2).
+  const row = versionRow(keys, first, createdAt, NO_PAYEE);
   const supplierFields = {
     status: SUPPLIER.initial,
     current_version_id: versionId,
@@ -333,26 +391,6 @@ export type SupplierCheck =
   | { readonly outcome: 'found'; readonly supplier: SupplierRecord; readonly state: VerifiedState }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
-
-/** One of `words`, or undefined. */
-const oneOf = <const Word extends string>(words: readonly Word[], value: string | null | undefined): Word | undefined =>
-  words.find((word) => word === value);
-
-const WHOLE = /^[1-9][0-9]{0,9}$/;
-
-/** A field's value as text or null, or undefined for one the fields don't hold at all. */
-type Field = string | null | undefined;
-
-const timeOf = (value: Field): Date | null | undefined => {
-  if (value === null || value === undefined) return value;
-  const time = new Date(value);
-  return Number.isNaN(time.getTime()) ? undefined : time;
-};
-
-const wholeOf = (value: Field): number | null | undefined => {
-  if (value === null || value === undefined) return value;
-  return WHOLE.test(value) ? Number(value) : undefined;
-};
 
 /** The supplier's record from its verified fields, or undefined when one isn't of its kind. */
 function supplierRecordOf(id: string, fields: ReadonlyMap<string, string | null>): SupplierRecord | undefined {
@@ -543,6 +581,153 @@ export async function reactivateSupplier(
   await move(tx, states, key, event, change);
   if (event === 'reactivate_verified') return (await againForChange(tx, states, key)).supplier;
   return clearVerification(tx, states, key, change);
+}
+
+/**
+ * A payee change: the version made with a registration's reference, that
+ * registration, and the supplier's current version as the caller read it.
+ */
+interface PayeeChange {
+  readonly version: VersionRecord;
+  readonly registration: RegistrationRecord;
+  readonly current: VersionRecord;
+}
+
+/**
+ * Refuses, before any SQL runs, a payee change for a VERIFIED supplier (the
+ * caller unverifies it first), or one whose version wasn't made from the
+ * registration: REGISTERED, of this supplier, started for that very version,
+ * which names it (a version carrying the payee forward names its follows'),
+ * and newer than the supplier's current version, so a change withdrawn or
+ * overtaken is never staged or confirmed again.
+ */
+function mayChangePayee(supplier: SupplierRecord, { version, registration, current }: PayeeChange): void {
+  if (supplier.status === 'VERIFIED') {
+    throw new RangeError('A verified supplier is unverified before its payee changes');
+  }
+  if (
+    registration.status !== 'REGISTERED' ||
+    registration.supplierId !== supplier.id ||
+    version.supplierId !== supplier.id ||
+    version.id !== registration.versionId ||
+    version.registrationId !== registration.id
+  ) {
+    throw new RangeError("A supplier's payee comes from a version made from its own registration, registered");
+  }
+  if (current.id !== supplier.currentVersionId || version.version <= current.version) {
+    throw new RangeError("A supplier's payee changes only to a version newer than the one it pays now");
+  }
+}
+
+/**
+ * Puts a payee change in waiting (E2, Tx 2), in the caller's transaction,
+ * which read the supplier with `change` (`found`) and made the version
+ * `registration` was started for (addVersion with it): that version pending,
+ * and nothing else. The supplier keeps the payee key of the version it pays,
+ * so the change stays inert until the admin's step-up confirms it
+ * (confirmPayeeChange, ADR-014 §3). One with a change waiting already, or
+ * one mayChangePayee refuses, is refused (RangeError) before any SQL runs.
+ * Gives the supplier as it now stands.
+ */
+export async function stagePayeeChange(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
+  change: PayeeChange,
+  { actor, details = {} }: SupplierChange,
+): Promise<SupplierRecord> {
+  if (found.supplier.pendingVersionId !== null) throw new RangeError('A supplier has one change waiting at a time');
+  mayChangePayee(found.supplier, change);
+  const { version, registration } = change;
+  await states.record(
+    tx,
+    SUPPLIERS,
+    key,
+    found.state,
+    { pending_version_id: version.id },
+    {
+      actor,
+      action: 'supplier.payee_change_staged',
+      details: { ...details, registrationId: registration.id, pendingVersionId: version.id },
+    },
+  );
+  return { ...found.supplier, pendingVersionId: version.id };
+}
+
+/**
+ * Confirms a payee change waiting (E2, after the admin's step-up, ADR-014
+ * §3), in the caller's transaction, which read the supplier with `change`
+ * (`found`): the pending version made current, and the registration's payee
+ * key (its key's version with it) the supplier's, in one signed state, so
+ * the key always moves with the version it pays. 0033's
+ * `one_supplier_a_payee` refuses a key another supplier of the organisation
+ * holds, a suspended one included (isPayeeTaken). A change that isn't the
+ * one waiting, or one mayChangePayee refuses, is refused (RangeError) before
+ * any SQL runs. A suspended supplier's verification, if any, stays on the
+ * version it was, so it comes back UNVERIFIED (stillVerified). Gives the
+ * supplier as it now stands.
+ */
+export async function confirmPayeeChange(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
+  change: PayeeChange,
+  { actor, details = {} }: SupplierChange,
+): Promise<SupplierRecord> {
+  const { version, registration } = change;
+  if (found.supplier.pendingVersionId !== version.id) throw new RangeError('Only the change waiting is confirmed');
+  mayChangePayee(found.supplier, change);
+  const confirmed = {
+    current_version_id: version.id,
+    pending_version_id: null,
+    payee_key: registration.payeeKey,
+    payee_key_version: registration.payeeKeyVersion,
+  };
+  await states.record(tx, SUPPLIERS, key, found.state, confirmed, {
+    actor,
+    action: 'supplier.payee_change_confirmed',
+    details: { ...details, registrationId: registration.id, currentVersionId: version.id },
+  });
+  return {
+    ...found.supplier,
+    currentVersionId: version.id,
+    pendingVersionId: null,
+    payeeKey: registration.payeeKey,
+    payeeKeyVersion: registration.payeeKeyVersion,
+  };
+}
+
+/**
+ * Withdraws the change waiting (E2: the admin's step-up refused or abandoned,
+ * or its key taken by another supplier first), in the caller's transaction,
+ * which read the supplier with `change` (`found`): no version pending, so
+ * another change may be staged and the supplier verified again. Its payee is
+ * untouched. `pendingVersionId` must be the change waiting (RangeError
+ * otherwise, before any SQL runs), so a withdrawal meant for one change never
+ * clears another. Gives the supplier as it now stands.
+ */
+export async function withdrawPayeeChange(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
+  pendingVersionId: string,
+  { actor, details = {} }: SupplierChange,
+): Promise<SupplierRecord> {
+  if (found.supplier.pendingVersionId !== pendingVersionId.toLowerCase()) {
+    throw new RangeError('Only the change waiting is withdrawn');
+  }
+  await states.record(
+    tx,
+    SUPPLIERS,
+    key,
+    found.state,
+    { pending_version_id: null },
+    { actor, action: 'supplier.payee_change_withdrawn', details: { ...details, pendingVersionId } },
+  );
+  return { ...found.supplier, pendingVersionId: null };
 }
 
 /** A version of a supplier's details, as its signed state says: never its contacts, which contactsOf opens. */
@@ -762,8 +947,8 @@ export async function suppliersPage(
   return { outcome: 'listed', suppliers: found, next };
 }
 
-/** The most suppliers an organisation may add in any 24 hours (partner, S69): their records are never retired (the B8-1 lesson). */
-export const MOST_SUPPLIERS_ADDED_A_DAY = 20;
+/** The most suppliers an organisation may add in any 24 hours (partner, S71): their records are never retired (the B8-1 lesson). */
+export const MOST_SUPPLIERS_ADDED_A_DAY = 100;
 
 /**
  * Takes the organisation's lock for adding suppliers until the transaction

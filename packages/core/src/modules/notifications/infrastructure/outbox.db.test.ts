@@ -274,6 +274,30 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(await rows()).toEqual([]);
   });
 
+  it('E2-1b writes a notice of each change to a supplier, about the supplier, to the admins and to the contacts (0033)', async () => {
+    const supplier = '0199a0f0-0000-7000-8000-00000000e2b1';
+    const told = [
+      'supplier_reactivated',
+      'supplier_payee_changed',
+      'supplier_details_changed',
+      'supplier_verified',
+      'supplier_suspended',
+    ] as const;
+    await app
+      .transaction()
+      .execute((tx) =>
+        outbox.add(tx, [
+          ...told.map((kind) => aboutAContact({ kind, aboutId: supplier })),
+          ...told.map((kind) => aboutAContact({ kind, aboutId: supplier, toContacts: true })),
+        ]),
+      );
+
+    const written = await rows();
+    expect(written).toHaveLength(told.length * 2);
+    expect(new Set(written.map(({ kind }) => kind))).toEqual(new Set(told));
+    expect(new Set(written.map(({ about_id }) => about_id))).toEqual(new Set([supplier]));
+  });
+
   it('B6-3b writes a reset’s link to one contact, about the reset, and its notices about the person', async () => {
     const told = [
       'factor_reset_asked',

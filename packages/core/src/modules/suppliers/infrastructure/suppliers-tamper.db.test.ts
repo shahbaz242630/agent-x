@@ -1,17 +1,18 @@
-// FX-TAMPER on a supplier and its versions (SEC-DB-10, E1-1), as the
-// database's owner: agentx_owner, the role the migration job logs in as,
-// holding none of the app's keys, working inside one organisation through
-// @agentx/testing's tamperAsOwner, as a funding source is tested
-// (sources-tamper.db.test.ts).
+// FX-TAMPER on a supplier, its versions and its payee registrations
+// (SEC-DB-10, E1-1, E2-1b), as the database's owner: agentx_owner, the role
+// the migration job logs in as, holding none of the app's keys, working
+// inside one organisation through @agentx/testing's tamperAsOwner, as a
+// funding source is tested (sources-tamper.db.test.ts).
 //
 // Each change to what a supplier may be paid on (its status, its current or
 // pending version, its cooling-off, its verifier, its payee key) or to what
 // a version says (its supplier, its name, the contacts it holds, the
-// independent source, who entered it and when, its payee reference) is
-// denied by the row check, with the SEV-1 alarm, and puts the organisation
-// on its integrity hold. A contact moved to another row or kind won't open
-// (SEC-DB-01). The live schema guard, with the product's own list, is clean
-// before and after each case.
+// independent source, who entered it and when, its payee reference) or to
+// how a payee registration ended (its reference, name check, status or
+// supplier) is denied by the row check, with the SEV-1 alarm, and puts the
+// organisation on its integrity hold. A contact moved to another row or kind
+// won't open (SEC-DB-01). The live schema guard, with the product's own
+// list, is clean before and after each case.
 import { createDatabase, type Database, liveSchemaProblems } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -31,6 +32,7 @@ import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
 import { type TamperSign, withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import type { SupplierDetails } from '../domain/supplier.ts';
+import { BENEFICIARY_REGISTRATIONS, recordRegistered, registrationOf, startRegistration } from './registrations.ts';
 import {
   addSupplier,
   addVersion,
@@ -78,9 +80,10 @@ const loggerFor = (destination: LogCapture) =>
   });
 
 let capture: LogCapture;
-/** The owner at the suppliers' table, and at their versions'. */
+/** The owner at the suppliers' table, at their versions', and at their registrations'. */
 let owner: OwnerTamper;
 let ownerOfVersions: OwnerTamper;
+let ownerOfRegistrations: OwnerTamper;
 let org: string;
 
 const services = () => ({ keys, ids, logger: loggerFor(capture) });
@@ -127,7 +130,11 @@ const lines = (event: string) => capture.lines().filter((line) => line.event ===
 /** Denied with the alarm on the row, and the organisation held for it. */
 async function deniedAndHeld(
   read: () => Promise<unknown>,
-  { id, subjectType, sign }: { id: string; subjectType: 'supplier' | 'supplier_version'; sign: TamperSign },
+  {
+    id,
+    subjectType,
+    sign,
+  }: { id: string; subjectType: 'supplier' | 'supplier_version' | 'beneficiary_registration'; sign: TamperSign },
 ): Promise<void> {
   expect(await read()).toEqual({ outcome: 'tampered', sign });
   expect(lines('audit.integrity_failed')).toEqual([
@@ -166,6 +173,57 @@ async function plantedVersion(supplierId: string): Promise<string> {
   );
   return id;
 }
+
+/** A payee registration of the supplier started (Tx 1), for a version to come: its ID. */
+async function startedRegistration(supplierId: string): Promise<string> {
+  const id = ids.next();
+  await withSignedStates(app, org, quiet(), (tx, states) =>
+    startRegistration(tx, states, {
+      orgId: org,
+      id,
+      supplierId,
+      versionId: ids.next(),
+      partner: 'fake_partner',
+      route: 'hosted',
+      startedBy: ids.next(),
+      createdAt: clock.now(),
+      actor: OPERATOR,
+    }),
+  );
+  return id;
+}
+
+/** A payee registration of the supplier, started and then REGISTERED with the partner's answer: its ID. */
+async function registeredRegistration(supplierId: string): Promise<string> {
+  const id = await startedRegistration(supplierId);
+  await withSignedStates(app, org, quiet(), async (tx, states) => {
+    const found = await registrationOf(tx, states, { orgId: org, id }, supplierId, 'change');
+    if (found.outcome !== 'found') throw new Error(`No registration: ${found.outcome}`);
+    await recordRegistered(tx, states, { orgId: org, id }, found, {
+      beneficiary: {
+        organizationId: org,
+        registrationId: id,
+        beneficiaryRef: `fake-beneficiary-${id}`,
+        payeeIdentity: 'fake-payee-1',
+        nameCheck: 'no_match',
+        maskedName: 'S****** E***',
+        hint: 'AE…6026',
+        registeredAt: clock.now(),
+      },
+      payee: { key: 'fake-payee-1', keyVersion: null },
+      actor: OPERATOR,
+    });
+  });
+  return id;
+}
+
+const readRegistration = (id: string, supplierId: string) =>
+  withSignedStates(app, org, services(), (tx, states) =>
+    registrationOf(tx, states, { orgId: org, id }, supplierId, 'share'),
+  );
+
+const registrationDenied = (id: string, supplierId: string, sign: TamperSign) =>
+  deniedAndHeld(() => readRegistration(id, supplierId), { id, subjectType: 'beneficiary_registration', sign });
 
 /**
  * The made-once guard refuses the owner's rewrites of a version too, so an
@@ -210,6 +268,7 @@ beforeEach(async () => {
   );
   owner = await tamperAsOwner(database, SUPPLIERS, org);
   ownerOfVersions = await tamperAsOwner(database, SUPPLIER_VERSIONS, org);
+  ownerOfRegistrations = await tamperAsOwner(database, BENEFICIARY_REGISTRATIONS, org);
   expect(await product()).toEqual([]);
   await ownerOfVersions.query(MADE_ONCE_OFF);
 });
@@ -218,6 +277,7 @@ afterEach(async () => {
   await ownerOfVersions.query(MADE_ONCE_ON);
   await owner.end();
   await ownerOfVersions.end();
+  await ownerOfRegistrations.end();
   expect(await product()).toEqual([]);
 });
 
@@ -280,6 +340,29 @@ describe(`FX-TAMPER as the owner on a supplier: denied by the row check, and hel
       id,
       'planted-payee',
     ]);
+
+    await supplierDenied(id, 'seal');
+  });
+
+  it('its payee key, once recorded, swapped for another account’s (E2-1b)', async () => {
+    const { id } = await addedSupplier();
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const found = await supplierOf(tx, states, { orgId: org, id }, 'change');
+      if (found.outcome !== 'found') throw new Error(`No supplier: ${found.outcome}`);
+      await states.record(
+        tx,
+        SUPPLIERS,
+        { orgId: org, id },
+        found.state,
+        { payee_key: 'fake-payee-1' },
+        {
+          actor: OPERATOR,
+          action: 'supplier.test_change',
+          details: {},
+        },
+      );
+    });
+    await owner.setColumn(id, 'payee_key', 'fake-payee-9');
 
     await supplierDenied(id, 'seal');
   });
@@ -404,11 +487,12 @@ describe(`FX-TAMPER as the owner on a supplier's version: denied by the row chec
     await versionDenied(versionId, id, 'seal');
   });
 
-  it('given a payee reference and the registration it came from', async () => {
+  it('given a payee reference and the registration it came from, one of its own supplier’s', async () => {
     const { id, versionId } = await addedSupplier();
+    const registrationId = await startedRegistration(id);
     await ownerOfVersions.query(
       'update suppliers.supplier_versions set registration_id = $2, beneficiary_ref = $3, payee_hint = $4 where id = $1',
-      [versionId, ids.next(), 'fake-beneficiary-planted', 'AE…0000'],
+      [versionId, registrationId, 'fake-beneficiary-planted', 'AE…0000'],
     );
 
     await versionDenied(versionId, id, 'seal');
@@ -476,6 +560,154 @@ describe(`FX-TAMPER as the owner on a supplier's version: denied by the row chec
 
     expect(page).toEqual({ outcome: 'tampered', sign: 'seal' });
     expect(await hold()).toMatchObject({ outcome: 'held' });
+  });
+});
+
+describe(`FX-TAMPER as the owner on a payee registration: denied by the row check, and held (E2-1b, Postgres ${server.version})`, () => {
+  it.each([
+    ['name_check', 'match'],
+    ['beneficiary_ref', 'fake-beneficiary-swapped'],
+    ['payee_key', 'fake-payee-9'],
+    ['masked_name', 'S****** E****'],
+    ['payee_hint', 'AE…0000'],
+  ] as const)('its %s changed once registered', async (column, value) => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await registeredRegistration(supplierId);
+    await ownerOfRegistrations.setColumn(id, column, value);
+
+    await registrationDenied(id, supplierId, 'seal');
+  });
+
+  it('moved to another supplier of the organisation', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const other = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    await ownerOfRegistrations.setColumn(id, 'supplier_id', other.id);
+
+    await registrationDenied(id, other.id, 'seal');
+  });
+
+  it('moved to another supplier while a version names it: refused by the version’s key (payee_from_its_suppliers_registration)', async () => {
+    const { id: supplierId, versionId } = await addedSupplier();
+    const other = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    await ownerOfVersions.query(
+      'update suppliers.supplier_versions set registration_id = $2, beneficiary_ref = $3 where id = $1',
+      [versionId, id, 'fake-beneficiary-planted'],
+    );
+
+    await expect(ownerOfRegistrations.setColumn(id, 'supplier_id', other.id)).rejects.toThrow(
+      /payee_from_its_suppliers_registration/,
+    );
+  });
+
+  it('a failure turned into a registration past the app, with all a registration needs', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      const found = await registrationOf(tx, states, { orgId: org, id }, supplierId, 'change');
+      if (found.outcome !== 'found') throw new Error(`No registration: ${found.outcome}`);
+      await states.record(
+        tx,
+        BENEFICIARY_REGISTRATIONS,
+        { orgId: org, id },
+        found.state,
+        { failure: 'expired' },
+        {
+          actor: OPERATOR,
+          action: 'beneficiary_registration.refused',
+          details: {},
+        },
+      );
+      await states.changeStatus(tx, BENEFICIARY_REGISTRATIONS, { orgId: org, id }, 'failed', {
+        actor: OPERATOR,
+        action: 'beneficiary_registration.failed',
+        details: {},
+      });
+    });
+    await ownerOfRegistrations.withoutStatusGuard(() =>
+      ownerOfRegistrations.query(
+        `update suppliers.beneficiary_registrations set status = 'REGISTERED', failure = null,
+           beneficiary_ref = 'fake-beneficiary-planted', name_check = 'match', payee_hint = 'AE…0000',
+           registered_at = now() where id = $1`,
+        [id],
+      ),
+    );
+
+    await registrationDenied(id, supplierId, 'seal');
+  });
+
+  it('rolled back to its saved, validly signed, STARTED state', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await startedRegistration(supplierId);
+    const saved = await ownerOfRegistrations.saveRow(id);
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      states.changeStatus(tx, BENEFICIARY_REGISTRATIONS, { orgId: org, id }, 'lost', {
+        actor: OPERATOR,
+        action: 'beneficiary_registration.lost',
+        details: {},
+      }),
+    );
+    await ownerOfRegistrations.withoutStatusGuard(() => ownerOfRegistrations.restoreRow(saved));
+
+    await registrationDenied(id, supplierId, 'pointer');
+  });
+
+  it('its events stripped of their seals', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = await registeredRegistration(supplierId);
+    await ownerOfRegistrations.stripSeals(id);
+
+    await registrationDenied(id, supplierId, 'unsigned');
+  });
+
+  it('planted REGISTERED with no event', async () => {
+    const { id: supplierId } = await addedSupplier();
+    const id = ids.next();
+    await ownerOfRegistrations.withoutStatusGuard(() =>
+      ownerOfRegistrations.query(
+        `insert into suppliers.beneficiary_registrations (org_id, id, supplier_id, version_id, partner, route, started_by,
+           status, beneficiary_ref, name_check, payee_hint, registered_at, created_at)
+         values ($1, $2, $3, $4, 'fake_partner', 'hosted', $4, 'REGISTERED', 'fake-beneficiary-planted', 'match',
+           'AE…0000', now(), now())`,
+        [org, id, supplierId, ids.next()],
+      ),
+    );
+
+    await registrationDenied(id, supplierId, 'unsigned');
+  });
+
+  it('the live guard sees DELETE granted on the registrations, and their status guard dropped outright', async () => {
+    const asOwner = database.as('owner');
+    const [trigger] = await asOwner.query<{ definition: string }>(
+      `select pg_catalog.pg_get_triggerdef(oid) as definition from pg_catalog.pg_trigger
+        where tgrelid = 'suppliers.beneficiary_registrations'::regclass and tgname = 'status_guard'`,
+    );
+    await asOwner.query('grant delete on suppliers.beneficiary_registrations to agentx_app');
+    await asOwner.query('drop trigger status_guard on suppliers.beneficiary_registrations');
+    try {
+      const found = await product();
+      expect(found).toContain('agentx_app may DELETE on suppliers.beneficiary_registrations');
+      expect(found).toContain('suppliers.beneficiary_registrations carries no status_guard');
+    } finally {
+      await asOwner.query('revoke delete on suppliers.beneficiary_registrations from agentx_app');
+      // eslint-disable-next-line agentx/no-string-built-sql -- the trigger's own definition, as Postgres wrote it
+      await asOwner.query(trigger?.definition ?? '');
+    }
+    expect(await product()).toEqual(["suppliers.supplier_versions's made_once is switched off"]);
+  });
+
+  // Widened, or on other columns: schema-guard.db.test.ts.
+  it('the live guard sees one supplier a payee dropped', async () => {
+    const asOwner = database.as('owner');
+    await asOwner.query('drop index suppliers.one_supplier_a_payee');
+    try {
+      expect(await product()).toContain(`suppliers.suppliers's partial unique index "one_supplier_a_payee" is missing`);
+    } finally {
+      await asOwner.query(
+        'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key is not null',
+      );
+    }
   });
 });
 

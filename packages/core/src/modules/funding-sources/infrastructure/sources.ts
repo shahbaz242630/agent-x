@@ -26,8 +26,8 @@ import type {
   TamperSign,
   VerifiedState,
 } from '../../audit/index.ts';
-import { type FundingSourceState, SOURCE_AVAILABILITIES } from '../../providers/index.ts';
-import { FUNDING_SOURCE, PARTNER_NAME, type SourceRecord } from '../domain/source.ts';
+import { type FundingSourceState, PARTNER_NAME, SOURCE_AVAILABILITIES } from '../../providers/index.ts';
+import { FUNDING_SOURCE, type SourceRecord } from '../domain/source.ts';
 import type { FundingSourcesTables } from './tables.ts';
 
 /** A source's row, as the signed state reads, records and moves it. */

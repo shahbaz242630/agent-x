@@ -4,7 +4,7 @@
 // - `POST /v1/suppliers`: adds a supplier, UNVERIFIED, with its name, its
 //   phone (an email and a trade licence number if known) and the independent
 //   source its details were checked against: 201 with the supplier. Admins;
-//   20 a day (409 SUPPLIER_ADDS_SPENT).
+//   100 a day (409 SUPPLIER_ADDS_SPENT).
 // - `GET /v1/suppliers?after=&limit=` and `/v1/suppliers/:id`: the suppliers
 //   as Agent X holds them, each verified against its signed state; one with
 //   its contacts. Every member.

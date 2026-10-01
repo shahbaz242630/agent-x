@@ -5,7 +5,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { messageFor, type ResetLink } from './messages.ts';
-import { type ClaimedNotice, type NoticeKind, SIGN_IN_NOTICE_KINDS, type SignInNoticeKind } from './notice.ts';
+import {
+  type ClaimedNotice,
+  type NoticeKind,
+  SIGN_IN_NOTICE_KINDS,
+  type SignInNoticeKind,
+  SUPPLIER_NOTICE_KINDS,
+} from './notice.ts';
 
 const NOTICE: ClaimedNotice = {
   id: '0199a0f0-0000-7000-8000-00000000b5c1',
@@ -195,6 +201,48 @@ describe('a notice’s email (B5-1b)', () => {
         RangeError,
       );
       expect(() => messageFor(NOTICE, 'a@example.test', link)).toThrow(RangeError);
+    });
+  });
+
+  describe('E2-1 a change to a supplier (0033)', () => {
+    const supplier = '0199a0f0-0000-7000-8000-00000000e201';
+    const aboutSupplier = (kind: NoticeKind, toAContact: boolean): ClaimedNotice => ({
+      ...NOTICE,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: supplier,
+      recipientUserId: toAContact ? null : NOTICE.recipientUserId,
+      recipientContactId: toAContact ? CONTACT : null,
+    });
+
+    it.each(SUPPLIER_NOTICE_KINDS)(
+      'tells of %s, naming the supplier by ID alone, and that it can change nothing',
+      (kind) => {
+        const admin = messageFor(aboutSupplier(kind, false), 'a@example.test');
+        const contact = messageFor(aboutSupplier(kind, true), 'c@example.test');
+
+        for (const { subject, text } of [admin, contact]) {
+          expect(subject).toMatch(/^Agent X: .*supplier/);
+          expect(`${subject} ${text}`).not.toMatch(/https?:|www\.|token|#/i);
+          expect(text).toContain(`Supplier: ${supplier}`);
+          expect(text).not.toContain('Registered contact:');
+          expect(text).toContain("check the organisation's suppliers");
+          expect(text).toContain("This email can't approve or change anything.");
+        }
+        expect(admin.text).toContain("You're told because you're an admin of this organisation.");
+        expect(contact.text).toContain("one of the organisation's registered contacts");
+      },
+    );
+
+    it('says what each change means', () => {
+      const text = (kind: NoticeKind) => messageFor(aboutSupplier(kind, false), 'a@example.test').text;
+
+      expect(text('supplier_reactivated')).toContain('verified again only if nothing about it changed');
+      expect(text('supplier_payee_changed')).toContain('Nothing is paid to them until a second person');
+      expect(text('supplier_details_changed')).toContain('until a second person verifies it again');
+      expect(text('supplier_verified')).toContain('may now ask to pay it');
+      expect(text('supplier_suspended')).toContain('nothing is paid to it until an admin reactivates it');
     });
   });
 

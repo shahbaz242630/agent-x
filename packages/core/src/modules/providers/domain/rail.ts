@@ -19,6 +19,9 @@
 // 4. From then on the partner's state of the source is read by its reference,
 //    again only for the organisation that linked it.
 
+/** A partner's name, as Agent X keeps it on a link or a registration: lower-case words, such as `fake`. */
+export const PARTNER_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+
 /**
  * What a source may do, whatever the rail calls it:
  * - `PENDING`: the business hasn't finished at its bank

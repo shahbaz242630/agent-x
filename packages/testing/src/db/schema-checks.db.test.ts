@@ -135,6 +135,7 @@ describe(`CI-06 what passes (Postgres ${server.version})`, () => {
         },
       },
       partialUniqueIndexes: [
+        ...POLICY.partialUniqueIndexes,
         {
           reason: 'One blank note an item',
           table: 't.notes',
@@ -498,14 +499,23 @@ describe('CI-06 each rule fails on a broken fixture', () => {
       expect(await problemsAfter(statements)).toEqual([`t.items: unique index items_label_incl ${LEAKS}`]);
     });
 
-    describe('a partial unique index (E2-1a)', () => {
-      /** The one the schema policy lists, on suppliers.suppliers, as 0033 makes it. */
+    describe('a partial unique index (E2-1a, made by 0033)', () => {
+      /** The one the schema policy lists, on suppliers.suppliers, as 0033 makes it; each fixture drops it first. */
       const LISTED =
         'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
+      const DROP = 'drop index suppliers.one_supplier_a_payee';
       const PARTIAL = "is partial, so it enforces nothing outside its condition, and the schema policy doesn't list it";
+      const MISSING =
+        'suppliers.suppliers: the partial unique index one_supplier_a_payee the schema policy lists is missing';
 
-      it('passes the listed one, so the rule is not simply always false', async () => {
-        expect(await problemsAfter([LISTED])).toEqual([]);
+      it('passes the listed one, made again as listed, so the rule is not simply always false', async () => {
+        expect(await problemsAfter([DROP, LISTED])).toEqual([]);
+      });
+
+      it('fails the listed one missing, or made again whole (E2-1b)', async () => {
+        const whole = 'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key)';
+        expect(await problemsAfter([DROP])).toEqual([MISSING]);
+        expect(await problemsAfter([DROP, whole])).toEqual([MISSING]);
       });
 
       it('fails the listed name with a wider condition, or on other columns', async () => {
@@ -517,24 +527,27 @@ describe('CI-06 each rule fails on a broken fixture', () => {
           'create unique index one_supplier_a_payee on suppliers.suppliers (org_id, payee_key, id) where payee_key is not null';
         const narrowerKey =
           'create unique index one_supplier_a_payee on suppliers.suppliers (org_id) where payee_key is not null';
-        expect(await problemsAfter([widened])).toEqual([
+        expect(await problemsAfter([DROP, widened])).toEqual([
           'suppliers.suppliers: unique index one_supplier_a_payee is partial on another condition than the schema policy lists',
         ]);
         for (const statement of [reordered, widerKey, narrowerKey]) {
-          expect(await problemsAfter([statement])).toEqual([
+          expect(await problemsAfter([DROP, statement])).toEqual([
             'suppliers.suppliers: unique index one_supplier_a_payee is partial on other columns than the schema policy lists',
           ]);
         }
       });
 
-      it('fails one by another name, or on another table', async () => {
+      it('fails one by another name in its place, or another on another table', async () => {
         const renamed =
           'create unique index a_payee_once on suppliers.suppliers (org_id, payee_key) where payee_key is not null';
         const elsewhere = [
           ...TENANT_TABLE,
           'create unique index one_supplier_a_payee on t.items (org_id, label) where label is not null',
         ];
-        expect(await problemsAfter([renamed])).toEqual([`suppliers.suppliers: unique index a_payee_once ${PARTIAL}`]);
+        expect(await problemsAfter([DROP, renamed])).toEqual([
+          MISSING,
+          `suppliers.suppliers: unique index a_payee_once ${PARTIAL}`,
+        ]);
         expect(await problemsAfter(elsewhere)).toEqual([`t.items: unique index one_supplier_a_payee ${PARTIAL}`]);
       });
 
@@ -543,7 +556,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
           ...POLICY,
           partialUniqueIndexes: POLICY.partialUniqueIndexes.map((entry) => ({ ...entry, reason: ' ' })),
         };
-        expect(await problemsAfter([LISTED], policy)).toEqual([
+        expect(await problemsAfter([], policy)).toEqual([
           'suppliers.suppliers: the partial unique index list gives no reason for one_supplier_a_payee',
         ]);
       });

@@ -7,7 +7,8 @@
 // the source it makes.
 import { sql, type Transaction } from 'kysely';
 
-import { LINK_OUTCOMES, type LinkOutcomeKind, PARTNER_NAME } from '../domain/source.ts';
+import { PARTNER_NAME } from '../../providers/index.ts';
+import { LINK_OUTCOMES, type LinkOutcomeKind } from '../domain/source.ts';
 import type { FundingSourcesTables } from './tables.ts';
 
 /** A transaction on the funding sources' tables, withTenant's (or withSignedStates') for their organisation. */
