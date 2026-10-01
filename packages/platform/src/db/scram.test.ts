@@ -75,6 +75,6 @@ describe('scramVerifier', () => {
     expect(SCRAM_VERIFIER.test(`${verifier}'`)).toBe(false);
     expect(SCRAM_VERIFIER.test(`x${verifier}`)).toBe(false);
     expect(SCRAM_VERIFIER.test(verifier.replace('SCRAM-SHA-256', 'md5'))).toBe(false);
-    expect(SCRAM_VERIFIER.test(verifier.replace('$4096:', '$0:'))).toBe(false);
+    expect(SCRAM_VERIFIER.test(verifier.replace('$4096:', () => '$0:'))).toBe(false);
   });
 });

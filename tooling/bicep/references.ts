@@ -160,13 +160,14 @@ export async function fileReferences(
     /** An error for a stop, with what Bicep said of it. */
     const stopped = (why: string): Error => {
       const said = stderr.trim();
-      return new Error(`${why}${said === '' ? '' : `: ${said}`}`);
+      return new Error(said === '' ? why : `${why}: ${said}`);
     };
     server.on('error', (error) => {
       end(stopped(`Bicep couldn't be run (${error.message})`));
     });
     server.on('close', (code, signal) => {
-      end(stopped(`Bicep stopped before answering (${code === null ? String(signal) : `status ${String(code)}`})`));
+      const how = code === null ? String(signal) : `status ${String(code)}`;
+      end(stopped(`Bicep stopped before answering (${how})`));
     });
     // A server that has gone refuses what is written (EPIPE); ended by us, it is refused nothing.
     server.stdin.on('error', (error) => {

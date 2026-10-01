@@ -58,7 +58,7 @@ const RETURN_TO = '/v1/after-first-admin';
 
 const { drive } = loginDriver({
   password,
-  callback: new RegExp(`^${`${API_ORIGIN}${RETURN_TO}`.replaceAll('.', '[.]')}$`),
+  callback: new RegExp('^' + (API_ORIGIN + RETURN_TO).replaceAll('.', '[.]') + '$'),
 });
 
 /** Where the suite writes a request, and where the operator's container reads it (compose.yaml). */
@@ -264,7 +264,7 @@ describe('B4-6d-2 the admin invites a second person, then changes their role and
   // used, so the admin's driver never gives the admin a code twice.
   const memberLogin = loginDriver({
     password,
-    callback: new RegExp(`^${`${API_ORIGIN}${RETURN_TO}`.replaceAll('.', '[.]')}$`),
+    callback: new RegExp('^' + (API_ORIGIN + RETURN_TO).replaceAll('.', '[.]') + '$'),
   });
 
   /** Signs the second person in through the API, however much the login still knows of them. */

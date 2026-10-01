@@ -504,7 +504,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     expect(fake.steps).toEqual(['role checked', 'schema checked', 'pool closed']);
     expect(fake.steps).not.toContain('start recorded');
     expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
-    expect(built.length).toBe(serversBefore);
+    expect(built).toHaveLength(serversBefore);
   });
 
   it('A3e-1b: checks the live schema on every scheduled run, before the chains, and keeps both', async () => {
@@ -552,7 +552,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
       }),
     );
     expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
-    expect(built.length).toBe(serversBefore);
+    expect(built).toHaveLength(serversBefore);
     expect(capture.lines().map((line) => line.event)).not.toContain('audit.integrity_failed');
   });
 
@@ -572,7 +572,7 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     );
     expect(fake.created.map((database) => database.destroyed)).toEqual([true]);
     // Nothing was built to listen: the refusal comes before the server.
-    expect(built.length).toBe(serversBefore);
+    expect(built).toHaveLength(serversBefore);
   });
 
   it('logs a database it cannot reach, redacted, closes the pool and exits with a failure', async () => {

@@ -117,7 +117,7 @@ const REJECTED: LintCase[] = [
 
 /** A plugin that calls every setter, and adds an onSend hook. */
 const callsAll = [
-  `type Setters = Record<${SETTERS.map((setter) => `'${setter}'`).join(' | ')}, (handler: () => void) => void>;`,
+  `type Setters = Record<${SETTERS.map((setter) => "'" + setter + "'").join(' | ')}, (handler: () => void) => void>;`,
   'export function plugin(app: Setters & { addHook(name: string, hook: () => void): void }): void {',
   ...SETTERS.map((setter) => `  app.${setter}(() => undefined);`),
   "  app.addHook('onSend', () => undefined);",

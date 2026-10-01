@@ -22,10 +22,12 @@ describe('`pnpm lint` end to end, with the real config (#222’s review)', () =>
   });
 
   it('only reports a SonarJS finding, counting it, with no fixable count left over', async () => {
-    const run = await lint('export const nested = (c) => `a${`b${String(c)}`}`;\n');
+    // A rule still reported only: once it blocks, pick another that isn't in BLOCKING.
+    const run = await lint('export const pick = (a, b) => (a ? (b ? 1 : 2) : 3);\n');
 
+    expect(BLOCKING.has('sonarjs/no-nested-conditional')).toBe(false);
     expect(run.fails).toBe(false);
-    expect(run.reported).toEqual([['sonarjs/no-nested-template-literals', 1]]);
+    expect(run.reported).toEqual([['sonarjs/no-nested-conditional', 1]]);
     expect(run.failing).toMatchObject([{ errorCount: 0, warningCount: 0, fixableErrorCount: 0 }]);
   });
 });
@@ -78,6 +80,25 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
   };
   const twice = (name: string) =>
     `export function ${name}(list) {\n  const kept = list.filter(Boolean);\n  const count = kept.length;\n  return count * 2;\n}\n`;
+  // Four tests of one shape, differing only in their literals: the shape the first report found.
+  const alike = [
+    "import { describe, it } from 'vitest';",
+    'declare const newRow: () => Promise<string>;',
+    'declare const tamper: (statement: string, id: string) => Promise<void>;',
+    'declare const deniedWith: (id: string, sign: string) => Promise<void>;',
+    "describe('tampering', () => {",
+    ...[
+      ['a status flipped', "update t set status = 'x'", 'seal'],
+      ['a role raised', "update t set role = 'admin'", 'seal'],
+      ['a pointer cleared', 'update t set p = null', 'pointer'],
+      ['a name changed', "update t set name = 'y'", 'seal'],
+    ].map(
+      ([title, statement, sign]) =>
+        `  it('${String(title)}', async () => {\n    const id = await newRow();\n    await tamper("${String(statement)}", id);\n\n    await deniedWith(id, '${String(sign)}');\n  });\n`,
+    ),
+    '});',
+    '',
+  ].join('\n');
 
   it.each([
     ['sonarjs/class-name', 'export class not_a_class_name {}\n'],
@@ -90,6 +111,19 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
       true,
     ],
     ['sonarjs/no-nested-assignment', 'let count = 0;\nexport const next = (use) => use((count += 1));\n'],
+    ['sonarjs/anchor-precedence', 'export const leadingOrAnywhere = /^a|b/;\n'],
+    ['sonarjs/existing-groups', "export const replaced = (text: string): string => text.replace('a', '$0');\n", true],
+    [
+      'sonarjs/misplaced-loop-counter',
+      'export const f = (n) => {\n  let i = 0;\n  for (let j = 0; i < n; j += 1) {\n    i += 2;\n  }\n  return i;\n};\n',
+    ],
+    ['sonarjs/no-nested-template-literals', 'export const say = (a, b) => `x${`y${a}`}${b}`;\n'],
+    ['sonarjs/parameterized-tests', alike, true],
+    [
+      'sonarjs/prefer-specific-assertions',
+      "import { expect, it } from 'vitest';\nit('counts', () => {\n  expect([1, 2].length).toBe(2);\n});\n",
+      true,
+    ],
   ])('%s', async (rule, code, typed = false) => {
     const { fails, rules } = await ruleIdsOf(code, typed);
 

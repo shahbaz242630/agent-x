@@ -1048,8 +1048,10 @@ interface Write {
 const TENANT = '00000000-0000-0000-0000-00000000000c';
 
 /** An error as `az rest` prints it: the HTTP reason, then Azure's answer, which names the subscription and quotes the host. */
-const azRestError = (reason: string, code: string): string =>
-  `ERROR: ${reason}(${JSON.stringify({ error: { code, message: `The client may not perform action(s) on /subscriptions/${SUBSCRIPTION}/x with https://${HOST}` } })})`;
+const azRestError = (reason: string, code: string): string => {
+  const message = `The client may not perform action(s) on /subscriptions/${SUBSCRIPTION}/x with https://${HOST}`;
+  return `ERROR: ${reason}(${JSON.stringify({ error: { code, message } })})`;
+};
 
 type State = 'Succeeded' | 'Failed' | 'Canceled' | 'InProgress';
 
@@ -1663,7 +1665,8 @@ describe('release', () => {
       };
       const ended_ = await outcome(azure);
       expect(ended_.message).toContain(message);
-      expect(ended_.message).toContain(`\nLeft: ${left === 'nothing' ? `migrate may hold ${NEW}, not run` : left}`);
+      const leftSaid = left === 'nothing' ? `migrate may hold ${NEW}, not run` : left;
+      expect(ended_.message).toContain(`\nLeft: ${leftSaid}`);
       expect(ended_.printed).not.toContain(HOST);
       expect(ended_.printed).not.toContain(SUBSCRIPTION);
       expect(azure.writes).toHaveLength(writesBefore + 1);

@@ -122,9 +122,9 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
 
   it('opens nothing for a session that is gone or past its absolute end', async () => {
     const { clock, challenges, binding } = await setUp();
-    expect(await challenges.open(app, { ...binding, sessionId: '0199a0f0-0000-7000-8000-00000000dead' })).toBe(
-      undefined,
-    );
+    expect(
+      await challenges.open(app, { ...binding, sessionId: '0199a0f0-0000-7000-8000-00000000dead' }),
+    ).toBeUndefined();
     clock.advanceBy(43_200 * SECOND);
     expect(await challenges.open(app, binding)).toBeUndefined();
   });

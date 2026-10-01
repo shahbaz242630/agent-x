@@ -354,7 +354,7 @@ function recording(handler: (url: string, method: string) => Response | Promise<
 const JOB_WORD = 'plainword';
 const PULL_WORD = 'otherword';
 const ACTOR = 'someone';
-const BASIC = `Basic ${Buffer.from(`${ACTOR}:${JOB_WORD}`).toString('base64')}`;
+const BASIC = `Basic ${Buffer.from(ACTOR + ':' + JOB_WORD).toString('base64')}`;
 
 /**
  * The package served as GitHub would: versions in pages, the registry's

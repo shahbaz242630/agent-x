@@ -80,9 +80,34 @@ export interface CallbackListener {
   close(): Promise<void>;
 }
 
+/** One wait for a callback, given its query when it arrives. */
+type Waiter = (query: URLSearchParams) => void;
+
+/** The next callback's query, or undefined if none comes within `timeoutMs`; the wait leaves `waiting` either way. */
+function nextArrival(waiting: Waiter[], timeoutMs: number): Promise<URLSearchParams | undefined> {
+  return new Promise((done) => {
+    const waiter: Waiter = (query) => {
+      clearTimeout(timer);
+      done(query);
+    };
+    const timer = setTimeout(() => {
+      waiting.splice(waiting.indexOf(waiter), 1);
+      done(undefined);
+    }, timeoutMs);
+    waiting.push(waiter);
+  });
+}
+
+/** Resolves once the server has closed. */
+const closed = (server: Server): Promise<void> =>
+  new Promise((done) => {
+    server.close(() => {
+      done();
+    });
+  });
+
 /** Listens for the issuer's redirect on the loopback address, one callback at a time. */
 export function listenForCallback(port: number): Promise<CallbackListener> {
-  type Waiter = (query: URLSearchParams) => void;
   const waiting: Waiter[] = [];
   const arrived: URLSearchParams[] = [];
   const server: Server = createServer((request, response) => {
@@ -103,25 +128,9 @@ export function listenForCallback(port: number): Promise<CallbackListener> {
         redirectUri: `http://127.0.0.1:${String(port)}/callback`,
         next: (timeoutMs) => {
           const ready = arrived.shift();
-          if (ready !== undefined) return Promise.resolve(ready);
-          return new Promise((done) => {
-            const waiter: Waiter = (query) => {
-              clearTimeout(timer);
-              done(query);
-            };
-            const timer = setTimeout(() => {
-              waiting.splice(waiting.indexOf(waiter), 1);
-              done(undefined);
-            }, timeoutMs);
-            waiting.push(waiter);
-          });
+          return ready === undefined ? nextArrival(waiting, timeoutMs) : Promise.resolve(ready);
         },
-        close: () =>
-          new Promise((done) => {
-            server.close(() => {
-              done();
-            });
-          }),
+        close: () => closed(server),
       });
     });
   });

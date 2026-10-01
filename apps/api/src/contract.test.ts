@@ -1162,7 +1162,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // five (B6-3b), the agent's own (C2-1), the funding sources' two (D2-3b), the fake bank's three (D2-3c),
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
     // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), with each GET's HEAD.
-    expect(answers.length).toBe(84);
+    expect(answers).toHaveLength(84);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },

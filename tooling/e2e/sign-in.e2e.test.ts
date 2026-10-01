@@ -25,7 +25,7 @@ const RETURN_TO = '/v1/after-sign-in';
 
 const { drive } = loginDriver({
   password,
-  callback: new RegExp(`^${`${API_ORIGIN}${RETURN_TO}`.replaceAll('.', '[.]')}$`),
+  callback: new RegExp('^' + (API_ORIGIN + RETURN_TO).replaceAll('.', '[.]') + '$'),
 });
 
 /** Zitadel's user IDs are digits; checked before one goes into a query. */

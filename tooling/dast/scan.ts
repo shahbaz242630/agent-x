@@ -418,7 +418,7 @@ export function summaryOf(findings: readonly Finding[], accepted: number): strin
   return [
     ...(['zap', 'schemathesis'] as const).map(
       (tool) =>
-        `${tool}: ${(['high', 'medium', 'low', 'info'] as const).map((severity) => `${severity} ${String(count(tool, severity))}`).join(', ')}`,
+        `${tool}: ${(['high', 'medium', 'low', 'info'] as const).map((severity) => severity + ' ' + String(count(tool, severity))).join(', ')}`,
     ),
     `accepted (listed in tooling/dast/scan.ts): ${String(accepted)}`,
     'Details: the repository Security tab, code scanning, category dast.',
@@ -463,10 +463,10 @@ async function wake(origin: string): Promise<void> {
 export const gateLines = (findings: readonly Finding[]): string[] =>
   findings
     .filter((finding) => finding.severity !== 'info' && acceptedReason(finding) === undefined)
-    .map(
-      (finding) =>
-        `${finding.severity} ${finding.rule}: ${finding.method} ${finding.path}${finding.status === undefined ? '' : ` (answered ${String(finding.status)})`}`,
-    );
+    .map((finding) => {
+      const answered = finding.status === undefined ? '' : ` (answered ${String(finding.status)})`;
+      return `${finding.severity} ${finding.rule}: ${finding.method} ${finding.path}${answered}`;
+    });
 
 /** The results directory, made writable for the scanners (their images' own users, not the runner's), with the document in it. */
 function resultsDir(): { dir: string; openapiText: string } {

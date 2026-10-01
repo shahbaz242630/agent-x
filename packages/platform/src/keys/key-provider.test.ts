@@ -187,6 +187,7 @@ describe('SEC-DATA-07 encryption (AES-256-GCM with associated data)', () => {
     const { ciphertext } = provider().encrypt('field-encryption', contact, ROW);
 
     expect(ciphertext).toHaveLength(12 + 16 + contact.length);
+    // eslint-disable-next-line sonarjs/prefer-specific-assertions -- a byte run inside the bytes: toContain on a buffer looks for one byte
     expect(ciphertext.includes(contact)).toBe(false);
   });
 

@@ -1835,7 +1835,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const MIGRATE_GRANT = GRANT_ON(JOB('migrate'));
     const properties = (assignment: Mutable): Mutable => inside(assignment, 'properties');
     const principal = (identity: string): string =>
-      `[reference('${idOf(named(new RegExp(`^${identity}$`)))}', '2024-11-30').principalId]`;
+      `[reference('${idOf(named(new RegExp('^' + identity + '$')))}', '2024-11-30').principalId]`;
     const scoped = (scope: string) => (assignment: Mutable) =>
       (assignment.id = `${scope}${marker}${String(assignment.name)}`);
     const grantName = String(staging.predictedResources.find(API_GRANT)?.name);
@@ -2168,8 +2168,10 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ));
     const scoped = (scope: unknown) => (assignment: Mutable) =>
       (assignment.id = `${String(scope)}/providers/Microsoft.Authorization/roleAssignments/${String(assignment.name)}`);
-    const principal = (workload: string): string =>
-      `[reference('${String(staging.predictedResources.find(named(new RegExp(`^id-agentx-stg-${workload}$`)))?.id)}', '2024-11-30').principalId]`;
+    const principal = (workload: string): string => {
+      const id = staging.predictedResources.find(named(new RegExp('^id-agentx-stg-' + workload + '$')))?.id;
+      return `[reference('${String(id)}', '2024-11-30').principalId]`;
+    };
     for (const change of [
       // Key Vault Secrets Officer, which also writes and deletes secrets; Key Vault Administrator.
       role('b86a8fe4-44ce-4948-aee5-eccb2c155cd7'),

@@ -197,44 +197,16 @@ describe(`FX-TAMPER as the owner on a funding source: denied by the row check, a
     expect(await product()).toEqual([]);
   });
 
-  it('the partner’s availability rewritten', async () => {
+  it.each([
+    ['the partner’s availability rewritten', 'availability', 'SUSPENDED'],
+    ['pointed at another partner reference', 'external_ref', 'fake-source-planted'],
+    ['its consent swapped', 'account_consent_id', 'fake-consent-planted'],
+    ['its consent’s expiry stretched', 'consent_expires_at', '2099-01-01T00:00:00Z'],
+    ['the bank’s most a payment widened', 'max_payment_minor', '999999999999'],
+    ['its currency changed', 'currency', 'USD'],
+  ] as const)('%s', async (_what, column, value) => {
     const id = await linkedSource();
-    await owner.setColumn(id, 'availability', 'SUSPENDED');
-
-    await deniedAndHeld(id, 'seal');
-  });
-
-  it('pointed at another partner reference', async () => {
-    const id = await linkedSource();
-    await owner.setColumn(id, 'external_ref', 'fake-source-planted');
-
-    await deniedAndHeld(id, 'seal');
-  });
-
-  it('its consent swapped', async () => {
-    const id = await linkedSource();
-    await owner.setColumn(id, 'account_consent_id', 'fake-consent-planted');
-
-    await deniedAndHeld(id, 'seal');
-  });
-
-  it('its consent’s expiry stretched', async () => {
-    const id = await linkedSource();
-    await owner.setColumn(id, 'consent_expires_at', '2099-01-01T00:00:00Z');
-
-    await deniedAndHeld(id, 'seal');
-  });
-
-  it('the bank’s most a payment widened', async () => {
-    const id = await linkedSource();
-    await owner.setColumn(id, 'max_payment_minor', '999999999999');
-
-    await deniedAndHeld(id, 'seal');
-  });
-
-  it('its currency changed', async () => {
-    const id = await linkedSource();
-    await owner.setColumn(id, 'currency', 'USD');
+    await owner.setColumn(id, column, value);
 
     await deniedAndHeld(id, 'seal');
   });

@@ -290,8 +290,9 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   // Matched code point by code point: an astral one is two units, each escaped.
   const escaped = (text: string) =>
     text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
+  const longestEmail = `${'a'.repeat(64)}@${'b'.repeat(189)}`;
   const longest = (name: string) =>
-    `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(`${'a'.repeat(64)}@${'b'.repeat(189)}`)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
+    `{"displayName":"${escaped(name)}","phone":"${escaped('+971501234567890')}","email":"${escaped(longestEmail)}","tradeLicence":"${escaped('L'.repeat(50))}","source":{"kind":"registry","ref":"${escaped('r'.repeat(200))}"}}`;
 
   it.each([
     ['100 astral characters', String.fromCodePoint(0x1d400).repeat(100)],

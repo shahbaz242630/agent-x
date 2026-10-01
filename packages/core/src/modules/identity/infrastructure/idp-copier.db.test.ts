@@ -392,7 +392,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 
     await copierWith(feed).run();
 
-    expect(asked.length).toBe(2);
+    expect(asked).toHaveLength(2);
     expect(await orgRecords(org)).toHaveLength(150);
     // The second page reads the first's last event again, from a millisecond before it, and copies it once.
     expect(lines('idp_events.copied')).toEqual([expect.objectContaining({ events: 151, records: 150 })]);

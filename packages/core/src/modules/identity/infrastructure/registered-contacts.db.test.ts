@@ -212,7 +212,7 @@ describe(`asking for a contact (B6-1a, Postgres ${server.version})`, () => {
     });
     // Encrypted: nothing of the address is in the row, in either case.
     expect(row.email_ciphertext.toString('latin1').toLowerCase()).not.toContain('finance');
-    expect(row.email_ciphertext.length).toBe(12 + 16 + 'finance.office@example.test'.length);
+    expect(row.email_ciphertext).toHaveLength(12 + 16 + 'finance.office@example.test'.length);
     const [event] = await eventsFrom(who.org, 4n);
     expect(event).toMatchObject({
       actor_id: who.adminUser,

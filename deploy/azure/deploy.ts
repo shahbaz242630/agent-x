@@ -981,7 +981,9 @@ const MAX_PAGES = 100;
 function armList(steps: Steps, first: string, what: string): unknown[] {
   const items: unknown[] = [];
   let url = first;
-  for (let page = 1; url !== ''; page += 1) {
+  let page = 0;
+  while (url !== '') {
+    page += 1;
     if (page > MAX_PAGES) {
       throw new Error(`Azure's list of ${what} went past ${String(MAX_PAGES)} pages, so it wasn't trusted.`);
     }
