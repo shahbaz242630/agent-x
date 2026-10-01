@@ -363,6 +363,16 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
     expect(await actions(org, id)).toEqual(['supplier.added', 'supplier.suspend']);
   });
 
+  it('refuses a session ended since, as UNAUTHENTICATED, opening no step-up', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    changedOf(await suspend(admin, id));
+    await app.deleteFrom('identity.sessions').where('id', '=', admin.sessionId).execute();
+
+    expect(await reactivate(admin, id)).toEqual({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' });
+  });
+
   it('refuses an approver, who may brake but not lift it: FORBIDDEN, asking or confirming', async () => {
     const org = await organization();
     const approver = await member(org, 'approver');

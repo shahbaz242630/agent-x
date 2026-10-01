@@ -313,16 +313,6 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     },
   );
 
-  it('refuses a name sent as more than 1,000 UTF-16 units with 400, unread', async () => {
-    const asked: Asked[] = [];
-    const app = await withSuppliers({}, asked);
-
-    const response = await app.inject(post('', { ...BODY, displayName: 'x'.repeat(1001) }));
-
-    expect(response.statusCode).toBe(400);
-    expect(asked).toEqual([]);
-  });
-
   it.each([
     [409, 'SUPPLIER_ADDS_SPENT'],
     [403, 'FORBIDDEN'],

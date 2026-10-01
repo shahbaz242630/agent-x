@@ -509,7 +509,7 @@ async function clearVerification(
  * Puts the business's brake on the supplier (E1-2), in the caller's
  * transaction, which read it with `change` (`found`): UNVERIFIED or VERIFIED
  * > SUSPENDED, its verification kept for reactivateSupplier to weigh. One
- * SUSPENDED already is refused (RangeError) before any SQL runs: the use case
+ * SUSPENDED already is refused by its machine (RangeError): the use case
  * answers a brake pressed twice as it is. Gives nothing: the use case answers
  * from the supplier read again, so a second read here would be thrown away
  * (#221's review: few calls a request).
@@ -521,7 +521,6 @@ export async function suspendSupplier(
   found: { readonly supplier: SupplierRecord },
   change: SupplierChange,
 ): Promise<void> {
-  if (found.supplier.status === 'SUSPENDED') throw new RangeError('A suspended supplier is not suspended again');
   await move(tx, states, key, 'suspend', change);
 }
 

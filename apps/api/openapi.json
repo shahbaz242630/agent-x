@@ -6985,7 +6985,7 @@
         "x-access": [
           "admin"
         ],
-        "x-body-limit": 6144,
+        "x-body-limit": 12288,
         "responses": {
           "201": {
             "description": "Default Response",

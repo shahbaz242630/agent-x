@@ -5,7 +5,13 @@
 // supplier-changes.db.test.ts.
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
+import {
+  addMembership,
+  type IdentityTables,
+  MEMBERSHIPS,
+  type Role,
+  userForSubject,
+} from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   MOST_SUPPLIERS_ADDED_A_DAY,
@@ -183,10 +189,28 @@ describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {
     expect(events).toEqual([{ action: 'supplier.added', actor_type: 'user', actor_id: admin.userId }]);
   });
 
-  it.each(['approver', 'developer', 'viewer'] as const)('refuses a%s: FORBIDDEN, adding nothing', async (role) => {
-    const org = await organization();
+  it.each(['approver', 'developer', 'viewer'] as const)(
+    'refuses the role %s: FORBIDDEN, adding nothing',
+    async (role) => {
+      const org = await organization();
 
-    expect(await add(await member(org, role))).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+      expect(await add(await member(org, role))).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
+      expect(await suppliersIn(org)).toBe(0);
+    },
+  );
+
+  it('refuses an admin whose membership is deactivated: FORBIDDEN, adding nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    await withSignedStates(app, org, quiet(), (tx, states) =>
+      states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
+        actor: OPERATOR,
+        action: 'membership.deactivated',
+        details: {},
+      }),
+    );
+
+    expect(await add(admin)).toEqual({ outcome: 'refused', status: 403, code: 'FORBIDDEN' });
     expect(await suppliersIn(org)).toBe(0);
   });
 
