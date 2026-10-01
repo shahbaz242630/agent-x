@@ -2,7 +2,7 @@
 // and parse errors always fail the run; a SonarJS rule only once it blocks.
 import { describe, expect, it } from 'vitest';
 
-import { lintWith, reportByRule, reportedOnly, split } from './lint.ts';
+import { BLOCKING, lintWith, reportByRule, reportedOnly, split } from './lint.ts';
 
 describe('`pnpm lint` end to end, with the real config (#222’s review)', () => {
   const lint = async (code: string) =>
@@ -63,5 +63,38 @@ describe('what `pnpm lint` only reports', () => {
       ['sonarjs/a', 1],
       ['sonarjs/b', 1],
     ]);
+  });
+});
+
+describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () => {
+  // A rule that needs types is linted as this TypeScript file's text, which the project knows.
+  const ruleIdsOf = async (code: string, typed: boolean) => {
+    const filePath = typed ? 'tooling/quality/lint.test.ts' : 'tooling/quality/example.js';
+    const run = split(await lintWith().lintText(code, { filePath }));
+    return {
+      fails: run.fails,
+      rules: run.failing.flatMap((result) => result.messages.map((message) => message.ruleId)),
+    };
+  };
+  const twice = (name: string) =>
+    `export function ${name}(list) {\n  const kept = list.filter(Boolean);\n  const count = kept.length;\n  return count * 2;\n}\n`;
+
+  it.each([
+    ['sonarjs/class-name', 'export class not_a_class_name {}\n'],
+    ['sonarjs/no-identical-functions', twice('first') + twice('second')],
+    ['sonarjs/no-inverted-boolean-check', 'export const notMore = (a, b) => !(a > b);\n'],
+    // The shapes the first report found: a sort inside a call, a count bumped inside one.
+    [
+      'sonarjs/no-misleading-array-reverse',
+      'const list: number[] = [3, 1, 2];\nexport const sortedTo = (use: (sorted: number[]) => void) => {\n  use(list.sort());\n};\n',
+      true,
+    ],
+    ['sonarjs/no-nested-assignment', 'let count = 0;\nexport const next = (use) => use((count += 1));\n'],
+  ])('%s', async (rule, code, typed = false) => {
+    const { fails, rules } = await ruleIdsOf(code, typed);
+
+    expect(BLOCKING.has(rule)).toBe(true);
+    expect(fails).toBe(true);
+    expect(rules).toContain(rule);
   });
 });

@@ -246,7 +246,10 @@ describe("the app's keys (ADR-011 §2): one file per key, as the API reads them"
   /** A byte source that counts up, so each key is its own, as the API requires. */
   const counting = () => {
     let next = 0;
-    return (count: number) => Buffer.alloc(count, (next += 1));
+    return (count: number) => {
+      next += 1;
+      return Buffer.alloc(count, next);
+    };
   };
 
   it('writes a version 1 key for every purpose: 32 random bytes as base64url, on one line', () => {

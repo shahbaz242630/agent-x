@@ -7,7 +7,13 @@
 import { ESLint } from 'eslint';
 
 /** The SonarJS rules whose findings are cleaned, so they block like any other. */
-export const BLOCKING: ReadonlySet<string> = new Set<string>([]);
+export const BLOCKING: ReadonlySet<string> = new Set<string>([
+  'sonarjs/class-name',
+  'sonarjs/no-identical-functions',
+  'sonarjs/no-inverted-boolean-check',
+  'sonarjs/no-misleading-array-reverse',
+  'sonarjs/no-nested-assignment',
+]);
 
 /** One finding, as ESLint gives it. */
 interface Finding {

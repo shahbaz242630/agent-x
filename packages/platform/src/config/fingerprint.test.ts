@@ -221,7 +221,7 @@ describe('SEC-OPS-05 the config fingerprint', () => {
         !leaf.startsWith('email.directoryToken: ') &&
         !leaf.startsWith('factorResets.token: '),
     );
-    expect(leaves(fingerprintedSettings(config)).sort()).toEqual(left.sort());
+    expect(leaves(fingerprintedSettings(config)).toSorted()).toEqual(left.toSorted());
   });
 
   it('ignores variables that are neither settings nor watched', () => {

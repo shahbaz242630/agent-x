@@ -292,7 +292,11 @@ const schemathesisSeverity = (check: string): Severity =>
 export function schemathesisFindings(xml: string): Finding[] {
   const suites = /<testsuites\b([^>]*)>/.exec(xml)?.[1] ?? '';
   const counted = (name: string): number => Number(new RegExp(`\\b${name}="(\\d+)"`).exec(suites)?.[1] ?? Number.NaN);
-  if (!(counted('tests') > 0)) throw new Error("Schemathesis's report holds no test case: the scan didn't run");
+  const tests = counted('tests');
+  // No count at all (NaN) is no test case either.
+  if (Number.isNaN(tests) || tests <= 0) {
+    throw new Error("Schemathesis's report holds no test case: the scan didn't run");
+  }
   const findings: Finding[] = [];
   let failed = 0;
   let errored = 0;

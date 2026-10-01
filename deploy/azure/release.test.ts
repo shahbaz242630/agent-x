@@ -1062,7 +1062,7 @@ interface Held {
 }
 
 /** A revision of the API: what it runs, and how Azure describes it. */
-interface Held_Revision {
+interface HeldRevision {
   image: string;
   release: string;
   provisioningState: string;
@@ -1101,7 +1101,7 @@ class Staging {
   };
   latest = 'ca-agentx-stg-api--0000007';
   ready = 'ca-agentx-stg-api--0000007';
-  revisions = new Map<string, Held_Revision>([
+  revisions = new Map<string, HeldRevision>([
     [
       'ca-agentx-stg-api--0000007',
       {

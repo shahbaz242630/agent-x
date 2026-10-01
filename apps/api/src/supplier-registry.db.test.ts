@@ -104,7 +104,12 @@ async function organization(): Promise<string> {
 }
 
 let keysUsed = 0;
-const keyed = (who: SupplierMember, key = `key-${String((keysUsed += 1))}`): IdempotentRequest => ({
+/** A fresh idempotency key for each write. */
+const nextKey = () => {
+  keysUsed += 1;
+  return `key-${String(keysUsed)}`;
+};
+const keyed = (who: SupplierMember, key = nextKey()): IdempotentRequest => ({
   orgId: who.orgId,
   client: { kind: 'user', id: who.userId },
   operation: ADD_OPERATION,

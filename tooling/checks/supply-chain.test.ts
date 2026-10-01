@@ -226,7 +226,11 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
     const tooFresh = npmUpdates.flatMap((update) => {
       const cooldown = (update.cooldown ?? {}) as Record<string, unknown>;
       const short = ['default-days', 'semver-major-days', 'semver-minor-days', 'semver-patch-days']
-        .filter((key) => !(Number(cooldown[key]) >= minimumDays))
+        // A missing or non-numeric value is short too.
+        .filter((key) => {
+          const days = Number(cooldown[key]);
+          return Number.isNaN(days) || days < minimumDays;
+        })
         .map((key) => `${key} is under ${minimumDays} days`);
       // A package excluded from the cooldown would be proposed too fresh to install.
       const excluded =
@@ -241,7 +245,7 @@ describe('SEC-SC-01 pnpm supply-chain settings are enforced', () => {
       const registered = SUPPLY_CHAIN_EXCEPTIONS.filter((entry) => entry.setting === setting).map(
         (entry) => entry.selector,
       );
-      expect(selectorsIn(setting).sort()).toEqual(registered.sort());
+      expect(selectorsIn(setting).toSorted()).toEqual(registered.toSorted());
     });
 
     it('has a reason, an owner and a real, future expiry date for every exception', () => {

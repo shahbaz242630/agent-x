@@ -219,7 +219,7 @@ describe('the secrets a run writes', () => {
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
-    expect(written.sort()).toEqual([APP_KEYS_VARIABLE, variableOf('zitadel-masterkey')].sort());
+    expect(written.toSorted()).toEqual([APP_KEYS_VARIABLE, variableOf('zitadel-masterkey')].toSorted());
     expect(peopleAskedFor(keysOnly)).toEqual([]);
   });
 
@@ -238,8 +238,8 @@ describe('the secrets a run writes', () => {
     const written = Object.entries(values)
       .filter(([, value]) => value !== '')
       .map(([variable]) => variable);
-    expect(written.sort()).toEqual(
-      [variableOf('db-app-password'), variableOf('zitadel-masterkey'), APP_KEYS_VARIABLE].sort(),
+    expect(written.toSorted()).toEqual(
+      [variableOf('db-app-password'), variableOf('zitadel-masterkey'), APP_KEYS_VARIABLE].toSorted(),
     );
     const pair = secretValues(rotating('login-client-private-key', 'login-client-public-key'), {}, quickMakers());
     expect(pair[variableOf('login-client-private-key')]).toBe('PRIVATE-HALF-PEM');
@@ -1905,15 +1905,15 @@ describe('the tool and the deployment agree', () => {
     const created = snapshot.predictedResources
       .filter((resource) => resource.type === 'Microsoft.KeyVault/vaults/secrets')
       .map((resource) => resource.name.split('/').at(-1));
-    expect(created.sort()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS].sort());
+    expect(created.toSorted()).toEqual([...Object.keys(VAULT_SECRETS), ...COPIED_SECRETS, ...APP_KEYS].toSorted());
     const paramsText = readFileSync(path.join(AZURE_DIR, 'staging.secrets.bicepparam'), 'utf8');
     const read = [...paramsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
-    expect(read.sort()).toEqual(
-      [...Object.values(VAULT_SECRETS).map((secret) => secret.variable), APP_KEYS_VARIABLE].sort(),
+    expect(read.toSorted()).toEqual(
+      [...Object.values(VAULT_SECRETS).map((secret) => secret.variable), APP_KEYS_VARIABLE].toSorted(),
     );
     const appsText = readFileSync(path.join(AZURE_DIR, 'staging.apps.bicepparam'), 'utf8');
     const appsRead = [...appsText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
-    expect(appsRead.sort()).toEqual(Object.values(APP_VARIABLES).sort());
+    expect(appsRead.toSorted()).toEqual(Object.values(APP_VARIABLES).toSorted());
     const foundationText = readFileSync(path.join(AZURE_DIR, 'staging.bicepparam'), 'utf8');
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_POSTGRES_ADMIN_PASSWORD')");
     expect(foundationText).toContain("readEnvironmentVariable('AGENTX_AZURE_ALERT_EMAIL')");
@@ -1922,7 +1922,7 @@ describe('the tool and the deployment agree', () => {
   it('reads the certificates’ hosts from the apps’ variables, and finds the environment the foundation creates', () => {
     const certificatesText = readFileSync(path.join(AZURE_DIR, 'staging.certificates.bicepparam'), 'utf8');
     const read = [...certificatesText.matchAll(/readEnvironmentVariable\('([A-Z0-9_]+)'\)/g)].map((match) => match[1]);
-    expect(read.sort()).toEqual(Object.values(CERTIFICATE_VARIABLES).sort());
+    expect(read.toSorted()).toEqual(Object.values(CERTIFICATE_VARIABLES).toSorted());
     const environments = snapshot.predictedResources.filter(
       (resource) => resource.type === 'Microsoft.App/managedEnvironments',
     );
