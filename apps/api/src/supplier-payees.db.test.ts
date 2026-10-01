@@ -12,6 +12,7 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { createFakeRail, type FakeRail, RailUnavailable, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
   confirmPayeeChange,
+  payeeFingerprint,
   registrationOf,
   type SupplierDetails,
   supplierOf,
@@ -42,6 +43,7 @@ import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './
 import {
   createSupplierPayees,
   PAYEE_CHECK_OPERATION,
+  PAYEE_PASS_THROUGH_OPERATION,
   PAYEE_START_OPERATION,
   type PayeeWrite,
   type SupplierPayees,
@@ -162,6 +164,19 @@ const start = (who: SupplierMember, supplierId: string, key?: string, using = pa
   using.start(who, keyed(who, PAYEE_START_OPERATION, key), supplierId, CORRELATION);
 const check = (who: SupplierMember, supplierId: string, registrationId: string, key?: string, using = payees) =>
   using.check(who, keyed(who, PAYEE_CHECK_OPERATION, key), supplierId, registrationId, CORRELATION);
+
+const passThrough = (
+  who: SupplierMember,
+  supplierId: string,
+  { key, using = payees, iban = ibanOf(JASMINE) }: { key?: string; using?: SupplierPayees; iban?: string } = {},
+) =>
+  using.passThrough(
+    who,
+    keyed(who, PAYEE_PASS_THROUGH_OPERATION, key),
+    supplierId,
+    { name: 'Jasmine AI FZ-LLC', iban },
+    CORRELATION,
+  );
 
 const answered = (write: PayeeWrite, outcome: 'started' | 'checked' | 'waiting') => {
   if (write.outcome !== outcome) throw new Error(`not ${outcome}: ${JSON.stringify(write)}`);
@@ -849,5 +864,170 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
       code: 'PARTNER_UNAVAILABLE',
     });
     expect(logs.lines().map((line) => line.event)).toContain('suppliers.registration_partner_differs');
+  });
+});
+
+describe(`registering a payee with its details passed through (E2-2d, Postgres ${server.version})`, () => {
+  /** A partner with no stable payee identity: its pass-through keyed by our fingerprint (ADR-014 §3 source (b)). */
+  const fingerprinting = () =>
+    createFakeRail({ clock, ids, stablePayeeIdentity: false, beneficiaryRoutes: ['pass_through'] });
+
+  it('SEC-PAY-05 registers it at once, the change staged inert, the IBAN in no answer, record or log', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+
+    const done = answered(await passThrough(admin, id), 'started');
+
+    expect(done.registration).toMatchObject({ route: 'pass_through', status: 'REGISTERED', nameCheck: 'match' });
+    expect(done.registration.payeeKey).toMatch(/^fake-payee-[a-p]{32}$/u);
+    expect(done.form).toBeNull();
+    const supplier = await supplierNow(org, id);
+    expect(supplier).toMatchObject({ pendingVersionId: done.registration.versionId, payeeKey: null });
+    const pending = await versionNow(org, id, done.registration.versionId);
+    expect(findLeaks(logs.text + JSON.stringify([done, supplier, pending]), IBANS)).toEqual([]);
+  });
+
+  it('keys it by our fingerprint where the partner gives no identity: the same account the same key', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const using = payeesWith(fingerprinting());
+
+    const first = answered(await passThrough(admin, await added(admin), { using }), 'started');
+    const second = answered(await passThrough(admin, await added(admin), { using }), 'started');
+
+    const { key, keyVersion } = payeeFingerprint(keys, org, ibanOf(JASMINE));
+    expect(first.registration).toMatchObject({ status: 'REGISTERED', payeeKey: key, payeeKeyVersion: keyVersion });
+    expect(second.registration.payeeKey).toBe(first.registration.payeeKey);
+    expect(findLeaks(logs.text + JSON.stringify([first, second]), IBANS)).toEqual([]);
+  });
+
+  it('after a lost answer, asks the partner by our ID when the same request is sent again, and keeps its fingerprint', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const partner = fingerprinting();
+    const lost = payeesWith({
+      ...partner,
+      registerBeneficiary: async (input) => {
+        await partner.registerBeneficiary(input);
+        throw new RailUnavailable();
+      },
+    });
+
+    expect(await passThrough(admin, id, { key: 'the-same-key', using: lost })).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    const again = answered(
+      await passThrough(admin, id, { key: 'the-same-key', using: payeesWith(partner) }),
+      'started',
+    );
+
+    expect(again.registration).toMatchObject({
+      status: 'REGISTERED',
+      payeeKey: payeeFingerprint(keys, org, ibanOf(JASMINE)).key,
+    });
+    expect(await actionsAbout(org, 'beneficiary_registration', again.registration.id)).toEqual([
+      'beneficiary_registration.started',
+      'beneficiary_registration.lost',
+      'beneficiary_registration.answered',
+      'beneficiary_registration.registered',
+    ]);
+  });
+
+  it('ends FAILED, logged by IDs, when a check finds registered one it can’t take our fingerprint for', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const partner = fingerprinting();
+    const lost = payeesWith({
+      ...partner,
+      registerBeneficiary: async (input) => {
+        await partner.registerBeneficiary(input);
+        throw new RailUnavailable();
+      },
+    });
+    await passThrough(admin, id, { using: lost });
+    const open = await withTenant(app, org, (tx) =>
+      tx.selectFrom('suppliers.beneficiary_registrations').select('id').where('supplier_id', '=', id).execute(),
+    );
+
+    const checked = answered(await check(admin, id, open[0]?.id ?? '', undefined, payeesWith(partner)), 'checked');
+
+    expect(checked.registration).toMatchObject({ status: 'FAILED', failure: 'unknown', payeeKey: null });
+    expect(logs.lines().filter(({ event }) => event === 'suppliers.fingerprint_unavailable')).toMatchObject([
+      { level: 'error', registrationId: checked.registration.id },
+    ]);
+    expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
+  });
+
+  it('never carries on with another request’s registration still open, nor a form’s with one passed through', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const neverDone = payeesWith(failingOnce(false));
+    expect(await passThrough(admin, id, { using: neverDone })).toMatchObject({ code: 'PARTNER_UNAVAILABLE' });
+
+    // Another request, with another account: a registration of its own, as the partner keys an ID to its first details.
+    const other = answered(await passThrough(admin, id, { iban: ibanOf(OTHER) }), 'started');
+    expect(other.registration).toMatchObject({ status: 'REGISTERED', payeeHint: `AE…${ibanOf(OTHER).slice(-4)}` });
+    const registrations = await withTenant(app, org, (tx) =>
+      tx
+        .selectFrom('suppliers.beneficiary_registrations')
+        .select(['route', 'status'])
+        .where('supplier_id', '=', id)
+        .orderBy('created_at')
+        .execute(),
+    );
+    expect(registrations).toEqual([
+      { route: 'pass_through', status: 'UNKNOWN' },
+      { route: 'pass_through', status: 'REGISTERED' },
+    ]);
+  });
+
+  it('a form’s start never carries on with a pass-through still open', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    await passThrough(admin, id, { using: payeesWith(failingOnce(false)) });
+
+    const started = answered(await start(admin, id), 'started');
+
+    expect(started.registration).toMatchObject({ route: 'hosted', status: 'STARTED' });
+    expect(started.form).not.toBeNull();
+  });
+
+  it('refuses a partner that takes no details passed through (PAYEE_ROUTE_NOT_OFFERED), or no admin, starting nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const formOnly = payeesWith(createFakeRail({ clock, ids, beneficiaryRoutes: ['hosted'] }));
+
+    expect(await passThrough(admin, id, { using: formOnly })).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'PAYEE_ROUTE_NOT_OFFERED',
+    });
+    expect(await passThrough(await member(org, 'approver'), id)).toEqual({
+      outcome: 'refused',
+      status: 403,
+      code: 'FORBIDDEN',
+    });
+    expect(
+      await payeesWith(undefined).passThrough(
+        admin,
+        keyed(admin, PAYEE_PASS_THROUGH_OPERATION),
+        id,
+        { name: 'x', iban: ibanOf(JASMINE) },
+        CORRELATION,
+      ),
+    ).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: null });
   });
 });

@@ -1,6 +1,7 @@
 // Registering a supplier's payee with the payment partner (ADR-014 §3,
-// PRD §6, BR-04, SEC-PAY-06, SEC-PAY-08; Phase 1 E2-2a), through the
-// partner's hosted form, so the bank details never touch Agent X. Composed
+// PRD §6, BR-04, SEC-PAY-05, SEC-PAY-06, SEC-PAY-08; Phase 1 E2-2a, E2-2d),
+// through the partner's hosted form, so the bank details never touch Agent
+// X, or passed through (E2-2d), held in one request's memory alone. Composed
 // here, in the API, as ADR-004 §7 has it: the partner is the providers
 // module's adapter, the supplier and its registrations the suppliers
 // module's, the member identity's.
@@ -40,6 +41,20 @@
 //    already ended answers as it stands. An answer the partner's contract
 //    forbids (an account number, or a stable identity that can't be kept)
 //    is never kept: the registration FAILED, logged by IDs.
+// 4. `passThrough` (`suppliers.payee.pass-through`), an admin, the name and
+//    IBAN in the body (E2-2d): Tx 1 as a start's, but never carrying on with
+//    a registration still open, as the partner answers a registration's ID as
+//    it first did, whatever details come with it, so another request's IBAN
+//    could be keyed to another account. Then the partner registers the
+//    payee with the details, outside any transaction, and its answer is kept
+//    at once, as a check's (Tx 2, the key already spent by Tx 1): where the
+//    partner's one source is ours, our fingerprint of the IBAN
+//    (payeeFingerprint) is the payee key. The IBAN goes no further than this
+//    request: not stored, not logged, and the idempotency key's hash of it is
+//    keyed. A call lost on the way leaves it UNKNOWN; the same request sent
+//    again with the same key (the same IBAN, as its hash holds it) asks the
+//    partner by our ID and keeps the answer. A check can't take our
+//    fingerprint, so one it finds registered ends FAILED, logged by IDs.
 //
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock (a
 // start's alone, for its budget: the supplier's row, read for change by a
@@ -53,6 +68,7 @@ import {
   type BeneficiaryOutcome,
   type FinancialRailAdapter,
   isPartnerPage,
+  type PayeeDetails,
   type RailCapabilities,
 } from '@agentx/core/modules/providers';
 import {
@@ -62,6 +78,8 @@ import {
   nextVersionNumber,
   onePayeeChangeAtATime,
   openRegistrationOf,
+  payeeFingerprint,
+  type PayeeKey,
   payeeKeyOf,
   payeeKeySource,
   recordFailed,
@@ -69,6 +87,7 @@ import {
   recordRegistered,
   registrationOf,
   type RegistrationRecord,
+  type RegistrationRoute,
   registrationsStartedSince,
   stagePayeeChange,
   startRegistration,
@@ -97,6 +116,8 @@ import {
 export const PAYEE_START_OPERATION = 'suppliers.payee.start';
 /** Asking the partner how it stands, and keeping its answer. */
 export const PAYEE_CHECK_OPERATION = 'suppliers.payee.check';
+/** Registering a payee with the details passed through (E2-2d). */
+export const PAYEE_PASS_THROUGH_OPERATION = 'suppliers.payee.pass-through';
 
 /** Who may register a supplier's payee: the admins (partner, S69). */
 export const REGISTERING_ROLES = ['admin'] as const;
@@ -131,6 +152,13 @@ export interface SupplierPayees {
     idempotent: IdempotentRequest,
     supplierId: string,
     registrationId: string,
+    correlationId: string,
+  ): Promise<PayeeWrite>;
+  passThrough(
+    member: SupplierMember,
+    idempotent: IdempotentRequest,
+    supplierId: string,
+    payee: PayeeDetails,
     correlationId: string,
   ): Promise<PayeeWrite>;
 }
@@ -236,19 +264,20 @@ export function createSupplierPayees({
       beneficiary,
       offer,
       enteredBy,
+      fingerprint,
     }: {
       readonly supplierId: string;
       readonly found: RegistrationFound;
       readonly beneficiary: Extract<BeneficiaryOutcome, { kind: 'registered' }>['beneficiary'];
       readonly offer: RailCapabilities;
       readonly enteredBy: string;
+      readonly fingerprint: PayeeKey | null;
     },
   ): Promise<void> => {
     const { orgId } = member;
     const supplierKey = { orgId, id: supplierId };
     const actor = { type: 'user' as const, id: member.userId };
-    // The hosted form takes no fingerprint: the key is the partner's identity, or none (R-13).
-    const payee = payeeKeyOf(payeeKeySource(offer, found.registration.route), beneficiary, null);
+    const payee = payeeKeyOf(payeeKeySource(offer, found.registration.route), beneficiary, fingerprint);
     // The early word: the index refuses the key again at the confirmation, whoever takes it first.
     const holder = payee.key === null ? null : await supplierWithPayeeKey(tx, orgId, payee.key);
     const registration = await recordRegistered(tx, states, { orgId, id: found.registration.id }, found, {
@@ -399,6 +428,7 @@ export function createSupplierPayees({
       offer,
       enteredBy,
       correlationId,
+      fingerprint = null,
     }: {
       readonly supplier: SupplierRecord;
       readonly found: RegistrationFound;
@@ -406,6 +436,8 @@ export function createSupplierPayees({
       readonly offer: RailCapabilities | undefined;
       readonly enteredBy: string;
       readonly correlationId: string;
+      /** Our fingerprint of the IBAN a pass-through holds in memory (E2-2d), else null. */
+      readonly fingerprint?: PayeeKey | null;
     },
   ): Promise<void> => {
     const key = { orgId: member.orgId, id: found.registration.id };
@@ -416,6 +448,12 @@ export function createSupplierPayees({
     }
     if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
     if (offer === undefined) throw new Error('a registered payee was answered without the partner’s offer');
+    if (payeeKeySource(offer, found.registration.route) === 'fingerprint' && fingerprint === null) {
+      // Our fingerprint is taken only in the request that passed the IBAN through: a check never has it (E2-2d).
+      logger.child({ correlationId }).error('suppliers.fingerprint_unavailable', { registrationId: key.id });
+      await recordFailed(tx, states, key, found, { reason: 'unknown', actor });
+      return;
+    }
     try {
       await keepRegistered(tx, states, member, {
         supplierId: supplier.id,
@@ -423,6 +461,7 @@ export function createSupplierPayees({
         beneficiary: outcome.beneficiary,
         offer,
         enteredBy,
+        fingerprint,
       });
     } catch (error) {
       // Thrown before anything is written (payeeKeyOf, recordRegistered), so the registration's state still holds.
@@ -432,55 +471,139 @@ export function createSupplierPayees({
     }
   };
 
+  /** The partner's offer, if it takes payees by `route`: PAYEE_ROUTE_NOT_OFFERED otherwise, PARTNER_UNAVAILABLE without an answer. */
+  const offering = async (partnerRail: FinancialRailAdapter, route: RegistrationRoute) => {
+    const offer = await asked(() => partnerRail.capabilities());
+    if (offer === 'unavailable') return PARTNER_UNAVAILABLE;
+    try {
+      payeeKeySource(offer, route);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      return { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' } as const;
+    }
+    return offer;
+  };
+
+  /**
+   * Tx 1, for either route: the registration the write added, or the hosted
+   * one it carried on with (never a pass-through's: see the top of this
+   * file), read again in a transaction of its own.
+   */
+  const opened = async (
+    member: SupplierMember,
+    idempotent: IdempotentRequest,
+    supplierId: string,
+    route: RegistrationRoute,
+    correlationId: string,
+  ): Promise<RegistrationRecord | Exclude<PayeeWrite, { outcome: 'started' | 'checked' | 'waiting' }>> => {
+    const done = await write(member, idempotent, correlationId, async (tx, states) => {
+      const { orgId } = member;
+      await onePayeeChangeAtATime(tx, orgId);
+      const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
+      const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
+      if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
+      // One open at a time for a supplier's form: a start carries on with it, starting nothing new.
+      const open =
+        route === 'hosted' ? await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner, route }) : null;
+      if (open !== null && isOpen((await registrationIn(tx, states, orgId, supplier.id, open, 'share')).registration)) {
+        return { status: 201, resourceId: open };
+      }
+      await withinBudget(tx, orgId);
+      const id = ids.next();
+      await startRegistration(tx, states, {
+        orgId,
+        id,
+        supplierId: supplier.id,
+        versionId: ids.next(),
+        partner,
+        route,
+        startedBy: admin.id,
+        createdAt: clock.now(),
+        actor: { type: 'user', id: member.userId },
+      });
+      return { status: 201, resourceId: id };
+    });
+    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+    // Only a check can find a registration still waiting inside its write.
+    if (done.outcome === 'waiting') throw new Error('a payee start answered as still waiting');
+    return registrationNow(member.orgId, supplierId, done.result.resourceId, correlationId);
+  };
+
+  /**
+   * Passes the payee's details to the partner for a pass-through Tx 1 added
+   * (STARTED), or asks it by our ID alone (UNKNOWN), then keeps its answer at
+   * once, as a check would (Tx 2), with our fingerprint of the IBAN where
+   * that is the partner's one source. A call lost on the way is recorded
+   * (STARTED > UNKNOWN) and answered PARTNER_UNAVAILABLE. One ended already
+   * is left as it stands.
+   */
+  const passedThrough = async (
+    partnerRail: FinancialRailAdapter,
+    offer: RailCapabilities,
+    member: SupplierMember,
+    registration: RegistrationRecord,
+    payee: PayeeDetails,
+    correlationId: string,
+  ): Promise<Refused | null> => {
+    if (!isOpen(registration)) return null;
+    const { orgId } = member;
+    const ref = { organizationId: orgId, registrationId: registration.id };
+    const outcome = await asked(() =>
+      registration.status === 'STARTED'
+        ? partnerRail.registerBeneficiary({ route: 'pass_through', ...ref, payee })
+        : partnerRail.getBeneficiaryState(ref),
+    );
+    const fingerprint =
+      payeeKeySource(offer, 'pass_through') === 'fingerprint' ? payeeFingerprint(keys, orgId, payee.iban) : null;
+    const kept = await work.answered(orgId, correlationId, async (tx, states) => {
+      const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
+      const { supplier } = await work.supplierIn(tx, states, { orgId, id: registration.supplierId }, 'change');
+      const found = await registrationIn(tx, states, orgId, supplier.id, registration.id, 'change');
+      // Ended meanwhile, by a check of it: as it stands.
+      if (!isOpen(found.registration)) return {};
+      if (outcome === 'unavailable') {
+        if (found.registration.status === 'STARTED') {
+          await recordLost(tx, states, { orgId, id: registration.id }, { actor: { type: 'user', id: member.userId } });
+        }
+        return {};
+      }
+      if (outcome.kind === 'waiting') throw new Error('A pass-through registration is never left waiting');
+      await keepAnswer(tx, states, member, {
+        supplier,
+        found,
+        outcome,
+        offer,
+        enteredBy: admin.id,
+        correlationId,
+        fingerprint,
+      });
+      return {};
+    });
+    if ('outcome' in kept) return kept;
+    return outcome === 'unavailable' ? PARTNER_UNAVAILABLE : null;
+  };
+
   return {
     async start(member, idempotent, supplierId, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
-      const offer = await asked(() => rail.capabilities());
-      if (offer === 'unavailable') return PARTNER_UNAVAILABLE;
-      try {
-        payeeKeySource(offer, 'hosted');
-      } catch (error) {
-        if (!(error instanceof RangeError)) throw error;
-        return { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' };
-      }
-      const done = await write(member, idempotent, correlationId, async (tx, states) => {
-        const { orgId } = member;
-        await onePayeeChangeAtATime(tx, orgId);
-        const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
-        const { supplier } = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'share');
-        if (supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
-        // One open at a time for a supplier: a start carries on with it, starting nothing new.
-        const open = await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner });
-        if (
-          open !== null &&
-          isOpen((await registrationIn(tx, states, orgId, supplier.id, open, 'share')).registration)
-        ) {
-          return { status: 201, resourceId: open };
-        }
-        await withinBudget(tx, orgId);
-        const id = ids.next();
-        await startRegistration(tx, states, {
-          orgId,
-          id,
-          supplierId: supplier.id,
-          versionId: ids.next(),
-          partner,
-          route: 'hosted',
-          startedBy: admin.id,
-          createdAt: clock.now(),
-          actor: { type: 'user', id: member.userId },
-        });
-        return { status: 201, resourceId: id };
-      });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
-      // Only a check can find a registration still waiting inside its write.
-      if (done.outcome === 'waiting') throw new Error('a payee start answered as still waiting');
-      const registrationId = done.result.resourceId;
-      const registration = await registrationNow(member.orgId, supplierId, registrationId, correlationId);
+      const offer = await offering(rail, 'hosted');
+      if ('outcome' in offer) return offer;
+      const registration = await opened(member, idempotent, supplierId, 'hosted', correlationId);
       if ('outcome' in registration) return registration;
       const form = await askAfterStart(rail, member, supplierId, registration, correlationId);
       if (form !== null && 'outcome' in form) return form;
-      return answer('started', member, supplierId, registrationId, form, correlationId);
+      return answer('started', member, supplierId, registration.id, form, correlationId);
+    },
+
+    async passThrough(member, idempotent, supplierId, payee, correlationId) {
+      if (rail === undefined) return PARTNER_UNAVAILABLE;
+      const offer = await offering(rail, 'pass_through');
+      if ('outcome' in offer) return offer;
+      const registration = await opened(member, idempotent, supplierId, 'pass_through', correlationId);
+      if ('outcome' in registration) return registration;
+      const refused = await passedThrough(rail, offer, member, registration, payee, correlationId);
+      if (refused !== null) return refused;
+      return answer('started', member, supplierId, registration.id, null, correlationId);
     },
 
     async check(member, idempotent, supplierId, registrationId, correlationId) {
