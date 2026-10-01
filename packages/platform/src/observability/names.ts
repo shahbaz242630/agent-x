@@ -133,12 +133,15 @@ const SECRET_CODE_WORDS = new Set([
 
 /** A camelCase, snake_case or kebab-case name as lower-case words. */
 export function wordsOf(name: string): string[] {
-  return name
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((word) => word !== '');
+  return (
+    name
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      // An acronym's last capital before a word's capital: HTMLParser is HTML Parser (a lookahead, so no backtracking).
+      .replace(/([A-Z])(?=[A-Z][a-z])/g, '$1 ')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word !== '')
+  );
 }
 
 export function ruleForName(name: string): NameRule {

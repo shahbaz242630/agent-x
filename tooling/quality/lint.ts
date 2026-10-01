@@ -19,6 +19,7 @@ export const BLOCKING: ReadonlySet<string> = new Set<string>([
   'sonarjs/no-nested-template-literals',
   'sonarjs/parameterized-tests',
   'sonarjs/prefer-specific-assertions',
+  'sonarjs/super-linear-regex',
 ]);
 
 /** One finding, as ESLint gives it. */

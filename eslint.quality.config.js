@@ -38,6 +38,10 @@ const NOT_TAKEN = {
   'sonarjs/concise-regex': 'off',
   // Under the `i` flag `[A-Za-z]` repeats itself on purpose: the class stays right if the flag is ever dropped.
   'sonarjs/duplicates-in-character-class': 'off',
+  // Its findings (S70) are flat chains, `a ? x : b ? y : z`, which Prettier lays out as a list of cases; several sit
+  // in the signed-state check, the live schema guard and a reset's lock order, where a rewrite for style alone
+  // would add risk and remove none.
+  'sonarjs/no-nested-conditional': 'off',
   // Slow and covered already (S70: together 44% of the run): @typescript-eslint/no-deprecated is on, SonarJS's
   // assertions-in-test-cases checks what assertions-in-tests does, and there is no AWS code here.
   'sonarjs/deprecation': 'off',
@@ -45,4 +49,16 @@ const NOT_TAKEN = {
   'sonarjs/aws-restricted-ip-admin-access': 'off',
 };
 
-export default [...base, sonarjs.configs.recommended, { rules: NOT_TAKEN }];
+/**
+ * A pattern that backtracks badly matters where a stranger's input reaches it:
+ * the product. Tools, CI scripts, deploy tools and tests read only our own
+ * files and Azure's answers. `server-setup.ts` is hand-deployed (a change means
+ * the partner's `apps` and a set-up run) and reads only our own migrations; its
+ * one such pattern is fixed with its next change (`Carry-Forward.md`).
+ */
+const OWN_INPUT_ONLY = {
+  files: ['tooling/**', 'scripts/**', 'deploy/**', '**/*.test.ts', 'packages/platform/src/db/server-setup.ts'],
+  rules: { 'sonarjs/super-linear-regex': 'off' },
+};
+
+export default [...base, sonarjs.configs.recommended, { rules: NOT_TAKEN }, OWN_INPUT_ONLY];

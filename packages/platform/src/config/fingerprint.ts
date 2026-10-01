@@ -122,7 +122,9 @@ export function configFingerprint(
   );
   const hash = createHash('sha256').update(JSON.stringify({ settings, keys, watched, nodeArguments })).digest('hex');
   const flags = [
-    ...new Set(nodeArguments.filter((argument) => argument.startsWith('-')).map((flag) => flag.replace(/=.*$/s, ''))),
+    ...new Set(
+      nodeArguments.filter((argument) => argument.startsWith('-')).map((flag) => flag.split('=', 1)[0] ?? flag),
+    ),
   ];
   return Object.freeze({
     configHash: `sha256:${hash}`,

@@ -23,11 +23,13 @@ describe('`pnpm lint` end to end, with the real config (#222’s review)', () =>
 
   it('only reports a SonarJS finding, counting it, with no fixable count left over', async () => {
     // A rule still reported only: once it blocks, pick another that isn't in BLOCKING.
-    const run = await lint('export const pick = (a, b) => (a ? (b ? 1 : 2) : 3);\n');
+    const run = await lint(
+      'export const sum = (n) => {\n  let total = 0;\n  for (let i = 0; i < n; i += 1) {\n    total += i;\n    i = total;\n  }\n  return total;\n};\n',
+    );
 
-    expect(BLOCKING.has('sonarjs/no-nested-conditional')).toBe(false);
+    expect(BLOCKING.has('sonarjs/updated-loop-counter')).toBe(false);
     expect(run.fails).toBe(false);
-    expect(run.reported).toEqual([['sonarjs/no-nested-conditional', 1]]);
+    expect(run.reported).toEqual([['sonarjs/updated-loop-counter', 1]]);
     expect(run.failing).toMatchObject([{ errorCount: 0, warningCount: 0, fixableErrorCount: 0 }]);
   });
 });
@@ -130,5 +132,25 @@ describe('each blocking SonarJS rule fails `pnpm lint` on a broken snippet', () 
     expect(BLOCKING.has(rule)).toBe(true);
     expect(fails).toBe(true);
     expect(rules).toContain(rule);
+  });
+
+  // The scrubber's old pattern: quadratic on a line of many `?`.
+  const backtracks = "export const cut = (text) => text.replace(/[?#].*$/s, '');\n";
+
+  it('sonarjs/super-linear-regex, in product code, where a stranger’s input reaches it', async () => {
+    const run = split(await lintWith().lintText(backtracks, { filePath: 'packages/platform/src/example.js' }));
+
+    expect(BLOCKING.has('sonarjs/super-linear-regex')).toBe(true);
+    expect(run.fails).toBe(true);
+    expect(run.failing.flatMap((result) => result.messages.map((message) => message.ruleId))).toContain(
+      'sonarjs/super-linear-regex',
+    );
+  });
+
+  it('but not in tooling, which reads only our own files (OWN_INPUT_ONLY)', async () => {
+    const run = split(await lintWith().lintText(backtracks, { filePath: 'tooling/quality/example.js' }));
+
+    expect(run.fails).toBe(false);
+    expect(run.reported).toEqual([]);
   });
 });
