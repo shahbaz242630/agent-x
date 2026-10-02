@@ -20,11 +20,14 @@ export {
   type AuditTransaction,
   createAuditTrail,
   type LatestSignedState,
+  type ReadEvent,
   type RecordedAuditEvent,
   TooManyEventsAboutObject,
+  TooManyEventsToRead,
 } from './infrastructure/audit-trail.ts';
 export {
   type ClearingStepUp,
+  type HistoryCheck,
   type HoldClearing,
   type OrganisationCheck,
   type HoldInvestigation,

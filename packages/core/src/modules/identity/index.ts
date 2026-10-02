@@ -18,6 +18,16 @@ export {
 export { isRole, MEMBERSHIP, type Role, ROLES } from './domain/membership.ts';
 export { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from './domain/idp-event.ts';
 export { REMOVAL_RESTRICTION_DAYS } from './domain/removal-restriction.ts';
+export {
+  ESTABLISHED_DAYS,
+  mayVerify,
+  SOLO_PATH_LOCK_DAYS,
+  type TwoPersonFacts,
+  type VerifierRefusal,
+  type VerifierVerdict,
+  verifierVerdict,
+} from './domain/two-person.ts';
+export { MOST_HISTORY_EVENTS, type TwoPersonFactsCheck, twoPersonFactsOf } from './infrastructure/two-person-facts.ts';
 export { CONTACT_COOLING_OFF_DAYS, countsNow, MOST_CONTACTS, REGISTERED_CONTACT } from './domain/registered-contact.ts';
 export {
   FACTOR_RESET,

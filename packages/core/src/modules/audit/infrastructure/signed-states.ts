@@ -69,6 +69,7 @@ import {
   type AuditTransaction,
   type LatestSignedState,
   lockChainHead,
+  type ReadEvent,
   type RecordedEventCheck,
   recordHoldEvent,
   TooManyEventsAboutObject,
@@ -248,6 +249,11 @@ export class SignedStateFailed extends Error {
   }
 }
 
+/** A history read from the log (historyOf): every event, whole; or tampered with, with the alarm raised. */
+export type HistoryCheck =
+  | { readonly outcome: 'read'; readonly events: readonly ReadEvent[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
 export interface SignedStates {
   /**
    * The row's state, verified against the log (ADR-012 §2), in the caller's
@@ -348,6 +354,14 @@ export interface SignedStates {
   ): Promise<InvestigationRecording>;
   /** An investigation of the organisation's hold by its ID, from its event in the log, believed only whole. */
   holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck>;
+  /**
+   * Every event about an object of `subjectTypes` in the organisation's log,
+   * in chain order, each believed only whole (the trail's recordedEvents): a
+   * history a decision rests on, such as who granted a member's role
+   * (ADR-012 §1). One that isn't whole raises the alarm and holds the
+   * organisation. Past `limit` events it throws TooManyEventsToRead.
+   */
+  historyOf(tx: AuditTransaction, orgId: string, subjectTypes: readonly string[], limit: number): Promise<HistoryCheck>;
   /**
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
@@ -763,6 +777,18 @@ export function createSignedStates({
     return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
   };
 
+  const historyOf = async (
+    tx: AuditTransaction,
+    orgId: string,
+    subjectTypes: readonly string[],
+    limit: number,
+  ): Promise<HistoryCheck> => {
+    const read = await trail.recordedEvents(tx, orgId, { subjectTypes, limit });
+    // The organisation's own history: the alarm names it, as no one object is to blame.
+    if (read.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', read.seq);
+    return Object.freeze({ outcome: 'read', events: read.events });
+  };
+
   return Object.freeze({
     verifiedState,
 
@@ -923,6 +949,8 @@ export function createSignedStates({
     },
 
     holdInvestigation,
+
+    historyOf,
 
     async clearIntegrityHold(
       tx: AuditTransaction,

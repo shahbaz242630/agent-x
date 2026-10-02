@@ -61,7 +61,7 @@ import {
 import { assertTenant, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
 import {
@@ -116,6 +116,14 @@ export type LatestSignedState =
 /** An event to find: by its own ID, or as the one event about an object recorded once. */
 type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
 
+/** An event read back whole: its ID, its place in the chain, when it was recorded and what it says. */
+export interface ReadEvent {
+  readonly id: string;
+  readonly seq: bigint;
+  readonly recordedAt: Date;
+  readonly event: AuditEvent;
+}
+
 /**
  * One event, found by its ID or its object (recordedEvent):
  * - `none`: no event of the organisation's has that ID, or is about that object
@@ -126,14 +134,28 @@ type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSub
  */
 export type RecordedEventCheck =
   | { readonly kind: 'none' }
-  | {
-      readonly kind: 'recorded';
-      readonly id: string;
-      readonly seq: bigint;
-      readonly recordedAt: Date;
-      readonly event: AuditEvent;
-    }
+  | ({ readonly kind: 'recorded' } & ReadEvent)
   | { readonly kind: 'broken'; readonly seq?: bigint };
+
+/**
+ * Every event about objects of some types (recordedEvents), in chain order:
+ * `recorded`, each whole as recordedEvent believes one; or `broken`, at the
+ * first that isn't, or where the chain holds an event past its head.
+ */
+type RecordedEventsCheck =
+  | { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] }
+  | { readonly kind: 'broken'; readonly seq?: bigint };
+
+/**
+ * Thrown by recordedEvents for more events than its caller's limit: a
+ * history read whole or not at all, never cut short unseen.
+ */
+export class TooManyEventsToRead extends Error {
+  constructor(limit: number) {
+    super(`More than ${limit.toString()} events to read; the read is whole or not at all`);
+    this.name = 'TooManyEventsToRead';
+  }
+}
 
 /** The most events about an object, its newest signed one first, that one read takes. */
 const LATER_EVENTS_READ = 1000;
@@ -203,6 +225,20 @@ export interface AuditTrail {
    * organisation, like `verify`.
    */
   recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck>;
+  /**
+   * Every event of the organisation's about an object of `subjectTypes`, in
+   * chain order, each believed only whole as recordedEvent believes one, read
+   * with the chain's head in one statement: a history a decision rests on
+   * (who granted a member's role, ADR-012 §1). Past `limit` events it throws
+   * TooManyEventsToRead. An event deleted from the history is the chain's
+   * check's and anchor's to find, as for any read of the log. Only in
+   * withTenant's transaction for that organisation, like `verify`.
+   */
+  recordedEvents(
+    tx: AuditTransaction,
+    orgId: string,
+    find: { readonly subjectTypes: readonly string[]; readonly limit: number },
+  ): Promise<RecordedEventsCheck>;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -258,6 +294,76 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
     details as string,
   );
 }
+
+/**
+ * The events `which` picks, in chain order and at most `limit`, each beside
+ * the chain's head and the first event past it, all in one statement so they
+ * come from the same moment. With no event picked, one row with the head alone.
+ */
+async function eventsWithHead(
+  tx: AuditTransaction,
+  chain: Chain & { readonly kind: 'organisation' },
+  which: RawBuilder<unknown>,
+  limit: number,
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const { rows } = await sql<Record<string, unknown>>`
+    select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
+           h.mac_key_version as head_mac_key_version, past.past_head,
+           e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
+           e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
+           e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
+    from (values (1)) as one (x)
+    left join audit.heads h on h.org_id = ${chain.orgId}
+    cross join lateral (
+      select pg_catalog.min(p.seq) as past_head from audit.events p
+      where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
+    ) as past
+    left join lateral (
+      select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit ${limit}
+    ) as e on true
+    order by e.seq
+  `.execute(tx);
+  return rows;
+}
+
+/** The event a row holds, if it is whole: readable, sealed by its own hash and MAC, and no later than `head`, itself whole. */
+function wholeEvent(
+  keys: KeyProvider,
+  chain: Chain,
+  row: Readonly<Record<string, unknown>>,
+  head: ChainHead | undefined,
+): ReadEvent | undefined {
+  const sealed = sealedFields(row);
+  const content = contentOf(row);
+  const details = detailsObject(row.details);
+  if (
+    sealed === undefined ||
+    content === undefined ||
+    details === undefined ||
+    head === undefined ||
+    sealed.seq > head.seq ||
+    !entryIsSealed(keys, chain, { ...sealed, content })
+  ) {
+    return undefined;
+  }
+  // contentOf read each of these as text, and the version as a number, or the row wasn't whole.
+  const { actor_type: actorType, actor_id: actorId, action, subject_type: type, subject_id: subjectId } = row;
+  return Object.freeze({
+    id: sealed.id,
+    seq: sealed.seq,
+    recordedAt: sealed.recordedAt,
+    event: Object.freeze({
+      actor: { type: actorType as ActorType, id: String(actorId) },
+      action: String(action),
+      subject: { type: String(type), id: String(subjectId), version: Number(row.subject_version) },
+      details: Object.freeze({ ...details }) as AuditEvent['details'],
+    }),
+  });
+}
+
+/** A read that can't be believed, at the row's place when it could be read. */
+const brokenAt = (row: Readonly<Record<string, unknown>>): { readonly kind: 'broken'; readonly seq?: bigint } =>
+  typeof row.seq === 'bigint' ? { kind: 'broken', seq: row.seq } : { kind: 'broken' };
 
 /** Recording's steps over the audit tables, for one organisation and one event. */
 function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, details: string): ChainWriter {
@@ -569,53 +675,42 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       }
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      // One statement, so the head and the event come from the same moment.
-      const { rows } = await sql<Record<string, unknown>>`
-        select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-               h.mac_key_version as head_mac_key_version, past.past_head,
-               e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-               e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-               e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
-        from (values (1)) as one (x)
-        left join audit.heads h on h.org_id = ${chain.orgId}
-        cross join lateral (
-          select pg_catalog.min(p.seq) as past_head from audit.events p
-          where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-        ) as past
-        left join lateral (
-          select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit 1
-        ) as e on true
-      `.execute(tx);
-      const [row] = rows;
+      const [row] = await eventsWithHead(tx, chain, which, 1);
       const past = row?.past_head;
       if (typeof past === 'bigint') return { kind: 'broken', seq: past };
       if (row === undefined || row.seq === null) return { kind: 'none' };
       const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
-      const sealed = sealedFields(row);
-      const content = contentOf(row);
-      const details = detailsObject(row.details);
-      if (
-        sealed === undefined ||
-        content === undefined ||
-        details === undefined ||
-        head === undefined ||
-        !entryIsSealed(keys, chain, { ...sealed, content })
-      ) {
-        return typeof row.seq === 'bigint' ? { kind: 'broken', seq: row.seq } : { kind: 'broken' };
+      const read = wholeEvent(keys, chain, row, head);
+      if (read === undefined) return brokenAt(row);
+      return Object.freeze({ kind: 'recorded', ...read });
+    },
+
+    async recordedEvents(
+      tx: AuditTransaction,
+      orgId: string,
+      { subjectTypes, limit }: { readonly subjectTypes: readonly string[]; readonly limit: number },
+    ): Promise<RecordedEventsCheck> {
+      // Any UUID stands in for the ID: only the types are checked here.
+      const problems = subjectTypes.flatMap((type) => subjectKeyProblems({ type, id: orgId }));
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      if (subjectTypes.length === 0) throw new RangeError('At least one subject type is read');
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      const rows = await eventsWithHead(tx, chain, sql`e.subject_type = any(${[...subjectTypes]}::text[])`, limit + 1);
+      const [first] = rows;
+      const past = first?.past_head;
+      if (typeof past === 'bigint') return { kind: 'broken', seq: past };
+      if (rows.length > limit) throw new TooManyEventsToRead(limit);
+      const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+      const events: ReadEvent[] = [];
+      for (const row of rows) {
+        if (row.seq === null) continue;
+        const read = wholeEvent(keys, chain, row, head);
+        if (read === undefined) return brokenAt(row);
+        events.push(read);
       }
-      const { actor_type: actorType, actor_id: actorId, action, subject_type: type, subject_id: subjectId } = row;
-      return Object.freeze({
-        kind: 'recorded',
-        id: sealed.id,
-        seq: sealed.seq,
-        recordedAt: sealed.recordedAt,
-        event: Object.freeze({
-          actor: { type: actorType as ActorType, id: String(actorId) },
-          action: String(action),
-          subject: { type: String(type), id: String(subjectId), version: Number(row.subject_version) },
-          details: Object.freeze({ ...details }) as AuditEvent['details'],
-        }),
-      });
+      return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });
     },
   });
   holdRecorders.set(trail, (tx, orgId, event) => recordAs(true, tx, orgId, event));
