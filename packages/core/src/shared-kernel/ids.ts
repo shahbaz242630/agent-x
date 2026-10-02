@@ -11,3 +11,6 @@ export interface IdGenerator {
 export const uuidV7Ids: IdGenerator = {
   next: () => v7(),
 };
+
+/** A UUID, as an ID the app made: any version, either case. */
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

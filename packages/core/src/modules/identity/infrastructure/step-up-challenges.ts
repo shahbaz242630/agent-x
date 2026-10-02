@@ -28,7 +28,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { PASSKEY_METHOD } from '../domain/step-up.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -145,7 +145,6 @@ export async function lockChallengesOf(tx: Transaction<IdentityTables>, userIds:
 /** A handle a challenge is opened or consumed on: the pool, or a change's own transaction, whatever else it can reach. */
 type Handle = Kysely<IdentityTables> | Transaction<IdentityTables>;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTION = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
 const ACTION_MAX = 64;
 const HASH_BYTES = 32;

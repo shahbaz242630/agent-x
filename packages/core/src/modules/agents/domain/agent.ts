@@ -14,7 +14,7 @@
 // keys may be given, and a request is allowed only what both the key's and
 // the agent's scopes hold, so narrowing an agent narrows its keys at once. A
 // key alone never grants spending: that is the mandate's (BR-03).
-import { defineStateMachine, visibleName } from '../../../shared-kernel/index.ts';
+import { DAY_MS, defineStateMachine, HOUR_MS, visibleName } from '../../../shared-kernel/index.ts';
 
 export const AGENT = defineStateMachine({
   name: 'agent',
@@ -120,8 +120,6 @@ export const isAgentName = (name: string): boolean => visibleName(name, MAX_NAME
 /** The longest a key lives (ADR-011 §1's maximum): a new key expires this many days after it is issued. */
 export const KEY_DAYS = 90;
 
-const DAY_MS = 86_400_000;
-
 /** When a key issued at `issuedAt` expires. */
 export const keyExpiresAt = (issuedAt: Date): Date => new Date(issuedAt.getTime() + KEY_DAYS * DAY_MS);
 
@@ -133,7 +131,7 @@ const KEY_OVERLAP_HOURS = 24;
  * expiry if that comes first, since an expiry is only ever brought forward.
  */
 export const rotatedKeyExpiresAt = (expiresAt: Date, now: Date): Date =>
-  new Date(Math.min(expiresAt.getTime(), now.getTime() + KEY_OVERLAP_HOURS * 3_600_000));
+  new Date(Math.min(expiresAt.getTime(), now.getTime() + KEY_OVERLAP_HOURS * HOUR_MS));
 
 /** Whether a key works at `now`: ACTIVE and not yet expired. */
 export const isLiveKey = (key: { readonly status: AgentKeyStatus; readonly expiresAt: Date }, now: Date): boolean =>

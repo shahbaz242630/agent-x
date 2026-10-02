@@ -53,6 +53,7 @@ import type { Clock } from '../../../shared-kernel/index.ts';
 import { isBreakGlassLogin } from '../domain/break-glass.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { checkEvidence, checkSubject, type SignInEvidence, type Subject } from '../domain/sign-in.ts';
+import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
 
 export interface OidcClientSettings {
@@ -169,28 +170,13 @@ function sameText(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-/** The body as text, refused past MOST_ANSWER_BYTES however the answer declares its length. */
-async function boundedText(response: Response): Promise<string> {
-  const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
-  if (reader === undefined) return '';
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MOST_ANSWER_BYTES) {
-      await reader.cancel();
-      throw new SignInFailed('provider_unavailable', `an answer was larger than ${MOST_ANSWER_BYTES} bytes`);
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
-
 /** A JSON object from the answer, or SignInFailed naming what was being read. */
 async function jsonObject(response: Response, what: string): Promise<Record<string, unknown>> {
-  const text = await boundedText(response);
+  const text = await boundedText(
+    response,
+    MOST_ANSWER_BYTES,
+    () => new SignInFailed('provider_unavailable', `an answer was larger than ${MOST_ANSWER_BYTES} bytes`),
+  );
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -232,19 +218,13 @@ export function createOidcClient({
   const { issuer, clientId, clientSecret, redirectUri, internalOrigin } = settings;
   const issuerOrigin = new URL(issuer).origin;
 
-  /**
-   * Where a call to the login service goes: the URL itself, or, with an
-   * internal origin, the same path and query there, naming the issuer's host
-   * to Zitadel. Every call is on the issuer's own origin: the discovery
-   * document's, and the endpoints `endpoint` has held to it.
-   */
-  function routed(url: string, init: RequestInit): [string, RequestInit] {
-    return routedToIssuer(issuer, internalOrigin, url, init);
-  }
-
   /** A call to the login service, bounded in time; a network failure is the provider's. */
   async function call(url: string, init: RequestInit = {}): Promise<Response> {
-    const [to, sent] = routed(url, init);
+    // Where the call goes: the URL itself, or, with an internal origin, the
+    // same path and query there, naming the issuer's host to Zitadel. Every
+    // call is on the issuer's own origin: the discovery document's, and the
+    // endpoints `endpoint` has held to it.
+    const [to, sent] = routedToIssuer(issuer, internalOrigin, url, init);
     try {
       return await fetch(to, { ...sent, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     } catch (error) {

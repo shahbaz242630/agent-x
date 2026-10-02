@@ -59,7 +59,7 @@ import { listedPersonOf, moveReset, resetForChange, resetRecord, resetsOf } from
 import type { SecondFactorRemover } from './idp-factors.ts';
 import { memberOf } from './memberships.ts';
 import { SECOND_FACTORS_REMOVED } from './removal-restriction.ts';
-import { toldOfReset } from './reset-changes.ts';
+import { toldOfReset } from './grant-notices.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { lockChallengesOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';

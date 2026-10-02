@@ -7,7 +7,7 @@
 // passed (COMPLETED), so the people told have time to stop it: any admin may
 // cancel until then (CANCELLED). A reset no contact confirms in time lapses
 // (EXPIRED). The database's status guard holds the same moves (0025).
-import { defineStateMachine } from '../../../shared-kernel/index.ts';
+import { defineStateMachine, HOUR_MS } from '../../../shared-kernel/index.ts';
 
 export const FACTOR_RESET = defineStateMachine({
   name: 'factor_reset',
@@ -47,8 +47,6 @@ export const RESET_COOLING_OFF_HOURS = 24;
  * for good.
  */
 export const MOST_RESETS_ASKED_A_DAY = 20;
-
-const HOUR_MS = 3_600_000;
 
 /** When a reset asked at `askedAt` lapses, if no contact has confirmed it. */
 export const resetExpiresAt = (askedAt: Date): Date => new Date(askedAt.getTime() + RESET_CONFIRM_HOURS * HOUR_MS);

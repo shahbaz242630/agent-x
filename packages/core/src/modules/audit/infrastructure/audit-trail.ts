@@ -63,7 +63,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
 import { type Kysely, type RawBuilder, sql, type Transaction } from 'kysely';
 
-import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
+import { canonicalDetails, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
   type ActorType,
   type AuditEvent,
@@ -77,8 +77,6 @@ import {
 import { HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
 export type AuditTransaction = Transaction<AuditTables>;
 
@@ -86,6 +84,12 @@ export interface RecordedAuditEvent {
   readonly id: string;
   readonly seq: bigint;
   readonly recordedAt: Date;
+}
+
+/** A read that can't be believed: `seq` is where, when it could be read. */
+interface BrokenRead {
+  readonly kind: 'broken';
+  readonly seq?: bigint;
 }
 
 /**
@@ -102,12 +106,6 @@ export interface RecordedAuditEvent {
  *   Someone past the app changed or forged it. `seq` is where, when it could
  *   be read.
  */
-/** A read that can't be believed: `seq` is where, when it could be read. */
-interface BrokenRead {
-  readonly kind: 'broken';
-  readonly seq?: bigint;
-}
-
 export type LatestSignedState =
   | { readonly kind: 'none' }
   | {

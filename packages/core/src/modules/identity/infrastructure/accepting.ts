@@ -58,6 +58,7 @@ import {
 } from './memberships.ts';
 import { sessionEmailOf } from './session-emails.ts';
 import type { IdentityTables } from './tables.ts';
+import { Refusal } from './refusals.ts';
 
 /** The route's operation. */
 export const ACCEPT_OPERATION = 'invitations.accept';
@@ -148,15 +149,10 @@ export interface InvitationAcceptance {
 }
 
 /** A refusal inside the write: thrown, so the claim and all the write did roll back. */
-class AcceptanceRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class AcceptanceRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`an invitation's acceptance refused: ${code}`);
+    super(`an invitation's acceptance refused: ${code}`, status, code);
     this.name = 'AcceptanceRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 

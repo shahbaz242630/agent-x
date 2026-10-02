@@ -45,10 +45,10 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedElsewhere, listedMember, listedMembership } from '../../directory/index.ts';
-import type { Notice, NoticeKind, NotificationsTables, Outbox } from '../../notifications/index.ts';
+import type { Notice, NotificationsTables, Outbox } from '../../notifications/index.ts';
 import {
   confirmableAt,
   hasLapsed,
@@ -77,8 +77,8 @@ import { memberOf, type MemberRecord, type MembershipsTransaction } from './memb
 import { contactsOf, TooManyContacts } from './registered-contacts.ts';
 import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-
-const DAY_MS = 86_400_000;
+import { toldOfReset } from './grant-notices.ts';
+import { Refusal } from './refusals.ts';
 
 /** Asking for a reset: its operation, which the step-up challenge names as its action too. */
 export const RESET_ASK_OPERATION = 'resets.ask';
@@ -126,15 +126,10 @@ export interface ResetChanges {
   list(orgId: string, correlationId: string): Promise<ResetsList>;
 }
 
-class ResetRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ResetRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`a reset's change refused: ${code}`);
+    super(`a reset's change refused: ${code}`, status, code);
     this.name = 'ResetRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -145,20 +140,6 @@ interface People {
   readonly adminId: string;
   readonly person: MemberRecord;
 }
-
-/**
- * The notices about a reset of the person's second factor: to them, as
- * themselves, and to the organisation's admins but them, found as they are
- * sent; and to its ACTIVE contacts once it was sent to them.
- */
-export const toldOfReset = (orgId: string, kind: NoticeKind, personUserId: string, toContacts: boolean): Notice[] => {
-  const about = { orgId, kind, membershipId: null, role: null, aboutId: personUserId } as const;
-  return [
-    { ...about, recipientUserId: personUserId },
-    { ...about, recipientUserId: null },
-    ...(toContacts ? [{ ...about, recipientUserId: null, toContacts: true }] : []),
-  ];
-};
 
 /** Each contact's own link to confirm the reset, read at send time (0026). */
 const linksTo = (orgId: string, resetId: string, contactIds: readonly string[]): Notice[] =>

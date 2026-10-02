@@ -19,7 +19,7 @@
 //   confirmed the details (partner, S74). Their note says who they spoke to
 //   and what was confirmed, never a number to call or to pay: it is kept in
 //   the audit trail for good, where no account number may be (SEC-PAY-05).
-import { type ReasonCode, visibleName } from '../../../shared-kernel/index.ts';
+import { DAY_MS, type ReasonCode, visibleName } from '../../../shared-kernel/index.ts';
 import type { NameCheck } from './registration.ts';
 import type { SupplierStatus } from './supplier.ts';
 
@@ -27,8 +27,6 @@ import type { SupplierStatus } from './supplier.ts';
 export const CALL_BACK_UNCHANGED_DAYS = 30;
 /** The most characters a call-back note may have. */
 export const CALL_NOTE_MOST = 500;
-
-const DAY_MS = 86_400_000;
 
 /** Why a supplier can't be verified now, its people aside. */
 export type VerificationProblem = Extract<

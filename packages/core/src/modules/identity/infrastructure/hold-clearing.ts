@@ -45,9 +45,10 @@ import {
   withSignedStates,
 } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
-import { membershipOf, type MembershipsTransaction } from './memberships.ts';
+import type { MembershipsTransaction } from './memberships.ts';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { activeAdminId, Refusal } from './refusals.ts';
 
 /** Asking to clear: its operation, which the step-up challenge names as its action too. */
 export const CLEAR_OPERATION = 'integrity-hold.clear';
@@ -94,15 +95,10 @@ export interface HoldClearings {
   ): Promise<ClearingWrite>;
 }
 
-class ClearingRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ClearingRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`a clearing of the integrity hold refused: ${code}`);
+    super(`a clearing of the integrity hold refused: ${code}`, status, code);
     this.name = 'ClearingRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -133,13 +129,6 @@ export function createHoldClearings({
 }): HoldClearings {
   if (authorityTables.length === 0) throw new RangeError('Clearing checks every authority table first');
   const trail = createAuditTrail({ keys, ids });
-
-  /** The person's membership, read again for this decision: active and an admin, or a refusal. */
-  const mustBeAdmin = async (tx: MembershipsTransaction, states: SignedStates, admin: ClearingAdmin): Promise<void> => {
-    const membership = await membershipOf(tx, states, admin.orgId, admin.userId);
-    if (membership.outcome === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || membership.role !== 'admin') throw new ClearingRefused(403, 'FORBIDDEN');
-  };
 
   /** The hold's HELD state, the event it was recorded by: or a refusal. */
   const heldEventOf = async (tx: MembershipsTransaction, states: SignedStates, orgId: string): Promise<string> => {
@@ -176,7 +165,7 @@ export function createHoldClearings({
   return {
     async ask(admin, idempotent, investigationId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
-        await mustBeAdmin(tx, states, admin);
+        await activeAdminId(tx, states, admin, ClearingRefused);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
         const investigation = await states.holdInvestigation(tx, admin.orgId, investigationId);
         if (investigation.outcome === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
@@ -210,7 +199,7 @@ export function createHoldClearings({
           });
           throw new ClearingRefused(503, 'INTEGRITY_FAILED');
         }
-        await mustBeAdmin(tx, states, admin);
+        await activeAdminId(tx, states, admin, ClearingRefused);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
         const consumed = await challenges.consume(
           tx,
