@@ -59,8 +59,12 @@ export interface VerificationFacts {
   readonly note: string | null;
 }
 
-/** Seven digits or more in a run, spaces, dots, dashes or slashes between them allowed: a phone, card or account number. */
-const LONG_NUMBER = /\d(?:[\s./-]*\d){6}/u;
+/**
+ * Seven digits or more in a run, of any script (Arabic-Indic and fullwidth
+ * too), spaces, dots, dashes, slashes or brackets between them allowed: a
+ * phone, card or account number.
+ */
+const LONG_NUMBER = /\p{Nd}(?:[\s./()-]*\p{Nd}){6}/u;
 
 /**
  * Whether a call-back note is one: 1 to 500 readable characters, no

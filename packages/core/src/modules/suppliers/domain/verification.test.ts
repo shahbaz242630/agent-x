@@ -113,10 +113,18 @@ describe('a call-back note', () => {
       'IBAN AE07 0331 2345',
       'ref 12-34-567',
       'a 1.2.3.4.5.6.7',
+      '(050) 123 4567',
+      // In Arabic-Indic digits (the confirmation review).
+      '٠٥٠١٢٣٤',
     ]) {
       expect(callNote(note).problems).toEqual(refused);
     }
-    for (const note of ['Spoke to Sara at 10:30 on 2 Oct', 'Invoice 123456 matched', 'Ext 12, then 345']) {
+    for (const note of [
+      'Spoke to Sara at 10:30 on 2 Oct',
+      'Invoice 123456 matched',
+      'Ext 12, then 345',
+      'Called 10:30, 11:00',
+    ]) {
       expect(callNote(note).problems).toEqual([]);
     }
   });

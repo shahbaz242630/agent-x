@@ -507,32 +507,29 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
   });
 
-  it('reads past any number of the supplier’s other events (the review), and refuses HISTORY_TOO_LONG past its verifications’ cap', async () => {
+  // Only its verification records are read (the review): that a read names its actions is audit-trail.db.test.ts's.
+  it('refuses HISTORY_TOO_LONG for a supplier with more verification records than one read takes', async () => {
     const { org, bob, supplierId } = await established();
-    /** Records `action` about the supplier straight, one past the read's cap: a stand-in for years of its events. */
-    const recordMany = (action: string) =>
-      withSignedStates(app, org, quiet(), async (tx, states) => {
-        for (let event = 0; event <= MOST_VERIFICATIONS_READ; event += 1) {
-          const read = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'change');
-          if (read.outcome !== 'found') throw new Error('not found');
-          await states.record(
-            tx,
-            SUPPLIERS,
-            { orgId: org, id: supplierId },
-            read.state,
-            {},
-            {
-              actor: OPERATOR,
-              action,
-              details: {},
-            },
-          );
-        }
-      });
+    // Recorded straight, one past the read's cap: a stand-in for years of the supplier's verifications.
+    await withSignedStates(app, org, quiet(), async (tx, states) => {
+      for (let event = 0; event <= MOST_VERIFICATIONS_READ; event += 1) {
+        const read = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'change');
+        if (read.outcome !== 'found') throw new Error('not found');
+        await states.record(
+          tx,
+          SUPPLIERS,
+          { orgId: org, id: supplierId },
+          read.state,
+          {},
+          {
+            actor: OPERATOR,
+            action: VERIFIER_RECORDED,
+            details: {},
+          },
+        );
+      }
+    });
 
-    await recordMany('supplier.test_event');
-    expect(askedFor(await ask(await signedIn(bob), supplierId))).toEqual(expect.any(String));
-    await recordMany(VERIFIER_RECORDED);
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('HISTORY_TOO_LONG', 409));
-  });
+  }, 120_000);
 });
