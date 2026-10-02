@@ -484,6 +484,9 @@ async function move(
  * not UNVERIFIED, is refused (RangeError) before any SQL runs. Gives the
  * supplier as it now stands.
  */
+/** The supplier's record of a verification: it names the version verified, which verifying reads back (E3-2a). */
+export const VERIFIER_RECORDED = 'supplier.verifier_recorded';
+
 export async function verifySupplier(
   tx: SuppliersTransaction,
   states: SignedStates,
@@ -498,7 +501,7 @@ export async function verifySupplier(
   const verified = { verified_by: verifiedBy, verified_version_id: supplier.currentVersionId };
   await states.record(tx, SUPPLIERS, key, found.state, verified, {
     actor: change.actor,
-    action: 'supplier.verifier_recorded',
+    action: VERIFIER_RECORDED,
     details: { ...change.details, verifiedVersionId: supplier.currentVersionId },
   });
   await move(tx, states, key, 'verify', change);

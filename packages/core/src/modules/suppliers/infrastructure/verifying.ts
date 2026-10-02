@@ -6,10 +6,11 @@
 // verify the phone they entered; and not every version ever, or two members
 // who have each changed a supplier once could never verify it again.
 //
-// When it was last verified is read from the supplier's own history in the
-// log, each event believed only whole (a verification's record names the
-// version verified), since a change of its details clears the verified
-// version from its row. Each version is then found by its number and read
+// When it was last verified is read from the supplier's own records of its
+// verifications in the log, each believed only whole (each names the version
+// verified), since a change of its details clears the verified version from
+// its row. Only those records: its other events, which members can add many
+// of (suspending, reactivating), never fill the read (E3-2a's review). Each version is then found by its number and read
 // through its signed state; numbers run on with no gap (each one past the
 // highest, nextVersionNumber), so one missing was removed past the app.
 import type { SignedStates, TamperSign } from '../../audit/index.ts';
@@ -18,17 +19,19 @@ import {
   SUPPLIERS,
   type SupplierRecord,
   type SuppliersTransaction,
+  VERIFIER_RECORDED,
   versionOf,
   type VersionRecord,
 } from './suppliers.ts';
 
-/** The most versions since the last verification one read takes: past it, refused rather than decided on part. */
-export const MOST_VERSIONS_TO_VERIFY = 200;
-/** The most events about one supplier one read takes: past it, the read throws (TooManyEventsToRead). */
-export const MOST_SUPPLIER_EVENTS = 1000;
-
-/** The supplier's record of a verification: it names the version verified. */
-const VERIFIER_RECORDED = 'supplier.verifier_recorded';
+/**
+ * The most versions since the last verification one read takes: past it,
+ * refused rather than decided on part. Each payee registration makes one, at
+ * most 100 a day for the whole organisation (E2-1).
+ */
+export const MOST_VERSIONS_TO_VERIFY = 1000;
+/** The most verifications of one supplier one read takes: past it, the read throws (TooManyEventsToRead). */
+export const MOST_VERIFICATIONS_READ = 1000;
 
 /**
  * What verifying reads: the first version and every version since the last
@@ -55,10 +58,11 @@ async function lastVerifiedNumber(
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SUPPLIERS.subject],
     subjectId: supplierId,
-    limit: MOST_SUPPLIER_EVENTS,
+    actions: [VERIFIER_RECORDED],
+    limit: MOST_VERIFICATIONS_READ,
   });
   if (history.outcome === 'tampered') return history;
-  const verified = history.events.findLast(({ event }) => event.action === VERIFIER_RECORDED);
+  const verified = history.events.at(-1);
   if (verified === undefined) return 0;
   // verifySupplier records the version it verified, its supplier's own (0032's key), on every verification.
   const id = String(verified.event.details.verifiedVersionId);
@@ -105,7 +109,8 @@ export async function versionsToVerify(
     if (version.outcome === 'found') read.push(version.version);
   }
   // Each number once, with no gap: the first, then every one past the last verified up to the current.
-  const wanted = [...new Set([1, ...Array.from({ length: current.version - last }, (_, at) => last + 1 + at)])];
+  const after = Array.from({ length: current.version - last }, (_, at) => last + 1 + at);
+  const wanted = last === 0 ? after : [1, ...after];
   const numbers = read.map(({ version }) => version);
   const [first] = read;
   if (first === undefined || numbers.length !== wanted.length || numbers.some((number, at) => number !== wanted[at])) {

@@ -9,14 +9,17 @@
 // - The partner's name check didn't say "no match"; any answer short of a
 //   match (partial, unavailable, none) needs the verifier's written note of
 //   the call-back (partner, S69 and S74).
-// - The call-back went to a phone unchanged for 30 days, or, for a phone the
-//   supplier has had since it was added, one taken from its independent
-//   source (a registry or its official website), never from an invoice or the
-//   person entering it (ADR-012 §1: "unchanged for N days" applies when an
-//   existing supplier's contact changes).
+// - The call-back went to a phone unchanged for 30 days, or to the phone the
+//   supplier has had since it was added, which its enterer recorded as taken
+//   from its independent source (a registry or its official website; ADR-012
+//   §1: "unchanged for N days" applies when an existing supplier's contact
+//   changes). Agent X can't check where that phone came from: the verifier's
+//   tick and the call itself are what does.
 // - The verifier ticked that they called the number on file and the supplier
-//   confirmed the details (partner, S74).
-import { visibleName } from '../../../shared-kernel/index.ts';
+//   confirmed the details (partner, S74). Their note says who they spoke to
+//   and what was confirmed, never a number to call or to pay: it is kept in
+//   the audit trail for good, where no account number may be (SEC-PAY-05).
+import { type ReasonCode, visibleName } from '../../../shared-kernel/index.ts';
 import type { NameCheck } from './registration.ts';
 import type { SupplierStatus } from './supplier.ts';
 
@@ -28,14 +31,16 @@ export const CALL_NOTE_MOST = 500;
 const DAY_MS = 86_400_000;
 
 /** Why a supplier can't be verified now, its people aside. */
-export type VerificationProblem =
+export type VerificationProblem = Extract<
+  ReasonCode,
   | 'SUPPLIER_NOT_UNVERIFIED'
   | 'SUPPLIER_CHANGE_WAITING'
   | 'SUPPLIER_NO_PAYEE'
   | 'SUPPLIER_COOLING_OFF'
   | 'SUPPLIER_NAME_MISMATCH'
   | 'SUPPLIER_CALL_NOTE_NEEDED'
-  | 'SUPPLIER_PHONE_TOO_NEW';
+  | 'SUPPLIER_PHONE_TOO_NEW'
+>;
 
 /** What verifying rests on: the supplier, its current version and payee, its first version, and the verifier's call-back. */
 export interface VerificationFacts {
@@ -54,10 +59,17 @@ export interface VerificationFacts {
   readonly note: string | null;
 }
 
-/** Whether a call-back note is one: 1 to 500 readable characters, no controls; composed (NFC) as it is kept. */
+/** Seven digits or more in a run, spaces, dots, dashes or slashes between them allowed: a phone, card or account number. */
+const LONG_NUMBER = /\d(?:[\s./-]*\d){6}/u;
+
+/**
+ * Whether a call-back note is one: 1 to 500 readable characters, no
+ * controls, and no long number in it; composed (NFC) as it is kept.
+ */
 export function callNote(note: string): { readonly note: string; readonly problems: readonly string[] } {
-  const { name, problems } = visibleName(note, CALL_NOTE_MOST);
-  return { note: name, problems: problems.map((problem) => problem.replace('the name', 'the note')) };
+  const { name, problems } = visibleName(note, CALL_NOTE_MOST, 'the note');
+  if (LONG_NUMBER.test(name)) problems.push('the note holds a long number: leave phone and account numbers out');
+  return { note: name, problems };
 }
 
 /**

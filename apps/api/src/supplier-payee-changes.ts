@@ -34,7 +34,7 @@
 // the first event recorded, then the notices, new rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import type { Notice, Outbox } from '@agentx/core/modules/notifications';
+import type { Outbox } from '@agentx/core/modules/notifications';
 import {
   confirmPayeeChange,
   isPayeeTaken,
@@ -55,6 +55,7 @@ import {
   SupplierRefused,
   type SupplierTables,
   type SupplierTx,
+  toldEveryone,
 } from './supplier-work.ts';
 
 /** Asking to confirm the change waiting: its operation, which the step-up challenge names as its action too. */
@@ -97,15 +98,6 @@ export interface SupplierPayeeChanges {
  */
 const approvalHash = (pendingVersionId: string): Buffer =>
   changeHashOf([PAYEE_APPROVE_OPERATION, pendingVersionId.toLowerCase()]);
-
-/** The notice of a payee change, for every active member and for the contacts that count, as the sender finds them. */
-const toldOfPayeeChange = (orgId: string, supplierId: string): Notice[] => {
-  const about = { orgId, kind: 'supplier_payee_changed' as const, membershipId: null, role: null, aboutId: supplierId };
-  return [
-    { ...about, recipientUserId: null },
-    { ...about, recipientUserId: null, toContacts: true },
-  ];
-};
 
 export function createSupplierPayeeChanges({
   database,
@@ -194,7 +186,7 @@ export function createSupplierPayeeChanges({
               coolingOffUntil: new Date(clock.now().getTime() + PAYEE_COOLING_OFF_MS),
             },
           );
-          await outbox.add(tx, toldOfPayeeChange(orgId, found.supplier.id));
+          await outbox.add(tx, toldEveryone(orgId, found.supplier.id, 'supplier_payee_changed'));
           return { status: 200, resourceId: found.supplier.id };
         });
       } catch (error) {

@@ -41,19 +41,23 @@ const STACKED = /(?:^\p{M})|\p{M}{5}/u;
  * being one: it must be 1 to `most` visible characters (code points, as a
  * table's char_length counts them), with a letter or digit, no space at
  * either end, and no more than four combining marks on one character. The
- * problems say why, never what it was.
+ * problems say why, never what it was, naming it as `what`.
  */
-export function visibleName(name: string, most: number): { readonly name: string; readonly problems: string[] } {
+export function visibleName(
+  name: string,
+  most: number,
+  what = 'the name',
+): { readonly name: string; readonly problems: string[] } {
   const composed = name.normalize('NFC');
   const problems: string[] = [];
   const length = Array.from(composed).length;
-  if (length === 0 || length > most) problems.push(`the name is 1 to ${String(most)} characters`);
+  if (length === 0 || length > most) problems.push(`${what} is 1 to ${String(most)} characters`);
   if (INVISIBLE.test(composed.replace(JOINER_IN_A_WORD, ''))) {
-    problems.push('the name holds a control, format, invisible or unassigned character');
+    problems.push(`${what} holds a control, format, invisible or unassigned character`);
   }
-  if (composed.trim() !== composed) problems.push('the name starts or ends with a space');
-  if (!READABLE.test(composed)) problems.push('the name has no letter or digit');
+  if (composed.trim() !== composed) problems.push(`${what} starts or ends with a space`);
+  if (!READABLE.test(composed)) problems.push(`${what} has no letter or digit`);
   if (STACKED.test(composed.replace(JOINERS, '')))
-    problems.push('the name starts with a combining mark, or stacks more than 4 on one');
+    problems.push(`${what} starts with a combining mark, or stacks more than 4 on one`);
   return { name: composed, problems };
 }

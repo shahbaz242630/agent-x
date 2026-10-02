@@ -10,7 +10,7 @@
 import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
-import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
 import {
   contactsOf,
   type NameCheck,
@@ -100,6 +100,19 @@ export type SupplierChangeWrite =
   | { readonly outcome: 'conflict' }
   | { readonly outcome: 'busy' }
   | Refused;
+
+/** A notice about a supplier, for every active member and for the contacts that count, as the sender finds them. */
+export const toldEveryone = (
+  orgId: string,
+  supplierId: string,
+  kind: 'supplier_payee_changed' | 'supplier_verified',
+): Notice[] => {
+  const about = { orgId, kind, membershipId: null, role: null, aboutId: supplierId };
+  return [
+    { ...about, recipientUserId: null },
+    { ...about, recipientUserId: null, toContacts: true },
+  ];
+};
 
 /** A supplier read for a decision or a change: its record, and the state a change records from. */
 type SupplierFound = Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>;

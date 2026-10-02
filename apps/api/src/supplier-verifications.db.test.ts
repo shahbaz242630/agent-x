@@ -22,12 +22,13 @@ import { createOutbox, type NotificationsTables } from '@agentx/core/modules/not
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
-  MOST_SUPPLIER_EVENTS,
+  MOST_VERIFICATIONS_READ,
   PAYEE_COOLING_OFF_MS,
   SUPPLIERS,
   type SupplierDetails,
   supplierOf,
   type SuppliersTables,
+  VERIFIER_RECORDED,
 } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -177,21 +178,29 @@ const askedFor = (write: SupplierChangeWrite): string => {
 };
 
 /**
- * A supplier added by `admin`, its bank details (`account`) registered
- * through the partner's form typed as `name` and confirmed with the admin's passkey: its
+ * A supplier added (by `adder`, or the admin), its bank details (`account`)
+ * registered by `admin` through the partner's form typed as `name`, checked
+ * (by `checker`, or the admin) and confirmed with the admin's passkey: its
  * 24 h cooling-off begun.
  */
-async function payable(adminPerson: Person, name = HOLDER, account: Account = JASMINE): Promise<string> {
+async function payable(
+  adminPerson: Person,
+  name = HOLDER,
+  account: Account = JASMINE,
+  { adder = adminPerson, checker = adminPerson }: { adder?: Person; checker?: Person } = {},
+): Promise<string> {
   const admin = await signedIn(adminPerson);
-  const added = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
+  const adding = await signedIn(adder);
+  const checking = await signedIn(checker);
+  const added = await registry.add(adding, keyed(adding, ADD_OPERATION), DETAILS, CORRELATION);
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
   const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name, iban: ibanOf(account) });
   const checked = await payees.check(
-    admin,
-    keyed(admin, PAYEE_CHECK_OPERATION),
+    checking,
+    keyed(checking, PAYEE_CHECK_OPERATION),
     supplierId,
     started.registration.id,
     CORRELATION,
@@ -258,17 +267,19 @@ const verifiedNotices = (org: string) =>
       .execute(),
   );
 
-/** The organisation's events about the supplier, oldest first. */
-const eventsAbout = (org: string, id: string) =>
-  withTenant(app, org, (tx) =>
+/** The supplier's record of its verification: who verified it, and the details kept. */
+const recordedOf = async (org: string, id: string) => {
+  const row = await withTenant(app, org, (tx) =>
     tx
       .selectFrom('audit.events')
-      .select(['action', 'actor_id', 'details'])
+      .select(['actor_id', 'details'])
       .where('subject_type', '=', 'supplier')
       .where('subject_id', '=', id)
-      .orderBy('seq')
-      .execute(),
+      .where('action', '=', VERIFIER_RECORDED)
+      .executeTakeFirst(),
   );
+  return { actorId: row?.actor_id, details: JSON.parse(row?.details ?? '{}') as unknown };
+};
 
 const refusedWith = (code: string, status?: number) =>
   expect.objectContaining({ outcome: 'refused', code, ...(status === undefined ? {} : { status }) }) as unknown;
@@ -294,12 +305,18 @@ beforeEach(() => {
   verifications = createSupplierVerifications({ ...services, challenges: challenges(), outbox });
 });
 
-/** An organisation whose admin Alice and approver Bob have been members 15 days, with a supplier Alice made payable a day ago. */
-async function established() {
+/** An organisation whose admin Alice and approver Bob have been members 15 days. */
+async function team() {
   const org = await organization();
   const alice = await member(org, 'admin');
   const bob = await member(org, 'approver');
   clock.advanceBy(15 * DAY_MS);
+  return { org, alice, bob };
+}
+
+/** The team, with a supplier Alice made payable, cooled off since. */
+async function established() {
+  const { org, alice, bob } = await team();
   const supplierId = await payable(alice);
   clock.advanceBy(PAYEE_COOLING_OFF_MS);
   return { org, alice, bob, supplierId };
@@ -318,9 +335,9 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     const supplier = await supplierNow(org, supplierId);
     expect(supplier).toMatchObject({ status: 'VERIFIED', verifiedBy: bob.membershipId });
     expect(supplier.verifiedVersionId).toBe(supplier.currentVersionId);
-    const recorded = (await eventsAbout(org, supplierId)).find(({ action }) => action === 'supplier.verifier_recorded');
-    expect(recorded?.actor_id).toBe(bob.userId);
-    expect(JSON.parse(recorded?.details ?? '{}')).toMatchObject({
+    const recorded = await recordedOf(org, supplierId);
+    expect(recorded.actorId).toBe(bob.userId);
+    expect(recorded.details).toMatchObject({
       path: 'two_person',
       calledBack: true,
       nameCheck: 'match',
@@ -339,6 +356,20 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(await supplierNow(org, supplierId)).toMatchObject({ status: 'UNVERIFIED' });
   });
 
+  it('holds apart everyone who entered its details: who added it, and who started its payee, whoever checked (the review)', async () => {
+    const { org, alice } = await team();
+    const carol = await member(org, 'admin');
+    const dan = await member(org, 'admin');
+    clock.advanceBy(15 * DAY_MS);
+    const supplierId = await payable(alice, HOLDER, JASMINE, { adder: carol, checker: dan });
+    clock.advanceBy(PAYEE_COOLING_OFF_MS);
+
+    for (const enterer of [alice, carol]) {
+      expect(await ask(await signedIn(enterer), supplierId)).toEqual(refusedWith('VERIFIER_ENTERED_DETAILS', 403));
+    }
+    expect(await verified(dan, supplierId)).toMatchObject({ supplier: { status: 'VERIFIED' } });
+  });
+
   it('takes the single-user path in an organisation of one: its own admin, once cooled off', async () => {
     const org = await organization();
     const alice = await member(org, 'admin');
@@ -346,8 +377,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     clock.advanceBy(PAYEE_COOLING_OFF_MS);
 
     expect(await verified(alice, supplierId)).toMatchObject({ outcome: 'changed', supplier: { status: 'VERIFIED' } });
-    const recorded = (await eventsAbout(org, supplierId)).find(({ action }) => action === 'supplier.verifier_recorded');
-    expect(JSON.parse(recorded?.details ?? '{}')).toMatchObject({ path: 'single_user' });
+    expect((await recordedOf(org, supplierId)).details).toMatchObject({ path: 'single_user' });
   });
 
   it('refuses a member under 14 days while another is eligible, and a viewer or developer at all', async () => {
@@ -362,10 +392,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
   });
 
   it('refuses one still cooling off, to the millisecond, and one with no bank details', async () => {
-    const org = await organization();
-    const alice = await member(org, 'admin');
-    const bob = await member(org, 'approver');
-    clock.advanceBy(15 * DAY_MS);
+    const { alice, bob } = await team();
     const supplierId = await payable(alice);
     clock.advanceBy(PAYEE_COOLING_OFF_MS - 1);
     const signedBob = await signedIn(bob);
@@ -381,10 +408,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
   });
 
   it('refuses a "no match" name check whatever the note, and needs a note for a partial one (partner, S69, S74)', async () => {
-    const org = await organization();
-    const alice = await member(org, 'admin');
-    const bob = await member(org, 'approver');
-    clock.advanceBy(15 * DAY_MS);
+    const { org, alice, bob } = await team();
     const [first = ''] = holderOf(OTHER).split(' ');
     const mismatched = await payable(alice, 'Zeta Trading LLC');
     const partial = await payable(alice, `${first} Somebody Else`, OTHER);
@@ -394,8 +418,7 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(await ask(signedBob, mismatched, NOTE)).toEqual(refusedWith('SUPPLIER_NAME_MISMATCH', 409));
     expect(await ask(signedBob, partial)).toEqual(refusedWith('SUPPLIER_CALL_NOTE_NEEDED', 409));
     expect(await verified(bob, partial, { note: NOTE })).toMatchObject({ supplier: { status: 'VERIFIED' } });
-    const recorded = (await eventsAbout(org, partial)).find(({ action }) => action === 'supplier.verifier_recorded');
-    expect(JSON.parse(recorded?.details ?? '{}')).toMatchObject({ nameCheck: 'partial', callBackNote: NOTE });
+    expect((await recordedOf(org, partial)).details).toMatchObject({ nameCheck: 'partial', callBackNote: NOTE });
   });
 
   it('SEC-HA-12 refuses a step-up made with an app code, verifying nothing and telling no one', async () => {
@@ -449,6 +472,28 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
   });
 
+  it('refuses INTEGRITY_FAILED for a version removed past the app, and logs it by IDs alone', async () => {
+    const { org, bob, supplierId } = await established();
+    await database
+      .as('admin')
+      .query('delete from suppliers.supplier_versions where org_id = $1 and version = 1', [org]);
+    const logs = new LogCapture();
+    verifications = createSupplierVerifications({
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: loggerFor(logs),
+      challenges: challenges(),
+      outbox: createOutbox({ ids, clock }),
+    });
+
+    expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
+    expect(logs.lines()).toContainEqual(
+      expect.objectContaining({ event: 'suppliers.version_missing', supplierId, orgId: org }),
+    );
+  });
+
   it('refuses INTEGRITY_FAILED for another member’s role raised past the app', async () => {
     const { org, bob, supplierId } = await established();
     const viewer = await member(org, 'viewer');
@@ -462,28 +507,32 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
   });
 
-  it('refuses HISTORY_TOO_LONG for a supplier whose history is longer than one read takes', async () => {
+  it('reads past any number of the supplier’s other events (the review), and refuses HISTORY_TOO_LONG past its verifications’ cap', async () => {
     const { org, bob, supplierId } = await established();
-    // Recorded straight, as only a stand-in for years of the supplier's events can be: one past the read's cap.
-    await withSignedStates(app, org, quiet(), async (tx, states) => {
-      for (let event = 0; event <= MOST_SUPPLIER_EVENTS; event += 1) {
-        const read = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'change');
-        if (read.outcome !== 'found') throw new Error('not found');
-        await states.record(
-          tx,
-          SUPPLIERS,
-          { orgId: org, id: supplierId },
-          read.state,
-          {},
-          {
-            actor: OPERATOR,
-            action: 'supplier.test_event',
-            details: {},
-          },
-        );
-      }
-    });
+    /** Records `action` about the supplier straight, one past the read's cap: a stand-in for years of its events. */
+    const recordMany = (action: string) =>
+      withSignedStates(app, org, quiet(), async (tx, states) => {
+        for (let event = 0; event <= MOST_VERIFICATIONS_READ; event += 1) {
+          const read = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'change');
+          if (read.outcome !== 'found') throw new Error('not found');
+          await states.record(
+            tx,
+            SUPPLIERS,
+            { orgId: org, id: supplierId },
+            read.state,
+            {},
+            {
+              actor: OPERATOR,
+              action,
+              details: {},
+            },
+          );
+        }
+      });
 
+    await recordMany('supplier.test_event');
+    expect(askedFor(await ask(await signedIn(bob), supplierId))).toEqual(expect.any(String));
+    await recordMany(VERIFIER_RECORDED);
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('HISTORY_TOO_LONG', 409));
   });
 });

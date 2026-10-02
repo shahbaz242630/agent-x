@@ -104,4 +104,20 @@ describe('a call-back note', () => {
     ]);
     expect(callNote(' spaced').problems).toEqual(['the note starts or ends with a space']);
   });
+
+  it('holds no phone, card or account number: seven digits in a run, spaced, dotted, dashed or slashed (SEC-PAY-05)', () => {
+    const refused = ['the note holds a long number: leave phone and account numbers out'];
+    for (const note of [
+      'Called 0501234567',
+      'Called 050 123 4567',
+      'IBAN AE07 0331 2345',
+      'ref 12-34-567',
+      'a 1.2.3.4.5.6.7',
+    ]) {
+      expect(callNote(note).problems).toEqual(refused);
+    }
+    for (const note of ['Spoke to Sara at 10:30 on 2 Oct', 'Invoice 123456 matched', 'Ext 12, then 345']) {
+      expect(callNote(note).problems).toEqual([]);
+    }
+  });
 });

@@ -650,14 +650,22 @@ export function createSupplierPayees({
       if (form !== null && 'outcome' in form) return form;
       // No payee-change lock: the supplier's row, read for change, serialises every check and start of it.
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
-        const admin = await work.memberIn(tx, states, member, REGISTERING_ROLES);
+        await work.memberIn(tx, states, member, REGISTERING_ROLES);
         const { supplier } = await work.supplierIn(tx, states, { orgId: member.orgId, id: supplierId }, 'change');
         const found = await registrationIn(tx, states, member.orgId, supplier.id, known.id, 'change');
         const resourceId = found.registration.id;
         // Ended already, by this write's retry or another check (the lock waits for one at once): as it stands.
         if (!isOpen(found.registration) || outcome === undefined) return { status: 200, resourceId };
         if (outcome.kind === 'waiting') throw new StillWaiting();
-        await keepAnswer(tx, states, member, { supplier, found, outcome, offer, enteredBy: admin.id, correlationId });
+        // Whoever started it entered the details at the partner's form, whoever checks (E3-2a's review: the two-person rule).
+        await keepAnswer(tx, states, member, {
+          supplier,
+          found,
+          outcome,
+          offer,
+          enteredBy: found.registration.startedBy,
+          correlationId,
+        });
         return { status: 200, resourceId };
       });
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;

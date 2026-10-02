@@ -58,6 +58,7 @@
 import type { PayeeDetails } from '@agentx/core/modules/providers';
 import { visibleName } from '@agentx/core/shared-kernel';
 import {
+  CALL_NOTE_MOST,
   callNote,
   MOST_SUPPLIERS_A_PAGE,
   NAME_CHECKS,
@@ -352,7 +353,8 @@ const CALL_BACK = {
     .describe('Ticked: you called the supplier on the number on file, and they confirmed these details.'),
   note: z
     .string()
-    .max(4000)
+    // UTF-16 units: each of its 500 characters sent as up to 4 code points, each astral (VERIFY_BODY_LIMIT).
+    .max(CALL_NOTE_MOST * 8)
     .transform((note, context) => {
       const { note: kept, problems } = callNote(note);
       for (const problem of problems) context.addIssue({ code: 'custom', message: problem });
@@ -360,7 +362,7 @@ const CALL_BACK = {
     })
     .optional()
     .describe(
-      'Your note of the call: who you spoke to and what they confirmed, at most 500 characters on one line. Needed when the bank’s name check was not a full match.',
+      'Your note of the call: who you spoke to and what they confirmed, at most 500 characters on one line, with no phone or account numbers (it is kept for good). Needed when the bank’s name check was not a full match.',
     ),
 };
 

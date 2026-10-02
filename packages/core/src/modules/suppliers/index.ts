@@ -66,6 +66,7 @@ export {
   type SuppliersTransaction,
   suspendSupplier,
   unverifySupplier,
+  VERIFIER_RECORDED,
   type VersionCheck,
   type VersionRecord,
   verifySupplier,
@@ -97,7 +98,7 @@ export {
 } from './infrastructure/registrations.ts';
 export type { SuppliersTables } from './infrastructure/tables.ts';
 export {
-  MOST_SUPPLIER_EVENTS,
+  MOST_VERIFICATIONS_READ,
   MOST_VERSIONS_TO_VERIFY,
   type VersionsToVerify,
   versionsToVerify,

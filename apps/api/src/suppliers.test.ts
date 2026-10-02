@@ -955,14 +955,7 @@ describe('POST /v1/suppliers/:id/verify, then /confirm (E3-2a)', () => {
   it('answers each refusal as the use case gives it', async () => {
     for (const [status, code] of [
       [409, 'SUPPLIER_COOLING_OFF'],
-      [409, 'SUPPLIER_NAME_MISMATCH'],
-      [409, 'SUPPLIER_CALL_NOTE_NEEDED'],
-      [409, 'SUPPLIER_PHONE_TOO_NEW'],
       [403, 'VERIFIER_ENTERED_DETAILS'],
-      [403, 'VERIFIER_GRANTED_BY_ENTERER'],
-      [403, 'VERIFIER_TOO_NEW'],
-      [403, 'SOLO_PATH_LOCKED'],
-      [409, 'HISTORY_TOO_LONG'],
     ] as const) {
       const app = await withSuppliers({ change: { outcome: 'refused', status, code } });
       const response = await app.inject(post(`/${SUPPLIER_ID}/verify`, { calledBack: true }));
@@ -983,6 +976,7 @@ describe('POST /v1/suppliers/:id/verify, then /confirm (E3-2a)', () => {
       { calledBack: true, note: 'x'.repeat(501) },
       { calledBack: true, note: 'two\nlines' },
       { calledBack: true, note: ' spaced' },
+      { calledBack: true, note: 'Called them on 050 123 4567' },
       { calledBack: true, also: 'x' },
     ]) {
       expect((await app.inject(post(`/${SUPPLIER_ID}/verify`, body))).statusCode).toBe(400);

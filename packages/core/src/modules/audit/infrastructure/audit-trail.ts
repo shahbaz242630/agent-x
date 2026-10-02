@@ -229,7 +229,7 @@ export interface AuditTrail {
   recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck>;
   /**
    * Every event of the organisation's about an object of `subjectTypes` (and
-   * only the one `subjectId` names, when it does), in chain order, each
+   * only the one `subjectId` names, and of `actions` alone, when they do), in chain order, each
    * believed only whole as recordedEvent believes one, read with the chain's
    * head in one statement: a history a decision rests on (who granted a
    * member's role, ADR-012 §1; when a supplier was last verified, E3-2a).
@@ -241,10 +241,11 @@ export interface AuditTrail {
   recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
 }
 
-/** A history to read (recordedEvents): its objects' types, one object alone if named, and the most events it may hold. */
+/** A history to read (recordedEvents): its objects' types, one object and some actions alone if named, and the most events it may hold. */
 export interface HistoryToRead {
   readonly subjectTypes: readonly string[];
   readonly subjectId?: string;
+  readonly actions?: readonly string[];
   readonly limit: number;
 }
 
@@ -685,7 +686,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     async recordedEvents(
       tx: AuditTransaction,
       orgId: string,
-      { subjectTypes, subjectId, limit }: HistoryToRead,
+      { subjectTypes, subjectId, actions, limit }: HistoryToRead,
     ): Promise<RecordedEventsCheck> {
       const problems = [
         ...subjectTypes.flatMap(subjectTypeProblems),
@@ -696,8 +697,14 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const ofTypes = sql`e.subject_type = any(${[...subjectTypes]}::text[])`;
-      const which = subjectId === undefined ? ofTypes : sql`${ofTypes} and e.subject_id = ${subjectId.toLowerCase()}`;
+      const which = sql.join(
+        [
+          sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
+          ...(subjectId === undefined ? [] : [sql`e.subject_id = ${subjectId.toLowerCase()}`]),
+          ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+        ],
+        sql` and `,
+      );
       const rows = await eventsWithHead(tx, chain, which, limit + 1);
       const [first] = rows;
       const past = first?.past_head;

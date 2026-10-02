@@ -1145,6 +1145,16 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
       trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: USER.toUpperCase(), limit: 2 }),
     );
     expect(read).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }, { seq: 3n }] });
+    await record(org, { ...about('supplier', 4), action: 'supplier.verified_once' });
+    const once = await withTenant(app, org, (tx) =>
+      trail.recordedEvents(tx, org, {
+        subjectTypes: ['supplier'],
+        subjectId: USER,
+        actions: ['supplier.verified_once'],
+        limit: 1,
+      }),
+    );
+    expect(once).toMatchObject({ kind: 'recorded', events: [{ seq: 4n }] });
     await expect(
       withTenant(app, org, (tx) =>
         trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: 'x', limit: 2 }),

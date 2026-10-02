@@ -36,13 +36,8 @@ import {
   type VerifierVerdict,
   verifierVerdict,
 } from '@agentx/core/modules/identity';
-import type { Notice, Outbox } from '@agentx/core/modules/notifications';
-import {
-  type VerificationProblem,
-  verificationProblem,
-  verifySupplier,
-  versionsToVerify,
-} from '@agentx/core/modules/suppliers';
+import type { Outbox } from '@agentx/core/modules/notifications';
+import { verificationProblem, verifySupplier, versionsToVerify } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -55,6 +50,7 @@ import {
   SupplierRefused,
   type SupplierTables,
   type SupplierTx,
+  toldEveryone,
 } from './supplier-work.ts';
 
 /** Asking to verify a supplier: its operation, which the step-up challenge names as its action too. */
@@ -87,17 +83,6 @@ export interface SupplierVerifications {
   ): Promise<SupplierChangeWrite>;
 }
 
-/** Each refusal of the supplier's state, as answered: all a conflict with the supplier as it stands. */
-const PROBLEMS: Readonly<Record<VerificationProblem, ReasonCode>> = {
-  SUPPLIER_NOT_UNVERIFIED: 'SUPPLIER_NOT_UNVERIFIED',
-  SUPPLIER_CHANGE_WAITING: 'SUPPLIER_CHANGE_WAITING',
-  SUPPLIER_NO_PAYEE: 'SUPPLIER_NO_PAYEE',
-  SUPPLIER_COOLING_OFF: 'SUPPLIER_COOLING_OFF',
-  SUPPLIER_NAME_MISMATCH: 'SUPPLIER_NAME_MISMATCH',
-  SUPPLIER_CALL_NOTE_NEEDED: 'SUPPLIER_CALL_NOTE_NEEDED',
-  SUPPLIER_PHONE_TOO_NEW: 'SUPPLIER_PHONE_TOO_NEW',
-};
-
 /** Each refusal of the verifier, as answered: the verifier may not, so forbidden. */
 const REFUSALS: Readonly<Record<VerifierRefusal, ReasonCode>> = {
   NOT_A_VERIFIER: 'FORBIDDEN',
@@ -115,15 +100,6 @@ const REFUSALS: Readonly<Record<VerifierRefusal, ReasonCode>> = {
  */
 const verificationHash = (versionId: string, note: string | null): Buffer =>
   changeHashOf([VERIFY_OPERATION, versionId.toLowerCase(), note ?? '']);
-
-/** The notice of a verification, for every active member and for the contacts that count, as the sender finds them. */
-const toldOfVerification = (orgId: string, supplierId: string): Notice[] => {
-  const about = { orgId, kind: 'supplier_verified' as const, membershipId: null, role: null, aboutId: supplierId };
-  return [
-    { ...about, recipientUserId: null },
-    { ...about, recipientUserId: null, toContacts: true },
-  ];
-};
 
 /** The rule's verdicts against every enterer, as one: the first refusal; else alone if any is; else two people. */
 function combined(verdicts: readonly VerifierVerdict[]): VerifierVerdict {
@@ -156,7 +132,8 @@ export function createSupplierVerifications({
   /**
    * Whether this member may verify the supplier now, with this call-back,
    * read in the write's transaction (the supplier `lock`ed as asked): the
-   * supplier, its current version and the rule's path; or a refusal thrown.
+   * verifier, the supplier, its current version, its payee's name check and
+   * the rule's path; or a refusal thrown.
    */
   const verifiable = async (
     tx: SupplierTx,
@@ -165,6 +142,7 @@ export function createSupplierVerifications({
     supplierId: string,
     { note }: CallBack,
     lock: 'share' | 'change',
+    correlationId: string,
   ) => {
     const { orgId } = member;
     const verifier = await work.memberIn(tx, states, member, VERIFYING_ROLES);
@@ -174,28 +152,29 @@ export function createSupplierVerifications({
     const current = await work.versionIn(tx, states, orgId, found.supplier.id, found.supplier.currentVersionId);
     const registration = await work.registrationFor(tx, states, orgId, current);
     const versions = await versionsToVerify(tx, states, orgId, found.supplier, current);
+    if (versions.outcome === 'incomplete') {
+      // A version number with no version: removed past the app. Logged by IDs alone.
+      logger.child({ correlationId, orgId }).error('suppliers.version_missing', { supplierId: found.supplier.id });
+    }
     if (versions.outcome === 'tampered' || versions.outcome === 'incomplete') {
       throw new SupplierRefused(503, 'INTEGRITY_FAILED');
     }
     if (versions.outcome === 'too_many') throw new SupplierRefused(409, 'HISTORY_TOO_LONG');
     const now = clock.now();
+    const nameCheck = registration?.nameCheck ?? null;
     const problem = verificationProblem(
-      {
-        supplier: found.supplier,
-        current,
-        nameCheck: registration?.nameCheck ?? null,
-        firstEnteredAt: versions.first.enteredAt,
-        note,
-      },
+      { supplier: found.supplier, current, nameCheck, firstEnteredAt: versions.first.enteredAt, note },
       now,
     );
-    if (problem !== undefined) throw new SupplierRefused(409, PROBLEMS[problem]);
-    const enterers = [...new Set(versions.since.map(({ enteredBy }) => enteredBy))];
+    if (problem !== undefined) throw new SupplierRefused(409, problem);
+    // Who entered each version since, and who started the registration of the payee paid now (E3-2a's review).
+    const enterers = new Set(versions.since.map(({ enteredBy }) => enteredBy));
+    if (registration !== null) enterers.add(registration.startedBy);
     const verdict = combined(
-      enterers.map((enteredById) => verifierVerdict(facts, { enteredById, verifierId: verifier.id }, now)),
+      [...enterers].map((enteredById) => verifierVerdict(facts, { enteredById, verifierId: verifier.id }, now)),
     );
     if (verdict.outcome === 'refused') throw new SupplierRefused(403, REFUSALS[verdict.reason]);
-    return { verifier, found, current, registration, path: verdict.outcome };
+    return { verifier, found, current, nameCheck, path: verdict.outcome };
   };
 
   /** The write, a history past its cap answered as a refusal like any other. */
@@ -211,7 +190,7 @@ export function createSupplierVerifications({
   return {
     async verify(member, idempotent, supplierId, callBack, correlationId) {
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
-        const { current } = await verifiable(tx, states, member, supplierId, callBack, 'share');
+        const { current } = await verifiable(tx, states, member, supplierId, callBack, 'share', correlationId);
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: VERIFY_OPERATION,
@@ -224,21 +203,26 @@ export function createSupplierVerifications({
       return work.askedAfter(done);
     },
 
-    async verifyConfirm(member, idempotent, supplierId, { stepUpChallengeId, note }, correlationId) {
+    async verifyConfirm(member, idempotent, supplierId, confirm, correlationId) {
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         const { orgId } = member;
-        const { verifier, found, current, registration, path } = await verifiable(
+        const { verifier, found, current, nameCheck, path } = await verifiable(
           tx,
           states,
           member,
           supplierId,
-          { note },
+          confirm,
           'change',
+          correlationId,
         );
         const consumed = await challenges.consume(
           tx,
-          stepUpChallengeId,
-          { sessionId: member.sessionId, action: VERIFY_OPERATION, changeHash: verificationHash(current.id, note) },
+          confirm.stepUpChallengeId,
+          {
+            sessionId: member.sessionId,
+            action: VERIFY_OPERATION,
+            changeHash: verificationHash(current.id, confirm.note),
+          },
           // A change that makes a supplier payable: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
         );
@@ -250,11 +234,11 @@ export function createSupplierVerifications({
             ...stepUpDetails(consumed),
             path,
             calledBack: true,
-            nameCheck: registration?.nameCheck ?? 'none',
-            ...(note === null ? {} : { callBackNote: note }),
+            nameCheck: nameCheck ?? 'none',
+            ...(confirm.note === null ? {} : { callBackNote: confirm.note }),
           },
         });
-        await outbox.add(tx, toldOfVerification(orgId, found.supplier.id));
+        await outbox.add(tx, toldEveryone(orgId, found.supplier.id, 'supplier_verified'));
         return { status: 200, resourceId: found.supplier.id };
       });
       return work.changedAfter(member.orgId, correlationId, done);
