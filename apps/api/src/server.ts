@@ -70,6 +70,7 @@ import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
+import type { SupplierDetailsChanges } from './supplier-details.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
 import type { SupplierVerifications } from './supplier-verifications.ts';
 import type { SupplierPayees } from './supplier-payees.ts';
@@ -138,6 +139,8 @@ export interface ServerOptions {
   readonly supplierPayees?: SupplierPayees | undefined;
   /** Confirming or withdrawing a supplier's payee change waiting (supplier-payee-changes.ts); without it, no one reaches those routes. */
   readonly supplierPayeeChanges?: SupplierPayeeChanges | undefined;
+  /** Changing suppliers' details (supplier-details.ts); without it, no one reaches those routes. */
+  readonly supplierDetailsChanges?: SupplierDetailsChanges | undefined;
   /** Verifying suppliers (supplier-verifications.ts); without it, no one reaches those routes. */
   readonly supplierVerifications?: SupplierVerifications | undefined;
   /** The fake partner's bank, where the partner is the fake (fake-bank.ts); without it, those routes answer 404. */
@@ -311,6 +314,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     payees: options.supplierPayees,
     payeeChanges: options.supplierPayeeChanges,
     verifications: options.supplierVerifications,
+    details: options.supplierDetailsChanges,
   });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {

@@ -16,14 +16,18 @@
 //   challenge: the same reads, the challenge consumed, then back VERIFIED
 //   only if nothing changed while it was suspended (the suppliers module's
 //   reactivateSupplier), otherwise UNVERIFIED with its verification cleared,
-//   the step-up's evidence on its events. Telling every member of it waits
-//   for the supplier notices' kinds (E2-1's migration; `Carry-Forward.md`).
+//   the step-up's evidence on its events.
+// Each is told to every active member and the counting contacts
+// (`supplier_suspended`, `supplier_reactivated`; partner S69, E3-2b), in the
+// same transaction; a brake pressed twice tells no one twice.
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
-// the supplier (6), its version, the step-up challenge, the chain head last.
+// the supplier (6), its version, the step-up challenge, the chain head, then
+// the notices, new rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { reactivateSupplier, suspendSupplier } from '@agentx/core/modules/suppliers';
+import type { Outbox } from '@agentx/core/modules/notifications';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -37,6 +41,7 @@ import {
   SupplierRefused,
   type SupplierTables,
   type SupplierTx,
+  toldEveryone,
 } from './supplier-work.ts';
 
 /** The brake on a supplier. */
@@ -87,12 +92,14 @@ export function createSupplierChanges({
   keys,
   ids,
   challenges,
+  outbox,
   logger,
 }: {
   readonly database: Database<SupplierTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly challenges: StepUpChallenges;
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): SupplierChanges {
   const work = createSupplierWork({ database, keys, ids, logger });
@@ -113,6 +120,7 @@ export function createSupplierChanges({
         // Pressed twice: stopped already, and answered as it is.
         if (found.supplier.status !== 'SUSPENDED') {
           await suspendSupplier(tx, states, key, found, { actor: { type: 'user', id: member.userId } });
+          await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_suspended'));
         }
         return { status: 200, resourceId: found.supplier.id };
       });
@@ -151,6 +159,7 @@ export function createSupplierChanges({
           actor: { type: 'user', id: member.userId },
           details: stepUpDetails(consumed),
         });
+        await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_reactivated'));
         return { status: 200, resourceId: found.supplier.id };
       });
       return work.changedAfter(member.orgId, correlationId, done);

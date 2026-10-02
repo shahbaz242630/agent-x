@@ -43,6 +43,7 @@ export {
 export {
   addSupplier,
   addVersion,
+  changeDetails,
   confirmPayeeChange,
   withdrawPayeeChange,
   contactsOf,
@@ -70,6 +71,7 @@ export {
   type VersionCheck,
   type VersionRecord,
   verifySupplier,
+  versionsEnteredSince,
   versionOf,
 } from './infrastructure/suppliers.ts';
 export {

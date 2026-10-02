@@ -133,10 +133,14 @@ export const REASON_CODES = {
     "The bank's name check didn't fully match the supplier's name, so a written note of the call-back is needed: who you spoke to and what they confirmed. Nothing was changed.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
+  SUPPLIER_CHANGES_SPENT:
+    "The organisation has changed its suppliers' details as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   SUPPLIER_CHANGE_WAITING:
     "A change of this supplier's bank details is already waiting to be confirmed, so another isn't made. Confirm or withdraw that one first.",
   SUPPLIER_COOLING_OFF:
     "The supplier's bank details are still in their 24-hour cooling-off, so it can't be verified yet. Nothing was changed. Look at the supplier for when it ends.",
+  SUPPLIER_DETAILS_UNCHANGED:
+    "These are the supplier's details already, so nothing was changed, and it stays as verified as it was.",
   SUPPLIER_NAME_MISMATCH:
     "The bank says the account holder's name doesn't match the supplier's, so it can't be verified. Nothing was changed. Call the supplier on its known number, then withdraw or replace the bank details.",
   SUPPLIER_NOT_SUSPENDED: 'The supplier is not suspended, so there is no suspension to lift. Nothing was changed.',

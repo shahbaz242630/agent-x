@@ -189,6 +189,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/registered-contacts/{id}/remove',
       'POST /v1/registered-contacts/{id}/remove/confirm',
       'POST /v1/suppliers',
+      'POST /v1/suppliers/{id}/details',
+      'POST /v1/suppliers/{id}/details/confirm',
       'POST /v1/suppliers/{id}/payee-change/approve',
       'POST /v1/suppliers/{id}/payee-change/approve/confirm',
       'POST /v1/suppliers/{id}/payee-change/withdraw',
@@ -1172,8 +1174,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
     // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), a payee's start and check
     // and the fake partner's form (E2-2a), a payee change's approve, confirm and withdraw (E2-2b), a payee passed
-    // through (E2-2d), a supplier's verify and its confirm (E3-2a), with each GET's HEAD.
-    expect(answers).toHaveLength(93);
+    // through (E2-2d), a supplier's verify and its confirm (E3-2a), its details' change and confirm (E3-2b), with each
+    // GET's HEAD.
+    expect(answers).toHaveLength(95);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1222,6 +1225,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'Session',
       'Supplier',
       'SupplierDetails',
+      'SupplierDetailsChangeAsked',
       'SupplierPayee',
       'SupplierPayeeApprovalAsked',
       'SupplierReactivationAsked',
