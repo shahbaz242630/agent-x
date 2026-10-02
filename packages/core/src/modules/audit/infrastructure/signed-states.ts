@@ -55,6 +55,7 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { UUID } from '../../../shared-kernel/index.ts';
 import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
 import {
   HOLD_SUBJECT,
@@ -416,8 +417,6 @@ const MISSING = Object.freeze({ outcome: 'missing' as const });
 const MISSING_HOLD = Object.freeze({ outcome: 'not_held' as const });
 const MOVED_ON = Object.freeze({ outcome: 'moved_on' as const });
 const NO_INVESTIGATION = Object.freeze({ outcome: 'no_investigation' as const });
-/** A UUID, as an ID the app made. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The investigation an event about one records, or nothing if its facts don't
@@ -541,7 +540,8 @@ export function createSignedStates({
   ): StateCheck => {
     if (latest.kind === 'none') return alarm(table.subject, key, 'unsigned');
     if (latest.kind === 'broken') return alarm(table.subject, key, 'log', latest.seq);
-    if (row.eventId !== latest.id.toLowerCase()) return alarm(table.subject, key, 'pointer');
+    const eventId = latest.id.toLowerCase();
+    if (row.eventId !== eventId) return alarm(table.subject, key, 'pointer');
     if (row.version !== latest.version) return alarm(table.subject, key, 'version');
     const facts = {
       orgId: key.orgId,
@@ -549,7 +549,6 @@ export function createSignedStates({
       fields: row.fields,
     };
     if (!stateSealMatches(keys, facts, latest.seal)) return alarm(table.subject, key, 'seal');
-    const eventId = latest.id.toLowerCase();
     return Object.freeze({ outcome: 'verified', version: row.version, eventId, fields: new Map(row.fields) });
   };
 

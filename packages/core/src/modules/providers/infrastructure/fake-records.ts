@@ -15,6 +15,7 @@
 import { limitStatements, withTenant } from '@agentx/platform/db';
 import type { Kysely, Transaction } from 'kysely';
 
+import type { ConsentControls, PayeeNameCheck } from '../domain/rail.ts';
 import type { ConsentStatus } from '../domain/uae-consent.ts';
 
 /** A link's session at the partner (ref: our link ID; alias: the session's reference). */
@@ -33,7 +34,7 @@ export interface SourceBody {
   readonly expiresAt: string;
   readonly controls: {
     readonly currency: string;
-    readonly period: 'day' | 'week' | 'month' | 'year';
+    readonly period: ConsentControls['period'];
     /** Minor units, as decimal text: JSON has no bigint. */
     readonly maxPaymentMinor: string;
     readonly maxPeriodMinor: string;
@@ -45,7 +46,7 @@ export interface SourceBody {
 export interface BeneficiaryBody {
   readonly beneficiaryRef: string;
   readonly payeeIdentity: string | null;
-  readonly nameCheck: 'match' | 'partial' | 'no_match' | 'unavailable';
+  readonly nameCheck: PayeeNameCheck;
   readonly maskedName: string | null;
   readonly hint: string;
   readonly registeredAt: string;

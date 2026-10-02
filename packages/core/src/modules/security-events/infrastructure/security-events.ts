@@ -19,7 +19,7 @@
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely } from 'kysely';
 
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import type { SecurityEventsTables } from './tables.ts';
 
 export const SECURITY_EVENT_KINDS = ['sign_in_failed', 'rate_limited'] as const;
@@ -53,8 +53,6 @@ export interface SecurityEvents {
 }
 
 const REASON = /^[a-z][a-z_]{0,63}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DAY_MS = 86_400_000;
 
 const OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])';
 const IPV4 = new RegExp(`^${OCTET}(?:[.]${OCTET}){3}$`);

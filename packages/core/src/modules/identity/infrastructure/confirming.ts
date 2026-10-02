@@ -56,6 +56,7 @@ import {
 } from './memberships.ts';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { activeAdminId, Refusal } from './refusals.ts';
 
 /** Asking to confirm: its operation, which the step-up challenge names as its action too. */
 export const APPROVE_OPERATION = 'members.approve';
@@ -93,15 +94,10 @@ export interface AcceptanceConfirmations {
   ): Promise<ConfirmationWrite>;
 }
 
-class ConfirmationRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ConfirmationRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`an acceptance's confirmation refused: ${code}`);
+    super(`an acceptance's confirmation refused: ${code}`, status, code);
     this.name = 'ConfirmationRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -129,14 +125,8 @@ export function createAcceptanceConfirmations({
   readonly outbox: Outbox;
   readonly logger: Logger;
 }): AcceptanceConfirmations {
-  const adminOf = async (tx: InvitationsTransaction, states: SignedStates, admin: InvitingAdmin): Promise<void> => {
-    const membership = await membershipOf(tx, states, admin.orgId, admin.userId);
-    if (membership.outcome === 'tampered') throw new ConfirmationRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || membership.role !== 'admin') throw new ConfirmationRefused(403, 'FORBIDDEN');
-  };
-
   /**
-   * The admin's membership, checked as adminOf does, and the membership of
+   * The admin's membership, checked as activeAdminId does, and the membership of
    * the person who accepted, read for change (a deactivated one comes back,
    * B4-5c): in order of membership ID (ADR-006 §6 level 2a), as a member's
    * role change or deactivation takes them, so the two never lock each other
@@ -148,7 +138,7 @@ export function createAcceptanceConfirmations({
     admin: InvitingAdmin,
     acceptedBy: string,
   ): Promise<MembershipCheck> => {
-    const readAdmin = () => adminOf(tx, states, admin);
+    const readAdmin = () => activeAdminId(tx, states, admin, ConfirmationRefused);
     const readTheirs = () => membershipOf(tx, states, admin.orgId, acceptedBy, 'change');
     const adminId = await listedMembership(tx, admin.orgId, admin.userId);
     const theirId = await listedMembership(tx, admin.orgId, acceptedBy);
@@ -228,7 +218,7 @@ export function createAcceptanceConfirmations({
     async ask(admin, idempotent, invitationId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
         const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: true });
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, ConfirmationRefused);
         const challenge = await challenges.open(tx, {
           sessionId: admin.sessionId,
           action: APPROVE_OPERATION,
@@ -322,7 +312,7 @@ export function createAcceptanceConfirmations({
     async decline(admin, idempotent, invitationId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
         const { invitation } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: false });
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, ConfirmationRefused);
         const moved = await states.changeStatus(tx, INVITATIONS, { orgId: admin.orgId, id: invitationId }, 'decline', {
           actor: { type: 'user', id: admin.userId },
           action: 'invitation.declined',

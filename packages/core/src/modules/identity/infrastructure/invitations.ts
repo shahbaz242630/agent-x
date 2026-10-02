@@ -30,14 +30,7 @@ import type { SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-} from '../../audit/index.ts';
+import type { AuditActor, AuditDetails, AuditTables, RecordedState, SignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, registerInvite } from '../../directory/index.ts';
 import {
   confirmationEnds,
@@ -47,8 +40,9 @@ import {
   needsConfirmation,
 } from '../domain/invitation.ts';
 import { isRole, type Role } from '../domain/membership.ts';
+import { openField } from './sealed-fields.ts';
 import { changeHashOf } from './step-up-challenges.ts';
-import type { IdentityTables } from './tables.ts';
+import type { Found, IdentityTables } from './tables.ts';
 
 /** An invitation's row, as the signed state reads, records and moves it. */
 export const INVITATIONS = {
@@ -192,8 +186,6 @@ export interface InvitationRecord {
   readonly acceptedBy: string | null;
 }
 
-type Found<T> = T | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
-
 const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): InvitationRecord => {
   const role = fields.get('role');
   const status = fields.get('status');
@@ -259,17 +251,12 @@ async function invitedEmail(tx: InvitationsTransaction, keys: KeyProvider, orgId
     .where('org_id', '=', orgId)
     .where('id', '=', id)
     .executeTakeFirstOrThrow();
-  try {
-    return keys
-      .decrypt(
-        'field-encryption',
-        { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
-        emailAssociatedData(orgId, id),
-      )
-      .toString('utf8');
-  } catch (error) {
-    throw new InvitationUnreadable(id, { cause: error });
-  }
+  return openField(
+    keys,
+    { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
+    emailAssociatedData(orgId, id),
+    (cause) => new InvitationUnreadable(id, { cause }),
+  );
 }
 
 /**

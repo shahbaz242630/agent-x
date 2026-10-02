@@ -28,8 +28,9 @@ import {
   withSignedStates,
 } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
-import { membershipOf, type MembershipsTransaction } from './memberships.ts';
+import type { MembershipsTransaction } from './memberships.ts';
 import type { IdentityTables } from './tables.ts';
+import { activeAdminId, Refusal } from './refusals.ts';
 
 /** Recording an investigation: its operation, as its idempotency keys name it. */
 export const INVESTIGATE_OPERATION = 'integrity-hold.investigate';
@@ -68,15 +69,10 @@ export interface HoldInvestigations {
 }
 
 /** A refusal inside a write: thrown, so the claim and all the write did roll back. */
-class WriteRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class WriteRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`an investigation's write refused: ${code}`);
+    super(`an investigation's write refused: ${code}`, status, code);
     this.name = 'WriteRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -93,13 +89,6 @@ export function createHoldInvestigations({
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }): HoldInvestigations {
-  /** The person's membership, read again for this decision: active and an admin, or a refusal. */
-  const mustBeAdmin = async (tx: MembershipsTransaction, states: SignedStates, admin: HoldAdmin): Promise<void> => {
-    const membership = await membershipOf(tx, states, admin.orgId, admin.userId);
-    if (membership.outcome === 'tampered') throw new WriteRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || membership.role !== 'admin') throw new WriteRefused(403, 'FORBIDDEN');
-  };
-
   /** Runs the work in the organisation's transaction, each statement limited to 10 seconds; a refusal is answered. */
   const inOrganisation = async <T>(
     admin: HoldAdmin,
@@ -121,7 +110,7 @@ export function createHoldInvestigations({
   return {
     async show(admin, correlationId) {
       return inOrganisation(admin, correlationId, async (tx, states): Promise<HoldShown> => {
-        await mustBeAdmin(tx, states, admin);
+        await activeAdminId(tx, states, admin, WriteRefused);
         const hold = await states.holdRecord(tx, admin.orgId);
         if (hold.outcome === 'tampered') throw new WriteRefused(503, 'INTEGRITY_FAILED');
         return { outcome: 'shown', hold };
@@ -132,7 +121,7 @@ export function createHoldInvestigations({
       const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
       const done = await inOrganisation(admin, correlationId, (tx, states) =>
         idempotency.run(tx, idempotent, async () => {
-          await mustBeAdmin(tx, states, admin);
+          await activeAdminId(tx, states, admin, WriteRefused);
           const id = ids.next();
           const recorded = await states.recordInvestigation(tx, admin.orgId, {
             id,

@@ -40,14 +40,14 @@ import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
-import { AUTH_TIME_TOLERANCE_SECONDS, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
+import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
 import { recordSessionEmail } from './session-emails.ts';
 import type { LiveSession, Sessions } from './sessions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-import { userForSubject } from './users.ts';
+import { userForSubject, userOfSubject } from './users.ts';
 
 export interface SignInBegun {
   /** The login service's address to send the browser to. */
@@ -164,19 +164,12 @@ export function createSignIn({
       throw new StepUpFailed(error.failure, error.message, userId);
     }
     const { subject, evidence, idTokenHash } = signedIn;
-    const person = await limited((tx) =>
-      tx
-        .selectFrom('identity.users')
-        .select('id')
-        .where('issuer', '=', subject.issuer)
-        .where('subject', '=', subject.subject)
-        .executeTakeFirst(),
-    );
+    const personId = await limited((tx) => userOfSubject(tx, subject));
     // A passkey is asked for as the change consumes the challenge, where its role is known (B3+-1).
     const refusal =
-      person === undefined
+      personId === undefined
         ? 'other_person'
-        : stepUpRefusal(pending, { userId: person.id, evidence }, { passkeyRequired: false });
+        : stepUpRefusal(pending, { userId: personId, evidence }, { passkeyRequired: false });
     if (refusal !== undefined) {
       throw new StepUpFailed(refusal, 'the fresh sign-in does not stand for the challenge', userId);
     }
@@ -224,8 +217,7 @@ export function createSignIn({
       }
       const { subject, evidence, verifiedEmail } = await oidc.finish(taken.flow, { code, state });
       // The sign-in asked for was a fresh one: a login service that answered with one it kept is refused.
-      const earliest = Math.floor(taken.startedAt.getTime() / 1000) * 1000 - AUTH_TIME_TOLERANCE_SECONDS * 1000;
-      if (evidence.authTime.getTime() < earliest) {
+      if (evidence.authTime.getTime() < earliestAuthTime(taken.startedAt)) {
         throw new SignInFailed('stale_authentication', 'the sign-in was made before the flow began');
       }
       return limited(async (tx) => {

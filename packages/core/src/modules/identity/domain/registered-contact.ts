@@ -10,7 +10,7 @@
 // and had time to act. Removing one needs step-up too (ACTIVE>REMOVED); an
 // address is never changed in place. The database's status guard holds the
 // same moves (0022).
-import { defineStateMachine } from '../../../shared-kernel/index.ts';
+import { DAY_MS, defineStateMachine } from '../../../shared-kernel/index.ts';
 
 export const REGISTERED_CONTACT = defineStateMachine({
   name: 'registered_contact',
@@ -42,7 +42,7 @@ export const MOST_CONTACTS_STARTED_A_DAY = 10;
 
 /** When a contact made ACTIVE at `activatedAt` starts to count. */
 export const contactCountsFrom = (activatedAt: Date): Date =>
-  new Date(activatedAt.getTime() + CONTACT_COOLING_OFF_DAYS * 86_400_000);
+  new Date(activatedAt.getTime() + CONTACT_COOLING_OFF_DAYS * DAY_MS);
 
 /** Whether an ACTIVE contact that starts to count at `countsFrom` counts at `now`. */
 export const counts = (countsFrom: Date, now: Date): boolean => countsFrom.getTime() <= now.getTime();

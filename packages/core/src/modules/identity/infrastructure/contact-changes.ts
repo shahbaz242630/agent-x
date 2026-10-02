@@ -39,13 +39,12 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
-import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import type { Notice, NotificationsTables, Outbox } from '../../notifications/index.ts';
 import { contactCountsFrom, MOST_CONTACTS, MOST_CONTACTS_STARTED_A_DAY } from '../domain/registered-contact.ts';
 import type { InvitingAdmin } from './inviting.ts';
-import { membershipOf, type MembershipsTransaction } from './memberships.ts';
 import {
   activateContact,
   contactChange,
@@ -62,8 +61,7 @@ import {
 } from './registered-contacts.ts';
 import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-
-const DAY_MS = 86_400_000;
+import { activeAdminId, Refusal } from './refusals.ts';
 
 /** Asking to add a contact: its operation, which the step-up challenge names as its action too. */
 export const CONTACT_ADD_OPERATION = 'contacts.add';
@@ -115,15 +113,10 @@ export interface ContactChanges {
   ): Promise<ContactChangeWrite>;
 }
 
-class ContactRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ContactRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`a registered contact's change refused: ${code}`);
+    super(`a registered contact's change refused: ${code}`, status, code);
     this.name = 'ContactRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -161,14 +154,6 @@ export function createContactChanges({
   readonly outbox: Outbox;
   readonly logger: Logger;
 }): ContactChanges {
-  /** The admin's membership, read again for this write's decision: its ID, or a refusal. */
-  const adminOf = async (tx: MembershipsTransaction, states: SignedStates, admin: InvitingAdmin): Promise<string> => {
-    const membership = await membershipOf(tx, states, admin.orgId, admin.userId);
-    if (membership.outcome === 'tampered') throw new ContactRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || membership.role !== 'admin') throw new ContactRefused(403, 'FORBIDDEN');
-    return membership.id;
-  };
-
   /** Refuses an address one of the organisation's ACTIVE contacts has already, or a list with no room. */
   const mustHaveRoomFor = async (tx: Transaction<Tables>, states: SignedStates, orgId: string, email: string) => {
     const listed = await contactsOf(tx, states, keys, orgId);
@@ -255,7 +240,7 @@ export function createContactChanges({
     async add(admin, idempotent, email, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         await oneAtATime(tx, admin.orgId);
-        const addedBy = await adminOf(tx, states, admin);
+        const addedBy = await activeAdminId(tx, states, admin, ContactRefused);
         await withinBudget(tx, admin.orgId, logger.child({ correlationId }));
         const id = ids.next();
         const { change, changeHash } = contactChange({ orgId: admin.orgId, id, email, addedBy });
@@ -281,7 +266,7 @@ export function createContactChanges({
     async confirm(admin, idempotent, contactId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         await oneAtATime(tx, admin.orgId);
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, ContactRefused);
         const read = await contactToActivate(tx, states, keys, { orgId: admin.orgId, id: contactId });
         if (read.outcome === 'missing') throw new ContactRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw new ContactRefused(503, 'INTEGRITY_FAILED');
@@ -312,7 +297,7 @@ export function createContactChanges({
 
     async remove(admin, idempotent, contactId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, ContactRefused);
         const read = await contactToRemove(tx, states, { orgId: admin.orgId, id: contactId });
         if (read.outcome === 'missing') throw new ContactRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw new ContactRefused(503, 'INTEGRITY_FAILED');
@@ -332,7 +317,7 @@ export function createContactChanges({
     async removeConfirm(admin, idempotent, contactId, stepUpChallengeId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         await oneAtATime(tx, admin.orgId);
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, ContactRefused);
         const read = await contactToRemove(tx, states, { orgId: admin.orgId, id: contactId });
         if (read.outcome === 'missing') throw new ContactRefused(404, 'NOT_FOUND');
         if (read.outcome === 'tampered') throw new ContactRefused(503, 'INTEGRITY_FAILED');

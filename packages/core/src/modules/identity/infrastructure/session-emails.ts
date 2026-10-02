@@ -7,6 +7,7 @@ import type { Kysely, Transaction } from 'kysely';
 
 import { invitationEmail } from '../domain/invitation.ts';
 import type { IdentityTables } from './tables.ts';
+import { openField } from './sealed-fields.ts';
 
 type Handle = Kysely<IdentityTables> | Transaction<IdentityTables>;
 
@@ -53,15 +54,10 @@ export async function sessionEmailOf(db: Handle, keys: KeyProvider, sessionId: s
     .where('session_id', '=', sessionId)
     .executeTakeFirst();
   if (row === undefined) return undefined;
-  try {
-    return keys
-      .decrypt(
-        'field-encryption',
-        { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
-        associatedData(sessionId),
-      )
-      .toString('utf8');
-  } catch (error) {
-    throw new SessionEmailUnreadable({ cause: error });
-  }
+  return openField(
+    keys,
+    { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
+    associatedData(sessionId),
+    (cause) => new SessionEmailUnreadable({ cause }),
+  );
 }

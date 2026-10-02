@@ -53,8 +53,9 @@ import {
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { invitationEmail } from '../domain/invitation.ts';
 import { countsNow, REGISTERED_CONTACT } from '../domain/registered-contact.ts';
+import { openField } from './sealed-fields.ts';
 import { changeHashOf } from './step-up-challenges.ts';
-import type { IdentityTables } from './tables.ts';
+import type { Found, IdentityTables } from './tables.ts';
 
 /** A registered contact's row, as the signed state reads, records and moves it. */
 export const REGISTERED_CONTACTS = {
@@ -165,8 +166,6 @@ export interface ContactRecord {
   readonly stepUpChallengeId: string;
 }
 
-type Found<T> = T | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
-
 const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): ContactRecord => {
   const status = fields.get('status');
   const addedBy = fields.get('added_by');
@@ -226,17 +225,12 @@ async function contactEmail(tx: ContactsTransaction, keys: KeyProvider, orgId: s
     .where('org_id', '=', orgId)
     .where('id', '=', id)
     .executeTakeFirstOrThrow();
-  try {
-    return keys
-      .decrypt(
-        'field-encryption',
-        { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
-        emailAssociatedData(orgId, id),
-      )
-      .toString('utf8');
-  } catch (error) {
-    throw new ContactUnreadable(id, { cause: error });
-  }
+  return openField(
+    keys,
+    { keyVersion: row.email_key_version, ciphertext: row.email_ciphertext },
+    emailAssociatedData(orgId, id),
+    (cause) => new ContactUnreadable(id, { cause }),
+  );
 }
 
 /**

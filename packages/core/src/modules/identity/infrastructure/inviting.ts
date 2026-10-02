@@ -39,9 +39,10 @@ import {
   invitationToOpen,
   openInvitation,
 } from './invitations.ts';
-import { membershipOf, type MembershipsTransaction } from './memberships.ts';
+import type { MembershipsTransaction } from './memberships.ts';
 import { type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { activeAdminId, Refusal } from './refusals.ts';
 
 /** The asking route's operation, which its step-up challenge names as its action too. */
 export const INVITE_OPERATION = 'members.invite';
@@ -84,15 +85,10 @@ export interface InvitationWrites {
 }
 
 /** A refusal inside a write: thrown, so the claim and all the write did roll back. */
-class WriteRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class WriteRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`an invitation's write refused: ${code}`);
+    super(`an invitation's write refused: ${code}`, status, code);
     this.name = 'WriteRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -113,14 +109,6 @@ export function createInvitationWrites({
   readonly challenges: StepUpChallenges;
   readonly logger: Logger;
 }): InvitationWrites {
-  /** The admin's membership, read again for this write's decision: its ID, or a refusal. */
-  const adminOf = async (tx: MembershipsTransaction, states: SignedStates, admin: InvitingAdmin): Promise<string> => {
-    const membership = await membershipOf(tx, states, admin.orgId, admin.userId);
-    if (membership.outcome === 'tampered') throw new WriteRefused(503, 'INTEGRITY_FAILED');
-    if (membership.outcome !== 'active' || membership.role !== 'admin') throw new WriteRefused(403, 'FORBIDDEN');
-    return membership.id;
-  };
-
   /**
    * Runs the write in the organisation's transaction, its key claimed first,
    * then answers from the invitation, re-read by the ID the answer names.
@@ -160,7 +148,7 @@ export function createInvitationWrites({
   return {
     async ask(admin, idempotent, { email, role }, correlationId) {
       return write(admin, idempotent, correlationId, async (tx, states) => {
-        const invitedBy = await adminOf(tx, states, admin);
+        const invitedBy = await activeAdminId(tx, states, admin, WriteRefused);
         const id = ids.next();
         const createdAt = clock.now();
         const { change, changeHash } = invitationChange({
@@ -190,7 +178,7 @@ export function createInvitationWrites({
     async confirm(admin, idempotent, invitationId, correlationId) {
       let token: string | undefined;
       const written = await write(admin, idempotent, correlationId, async (tx, states) => {
-        await adminOf(tx, states, admin);
+        await activeAdminId(tx, states, admin, WriteRefused);
         const read = await invitationToOpen(tx, states, keys, {
           orgId: admin.orgId,
           id: invitationId,
