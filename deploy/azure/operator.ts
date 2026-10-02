@@ -60,6 +60,7 @@ import {
   type LogLine,
   POLL_MS,
   readLog,
+  runCli,
   start,
   type Target,
   unfinishedRuns,
@@ -78,6 +79,7 @@ import {
   type Running,
   runningAs,
   same,
+  settingValue,
   type WorkloadSpec,
 } from './release.ts';
 
@@ -460,8 +462,7 @@ export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps):
   const hash = createHash('sha256').update(token, 'ascii').digest('hex');
   const id = request.id ?? uuidV7Ids.next();
   return runRequest(steps, (api) => {
-    const origin = api.container.env.find((setting) => setting.name === 'AGENTX_PUBLIC_ORIGIN');
-    const value = origin !== undefined && 'value' in origin ? origin.value : '';
+    const value = settingValue(api.container, 'AGENTX_PUBLIC_ORIGIN');
     if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
       throw new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.');
     }
@@ -539,32 +540,24 @@ async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest
   }
 }
 
-export async function main(
+export function main(
   argv: readonly string[],
   say: (line: string) => void = console.log,
   az: () => ReturnType<typeof realAz> = realAz,
 ): Promise<number> {
-  let work: (steps: JobSteps) => Promise<number>;
-  try {
-    if (argv[0] === 'invite-first-admin') {
-      const request = parseFirstAdmin(argv);
-      work = (steps) => inviteFirstAdmin(request, steps);
-    } else {
+  return runCli(
+    USAGE,
+    say,
+    (): ((steps: JobSteps) => Promise<number>) => {
+      if (argv[0] === 'invite-first-admin') {
+        const request = parseFirstAdmin(argv);
+        return (steps) => inviteFirstAdmin(request, steps);
+      }
       const request = parseArguments(argv);
-      work = (steps) => createOrganization(request, steps);
-    }
-  } catch (error) {
-    if (!(error instanceof UsageError)) throw error;
-    say(`${error.message}\n${USAGE}`);
-    return 2;
-  }
-  try {
-    return await work({ az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) });
-  } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    say(error.message);
-    return 1;
-  }
+      return (steps) => createOrganization(request, steps);
+    },
+    (work) => work({ az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) }),
+  );
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

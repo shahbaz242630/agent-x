@@ -88,34 +88,34 @@ export default async function setup(project: TestProject): Promise<() => Promise
   const { id: projectId } = await client.post<{ id: string }>('/management/v1/projects', { name: run });
   const app = { projectId, clientId: '' };
   const created: TestUser[] = [];
+  /** A user named for this run, recorded for removal before anything else is done to it. */
+  const newUser = async (name: string): Promise<TestUser> => {
+    const user = await createHumanUser(client, `${run}-${name}`, password);
+    created.push(user);
+    return user;
+  };
+  /** As newUser, with an authenticator app registered and verified: the user and the app's secret. */
+  const newUserWithApp = async (name: string): Promise<readonly [TestUser, string]> => {
+    const user = await newUser(name);
+    const secret = await registerTotp(client, user.userId);
+    await verifyTotp(client, user.userId, totp(secret, Date.now()));
+    return [user, secret];
+  };
+  const removeAll = () =>
+    Promise.allSettled([
+      ...created.map((user) => deleteUser(client, user.userId)),
+      deleteProject(client, app.projectId),
+    ]);
   try {
     app.clientId = (await createOidcApp(client, projectId, run, REDIRECT_URI)).clientId;
-    const noFactor = await createHumanUser(client, `${run}-nofactor`, password);
-    created.push(noFactor);
-    const withTotp = await createHumanUser(client, `${run}-totp`, password);
-    created.push(withTotp);
-    const totpSecret = await registerTotp(client, withTotp.userId);
-    await verifyTotp(client, withTotp.userId, totp(totpSecret, Date.now()));
-    const signIn = await createHumanUser(client, `${run}-signin`, password);
-    created.push(signIn);
-    const signInSecret = await registerTotp(client, signIn.userId);
-    await verifyTotp(client, signIn.userId, totp(signInSecret, Date.now()));
-    const stepUpApp = await createHumanUser(client, `${run}-stepup-app`, password);
-    created.push(stepUpApp);
-    const stepUpSecret = await registerTotp(client, stepUpApp.userId);
-    await verifyTotp(client, stepUpApp.userId, totp(stepUpSecret, Date.now()));
-    const stepUpKey = await createHumanUser(client, `${run}-stepup-key`, password);
-    created.push(stepUpKey);
-    const firstAdmin = await createHumanUser(client, `${run}-first-admin`, password);
-    created.push(firstAdmin);
-    const member = await createHumanUser(client, `${run}-member`, password);
-    created.push(member);
-    const memberSecret = await registerTotp(client, member.userId);
-    await verifyTotp(client, member.userId, totp(memberSecret, Date.now()));
-    const resetTarget = await createHumanUser(client, `${run}-reset-target`, password);
-    created.push(resetTarget);
-    const resetSecret = await registerTotp(client, resetTarget.userId);
-    await verifyTotp(client, resetTarget.userId, totp(resetSecret, Date.now()));
+    const noFactor = await newUser('nofactor');
+    const [withTotp, totpSecret] = await newUserWithApp('totp');
+    const [signIn, signInSecret] = await newUserWithApp('signin');
+    const [stepUpApp, stepUpSecret] = await newUserWithApp('stepup-app');
+    const stepUpKey = await newUser('stepup-key');
+    const firstAdmin = await newUser('first-admin');
+    const [member, memberSecret] = await newUserWithApp('member');
+    const [resetTarget] = await newUserWithApp('reset-target');
     await addOtpEmail(client, resetTarget.userId);
     await loginSees(client, noFactor, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
     await loginSees(client, stepUpKey, ['AUTHENTICATION_METHOD_TYPE_PASSWORD']);
@@ -151,17 +151,11 @@ export default async function setup(project: TestProject): Promise<() => Promise
       impersonation: await impersonationEnabled(client),
     });
   } catch (error) {
-    await Promise.allSettled([
-      ...created.map((user) => deleteUser(client, user.userId)),
-      deleteProject(client, app.projectId),
-    ]);
+    await removeAll();
     throw error;
   }
 
   return async () => {
-    await Promise.allSettled([
-      ...created.map((user) => deleteUser(client, user.userId)),
-      deleteProject(client, app.projectId),
-    ]);
+    await removeAll();
   };
 }

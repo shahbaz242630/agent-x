@@ -3,6 +3,8 @@
 // policies, and creating the test users and the OIDC client the login tests
 // need (FX-IDP). Everything created here is named by the run and removed by
 // the suite's teardown.
+import { setTimeout as sleep } from 'node:timers/promises';
+
 export interface ZitadelClient {
   get<T>(path: string): Promise<T>;
   post<T>(path: string, body?: unknown): Promise<T>;
@@ -67,6 +69,25 @@ export async function impersonationEnabled(client: ZitadelClient): Promise<boole
   return policy.enableImpersonation ?? false;
 }
 
+/** A web client (the authorization code with PKCE) in an existing project, in development mode. */
+const oidcApp = <T>(
+  client: ZitadelClient,
+  projectId: string,
+  name: string,
+  redirectUri: string,
+  authMethodType: string,
+): Promise<T> =>
+  client.post<T>(`/management/v1/projects/${projectId}/apps/oidc`, {
+    name,
+    redirectUris: [redirectUri],
+    responseTypes: ['OIDC_RESPONSE_TYPE_CODE'],
+    grantTypes: ['OIDC_GRANT_TYPE_AUTHORIZATION_CODE'],
+    appType: 'OIDC_APP_TYPE_WEB',
+    authMethodType,
+    accessTokenType: 'OIDC_TOKEN_TYPE_BEARER',
+    devMode: true,
+  });
+
 /**
  * A public web client (authorization code with PKCE, no secret) in an
  * existing project, in development mode so its redirect may be plain http on
@@ -78,16 +99,13 @@ export async function createOidcApp(
   name: string,
   redirectUri: string,
 ): Promise<{ clientId: string }> {
-  const { clientId } = await client.post<{ clientId: string }>(`/management/v1/projects/${projectId}/apps/oidc`, {
+  const { clientId } = await oidcApp<{ clientId: string }>(
+    client,
+    projectId,
     name,
-    redirectUris: [redirectUri],
-    responseTypes: ['OIDC_RESPONSE_TYPE_CODE'],
-    grantTypes: ['OIDC_GRANT_TYPE_AUTHORIZATION_CODE'],
-    appType: 'OIDC_APP_TYPE_WEB',
-    authMethodType: 'OIDC_AUTH_METHOD_TYPE_NONE',
-    accessTokenType: 'OIDC_TOKEN_TYPE_BEARER',
-    devMode: true,
-  });
+    redirectUri,
+    'OIDC_AUTH_METHOD_TYPE_NONE',
+  );
   return { clientId };
 }
 
@@ -103,16 +121,7 @@ export async function createConfidentialApp(
   name: string,
   redirectUri: string,
 ): Promise<{ clientId: string; clientSecret: string }> {
-  return client.post(`/management/v1/projects/${projectId}/apps/oidc`, {
-    name,
-    redirectUris: [redirectUri],
-    responseTypes: ['OIDC_RESPONSE_TYPE_CODE'],
-    grantTypes: ['OIDC_GRANT_TYPE_AUTHORIZATION_CODE'],
-    appType: 'OIDC_APP_TYPE_WEB',
-    authMethodType: 'OIDC_AUTH_METHOD_TYPE_BASIC',
-    accessTokenType: 'OIDC_TOKEN_TYPE_BEARER',
-    devMode: true,
-  });
+  return oidcApp(client, projectId, name, redirectUri, 'OIDC_AUTH_METHOD_TYPE_BASIC');
 }
 
 /** The IDs of the projects with exactly this name. */
@@ -184,7 +193,7 @@ export async function loginSees(
         `the login still can't see a test user after ${String(timeoutMs)} ms (found: ${String(found)}, methods: ${JSON.stringify(authMethodTypes)})`,
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await sleep(250);
   }
 }
 
