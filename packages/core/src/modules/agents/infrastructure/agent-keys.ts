@@ -15,7 +15,7 @@
 //
 // Its secret's MAC is sealed but never put in an event: a seal is a MAC over
 // the fields, so the audit trail holds nothing a key could be guessed from.
-import type { SignedStateTable } from '@agentx/platform/db';
+import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
 import { sql } from 'kysely';
 
 import type {
@@ -226,8 +226,7 @@ export async function agentKeysOf(
  * the last of the day's budget. Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneKeyIssueAtATime(tx: AgentsTransaction, orgId: string): Promise<void> {
-  const key = `agentx.agent_keys:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'agent_keys', orgId);
 }
 
 /** How many keys the organisation issued after `since`, first keys included: its budget's count, in one statement. */

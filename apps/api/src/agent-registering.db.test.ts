@@ -18,12 +18,13 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
@@ -407,9 +408,7 @@ describe('what registering refuses, writing nothing', () => {
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.agents:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('agents', org));
       const confirming = within(20_000, confirm(developer, challengeId), 'the confirmation');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');

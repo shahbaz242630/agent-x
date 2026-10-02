@@ -36,7 +36,7 @@
 // organisation, the version and the contact's kind as associated data
 // (ADR-011 §2), and opened only from a version the caller read through its
 // signed state.
-import type { SignedStateTable } from '@agentx/platform/db';
+import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
 import { KeyError, type KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
@@ -1040,8 +1040,7 @@ export const MOST_SUPPLIERS_ADDED_A_DAY = 100;
  * Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneSupplierAddAtATime(tx: SuppliersTransaction, orgId: string): Promise<void> {
-  const key = `agentx.suppliers:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'suppliers', orgId);
 }
 
 /** How many suppliers the organisation added after `since`: the day's budget's count (E1-2), in one statement. */

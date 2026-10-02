@@ -9,6 +9,7 @@ import {
   createDatabase,
   type Database,
   type IdempotentRequest,
+  lockName,
   TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
@@ -17,6 +18,7 @@ import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   tamperAsOwner,
@@ -783,9 +785,7 @@ describe(`the first admin, invited by the operator's command (B4-6a, Postgres ${
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.first-admin:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('first-admin', org));
       await holder.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
         someone.userId,
         org,

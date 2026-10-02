@@ -10,7 +10,7 @@
 // query on this table outside the audit module's steps, as for an
 // organisation's row (organizations.ts says why a plain insert is safe, and
 // must stay plain). Its name is kept on the row alone, never in an event.
-import type { SignedStateTable } from '@agentx/platform/db';
+import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import type {
@@ -89,8 +89,7 @@ export async function addAgent(
  * Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneAgentAddAtATime(tx: AgentsTransaction, orgId: string): Promise<void> {
-  const key = `agentx.agents:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'agents', orgId);
 }
 
 /** How many agents the organisation added after `since`: its budget's count, in one statement. */

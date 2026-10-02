@@ -1,10 +1,26 @@
-import { createTenantProbe, createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import {
+  createTenantProbe,
+  createTestDatabase,
+  holdNamedLock,
+  LogCapture,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
-import { assertTenant, limitStatements, STATEMENT_SECONDS, TenantContextError, withTenant } from './tenant.ts';
+import {
+  assertTenant,
+  holdTransactionLock,
+  limitStatements,
+  lockName,
+  STATEMENT_SECONDS,
+  TenantContextError,
+  withTenant,
+} from './tenant.ts';
 
 interface ProbeSchema {
   'probe.items': { org_id: string; id: string; label: string };
@@ -374,6 +390,60 @@ describe('limitStatements', () => {
     // The next transaction on the same pool starts without it.
     const after = await app.transaction().execute(async (tx) => (await read().execute(tx)).rows[0]?.limit);
     expect(after).not.toBe(`${String(STATEMENT_SECONDS)}s`);
+  });
+});
+
+describe('holdTransactionLock', () => {
+  it('names the lock by its scope and its IDs in lower case', () => {
+    expect(lockName('factor-resets', ORG_A.toUpperCase(), ITEM(1))).toBe(`agentx.factor-resets:${ORG_A}:${ITEM(1)}`);
+  });
+
+  it('waits while another transaction holds the lock, and takes it once that one ends', async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holdNamedLock(holder, lockName('probe', ORG_A));
+      const order: string[] = [];
+      const taking = within(
+        20_000,
+        withTenant(app, ORG_A, async (tx) => {
+          await holdTransactionLock(tx, 'probe', ORG_A);
+          order.push('taken');
+        }),
+        'the lock',
+      );
+      await waitUntilQueued(database.as('admin'), 1);
+      order.push('released');
+      await holder.query('commit');
+      await taking;
+
+      expect(order).toEqual(['released', 'taken']);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it("doesn't wait for another scope's lock, or another organisation's", async () => {
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holdNamedLock(holder, lockName('probe', ORG_A));
+
+      await within(
+        5_000,
+        withTenant(app, ORG_A, (tx) => holdTransactionLock(tx, 'other', ORG_A)),
+        'another scope',
+      );
+      await within(
+        5_000,
+        withTenant(app, ORG_B, (tx) => holdTransactionLock(tx, 'probe', ORG_B)),
+        'another organisation',
+      );
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
 

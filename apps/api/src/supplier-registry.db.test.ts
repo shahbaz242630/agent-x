@@ -22,12 +22,13 @@ import {
   verifySupplier,
 } from '@agentx/core/modules/suppliers';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   tamperAsOwner,
@@ -279,9 +280,7 @@ describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.suppliers:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('suppliers', org));
       const adding = within(20_000, add(admin), 'the add');
       await waitUntilQueued(database.as('admin'), 1);
       expect(await suppliersIn(org)).toBe(0);

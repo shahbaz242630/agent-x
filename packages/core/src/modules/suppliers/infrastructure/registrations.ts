@@ -19,7 +19,7 @@
 // (confirmPayeeChange). The insert is the only query on the table outside the
 // audit module's steps but for the budget's count, as for a supplier's row.
 // The seals are MACs, so the masked name is never put in an event.
-import type { SignedStateTable } from '@agentx/platform/db';
+import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import type {
@@ -401,8 +401,7 @@ export const MOST_PAYEE_REGISTRATIONS_A_DAY = 100;
  * budget. Taken right after the idempotency key's claim, before any row lock.
  */
 export async function onePayeeChangeAtATime(tx: RegistrationsTransaction, orgId: string): Promise<void> {
-  const key = `agentx.payees:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'payees', orgId);
 }
 
 /** How many registrations the organisation started after `since`: the day's budget's count, in one statement. */

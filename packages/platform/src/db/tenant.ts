@@ -119,6 +119,24 @@ export async function limitStatements<Schema>(tx: Transaction<Schema>): Promise<
   await sql`select pg_catalog.set_config('statement_timeout', ${timeout}, true)`.execute(tx);
 }
 
+/** A lock's name, `agentx.<scope>:<id>…` with the IDs in lower case, so every taker of one lock names it alike. */
+export const lockName = (scope: string, ...ids: readonly string[]): string =>
+  `agentx.${scope}:${ids.map((id) => id.toLowerCase()).join(':')}`;
+
+/**
+ * Takes the lock lockName names until the transaction ends, waiting while
+ * another transaction holds it: what serialises work no one row stands for,
+ * such as two adds taking the last of a day's budget (ADR-006 §6).
+ */
+export async function holdTransactionLock<Schema>(
+  tx: Transaction<Schema>,
+  scope: string,
+  ...ids: readonly string[]
+): Promise<void> {
+  const name = lockName(scope, ...ids);
+  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${name}, 0))`.execute(tx);
+}
+
 /**
  * What a connection must carry before any work runs on it: no tenant, and the
  * `search_path` the startup packet pinned. Both come back from one statement,

@@ -5,6 +5,7 @@
 // server to server (SEC-PTR-08), never from anything that came back through
 // the browser. Locked at the funding source's level (ADR-006 §6: 5), before
 // the source it makes.
+import { holdTransactionLock } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
 import { PARTNER_NAME } from '../../providers/index.ts';
@@ -56,8 +57,7 @@ export const MOST_LINKS_STARTED_A_DAY = 20;
  * Taken right after the idempotency key's claim, before any row lock.
  */
 export async function oneLinkStartAtATime(tx: LinksTransaction, orgId: string): Promise<void> {
-  const key = `agentx.funding-links:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'funding-links', orgId);
 }
 
 /** How many links the organisation started after `since`: its budget's count, in one statement. */
