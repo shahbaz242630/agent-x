@@ -29,8 +29,8 @@ export interface PageAsked {
  * caller's transaction, which must be withSignedStates' for it: each row read
  * by `read`, so a page holds nothing that can't be believed. A row gone since
  * its ID was listed is left out. Tampered with, at the first row that is, the
- * page is refused (`read` raised the alarm). Besides each row's own read, one
- * statement a page: its IDs. A limit outside 1 to `most` is refused before
+ * page is refused (`read` raised the alarm). Besides each row's own read, two
+ * statements a page: the tenant check and its IDs. A limit outside 1 to `most` is refused before
  * any SQL runs, naming the page's `rows`.
  */
 export async function verifiedPage<Schema, Item>(

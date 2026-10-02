@@ -233,7 +233,7 @@ export const MOST_AGENTS_A_PAGE = 50;
  * it: at most `limit` (1 to MOST_AGENTS_A_PAGE) after the agent `after`, with
  * the ID to ask the next page after, or null at the end; or tampered with, at
  * the first agent that is, and then no page at all. Besides each agent's own
- * read, two statements a page: its IDs, and its names.
+ * read, three statements a page: the tenant check, its IDs and its names.
  */
 export async function agentsPage(
   tx: AgentsTransaction,

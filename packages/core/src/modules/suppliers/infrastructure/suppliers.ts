@@ -968,7 +968,7 @@ export const MOST_SUPPLIERS_A_PAGE = 50;
  * MOST_SUPPLIERS_A_PAGE) after the supplier `after`, with the ID to ask the
  * next page after, or null at the end; or tampered with, at the first
  * supplier or version that is, and then no page at all. Besides each row's
- * own read, one statement a page: its IDs.
+ * own read, two statements a page: the tenant check and its IDs.
  */
 export async function suppliersPage(
   tx: SuppliersTransaction,

@@ -19,7 +19,6 @@
 //   sign-in (`routedToIssuer`), and the outbound fetch's allowlist. Each
 //   answer is read strictly and bounded; anything else throws
 //   IdpFactorsUnavailable, naming the step, never the answer.
-
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */

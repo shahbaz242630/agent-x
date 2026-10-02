@@ -14,7 +14,6 @@
 // - A login service that can't be reached, refuses the token, or answers
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
-
 import { classOfIdpEvent, type IdpEventClass, MOST_WATCHED_TYPES, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
