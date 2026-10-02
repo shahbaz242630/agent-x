@@ -13,12 +13,9 @@
 //   notice to them is given up. A login service that can't be reached, or
 //   refuses the token, throws: the notice waits to be tried again.
 // - The address is never logged; a failure names the step, never the answer.
-import type { OutboundFetch } from '@agentx/platform/outbound';
-
 import type { AddressBook } from '../../notifications/index.ts';
 import type { Subject } from '../domain/sign-in.ts';
-import { boundedText } from './zitadel-answer.ts';
-import { routedToIssuer } from './zitadel-route.ts';
+import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
 const CALL_TIMEOUT_MS = 10_000;
@@ -28,9 +25,6 @@ const MOST_ANSWER_BYTES = 64 * 1024;
 
 /** A subject as Zitadel makes them: its IDs are digits. */
 const SUBJECT = /^[0-9]{1,32}$/;
-
-/** A token: visible ASCII, bounded. */
-const TOKEN = /^[!-~]{1,4096}$/;
 
 /** An address as it can be sent to: one @, no spaces or angle brackets, bounded. */
 const ADDRESS = /^[^\s@<>"]{1,64}@[^\s@<>"]{1,253}$/;
@@ -52,58 +46,22 @@ function verifiedAddress(answer: unknown): string | undefined {
 
 export function createAddressBook({
   subjectOf,
-  issuer,
-  internalOrigin,
-  token,
-  fetch,
-}: {
+  ...login
+}: ZitadelCallOptions & {
   /** The issuer and subject a user signs in as (`subjectOfUser`); undefined for no such user. */
   readonly subjectOf: (userId: string) => Promise<Subject | undefined>;
-  /** The login service, exactly as its tokens name it. */
-  readonly issuer: string;
-  /** Where to reach it inside the platform (B2-6); undefined to call the issuer itself. */
-  readonly internalOrigin: string | undefined;
-  readonly token: string;
-  readonly fetch: OutboundFetch;
 }): AddressBook {
-  if (!URL.canParse(issuer) || new URL(issuer).origin !== issuer) throw new RangeError('the issuer must be an origin');
-  if (!TOKEN.test(token)) throw new RangeError('the token must be 1 to 4096 visible ASCII characters');
+  const call = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
+  const unavailable = (how: string) => new AddressBookUnavailable(how);
 
   return {
     async addressOf(userId) {
       const user = await subjectOf(userId);
       // Only the login service this API signs in with is asked; its subjects are its own IDs.
-      if (user?.issuer !== issuer || !SUBJECT.test(user.subject)) return undefined;
-      const [url, init] = routedToIssuer(issuer, internalOrigin, `${issuer}/v2/users/${user.subject}`, {
-        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-      });
-      let response: Response;
-      try {
-        response = await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
-      } catch {
-        throw new AddressBookUnavailable('the call failed');
-      }
-      if (response.status === 404) {
-        await response.body?.cancel();
-        return undefined;
-      }
-      if (response.status !== 200) {
-        await response.body?.cancel();
-        throw new AddressBookUnavailable(`it answered ${String(response.status)}`);
-      }
-      let answer: unknown;
-      try {
-        answer = JSON.parse(
-          await boundedText(
-            response,
-            MOST_ANSWER_BYTES,
-            () => new AddressBookUnavailable(`the answer was larger than ${String(MOST_ANSWER_BYTES)} bytes`),
-          ),
-        );
-      } catch (error) {
-        if (error instanceof AddressBookUnavailable) throw error;
-        throw new AddressBookUnavailable('the answer is not JSON');
-      }
+      if (user?.issuer !== login.issuer || !SUBJECT.test(user.subject)) return undefined;
+      const { status, answer } = await call({ path: `/v2/users/${user.subject}` }, unavailable);
+      if (status === 404) return undefined;
+      if (status !== 200) throw unavailable(`it answered ${String(status)}`);
       return verifiedAddress(answer);
     },
   };
