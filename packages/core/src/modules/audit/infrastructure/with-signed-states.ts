@@ -162,8 +162,9 @@ export async function holdOrganisation(
 
 /**
  * Runs `work` in withTenant's transaction for the organisation, with signed
- * states of its own, and then puts the organisation on hold for anything they
- * found tampered with. Returns what `work` returns, or throws what it throws.
+ * states of its own and each statement limited (limitStatements), and then
+ * puts the organisation on hold for anything they found tampered with.
+ * Returns what `work` returns, or throws what it throws.
  */
 export async function withSignedStates<Tables extends AuditTables, Result>(
   // Both: the work's transaction has every table the caller's has, the hold's the audit tables.
@@ -184,8 +185,9 @@ export async function withSignedStates<Tables extends AuditTables, Result>(
   // Whether the work's transaction began: one refused outright (nested, a bad ID) found nothing, and tries nothing.
   const opened = { began: false };
   try {
-    return await withTenant(db, orgId, (tx) => {
+    return await withTenant(db, orgId, async (tx) => {
       opened.began = true;
+      await limitStatements(tx);
       return work(tx, states);
     });
   } catch (error) {

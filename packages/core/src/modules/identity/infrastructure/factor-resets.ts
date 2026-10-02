@@ -34,7 +34,6 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
-import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
@@ -549,7 +548,6 @@ export function resetLinkFor(
   contactId: string,
 ): Promise<{ readonly url: string; readonly expiresAt: Date } | undefined> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await limitStatements(tx);
     // The contact (level 2b) before the reset (2c).
     const contact = await contactRecord(tx, states, orgId, contactId);
     const read = await resetRecord(tx, states, orgId, resetId);

@@ -26,7 +26,6 @@
 // statement is limited to 10 seconds.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { limitStatements } from '@agentx/platform/db';
 import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
@@ -92,7 +91,6 @@ export function createContactConfirmations({
       const services = { keys, ids, logger: logger.child({ correlationId }) };
       try {
         const coolingOffUntil = await withSignedStates(database, orgId, services, async (tx, states) => {
-          await limitStatements(tx);
           const matched = await confirmationMatches(tx, keys, link);
           if (matched !== 'matches') throw new ConfirmationRefused(404, 'NOT_FOUND');
           // A secret was written for them, so the reset and the contact are the organisation's.

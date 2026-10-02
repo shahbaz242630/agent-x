@@ -46,7 +46,6 @@
 // seconds; the login service's calls to 10 seconds each.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
@@ -120,10 +119,7 @@ export function createResetRemovals({
     work: (tx: Transaction<Tables>, states: SignedStates) => Promise<T>,
   ): Promise<T> => {
     const services: SignedStatesServices = { keys, ids, logger: logger.child({ orgId }) };
-    return withSignedStates(database, orgId, services, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+    return withSignedStates(database, orgId, services, work);
   };
 
   /** The IDs of the organisation's resets due now. Throws for resets that can't be believed, or more than are read. */

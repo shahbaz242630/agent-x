@@ -30,7 +30,6 @@ import {
   type Database,
   type DatabaseTransaction,
   type IdempotentRequest,
-  limitStatements,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -131,11 +130,7 @@ export function createSupplierWork({
     orgId: string,
     correlationId: string,
     work: (tx: SupplierTx, states: SignedStates) => Promise<T>,
-  ): Promise<T> =>
-    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+  ): Promise<T> => withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
 
   /** A read in the organisation's transaction, a refusal inside it answered. */
   const answered = async <T extends object>(

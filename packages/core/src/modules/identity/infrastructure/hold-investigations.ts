@@ -13,7 +13,7 @@
 //
 // A refusal inside the write throws, so the key's claim and anything written
 // roll back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
@@ -95,15 +95,7 @@ export function createHoldInvestigations({
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<T>,
   ): Promise<T> =>
-    withSignedStates(
-      database,
-      admin.orgId,
-      { keys, ids, logger: logger.child({ correlationId }) },
-      async (tx, states) => {
-        await limitStatements(tx);
-        return work(tx, states);
-      },
-    );
+    withSignedStates(database, admin.orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
 
   /** As inTransaction, a refusal answered. */
   const inOrganisation = async <T>(

@@ -15,7 +15,6 @@ import {
   type Database,
   type DatabaseTransaction,
   type IdempotentRequest,
-  limitStatements,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -94,11 +93,7 @@ export function createFundingSourceWork({
     orgId: string,
     correlationId: string,
     work: (tx: FundingSourceTx, states: SignedStates) => Promise<T>,
-  ): Promise<T> =>
-    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+  ): Promise<T> => withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
 
   return {
     inOrganisation,
