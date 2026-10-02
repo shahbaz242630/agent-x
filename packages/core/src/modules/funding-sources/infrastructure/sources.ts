@@ -17,14 +17,16 @@
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  type AuditDetails,
+  type AuditTables,
+  type PageAsked,
+  type RecordedState,
+  type SignedStates,
+  type TamperSign,
+  verifiedPage,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import { type FundingSourceState, PARTNER_NAME, SOURCE_AVAILABILITIES } from '../../providers/index.ts';
 import { FUNDING_SOURCE, type SourceRecord } from '../domain/source.ts';
@@ -282,8 +284,6 @@ export async function endUnknownToPartner(
 /** The most sources a page holds (D2-4). */
 export const MOST_SOURCES_A_PAGE = 50;
 
-const NIL_UUID = '00000000-0000-0000-0000-000000000000';
-
 /**
  * A page of the organisation's sources, in order of ID, after `after` (null
  * from the start), in the caller's transaction, which must be
@@ -296,35 +296,23 @@ export async function sourcesPage(
   tx: FundingSourcesTransaction,
   states: SignedStates,
   orgId: string,
-  { after, limit }: { readonly after: string | null; readonly limit: number },
+  page: PageAsked,
 ): Promise<
   | { readonly outcome: 'listed'; readonly sources: readonly SourceRecord[]; readonly next: string | null }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  if (!Number.isInteger(limit) || limit < 1 || limit > MOST_SOURCES_A_PAGE) {
-    throw new RangeError(`A page is 1 to ${String(MOST_SOURCES_A_PAGE)} sources`);
-  }
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each source is then read through its signed state
-    .selectFrom(SOURCES.table)
-    .select('id')
-    .where('org_id', '=', orgId)
-    // From the start, every ID is after the nil uuid.
-    .where('id', '>', after ?? NIL_UUID)
-    .orderBy('id')
-    .limit(limit + 1)
-    .execute();
-  const found: SourceRecord[] = [];
-  let last: string | null = null;
-  for (const { id } of rows.slice(0, limit)) {
-    const read = await sourceOf(tx, states, { orgId, id }, 'share');
-    if (read.outcome === 'tampered') return read;
-    if (read.outcome === 'found') found.push(read.source);
-    last = id;
-  }
-  // One more than the page was there: the next page starts after this one's last.
-  const next = rows.length > limit ? last : null;
-  return { outcome: 'listed', sources: found, next };
+  const listed = await verifiedPage(
+    tx,
+    SOURCES,
+    orgId,
+    page,
+    { most: MOST_SOURCES_A_PAGE, rows: 'sources' },
+    async (id) => {
+      const read = await sourceOf(tx, states, { orgId, id }, 'share');
+      return read.outcome === 'found' ? { outcome: 'found', item: read.source } : read;
+    },
+  );
+  return listed.outcome === 'tampered' ? listed : { outcome: 'listed', sources: listed.items, next: listed.next };
 }
 
 /** The partner's answer names another source than the one it was asked about. */

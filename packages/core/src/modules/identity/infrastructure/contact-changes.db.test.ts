@@ -6,12 +6,13 @@
 // registered-contacts.db.test.ts.
 import { createHash } from 'node:crypto';
 
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   tamperAsOwner,
@@ -391,9 +392,7 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.registered-contacts:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('registered-contacts', org));
       const confirming = within(20_000, confirm(admin, asked.contact.id), 'the confirmation');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');
@@ -468,9 +467,7 @@ describe(`the organisation's budget of contacts started (B8-2, Postgres ${server
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.registered-contacts:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('registered-contacts', org));
       const adding = within(20_000, add(admin), 'the add');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');
@@ -573,9 +570,7 @@ describe(`removing a registered contact (B6-1c, Postgres ${server.version})`, ()
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.registered-contacts:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('registered-contacts', org));
       const removing = within(20_000, removeConfirm(admin, id, asked.stepUpChallengeId), 'the removal');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');

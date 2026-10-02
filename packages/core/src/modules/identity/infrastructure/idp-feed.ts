@@ -14,11 +14,8 @@
 // - A login service that can't be reached, refuses the token, or answers
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
-import type { OutboundFetch } from '@agentx/platform/outbound';
-
 import { classOfIdpEvent, type IdpEventClass, MOST_WATCHED_TYPES, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
-import { boundedText } from './zitadel-answer.ts';
-import { routedToIssuer } from './zitadel-route.ts';
+import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
 const CALL_TIMEOUT_MS = 20_000;
@@ -28,9 +25,6 @@ const MOST_ANSWER_BYTES = 2 * 1024 * 1024;
 
 /** The most events one search takes. */
 export const MOST_EVENTS_A_PAGE = 100;
-
-/** A token: visible ASCII, bounded. */
-const TOKEN = /^[!-~]{1,4096}$/;
 
 /** An ID as Zitadel makes them: digits, or letters for its own system actors. */
 const ZITADEL_ID = /^[0-9A-Za-z_-]{1,200}$/;
@@ -104,21 +98,9 @@ function eventOf(raw: unknown): IdpEvent | undefined {
   };
 }
 
-export function createIdpEventFeed({
-  issuer,
-  internalOrigin,
-  token,
-  fetch,
-}: {
-  /** The login service, exactly as its tokens name it. */
-  readonly issuer: string;
-  /** Where to reach it inside the platform (B2-6); undefined to call the issuer itself. */
-  readonly internalOrigin: string | undefined;
-  readonly token: string;
-  readonly fetch: OutboundFetch;
-}): IdpEventFeed {
-  if (!URL.canParse(issuer) || new URL(issuer).origin !== issuer) throw new RangeError('the issuer must be an origin');
-  if (!TOKEN.test(token)) throw new RangeError('the token must be 1 to 4096 visible ASCII characters');
+export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {
+  const call = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
+  const unavailable = (how: string) => new IdpFeedUnavailable(how);
   const eventTypes = Object.keys(WATCHED_IDP_EVENTS);
   if (eventTypes.length > MOST_WATCHED_TYPES) throw new RangeError('more event types than one search takes');
 
@@ -127,39 +109,20 @@ export function createIdpEventFeed({
       if (!Number.isSafeInteger(most) || most < 1 || most > MOST_EVENTS_A_PAGE) {
         throw new RangeError(`a search takes 1 to ${String(MOST_EVENTS_A_PAGE)} events`);
       }
-      const [url, init] = routedToIssuer(issuer, internalOrigin, `${issuer}/admin/v1/events/_search`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({
-          asc: true,
-          limit: most,
-          event_types: eventTypes,
-          range: { since: since.toISOString(), until: until.toISOString() },
-        }),
-      });
-      let response: Response;
-      try {
-        response = await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
-      } catch {
-        throw new IdpFeedUnavailable('the call failed');
-      }
-      if (response.status !== 200) {
-        await response.body?.cancel();
-        throw new IdpFeedUnavailable(`it answered ${String(response.status)}`);
-      }
-      let answer: unknown;
-      try {
-        answer = JSON.parse(
-          await boundedText(
-            response,
-            MOST_ANSWER_BYTES,
-            () => new IdpFeedUnavailable(`the answer was larger than ${String(MOST_ANSWER_BYTES)} bytes`),
-          ),
-        );
-      } catch (error) {
-        if (error instanceof IdpFeedUnavailable) throw error;
-        throw new IdpFeedUnavailable('the answer is not JSON');
-      }
+      const { status, answer } = await call(
+        {
+          path: '/admin/v1/events/_search',
+          method: 'POST',
+          body: {
+            asc: true,
+            limit: most,
+            event_types: eventTypes,
+            range: { since: since.toISOString(), until: until.toISOString() },
+          },
+        },
+        unavailable,
+      );
+      if (status !== 200) throw unavailable(`it answered ${String(status)}`);
       const raw = field(answer, 'events') ?? [];
       if (!Array.isArray(raw) || raw.length > most) throw new IdpFeedUnavailable('the answer holds no list of events');
       return raw.map((each) => {

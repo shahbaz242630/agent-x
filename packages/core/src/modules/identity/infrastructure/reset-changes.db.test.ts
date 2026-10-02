@@ -8,12 +8,13 @@
 // (contact-confirmations.ts).
 import { createHash } from 'node:crypto';
 
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   tamperAsOwner,
@@ -438,9 +439,7 @@ describe(`asking for a reset (B6-3b, Postgres ${server.version})`, () => {
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.factor-resets:${org}:${person.membershipId}`,
-      ]);
+      await holdNamedLock(holder, lockName('factor-resets', org, person.membershipId));
       const asking = within(20_000, ask(admin, person.membershipId), 'the ask');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');

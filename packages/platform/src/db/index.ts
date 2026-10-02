@@ -52,7 +52,15 @@ export {
   type WrittenRow,
   writeSignedRow,
 } from './signed-rows.ts';
-export { assertTenant, limitStatements, STATEMENT_SECONDS, TenantContextError, withTenant } from './tenant.ts';
+export {
+  assertTenant,
+  holdTransactionLock,
+  limitStatements,
+  lockName,
+  STATEMENT_SECONDS,
+  TenantContextError,
+  withTenant,
+} from './tenant.ts';
 export {
   createStatusChanger,
   type StatusChange,

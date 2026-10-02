@@ -51,4 +51,5 @@ export {
   isIncidentReference,
 } from './domain/integrity-hold.ts';
 export type { AuditTables } from './infrastructure/tables.ts';
+export { type PageAsked, type PageRead, type VerifiedPage, verifiedPage } from './infrastructure/verified-page.ts';
 export { holdOrganisation, type SignedStatesServices, withSignedStates } from './infrastructure/with-signed-states.ts';

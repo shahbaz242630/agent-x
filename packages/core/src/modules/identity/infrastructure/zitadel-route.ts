@@ -3,7 +3,8 @@
 // origin goes there instead, carrying the issuer's host in Zitadel's
 // `x-zitadel-instance-host` and `x-zitadel-public-host` headers, as the login
 // pages do: Zitadel then answers as the issuer. Without one, the call goes to
-// the URL itself. The OIDC client (B2-2) and the address book (B5-3) share it.
+// the URL itself. The OIDC client (B2-2) and the calls to its API
+// (zitadel-call.ts) share it.
 
 /** The URL and options a call to `url`, on the issuer's own origin, is sent with. */
 export function routedToIssuer(

@@ -34,10 +34,15 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
+import {
+  createIdempotentWrites,
+  holdTransactionLock,
+  type IdempotentRequest,
+  limitStatements,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
@@ -232,8 +237,7 @@ export function createContactChanges({
 
   /** Serialises the organisation's contact changes, so a check for room holds until the change commits. */
   const oneAtATime = async (tx: Transaction<Tables>, orgId: string): Promise<void> => {
-    const key = `agentx.registered-contacts:${orgId.toLowerCase()}`;
-    await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+    await holdTransactionLock(tx, 'registered-contacts', orgId);
   };
 
   return {

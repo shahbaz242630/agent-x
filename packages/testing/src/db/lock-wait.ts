@@ -8,6 +8,8 @@
 //   holds. It lines up code that can't call a barrier: the test holds the lock
 //   the code takes first (say, the organisation row), waits until all parties
 //   queue, and then lets go.
+// - holdNamedLock: holds a lock no row stands for (@agentx/platform/db's
+//   holdTransactionLock), as a party part-way through its work would.
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { DEFAULT_WAIT_MS } from '../race.ts';
@@ -89,4 +91,13 @@ export async function waitUntilQueued(
     },
     (timeoutMs) => `${waiting} of ${count} sessions were waiting for a lock after ${timeoutMs} ms`,
   );
+}
+
+/**
+ * Takes the named lock (holdTransactionLock's, named by lockName) in the
+ * client's open transaction, held until it ends, as a party part-way through
+ * its work holds it.
+ */
+export async function holdNamedLock(client: TestSession, name: string): Promise<void> {
+  await client.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [name]);
 }

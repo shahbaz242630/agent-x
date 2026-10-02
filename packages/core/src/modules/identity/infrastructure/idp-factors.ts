@@ -19,10 +19,7 @@
 //   sign-in (`routedToIssuer`), and the outbound fetch's allowlist. Each
 //   answer is read strictly and bounded; anything else throws
 //   IdpFactorsUnavailable, naming the step, never the answer.
-import type { OutboundFetch } from '@agentx/platform/outbound';
-
-import { boundedText } from './zitadel-answer.ts';
-import { routedToIssuer } from './zitadel-route.ts';
+import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
 const CALL_TIMEOUT_MS = 10_000;
@@ -46,9 +43,6 @@ const sleep = (ms: number) =>
 
 /** The most factors, or passkeys, one person may have that a removal reads. */
 const MOST_FACTORS = 100;
-
-/** A token: visible ASCII, bounded. */
-const TOKEN = /^[!-~]{1,4096}$/;
 
 /** A subject, and a factor's ID, as Zitadel makes them: digits. */
 const ZITADEL_ID = /^[0-9]{1,32}$/;
@@ -148,63 +142,20 @@ function passkeyRemovalOf(passkey: unknown): string {
 }
 
 export function createSecondFactorRemover({
-  issuer,
-  internalOrigin,
-  token,
-  fetch,
   pause = sleep,
-}: {
-  /** The login service, exactly as its tokens name it. */
-  readonly issuer: string;
-  /** Where to reach it inside the platform (B2-6); undefined to call the issuer itself. */
-  readonly internalOrigin: string | undefined;
-  readonly token: string;
-  readonly fetch: OutboundFetch;
+  ...login
+}: ZitadelCallOptions & {
   /** Waits between the reads after a removal; a test's is instant. */
   readonly pause?: (ms: number) => Promise<void>;
 }): SecondFactorRemover & PasskeysHeld {
-  if (!URL.canParse(issuer) || new URL(issuer).origin !== issuer) throw new RangeError('the issuer must be an origin');
-  if (!TOKEN.test(token)) throw new RangeError('the token must be 1 to 4096 visible ASCII characters');
+  const zitadel = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
 
-  /** Calls the user's path; its answer's status and body (read and parsed only when `read`). */
-  const call = async (
-    subject: string,
-    path: string,
-    method: 'GET' | 'POST' | 'DELETE',
-    body: unknown,
-    step: string,
-  ): Promise<{ status: number; answer: unknown }> => {
-    const [url, init] = routedToIssuer(issuer, internalOrigin, `${issuer}/v2/users/${subject}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: 'application/json',
-        ...(body !== undefined && { 'content-type': 'application/json' }),
-      },
-      ...(body !== undefined && { body: JSON.stringify(body) }),
-    });
-    let response: Response;
-    try {
-      response = await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
-    } catch {
-      throw new IdpFactorsUnavailable(`${step}: the call failed`);
-    }
-    if (response.status !== 200) {
-      await response.body?.cancel();
-      return { status: response.status, answer: undefined };
-    }
-    try {
-      const text = await boundedText(
-        response,
-        MOST_ANSWER_BYTES,
-        () => new IdpFactorsUnavailable(`${step}: the answer was larger than ${String(MOST_ANSWER_BYTES)} bytes`),
-      );
-      return { status: 200, answer: JSON.parse(text) as unknown };
-    } catch (error) {
-      if (error instanceof IdpFactorsUnavailable) throw error;
-      throw new IdpFactorsUnavailable(`${step}: the answer is not JSON`);
-    }
-  };
+  /** Calls the user's path; its answer's status and body (parsed for a 200 alone). */
+  const call = (subject: string, path: string, method: 'GET' | 'POST' | 'DELETE', body: unknown, step: string) =>
+    zitadel(
+      { path: `/v2/users/${subject}${path}`, method, body },
+      (how) => new IdpFactorsUnavailable(`${step}: ${how}`),
+    );
 
   /** A read's answer; anything but 200 throws. */
   const read = async (subject: string, path: string, method: 'GET' | 'POST', body: unknown, step: string) => {

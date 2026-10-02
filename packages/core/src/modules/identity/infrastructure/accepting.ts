@@ -31,10 +31,15 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
 // limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
+import {
+  createIdempotentWrites,
+  holdTransactionLock,
+  type IdempotentRequest,
+  limitStatements,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql } from 'kysely';
+import type { Kysely } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
@@ -74,8 +79,7 @@ export const ACCEPT_OPERATION = 'invitations.accept';
  * person's membership are read, and before any membership is added.
  */
 async function firstToJoin(tx: Parameters<typeof listedMembers>[0], orgId: string): Promise<boolean> {
-  const key = `agentx.first-admin:${orgId.toLowerCase()}`;
-  await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+  await holdTransactionLock(tx, 'first-admin', orgId);
   return (await listedMembers(tx, orgId, 1)).length === 0;
 }
 

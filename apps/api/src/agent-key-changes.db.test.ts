@@ -30,12 +30,13 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
@@ -577,9 +578,7 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.agent_keys:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('agent_keys', org));
       const confirming = within(20_000, rotateConfirm(developer, key, challengeId), 'the confirmation');
       await waitUntilQueued(database.as('admin'), 1);
       await holder.query('commit');
@@ -852,9 +851,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.agent_keys:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('agent_keys', org));
       const confirming = within(
         20_000,
         handOverConfirm(admin, key.agentId, next.membershipId, challengeId),

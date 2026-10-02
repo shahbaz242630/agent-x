@@ -11,13 +11,14 @@
 // the organisation's lock; and starts are counted for the day's budget under
 // that same lock. What the owner can do past the app is
 // suppliers-tamper.db.test.ts.
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
-  FixedClock,
   findLeaks,
+  FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
@@ -1233,9 +1234,7 @@ describe(`the day's budget of payee registrations (E2-1b, Postgres ${server.vers
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.payees:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('payees', org));
       const starting = within(20_000, startedUnderLock(org, supplierId), 'the start');
       await waitUntilQueued(database.as('admin'), 1);
       // Another organisation's lock is its own.

@@ -40,10 +40,15 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
+import {
+  createIdempotentWrites,
+  holdTransactionLock,
+  type IdempotentRequest,
+  limitStatements,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import type { Kysely, Transaction } from 'kysely';
 
 import { type Clock, DAY_MS, type IdGenerator, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
@@ -278,8 +283,7 @@ export function createResetChanges({
 
   /** Serialises the person's resets, so a check for an open one holds until the ask commits. */
   const oneAtATime = async (tx: Transaction<Tables>, orgId: string, personId: string): Promise<void> => {
-    const key = `agentx.factor-resets:${orgId.toLowerCase()}:${personId.toLowerCase()}`;
-    await sql`select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key}, 0))`.execute(tx);
+    await holdTransactionLock(tx, 'factor-resets', orgId, personId);
   };
 
   /** Runs the work in the organisation's transaction, each statement limited to 10 seconds. */

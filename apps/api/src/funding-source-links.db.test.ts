@@ -22,12 +22,13 @@ import {
   RailUnavailable,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
@@ -269,9 +270,7 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
     const holder = await database.connect('admin');
     await holder.query('begin');
     try {
-      await holder.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [
-        `agentx.funding-links:${org}`,
-      ]);
+      await holdNamedLock(holder, lockName('funding-links', org));
       const both = within(20_000, Promise.all([start(admin), start(admin)]), 'the two starts');
       await waitUntilQueued(database.as('admin'), 2);
       await holder.query('commit');
