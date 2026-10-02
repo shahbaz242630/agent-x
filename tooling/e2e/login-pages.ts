@@ -68,25 +68,22 @@ export function loginDriver({ password, callback }: { password: string; callback
   }
 
   /**
-   * Fills the page's form and submits it, and waits for the login to move on.
-   * The login's pages are a React app: filled or clicked before its scripts
-   * have taken over the page, the form keeps nothing, or the button does
-   * nothing, and the page just sits there (S49–S53: "did not move on from the
-   * password page", three times in one day). So a page that hasn't moved on
-   * is let settle and sent once more, before the login is called stuck. A
-   * retry that meets the page already leaving (the first send was only slow)
-   * counts as moved on. The worst case is about what one send used to wait.
+   * Does what moves the page on, and waits for the login to move on. The
+   * login's pages are a React app: filled or clicked before its scripts have
+   * taken over the page, the form keeps nothing, or the button does nothing,
+   * and the page just sits there (S49–S53: "did not move on from the password
+   * page", three times in one day; S68 and S75 the account chooser). So a
+   * page that hasn't moved on is let settle and sent once more, before the
+   * login is called stuck. A retry that meets the page already leaving (the
+   * first send was only slow) counts as moved on. The worst case is about
+   * what one send used to wait.
    */
-  async function submitAndLeave(page: Page, current: PageName, fill?: () => Promise<void>): Promise<void> {
+  async function actAndLeave(page: Page, current: PageName, send: () => Promise<void>): Promise<void> {
     const leaves = (timeout: number) =>
       page
         .waitForURL((url) => pageNameOf(url.href) !== current, { timeout })
         .then(() => true)
         .catch(() => false);
-    const send = async () => {
-      if (fill !== undefined) await fill();
-      await page.getByTestId('submit-button').click();
-    };
     await send();
     if (await leaves(FIRST_WAIT_MS)) return;
     await page.waitForLoadState('networkidle', { timeout: SETTLE_MS }).catch(() => undefined);
@@ -101,6 +98,13 @@ export function loginDriver({ password, callback }: { password: string; callback
     if (await leaves(RETRY_WAIT_MS)) return;
     throw new Error(`the login did not move on from the ${current} page ${where(page)}`);
   }
+
+  /** Fills the page's form, if there is one to fill, and submits it (actAndLeave). */
+  const submitAndLeave = (page: Page, current: PageName, fill?: () => Promise<void>): Promise<void> =>
+    actAndLeave(page, current, async () => {
+      if (fill !== undefined) await fill();
+      await page.getByTestId('submit-button').click();
+    });
 
   /**
    * A one-time code never used before by this driver (Zitadel refuses a
@@ -132,12 +136,7 @@ export function loginDriver({ password, callback }: { password: string; callback
           break;
         case 'accounts':
           // The session chooser: pick this user, by the login name it shows.
-          await page.getByText(user.loginName, { exact: false }).first().click();
-          await page
-            .waitForURL((url) => pageNameOf(url.href) !== 'accounts', { timeout: 30_000 })
-            .catch(() => {
-              throw new Error(`the login did not move on from the account chooser ${where(page)}`);
-            });
+          await actAndLeave(page, current, () => page.getByText(user.loginName, { exact: false }).first().click());
           break;
         case 'password':
           await submitAndLeave(page, current, () => page.fill('input[name=password]', password));
