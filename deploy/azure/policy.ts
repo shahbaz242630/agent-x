@@ -732,6 +732,26 @@ const deliversAlerts = (snapshot: Snapshot, id: unknown): boolean =>
         0,
   );
 
+/**
+ * Whether an enabled alert on this deployment's workspace has a condition
+ * `matches` takes. A `stateless SEV-1` one is severity 1 and never resolves
+ * itself (autoMitigate false), so it notifies on every window, not once.
+ */
+const workspaceAlerted = (
+  snapshot: Snapshot,
+  kind: 'any' | 'stateless SEV-1',
+  matches: (criterion: unknown, alert: PredictedResource) => boolean,
+): boolean => {
+  const workspaces = workspaceIds(snapshot);
+  return ofType(snapshot, TYPES.alert).some(
+    (alert) =>
+      at(alert.properties, 'enabled') === true &&
+      (kind === 'any' || (at(alert.properties, 'severity') === 1 && at(alert.properties, 'autoMitigate') === false)) &&
+      list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
+      list(at(alert.properties, 'criteria', 'allOf')).some((criterion) => matches(criterion, alert)),
+  );
+};
+
 const complete: Check = (snapshot, _expected, add) => {
   if (list(snapshot.diagnostics).length > 0) {
     add({
@@ -980,7 +1000,6 @@ const postgresSubnets = (snapshot: Snapshot): readonly { id: string; subnet: unk
   );
 
 const database: Check = (snapshot, expected, add) => {
-  const workspaces = workspaceIds(snapshot);
   for (const server of ofType(snapshot, TYPES.server)) {
     const problem = (rule: RuleId, message: string): void => {
       add({ rule, resource: server.name, message });
@@ -1036,17 +1055,12 @@ const database: Check = (snapshot, expected, add) => {
     // here on (S19: a pattern without the prefix never matched).
     const admin = String(at(properties, 'administratorLogin'));
     const pattern = `@"${LOG_LINE_START}connection authorized: user=(${admin}|${BACKUP_ROLE}) "`;
-    const alerted = ofType(snapshot, TYPES.alert).some(
-      (alert) =>
-        at(alert.properties, 'enabled') === true &&
-        at(alert.properties, 'severity') === 1 &&
-        at(alert.properties, 'autoMitigate') === false &&
-        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-        list(at(alert.properties, 'criteria', 'allOf')).some(
-          (criterion) =>
-            queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
-            watchesEveryWindow(alert, criterion),
-        ),
+    const alerted = workspaceAlerted(
+      snapshot,
+      'stateless SEV-1',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'PGSQLServerLogs', [`where Message matches regex ${pattern}`], 'count()') &&
+        watchesEveryWindow(alert, criterion),
     );
     if (settings.get('log_connections') !== 'on' || settings.get('log_line_prefix') !== LOG_LINE_PREFIX || !alerted) {
       problem(
@@ -1683,22 +1697,16 @@ const appsLogs: Check = (snapshot, _expected, add) => {
 
 /** An enabled alert on the workspace counts the apps' error events (logging standard §5, "Error spike"). */
 const appErrorsAlert: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
   for (const environment of ofType(snapshot, TYPES.environment)) {
-    const alerted = ofType(snapshot, TYPES.alert).some(
-      (alert) =>
-        at(alert.properties, 'enabled') === true &&
-        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-        list(at(alert.properties, 'criteria', 'allOf')).some((criterion) => {
-          const threshold = at(criterion, 'threshold');
-          return (
-            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ERROR_LINES], 'count()') &&
-            at(criterion, 'operator') === 'GreaterThan' &&
-            typeof threshold === 'number' &&
-            threshold >= 0
-          );
-        }),
-    );
+    const alerted = workspaceAlerted(snapshot, 'any', (criterion) => {
+      const threshold = at(criterion, 'threshold');
+      return (
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [ERROR_LINES], 'count()') &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        typeof threshold === 'number' &&
+        threshold >= 0
+      );
+    });
     if (!alerted) {
       add({
         rule: 'app-errors-alert',
@@ -1715,21 +1723,15 @@ const appErrorsAlert: Check = (snapshot, _expected, add) => {
  * and it notifies again every window the alarm goes on.
  */
 const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
   for (const environment of ofType(snapshot, TYPES.environment)) {
-    const alerted = ofType(snapshot, TYPES.alert).some(
-      (alert) =>
-        at(alert.properties, 'enabled') === true &&
-        at(alert.properties, 'severity') === 1 &&
-        at(alert.properties, 'autoMitigate') === false &&
-        list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-        list(at(alert.properties, 'criteria', 'allOf')).some(
-          (criterion) =>
-            queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
-            at(criterion, 'operator') === 'GreaterThan' &&
-            at(criterion, 'threshold') === 0 &&
-            watchesEveryWindow(alert, criterion),
-        ),
+    const alerted = workspaceAlerted(
+      snapshot,
+      'stateless SEV-1',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_LINES], 'count()') &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
     );
     if (!alerted) {
       add({
@@ -1750,7 +1752,6 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
  * and it runs and reads exactly as its band needs (OWNER_LOGIN_RUNS).
  */
 const ownerLoginAlert: Check = (snapshot, _expected, add) => {
-  const workspaces = workspaceIds(snapshot);
   const [migrate, ...others] = ofType(snapshot, TYPES.job).filter((job) => jobWorkloadOf(job.name) === 'migrate');
   const [environment, ...otherEnvironments] = ofType(snapshot, TYPES.environment);
   for (const server of ofType(snapshot, TYPES.server)) {
@@ -1759,21 +1760,16 @@ const ownerLoginAlert: Check = (snapshot, _expected, add) => {
       others.length === 0 &&
       environment !== undefined &&
       otherEnvironments.length === 0 &&
-      ofType(snapshot, TYPES.alert).some(
-        (alert) =>
-          at(alert.properties, 'enabled') === true &&
-          at(alert.properties, 'severity') === 1 &&
-          at(alert.properties, 'autoMitigate') === false &&
+      workspaceAlerted(
+        snapshot,
+        'stateless SEV-1',
+        (criterion, alert) =>
           at(alert.properties, 'evaluationFrequency') === OWNER_LOGIN_RUNS.every &&
           at(alert.properties, 'overrideQueryTimeRange') === OWNER_LOGIN_RUNS.reads &&
-          list(at(alert.properties, 'scopes')).some((scope) => workspaces.has(scope)) &&
-          list(at(alert.properties, 'criteria', 'allOf')).some(
-            (criterion) =>
-              at(criterion, 'query') === ownerLoginQuery(migrate.name, environment.id) &&
-              at(criterion, 'operator') === 'GreaterThan' &&
-              at(criterion, 'threshold') === 0 &&
-              watchesEveryWindow(alert, criterion),
-          ),
+          at(criterion, 'query') === ownerLoginQuery(migrate.name, environment.id) &&
+          at(criterion, 'operator') === 'GreaterThan' &&
+          at(criterion, 'threshold') === 0 &&
+          watchesEveryWindow(alert, criterion),
       );
     if (!alerted) {
       add({
