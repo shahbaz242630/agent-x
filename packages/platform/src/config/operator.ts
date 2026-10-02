@@ -6,23 +6,10 @@
 // needs, and a typo is still caught. It also reads the name Azure gives each
 // run of its job, which its platform event records (B1c-2b).
 import type { KeySettings } from '../keys/load.ts';
-import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel } from './common.ts';
-import { checkLocation, pgVariableProblems, secretSetting, tlsModeProblems } from './database.ts';
+import { ConfigError, type Env, type Environment, LOCAL_ONLY, LOCAL_RELEASE, type LogLevel } from './common.ts';
+import { checkLocation, deployedProblems, secretSetting, startProblems } from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
-import {
-  allOk,
-  type Checked,
-  failures,
-  logLevelProblems,
-  nodeDebugProblems,
-  releaseProblems,
-  setting,
-  unknownSettings,
-} from './settings.ts';
-import { tlsProblems } from './tls.ts';
-
-/** The release name a local run uses when none is set. */
-const LOCAL_RELEASE = 'local';
+import { allOk, type Checked, logLevelProblems, releaseProblems, setting } from './settings.ts';
 
 /**
  * Where Azure names the run of a job a process is part of: Container Apps
@@ -107,15 +94,11 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
   const { environment, release, run, logLevel } = checks;
 
   const problems = [
-    ...tlsProblems(env),
-    ...pgVariableProblems(env),
-    ...unknownSettings(env, 'operator'),
-    ...failures(Object.values(checks)),
+    ...startProblems(env, 'operator', checks),
     ...(environment.ok && release.ok ? releaseProblems(environment.value, release.value) : []),
     ...(environment.ok && run.ok ? runProblems(environment.value, run.value) : []),
     ...(environment.ok && logLevel.ok ? logLevelProblems(environment.value, logLevel.value) : []),
-    ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
-    ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
+    ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
   if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);

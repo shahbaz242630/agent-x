@@ -11,6 +11,7 @@
 // only if it is still the one read under the lock. The duties they can't
 // check are on each method below, and a store's tests must prove them.
 
+import { UUID } from '../db/patterns.ts';
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import {
@@ -106,8 +107,6 @@ export class ChainBroken extends Error {
     this.chain = chain;
   }
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** How many events the check reads at a time. */
 const BATCH = 500;

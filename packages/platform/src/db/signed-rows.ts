@@ -24,6 +24,7 @@
 // table changed it on the way) before sealing it.
 import { type RawBuilder, sql, type Transaction } from 'kysely';
 
+import { TABLE, UUID } from './patterns.ts';
 import { assertTenant } from './tenant.ts';
 
 /** The Postgres type of an authority field, which decides how it is read as text. */
@@ -92,12 +93,10 @@ export interface WrittenRow {
   readonly written: readonly FieldText[];
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * Names from our migrations, never from input: checked on every call anyway,
  * since they go into the SQL as names, quoted, rather than as bound values.
  */
-const TABLE = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
 const COLUMN = /^[a-z][a-z0-9_]{0,62}$/;
 /**
  * The column types each declared type may be, by the built-in types' fixed

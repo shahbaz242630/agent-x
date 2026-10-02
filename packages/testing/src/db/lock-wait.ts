@@ -21,6 +21,25 @@ interface WaitOptions {
 }
 
 /**
+ * Asks `check` every POLL_MS until it returns the process IDs it looks for,
+ * and rejects with `failure`'s message once the timeout has run out.
+ */
+async function poll(
+  options: WaitOptions,
+  check: () => Promise<number[] | undefined>,
+  failure: (timeoutMs: number) => string,
+): Promise<number[]> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_MS;
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    const found = await check();
+    if (found !== undefined) return found;
+    if (performance.now() >= deadline) throw new Error(failure(timeoutMs));
+    await sleep(POLL_MS);
+  }
+}
+
+/**
  * Waits until the server process `pid` is waiting for a lock, and returns the
  * processes it is waiting for, so the test can check they are the ones it
  * expects. Rejects if that doesn't happen within the timeout.
@@ -30,19 +49,17 @@ export async function waitUntilBlocked(
   pid: number,
   options: WaitOptions = {},
 ): Promise<number[]> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_MS;
-  const deadline = performance.now() + timeoutMs;
-  for (;;) {
-    const rows = await monitor.query<{ blockers: number[] }>('select pg_catalog.pg_blocking_pids($1) as blockers', [
-      pid,
-    ]);
-    const blockers = rows.flatMap((row) => row.blockers);
-    if (blockers.length > 0) return blockers;
-    if (performance.now() >= deadline) {
-      throw new Error(`Server process ${pid} was not waiting for a lock within ${timeoutMs} ms`);
-    }
-    await sleep(POLL_MS);
-  }
+  return poll(
+    options,
+    async () => {
+      const rows = await monitor.query<{ blockers: number[] }>('select pg_catalog.pg_blocking_pids($1) as blockers', [
+        pid,
+      ]);
+      const blockers = rows.flatMap((row) => row.blockers);
+      return blockers.length > 0 ? blockers : undefined;
+    },
+    (timeoutMs) => `Server process ${pid} was not waiting for a lock within ${timeoutMs} ms`,
+  );
 }
 
 /**
@@ -56,19 +73,20 @@ export async function waitUntilQueued(
   count: number,
   options: WaitOptions = {},
 ): Promise<number[]> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_MS;
-  const deadline = performance.now() + timeoutMs;
-  for (;;) {
-    const rows = await monitor.query<{ pid: number }>(
-      `select a.pid from pg_catalog.pg_stat_activity a
+  // The last look's count, for the message if the wait runs out.
+  let waiting = 0;
+  return poll(
+    options,
+    async () => {
+      const rows = await monitor.query<{ pid: number }>(
+        `select a.pid from pg_catalog.pg_stat_activity a
        where a.datname = pg_catalog.current_database()
          and pg_catalog.cardinality(pg_catalog.pg_blocking_pids(a.pid)) > 0
        order by a.pid`,
-    );
-    if (rows.length >= count) return rows.map((row) => row.pid);
-    if (performance.now() >= deadline) {
-      throw new Error(`${rows.length} of ${count} sessions were waiting for a lock after ${timeoutMs} ms`);
-    }
-    await sleep(POLL_MS);
-  }
+      );
+      waiting = rows.length;
+      return rows.length >= count ? rows.map((row) => row.pid) : undefined;
+    },
+    (timeoutMs) => `${waiting} of ${count} sessions were waiting for a lock after ${timeoutMs} ms`,
+  );
 }

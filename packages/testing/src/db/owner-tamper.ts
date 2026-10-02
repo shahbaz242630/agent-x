@@ -16,6 +16,7 @@
 // tests forge it themselves.
 import pg from 'pg';
 
+import { TABLE_NAME } from './names.ts';
 import type { TestClient, TestDatabase } from './test-database.ts';
 
 /** What the scripts need of an authority table: the module's own SignedStateTable fits. */
@@ -80,7 +81,6 @@ export interface OwnerTamper {
   end(): Promise<void>;
 }
 
-const TABLE_NAME = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATE_SEAL = ['stateFingerprint', 'stateKeyVersion'] as const;
 /** A word a hiding policy looks for in a query's text: written into the policy, so letters and underscores only. */

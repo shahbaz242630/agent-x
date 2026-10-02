@@ -3,22 +3,10 @@
 // It shares the database's location with the app and has its own role and
 // password. The app's settings are refused here by name: the job reads only
 // what it needs, and a typo is still caught.
-import { ConfigError, type Env, type Environment, type LogLevel } from './common.ts';
-import { checkLocation, pgVariableProblems, secretSetting, tlsModeProblems } from './database.ts';
+import { ConfigError, type Env, type Environment, LOCAL_RELEASE, type LogLevel } from './common.ts';
+import { checkLocation, deployedProblems, secretSetting, startProblems } from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
-import {
-  allOk,
-  failures,
-  logLevelProblems,
-  nodeDebugProblems,
-  releaseProblems,
-  setting,
-  unknownSettings,
-} from './settings.ts';
-import { tlsProblems } from './tls.ts';
-
-/** The release name a local run uses when none is set. */
-const LOCAL_RELEASE = 'local';
+import { allOk, logLevelProblems, releaseProblems, setting } from './settings.ts';
 
 export interface MigrationConfig {
   readonly environment: Environment;
@@ -54,14 +42,10 @@ export function loadMigrationConfig(env: Env = process.env): MigrationConfig {
   const { environment, release, logLevel } = checks;
 
   const problems = [
-    ...tlsProblems(env),
-    ...pgVariableProblems(env),
-    ...unknownSettings(env, 'migrate'),
-    ...failures(Object.values(checks)),
+    ...startProblems(env, 'migrate', checks),
     ...(environment.ok && release.ok ? releaseProblems(environment.value, release.value) : []),
     ...(environment.ok && logLevel.ok ? logLevelProblems(environment.value, logLevel.value) : []),
-    ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
-    ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
+    ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
   if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);

@@ -21,10 +21,8 @@ import { type Kysely, type PostgresPool, sql, type Transaction } from 'kysely';
 import type pg from 'pg';
 
 import type { Logger } from '../observability/index.ts';
+import { UUID } from './patterns.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
-
-/** A UUID in its canonical form, which is how every organisation ID is written (ADR-007). */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The tenant policy's expression as `pg_get_expr` prints it back, which the

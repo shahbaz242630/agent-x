@@ -6,6 +6,9 @@ export type Environment = (typeof ENVIRONMENTS)[number];
 /** Where nothing real is at stake, so a local stack may talk plain http and needs no release name, nor a job run's name. */
 export const LOCAL_ONLY: readonly Environment[] = ['development', 'test'];
 
+/** The release name a local run uses when none is set. */
+export const LOCAL_RELEASE = 'local';
+
 /** The logging standard's levels, most to least severe. */
 export const LOG_LEVELS = ['error', 'warn', 'info', 'debug'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];

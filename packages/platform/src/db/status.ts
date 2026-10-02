@@ -26,6 +26,7 @@
 import { sql, type Transaction } from 'kysely';
 
 import type { Logger } from '../observability/index.ts';
+import { TABLE, UUID } from './patterns.ts';
 import { assertTenant } from './tenant.ts';
 
 /** What a status change needs of a state machine: the shared-kernel's defineStateMachine gives one. */
@@ -99,14 +100,6 @@ export interface StatusChanger {
     event: NoInfer<Event>,
   ): Promise<StatusChange<State>>;
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/**
- * Schema and table in lower-case words: names from our migrations, never from
- * input. Checked on every change, since the name goes into the SQL as a name,
- * quoted, rather than as a bound value.
- */
-const TABLE = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
 
 /**
  * Build it from the request's or job's logger, a child carrying its

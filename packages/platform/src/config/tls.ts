@@ -4,9 +4,9 @@
 // check refuses it, lint stops our code touching process.env, and the outbound
 // client checks again before every request, because a dependency could still
 // change it after start-up.
-const TLS_CHECKS_OFF_SWITCH = 'NODE_TLS_REJECT_UNAUTHORIZED';
+import type { Env } from './common.ts';
 
-type Env = Readonly<Record<string, string | undefined>>;
+const TLS_CHECKS_OFF_SWITCH = 'NODE_TLS_REJECT_UNAUTHORIZED';
 
 /**
  * Any value but '1' is refused, not only '0': a value there means someone

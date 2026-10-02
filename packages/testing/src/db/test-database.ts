@@ -59,11 +59,18 @@ export async function queryOnce<Row extends object = Record<string, unknown>>(
   connection: TestConnection,
   text: string,
 ): Promise<Row[]> {
+  return withClient(connection, async (client) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- This passes on the caller's text; the rule checks it where the caller writes it.
+    return (await client.query<Row>(text)).rows;
+  });
+}
+
+/** Opens a connection of its own for `work`, and closes it after, whether the work succeeded or not. */
+async function withClient<T>(connection: TestConnection, work: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({ ...connection, ssl: false });
   await client.connect();
   try {
-    // eslint-disable-next-line agentx/no-string-built-sql -- This passes on the caller's text; the rule checks it where the caller writes it.
-    return (await client.query<Row>(text)).rows;
+    return await work(client);
   } finally {
     await client.end();
   }
@@ -91,16 +98,12 @@ function poolFor(connection: TestConnection): pg.Pool {
 
 /** Runs statements that name the database itself, as the superuser, from the server's maintenance database. */
 async function onServer(server: TestPostgresServer, statements: readonly string[]): Promise<void> {
-  const client = new pg.Client({ ...connectionFor(server, 'admin', 'postgres'), ssl: false });
-  await client.connect();
-  try {
+  await withClient(connectionFor(server, 'admin', 'postgres'), async (client) => {
     for (const statement of statements) {
       // eslint-disable-next-line agentx/no-string-built-sql -- CREATE and DROP DATABASE can't take names as parameters; every name here is generated or configured, and quoted with escapeIdentifier.
       await client.query(statement);
     }
-  } finally {
-    await client.end();
-  }
+  });
 }
 
 /**
