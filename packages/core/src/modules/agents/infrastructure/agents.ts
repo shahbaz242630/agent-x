@@ -13,14 +13,16 @@
 import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db';
 import { sql, type Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  type AuditDetails,
+  type AuditTables,
+  type PageAsked,
+  type RecordedState,
+  type SignedStates,
+  type TamperSign,
+  verifiedPage,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { AGENT, agentName, type AgentStatus, type Scope, scopesOf, scopesText } from '../domain/agent.ts';
@@ -222,9 +224,6 @@ export async function agentsShown(
   });
 }
 
-/** The lowest uuid: every agent's ID is after it. */
-const NIL_UUID = '00000000-0000-0000-0000-000000000000';
-
 /** The most agents a page gives. */
 export const MOST_AGENTS_A_PAGE = 50;
 
@@ -240,33 +239,22 @@ export async function agentsPage(
   tx: AgentsTransaction,
   states: SignedStates,
   orgId: string,
-  { after, limit }: { readonly after: string | null; readonly limit: number },
+  page: PageAsked,
 ): Promise<
   | { readonly outcome: 'listed'; readonly agents: readonly AgentShown[]; readonly next: string | null }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  if (!Number.isInteger(limit) || limit < 1 || limit > MOST_AGENTS_A_PAGE) {
-    throw new RangeError(`A page is 1 to ${String(MOST_AGENTS_A_PAGE)} agents`);
-  }
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each agent is then read through its signed state
-    .selectFrom(AGENTS.table)
-    .select('id')
-    .where('org_id', '=', orgId)
-    // From the start, every ID is after the nil uuid.
-    .where('id', '>', after ?? NIL_UUID)
-    .orderBy('id')
-    .limit(limit + 1)
-    .execute();
-  const found: AgentRecord[] = [];
-  let last: string | null = null;
-  for (const { id } of rows.slice(0, limit)) {
-    const read = await agentOf(tx, states, { orgId, id }, 'share');
-    if (read.outcome === 'tampered') return read;
-    if (read.outcome === 'found') found.push(read.agent);
-    last = id;
-  }
-  // One more than the page was there: the next page starts after this one's last.
-  const next = rows.length > limit ? last : null;
-  return { outcome: 'listed', agents: await agentsShown(tx, orgId, found), next };
+  const listed = await verifiedPage(
+    tx,
+    AGENTS,
+    orgId,
+    page,
+    { most: MOST_AGENTS_A_PAGE, rows: 'agents' },
+    async (id) => {
+      const read = await agentOf(tx, states, { orgId, id }, 'share');
+      return read.outcome === 'found' ? { outcome: 'found', item: read.agent } : read;
+    },
+  );
+  if (listed.outcome === 'tampered') return listed;
+  return { outcome: 'listed', agents: await agentsShown(tx, orgId, listed.items), next: listed.next };
 }

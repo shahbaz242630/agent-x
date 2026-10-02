@@ -19,6 +19,7 @@ import {
   pointSignedRow,
   readSignedRow,
   type SignedFieldValues,
+  signedRowIds,
   type SignedStateTable,
   writeSignedRow,
 } from './signed-rows.ts';
@@ -222,6 +223,26 @@ describe('reading a signed row (ADR-012 §2)', () => {
     await expect(
       withTenant(app, ORG, (tx) => readSignedRow(tx, GRANTS, { orgId: ORG, id: 'not-a-uuid' }, 'share')),
     ).rejects.toBeInstanceOf(RangeError);
+  });
+});
+
+describe("listing a table's row IDs", () => {
+  /** An organisation of its own, so the rows listed are only this test's. */
+  const PAGED_ORG = '0199a0f0-0000-7000-8000-00000000000c';
+  const ids = (limit: number, after?: string | null) =>
+    withTenant(app, PAGED_ORG, (tx) => signedRowIds(tx, GRANTS, PAGED_ORG, limit, after));
+
+  it('lists them in order after the one named, at most the limit and one more', async () => {
+    const [first, second, third] = [await newGrant(PAGED_ORG), await newGrant(PAGED_ORG), await newGrant(PAGED_ORG)];
+
+    expect(await ids(1)).toEqual([first, second]);
+    expect(await ids(1, null)).toEqual([first, second]);
+    expect(await ids(5, first)).toEqual([second, third]);
+    expect(await ids(5, third)).toEqual([]);
+  });
+
+  it('refuses an after that is not a UUID, before any SQL', async () => {
+    await expect(ids(1, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
 });
 

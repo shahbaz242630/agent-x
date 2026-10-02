@@ -40,14 +40,17 @@ import { holdTransactionLock, type SignedStateTable } from '@agentx/platform/db'
 import { KeyError, type KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditDetails,
-  AuditTables,
-  RecordedState,
-  SignedStates,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  type AuditDetails,
+  type AuditTables,
+  type PageAsked,
+  type PageRead,
+  type RecordedState,
+  type SignedStates,
+  type TamperSign,
+  verifiedPage,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import {
   contactsHeld,
@@ -958,9 +961,6 @@ export interface SupplierShown extends SupplierRecord {
 /** The most suppliers a page gives. */
 export const MOST_SUPPLIERS_A_PAGE = 50;
 
-/** The lowest uuid: every supplier's ID is after it. */
-const NIL_UUID = '00000000-0000-0000-0000-000000000000';
-
 /**
  * A page of the organisation's suppliers, in order of ID, each read (`share`)
  * and verified with its current version, in the caller's transaction, which
@@ -974,42 +974,29 @@ export async function suppliersPage(
   tx: SuppliersTransaction,
   states: SignedStates,
   orgId: string,
-  { after, limit }: { readonly after: string | null; readonly limit: number },
+  page: PageAsked,
 ): Promise<
   | { readonly outcome: 'listed'; readonly suppliers: readonly SupplierShown[]; readonly next: string | null }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  if (!Number.isInteger(limit) || limit < 1 || limit > MOST_SUPPLIERS_A_PAGE) {
-    throw new RangeError(`A page is 1 to ${String(MOST_SUPPLIERS_A_PAGE)} suppliers`);
-  }
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- where to look alone; each supplier is then read through its signed state
-    .selectFrom(SUPPLIERS.table)
-    .select('id')
-    .where('org_id', '=', orgId)
-    // From the start, every ID is after the nil uuid.
-    .where('id', '>', after ?? NIL_UUID)
-    .orderBy('id')
-    .limit(limit + 1)
-    .execute();
-  const found: SupplierShown[] = [];
-  let last: string | null = null;
-  for (const { id } of rows.slice(0, limit)) {
-    const read = await supplierOf(tx, states, { orgId, id }, 'share');
-    if (read.outcome === 'tampered') return read;
-    if (read.outcome === 'found') {
+  const listed = await verifiedPage(
+    tx,
+    SUPPLIERS,
+    orgId,
+    page,
+    { most: MOST_SUPPLIERS_A_PAGE, rows: 'suppliers' },
+    async (id): Promise<PageRead<SupplierShown>> => {
+      const read = await supplierOf(tx, states, { orgId, id }, 'share');
+      if (read.outcome !== 'found') return read;
       const current = await versionOf(tx, states, { orgId, id: read.supplier.currentVersionId }, id);
       if (current.outcome === 'tampered') return current;
       // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
       if (current.outcome === 'missing')
         throw new Error(`A verified supplier has no current version of its own: ${id}`);
-      found.push({ ...read.supplier, displayName: current.version.displayName });
-    }
-    last = id;
-  }
-  // One more than the page was there: the next page starts after this one's last.
-  const next = rows.length > limit ? last : null;
-  return { outcome: 'listed', suppliers: found, next };
+      return { outcome: 'found', item: { ...read.supplier, displayName: current.version.displayName } };
+    },
+  );
+  return listed.outcome === 'tampered' ? listed : { outcome: 'listed', suppliers: listed.items, next: listed.next };
 }
 
 /**
