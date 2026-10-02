@@ -92,7 +92,7 @@ import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
-import { createRowSweep, scheduleRowSweep } from './row-sweep.ts';
+import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
@@ -592,62 +592,25 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   // bounded, and a pool at its limit queues rather than refuses. Nothing orders
   // the sweep after a schema check: 0009's `retention` policy is its wall.
   const sweeping = scheduleRetentionSweep(retention, SWEEP_EVERY_MS);
+  // A table's own sweep on a timer of its own, each batch within the anchor check's deadline.
+  const sweepRows = (rows: SweptRows, sweep: (most: number) => Promise<number>) =>
+    scheduleRowSweep(
+      createRowSweep({ rows, sweep, logger, deadlineMs: ANCHOR_CHECK_DEADLINE_MS, ...ROW_SWEEP }),
+      SWEEP_EVERY_MS,
+    );
   // The sign-in flows' and the ended sessions' own sweeps, each on its own
   // timer too, whether or not sign-in is on: rows left from when it was on
   // still go (B2-3a-2, B2-4a).
-  const flowSweeping = scheduleRowSweep(
-    createRowSweep({
-      rows: 'identity.flow',
-      sweep: (most) => flows.sweep(database, most),
-      logger,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...ROW_SWEEP,
-    }),
-    SWEEP_EVERY_MS,
-  );
-  const sessionSweeping = scheduleRowSweep(
-    createRowSweep({
-      rows: 'identity.session',
-      sweep: (most) => sessions.sweep(database, most),
-      logger,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...ROW_SWEEP,
-    }),
-    SWEEP_EVERY_MS,
-  );
+  const flowSweeping = sweepRows('identity.flow', (most) => flows.sweep(database, most));
+  const sessionSweeping = sweepRows('identity.session', (most) => sessions.sweep(database, most));
   // Step-up challenges past their five minutes (B3-1), on a timer of its own too.
-  const challengeSweeping = scheduleRowSweep(
-    createRowSweep({
-      rows: 'identity.step_up_challenge',
-      sweep: (most) => challenges.sweep(database, most),
-      logger,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...ROW_SWEEP,
-    }),
-    SWEEP_EVERY_MS,
-  );
+  const challengeSweeping = sweepRows('identity.step_up_challenge', (most) => challenges.sweep(database, most));
   // The security events past the retention the config names (B2-5a), on a timer of its own too.
-  const eventSweeping = scheduleRowSweep(
-    createRowSweep({
-      rows: 'security.event',
-      sweep: (most) => securityEvents.sweep(database, most),
-      logger,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...ROW_SWEEP,
-    }),
-    SWEEP_EVERY_MS,
-  );
+  const eventSweeping = sweepRows('security.event', (most) => securityEvents.sweep(database, most));
   // Notices sent or given up, past their retention (B5-1b), on a timer of their own too.
-  const noticeSweeping = scheduleRowSweep(
-    createRowSweep({
-      rows: 'notifications.notice',
-      sweep: (most) => outbox.sweep(database, most),
-      logger,
-      deadlineMs: ANCHOR_CHECK_DEADLINE_MS,
-      ...ROW_SWEEP,
-    }),
-    SWEEP_EVERY_MS,
-  );
+  const noticeSweeping = sweepRows('notifications.notice', (most) => outbox.sweep(database, most));
+  // The one allowlisted fetch the notices, the login service's events and the resets send with.
+  const outboundFetch = createOutboundFetch(config.outbound.allowedOrigins);
   // The notices, once the config names email (B5-3), on a timer of their own too.
   const sender = noticeSenderFrom({
     config,
@@ -671,7 +634,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       { keys, ids: uuidV7Ids, logger },
       { publicOrigin: config.http.publicOrigin, clock: systemClock },
     ),
-    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    fetch: outboundFetch,
     logger,
   });
   const noticeSending = sender === undefined ? undefined : scheduleRuns(sender, NOTICES_EVERY_MS);
@@ -684,7 +647,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     ids: uuidV7Ids,
     clock: systemClock,
     outbox,
-    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    fetch: outboundFetch,
     logger,
   });
   const idpCopying = scheduleRunsIfAny(copier, IDP_EVENTS_EVERY_MS);
@@ -697,7 +660,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     ids: uuidV7Ids,
     clock: systemClock,
     outbox,
-    fetch: createOutboundFetch(config.outbound.allowedOrigins),
+    fetch: outboundFetch,
     logger,
   });
   const factorRemoving = scheduleRunsIfAny(removals, FACTOR_REMOVALS_EVERY_MS);

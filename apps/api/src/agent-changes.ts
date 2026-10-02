@@ -79,8 +79,8 @@ import {
   type AgentTx,
   type AgentWithKeys,
   createAgentWork,
-  type Refused,
 } from './agent-writes.ts';
+import type { Refused } from './refused.ts';
 
 /** Suspending an agent: the kill switch. */
 export const SUSPEND_OPERATION = 'agents.suspend';

@@ -23,7 +23,6 @@ import {
   DEACTIVATE_OPERATION,
   type MembershipChange,
   type MembershipChanges,
-  type MembershipChangeWrite,
   ROLE_CONFIRM_OPERATION,
   ROLE_OPERATION,
 } from '@agentx/core/modules/identity';
@@ -31,10 +30,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { MEMBER, memberOf } from './members.ts';
+import { NOTHING, STEP_UP_SIGNED_IN, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
 
 /** The most an ask's body may be: a role, with room to spare. */
 const ASK_BODY_LIMIT = 128;
@@ -43,18 +43,10 @@ const CONFIRM_BODY_LIMIT = 192;
 
 const ROLE = z.enum(['admin', 'approver', 'developer', 'viewer']).describe('The role the member is to have.');
 const MEMBERSHIP_ID = z.object({ id: z.uuid().describe('The membership, by its ID.') });
-const STEP_UP = z.uuid().describe('The step-up the ask answered with, signed in again for.');
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
 
 const ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'MemberChangeAsked',
@@ -77,7 +69,7 @@ const ROLE_CONFIRM_SCHEMA = {
   summary: "Change a member's role, once signed in again for it",
   params: MEMBERSHIP_ID,
   body: z
-    .strictObject({ role: ROLE, stepUpChallengeId: STEP_UP })
+    .strictObject({ role: ROLE, stepUpChallengeId: STEP_UP_SIGNED_IN })
     .describe('The same role as asked for, and the step-up signed in again for.'),
   response: { 200: CHANGED },
 };
@@ -92,22 +84,8 @@ const DEACTIVATE_SCHEMA = {
 const DEACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Deactivate a member, once signed in again for it',
   params: MEMBERSHIP_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP }).describe('The step-up signed in again for.'),
+  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
   response: { 200: CHANGED },
-};
-
-/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
-function adminOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a member change route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
-
-/** Answers a refusal; undefined for the route to answer. */
-const refusalOf = (written: MembershipChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
-  if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
-  if (written.outcome === 'conflict' || written.outcome === 'busy') return answerRefusedWrite(written, request, reply);
-  return undefined;
 };
 
 /**
@@ -117,15 +95,11 @@ const refusalOf = (written: MembershipChangeWrite, request: FastifyRequest, repl
  */
 export function registerMemberChanges(app: FastifyInstance, changes: MembershipChanges | undefined): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const changesOf = (): MembershipChanges => {
-    if (changes === undefined) throw new Error('the member change routes ran without their writes');
-    return changes;
-  };
 
   const ask = async (request: FastifyRequest, reply: FastifyReply, id: string, change: MembershipChange) => {
-    const admin = adminOf(request);
-    const written = await changesOf().ask(admin, idempotentRequest(request, admin.orgId), id, change, request.id);
-    const refused = refusalOf(written, request, reply);
+    const admin = memberInSessionOf(request);
+    const written = await need(changes).ask(admin, idempotentRequest(request, admin.orgId), id, change, request.id);
+    const refused = answerRefusal(written, request, reply);
     if (refused !== undefined) return refused;
     if (written.outcome !== 'asked') throw new Error('an ask answered without its challenge');
     return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
@@ -138,8 +112,8 @@ export function registerMemberChanges(app: FastifyInstance, changes: MembershipC
     change: MembershipChange,
     stepUpChallengeId: string,
   ) => {
-    const admin = adminOf(request);
-    const written = await changesOf().confirm(
+    const admin = memberInSessionOf(request);
+    const written = await need(changes).confirm(
       admin,
       idempotentRequest(request, admin.orgId),
       id,
@@ -147,7 +121,7 @@ export function registerMemberChanges(app: FastifyInstance, changes: MembershipC
       stepUpChallengeId,
       request.id,
     );
-    const refused = refusalOf(written, request, reply);
+    const refused = answerRefusal(written, request, reply);
     if (refused !== undefined) return refused;
     if (written.outcome !== 'written') throw new Error('a confirmation answered without its member');
     return { member: memberOf(written.member) };

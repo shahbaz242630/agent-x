@@ -19,6 +19,7 @@ import {
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+import type { Refused } from './refused.ts';
 
 /** The tables the funding-source use cases work on. */
 export type FundingSourceTables = IdentityTables & FundingSourcesTables & DirectoryTables & AuditTables;
@@ -28,13 +29,6 @@ export type FundingSourceTx = DatabaseTransaction<FundingSourceTables>;
 export interface FundingSourceMember {
   readonly orgId: string;
   readonly userId: string;
-}
-
-/** A refusal, as a use case answers it. */
-export interface Refused {
-  readonly outcome: 'refused';
-  readonly status: number;
-  readonly code: ReasonCode;
 }
 
 export const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });

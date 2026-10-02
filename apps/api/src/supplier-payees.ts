@@ -106,9 +106,9 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { asked, orStillWaiting, PARTNER_UNAVAILABLE, StillWaiting } from './funding-source-work.ts';
+import type { Refused } from './refused.ts';
 import {
   createSupplierWork,
-  type Refused,
   type SupplierMember,
   SupplierRefused,
   type SupplierTables,

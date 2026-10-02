@@ -43,8 +43,8 @@ import {
   type AgentTables,
   type AgentWithKeys,
   createAgentWork,
-  type Refused,
 } from './agent-writes.ts';
+import type { Refused } from './refused.ts';
 
 /** Asking to register an agent: its operation, which the step-up challenge names as its action too. */
 export const REGISTER_OPERATION = 'agents.register';

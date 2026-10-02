@@ -109,16 +109,20 @@ const REDIRECT = z
   .object({})
   .register(API_SCHEMAS, { description: 'Sent on: the Location header names where; the body is an empty object.' });
 
+/** Where to send the browser once done, if anywhere: a path on this origin. */
+const returnTo = (description: string) =>
+  z
+    .string()
+    .max(512)
+    // A pattern, not a refinement, so the document states the rule (B7: a scanner took any string as valid).
+    .regex(RETURN_PATH, { error: 'must be a path on this origin' })
+    .optional()
+    .describe(description);
+
 const SIGN_IN_SCHEMA = {
   summary: 'Start a sign-in',
   querystring: z.object({
-    returnTo: z
-      .string()
-      .max(512)
-      // A pattern, not a refinement, so the document states the rule (B7: a scanner took any string as valid).
-      .regex(RETURN_PATH, { error: 'must be a path on this origin' })
-      .optional()
-      .describe('Where to go once signed in: a path on this origin. Home if none.'),
+    returnTo: returnTo('Where to go once signed in: a path on this origin. Home if none.'),
   }),
   response: { 302: REDIRECT },
 };
@@ -137,13 +141,7 @@ const STEP_UP_SCHEMA = {
   summary: 'Sign in again to confirm a change',
   querystring: z.object({
     challenge: z.uuid().describe("The step-up challenge the change's own address opened for this session."),
-    returnTo: z
-      .string()
-      .max(512)
-      // A pattern, not a refinement, so the document states the rule (B7: a scanner took any string as valid).
-      .regex(RETURN_PATH, { error: 'must be a path on this origin' })
-      .optional()
-      .describe('Where to go once signed in again, to confirm the change: a path on this origin. Home if none.'),
+    returnTo: returnTo('Where to go once signed in again, to confirm the change: a path on this origin. Home if none.'),
   }),
   response: { 302: REDIRECT },
 };
