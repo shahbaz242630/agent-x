@@ -12,15 +12,19 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
-import { downloadPinnedTo, sha256OfFile, type StreamingFetch, TOOLS_DIR } from '../pinned-download.ts';
+import {
+  downloadPinnedTo,
+  type PinnedBinary,
+  pinnedFor,
+  sha256OfFile,
+  type StreamingFetch,
+  TOOLS_DIR,
+} from '../pinned-download.ts';
 
 /** The version ci.yml's cosign-installer is given (`cosign-release`); a test holds the two equal. */
 export const COSIGN_VERSION = '3.1.3';
 
-export interface PinnedBinary {
-  readonly file: string;
-  readonly sha256: string;
-}
+export type { PinnedBinary } from '../pinned-download.ts';
 
 /** The release file for each platform we work on. cosign publishes no Windows build for Arm. */
 export const BINARIES: Readonly<Record<string, PinnedBinary>> = {
@@ -52,11 +56,8 @@ export function cosignPath(platform: NodeJS.Platform = process.platform, toolsDi
 }
 
 /** The pinned binary for this machine, or an error naming what is missing. */
-export function binaryFor(platform: string, arch: string, binaries = BINARIES): PinnedBinary {
-  const binary = binaries[`${platform}-${arch}`];
-  if (binary === undefined) throw new Error(`No cosign binary is pinned for ${platform}-${arch}.`);
-  return binary;
-}
+export const binaryFor = (platform: string, arch: string, binaries = BINARIES): PinnedBinary =>
+  pinnedFor(binaries, platform, arch, 'cosign binary');
 
 export const downloadUrl = (file: string): string =>
   `https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/${file}`;

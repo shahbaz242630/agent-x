@@ -28,6 +28,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 /** The scanners, each pinned by digest (SEC-SC-02; tooling/checks/images.test.ts). */
 export const SCANNER_IMAGES = {
@@ -448,7 +449,7 @@ async function wakeAt(url: string, what: string): Promise<void> {
     } catch {
       // Still waking.
     }
-    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    await sleep(10_000);
   }
   throw new Error(`${what} did not answer within 3 minutes`);
 }

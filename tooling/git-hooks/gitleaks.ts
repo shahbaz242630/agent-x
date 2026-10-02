@@ -7,20 +7,11 @@
 // checked against its pin every time the hook runs it, so a file swapped in
 // under .tools/ is refused too. Installed under .tools/ (git-ignored).
 import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { downloadPinned, type Fetch, sha256Of, TOOLS_DIR } from '../pinned-download.ts';
+import { downloadPinned, type Fetch, pinnedFor, sha256OfFile, TOOLS_DIR } from '../pinned-download.ts';
 
 export const GITLEAKS_VERSION = '8.30.1';
 
@@ -67,11 +58,8 @@ export function gitleaksPath(platform: NodeJS.Platform = process.platform, tools
 }
 
 /** The pinned archive for this machine, or an error naming what is missing. */
-export function archiveFor(platform: string, arch: string, archives = ARCHIVES): PinnedArchive {
-  const archive = archives[`${platform}-${arch}`];
-  if (archive === undefined) throw new Error(`No gitleaks archive is pinned for ${platform}-${arch}.`);
-  return archive;
-}
+export const archiveFor = (platform: string, arch: string, archives = ARCHIVES): PinnedArchive =>
+  pinnedFor(archives, platform, arch, 'gitleaks archive');
 
 export const downloadUrl = (file: string): string =>
   `https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${file}`;
@@ -104,7 +92,7 @@ export async function ensureGitleaks(options: InstallOptions = {}): Promise<stri
   const platform = options.platform ?? process.platform;
   const pinned = archiveFor(platform, options.arch ?? process.arch, options.archives);
   const target = gitleaksPath(platform, options.toolsDir);
-  const matchesPin = (): boolean => sha256Of(readFileSync(target)) === pinned.binarySha256;
+  const matchesPin = (): boolean => sha256OfFile(target) === pinned.binarySha256;
 
   if (existsSync(target)) {
     if (!matchesPin()) {

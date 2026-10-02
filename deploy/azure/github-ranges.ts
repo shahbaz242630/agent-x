@@ -57,15 +57,8 @@ export interface LiveRanges {
 }
 
 /** A field of meta as the list of prefixes it should be, or nothing if it is anything else. */
-function prefixList(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const prefixes: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== 'string') return undefined;
-    prefixes.push(entry);
-  }
-  return prefixes;
-}
+const prefixList = (value: unknown): string[] | undefined =>
+  Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? [...value] : undefined;
 
 /**
  * Where the ranges are published. A constant, never a field of the file: the

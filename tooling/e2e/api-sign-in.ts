@@ -26,6 +26,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { API_ORIGIN, LOGIN_ORIGIN, restart, SECRETS_DIR } from './compose.ts';
 import {
@@ -124,7 +125,21 @@ export async function apiAnswers(timeoutMs = 60_000): Promise<void> {
     if (status === 200) return;
     if (Date.now() > deadline)
       throw new Error(`the API did not answer through the edge after it restarted (${String(status)})`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleep(500);
+  }
+}
+
+/** Asks `check` every `everyMs` until it says yes; an error saying `failMessage` once `timeoutMs` has passed. */
+async function waitUntil(
+  check: () => Promise<boolean>,
+  timeoutMs: number,
+  everyMs: number,
+  failMessage: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(failMessage);
+    await sleep(everyMs);
   }
 }
 
@@ -138,12 +153,12 @@ async function clientListed(
   clientId: string,
   timeoutMs = 60_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await clientIdsOf(client, projectId)).includes(clientId)) {
-    if (Date.now() > deadline)
-      throw new Error(`Zitadel still doesn't list the API's client after ${String(timeoutMs)} ms`);
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
+  await waitUntil(
+    async () => (await clientIdsOf(client, projectId)).includes(clientId),
+    timeoutMs,
+    250,
+    `Zitadel still doesn't list the API's client after ${String(timeoutMs)} ms`,
+  );
 }
 
 /** A file's text, or undefined when it isn't there. */
@@ -193,11 +208,12 @@ async function apiEmail(client: ZitadelClient): Promise<boolean> {
   const made = await createServiceUser(client, DIRECTORY_USER, 'Agent X directory (local stack)');
   await grantOrgRoles(client, made.userId, ['ORG_OWNER_VIEWER']);
   await grantInstanceRoles(client, made.userId, ['IAM_OWNER_VIEWER']);
-  const deadline = Date.now() + 60_000;
-  while (!(await directoryReads(made.token, made.userId))) {
-    if (Date.now() > deadline) throw new Error("the directory's token still can't read a user and the event feed");
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
+  await waitUntil(
+    () => directoryReads(made.token, made.userId),
+    60_000,
+    500,
+    "the directory's token still can't read a user and the event feed",
+  );
   // An access key as ACS gives them, in base64. Readable by the API's and the stand-in's own users.
   const accessKey = randomBytes(32).toString('base64');
   writeFileSync(TOKEN_FILE, made.token, { mode: 0o644 });
@@ -229,11 +245,12 @@ async function apiResets(client: ZitadelClient, otherUserId: string): Promise<bo
   await Promise.all(found.map((id) => deleteUser(client, id)));
   const made = await createServiceUser(client, RESETS_USER, 'Agent X resets (local stack)');
   await grantOrgRoles(client, made.userId, ['ORG_USER_MANAGER']);
-  const deadline = Date.now() + 60_000;
-  while (!(await resetsRead(made.token, otherUserId))) {
-    if (Date.now() > deadline) throw new Error("the reset token still can't read the organisation's users");
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
+  await waitUntil(
+    () => resetsRead(made.token, otherUserId),
+    60_000,
+    500,
+    "the reset token still can't read the organisation's users",
+  );
   // Readable by the API's own user.
   writeFileSync(RESET_TOKEN_FILE, made.token, { mode: 0o644 });
   return true;

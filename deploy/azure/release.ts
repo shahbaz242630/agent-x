@@ -60,9 +60,10 @@ import {
   type Recorded,
   recordTag,
   RESOURCE_GROUP,
+  UsageError,
 } from './deploy.ts';
 import { type Checkout, type History, realCheckout, realHistory } from './git.ts';
-import { ENDED, isRunOf, JOBS_API, POLL_MS, START_ALLOWANCE_SECONDS } from './jobs.ts';
+import { ENDED, GUID, isRunOf, isStrings, JOBS_API, POLL_MS, runCli, START_ALLOWANCE_SECONDS } from './jobs.ts';
 
 /** Something only a person deploys, by the start of its path, and why. */
 export interface HandDeployed {
@@ -221,9 +222,6 @@ const COMMIT = /^[0-9a-f]{40}$/;
 /** An image digest, as ghcr.io gives it. */
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
-/** A subscription's ID, as Azure writes it. */
-const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 /** Our image by digest, the only form a deployment names it in (SEC-SC-02). */
 const isOurImage = (image: string): boolean =>
   image.startsWith(`${IMAGE_REPOSITORY}@`) && DIGEST.test(image.slice(IMAGE_REPOSITORY.length + 1));
@@ -242,12 +240,7 @@ const CONTAINER_FIELDS: ReadonlySet<string> = new Set([
 /** A container's size as Azure gives it: the two we set, and the disk it works out from them. */
 const SIZE_FIELDS: ReadonlySet<string> = new Set(['cpu', 'memory', 'ephemeralStorage']);
 
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UsageError';
-  }
-}
+export { UsageError } from './deploy.ts';
 
 export const USAGE = `Usage:
   node deploy/azure/release.ts check <commit> <digest>     say what a release of that commit would do, changing nothing
@@ -297,9 +290,6 @@ export interface Running {
   readonly image: string;
   readonly release: string;
 }
-
-const isStrings = (value: unknown): value is readonly string[] =>
-  Array.isArray(value) && value.every((item) => typeof item === 'string');
 
 export function record(value: unknown): Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -549,11 +539,14 @@ export function readWorkload(az: Az, subscription: string, workload: Workload): 
   return { properties, tags: record(found.tags), running: runningIn(workload, record(properties.template).containers) };
 }
 
-/** The build a container names in AGENTX_RELEASE, or nothing. */
-const buildOf = (container: Container): string => {
-  const found = container.env.find((setting) => setting.name === RELEASE_SETTING);
+/** The value a container's setting holds in the open, or nothing (none, or a secret reference). */
+export const settingValue = (container: Container, name: string): string => {
+  const found = container.env.find((setting) => setting.name === name);
   return found !== undefined && 'value' in found ? found.value : '';
 };
+
+/** The build a container names in AGENTX_RELEASE, or nothing. */
+const buildOf = (container: Container): string => settingValue(container, RELEASE_SETTING);
 
 /** Whether two containers are the same, field for field. */
 export const same = (one: Container, other: Container): boolean => JSON.stringify(one) === JSON.stringify(other);
@@ -721,8 +714,7 @@ function settledBefore(workload: Workload, read: Read): void {
 
 /** The address the API is served at, from its own setting (never printed: it names the domain). */
 function publicOrigin(api: Running): string {
-  const origin = api.container.env.find((setting) => setting.name === 'AGENTX_PUBLIC_ORIGIN');
-  const value = origin !== undefined && 'value' in origin ? origin.value : '';
+  const value = settingValue(api.container, 'AGENTX_PUBLIC_ORIGIN');
   if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
     throw new Error('The API names no https origin (AGENTX_PUBLIC_ORIGIN) to check it through once released.');
   }
@@ -1165,7 +1157,7 @@ function realExtras(): Extras {
   };
 }
 
-export async function main(
+export function main(
   argv: readonly string[],
   say: (line: string) => void = console.log,
   az: () => Az = realAz,
@@ -1173,24 +1165,15 @@ export async function main(
   extras: () => Extras = realExtras,
   folder: () => Folder = realFolder,
 ): Promise<number> {
-  let request: Request;
-  try {
-    request = parseArguments(argv);
-  } catch (error) {
-    if (!(error instanceof UsageError)) throw error;
-    say(`${error.message}\n${USAGE}`);
-    return 2;
-  }
-  try {
-    const steps = { az: az(), history: history(), folder: folder(), say };
-    return request.command === 'check'
-      ? await check(request, steps)
-      : await release(request, { ...steps, ...extras() });
-  } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    say(error.message);
-    return 1;
-  }
+  return runCli(
+    USAGE,
+    say,
+    () => parseArguments(argv),
+    (request) => {
+      const steps = { az: az(), history: history(), folder: folder(), say };
+      return request.command === 'check' ? check(request, steps) : release(request, { ...steps, ...extras() });
+    },
+  );
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

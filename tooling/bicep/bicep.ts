@@ -10,14 +10,18 @@
 import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { downloadPinned, type Fetch, sha256OfFile, TOOLS_DIR } from '../pinned-download.ts';
+import {
+  downloadPinned,
+  type Fetch,
+  type PinnedBinary,
+  pinnedFor,
+  sha256OfFile,
+  TOOLS_DIR,
+} from '../pinned-download.ts';
 
 export const BICEP_VERSION = '0.47.16';
 
-export interface PinnedBinary {
-  readonly file: string;
-  readonly sha256: string;
-}
+export type { PinnedBinary } from '../pinned-download.ts';
 
 /** The release file for each platform we work on. */
 export const BINARIES: Readonly<Record<string, PinnedBinary>> = {
@@ -53,11 +57,8 @@ export function bicepPath(platform: NodeJS.Platform = process.platform, toolsDir
 }
 
 /** The pinned binary for this machine, or an error naming what is missing. */
-export function binaryFor(platform: string, arch: string, binaries = BINARIES): PinnedBinary {
-  const binary = binaries[`${platform}-${arch}`];
-  if (binary === undefined) throw new Error(`No Bicep binary is pinned for ${platform}-${arch}.`);
-  return binary;
-}
+export const binaryFor = (platform: string, arch: string, binaries = BINARIES): PinnedBinary =>
+  pinnedFor(binaries, platform, arch, 'Bicep binary');
 
 export const downloadUrl = (file: string): string =>
   `https://github.com/Azure/bicep/releases/download/v${BICEP_VERSION}/${file}`;

@@ -26,7 +26,7 @@
 // (B1c-2b), with this file's steps; a run of it can still be waited for here.
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text } from './deploy.ts';
+import { ARM, type Az, azJson, realAz, RESOURCE_GROUP, signedIn, text, UsageError } from './deploy.ts';
 
 /** The jobs a first deploy runs, in its order. */
 const FIRST_DEPLOY = ['db-setup', 'migrate', 'zitadel-init', 'zitadel-setup'] as const;
@@ -86,12 +86,7 @@ export const JOBS_API = '2026-01-01';
 /** What the setup job runs instead, once, to cancel a step a dead run left marked as started. */
 const CLEANUP_ARGS = ['setup', 'cleanup'] as const;
 
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UsageError';
-  }
-}
+export { UsageError } from './deploy.ts';
 
 export const USAGE = `Usage:
   node deploy/azure/jobs.ts run <job>             start the job, wait for the run to end, read its log
@@ -152,7 +147,7 @@ export interface JobSteps {
 }
 
 /** A subscription's or a workspace's ID, as Azure writes it. */
-const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** A job in the subscription the operator is signed in to. */
 export interface Target {
@@ -203,7 +198,7 @@ interface RunContainer {
   readonly resources: { readonly cpu: number; readonly memory: string };
 }
 
-const isStrings = (value: unknown): value is readonly string[] =>
+export const isStrings = (value: unknown): value is readonly string[] =>
   Array.isArray(value) && value.every((item) => typeof item === 'string');
 
 /**
@@ -562,26 +557,45 @@ async function finish(
   return 0;
 }
 
-export async function main(
-  argv: readonly string[],
-  say: (line: string) => void = console.log,
-  az: () => Az = realAz,
+/**
+ * A command line's run, shared by jobs.ts, operator.ts and release.ts: a
+ * UsageError while parsing is said with the usage and gives 2; any other
+ * error once working is said alone and gives 1.
+ */
+export async function runCli<T>(
+  usage: string,
+  say: (line: string) => void,
+  parse: () => T,
+  work: (request: T) => Promise<number>,
 ): Promise<number> {
-  let request: Request;
+  let request: T;
   try {
-    request = parseArguments(argv);
+    request = parse();
   } catch (error) {
     if (!(error instanceof UsageError)) throw error;
-    say(`${error.message}\n${USAGE}`);
+    say(`${error.message}\n${usage}`);
     return 2;
   }
   try {
-    return await jobs(request, { az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) });
+    return await work(request);
   } catch (error) {
     if (!(error instanceof Error)) throw error;
     say(error.message);
     return 1;
   }
+}
+
+export function main(
+  argv: readonly string[],
+  say: (line: string) => void = console.log,
+  az: () => Az = realAz,
+): Promise<number> {
+  return runCli(
+    USAGE,
+    say,
+    () => parseArguments(argv),
+    (request) => jobs(request, { az: az(), say, now: () => new Date(), sleep: (ms) => sleep(ms) }),
+  );
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));

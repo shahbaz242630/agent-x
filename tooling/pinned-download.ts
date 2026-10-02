@@ -15,6 +15,19 @@ import { fileURLToPath } from 'node:url';
 /** Where the pinned tools live once installed (git-ignored). */
 export const TOOLS_DIR = fileURLToPath(new URL('../.tools/', import.meta.url));
 
+/** A release file pinned by its SHA-256. */
+export interface PinnedBinary {
+  readonly file: string;
+  readonly sha256: string;
+}
+
+/** The pinned file for this machine from a tool's table, or an error naming what is missing. */
+export function pinnedFor<T>(table: Readonly<Record<string, T>>, platform: string, arch: string, label: string): T {
+  const pinned = table[`${platform}-${arch}`];
+  if (pinned === undefined) throw new Error(`No ${label} is pinned for ${platform}-${arch}.`);
+  return pinned;
+}
+
 export const sha256Of = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
 /**
