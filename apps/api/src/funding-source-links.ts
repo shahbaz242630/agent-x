@@ -79,9 +79,9 @@ import {
   type FundingSourceTx,
   PARTNER_UNAVAILABLE,
   orStillWaiting,
-  type Refused,
   StillWaiting,
 } from './funding-source-work.ts';
+import type { Refused } from './refused.ts';
 
 /** Starting a link. */
 export const LINK_START_OPERATION = 'funding-sources.link.start';

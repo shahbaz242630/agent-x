@@ -43,6 +43,7 @@ import {
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+import type { Refused } from './refused.ts';
 
 /** The tables the agents' use cases work on: both modules', with the directory and the audit trail. */
 export type AgentTables = IdentityTables & AgentsTables & DirectoryTables & AuditTables;
@@ -55,13 +56,6 @@ export interface AgentMember {
   readonly userId: string;
   /** The session a step-up binds to (ADR-003 §7). */
   readonly sessionId: string;
-}
-
-/** A refusal, as a use case answers it. */
-export interface Refused {
-  readonly outcome: 'refused';
-  readonly status: number;
-  readonly code: ReasonCode;
 }
 
 /** An agent with its keys, as an answer shows it. */

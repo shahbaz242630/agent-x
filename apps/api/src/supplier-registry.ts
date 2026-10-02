@@ -38,9 +38,9 @@ import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import type { Refused } from './refused.ts';
 import {
   createSupplierWork,
-  type Refused,
   type SupplierMember,
   SupplierRefused,
   type SupplierTables,

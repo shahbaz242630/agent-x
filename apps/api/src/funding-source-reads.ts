@@ -18,7 +18,8 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { createFundingSourceWork, type FundingSourceTables, type Refused, refused } from './funding-source-work.ts';
+import { createFundingSourceWork, type FundingSourceTables, refused } from './funding-source-work.ts';
+import type { Refused } from './refused.ts';
 
 /** Where a page starts, and how many it holds at most (MOST_SOURCES_A_PAGE). */
 export interface SourcePage {

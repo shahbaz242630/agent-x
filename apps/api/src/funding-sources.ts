@@ -36,7 +36,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { agentOf } from './access.ts';
+import { agentOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import {
@@ -58,18 +58,18 @@ import {
 } from './funding-source-links.ts';
 import type { FundingSourceReads } from './funding-source-reads.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import {
+  CHALLENGE_BODY_LIMIT,
+  NEXT,
+  NOTHING,
+  NOTHING_BODY_LIMIT,
+  pageQuery,
+  STEP_UP_SIGNED_IN,
+  STEP_UP_TO_SIGN_IN,
+} from './route-schemas.ts';
 
 /** Every member may see the organisation's sources. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
-
-/** The most a bodyless write may be sent with: an empty object, with room to spare. */
-const NOTHING_BODY_LIMIT = 64;
-
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
 
 const LINK = z
   .object({
@@ -186,18 +186,7 @@ const sourceOf = (source: SourceRecord) => ({
   },
 });
 
-const PAGE = z.strictObject({
-  after: z.uuid().optional().describe('The ID the page starts after: the last page’s `next`.'),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(MOST_SOURCES_A_PAGE)
-    .optional()
-    .describe(`How many at most, ${String(MOST_SOURCES_A_PAGE)} unless fewer are asked for.`),
-});
-
-const NEXT = z.uuid().nullable().describe('The ID to ask the next page after; null at the end.');
+const PAGE = pageQuery(MOST_SOURCES_A_PAGE);
 
 const LIST_SCHEMA = {
   summary: "Your organisation's bank accounts",
@@ -224,9 +213,6 @@ const REFRESH_SCHEMA = {
   response: { 200: SOURCE.describe('The source, brought up to the partner’s answer.') },
 };
 
-/** The most a confirm's body may be: a challenge's ID, with room to spare. */
-const CHALLENGE_BODY_LIMIT = 128;
-
 const SOURCE_CHANGED = SOURCE.describe('The source, as the change left it.');
 
 const SUSPEND_SCHEMA = {
@@ -238,9 +224,7 @@ const SUSPEND_SCHEMA = {
 
 const REACTIVATION_ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'FundingSourceReactivationAsked',
@@ -257,9 +241,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the bank account, once signed in again for it',
   params: SOURCE_ID,
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
-    .describe('The step-up signed in again for.'),
+  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
   response: { 200: SOURCE_CHANGED },
 };
 
@@ -302,11 +284,6 @@ export function registerFundingSources(
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const need = <T>(useCase: T | undefined): T => {
-    if (useCase === undefined) throw new Error('a funding-sources route ran without its use case');
-    return useCase;
-  };
-  const linksOf = (): FundingSourceLinks => need(links);
   const refused = (
     answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
     request: FastifyRequest,
@@ -330,7 +307,7 @@ export function registerFundingSources(
     },
     async (request, reply) => {
       const member = memberOf(request);
-      const written = await linksOf().start(member, idempotentRequest(request, member.orgId), request.id);
+      const written = await need(links).start(member, idempotentRequest(request, member.orgId), request.id);
       if (written.outcome === 'refused') return refused(written, request, reply);
       if (written.outcome === 'conflict' || written.outcome === 'busy') {
         return answerRefusedWrite(written, request, reply);
@@ -348,7 +325,7 @@ export function registerFundingSources(
     },
     async (request, reply) => {
       const member = memberOf(request);
-      const written = await linksOf().confirm(
+      const written = await need(links).confirm(
         member,
         idempotentRequest(request, member.orgId),
         request.params.linkId,
