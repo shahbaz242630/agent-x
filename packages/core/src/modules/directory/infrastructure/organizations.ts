@@ -5,8 +5,9 @@
 // so the two can't part: the row can't be written without its entry, and the
 // app can't delete an entry.
 import { assertTenant } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
+import { readAlone } from './read-alone.ts';
 import type { DirectoryTables } from './tables.ts';
 
 /**
@@ -28,12 +29,8 @@ export async function registerOrganization(tx: Transaction<DirectoryTables>, org
  * its connection back.
  */
 export function listedOrganizations(db: Kysely<DirectoryTables>): Promise<string[]> {
-  return db
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
-      const rows = await tx.selectFrom('directory.orgs').select('org_id').orderBy('org_id').execute();
-      return rows.map((row) => row.org_id);
-    });
+  return readAlone(db, async (tx) => {
+    const rows = await tx.selectFrom('directory.orgs').select('org_id').orderBy('org_id').execute();
+    return rows.map((row) => row.org_id);
+  });
 }

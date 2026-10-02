@@ -32,7 +32,7 @@
 // tampering too, and raises the alarm (`check: record`) before its error goes
 // back.
 import { ChainBroken } from '@agentx/platform/audit-chain';
-import { withTenant } from '@agentx/platform/db';
+import { limitStatements, withTenant } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
@@ -104,7 +104,7 @@ async function setHold(
     });
     const outcome = await withTenant<AuditTables, 'set' | 'already'>(db, held, async (tx) => {
       await sql`set local lock_timeout = '5s'`.execute(tx);
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return holder.hold(tx, finding, count);
     });
     unrecorded.delete(held);

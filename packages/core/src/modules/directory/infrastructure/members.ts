@@ -5,8 +5,9 @@
 // can't be written without it. An entry grants nothing: the membership, with
 // its role and status, is read inside the organisation's own withTenant.
 import { assertTenant } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
+import { readAlone } from './read-alone.ts';
 import type { DirectoryTables } from './tables.ts';
 
 /** A person's entry: who, where, and the ID of their membership there. */
@@ -86,19 +87,15 @@ export async function listedMember(
  * seconds, so a hung read gives its connection back.
  */
 export function organizationsOf(db: Kysely<DirectoryTables>, userId: string): Promise<string[]> {
-  return db
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
-      const rows = await tx
-        .selectFrom('directory.members')
-        .select('org_id')
-        .where('user_id', '=', userId)
-        .orderBy('org_id')
-        .execute();
-      return rows.map((row) => row.org_id);
-    });
+  return readAlone(db, async (tx) => {
+    const rows = await tx
+      .selectFrom('directory.members')
+      .select('org_id')
+      .where('user_id', '=', userId)
+      .orderBy('org_id')
+      .execute();
+    return rows.map((row) => row.org_id);
+  });
 }
 
 /**

@@ -5,7 +5,8 @@
 // times are the Clock's (ADR-006 §3).
 import { createHash, randomBytes } from 'node:crypto';
 
-import { type Kysely, sql } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely } from 'kysely';
 
 import type { Clock } from '../../../shared-kernel/index.ts';
 import { isReturnPath } from '../domain/sign-in.ts';
@@ -93,7 +94,7 @@ export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlo
       if (!Number.isSafeInteger(most) || most < 1) throw new RangeError('a sweep deletes at least one flow at a time');
       const now = clock.now();
       return db.transaction().execute(async (tx) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         const ended = tx
           .selectFrom('identity.login_flows')
           .select('cookie_hash')

@@ -31,7 +31,7 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back; a retry with the same key answers as the first did. Each statement is
 // limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql } from 'kysely';
@@ -191,7 +191,7 @@ export function createInvitationAcceptance({
       let done;
       try {
         done = await withSignedStates(database, orgId, services, async (tx, states) => {
-          await sql`set local statement_timeout = '10s'`.execute(tx);
+          await limitStatements(tx);
           return idempotency.run(tx, idempotent(orgId), async () => {
             const now = clock.now();
             const read = await invitationToAccept(tx, states, keys, { orgId, id: invitationId, now });
@@ -247,7 +247,7 @@ export function createInvitationAcceptance({
       }
       if (done.outcome === 'conflict' || done.outcome === 'busy') return done;
       const answered = await withSignedStates(database, orgId, services, async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return invitationRecord(tx, states, orgId, done.result.resourceId);
       });
       if (answered.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');

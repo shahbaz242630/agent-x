@@ -34,7 +34,7 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, sql, type Transaction } from 'kysely';
@@ -206,7 +206,7 @@ export function createContactChanges({
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
       return await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return idempotency.run(tx, idempotent, () => work(tx, states));
       });
     } catch (error) {
@@ -230,7 +230,7 @@ export function createContactChanges({
       admin.orgId,
       { keys, ids, logger: logger.child({ correlationId }) },
       async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return contactShown(tx, states, keys, admin.orgId, contactId);
       },
     );

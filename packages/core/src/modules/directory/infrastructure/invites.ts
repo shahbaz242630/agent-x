@@ -5,8 +5,9 @@
 // points to opens (the identity module's). An entry grants nothing: the
 // invitation is read and verified inside the organisation's own withTenant.
 import { assertTenant } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
+import { readAlone } from './read-alone.ts';
 import type { DirectoryTables } from './tables.ts';
 
 /** A token's entry: its SHA-256, and the invitation it opens. */
@@ -45,16 +46,12 @@ export function listedInvite(
   db: Kysely<DirectoryTables>,
   tokenHash: Buffer,
 ): Promise<{ readonly orgId: string; readonly invitationId: string } | undefined> {
-  return db
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
-      const entry = await tx
-        .selectFrom('directory.invites')
-        .select(['org_id', 'invitation_id'])
-        .where('token_hash', '=', tokenHash)
-        .executeTakeFirst();
-      return entry === undefined ? undefined : { orgId: entry.org_id, invitationId: entry.invitation_id };
-    });
+  return readAlone(db, async (tx) => {
+    const entry = await tx
+      .selectFrom('directory.invites')
+      .select(['org_id', 'invitation_id'])
+      .where('token_hash', '=', tokenHash)
+      .executeTakeFirst();
+    return entry === undefined ? undefined : { orgId: entry.org_id, invitationId: entry.invitation_id };
+  });
 }

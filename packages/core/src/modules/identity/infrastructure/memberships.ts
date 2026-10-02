@@ -17,7 +17,8 @@
 // state), and then verified: the signed state must name the same person, so
 // an entry pointed at someone else's membership finds nothing.
 import type { SignedStateTable } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely, type Transaction } from 'kysely';
 
 import {
   type AuditActor,
@@ -192,7 +193,7 @@ export function membershipFor(
   userId: string,
 ): Promise<MembershipCheck> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     return membershipOf(tx, states, orgId, userId);
   });
 }
@@ -208,7 +209,7 @@ export function membersFor(
   orgId: string,
 ): Promise<MembersList> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     return membersOf(tx, states, orgId);
   });
 }

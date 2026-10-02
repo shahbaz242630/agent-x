@@ -22,10 +22,10 @@
 // written roll back and the same key may be sent again (the idempotency
 // store keeps only answers from 200 to 299). Each statement is limited to
 // 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql } from 'kysely';
+import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
@@ -136,7 +136,7 @@ export function createInvitationWrites({
     let done;
     try {
       done = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return idempotency.run(tx, idempotent, () => work(tx, states));
       });
     } catch (error) {
@@ -147,7 +147,7 @@ export function createInvitationWrites({
     }
     if (done.outcome === 'conflict' || done.outcome === 'busy') return done;
     const read = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return invitationRecord(tx, states, admin.orgId, done.result.resourceId);
     });
     if (read.outcome === 'tampered') {
