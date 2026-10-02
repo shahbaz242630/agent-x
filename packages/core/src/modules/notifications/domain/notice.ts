@@ -9,7 +9,6 @@
 // asks a contact to confirm a reset names the reset (0026), and one about a
 // supplier (E2-1, 0033) names the supplier.
 
-/** The kinds about a membership. */
 /** The kinds about a membership: a role given, a rejoin, and since the S68 audit a removal and a role taken away (0031). */
 const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined', 'member_removed', 'role_removed'] as const;
 /** The kinds about a registered contact (B6-1b). */
@@ -65,14 +64,9 @@ export type NoticeRole = (typeof NOTICE_ROLES)[number];
 export const isNoticeKind = (value: unknown): value is NoticeKind => NOTICE_KINDS.some((kind) => kind === value);
 export const isNoticeRole = (value: unknown): value is NoticeRole => NOTICE_ROLES.some((role) => role === value);
 
-/** Whether a kind is about a person's sign-in, `aboutId` their user ID (B6-2a). */
-const isAboutASignIn = (kind: NoticeKind): boolean => SIGN_IN_NOTICE_KINDS.some((each) => each === kind);
-
-/** Whether a kind is about a reset of a person's second factor, `aboutId` their user ID (B6-3b). */
-const isAboutAReset = (kind: NoticeKind): boolean => RESET_NOTICE_KINDS.some((each) => each === kind);
-
-/** Whether a kind is about a person, `aboutId` their user ID: their sign-in, or a reset of their second factor. */
-export const isAboutAPerson = (kind: NoticeKind): boolean => isAboutASignIn(kind) || isAboutAReset(kind);
+/** Whether a kind is about a person, `aboutId` their user ID: their sign-in (B6-2a), or a reset of their second factor (B6-3b). */
+export const isAboutAPerson = (kind: NoticeKind): boolean =>
+  SIGN_IN_NOTICE_KINDS.some((each) => each === kind) || RESET_NOTICE_KINDS.some((each) => each === kind);
 
 /** Whether a kind is about a supplier, `aboutId` its ID (0033). */
 export const isAboutASupplier = (kind: NoticeKind): boolean => SUPPLIER_NOTICE_KINDS.some((each) => each === kind);

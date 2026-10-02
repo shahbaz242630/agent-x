@@ -43,9 +43,11 @@ import {
   resetForChange,
   resetLinkToken,
 } from './factor-resets.ts';
+import { toldOfReset } from './grant-notices.ts';
 import { memberOf } from './memberships.ts';
 import { contactRecord } from './registered-contacts.ts';
 import type { IdentityTables } from './tables.ts';
+import { Refusal } from './refusals.ts';
 
 /** What a contact's confirmation answers. */
 export type ContactConfirmation =
@@ -57,15 +59,10 @@ export interface ContactConfirmations {
   confirm(token: string, correlationId: string): Promise<ContactConfirmation>;
 }
 
-class ConfirmationRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ConfirmationRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`a contact's confirmation refused: ${code}`);
+    super(`a contact's confirmation refused: ${code}`, status, code);
     this.name = 'ConfirmationRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 
@@ -128,18 +125,7 @@ export function createContactConfirmations({
             coolingOffUntil: until,
             details: {},
           });
-          const about = {
-            orgId,
-            kind: 'factor_reset_confirmed',
-            membershipId: null,
-            role: null,
-            aboutId: person.member.userId,
-          } as const;
-          await outbox.add(tx, [
-            { ...about, recipientUserId: person.member.userId },
-            { ...about, recipientUserId: null },
-            { ...about, recipientUserId: null, toContacts: true },
-          ]);
+          await outbox.add(tx, toldOfReset(orgId, 'factor_reset_confirmed', person.member.userId, true));
           return until;
         });
         return { outcome: 'confirmed', coolingOffUntil };

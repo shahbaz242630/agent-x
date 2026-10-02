@@ -68,10 +68,10 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, createAuditTrail } from '../../audit/index.ts';
 import { type DirectoryTables, organizationsOf } from '../../directory/index.ts';
-import type { Notice, NotificationsTables, Outbox } from '../../notifications/index.ts';
+import type { NotificationsTables, Outbox } from '../../notifications/index.ts';
 import {
   createPlatformChain,
   latestPlatformTime,
@@ -80,7 +80,8 @@ import {
   type PlatformControlsTables,
 } from '../../platform-controls/index.ts';
 import { endsSessions, isToldToThePerson, PASSKEY_ADDED_EVENTS, PASSKEY_REMOVED_EVENTS } from '../domain/idp-event.ts';
-import { REMOVAL_RESTRICTION_DAYS } from '../domain/removal-restriction.ts';
+import { restrictedUntil } from '../domain/removal-restriction.ts';
+import { toldOfReset } from './grant-notices.ts';
 import type { PasskeysHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
@@ -94,7 +95,7 @@ export const IDP_EVENT_COPIED = 'idp.event_copied';
 export const SIGN_IN_CHANGED = 'person.sign_in_changed';
 
 /** How far back the first run reads. */
-const FIRST_RUN_BACK_MS = 24 * 3_600_000;
+const FIRST_RUN_BACK_MS = DAY_MS;
 
 /** How long an event may be written after its time and still be read: runs read up to this long ago. */
 const SETTLE_MS = 60_000;
@@ -151,17 +152,21 @@ export function createIdpEventCopier({
   const trail = createAuditTrail({ keys, ids });
   const platform = createPlatformChain({ keys, ids });
 
+  /** Whether a key event of one of `types` was copied for the person in the 7 days before `event`. */
+  const keyEventWithinWeek = async (event: IdpEvent, person: string, types: readonly string[]): Promise<boolean> => {
+    const at = await latestPlatformTimeOf(database, 'at', [
+      { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: types } },
+    ]);
+    return at !== undefined && restrictedUntil(at).getTime() >= event.createdAt.getTime();
+  };
+
   /**
    * Whether a key added counts toward the restriction: the person holds two
    * or more now, or had one removed in the 7 days before; and when that
    * can't be read, it counts.
    */
   const keyAddedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
-    const removed = await latestPlatformTimeOf(database, 'at', [
-      { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: PASSKEY_REMOVED_EVENTS } },
-    ]);
-    const weekBefore = event.createdAt.getTime() - REMOVAL_RESTRICTION_DAYS * 86_400_000;
-    if (removed !== undefined && removed.getTime() >= weekBefore) return true;
+    if (await keyEventWithinWeek(event, person, PASSKEY_REMOVED_EVENTS)) return true;
     if (passkeys === undefined) return true;
     try {
       return (await passkeys.passkeysHeld(event.aggregateId)) >= 2;
@@ -177,13 +182,8 @@ export function createIdpEventCopier({
    * another's). The addition is copied first, as the feed gives events in
    * time order.
    */
-  const keyRemovedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
-    const added = await latestPlatformTimeOf(database, 'at', [
-      { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: PASSKEY_ADDED_EVENTS } },
-    ]);
-    const weekBefore = event.createdAt.getTime() - REMOVAL_RESTRICTION_DAYS * 86_400_000;
-    return added !== undefined && added.getTime() >= weekBefore;
-  };
+  const keyRemovedCounts = (event: IdpEvent, person: string): Promise<boolean> =>
+    keyEventWithinWeek(event, person, PASSKEY_ADDED_EVENTS);
 
   /** Whether the event counts toward the restriction: a key added or removed, as above; nothing else. */
   const counted = (event: IdpEvent, person: string): Promise<boolean> | boolean => {
@@ -244,12 +244,7 @@ export function createIdpEventCopier({
         details: { event: key, type: event.type, at: event.createdAt.toISOString(), by: byWhom(event) },
       });
       if (isToldToThePerson(event.eventClass)) {
-        const about = { orgId, kind: event.eventClass, membershipId: null, role: null, aboutId: person } as const;
-        const notices: Notice[] = [
-          { ...about, recipientUserId: person },
-          { ...about, recipientUserId: null },
-        ];
-        await outbox.add(tx, notices);
+        await outbox.add(tx, toldOfReset(orgId, event.eventClass, person, false));
       }
       await platform.record(tx, platformEvent(ended));
     });

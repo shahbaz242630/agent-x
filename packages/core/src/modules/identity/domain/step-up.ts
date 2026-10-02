@@ -41,6 +41,13 @@ export interface FreshSignIn {
 /** How far behind ours the login service's clock may be: both keep time from Azure's, so seconds at most. */
 export const AUTH_TIME_TOLERANCE_SECONDS = 5;
 
+/**
+ * The earliest sign-in that counts as made after `at`: `at` truncated to the
+ * second, as an ID token's auth_time is, less the tolerance; in milliseconds.
+ */
+export const earliestAuthTime = (at: Date): number =>
+  Math.floor(at.getTime() / 1000) * 1000 - AUTH_TIME_TOLERANCE_SECONDS * 1000;
+
 /** The `amr` value every second factor carries at Zitadel (S10: security key and authenticator app alike). */
 const SECOND_FACTOR = 'mfa';
 /** The `amr` value a security key (WebAuthn) carries at Zitadel, and an authenticator app doesn't (S10). */
@@ -53,7 +60,7 @@ export function stepUpRefusal(
   { passkeyRequired }: { readonly passkeyRequired: boolean },
 ): StepUpRefusal | undefined {
   if (signIn.userId.toLowerCase() !== challenge.userId.toLowerCase()) return 'other_person';
-  const earliest = Math.floor(challenge.createdAt.getTime() / 1000) * 1000 - AUTH_TIME_TOLERANCE_SECONDS * 1000;
+  const earliest = earliestAuthTime(challenge.createdAt);
   const authTime = signIn.evidence.authTime.getTime();
   if (Number.isNaN(authTime) || authTime < earliest) return 'stale_authentication';
   const { amr } = signIn.evidence;

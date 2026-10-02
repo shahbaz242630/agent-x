@@ -24,7 +24,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { limitStatements } from '@agentx/platform/db';
 import { type ExpressionBuilder, type Kysely, type Transaction } from 'kysely';
 
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
 import type { IdentityTables } from './tables.ts';
 
@@ -95,7 +95,6 @@ const newCookie = (): string => randomBytes(COOKIE_BYTES).toString('base64url');
 const hashOf = (cookie: string): Buffer => createHash('sha256').update(cookie, 'ascii').digest();
 /** Only text a cookie ID could be is looked up: anything else is no session, and no query. */
 const isCookie = (value: unknown): value is string => typeof value === 'string' && COOKIE.test(value);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const isWholeSeconds = (value: number): boolean => Number.isSafeInteger(value) && value >= LEAST_SECONDS;
 

@@ -52,8 +52,9 @@ import {
 import { confirmableAt, FACTOR_RESET, type FactorResetStatus, isOpenReset } from '../domain/factor-reset.ts';
 import { countsNow } from '../domain/registered-contact.ts';
 import { contactRecord } from './registered-contacts.ts';
+import { openField } from './sealed-fields.ts';
 import { changeHashOf } from './step-up-challenges.ts';
-import type { IdentityTables } from './tables.ts';
+import type { Found, IdentityTables } from './tables.ts';
 
 /** A reset's row, as the signed state reads, records and moves it. */
 export const FACTOR_RESETS = {
@@ -159,8 +160,6 @@ export interface ResetRecord {
   /** When the factor may be removed; null until a contact has confirmed. */
   readonly coolingOffUntil: Date | null;
 }
-
-type Found<T> = T | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 const recordOf = (id: string, fields: ReadonlyMap<string, string | null>): ResetRecord => {
   const status = fields.get('status');
@@ -303,32 +302,10 @@ export async function openResetsFor(
   states: SignedStates,
   orgId: string,
   person: string,
-): Promise<
-  | { readonly outcome: 'found'; readonly resets: readonly ResetRecord[] }
-  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
-> {
-  const whole = await states.verifyAll(tx, orgId, [FACTOR_RESETS], MOST_RESET_RECORDS);
-  if (whole.outcome === 'too_many') throw new TooManyResets();
-  if (whole.outcome === 'tampered') {
-    const [first] = whole.findings;
-    if (first === undefined) throw new Error('verifyAll found tampering it names no finding for');
-    return { outcome: 'tampered', sign: first.sign };
-  }
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows' IDs alone, each then read through its signed state; verifyAll has just checked every one the table or the log knows of
-    .selectFrom(FACTOR_RESETS.table)
-    .select('id')
-    .where('person', '=', person)
-    .orderBy('id')
-    .execute();
-  const resets: ResetRecord[] = [];
-  for (const { id } of rows) {
-    const read = await resetRecord(tx, states, orgId, id);
-    // Verified by verifyAll in this transaction, and locked for share since.
-    if (read.outcome !== 'found') throw new Error(`a reset verifyAll verified reads as ${read.outcome}: ${id}`);
-    if (isOpenReset(read.reset.status)) resets.push(read.reset);
-  }
-  return { outcome: 'found', resets };
+): Promise<ResetsRead> {
+  const read = await verifiedResets(tx, states, orgId, person);
+  if (read.outcome !== 'found') return read;
+  return { outcome: 'found', resets: read.resets.filter((reset) => isOpenReset(reset.status)) };
 }
 
 /**
@@ -338,14 +315,26 @@ export async function openResetsFor(
  * with, when any reset the table or the log knows of doesn't verify. More than
  * MOST_RESET_RECORDS throws TooManyResets.
  */
-export async function resetsOf(
+export function resetsOf(tx: ResetsTransaction, states: SignedStates, orgId: string): Promise<ResetsRead> {
+  return verifiedResets(tx, states, orgId);
+}
+
+/** The resets found, or the first tampering found among the organisation's. */
+type ResetsRead =
+  | { readonly outcome: 'found'; readonly resets: readonly ResetRecord[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/**
+ * Every reset of the organisation verified first (verifyAll), then the
+ * resets' rows (the person's alone, if named) each read through its signed
+ * state, in order of ID. More than MOST_RESET_RECORDS throws TooManyResets.
+ */
+async function verifiedResets(
   tx: ResetsTransaction,
   states: SignedStates,
   orgId: string,
-): Promise<
-  | { readonly outcome: 'found'; readonly resets: readonly ResetRecord[] }
-  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
-> {
+  person?: string,
+): Promise<ResetsRead> {
   const whole = await states.verifyAll(tx, orgId, [FACTOR_RESETS], MOST_RESET_RECORDS);
   if (whole.outcome === 'too_many') throw new TooManyResets();
   if (whole.outcome === 'tampered') {
@@ -353,15 +342,15 @@ export async function resetsOf(
     if (first === undefined) throw new Error('verifyAll found tampering it names no finding for');
     return { outcome: 'tampered', sign: first.sign };
   }
-  const rows = await tx
+  const all = tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the rows' IDs alone, each then read through its signed state; verifyAll has just checked every one the table or the log knows of
     .selectFrom(FACTOR_RESETS.table)
-    .select('id')
-    .orderBy('id')
-    .execute();
+    .select('id');
+  const rows = await (person === undefined ? all : all.where('person', '=', person)).orderBy('id').execute();
   const resets: ResetRecord[] = [];
   for (const { id } of rows) {
     const read = await resetRecord(tx, states, orgId, id);
+    // Verified by verifyAll in this transaction, and locked for share since.
     if (read.outcome !== 'found') throw new Error(`a reset verifyAll verified reads as ${read.outcome}: ${id}`);
     resets.push(read.reset);
   }
@@ -498,17 +487,12 @@ export async function confirmationSecret(
     .where('contact_id', '=', contactId)
     .executeTakeFirst();
   if (row === undefined) return undefined;
-  try {
-    return keys
-      .decrypt(
-        'field-encryption',
-        { keyVersion: row.secret_key_version, ciphertext: row.secret_ciphertext },
-        secretAssociatedData(orgId, resetId, contactId),
-      )
-      .toString('utf8');
-  } catch (error) {
-    throw new ConfirmationUnreadable(resetId, contactId, { cause: error });
-  }
+  return openField(
+    keys,
+    { keyVersion: row.secret_key_version, ciphertext: row.secret_ciphertext },
+    secretAssociatedData(orgId, resetId, contactId),
+    (cause) => new ConfirmationUnreadable(resetId, contactId, { cause }),
+  );
 }
 
 /** The page a contact's link opens, on the console's origin: confirming there takes a press (B6-3b). */
