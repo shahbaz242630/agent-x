@@ -760,7 +760,11 @@ export async function changeDetails(
 ): Promise<SupplierRecord> {
   if (found.supplier.pendingVersionId !== null) throw new RangeError('Details change only with no change waiting');
   const change = { actor: version.actor, details: version.details ?? {} };
-  const from = found.supplier.status === 'VERIFIED' ? await unverified(tx, states, key, found, change) : found;
+  let from = found;
+  if (found.supplier.status === 'VERIFIED') {
+    await unverifySupplier(tx, states, key, found, change);
+    from = await againForChange(tx, states, key);
+  }
   await addVersion(tx, states, keys, { ...version, of: from });
   await states.record(
     tx,
@@ -773,25 +777,19 @@ export async function changeDetails(
   return (await againForChange(tx, states, key)).supplier;
 }
 
-/** The supplier taken back to UNVERIFIED, its verification cleared, read again for change. */
-async function unverified(
-  tx: SuppliersTransaction,
-  states: SignedStates,
-  key: SupplierKey,
-  found: { readonly supplier: SupplierRecord },
-  change: SupplierChange,
-) {
-  await unverifySupplier(tx, states, key, found, change);
-  return againForChange(tx, states, key);
-}
-
-/** How many versions of its suppliers' details the organisation entered after `since`: the day's budget's count (E3-2b), in one statement. */
-export async function versionsEnteredSince(tx: SuppliersTransaction, orgId: string, since: Date): Promise<number> {
+/**
+ * How many changes of its suppliers the organisation entered after `since`:
+ * every version past a supplier's first (a payee registered, details
+ * changed), never a supplier added, which has its own budget. The day's
+ * budget's count (E3-2b), in one statement.
+ */
+export async function changesEnteredSince(tx: SuppliersTransaction, orgId: string, since: Date): Promise<number> {
   const row = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone, for a budget; no version is decided on from it
     .selectFrom(SUPPLIER_VERSIONS.table)
     .select(sql<number>`pg_catalog.count(*)::int`.as('entered'))
     .where('org_id', '=', orgId)
+    .where('version', '>', 1)
     .where('entered_at', '>', since)
     .executeTakeFirstOrThrow();
   return row.entered;

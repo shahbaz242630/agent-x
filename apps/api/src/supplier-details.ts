@@ -19,7 +19,9 @@
 //   member and the counting contacts, in the same transaction.
 //
 // Every version is kept for good, so the organisation may enter at most 200
-// a day, payee registrations' among them (the B8-1 lesson).
+// changes of its suppliers a day: payee registrations (100 a day of their
+// own) and details changes; never counting a supplier added (the B8-1
+// lesson; E3-2b's review).
 //
 // Lock order (ADR-006 §6): the idempotency key, the supplier lock, the
 // member's membership (2a), the supplier (6), its version, the step-up
@@ -31,8 +33,8 @@ import {
   changeDetails,
   nextVersionNumber,
   oneSupplierAddAtATime,
+  changesEnteredSince,
   type SupplierDetails,
-  versionsEnteredSince,
 } from '@agentx/core/modules/suppliers';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
@@ -55,8 +57,8 @@ export const DETAILS_OPERATION = 'suppliers.details';
 /** Changing them, once stepped up. */
 export const DETAILS_CONFIRM_OPERATION = 'suppliers.details.confirm';
 
-/** The most versions of its suppliers' details an organisation may enter in any 24 hours: payee registrations' 100 and as many changes. */
-export const MOST_VERSIONS_A_DAY = 200;
+/** The most changes of its suppliers an organisation may enter in any 24 hours: payee registrations' 100 and as many details changes. */
+export const MOST_CHANGES_A_DAY = 200;
 
 const DAY_MS = 86_400_000;
 
@@ -132,15 +134,15 @@ export function createSupplierDetailsChanges({
     const { orgId } = member;
     await oneSupplierAddAtATime(tx, orgId);
     const since = new Date(clock.now().getTime() - DAY_MS);
-    if ((await versionsEnteredSince(tx, orgId, since)) >= MOST_VERSIONS_A_DAY) {
+    if ((await changesEnteredSince(tx, orgId, since)) >= MOST_CHANGES_A_DAY) {
       throw new SupplierRefused(409, 'SUPPLIER_CHANGES_SPENT');
     }
     const admin = await work.memberIn(tx, states, member, ADDING_ROLES);
     const found = await work.supplierIn(tx, states, { orgId, id: supplierId }, lock);
     if (found.supplier.pendingVersionId !== null) throw new SupplierRefused(409, 'SUPPLIER_CHANGE_WAITING');
     const current = await work.versionIn(tx, states, orgId, found.supplier.id, found.supplier.currentVersionId);
-    const now = fieldsOf({ ...current, contacts: await work.contactsIn(tx, orgId, current, correlationId) });
-    if (fieldsOf(details).every((field, at) => field === now[at])) {
+    const currentFields = fieldsOf({ ...current, contacts: await work.contactsIn(tx, orgId, current, correlationId) });
+    if (fieldsOf(details).every((field, at) => field === currentFields[at])) {
       throw new SupplierRefused(409, 'SUPPLIER_DETAILS_UNCHANGED');
     }
     return { admin, found, current };

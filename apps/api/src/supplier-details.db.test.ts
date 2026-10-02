@@ -23,10 +23,14 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
   addSupplier,
+  addVersion,
+  nextVersionNumber,
   PAYEE_COOLING_OFF_MS,
   type SupplierDetails,
+  supplierDetails,
   supplierOf,
   type SuppliersTables,
+  versionOf,
 } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -50,6 +54,7 @@ import {
   createSupplierChanges,
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
+  type SupplierChanges,
   SUSPEND_OPERATION,
 } from './supplier-changes.ts';
 import { ADD_OPERATION, createSupplierRegistry, type SupplierRegistry } from './supplier-registry.ts';
@@ -57,7 +62,7 @@ import {
   createSupplierDetailsChanges,
   DETAILS_CONFIRM_OPERATION,
   DETAILS_OPERATION,
-  MOST_VERSIONS_A_DAY,
+  MOST_CHANGES_A_DAY,
   type SupplierDetailsChanges,
 } from './supplier-details.ts';
 import {
@@ -110,6 +115,7 @@ let payees: SupplierPayees;
 let payeeChanges: SupplierPayeeChanges;
 let verifications: SupplierVerifications;
 let detailsChanges: SupplierDetailsChanges;
+let changes: SupplierChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
 const loggerFor = (destination: LogCapture) =>
@@ -188,30 +194,18 @@ const askedFor = (write: SupplierChangeWrite): string => {
   return write.stepUpChallengeId;
 };
 
-/**
- * A supplier added (by `adder`, or the admin), its bank details (`account`)
- * registered by `admin` through the partner's form typed as `name`, checked
- * (by `checker`, or the admin) and confirmed with the admin's passkey: its
- * 24 h cooling-off begun.
- */
-async function payable(
-  adminPerson: Person,
-  name = HOLDER,
-  account: Account = JASMINE,
-  { adder = adminPerson, checker = adminPerson }: { adder?: Person; checker?: Person } = {},
-): Promise<string> {
+/** A supplier added by the admin, its bank details registered, checked and confirmed with their passkey: its 24 h cooling-off begun. */
+async function payable(adminPerson: Person): Promise<string> {
   const admin = await signedIn(adminPerson);
-  const adding = await signedIn(adder);
-  const checking = await signedIn(checker);
-  const added = await registry.add(adding, keyed(adding, ADD_OPERATION), DETAILS, CORRELATION);
+  const added = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
   const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
-  await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name, iban: ibanOf(account) });
+  await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name: HOLDER, iban: ibanOf(JASMINE) });
   const checked = await payees.check(
-    checking,
-    keyed(checking, PAYEE_CHECK_OPERATION),
+    admin,
+    keyed(admin, PAYEE_CHECK_OPERATION),
     supplierId,
     started.registration.id,
     CORRELATION,
@@ -232,28 +226,19 @@ async function payable(
   return supplierId;
 }
 
-const ask = (who: SessionMember, id: string, note: string | null = null) =>
-  verifications.verify(who, keyed(who, VERIFY_OPERATION), id, { note }, CORRELATION);
+const ask = (who: SessionMember, id: string) =>
+  verifications.verify(who, keyed(who, VERIFY_OPERATION), id, { note: null }, CORRELATION);
 
-/** Asked with `note`, stepped up with `amr`, then confirmed with `confirmNote`. */
-async function verified(
-  person: Person,
-  id: string,
-  {
-    note = null,
-    confirmNote = note,
-    amr = PASSKEY,
-    key,
-  }: { note?: string | null; confirmNote?: string | null; amr?: readonly string[]; key?: string } = {},
-) {
+/** Asked, stepped up with a passkey, then confirmed (E3-2a). */
+async function verified(person: Person, id: string) {
   const who = await signedIn(person);
-  const challengeId = askedFor(await ask(who, id, note));
-  await stepUp(who, challengeId, amr);
+  const challengeId = askedFor(await ask(who, id));
+  await stepUp(who, challengeId);
   return verifications.verifyConfirm(
     who,
-    keyed(who, VERIFY_CONFIRM_OPERATION, key),
+    keyed(who, VERIFY_CONFIRM_OPERATION),
     id,
-    { stepUpChallengeId: challengeId, note: confirmNote },
+    { stepUpChallengeId: challengeId, note: null },
     CORRELATION,
   );
 }
@@ -266,8 +251,8 @@ const supplierNow = (org: string, id: string) =>
     return read.supplier;
   });
 
-const refusedWith = (code: string, status?: number) =>
-  expect.objectContaining({ outcome: 'refused', code, ...(status === undefined ? {} : { status }) }) as unknown;
+const refusedWith = (code: string, status: number) =>
+  expect.objectContaining({ outcome: 'refused', code, status }) as unknown;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -289,6 +274,7 @@ beforeEach(() => {
   payeeChanges = createSupplierPayeeChanges({ ...services, challenges: challenges(), outbox });
   verifications = createSupplierVerifications({ ...services, challenges: challenges(), outbox });
   detailsChanges = createSupplierDetailsChanges({ ...services, challenges: challenges(), outbox });
+  changes = createSupplierChanges({ ...services, challenges: challenges(), outbox });
 });
 
 /** An organisation whose admin Alice and approver Bob have been members 15 days. */
@@ -417,14 +403,6 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
   it('keeps a suspended supplier suspended, and it comes back UNVERIFIED', async () => {
     const { org, alice, bob, supplierId } = await established();
     await verified(bob, supplierId);
-    const changes = createSupplierChanges({
-      database: app,
-      keys,
-      ids,
-      challenges: challenges(),
-      outbox: createOutbox({ ids, clock }),
-      logger: loggerFor(new LogCapture()),
-    });
     const admin = await signedIn(alice);
     await changes.suspend(admin, keyed(admin, SUSPEND_OPERATION), supplierId, CORRELATION);
 
@@ -444,25 +422,73 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
     expect((await supplierNow(org, supplierId)).status).toBe('UNVERIFIED');
   });
 
-  it('refuses SUPPLIER_CHANGES_SPENT past the day’s versions, and takes them again a day on', async () => {
+  it('refuses SUPPLIER_CHANGES_SPENT past the day’s changes, never counting suppliers added, and takes them a day on', async () => {
     const { org, alice, supplierId } = await established();
-    // The day's versions entered straight, as payee registrations and changes would: up to the budget.
+    const added = async (count: number) =>
+      withSignedStates(app, org, quiet(), async (tx, states) => {
+        for (let at = 0; at < count; at += 1) {
+          await addSupplier(tx, states, keys, {
+            orgId: org,
+            id: ids.next(),
+            versionId: ids.next(),
+            supplier: { ...DETAILS, displayName: `Filler ${String(at)} LLC` },
+            enteredBy: alice.membershipId,
+            createdAt: clock.now(),
+            actor: OPERATOR,
+          });
+        }
+      });
+    // A busy day of suppliers added counts for nothing (the review's medium).
+    await added(MOST_CHANGES_A_DAY);
+    expect(await changed(alice, supplierId, NEW_PHONE)).toMatchObject({ outcome: 'changed' });
+    // The day's changes entered straight, as payee registrations would: later versions, up to the budget.
     await withSignedStates(app, org, quiet(), async (tx, states) => {
-      for (let added = 0; added < MOST_VERSIONS_A_DAY; added += 1) {
-        await addSupplier(tx, states, keys, {
+      const found = await supplierOf(tx, states, { orgId: org, id: supplierId }, 'change');
+      if (found.outcome !== 'found') throw new Error('not found');
+      const follows = await versionOf(tx, states, { orgId: org, id: found.supplier.currentVersionId }, supplierId);
+      if (follows.outcome !== 'found') throw new Error('no version');
+      for (let at = 0; at < MOST_CHANGES_A_DAY - 1; at += 1) {
+        await addVersion(tx, states, keys, {
           orgId: org,
           id: ids.next(),
-          versionId: ids.next(),
-          supplier: { ...DETAILS, displayName: `Filler ${String(added)} LLC` },
+          supplierId,
+          version: await nextVersionNumber(tx, org, supplierId),
+          supplier: NEW_PHONE,
           enteredBy: alice.membershipId,
-          createdAt: clock.now(),
+          enteredAt: clock.now(),
           actor: OPERATOR,
+          of: found,
+          follows: follows.version,
         });
       }
     });
 
-    expect(await changed(alice, supplierId, NEW_PHONE)).toEqual(refusedWith('SUPPLIER_CHANGES_SPENT', 409));
+    expect(await changed(alice, supplierId, DETAILS)).toEqual(refusedWith('SUPPLIER_CHANGES_SPENT', 409));
     clock.advanceBy(DAY_MS);
-    expect(await changed(alice, supplierId, NEW_PHONE)).toMatchObject({ outcome: 'changed' });
-  }, 60_000);
+    expect(await changed(alice, supplierId, DETAILS)).toMatchObject({ outcome: 'changed' });
+  }, 120_000);
+
+  it('restarts the phone’s start at each change of it, back to an earlier phone too (the review)', async () => {
+    const { alice, supplierId } = await established();
+    const changedAt = async (details: SupplierDetails) => {
+      clock.advanceBy(DAY_MS);
+      const answer = await changed(alice, supplierId, details);
+      if (answer.outcome !== 'changed') throw new Error(`not changed: ${JSON.stringify(answer)}`);
+      return answer.version.phoneSince.getTime();
+    };
+
+    expect(await changedAt(NEW_PHONE)).toBe(clock.now().getTime());
+    expect(await changedAt(DETAILS)).toBe(clock.now().getTime());
+  });
+
+  it('takes an email differing only in its letters’ case as unchanged', async () => {
+    const { alice, supplierId } = await established();
+    const withEmail = { ...DETAILS, contacts: { ...DETAILS.contacts, email: 'accounts@jasmine.example' } };
+    await changed(alice, supplierId, withEmail);
+    const shouted = { ...DETAILS, contacts: { ...DETAILS.contacts, email: 'Accounts@JASMINE.example' } };
+
+    expect(await changed(alice, supplierId, supplierDetails(shouted))).toEqual(
+      refusedWith('SUPPLIER_DETAILS_UNCHANGED', 409),
+    );
+  });
 });

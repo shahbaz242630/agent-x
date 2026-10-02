@@ -71,7 +71,7 @@ export {
   type VersionCheck,
   type VersionRecord,
   verifySupplier,
-  versionsEnteredSince,
+  changesEnteredSince,
   versionOf,
 } from './infrastructure/suppliers.ts';
 export {

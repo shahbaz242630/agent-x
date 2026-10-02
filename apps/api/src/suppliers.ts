@@ -245,7 +245,7 @@ const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDeta
   }
 };
 
-const ADDED = z.strictObject(DETAIL_FIELDS).transform(detailsKept).describe('The supplier to add, UNVERIFIED.');
+const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
 
 /** A step-up asked: the 202's body, under its own name in the document. */
 const stepUpAsked = (id: string, description: string) =>
@@ -259,7 +259,7 @@ const stepUpAsked = (id: string, description: string) =>
 
 const ADD_SCHEMA = {
   summary: 'Add a supplier, unverified',
-  body: ADDED,
+  body: DETAILS_BODY.describe('The supplier to add, UNVERIFIED.'),
   response: { 201: SUPPLIER_DETAILS.describe('The supplier, added UNVERIFIED.') },
 };
 
@@ -299,10 +299,7 @@ const SUPPLIER_CHANGED = SUPPLIER_DETAILS.describe('The supplier, as the change 
 const DETAILS_SCHEMA = {
   summary: 'Ask to change a supplier’s details: its name, contacts or source, never its bank details',
   params: SUPPLIER_ID,
-  body: z
-    .strictObject(DETAIL_FIELDS)
-    .transform(detailsKept)
-    .describe('Its new details, every field: the supplier is UNVERIFIED once they are confirmed.'),
+  body: DETAILS_BODY.describe('Its new details, every field: the supplier is UNVERIFIED once they are confirmed.'),
   response: {
     202: stepUpAsked(
       'SupplierDetailsChangeAsked',
