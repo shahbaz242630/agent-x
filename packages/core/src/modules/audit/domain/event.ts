@@ -93,10 +93,14 @@ function actorProblems(actor: AuditActor): string[] {
 /** The object an event is about, without the version: what an object's events are found by. */
 export type AuditSubjectKey = Pick<AuditSubject, 'type' | 'id'>;
 
+/** Problems with an object's type, as every search by type needs them. */
+export function subjectTypeProblems(type: string): string[] {
+  return SUBJECT_TYPE.test(type) ? [] : ['subject.type must be lower-case words joined by _'];
+}
+
 /** Problems with an object's type and ID, as every event and every search by object needs them. */
 export function subjectKeyProblems({ type, id }: AuditSubjectKey): string[] {
-  const problems: string[] = [];
-  if (!SUBJECT_TYPE.test(type)) problems.push('subject.type must be lower-case words joined by _');
+  const problems = subjectTypeProblems(type);
   if (!UUID.test(id)) problems.push('subject.id must be a UUID');
   return problems;
 }

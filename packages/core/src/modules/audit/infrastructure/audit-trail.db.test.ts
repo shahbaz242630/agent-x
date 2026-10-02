@@ -27,7 +27,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
-import { type AuditTrail, createAuditTrail, TooManyEventsAboutObject } from './audit-trail.ts';
+import { type AuditTrail, createAuditTrail, TooManyEventsAboutObject, TooManyEventsToRead } from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -1090,5 +1090,114 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       expect(await latest(org)).toMatchObject({ kind: 'signed', seq: 1n, version: 1 });
       expect(await verify(org)).toMatchObject({ ok: false });
     });
+  });
+});
+
+describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
+  const about = (type: string, step: number): AuditEvent => ({
+    actor: { type: 'user', id: USER },
+    action: `${type}.stepped`,
+    subject: { type, id: USER, version: step },
+    details: { step },
+  });
+  const history = (orgId: string, subjectTypes: readonly string[] = ['membership', 'invitation'], limit = 10) =>
+    withTenant(app, orgId, (tx) => trail.recordedEvents(tx, orgId, { subjectTypes, limit }));
+  /** Runs one statement as the attacker, the organisation as $1. */
+  const tamper = (statement: string): Promise<unknown> =>
+    // eslint-disable-next-line agentx/no-string-built-sql -- The statements are fixed text, written in the tests below.
+    attacker.query(statement, [org]);
+
+  it('gives every event about the types asked, in chain order, each as recorded, and none of any other type', async () => {
+    await record(org, about('membership', 1), about('probe', 2), about('invitation', 3), about('membership', 4));
+
+    const read = await history(org);
+    expect(read.kind).toBe('recorded');
+    if (read.kind !== 'recorded') return;
+    expect(
+      read.events.map(({ seq, event: { action, subject } }) => [seq, action, subject.type, subject.version]),
+    ).toEqual([
+      [1n, 'membership.stepped', 'membership', 1],
+      [3n, 'invitation.stepped', 'invitation', 3],
+      [4n, 'membership.stepped', 'membership', 4],
+    ]);
+    expect(read.events[0]).toEqual({
+      id: expect.any(String) as string,
+      seq: 1n,
+      recordedAt: expect.any(Date) as Date,
+      event: {
+        actor: { type: 'user', id: USER },
+        action: 'membership.stepped',
+        subject: { type: 'membership', id: USER, version: 1 },
+        details: { step: 1 },
+      },
+    });
+  });
+
+  it('gives none for a chain that holds none, or was never started', async () => {
+    expect(await history(org)).toEqual({ kind: 'recorded', events: [] });
+    await record(org, about('probe', 1));
+    expect(await history(org)).toEqual({ kind: 'recorded', events: [] });
+  });
+
+  it('reads up to its limit, and throws past it rather than give part of the history', async () => {
+    await record(org, about('membership', 1), about('membership', 2), about('probe', 3));
+
+    expect(await history(org, ['membership'], 2)).toMatchObject({
+      kind: 'recorded',
+      events: [{ seq: 1n }, { seq: 2n }],
+    });
+    await expect(history(org, ['membership'], 1)).rejects.toThrow(TooManyEventsToRead);
+  });
+
+  it('is broken at an event edited past the app', async () => {
+    await record(org, about('membership', 1), about('membership', 2), about('membership', 3));
+    await tamper(`update audit.events set details = '{"step":9}' where org_id = $1 and seq = 2`);
+
+    expect(await history(org)).toEqual({ kind: 'broken', seq: 2n });
+  });
+
+  it('is broken at an event whose MAC fails, though its hash holds', async () => {
+    await record(org, about('membership', 1), about('invitation', 2));
+    await attacker.query('update audit.events set mac = $2 where org_id = $1 and seq = 2', [org, Buffer.alloc(32, 7)]);
+
+    expect(await history(org)).toEqual({ kind: 'broken', seq: 2n });
+  });
+
+  it('is broken for a chain holding an event past its head, even one about another type', async () => {
+    await record(org, about('membership', 1));
+    const [head] = await attacker.query('select seq, hash, mac, mac_key_version from audit.heads where org_id = $1', [
+      org,
+    ]);
+    if (head === undefined) throw new Error('The chain has no head');
+    await record(org, about('probe', 2));
+    await attacker.query(
+      'update audit.heads set seq = $2, hash = $3, mac = $4, mac_key_version = $5 where org_id = $1',
+      [org, head.seq, head.hash, head.mac, head.mac_key_version],
+    );
+
+    expect(await history(org)).toEqual({ kind: 'broken', seq: 2n });
+  });
+
+  it('is broken for events with no head, or a head that fails its own MAC', async () => {
+    await record(org, about('membership', 1));
+    await attacker.query('update audit.heads set mac = $2 where org_id = $1', [org, Buffer.alloc(32, 7)]);
+    expect(await history(org)).toEqual({ kind: 'broken', seq: 1n });
+
+    await tamper('delete from audit.heads where org_id = $1');
+    expect(await history(org)).toEqual({ kind: 'broken', seq: 1n });
+  });
+
+  it('refuses a subject type that is not one, no type at all, or a limit that is not a whole number from 1', async () => {
+    await expect(history(org, ['Not A Type'])).rejects.toThrow(AuditEventRefused);
+    await expect(history(org, [])).rejects.toThrow('At least one subject type is read');
+    for (const limit of [0, 1.5, Number.NaN]) {
+      await expect(history(org, ['membership'], limit)).rejects.toThrow('The limit is a whole number from 1');
+    }
+  });
+
+  it("is read only in withTenant's transaction for the organisation", async () => {
+    await expect(
+      withTenant(app, newOrg(), (tx) => trail.recordedEvents(tx, org, { subjectTypes: ['membership'], limit: 1 })),
+    ).rejects.toThrow("the transaction isn't withTenant's for this organisation");
   });
 });
