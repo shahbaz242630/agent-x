@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 
 import type { KeyDescription } from '../keys/key-provider.ts';
+import type { Env } from './common.ts';
 import type { Config } from './config.ts';
 
 export const WATCHED_VARIABLES = [
@@ -55,8 +56,6 @@ export interface ConfigFingerprint {
   /** The flags Node was started with, by name only (`--use-system-ca`, not what follows `=`). */
   readonly nodeFlags: readonly string[];
 }
-
-type Env = Readonly<Record<string, string | undefined>>;
 
 /**
  * The settings that count, named one by one, in a fixed order, so the same

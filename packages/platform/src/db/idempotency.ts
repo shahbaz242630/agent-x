@@ -49,6 +49,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
+import { UUID } from './patterns.ts';
 import { assertTenant, limitStatements, withTenant } from './tenant.ts';
 
 /**
@@ -151,7 +152,6 @@ export const IDEMPOTENCY_RETENTION_DAYS = 30;
 /** The most keys one sweep deletes: each is a short transaction, and a caller sweeps again while it deletes this many. */
 const MOST_SWEPT = 10_000;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Every kind of client, as a list of text: a caller the compiler can't see (a cast) could name another. */
 const CLIENT_KINDS: readonly string[] = ['user', 'agent'] satisfies readonly IdempotencyClient['kind'][];
 const OPERATION = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;

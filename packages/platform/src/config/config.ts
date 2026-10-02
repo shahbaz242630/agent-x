@@ -7,30 +7,25 @@
 // Problems name the variable and the rule, never the value, so a secret pasted
 // into the wrong variable can't leak through the error.
 import type { KeySettings } from '../keys/load.ts';
-import { ConfigError, type Env, type Environment, LOCAL_ONLY, type LogLevel, type PartnerMode } from './common.ts';
+import {
+  ConfigError,
+  type Env,
+  type Environment,
+  LOCAL_ONLY,
+  LOCAL_RELEASE,
+  type LogLevel,
+  type PartnerMode,
+} from './common.ts';
 import {
   checkLocation,
+  deployedProblems,
   type LocationChecks,
   optionalSecretSetting,
-  pgVariableProblems,
   secretSetting,
-  tlsModeProblems,
+  startProblems,
 } from './database.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
-import {
-  allOk,
-  failures,
-  logLevelProblems,
-  nodeDebugProblems,
-  releaseProblems,
-  setting,
-  type SettingName,
-  unknownSettings,
-} from './settings.ts';
-import { tlsProblems } from './tls.ts';
-
-/** The release name a local run uses when none is set. */
-const LOCAL_RELEASE = 'local';
+import { allOk, logLevelProblems, releaseProblems, setting, type SettingName } from './settings.ts';
 
 /**
  * The address a local run is reached at when none is set, on the default port.
@@ -432,20 +427,17 @@ function httpRuleProblems(checks: Settings): string[] {
 
 /** Each rate limit against the log event cap, where both are valid. */
 function rateLimitRuleProblems(checks: Settings): string[] {
-  const { rateLimit, eventCap } = checks;
-  return [
-    ...(rateLimit.ok && eventCap.ok
-      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_MINUTE', rateLimit.value, eventCap.value)
-      : []),
+  const { eventCap } = checks;
+  const limits = [
+    ['AGENTX_RATE_LIMIT_PER_MINUTE', checks.rateLimit],
     // B2-5c: a person reaching us from many addresses, each under its own limit, is held by theirs.
-    ...(checks.rateLimitPerUser.ok && eventCap.ok
-      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser.value, eventCap.value)
-      : []),
+    ['AGENTX_RATE_LIMIT_PER_USER_PER_MINUTE', checks.rateLimitPerUser],
     // C2-2: an agent using several keys, or several addresses, is held by its own.
-    ...(checks.rateLimitPerAgent.ok && eventCap.ok
-      ? rateLimitProblems('AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent.value, eventCap.value)
-      : []),
-  ];
+    ['AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE', checks.rateLimitPerAgent],
+  ] as const;
+  return limits.flatMap(([name, limit]) =>
+    limit.ok && eventCap.ok ? rateLimitProblems(name, limit.value, eventCap.value) : [],
+  );
 }
 
 /** Rules between the login, email, factor reset and session settings, where those are valid. */
@@ -503,10 +495,7 @@ export function loadConfig(env: Env = process.env): Config {
   const { environment } = checks;
 
   const problems = [
-    ...tlsProblems(env),
-    ...pgVariableProblems(env),
-    ...unknownSettings(env, 'app'),
-    ...failures(Object.values(checks)),
+    ...startProblems(env, 'app', checks),
     // A rule between settings runs whenever the settings it compares are valid,
     // so one start reports it alongside any other problem.
     ...httpRuleProblems(checks),
@@ -515,8 +504,7 @@ export function loadConfig(env: Env = process.env): Config {
     ...(environment.ok && checks.partnerMode.ok
       ? partnerModeProblems(environment.value, checks.partnerMode.value)
       : []),
-    ...(environment.ok && location.tls.ok ? tlsModeProblems(environment.value, location.tls.value) : []),
-    ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
+    ...deployedProblems(env, environment, location.tls),
   ];
   // Every failed setting is already among the problems; the type guard narrows the checks to their values.
   if (!allOk(checks) || problems.length > 0) throw new ConfigError(problems);

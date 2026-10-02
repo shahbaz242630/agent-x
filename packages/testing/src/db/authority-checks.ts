@@ -34,6 +34,7 @@
 import type pg from 'pg';
 
 import { catalogueRows as rows, openCatalogue } from './catalogue.ts';
+import { TABLE_NAME } from './names.ts';
 import type { TestDatabase } from './test-database.ts';
 
 /** The type an authority field is read as: @agentx/platform/db's SignedFieldType. */
@@ -88,8 +89,7 @@ export interface AuthorityTable {
   readonly statusConditions?: readonly string[];
 }
 
-/** Names from our migrations: the shapes @agentx/platform/db accepts (signed-rows.ts, status.ts). */
-const TABLE_NAME = /^[a-z][a-z0-9_]{0,62}\.[a-z][a-z0-9_]{0,62}$/;
+/** A column name from our migrations: the shape @agentx/platform/db accepts (signed-rows.ts). */
 const COLUMN_NAME = /^[a-z][a-z0-9_]{0,62}$/;
 /** A subject type and a trigger name: lower-case words joined by single underscores. */
 const LOWER_WORDS = /^[a-z]+(?:_[a-z]+)*$/;

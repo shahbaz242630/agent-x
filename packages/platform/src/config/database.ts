@@ -8,7 +8,8 @@ import { readFileSync } from 'node:fs';
 
 import { type Env, type Environment, LOCAL_ONLY } from './common.ts';
 import type { DatabaseTlsMode } from './primitives.ts';
-import { type Checked, setting } from './settings.ts';
+import { type Checked, failures, nodeDebugProblems, type Process, setting, unknownSettings } from './settings.ts';
+import { tlsProblems } from './tls.ts';
 
 /** Where the database is, and how the connection is protected: the checks both loaders share. */
 export interface LocationChecks {
@@ -107,4 +108,25 @@ export function tlsModeProblems(environment: Environment, mode: DatabaseTlsMode)
         `AGENTX_DB_TLS: disable is allowed only in ${LOCAL_ONLY.join(' and ')}; ${environment} must verify the server's certificate (verify-full)`,
       ]
     : [];
+}
+
+/**
+ * The checks every loader runs first, in this order: TLS checks left on, no
+ * PG* variable, no setting another process reads, then each setting's own.
+ */
+export function startProblems(env: Env, reader: Process, checks: Readonly<Record<string, Checked<unknown>>>): string[] {
+  return [
+    ...tlsProblems(env),
+    ...pgVariableProblems(env),
+    ...unknownSettings(env, reader),
+    ...failures(Object.values(checks)),
+  ];
+}
+
+/** The checks every loader runs last, where the environment is valid: the database's TLS mode, then Node's debugger. */
+export function deployedProblems(env: Env, environment: Checked<Environment>, tls: Checked<DatabaseTlsMode>): string[] {
+  return [
+    ...(environment.ok && tls.ok ? tlsModeProblems(environment.value, tls.value) : []),
+    ...(environment.ok ? nodeDebugProblems(environment.value, env) : []),
+  ];
 }
