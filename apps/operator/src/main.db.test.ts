@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import { createPlatformChain } from '@agentx/core/modules/platform-controls';
+import { createPlatformChain, HEAD_WAIT_SECONDS } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
@@ -346,7 +346,7 @@ describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres
     }
   });
 
-  it("gives up after 10 seconds while the platform's head stays held, naming the organisation it didn't create", async () => {
+  it("gives up after HEAD_WAIT_SECONDS while the platform's head stays held, naming the organisation it didn't create", async () => {
     expect((await run(['create-organization', '--name', NAME])).code).toBe(0);
     const before = await counts();
     const head = await holdPlatformHead();
@@ -354,7 +354,7 @@ describe(`B1c the lock order and the platform head's wait (ADR-006 §6; Postgres
       const began = performance.now();
       const { code, events, line } = await within(20_000, run(['create-organization', '--name', NAME]), 'the command');
 
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      expect(performance.now() - began).toBeGreaterThanOrEqual((HEAD_WAIT_SECONDS - 1) * 1000);
       expect(code).toBe(1);
       expect(events).toEqual(['operator.starting', 'db.schema_checked', 'operator.failed']);
       const failed = line('operator.failed');

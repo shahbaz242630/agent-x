@@ -40,9 +40,9 @@ export interface RecordedPlatformEvent {
 export interface PlatformChain {
   /**
    * Adds the event to the platform chain, in the caller's transaction. Takes
-   * the chain head's lock, which comes last (ADR-006 §6), waiting at most 10
-   * seconds for it, or less where the caller's transaction already allows
-   * less. Anything else holding it (a session left open by hand, a stuck
+   * the chain head's lock, which comes last (ADR-006 §6), waiting at most
+   * HEAD_WAIT_SECONDS for it, or less where the caller's transaction already
+   * allows less. Anything else holding it (a session left open by hand, a stuck
    * operator action) would otherwise hold the caller up with no line saying
    * why, until the platform gave up on it; this way recording fails with
    * Postgres's lock-timeout error, and says so. The limit is `set local`, so
@@ -213,16 +213,25 @@ function readerFor(tx: PlatformTransaction): ChainReader {
 }
 
 /**
- * Bounds how long the transaction waits for a lock from here on: 10 seconds,
- * unless the caller has already set a shorter limit, which is kept (Postgres's
- * `0` is no limit at all). A limit that can't be read is replaced by 10 s.
+ * How long recording waits for the head's lock: a second under the statement
+ * limit a request's transaction runs with (STATEMENT_SECONDS), so a wait that
+ * runs out ends as the lock timeout it is, never as a statement cut short (a
+ * test records under both). Written out in boundHeadWait's SQL too.
+ */
+export const HEAD_WAIT_SECONDS = 9;
+
+/**
+ * Bounds how long the transaction waits for a lock from here on:
+ * HEAD_WAIT_SECONDS, unless the caller has already set a shorter limit, which
+ * is kept (Postgres's `0` is no limit at all). A limit that can't be read is
+ * replaced.
  */
 async function boundHeadWait(tx: PlatformTransaction): Promise<void> {
   const { rows } = await sql<{ longer: boolean | null }>`
-    select (limit_now = interval '0' or limit_now > interval '10 seconds') as longer
+    select (limit_now = interval '0' or limit_now > interval '9 seconds') as longer
     from (select pg_catalog.current_setting('lock_timeout')::interval as limit_now) as setting
   `.execute(tx);
-  if (rows[0]?.longer !== false) await sql`set local lock_timeout = '10s'`.execute(tx);
+  if (rows[0]?.longer !== false) await sql`set local lock_timeout = '9s'`.execute(tx);
 }
 
 export function createPlatformChain({

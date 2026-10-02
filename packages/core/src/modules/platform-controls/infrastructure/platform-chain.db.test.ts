@@ -6,7 +6,7 @@
 import { AsyncResource } from 'node:async_hooks';
 
 import { ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, limitStatements } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
@@ -23,7 +23,7 @@ import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type PlatformEvent, PlatformEventRefused } from '../domain/event.ts';
-import { createPlatformChain } from './platform-chain.ts';
+import { createPlatformChain, HEAD_WAIT_SECONDS } from './platform-chain.ts';
 import type { PlatformControlsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -114,7 +114,7 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
     expect(await verify()).toMatchObject({ ok: true, seq: 0n });
   });
 
-  it("gives up after 10 seconds when something else holds the head's lock, in the caller's transaction too", async () => {
+  it("gives up after HEAD_WAIT_SECONDS when something else holds the head's lock, in the caller's transaction too", async () => {
     await record(started(1));
     const holder = await database.connect('admin');
     await holder.query('begin');
@@ -122,7 +122,7 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
     try {
       const began = performance.now();
       await expect(within(20_000, record(started(2)), 'the event')).rejects.toThrow(/lock timeout/);
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      expect(performance.now() - began).toBeGreaterThanOrEqual((HEAD_WAIT_SECONDS - 1) * 1000);
     } finally {
       await holder.query('rollback');
       await holder.end();
@@ -130,7 +130,7 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
     expect(await verify()).toMatchObject({ ok: true, seq: 1n });
   });
 
-  it("brings a longer limit the caller's transaction set down to 10 seconds", async () => {
+  it("brings a longer limit the caller's transaction set down to HEAD_WAIT_SECONDS", async () => {
     await record(started(1));
     const holder = await database.connect('admin');
     await holder.query('begin');
@@ -147,14 +147,36 @@ describe('recording platform events (ADR-011 §3, ADR-014 §8)', () => {
           'the event',
         ),
       ).rejects.toThrow(/lock timeout/);
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      expect(performance.now() - began).toBeGreaterThanOrEqual((HEAD_WAIT_SECONDS - 1) * 1000);
     } finally {
       await holder.query('rollback');
       await holder.end();
     }
   });
 
-  it("keeps a shorter limit the caller's transaction set, rather than lengthen it to 10 seconds", async () => {
+  it("ends as the lock timeout it is in a request's transaction, its statements limited, never as a statement cut short", async () => {
+    await record(started(1));
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    await holder.query('select * from platform_controls.audit_head for update');
+    try {
+      await expect(
+        within(
+          20_000,
+          app.transaction().execute(async (tx) => {
+            await limitStatements(tx);
+            return chain.record(tx, started(2));
+          }),
+          'the event',
+        ),
+      ).rejects.toThrow(/lock timeout/);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it("keeps a shorter limit the caller's transaction set, rather than lengthen it to HEAD_WAIT_SECONDS", async () => {
     await record(started(1));
     const holder = await database.connect('admin');
     await holder.query('begin');
@@ -193,7 +215,7 @@ describe('recording in a transaction of its own, as a process start does', () =>
     expect(await verify()).toMatchObject({ ok: true, seq: 1n });
   });
 
-  it("gives up after 10 seconds when something else holds the head's lock, rather than hang", async () => {
+  it("gives up after HEAD_WAIT_SECONDS when something else holds the head's lock, rather than hang", async () => {
     await record(started(1));
     const holder = await database.connect('admin');
     await holder.query('begin');
@@ -201,7 +223,7 @@ describe('recording in a transaction of its own, as a process start does', () =>
     try {
       const began = performance.now();
       await expect(within(20_000, chain.recordAlone(app, started(2)), 'the start')).rejects.toThrow(/lock timeout/);
-      expect(performance.now() - began).toBeGreaterThanOrEqual(9_000);
+      expect(performance.now() - began).toBeGreaterThanOrEqual((HEAD_WAIT_SECONDS - 1) * 1000);
     } finally {
       await holder.query('rollback');
       await holder.end();

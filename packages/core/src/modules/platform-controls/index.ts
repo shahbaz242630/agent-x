@@ -4,6 +4,7 @@
 export { type PlatformActor, type PlatformEvent, PlatformEventRefused } from './domain/event.ts';
 export {
   createPlatformChain,
+  HEAD_WAIT_SECONDS,
   type PlatformChain,
   type PlatformTransaction,
   type RecordedPlatformEvent,
