@@ -198,6 +198,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/suppliers/{id}/reactivate',
       'POST /v1/suppliers/{id}/reactivate/confirm',
       'POST /v1/suppliers/{id}/suspend',
+      'POST /v1/suppliers/{id}/verify',
+      'POST /v1/suppliers/{id}/verify/confirm',
       'PUT /test/both',
     ]);
   });
@@ -1170,8 +1172,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
     // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), a payee's start and check
     // and the fake partner's form (E2-2a), a payee change's approve, confirm and withdraw (E2-2b), a payee passed
-    // through (E2-2d), with each GET's HEAD.
-    expect(answers).toHaveLength(91);
+    // through (E2-2d), a supplier's verify and its confirm (E3-2a), with each GET's HEAD.
+    expect(answers).toHaveLength(93);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1223,6 +1225,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'SupplierPayee',
       'SupplierPayeeApprovalAsked',
       'SupplierReactivationAsked',
+      'SupplierVerificationAsked',
     ]);
   });
 

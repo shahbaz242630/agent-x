@@ -102,6 +102,7 @@ import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
 import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
+import { createSupplierVerifications } from './supplier-verifications.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
 
@@ -498,6 +499,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     supplierPayeeChanges: createSupplierPayeeChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
+    supplierVerifications: createSupplierVerifications({
       database,
       keys,
       ids: uuidV7Ids,

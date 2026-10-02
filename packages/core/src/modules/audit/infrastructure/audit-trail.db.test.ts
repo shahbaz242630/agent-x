@@ -1133,6 +1133,25 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     });
   });
 
+  it('gives one object’s events alone when it names one, whatever its ID’s case (E3-2a)', async () => {
+    const other = '0199a0f0-0000-7000-8000-0000000000bb';
+    await record(org, about('supplier', 1), {
+      ...about('supplier', 2),
+      subject: { type: 'supplier', id: other, version: 2 },
+    });
+    await record(org, about('supplier', 3));
+
+    const read = await withTenant(app, org, (tx) =>
+      trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: USER.toUpperCase(), limit: 2 }),
+    );
+    expect(read).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }, { seq: 3n }] });
+    await expect(
+      withTenant(app, org, (tx) =>
+        trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: 'x', limit: 2 }),
+      ),
+    ).rejects.toThrow('subject.id must be a UUID');
+  });
+
   it('gives none for a chain that holds none, or was never started', async () => {
     expect(await history(org)).toEqual({ kind: 'recorded', events: [] });
     await record(org, about('probe', 1));

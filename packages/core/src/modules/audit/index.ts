@@ -19,6 +19,7 @@ export {
   type AuditTrail,
   type AuditTransaction,
   createAuditTrail,
+  type HistoryToRead,
   type LatestSignedState,
   type ReadEvent,
   type RecordedAuditEvent,

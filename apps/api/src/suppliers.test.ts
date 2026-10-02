@@ -26,6 +26,7 @@ import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
+import type { SupplierVerifications } from './supplier-verifications.ts';
 import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
 import type { SupplierChangeWrite, SupplierView } from './supplier-work.ts';
@@ -219,6 +220,13 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly payee: object;
+    }
+  | {
+      readonly kind: 'verify' | 'verifyConfirm';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly callBack: object;
     };
 
 const servers: FastifyInstance[] = [];
@@ -294,6 +302,16 @@ async function withSuppliers(
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
+  const verifications: SupplierVerifications = {
+    verify: (member, keyed, supplierId, callBack) => {
+      asked.push({ kind: 'verify', member, keyed, supplierId, callBack });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    verifyConfirm: (member, keyed, supplierId, callBack) => {
+      asked.push({ kind: 'verifyConfirm', member, keyed, supplierId, callBack });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+  };
   const config = {
     http: {
       host: '127.0.0.1',
@@ -326,6 +344,7 @@ async function withSuppliers(
     supplierChanges: changes,
     supplierPayees: payees,
     supplierPayeeChanges: payeeChanges,
+    supplierVerifications: verifications,
   });
   servers.push(app);
   await app.ready();
@@ -880,6 +899,110 @@ describe('POST /v1/suppliers/:id/payee-change/approve, then /confirm, and /withd
       ).statusCode,
     ).toBe(400);
     expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/suppliers/:id/verify, then /confirm (E3-2a)', () => {
+  const NOTE = 'Spoke to Sara in accounts on the registry number; she confirmed the account';
+
+  it('answers the ask 202 with the step-up, passing the member in their session and the note', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/verify`, { calledBack: true, note: NOTE }));
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked).toMatchObject([
+      {
+        kind: 'verify',
+        member: { ...MEMBER, sessionId: LIVE.sessionId },
+        keyed: { operation: 'suppliers.verify' },
+        supplierId: SUPPLIER_ID,
+        callBack: { note: NOTE },
+      },
+    ]);
+  });
+
+  it('answers the confirm 200 with the supplier, passing the step-up and no note as null', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/verify/confirm`, { stepUpChallengeId: CHALLENGE, calledBack: true }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(DETAILS_ANSWERED);
+    expect(asked).toMatchObject([
+      {
+        kind: 'verifyConfirm',
+        keyed: { operation: 'suppliers.verify.confirm' },
+        callBack: { stepUpChallengeId: CHALLENGE, note: null },
+      },
+    ]);
+  });
+
+  it('keeps a note composed (NFC), as it is bound and recorded', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
+
+    await app.inject(post(`/${SUPPLIER_ID}/verify`, { calledBack: true, note: 'Cafe\u0301 owner confirmed' }));
+
+    expect(asked).toMatchObject([{ callBack: { note: 'Café owner confirmed' } }]);
+  });
+
+  it('answers each refusal as the use case gives it', async () => {
+    for (const [status, code] of [
+      [409, 'SUPPLIER_COOLING_OFF'],
+      [409, 'SUPPLIER_NAME_MISMATCH'],
+      [409, 'SUPPLIER_CALL_NOTE_NEEDED'],
+      [409, 'SUPPLIER_PHONE_TOO_NEW'],
+      [403, 'VERIFIER_ENTERED_DETAILS'],
+      [403, 'VERIFIER_GRANTED_BY_ENTERER'],
+      [403, 'VERIFIER_TOO_NEW'],
+      [403, 'SOLO_PATH_LOCKED'],
+      [409, 'HISTORY_TOO_LONG'],
+    ] as const) {
+      const app = await withSuppliers({ change: { outcome: 'refused', status, code } });
+      const response = await app.inject(post(`/${SUPPLIER_ID}/verify`, { calledBack: true }));
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ error: { code } });
+    }
+  });
+
+  it('refuses no tick, a tick that isn’t true, a note that isn’t one, or anything more, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({}, asked);
+
+    for (const body of [
+      {},
+      { calledBack: false },
+      { calledBack: 'yes' },
+      { calledBack: true, note: '' },
+      { calledBack: true, note: 'x'.repeat(501) },
+      { calledBack: true, note: 'two\nlines' },
+      { calledBack: true, note: ' spaced' },
+      { calledBack: true, also: 'x' },
+    ]) {
+      expect((await app.inject(post(`/${SUPPLIER_ID}/verify`, body))).statusCode).toBe(400);
+    }
+    expect((await app.inject(post(`/${SUPPLIER_ID}/verify/confirm`, { calledBack: true }))).statusCode).toBe(400);
+    expect(asked).toEqual([]);
+  });
+
+  it('takes the longest note the schema allows, sent decomposed with every character escaped, within its body limit', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
+    // 500 characters kept, each sent as 3 code points that compose to one (ǖ: u, diaeresis, macron), every one escaped.
+    const note = ['\\u0075', '\\u0308', '\\u0304'].join('').repeat(500);
+    const escaped = `{"stepUpChallengeId":"${CHALLENGE}","calledBack":true,"note":"${note}"}`;
+
+    const response = await app.inject({ ...post(`/${SUPPLIER_ID}/verify/confirm`), payload: escaped });
+
+    expect(note).toHaveLength(9000);
+    expect(response.statusCode).toBe(200);
+    expect(asked).toMatchObject([{ callBack: { note: '\u01d6'.repeat(500) } }]);
   });
 });
 
