@@ -40,12 +40,7 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import {
-  createIdempotentWrites,
-  holdTransactionLock,
-  type IdempotentRequest,
-  limitStatements,
-} from '@agentx/platform/db';
+import { createIdempotentWrites, holdTransactionLock, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely, Transaction } from 'kysely';
@@ -291,11 +286,7 @@ export function createResetChanges({
     orgId: string,
     services: SignedStatesServices,
     work: (tx: Transaction<Tables>, states: SignedStates) => Promise<T>,
-  ): Promise<T> =>
-    withSignedStates(database, orgId, services, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+  ): Promise<T> => withSignedStates(database, orgId, services, work);
 
   /** Runs the write in the organisation's transaction, its key claimed first; a refusal becomes an answer. */
   const write = async (

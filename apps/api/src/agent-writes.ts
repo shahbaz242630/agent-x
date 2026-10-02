@@ -39,7 +39,6 @@ import {
   type DatabaseTransaction,
   type IdempotentRequest,
   type IdempotentWrite,
-  limitStatements,
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -153,10 +152,7 @@ export function createAgentWork({
   readonly logger: Logger;
 }): AgentWork {
   const inOrganisation: AgentWork['inOrganisation'] = (orgId, correlationId, work) =>
-    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, async (tx, states) => {
-      await limitStatements(tx);
-      return work(tx, states);
-    });
+    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
 
   return {
     inOrganisation,

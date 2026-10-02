@@ -17,7 +17,6 @@
 // state), and then verified: the signed state must name the same person, so
 // an entry pointed at someone else's membership finds nothing.
 import type { SignedStateTable } from '@agentx/platform/db';
-import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, type Transaction } from 'kysely';
 
 import {
@@ -192,10 +191,7 @@ export function membershipFor(
   orgId: string,
   userId: string,
 ): Promise<MembershipCheck> {
-  return withSignedStates(db, orgId, services, async (tx, states) => {
-    await limitStatements(tx);
-    return membershipOf(tx, states, orgId, userId);
-  });
+  return withSignedStates(db, orgId, services, (tx, states) => membershipOf(tx, states, orgId, userId));
 }
 
 /**
@@ -208,10 +204,7 @@ export function membersFor(
   services: SignedStatesServices,
   orgId: string,
 ): Promise<MembersList> {
-  return withSignedStates(db, orgId, services, async (tx, states) => {
-    await limitStatements(tx);
-    return membersOf(tx, states, orgId);
-  });
+  return withSignedStates(db, orgId, services, (tx, states) => membersOf(tx, states, orgId));
 }
 
 /** The most members an organisation's list gives: more is refused, never cut short unseen. */

@@ -16,12 +16,13 @@ import {
   createDatabase,
   type Database,
   type SignedStateTable,
+  STATEMENT_SECONDS,
   TenantContextError,
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import type { Transaction } from 'kysely';
+import { sql, type Transaction } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -208,6 +209,17 @@ describe(`withSignedStates: the integrity hold follows every tamper sign (B1b, P
     expect((await holdEvents()).map(({ action }) => action)).toEqual(['integrity_hold.created']);
     expect(lines('audit.integrity_failed')).toEqual([]);
     expect(lines('audit.integrity_hold_set')).toEqual([]);
+  });
+
+  it('limits each of the work’s statements to the request’s time, as a hung read must give its connection back', async () => {
+    const limit = await inOrg(async (tx) => {
+      const { rows } = await sql<{
+        limit: string;
+      }>`select pg_catalog.current_setting('statement_timeout') as limit`.execute(tx);
+      return rows[0]?.limit;
+    });
+
+    expect(limit).toBe(`${String(STATEMENT_SECONDS)}s`);
   });
 
   it('found in a transaction that commits: HELD over its CLEAR once it has, and the read still denied', async () => {

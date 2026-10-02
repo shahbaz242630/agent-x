@@ -32,7 +32,7 @@
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely, type Transaction } from 'kysely';
@@ -198,10 +198,9 @@ export function createMembershipChanges({
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
-      const done = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await limitStatements(tx);
-        return idempotency.run(tx, idempotent, () => work(tx, states));
-      });
+      const done = await withSignedStates(database, admin.orgId, services, (tx, states) =>
+        idempotency.run(tx, idempotent, () => work(tx, states)),
+      );
       return { done, services };
     } catch (error) {
       if (error instanceof ChangeRefused) {
@@ -217,10 +216,9 @@ export function createMembershipChanges({
     services: SignedStatesServices,
     id: string,
   ): Promise<MembershipChangeWrite> => {
-    const read = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-      await limitStatements(tx);
-      return memberOf(tx, states, { orgId: admin.orgId, id }, 'share');
-    });
+    const read = await withSignedStates(database, admin.orgId, services, (tx, states) =>
+      memberOf(tx, states, { orgId: admin.orgId, id }, 'share'),
+    );
     if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
     if (read.outcome === 'missing') throw new Error('a membership changed, or changed before, is not there');
     return { outcome: 'written', member: read.member };
