@@ -46,7 +46,8 @@
 // seconds; the login service's calls to 10 seconds each.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, type SignedStatesServices, withSignedStates } from '../../audit/index.ts';
@@ -120,7 +121,7 @@ export function createResetRemovals({
   ): Promise<T> => {
     const services: SignedStatesServices = { keys, ids, logger: logger.child({ orgId }) };
     return withSignedStates(database, orgId, services, async (tx, states) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return work(tx, states);
     });
   };

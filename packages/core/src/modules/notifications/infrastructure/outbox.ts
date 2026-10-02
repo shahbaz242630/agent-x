@@ -33,7 +33,8 @@
 //
 // Each but `add` runs in a transaction of its own whose statements give up
 // after 10 seconds, a wait for a lock included. The times are the Clock's.
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import {
@@ -143,7 +144,7 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(db: Kysely<NotificationsTables>, work: (tx: Kysely<NotificationsTables>) => Promise<T>) =>
     db.transaction().execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return work(tx);
     });
 

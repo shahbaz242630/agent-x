@@ -6,8 +6,9 @@
 // MAC, is read by that ID inside the organisation's own withTenant and
 // verified there.
 import { assertTenant } from '@agentx/platform/db';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
+import { readAlone } from './read-alone.ts';
 import type { DirectoryTables } from './tables.ts';
 
 /**
@@ -32,16 +33,12 @@ export async function registerAgentKey(
  * read gives its connection back.
  */
 export function listedAgentKey(db: Kysely<DirectoryTables>, keyId: string): Promise<string | undefined> {
-  return db
-    .transaction()
-    .setIsolationLevel('read committed')
-    .execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
-      const entry = await tx
-        .selectFrom('directory.agent_keys')
-        .select('org_id')
-        .where('key_id', '=', keyId)
-        .executeTakeFirst();
-      return entry?.org_id;
-    });
+  return readAlone(db, async (tx) => {
+    const entry = await tx
+      .selectFrom('directory.agent_keys')
+      .select('org_id')
+      .where('key_id', '=', keyId)
+      .executeTakeFirst();
+    return entry?.org_id;
+  });
 }

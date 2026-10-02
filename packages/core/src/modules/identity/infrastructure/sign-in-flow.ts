@@ -35,7 +35,8 @@
 // Each database step gives up after 10 seconds, a wait for a lock included,
 // so a hung statement can't hold a sign-in, or its connection, for good.
 import type { KeyProvider } from '@agentx/platform/keys';
-import { type Kysely, sql } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
@@ -137,7 +138,7 @@ export function createSignIn({
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(work: (tx: Kysely<IdentityTables>) => Promise<T>): Promise<T> =>
     db.transaction().execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return work(tx);
     });
 

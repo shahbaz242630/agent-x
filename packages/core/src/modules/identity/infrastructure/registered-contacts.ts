@@ -36,6 +36,7 @@
 // plain).
 import type { SignedStateTable } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
+import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import {
@@ -479,7 +480,7 @@ function contactIdsFor(
   keep: (contact: ContactRecord) => boolean,
 ): Promise<readonly string[]> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     const listed = await contactsOf(tx, states, services.keys, orgId);
     if (listed.outcome === 'tampered') throw new ContactsTampered(orgId);
     return listed.contacts.filter(keep).map((contact) => contact.id);
@@ -524,7 +525,7 @@ export function contactAddressFor(
   contactId: string,
 ): Promise<string | undefined> {
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     const read = await contactRecord(tx, states, orgId, contactId);
     if (read.outcome === 'tampered') throw new ContactsTampered(orgId);
     if (read.outcome === 'missing' || read.contact.status === 'DRAFT') return undefined;
@@ -569,7 +570,7 @@ export function registeredContactsFor(
 > {
   const services = { keys, ids, logger: logger.child({ correlationId }) };
   return withSignedStates(db, orgId, services, async (tx, states) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     const listed = await contactsOf(tx, states, keys, orgId);
     if (listed.outcome === 'tampered') return listed;
     return { outcome: 'listed', contacts: listed.contacts.filter((contact) => contact.status === 'ACTIVE') };

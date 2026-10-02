@@ -25,6 +25,7 @@
 // (ADR-006 §3), so tests can move them.
 import { createHash, randomBytes } from 'node:crypto';
 
+import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
@@ -301,7 +302,7 @@ export function createStepUpChallenges({
       }
       const now = clock.now();
       return db.transaction().execute(async (tx) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         const ended = tx.selectFrom('identity.step_up_challenges').select('id').where('ends_at', '<=', now).limit(most);
         const rows = await tx
           .deleteFrom('identity.step_up_challenges')
