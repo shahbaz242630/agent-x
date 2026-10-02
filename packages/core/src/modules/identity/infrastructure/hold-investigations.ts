@@ -89,18 +89,30 @@ export function createHoldInvestigations({
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }): HoldInvestigations {
-  /** Runs the work in the organisation's transaction, each statement limited to 10 seconds; a refusal is answered. */
+  /** Runs the work in the organisation's transaction, each statement limited to 10 seconds. */
+  const inTransaction = <T>(
+    admin: HoldAdmin,
+    correlationId: string,
+    work: (tx: MembershipsTransaction, states: SignedStates) => Promise<T>,
+  ): Promise<T> =>
+    withSignedStates(
+      database,
+      admin.orgId,
+      { keys, ids, logger: logger.child({ correlationId }) },
+      async (tx, states) => {
+        await limitStatements(tx);
+        return work(tx, states);
+      },
+    );
+
+  /** As inTransaction, a refusal answered. */
   const inOrganisation = async <T>(
     admin: HoldAdmin,
     correlationId: string,
     work: (tx: MembershipsTransaction, states: SignedStates) => Promise<T>,
   ): Promise<T | Refused> => {
-    const services = { keys, ids, logger: logger.child({ correlationId }) };
     try {
-      return await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await limitStatements(tx);
-        return work(tx, states);
-      });
+      return await inTransaction(admin, correlationId, work);
     } catch (error) {
       if (error instanceof WriteRefused) return { outcome: 'refused', status: error.status, code: error.code };
       throw error;
@@ -136,10 +148,9 @@ export function createHoldInvestigations({
       );
       if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
       // Answered from the investigation's own event, re-read by the ID the answer names, on a replay too.
-      const read = await inOrganisation(admin, correlationId, (tx, states) =>
+      const read = await inTransaction(admin, correlationId, (tx, states) =>
         states.holdInvestigation(tx, admin.orgId, done.result.resourceId),
       );
-      if (read.outcome === 'refused') return read;
       if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
       if (read.outcome === 'missing') throw new Error('an investigation recorded, or recorded before, is not there');
       return { outcome: 'written', status: done.result.status, investigation: read.investigation };
