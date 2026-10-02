@@ -829,8 +829,9 @@ describe("every exit writes the log's held-back counts first", () => {
     AGENTX_RATE_LIMIT_PER_AGENT_PER_MINUTE: '10',
   };
 
-  // The cap and the rate limit count per minute of the clock: frozen, so 45
-  // requests can't straddle a minute and start the counts again (S43's flake).
+  // The log cap counts per minute of the clock: held near one instant (vi.waitFor
+  // moves it 50 ms a poll), so 45 requests can't straddle a minute and start its
+  // counts again (S43's flake).
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-03T10:00:05.000Z'));
