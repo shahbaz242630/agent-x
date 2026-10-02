@@ -31,6 +31,7 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
+import { NOTHING } from './route-schemas.ts';
 
 /** Approving a link at the bank. */
 const BANK_APPROVE_OPERATION = 'fake-bank.approve';
@@ -106,11 +107,7 @@ const APPROVE_SCHEMA = {
 const REJECT_SCHEMA = {
   summary: 'Turn a link down at the fake partner’s bank (staging only; a retry answers 409 once done)',
   params: SESSION,
-  body: z
-    .strictObject({})
-    // Fastify gives a request sent with no body a null one.
-    .nullish()
-    .describe('Nothing. An empty object, or no body at all.'),
+  body: NOTHING,
   response: { 200: DONE('rejected') },
 };
 

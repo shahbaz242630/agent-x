@@ -55,8 +55,8 @@ import {
   type FundingSourceTables,
   type FundingSourceTx,
   PARTNER_UNAVAILABLE,
-  type Refused,
 } from './funding-source-work.ts';
+import type { Refused } from './refused.ts';
 
 /** Asking the partner how a source stands now. */
 export const REFRESH_OPERATION = 'funding-sources.refresh';

@@ -43,12 +43,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { NOTHING, NOTHING_BODY_LIMIT } from './route-schemas.ts';
 
-/** The most a body that names nothing may be. */
-const NOTHING_BODY_LIMIT = 64;
 /** The most a contact's confirmation may be: its token, with room to spare. */
 const TOKEN_BODY_LIMIT = 512;
 
@@ -77,12 +77,6 @@ const RESET = z
 
 const ID = z.object({ id: z.uuid().describe('The reset, by its ID.') });
 const MEMBER_ID = z.object({ id: z.uuid().describe('The membership of the person whose second factor is lost.') });
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
-
 const CHANGED = z
   .object({ reset: RESET })
   .register(API_SCHEMAS, { id: 'FactorResetChanged', description: 'The reset, as it now stands.' });
@@ -172,13 +166,6 @@ const resetOf = (reset: Reset) => ({
   coolingOffUntil: reset.coolingOffUntil?.toISOString() ?? null,
 });
 
-/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
-function adminOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a factor reset route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
-
 /** Answers a write that wrote nothing: refused, or its key in use for another request or still being done. */
 const refusalOf = (
   written: Exclude<ResetChangeWrite, { outcome: 'written' }>,
@@ -212,14 +199,10 @@ export function registerFactorResets(
       return { coolingOffUntil: confirmed.coolingOffUntil.toISOString() };
     },
   );
-  const changesOf = (): ResetChanges => {
-    if (changes === undefined) throw new Error('the factor reset routes ran without their writes');
-    return changes;
-  };
 
   routes.get('/v1/factor-resets', { schema: LIST_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
-    const admin = adminOf(request);
-    const list = await changesOf().list(admin.orgId, request.id);
+    const admin = memberInSessionOf(request);
+    const list = await need(changes).list(admin.orgId, request.id);
     if (list.outcome === 'refused') return sendErrorBody(reply, list.status, list.code, request.id);
     return { resets: list.resets.map(resetOf) };
   });
@@ -232,8 +215,8 @@ export function registerFactorResets(
       config: { access: ['admin'], operation: RESET_ASK_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().ask(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).ask(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
@@ -256,8 +239,8 @@ export function registerFactorResets(
       config: { access: ['admin'], operation: RESET_ASK_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().confirm(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).confirm(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
@@ -276,8 +259,8 @@ export function registerFactorResets(
       config: { access: ['admin'], operation: RESET_CANCEL_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().cancel(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).cancel(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,

@@ -21,6 +21,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { sendErrorBody } from './errors.ts';
 import { IDEMPOTENCY_KEY_HEADER } from './write-operations.ts';
+import type { Refused } from './refused.ts';
 
 /** How long a client is told to wait before sending a busy request again: as long as the store waited, time for most writes holding the key to end. */
 export const BUSY_RETRY_SECONDS = 5;
@@ -121,5 +122,19 @@ export function answerRefusedWrite(
       request.id,
     );
   }
+  return undefined;
+}
+
+/**
+ * Answers a use case's refusal, or a write the store refused to do; for
+ * anything else, returns undefined and the route answers it.
+ */
+export function answerRefusal(
+  answer: Refused | IdempotentWrite | { readonly outcome: 'written' | 'asked' | 'shown' | 'cleared' },
+  request: FastifyRequest,
+  reply: FastifyReply,
+): FastifyReply | undefined {
+  if (answer.outcome === 'refused') return sendErrorBody(reply, answer.status, answer.code, request.id);
+  if (answer.outcome === 'conflict' || answer.outcome === 'busy') return answerRefusedWrite(answer, request, reply);
   return undefined;
 }

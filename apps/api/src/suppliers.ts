@@ -76,10 +76,19 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { agentOf } from './access.ts';
+import { agentOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import {
+  CHALLENGE_BODY_LIMIT,
+  NEXT,
+  NOTHING,
+  NOTHING_BODY_LIMIT,
+  pageQuery,
+  STEP_UP_SIGNED_IN,
+  STEP_UP_TO_SIGN_IN,
+} from './route-schemas.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -129,10 +138,6 @@ const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
  * schema allows.
  */
 const ADD_BODY_LIMIT = 12_288;
-/** The most a bodyless write may be sent with: an empty object, with room to spare. */
-const NOTHING_BODY_LIMIT = 64;
-/** The most a confirm's body may be: a challenge's ID, with room to spare. */
-const CHALLENGE_BODY_LIMIT = 128;
 /**
  * The most a verification's body may be: a call-back note of at most 500
  * code points once composed, sent decomposed as at most 4 each, astral at
@@ -141,12 +146,6 @@ const CHALLENGE_BODY_LIMIT = 128;
  * every body the schema allows).
  */
 const VERIFY_BODY_LIMIT = 24_576;
-
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
 
 const STATUS = z
   .enum(['UNVERIFIED', 'VERIFIED', 'SUSPENDED'])
@@ -251,9 +250,7 @@ const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
 const stepUpAsked = (id: string, description: string) =>
   z
     .object({
-      stepUpChallengeId: z
-        .uuid()
-        .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+      stepUpChallengeId: STEP_UP_TO_SIGN_IN,
     })
     .register(API_SCHEMAS, { id, description });
 
@@ -263,18 +260,7 @@ const ADD_SCHEMA = {
   response: { 201: SUPPLIER_DETAILS.describe('The supplier, added UNVERIFIED.') },
 };
 
-const PAGE = z.strictObject({
-  after: z.uuid().optional().describe('The ID the page starts after: the last page’s `next`.'),
-  limit: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(MOST_SUPPLIERS_A_PAGE)
-    .optional()
-    .describe(`How many at most, ${String(MOST_SUPPLIERS_A_PAGE)} unless fewer are asked for.`),
-});
-
-const NEXT = z.uuid().nullable().describe('The ID to ask the next page after; null at the end.');
+const PAGE = pageQuery(MOST_SUPPLIERS_A_PAGE);
 
 const LIST_SCHEMA = {
   summary: "Your organisation's suppliers",
@@ -314,7 +300,7 @@ const DETAILS_CONFIRM_SCHEMA = {
   body: z
     .strictObject({
       ...DETAIL_FIELDS,
-      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
     })
     .transform((body, context) => ({ stepUpChallengeId: body.stepUpChallengeId, details: detailsKept(body, context) }))
     .describe('The step-up signed in again for, with the same details as the ask.'),
@@ -344,9 +330,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the supplier, once signed in again for it',
   params: SUPPLIER_ID,
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
-    .describe('The step-up signed in again for.'),
+  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
   response: { 200: SUPPLIER_CHANGED },
 };
 
@@ -365,9 +349,7 @@ const PAYEE_APPROVE_SCHEMA = {
 const PAYEE_APPROVE_CONFIRM_SCHEMA = {
   summary: 'Confirm a supplier’s new bank details, once signed in again for it',
   params: SUPPLIER_ID,
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
-    .describe('The step-up signed in again for.'),
+  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
   response: {
     200: SUPPLIER_CHANGED.describe(
       'The supplier, paying the new details once verified: unverified, its cooling-off begun, and everyone told.',
@@ -409,7 +391,7 @@ const VERIFY_CONFIRM_SCHEMA = {
   params: SUPPLIER_ID,
   body: z
     .strictObject({
-      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
       ...CALL_BACK,
     })
     .describe('The step-up signed in again for, with the same call-back as the ask.'),
@@ -632,10 +614,6 @@ export function registerSuppliers(
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const need = <T>(useCase: T | undefined): T => {
-    if (useCase === undefined) throw new Error('a suppliers route ran without its use case');
-    return useCase;
-  };
   const refused = (
     answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
     request: FastifyRequest,

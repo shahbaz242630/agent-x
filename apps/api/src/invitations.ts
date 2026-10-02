@@ -47,13 +47,15 @@ import {
   type InvitationWrite,
   type InvitationWrites,
 } from '@agentx/core/modules/identity';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerRefusal, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { NOTHING } from './route-schemas.ts';
 
 /** The most an invitation's body may be: an address and a role, with room to spare. */
 const INVITATION_BODY_LIMIT = 1024;
@@ -171,11 +173,7 @@ const DECIDED = z
 const APPROVE_SCHEMA = {
   summary: "Ask to confirm who accepted an admin's or approver's invitation",
   params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
-  body: z
-    .strictObject({})
-    // Fastify gives a request sent with no body a null one.
-    .nullish()
-    .describe('Nothing. An empty object, or no body at all.'),
+  body: NOTHING,
   response: {
     202: z
       .object({
@@ -202,26 +200,12 @@ const APPROVE_CONFIRM_SCHEMA = {
 const DECLINE_SCHEMA = {
   summary: "Decline who accepted an admin's or approver's invitation",
   params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
-  body: z.strictObject({}).nullish().describe('Nothing. An empty object, or no body at all.'),
+  body: NOTHING,
   response: { 200: DECIDED },
 };
 
 /** Where an invitation is accepted: the token in the fragment, which browsers never send to a server or in a Referer. */
 const linkFor = (publicOrigin: string, token: string): string => `${publicOrigin}/invitations/accept#token=${token}`;
-
-/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
-function adminOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('an invitation route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
-
-/** Answers an invitation's or a confirmation's refusal; undefined for the route to answer. */
-const answerRefusal = (written: InvitationWrite | ConfirmationWrite, request: FastifyRequest, reply: FastifyReply) => {
-  if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
-  if (written.outcome === 'conflict' || written.outcome === 'busy') return answerRefusedWrite(written, request, reply);
-  return undefined;
-};
 
 const invitationOf = (written: Extract<InvitationWrite, { outcome: 'written' }>) => ({
   id: written.invitation.id,
@@ -259,7 +243,7 @@ export function registerInvitations(
     },
     async (request, reply) => {
       if (writes === undefined) throw new Error('the invitation routes ran without their writes');
-      const admin = adminOf(request);
+      const admin = memberInSessionOf(request);
       const written = await writes.ask(admin, idempotentRequest(request, admin.orgId), request.body, request.id);
       const refused = answerRefusal(written, request, reply);
       if (refused !== undefined || written.outcome !== 'written') return refused;
@@ -280,7 +264,7 @@ export function registerInvitations(
     },
     async (request, reply) => {
       if (writes === undefined) throw new Error('the invitation routes ran without their writes');
-      const admin = adminOf(request);
+      const admin = memberInSessionOf(request);
       const written = await writes.confirm(
         admin,
         idempotentRequest(request, admin.orgId),
@@ -325,10 +309,6 @@ export function registerInvitations(
       };
     },
   );
-  const confirmationsOf = (): AcceptanceConfirmations => {
-    if (confirmations === undefined) throw new Error('the confirmation routes ran without their writes');
-    return confirmations;
-  };
   const decided = (written: ConfirmationWrite) => {
     if (written.outcome !== 'written') throw new Error('a confirmation answered without its invitation');
     return {
@@ -349,8 +329,8 @@ export function registerInvitations(
       config: { access: ['admin'], operation: APPROVE_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await confirmationsOf().ask(
+      const admin = memberInSessionOf(request);
+      const written = await need(confirmations).ask(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
@@ -371,8 +351,8 @@ export function registerInvitations(
       config: { access: ['admin'], operation: APPROVE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await confirmationsOf().confirm(
+      const admin = memberInSessionOf(request);
+      const written = await need(confirmations).confirm(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
@@ -391,8 +371,8 @@ export function registerInvitations(
       config: { access: ['admin'], operation: DECLINE_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await confirmationsOf().decline(
+      const admin = memberInSessionOf(request);
+      const written = await need(confirmations).decline(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,

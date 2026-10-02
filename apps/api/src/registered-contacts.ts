@@ -37,13 +37,15 @@ import {
   TooManyContacts,
 } from '@agentx/core/modules/identity';
 import { systemClock } from '@agentx/core/shared-kernel';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { CHALLENGE_BODY_LIMIT, NOTHING, NOTHING_BODY_LIMIT, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
 
 /** The organisation's ACTIVE contacts, verified, for the request with this correlation ID. */
 export type ListContacts = (
@@ -55,10 +57,6 @@ export type ListContacts = (
 
 /** The most an add's body may be: an address, with room to spare. */
 const ADD_BODY_LIMIT = 512;
-/** The most a body that names nothing may be. */
-const NOTHING_BODY_LIMIT = 64;
-/** The most a removal's confirmation may be: a challenge's ID, with room to spare. */
-const REMOVE_CONFIRM_BODY_LIMIT = 128;
 
 const CONTACT = z
   .object({
@@ -78,11 +76,6 @@ const CONTACT = z
   .register(API_SCHEMAS, { id: 'RegisteredContact', description: "One of the organisation's registered contacts." });
 
 const ID = z.object({ id: z.uuid().describe('The registered contact, by its ID.') });
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
 
 const CHANGED = z
   .object({ contact: CONTACT })
@@ -135,9 +128,7 @@ const REMOVE_SCHEMA = {
   response: {
     202: z
       .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+        stepUpChallengeId: STEP_UP_TO_SIGN_IN,
       })
       .register(API_SCHEMAS, {
         id: 'RegisteredContactRemovalAsked',
@@ -164,20 +155,6 @@ const contactOf = (contact: ContactWithAddress, now: Date) => ({
   counts: countsNow(contact, now),
 });
 
-/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
-function adminOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('a registered contact route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
-
-/** Answers a write's refusal; undefined for the route to answer. */
-const refusalOf = (written: ContactChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
-  if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
-  if (written.outcome === 'conflict' || written.outcome === 'busy') return answerRefusedWrite(written, request, reply);
-  return undefined;
-};
-
 /** The written contact, which every answer but a refusal and a removal's ask holds. */
 const writtenOf = (written: ContactChangeWrite) => {
   if (written.outcome !== 'written') throw new Error("a contact's change answered without its contact");
@@ -194,16 +171,12 @@ export function registerRegisteredContacts(
   { listContacts, changes }: { listContacts: ListContacts | undefined; changes: ContactChanges | undefined },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const changesOf = (): ContactChanges => {
-    if (changes === undefined) throw new Error('the registered contact routes ran without their writes');
-    return changes;
-  };
 
   routes.get(
     '/v1/registered-contacts',
     { schema: LIST_SCHEMA, config: { access: ['admin'] } },
     async (request, reply) => {
-      const admin = adminOf(request);
+      const admin = memberInSessionOf(request);
       if (listContacts === undefined) throw new Error('the registered contacts route ran without its list');
       const list = await listContacts(admin.orgId, request.id).catch((error: unknown) => {
         if (error instanceof TooManyContacts) return { outcome: 'too_many' } as const;
@@ -220,14 +193,14 @@ export function registerRegisteredContacts(
     '/v1/registered-contacts',
     { schema: ADD_SCHEMA, bodyLimit: ADD_BODY_LIMIT, config: { access: ['admin'], operation: CONTACT_ADD_OPERATION } },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().add(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).add(
         admin,
         idempotentRequest(request, admin.orgId),
         request.body.email,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined) return refused;
       const { contact, stepUpChallengeId } = writtenOf(written);
       return reply.code(202).send({
@@ -245,15 +218,15 @@ export function registerRegisteredContacts(
       config: { access: ['admin'], operation: CONTACT_ADD_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().confirm(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).confirm(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
         request.id,
       );
       return (
-        refusalOf(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
+        answerRefusal(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
       );
     },
   );
@@ -266,14 +239,14 @@ export function registerRegisteredContacts(
       config: { access: ['admin'], operation: CONTACT_REMOVE_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().remove(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).remove(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined) return refused;
       if (written.outcome !== 'asked') throw new Error('a removal answered without its challenge');
       return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
@@ -284,12 +257,12 @@ export function registerRegisteredContacts(
     '/v1/registered-contacts/:id/remove/confirm',
     {
       schema: REMOVE_CONFIRM_SCHEMA,
-      bodyLimit: REMOVE_CONFIRM_BODY_LIMIT,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
       config: { access: ['admin'], operation: CONTACT_REMOVE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await changesOf().removeConfirm(
+      const admin = memberInSessionOf(request);
+      const written = await need(changes).removeConfirm(
         admin,
         idempotentRequest(request, admin.orgId),
         request.params.id,
@@ -297,7 +270,7 @@ export function registerRegisteredContacts(
         request.id,
       );
       return (
-        refusalOf(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
+        answerRefusal(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
       );
     },
   );

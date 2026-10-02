@@ -116,6 +116,19 @@ export function agentOf(request: Pick<FastifyRequest, 'agent'>): AcceptedKey {
   return request.agent;
 }
 
+/** A member's route's caller: their organisation, and who they are in which session. The hooks let no one else through. */
+export function memberInSessionOf(request: Pick<FastifyRequest, 'member' | 'person'>) {
+  const { member, person } = request;
+  if (member === null || person === null) throw new Error("a member's route ran without a member");
+  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
+}
+
+/** A route's use case: without it the route is still documented, and no one reaches it, as no one holds a role. */
+export function need<T>(useCase: T | undefined): T {
+  if (useCase === undefined) throw new Error('a route ran without its use case');
+  return useCase;
+}
+
 /** Checks the key text an agent sent (key-check.ts): the same `refused` for every reason. */
 export type CheckAgentKey = (text: string, correlationId: string) => Promise<KeyChecked>;
 
