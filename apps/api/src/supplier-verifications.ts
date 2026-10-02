@@ -167,9 +167,8 @@ export function createSupplierVerifications({
       now,
     );
     if (problem !== undefined) throw new SupplierRefused(409, problem);
-    // Who entered each version since, and who started the registration of the payee paid now (E3-2a's review).
+    // Who entered each version since: a payee's version names who started its registration (E3-2a's review).
     const enterers = new Set(versions.since.map(({ enteredBy }) => enteredBy));
-    if (registration !== null) enterers.add(registration.startedBy);
     const verdict = combined(
       [...enterers].map((enteredById) => verifierVerdict(facts, { enteredById, verifierId: verifier.id }, now)),
     );

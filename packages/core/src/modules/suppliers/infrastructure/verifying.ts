@@ -64,11 +64,12 @@ async function lastVerifiedNumber(
   if (history.outcome === 'tampered') return history;
   const verified = history.events.at(-1);
   if (verified === undefined) return 0;
-  // verifySupplier records the version it verified, its supplier's own (0032's key), on every verification.
+  // verifySupplier records the version it verified, its supplier's own (0032's key), on every verification;
+  // one naming none of its versions (only a forged record could) counts every version, the strictest reading.
   const id = String(verified.event.details.verifiedVersionId);
   const version = await versionOf(tx, states, { orgId, id }, supplierId);
   if (version.outcome === 'tampered') return version;
-  return version.outcome === 'found' ? version.version.version : { outcome: 'tampered', sign: 'deleted' };
+  return version.outcome === 'found' ? version.version.version : 0;
 }
 
 /**
@@ -108,14 +109,11 @@ export async function versionsToVerify(
     if (version.outcome === 'tampered') return version;
     if (version.outcome === 'found') read.push(version.version);
   }
-  // Each number once, with no gap: the first, then every one past the last verified up to the current.
-  const after = Array.from({ length: current.version - last }, (_, at) => last + 1 + at);
-  const wanted = last === 0 ? after : [1, ...after];
-  const numbers = read.map(({ version }) => version);
+  // The query takes only the numbers wanted, each once (0032's key), so one short of their count is a gap:
+  // the first, then every one past the last verified up to the current.
+  const wanted = (last === 0 ? 0 : 1) + current.version - last;
   const [first] = read;
-  if (first === undefined || numbers.length !== wanted.length || numbers.some((number, at) => number !== wanted[at])) {
-    return { outcome: 'incomplete' };
-  }
+  if (first === undefined || read.length !== wanted) return { outcome: 'incomplete' };
   const since = read.filter(({ version }) => version > last);
   // Nothing entered since it was last verified (a change waiting dropped): the current version's enterer still counts.
   return { outcome: 'read', first, since: since.length > 0 ? since : [current] };

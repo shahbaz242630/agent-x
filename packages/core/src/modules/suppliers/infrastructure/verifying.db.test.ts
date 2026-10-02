@@ -208,6 +208,18 @@ describe(`the versions verifying reads (E3-2a, Postgres ${server.version})`, () 
     });
   });
 
+  it('reads from the latest verification, not an earlier one', async () => {
+    await changed(2);
+    await verify();
+    await unverify();
+    await changed(3);
+    await verify();
+    await unverify();
+    const fourth = await changed(4);
+
+    expect(shape(await toVerify())).toEqual({ first: 1, since: [[4, fourth]] });
+  });
+
   it('reads the current version alone when nothing newer was entered since it was verified', async () => {
     const second = await changed(2);
     await verify();
