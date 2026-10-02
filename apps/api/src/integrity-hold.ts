@@ -27,25 +27,24 @@
 import {
   CLEAR_CONFIRM_OPERATION,
   CLEAR_OPERATION,
-  type ClearingWrite,
   type HoldClearings,
   type HoldInvestigations,
   type HoldShown,
   INVESTIGATE_OPERATION,
-  type InvestigationWrite,
 } from '@agentx/core/modules/identity';
 import {
   INVESTIGATION_CONCLUSIONS,
   INVESTIGATION_REFERENCE_MAX,
   isIncidentReference,
 } from '@agentx/core/modules/audit';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { STEP_UP_SIGNED_IN, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
 
 /** The most an investigation's body may be: a conclusion and a reference, with room to spare. */
 const INVESTIGATION_BODY_LIMIT = 256;
@@ -112,9 +111,7 @@ const INVESTIGATION_ID = z.uuid().describe('The investigation of the hold as it 
 
 const ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'HoldClearingAsked',
@@ -132,18 +129,11 @@ const CLEAR_CONFIRM_SCHEMA = {
   body: z
     .strictObject({
       investigationId: INVESTIGATION_ID,
-      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
     })
     .describe('The same investigation as asked with, and the step-up signed in again for.'),
   response: { 200: z.object({ hold: HOLD }).describe('The hold, as the clearing left it.') },
 };
-
-/** The route's own caller: an admin the access hook found, with their session. The hooks let no one else through. */
-function adminOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('an integrity hold route ran without an admin');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
 
 /** The hold as the API answers it. */
 const holdOf = (hold: Extract<HoldShown, { outcome: 'shown' }>['hold']) => ({
@@ -153,17 +143,6 @@ const holdOf = (hold: Extract<HoldShown, { outcome: 'shown' }>['hold']) => ({
   reason: hold.outcome === 'held' ? hold.reason : null,
   foundOn: hold.outcome === 'held' ? hold.foundOn : null,
 });
-
-/** Answers a refusal; undefined for the route to answer. */
-const refusalOf = (
-  answer: HoldShown | InvestigationWrite | ClearingWrite,
-  request: FastifyRequest,
-  reply: FastifyReply,
-) => {
-  if (answer.outcome === 'refused') return sendErrorBody(reply, answer.status, answer.code, request.id);
-  if (answer.outcome === 'conflict' || answer.outcome === 'busy') return answerRefusedWrite(answer, request, reply);
-  return undefined;
-};
 
 /**
  * The integrity hold's routes. `investigations` does them; without it the
@@ -178,19 +157,11 @@ export function registerIntegrityHold(
   }: { investigations: HoldInvestigations | undefined; clearings: HoldClearings | undefined },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const investigationsOf = (): HoldInvestigations => {
-    if (investigations === undefined) throw new Error('the integrity hold routes ran without their use case');
-    return investigations;
-  };
-  const clearingsOf = (): HoldClearings => {
-    if (clearings === undefined) throw new Error('the integrity hold clearing routes ran without their use case');
-    return clearings;
-  };
 
   routes.get('/v1/integrity-hold', { schema: SHOW_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
-    const { orgId, userId } = adminOf(request);
-    const shown = await investigationsOf().show({ orgId, userId }, request.id);
-    const refused = refusalOf(shown, request, reply);
+    const { orgId, userId } = memberInSessionOf(request);
+    const shown = await need(investigations).show({ orgId, userId }, request.id);
+    const refused = answerRefusal(shown, request, reply);
     if (refused !== undefined || shown.outcome !== 'shown') return refused;
     return { hold: holdOf(shown.hold) };
   });
@@ -203,14 +174,14 @@ export function registerIntegrityHold(
       config: { access: ['admin'], operation: INVESTIGATE_OPERATION },
     },
     async (request, reply) => {
-      const { orgId, userId } = adminOf(request);
-      const written = await investigationsOf().record(
+      const { orgId, userId } = memberInSessionOf(request);
+      const written = await need(investigations).record(
         { orgId, userId },
         idempotentRequest(request, orgId),
         request.body,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined || written.outcome !== 'written') return refused;
       const { investigation } = written;
       return reply.code(201).send({
@@ -234,14 +205,14 @@ export function registerIntegrityHold(
       config: { access: ['admin'], operation: CLEAR_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await clearingsOf().ask(
+      const admin = memberInSessionOf(request);
+      const written = await need(clearings).ask(
         admin,
         idempotentRequest(request, admin.orgId),
         request.body.investigationId,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined) return refused;
       if (written.outcome !== 'asked') throw new Error('an ask answered without its step-up');
       return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
@@ -256,15 +227,15 @@ export function registerIntegrityHold(
       config: { access: ['admin'], operation: CLEAR_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const admin = adminOf(request);
-      const written = await clearingsOf().confirm(
+      const admin = memberInSessionOf(request);
+      const written = await need(clearings).confirm(
         admin,
         idempotentRequest(request, admin.orgId),
         request.body.investigationId,
         request.body.stepUpChallengeId,
         request.id,
       );
-      const refused = refusalOf(written, request, reply);
+      const refused = answerRefusal(written, request, reply);
       if (refused !== undefined) return refused;
       if (written.outcome !== 'cleared') throw new Error('a clearing answered without the hold');
       return { hold: holdOf(written.hold) };

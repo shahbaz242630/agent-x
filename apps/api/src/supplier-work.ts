@@ -34,6 +34,7 @@ import {
 } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
+import type { Refused } from './refused.ts';
 
 /** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
 export type SupplierTables = IdentityTables & SuppliersTables & DirectoryTables & AuditTables & NotificationsTables;
@@ -48,13 +49,6 @@ export interface SupplierMember {
 /** A member acting in a session of theirs, which a step-up challenge is bound to. */
 export interface SessionMember extends SupplierMember {
   readonly sessionId: string;
-}
-
-/** A refusal, as a use case answers it. */
-export interface Refused {
-  readonly outcome: 'refused';
-  readonly status: number;
-  readonly code: ReasonCode;
 }
 
 const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });

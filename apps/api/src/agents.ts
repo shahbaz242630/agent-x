@@ -48,6 +48,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
+import { memberInSessionOf, need } from './access.ts';
 import {
   type AgentRegistrations,
   REGISTER_CONFIRM_OPERATION,
@@ -80,6 +81,15 @@ import {
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import {
+  CHALLENGE_BODY_LIMIT,
+  NEXT,
+  NOTHING,
+  NOTHING_BODY_LIMIT,
+  pageQuery,
+  STEP_UP_SIGNED_IN,
+  STEP_UP_TO_SIGN_IN,
+} from './route-schemas.ts';
 
 /**
  * The most a registration's body may be: a name of 100 characters, each
@@ -126,21 +136,12 @@ const ASKED = z
 
 const LIST_SCHEMA = {
   summary: "Your organisation's agents",
-  querystring: z.strictObject({
-    after: z.uuid().optional().describe('The ID the page starts after: the last page’s `next`.'),
-    limit: z.coerce
-      .number()
-      .int()
-      .min(1)
-      .max(MOST_AGENTS_A_PAGE)
-      .optional()
-      .describe(`How many at most, ${String(MOST_AGENTS_A_PAGE)} unless fewer are asked for.`),
-  }),
+  querystring: pageQuery(MOST_AGENTS_A_PAGE),
   response: {
     200: z
       .object({
         agents: z.array(AGENT).describe('The agents, in order of ID.'),
-        next: z.uuid().nullable().describe('The ID to ask the next page after; null at the end.'),
+        next: NEXT,
       })
       .describe('A page of agents, each as its signed state says.'),
   },
@@ -158,9 +159,7 @@ const REGISTER_SCHEMA = {
   response: {
     202: z
       .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+        stepUpChallengeId: STEP_UP_TO_SIGN_IN,
       })
       .register(API_SCHEMAS, {
         id: 'AgentRegistrationAsked',
@@ -175,7 +174,7 @@ const CONFIRM_SCHEMA = {
     .strictObject({
       name: NAME,
       scopes: ASKED,
-      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
     })
     .describe('The same name and scopes as asked, and the step-up signed in again for.'),
   response: {
@@ -190,28 +189,16 @@ const CONFIRM_SCHEMA = {
   },
 };
 
-/** The most a bodyless change may be sent with: an empty object, with room to spare. */
-const NOTHING_BODY_LIMIT = 64;
-/** The most a reactivation's confirm may be: a step-up's ID, with room to spare. */
-const CHALLENGE_BODY_LIMIT = 128;
 /** The most a handover's ask or confirm may be: a membership's ID and a step-up's, with room to spare. */
 const HAND_OVER_BODY_LIMIT = 256;
 
 const AGENT_ID = z.object({ id: z.uuid().describe('The agent, by its ID.') });
 
-const NOTHING = z
-  .strictObject({})
-  // Fastify gives a request sent with no body a null one.
-  .nullish()
-  .describe('Nothing. An empty object, or no body at all.');
-
 const AGENT_CHANGED = AGENT_WITH_KEYS.describe('The agent and its keys, as the change left them.');
 
 const STEP_UP_ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'AgentReactivationAsked',
@@ -235,9 +222,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the agent, once signed in again for it',
   params: AGENT_ID,
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
-    .describe('The step-up signed in again for.'),
+  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
   response: { 200: AGENT_CHANGED },
 };
 
@@ -247,9 +232,7 @@ const NEW_OWNER = z
 
 const HAND_OVER_ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'AgentHandOverAsked',
@@ -269,7 +252,7 @@ const HAND_OVER_CONFIRM_SCHEMA = {
   body: z
     .strictObject({
       owner: NEW_OWNER,
-      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      stepUpChallengeId: STEP_UP_SIGNED_IN,
     })
     .describe('The same member as asked, and the step-up signed in again for.'),
   response: {
@@ -291,9 +274,7 @@ const KEY_NAMED = z.object({
 
 const KEY_CHANGE_ASKED = z
   .object({
-    stepUpChallengeId: z
-      .uuid()
-      .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
   })
   .register(API_SCHEMAS, {
     id: 'AgentKeyChangeAsked',
@@ -301,7 +282,7 @@ const KEY_CHANGE_ASKED = z
   });
 
 const STEP_UP_CONFIRM = z
-  .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.') })
+  .strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN })
   .describe('The step-up signed in again for.');
 
 const ROTATE_SCHEMA = {
@@ -341,13 +322,6 @@ const REVOKE_CONFIRM_SCHEMA = {
   response: { 200: AGENT_CHANGED },
 };
 
-/** The route's own caller: a member the access hook found, with their session. The hooks let no one else through. */
-function memberOf(request: FastifyRequest) {
-  const { member, person } = request;
-  if (member === null || person === null) throw new Error('an agents route ran without a member');
-  return { orgId: member.orgId, userId: person.userId, sessionId: person.sessionId };
-}
-
 const agentOf = (agent: AgentShown) => ({
   id: agent.id,
   name: agent.name,
@@ -383,18 +357,6 @@ export function registerAgents(
   },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const registrationsOf = (): AgentRegistrations => {
-    if (registrations === undefined) throw new Error('the agents routes ran without their use case');
-    return registrations;
-  };
-  const changesOf = (): AgentChanges => {
-    if (changes === undefined) throw new Error('the agents change routes ran without their use case');
-    return changes;
-  };
-  const keyChangesOf = (): AgentKeyChanges => {
-    if (keyChanges === undefined) throw new Error("the agents' key routes ran without their use case");
-    return keyChanges;
-  };
   const refused = (
     answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
     request: FastifyRequest,
@@ -405,8 +367,8 @@ export function registerAgents(
     '/v1/agents',
     { schema: LIST_SCHEMA, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
     async (request, reply) => {
-      const { orgId } = memberOf(request);
-      const listed = await registrationsOf().list(
+      const { orgId } = memberInSessionOf(request);
+      const listed = await need(registrations).list(
         orgId,
         { after: request.query.after ?? null, limit: request.query.limit ?? MOST_AGENTS_A_PAGE },
         request.id,
@@ -420,8 +382,8 @@ export function registerAgents(
     '/v1/agents/:id',
     { schema: SHOW_SCHEMA, config: { access: ['admin', 'approver', 'developer', 'viewer'] } },
     async (request, reply) => {
-      const { orgId } = memberOf(request);
-      const found = await registrationsOf().show(orgId, request.params.id, request.id);
+      const { orgId } = memberInSessionOf(request);
+      const found = await need(registrations).show(orgId, request.params.id, request.id);
       if (found.outcome === 'refused') return refused(found, request, reply);
       return withKeysOf(found);
     },
@@ -435,8 +397,8 @@ export function registerAgents(
       config: { access: [...REGISTERING_ROLES], operation: REGISTER_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await registrationsOf().ask(
+      const member = memberInSessionOf(request);
+      const written = await need(registrations).ask(
         member,
         idempotentRequest(request, member.orgId),
         request.body,
@@ -459,9 +421,9 @@ export function registerAgents(
       config: { access: [...REGISTERING_ROLES], operation: REGISTER_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
+      const member = memberInSessionOf(request);
       const { stepUpChallengeId, ...asked } = request.body;
-      const written = await registrationsOf().confirm(
+      const written = await need(registrations).confirm(
         member,
         idempotentRequest(request, member.orgId),
         asked,
@@ -496,8 +458,8 @@ export function registerAgents(
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await changesOf().suspend(
+      const member = memberInSessionOf(request);
+      const written = await need(changes).suspend(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
@@ -515,8 +477,8 @@ export function registerAgents(
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await changesOf().reactivate(
+      const member = memberInSessionOf(request);
+      const written = await need(changes).reactivate(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
@@ -534,8 +496,8 @@ export function registerAgents(
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await changesOf().reactivateConfirm(
+      const member = memberInSessionOf(request);
+      const written = await need(changes).reactivateConfirm(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
@@ -554,8 +516,8 @@ export function registerAgents(
       config: { access: [...HANDING_OVER_ROLES], operation: HAND_OVER_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await changesOf().handOver(
+      const member = memberInSessionOf(request);
+      const written = await need(changes).handOver(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
@@ -574,8 +536,8 @@ export function registerAgents(
       config: { access: [...HANDING_OVER_ROLES], operation: HAND_OVER_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await changesOf().handOverConfirm(
+      const member = memberInSessionOf(request);
+      const written = await need(changes).handOverConfirm(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
@@ -608,8 +570,8 @@ export function registerAgents(
       config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await keyChangesOf().rotate(
+      const member = memberInSessionOf(request);
+      const written = await need(keyChanges).rotate(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
@@ -627,8 +589,8 @@ export function registerAgents(
       config: { access: [...KEY_CHANGING_ROLES], operation: ROTATE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await keyChangesOf().rotateConfirm(
+      const member = memberInSessionOf(request);
+      const written = await need(keyChanges).rotateConfirm(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
@@ -647,8 +609,8 @@ export function registerAgents(
       config: { access: [...KEY_CHANGING_ROLES], operation: REVOKE_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await keyChangesOf().revoke(
+      const member = memberInSessionOf(request);
+      const written = await need(keyChanges).revoke(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
@@ -666,8 +628,8 @@ export function registerAgents(
       config: { access: [...KEY_CHANGING_ROLES], operation: REVOKE_CONFIRM_OPERATION },
     },
     async (request, reply) => {
-      const member = memberOf(request);
-      const written = await keyChangesOf().revokeConfirm(
+      const member = memberInSessionOf(request);
+      const written = await need(keyChanges).revokeConfirm(
         member,
         idempotentRequest(request, member.orgId),
         named(request.params),
