@@ -72,6 +72,7 @@ import {
   checkedEvent,
   eventContent,
   subjectKeyProblems,
+  subjectTypeProblems,
 } from '../domain/event.ts';
 import { HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
@@ -101,6 +102,12 @@ export interface RecordedAuditEvent {
  *   Someone past the app changed or forged it. `seq` is where, when it could
  *   be read.
  */
+/** A read that can't be believed: `seq` is where, when it could be read. */
+interface BrokenRead {
+  readonly kind: 'broken';
+  readonly seq?: bigint;
+}
+
 export type LatestSignedState =
   | { readonly kind: 'none' }
   | {
@@ -111,7 +118,7 @@ export type LatestSignedState =
       readonly version: number;
       readonly seal: StateSeal;
     }
-  | { readonly kind: 'broken'; readonly seq?: bigint };
+  | BrokenRead;
 
 /** An event to find: by its own ID, or as the one event about an object recorded once. */
 type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
@@ -132,19 +139,14 @@ export interface ReadEvent {
  *   MAC, it lies past the head, or the chain holds any event past its head or
  *   has no head for the events there are (as latestSignedState reads a chain)
  */
-export type RecordedEventCheck =
-  | { readonly kind: 'none' }
-  | ({ readonly kind: 'recorded' } & ReadEvent)
-  | { readonly kind: 'broken'; readonly seq?: bigint };
+export type RecordedEventCheck = { readonly kind: 'none' } | ({ readonly kind: 'recorded' } & ReadEvent) | BrokenRead;
 
 /**
  * Every event about objects of some types (recordedEvents), in chain order:
  * `recorded`, each whole as recordedEvent believes one; or `broken`, at the
  * first that isn't, or where the chain holds an event past its head.
  */
-type RecordedEventsCheck =
-  | { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] }
-  | { readonly kind: 'broken'; readonly seq?: bigint };
+type RecordedEventsCheck = { readonly kind: 'recorded'; readonly events: readonly ReadEvent[] } | BrokenRead;
 
 /**
  * Thrown by recordedEvents for more events than its caller's limit: a
@@ -326,7 +328,11 @@ async function eventsWithHead(
   return rows;
 }
 
-/** The event a row holds, if it is whole: readable, sealed by its own hash and MAC, and no later than `head`, itself whole. */
+/**
+ * The event a row holds, if it is whole: readable and sealed by its own hash
+ * and MAC, with `head` whole. Its callers have refused a chain holding any
+ * event past the head, in the same statement, so none here lies past it.
+ */
 function wholeEvent(
   keys: KeyProvider,
   chain: Chain,
@@ -341,7 +347,6 @@ function wholeEvent(
     content === undefined ||
     details === undefined ||
     head === undefined ||
-    sealed.seq > head.seq ||
     !entryIsSealed(keys, chain, { ...sealed, content })
   ) {
     return undefined;
@@ -361,9 +366,10 @@ function wholeEvent(
   });
 }
 
-/** A read that can't be believed, at the row's place when it could be read. */
-const brokenAt = (row: Readonly<Record<string, unknown>>): { readonly kind: 'broken'; readonly seq?: bigint } =>
-  typeof row.seq === 'bigint' ? { kind: 'broken', seq: row.seq } : { kind: 'broken' };
+/** A read that can't be believed, at `seq` when it could be read. */
+function brokenAt(seq: unknown): BrokenRead {
+  return typeof seq === 'bigint' ? { kind: 'broken', seq } : { kind: 'broken' };
+}
 
 /** Recording's steps over the audit tables, for one organisation and one event. */
 function writerFor(tx: AuditTransaction, orgId: string, event: AuditEvent, details: string): ChainWriter {
@@ -573,36 +579,24 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const id = subject.id.toLowerCase();
-      // One statement, so the head and the events come from the same moment.
-      const { rows } = await sql<Record<string, unknown>>`
-        select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
-               h.mac_key_version as head_mac_key_version, past.past_head,
-               e.seq, e.id, e.recorded_at, e.actor_type, e.actor_id, e.action, e.subject_type, e.subject_id,
-               e.subject_version, e.details, e.prev_hash, e.hash, e.mac, e.mac_key_version,
-               e.recorded_at = pg_catalog.date_trunc('milliseconds', e.recorded_at) as whole_ms
-        from (values (1)) as one (x)
-        left join audit.heads h on h.org_id = ${chain.orgId}
-        cross join lateral (
-          select pg_catalog.min(p.seq) as past_head from audit.events p
-          where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
-        ) as past
-        left join audit.events e on e.org_id = ${chain.orgId} and e.subject_type = ${subject.type}
-          and e.subject_id = ${id}
+      // The object's newest signed event and every one after it.
+      const rows = await eventsWithHead(
+        tx,
+        chain,
+        sql`e.subject_type = ${subject.type} and e.subject_id = ${id}
           and e.seq >= (
             select pg_catalog.max(s.seq) from audit.events s
             where s.org_id = ${chain.orgId} and s.subject_type = ${subject.type} and s.subject_id = ${id}
               and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
-          )
-        order by e.seq
-        limit ${LATER_EVENTS_READ + 1}
-      `.execute(tx);
+          )`,
+        LATER_EVENTS_READ + 1,
+      );
       const [first] = rows;
       // The first event of the chain past its head (or of a chain with no head), if there is one: such a chain
       // refuses every new event, the integrity hold's among them, so nothing about it is believed.
       const past = first?.past_head;
       const pastHead = past !== null;
-      const brokenPast: LatestSignedState =
-        typeof past === 'bigint' ? { kind: 'broken', seq: past } : { kind: 'broken' };
+      const brokenPast = brokenAt(past);
       if (rows.length > LATER_EVENTS_READ) {
         if (pastHead) return brokenPast;
         throw new TooManyEventsAboutObject();
@@ -632,8 +626,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         seal === undefined ||
         seal === 'malformed'
       ) {
-        const seq = (bad ?? read[0])?.row.seq;
-        return typeof seq === 'bigint' ? { kind: 'broken', seq } : { kind: 'broken' };
+        return brokenAt((bad ?? read[0])?.row.seq);
       }
       if (pastHead) return brokenPast;
       return Object.freeze({
@@ -647,8 +640,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     },
 
     async subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]> {
-      // Any UUID stands in for the ID: only the type is checked here.
-      const problems = subjectKeyProblems({ type, id: orgId });
+      const problems = subjectTypeProblems(type);
       if (problems.length > 0) throw new AuditEventRefused(problems);
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       await assertTenant(tx, orgId);
@@ -677,11 +669,11 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       const chain = chainOf(orgId);
       const [row] = await eventsWithHead(tx, chain, which, 1);
       const past = row?.past_head;
-      if (typeof past === 'bigint') return { kind: 'broken', seq: past };
+      if (typeof past === 'bigint') return brokenAt(past);
       if (row === undefined || row.seq === null) return { kind: 'none' };
       const head = row.has_head === true ? headIsWhole(keys, chain, row) : undefined;
       const read = wholeEvent(keys, chain, row, head);
-      if (read === undefined) return brokenAt(row);
+      if (read === undefined) return brokenAt(row.seq);
       return Object.freeze({ kind: 'recorded', ...read });
     },
 
@@ -690,8 +682,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       orgId: string,
       { subjectTypes, limit }: { readonly subjectTypes: readonly string[]; readonly limit: number },
     ): Promise<RecordedEventsCheck> {
-      // Any UUID stands in for the ID: only the types are checked here.
-      const problems = subjectTypes.flatMap((type) => subjectKeyProblems({ type, id: orgId }));
+      const problems = subjectTypes.flatMap(subjectTypeProblems);
       if (problems.length > 0) throw new AuditEventRefused(problems);
       if (subjectTypes.length === 0) throw new RangeError('At least one subject type is read');
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
@@ -700,14 +691,14 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       const rows = await eventsWithHead(tx, chain, sql`e.subject_type = any(${[...subjectTypes]}::text[])`, limit + 1);
       const [first] = rows;
       const past = first?.past_head;
-      if (typeof past === 'bigint') return { kind: 'broken', seq: past };
+      if (typeof past === 'bigint') return brokenAt(past);
       if (rows.length > limit) throw new TooManyEventsToRead(limit);
       const head = first?.has_head === true ? headIsWhole(keys, chain, first) : undefined;
       const events: ReadEvent[] = [];
       for (const row of rows) {
         if (row.seq === null) continue;
         const read = wholeEvent(keys, chain, row, head);
-        if (read === undefined) return brokenAt(row);
+        if (read === undefined) return brokenAt(row.seq);
         events.push(read);
       }
       return Object.freeze({ kind: 'recorded', events: Object.freeze(events) });

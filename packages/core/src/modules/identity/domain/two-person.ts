@@ -11,8 +11,16 @@
 // user) takes the single-user path: the cooling-off and the notices alone, so
 // any admin or approver may verify, the enterer too (ADR-012 §1). Removing
 // people doesn't open that path: for 14 days after an admin or an approver is
-// deactivated or given a lesser role, it is shut, so demoting the one other
-// verifier can't leave an insider alone.
+// deactivated or has their role changed, it is shut. Any change counts, not
+// only a demotion: an admin moved to approver by the enterer is then one whose
+// role the enterer granted, so a sideways move would otherwise leave an
+// insider alone as surely as a demotion (E3-1's review).
+//
+// Grants count directly, as ADR-012 §1 says: a member invited by someone the
+// enterer invited is eligible. Following the chain would leave every
+// organisation whose founder invited everyone with no second verifier;
+// collusion through a planted account is the residual R-10 names, with the
+// 14 days and the notices to everyone between it and a payment.
 //
 // Pure: the history it rests on is read from the organisation's log
 // (infrastructure/two-person-facts.ts). A member in the 7 days without powers
@@ -23,7 +31,7 @@ import type { Role } from './membership.ts';
 
 /** How long a verifier must have been a member (ADR-012 §1). */
 export const ESTABLISHED_DAYS = 14;
-/** How long the single-user path stays shut after an admin or approver is removed or demoted (ADR-012 §1). */
+/** How long the single-user path stays shut after an admin or approver is removed or has their role changed (ADR-012 §1). */
 export const SOLO_PATH_LOCK_DAYS = 14;
 
 const DAY_MS = 86_400_000;
@@ -51,13 +59,13 @@ export interface RuleEvent {
   };
 }
 
-/** What the rule decides on: every member, who granted each one's role, and the latest loss of a verifier. */
+/** What the rule decides on: every member, who granted each one's role, and the latest change to a verifier. */
 export interface TwoPersonFacts {
   readonly members: readonly RuleMember[];
   /** By membership ID: the people (user IDs, lower case) who granted or confirmed its role, ever. */
   readonly grantedBy: ReadonlyMap<string, ReadonlySet<string>>;
-  /** When an admin or approver was last deactivated or given a lesser role; undefined for never. */
-  readonly lastVerifierLoss: Date | undefined;
+  /** When an admin or approver was last deactivated or had their role changed; undefined for never. */
+  readonly lastVerifierChange: Date | undefined;
 }
 
 /** The subject types the history is read from. */
@@ -85,18 +93,18 @@ const addTo = (map: Map<string, Set<string>>, key: string, value: string): void 
   map.set(key, set);
 };
 
-/** Whether the event takes a verifier away: an admin or approver deactivated, or given a role that can't verify. */
-const losesVerifier = ({ action, details }: RuleEvent['event']): boolean =>
+/** Whether the event changes a verifier: an admin or approver deactivated, or their role changed to any other. */
+const changesVerifier = ({ action, details }: RuleEvent['event']): boolean =>
   (action === 'membership.deactivated' && mayVerify(String(details.role))) ||
-  (action === 'membership.role_changed' && mayVerify(String(details.roleFrom)) && !mayVerify(String(details.roleTo)));
+  (action === 'membership.role_changed' && mayVerify(String(details.roleFrom)));
 
-/** The log's events, gathered: who granted each membership and invitation, who accepted which, the latest loss. */
+/** The log's events, gathered: who granted each membership and invitation, who accepted which, the latest change to a verifier. */
 interface History {
   readonly byMembership: Map<string, Set<string>>;
   readonly byInvitation: Map<string, Set<string>>;
   /** By person: the invitations they accepted. */
   readonly acceptedBy: Map<string, Set<string>>;
-  lastVerifierLoss: Date | undefined;
+  lastVerifierChange: Date | undefined;
 }
 
 /** Adds one event to the history. */
@@ -106,8 +114,9 @@ function gather(history: History, { recordedAt, event }: RuleEvent): void {
   const byPerson = event.actor.type === 'user';
   if (event.subject.type === 'membership') {
     if (byPerson && MEMBERSHIP_GRANTS.has(event.action)) addTo(history.byMembership, subject, actor);
-    const latest = history.lastVerifierLoss;
-    if (losesVerifier(event) && (latest === undefined || recordedAt > latest)) history.lastVerifierLoss = recordedAt;
+    const latest = history.lastVerifierChange;
+    if (changesVerifier(event) && (latest === undefined || recordedAt > latest))
+      history.lastVerifierChange = recordedAt;
   } else if (event.subject.type === 'invitation') {
     if (event.action === 'invitation.acceptance_recorded') addTo(history.acceptedBy, actor, subject);
     else if (byPerson && INVITATION_GRANTS.has(event.action)) addTo(history.byInvitation, subject, actor);
@@ -124,10 +133,10 @@ export function twoPersonFacts(members: readonly RuleMember[], events: readonly 
     byMembership: new Map(),
     byInvitation: new Map(),
     acceptedBy: new Map(),
-    lastVerifierLoss: undefined,
+    lastVerifierChange: undefined,
   };
   for (const event of events) gather(history, event);
-  const { byMembership, byInvitation, acceptedBy, lastVerifierLoss } = history;
+  const { byMembership, byInvitation, acceptedBy, lastVerifierChange } = history;
   const grantedBy = new Map<string, ReadonlySet<string>>();
   for (const member of members) {
     const person = member.userId.toLowerCase();
@@ -138,7 +147,7 @@ export function twoPersonFacts(members: readonly RuleMember[], events: readonly 
     granted.delete(person);
     grantedBy.set(member.id.toLowerCase(), granted);
   }
-  return { members, grantedBy, lastVerifierLoss };
+  return { members, grantedBy, lastVerifierChange };
 }
 
 /** Why a member may not verify details another entered. */
@@ -191,18 +200,18 @@ export function verifierVerdict(
     return found;
   };
   const enterer = find(enteredById);
-  const verifier = find(verifierId);
-  if (verifier.status !== 'ACTIVE' || !mayVerify(verifier.role)) {
-    return { outcome: 'refused', reason: 'NOT_A_VERIFIER' };
-  }
-  const why = ineligibility(facts, verifier, enterer, now);
+  const why = ineligibility(facts, find(verifierId), enterer, now);
   if (why === undefined) return { outcome: 'two_person' };
-  if (facts.members.some((member) => ineligibility(facts, member, enterer, now) === undefined)) {
+  // Only an admin or approver takes the single-user path, and only when no one else is eligible.
+  if (
+    why.reason === 'NOT_A_VERIFIER' ||
+    facts.members.some((member) => ineligibility(facts, member, enterer, now) === undefined)
+  ) {
     return { outcome: 'refused', ...why };
   }
-  // No one eligible: the single-user path, unless a verifier was taken away lately.
-  if (facts.lastVerifierLoss !== undefined) {
-    const reopens = new Date(facts.lastVerifierLoss.getTime() + SOLO_PATH_LOCK_DAYS * DAY_MS);
+  // No one eligible: the single-user path, unless a verifier was changed lately.
+  if (facts.lastVerifierChange !== undefined) {
+    const reopens = new Date(facts.lastVerifierChange.getTime() + SOLO_PATH_LOCK_DAYS * DAY_MS);
     if (now.getTime() < reopens.getTime()) return { outcome: 'refused', reason: 'SOLO_PATH_LOCKED', until: reopens };
   }
   return { outcome: 'single_user' };

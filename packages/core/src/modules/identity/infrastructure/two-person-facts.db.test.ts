@@ -138,7 +138,7 @@ beforeEach(async () => {
 });
 
 describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.version})`, () => {
-  it('finds who granted each member’s role, by adding, inviting or changing it, and the latest loss of a verifier', async () => {
+  it('finds who granted each member’s role, by adding, inviting or changing it, and the latest change to a verifier', async () => {
     const alice = await add('admin');
     const bob = await add('viewer', userActor(alice.userId));
     const dave = await add('admin');
@@ -157,7 +157,7 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
     expect(granters(bob.id)).toEqual([alice.userId]);
     expect(granters(carol.id)).toEqual([dave.userId]);
     expect(granters(dave.id)).toEqual([alice.userId]);
-    expect(read.lastVerifierLoss).toBeInstanceOf(Date);
+    expect(read.lastVerifierChange).toBeInstanceOf(Date);
     expect(alarms()).toEqual([]);
 
     // Fourteen days on: Bob, whose role Alice granted, can't verify what she entered; Carol can.
@@ -176,7 +176,7 @@ describe(`the two-person rule's facts, from the log (E3-1, Postgres ${server.ver
 
     const read = await facts();
 
-    expect(read).toMatchObject({ outcome: 'read', lastVerifierLoss: undefined });
+    expect(read).toMatchObject({ outcome: 'read', lastVerifierChange: undefined });
     if (read.outcome !== 'read') return;
     expect(verifierVerdict(read, { enteredById: alice.id, verifierId: alice.id }, clock.now())).toEqual({
       outcome: 'single_user',

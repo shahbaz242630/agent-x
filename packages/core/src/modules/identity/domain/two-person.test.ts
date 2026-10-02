@@ -162,15 +162,13 @@ describe('the single-user path (ADR-012 §1)', () => {
     expect(verdict(facts([alice, bob], [invited, accepted]), 'a', 'a')).toEqual({ outcome: 'single_user' });
   });
 
+  /** A role change Alice made `days` ago. */
+  const roleChange = (id: string, roleFrom: Role, roleTo: Role, days = 1): RuleEvent =>
+    event('membership.role_changed', { type: 'membership', id }, alice.userId, { roleFrom, roleTo }, daysAgo(days));
+
   it('is shut for 14 days after the one other verifier is demoted: demote-then-self-verify', () => {
     const bob = member('b', 'viewer');
-    const demoted = event(
-      'membership.role_changed',
-      { type: 'membership', id: bob.id },
-      alice.userId,
-      { roleFrom: 'admin', roleTo: 'viewer' },
-      daysAgo(5),
-    );
+    const demoted = roleChange(bob.id, 'admin', 'viewer', 5);
     expect(verdict(facts([alice, bob], [demoted]), 'a', 'a')).toEqual({
       outcome: 'refused',
       reason: 'SOLO_PATH_LOCKED',
@@ -184,17 +182,24 @@ describe('the single-user path (ADR-012 §1)', () => {
     });
   });
 
-  it('is shut for 14 days after an admin or approver is deactivated, from the latest such loss', () => {
+  it('is shut for 14 days after the enterer moves the one other verifier sideways, which taints them (the review’s high)', () => {
+    const bob = member('b', 'approver');
+    const moved = roleChange(bob.id, 'admin', 'approver');
+    // Bob is tainted, so no one is eligible; and the move shuts the solo path to both of them.
+    for (const verifier of ['a', 'b']) {
+      expect(verdict(facts([alice, bob], [moved]), 'a', verifier)).toEqual({
+        outcome: 'refused',
+        reason: 'SOLO_PATH_LOCKED',
+        until: new Date(daysAgo(1).getTime() + 14 * DAY),
+      });
+    }
+  });
+
+  it('is shut for 14 days after an admin or approver is deactivated, from the latest such change', () => {
     const gone = member('b', 'approver', 30, 'DEACTIVATED');
     const losses = [
       event('membership.deactivated', { type: 'membership', id: gone.id }, alice.userId, { role: 'admin' }, daysAgo(2)),
-      event(
-        'membership.deactivated',
-        { type: 'membership', id: 'm-old' },
-        alice.userId,
-        { role: 'approver' },
-        daysAgo(20),
-      ),
+      roleChange('m-old', 'approver', 'viewer', 20),
     ];
     expect(verdict(facts([alice, gone], losses), 'a', 'a')).toMatchObject({
       reason: 'SOLO_PATH_LOCKED',
@@ -205,40 +210,22 @@ describe('the single-user path (ADR-012 §1)', () => {
     });
   });
 
-  it('isn’t shut by a loss that takes no verifier away', () => {
-    const notLosses = [
+  it('isn’t shut by a change to someone who couldn’t verify', () => {
+    const notChanges = [
       event('membership.deactivated', { type: 'membership', id: 'm-v' }, alice.userId, { role: 'viewer' }, daysAgo(1)),
-      event(
-        'membership.role_changed',
-        { type: 'membership', id: 'm-d' },
-        alice.userId,
-        {
-          roleFrom: 'admin',
-          roleTo: 'approver',
-        },
-        daysAgo(1),
-      ),
-      event(
-        'membership.role_changed',
-        { type: 'membership', id: 'm-e' },
-        alice.userId,
-        {
-          roleFrom: 'developer',
-          roleTo: 'viewer',
-        },
-        daysAgo(1),
-      ),
+      roleChange('m-d', 'developer', 'admin'),
+      roleChange('m-e', 'developer', 'viewer'),
       event('invitation.declined', { type: 'invitation', id: 'i-9' }, alice.userId, { role: 'admin' }, daysAgo(1)),
     ];
-    expect(facts([alice], notLosses).lastVerifierLoss).toBeUndefined();
-    expect(verdict(facts([alice], notLosses), 'a', 'a')).toEqual({ outcome: 'single_user' });
+    expect(facts([alice], notChanges).lastVerifierChange).toBeUndefined();
+    expect(verdict(facts([alice], notChanges), 'a', 'a')).toEqual({ outcome: 'single_user' });
   });
 
   it('doesn’t matter while someone is eligible: the two-person path stays open', () => {
     const lost = event(
       'membership.deactivated',
       { type: 'membership', id: 'm-x' },
-      'u-a',
+      alice.userId,
       { role: 'admin' },
       daysAgo(1),
     );
