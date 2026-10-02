@@ -25,7 +25,7 @@ import {
   verifySupplier,
   versionOf,
 } from '@agentx/core/modules/suppliers';
-import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -243,8 +243,20 @@ beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   const services = { database: app, keys, ids, logger: loggerFor(new LogCapture()) };
   registry = createSupplierRegistry({ ...services, clock });
-  changes = createSupplierChanges({ ...services, challenges: challenges() });
+  changes = createSupplierChanges({ ...services, challenges: challenges(), outbox: createOutbox({ ids, clock }) });
 });
+
+/** The organisation's notices about its suppliers, by kind, then contacts last. */
+const noticesOf = (org: string) =>
+  withTenant(app, org, (tx) =>
+    tx
+      .selectFrom('notifications.outbox')
+      .select(['kind', 'to_contacts', 'about_id'])
+      .where('org_id', '=', org)
+      .orderBy('kind')
+      .orderBy('to_contacts')
+      .execute(),
+  );
 
 describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${server.version})`, () => {
   it.each(['admin', 'approver'] as const)('is one write by an %s: SUSPENDED, shown to no agent', async (role) => {
@@ -265,6 +277,10 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
       actor_type: 'user',
       actor_id: who.userId,
     });
+    expect(await noticesOf(org)).toEqual([
+      { kind: 'supplier_suspended', to_contacts: false, about_id: id },
+      { kind: 'supplier_suspended', to_contacts: true, about_id: id },
+    ]);
   });
 
   it('pressed twice is answered as it is, recording nothing more', async () => {
@@ -275,6 +291,7 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
 
     expect(changedOf(await suspend(admin, id)).supplier.status).toBe('SUSPENDED');
     expect(await actions(org, id)).toEqual(['supplier.added', 'supplier.suspend']);
+    expect(await noticesOf(org)).toHaveLength(2);
   });
 
   it('refuses a developer or a viewer: FORBIDDEN, the supplier left as it was', async () => {
@@ -329,6 +346,13 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
       stepUpChallengeId: challengeId,
       methods: PASSKEY.join(' '),
     });
+    // Everyone told of the brake, then of its lifting (partner, S69; E3-2b).
+    expect((await noticesOf(org)).map(({ kind }) => kind)).toEqual([
+      'supplier_reactivated',
+      'supplier_reactivated',
+      'supplier_suspended',
+      'supplier_suspended',
+    ]);
   });
 
   it('comes back UNVERIFIED when it was never verified', async () => {

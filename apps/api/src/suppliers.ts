@@ -105,6 +105,7 @@ import {
   type SupplierPayeeChanges,
   WITHDRAWING_ROLES,
 } from './supplier-payee-changes.ts';
+import { DETAILS_CONFIRM_OPERATION, DETAILS_OPERATION, type SupplierDetailsChanges } from './supplier-details.ts';
 import {
   type SupplierVerifications,
   VERIFY_CONFIRM_OPERATION,
@@ -212,39 +213,53 @@ const SUPPLIER_DETAILS = SUPPLIER.extend({
   description: 'A supplier with its current details: never a payment detail.',
 });
 
+/** A supplier's details as a body sends them: what adding one (E1-2) and changing its details (E3-2b) take. */
+const DETAIL_FIELDS = {
+  displayName: z.string().describe('Its name: 1 to 100 visible characters, with a letter or digit.'),
+  phone: z.string().describe('Its phone, in international form, such as +971501234567.'),
+  email: z.string().nullish().describe('Its email, if known.'),
+  tradeLicence: z.string().nullish().describe('Its trade licence number, if known: letters, digits, - and /.'),
+  source: z
+    .strictObject({
+      kind: z.enum(SOURCE_KINDS).describe('Where you checked its details: a registry or its official website.'),
+      ref: z.string().describe('The registry number, or the website’s address: printable ASCII, at most 200.'),
+    })
+    .describe('The independent source you checked its details against.'),
+};
+
+type DetailFields = z.infer<z.ZodObject<typeof DETAIL_FIELDS>>;
+
 /** The details as a version keeps them, or the problems that keep them from being one. */
-const ADDED = z
-  .strictObject({
-    displayName: z.string().describe('Its name: 1 to 100 visible characters, with a letter or digit.'),
-    phone: z.string().describe('Its phone, in international form, such as +971501234567.'),
-    email: z.string().nullish().describe('Its email, if known.'),
-    tradeLicence: z.string().nullish().describe('Its trade licence number, if known: letters, digits, - and /.'),
-    source: z
-      .strictObject({
-        kind: z.enum(SOURCE_KINDS).describe('Where you checked its details: a registry or its official website.'),
-        ref: z.string().describe('The registry number, or the website’s address: printable ASCII, at most 200.'),
-      })
-      .describe('The independent source you checked its details against.'),
-  })
-  .transform((body, context): SupplierDetails => {
-    const details = {
-      displayName: body.displayName,
-      contacts: { phone: body.phone, email: body.email ?? null, tradeLicence: body.tradeLicence ?? null },
-      source: body.source,
-    };
-    try {
-      return supplierDetails(details);
-    } catch (error) {
-      if (!(error instanceof SupplierDetailsRefused)) throw error;
-      for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
-      return z.NEVER;
-    }
-  })
-  .describe('The supplier to add, UNVERIFIED.');
+const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDetails => {
+  const details = {
+    displayName: body.displayName,
+    contacts: { phone: body.phone, email: body.email ?? null, tradeLicence: body.tradeLicence ?? null },
+    source: body.source,
+  };
+  try {
+    return supplierDetails(details);
+  } catch (error) {
+    if (!(error instanceof SupplierDetailsRefused)) throw error;
+    for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
+    return z.NEVER;
+  }
+};
+
+const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
+
+/** A step-up asked: the 202's body, under its own name in the document. */
+const stepUpAsked = (id: string, description: string) =>
+  z
+    .object({
+      stepUpChallengeId: z
+        .uuid()
+        .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+    })
+    .register(API_SCHEMAS, { id, description });
 
 const ADD_SCHEMA = {
   summary: 'Add a supplier, unverified',
-  body: ADDED,
+  body: DETAILS_BODY.describe('The supplier to add, UNVERIFIED.'),
   response: { 201: SUPPLIER_DETAILS.describe('The supplier, added UNVERIFIED.') },
 };
 
@@ -281,6 +296,35 @@ const SHOW_SCHEMA = {
 
 const SUPPLIER_CHANGED = SUPPLIER_DETAILS.describe('The supplier, as the change left it.');
 
+const DETAILS_SCHEMA = {
+  summary: 'Ask to change a supplier’s details: its name, contacts or source, never its bank details',
+  params: SUPPLIER_ID,
+  body: DETAILS_BODY.describe('Its new details, every field: the supplier is UNVERIFIED once they are confirmed.'),
+  response: {
+    202: stepUpAsked(
+      'SupplierDetailsChangeAsked',
+      'Changing a supplier’s details, waiting for the admin to sign in again.',
+    ),
+  },
+};
+
+const DETAILS_CONFIRM_SCHEMA = {
+  summary: 'Change a supplier’s details, once signed in again for it',
+  params: SUPPLIER_ID,
+  body: z
+    .strictObject({
+      ...DETAIL_FIELDS,
+      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+    })
+    .transform((body, context) => ({ stepUpChallengeId: body.stepUpChallengeId, details: detailsKept(body, context) }))
+    .describe('The step-up signed in again for, with the same details as the ask.'),
+  response: {
+    200: SUPPLIER_CHANGED.describe(
+      'The supplier with its new details: UNVERIFIED until a second person verifies it again, and everyone told.',
+    ),
+  },
+};
+
 const SUSPEND_SCHEMA = {
   summary: 'Suspend a supplier: the brake, at once and with no step-up',
   params: SUPPLIER_ID,
@@ -293,16 +337,7 @@ const REACTIVATE_SCHEMA = {
   params: SUPPLIER_ID,
   body: NOTHING,
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
-      })
-      .register(API_SCHEMAS, {
-        id: 'SupplierReactivationAsked',
-        description: 'Reactivating a supplier, waiting for the admin to sign in again.',
-      }),
+    202: stepUpAsked('SupplierReactivationAsked', 'Reactivating a supplier, waiting for the admin to sign in again.'),
   },
 };
 
@@ -320,16 +355,10 @@ const PAYEE_APPROVE_SCHEMA = {
   params: SUPPLIER_ID,
   body: NOTHING,
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
-      })
-      .register(API_SCHEMAS, {
-        id: 'SupplierPayeeApprovalAsked',
-        description: 'Confirming a supplier’s new bank details, waiting for the admin to sign in again.',
-      }),
+    202: stepUpAsked(
+      'SupplierPayeeApprovalAsked',
+      'Confirming a supplier’s new bank details, waiting for the admin to sign in again.',
+    ),
   },
 };
 
@@ -371,16 +400,7 @@ const VERIFY_SCHEMA = {
   params: SUPPLIER_ID,
   body: z.strictObject(CALL_BACK).describe('The call-back you made.'),
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
-      })
-      .register(API_SCHEMAS, {
-        id: 'SupplierVerificationAsked',
-        description: 'Verifying a supplier, waiting for the verifier to sign in again.',
-      }),
+    202: stepUpAsked('SupplierVerificationAsked', 'Verifying a supplier, waiting for the verifier to sign in again.'),
   },
 };
 
@@ -601,12 +621,14 @@ export function registerSuppliers(
     payees,
     payeeChanges,
     verifications,
+    details,
   }: {
     registry: SupplierRegistry | undefined;
     changes: SupplierChanges | undefined;
     payees: SupplierPayees | undefined;
     payeeChanges: SupplierPayeeChanges | undefined;
     verifications: SupplierVerifications | undefined;
+    details: SupplierDetailsChanges | undefined;
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -704,6 +726,46 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/details',
+    {
+      schema: DETAILS_SCHEMA,
+      bodyLimit: ADD_BODY_LIMIT,
+      config: { access: [...ADDING_ROLES], operation: DETAILS_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(details).change(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/details/confirm',
+    {
+      schema: DETAILS_CONFIRM_SCHEMA,
+      bodyLimit: ADD_BODY_LIMIT + CHALLENGE_BODY_LIMIT,
+      config: { access: [...ADDING_ROLES], operation: DETAILS_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(details).changeConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body,
         request.id,
       );
       return answerChange(written, request, reply);

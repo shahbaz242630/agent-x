@@ -105,7 +105,12 @@ export type SupplierChangeWrite =
 export const toldEveryone = (
   orgId: string,
   supplierId: string,
-  kind: 'supplier_payee_changed' | 'supplier_verified',
+  kind:
+    | 'supplier_payee_changed'
+    | 'supplier_verified'
+    | 'supplier_details_changed'
+    | 'supplier_suspended'
+    | 'supplier_reactivated',
 ): Notice[] => {
   const about = { orgId, kind, membershipId: null, role: null, aboutId: supplierId };
   return [
@@ -209,6 +214,28 @@ export function createSupplierWork({
   };
 
   /**
+   * A version's contacts, opened from a version read through its signed state
+   * in this transaction: INTEGRITY_FAILED for contacts that won't open, logged
+   * by IDs alone, never a contact.
+   */
+  const contactsIn = async (
+    tx: SupplierTx,
+    orgId: string,
+    version: VersionRecord,
+    correlationId: string,
+  ): Promise<SupplierContacts> => {
+    try {
+      return await contactsOf(tx, keys, orgId, version);
+    } catch (error) {
+      if (!(error instanceof SupplierContactsUnreadable)) throw error;
+      logger
+        .child({ correlationId, orgId })
+        .error('suppliers.contacts_unreadable', { supplierId: version.supplierId, versionId: version.id });
+      throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    }
+  };
+
+  /**
    * The supplier with its current version, contacts and payee, and the change
    * waiting, read (`share`) in the organisation's transaction: NOT_FOUND for
    * one it doesn't have; INTEGRITY_FAILED for a supplier, version or
@@ -227,21 +254,10 @@ export function createSupplierWork({
       supplier.pendingVersionId === null
         ? null
         : await versionIn(tx, states, orgId, supplier.id, supplier.pendingVersionId);
-    let contacts: SupplierContacts;
-    try {
-      contacts = await contactsOf(tx, keys, orgId, version);
-    } catch (error) {
-      if (!(error instanceof SupplierContactsUnreadable)) throw error;
-      // Logged by IDs alone, never a contact.
-      logger
-        .child({ correlationId, orgId })
-        .error('suppliers.contacts_unreadable', { supplierId: supplier.id, versionId: version.id });
-      throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    }
     return {
       supplier,
       version,
-      contacts,
+      contacts: await contactsIn(tx, orgId, version, correlationId),
       payee: await payeeOf(tx, states, orgId, version),
       pending: pending === null ? null : { version: pending, payee: await payeeOf(tx, states, orgId, pending) },
     };
@@ -284,6 +300,7 @@ export function createSupplierWork({
     supplierIn,
     versionIn,
     registrationFor,
+    contactsIn,
     write,
     view,
 

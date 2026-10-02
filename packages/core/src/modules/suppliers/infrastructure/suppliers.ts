@@ -738,6 +738,63 @@ export async function withdrawPayeeChange(
   return { ...found.supplier, pendingVersionId: null };
 }
 
+/**
+ * Changes a supplier's details (ADR-012 §1: "contact changes are sensitive
+ * too"; E3-2b), in the caller's transaction, which read it with `change`
+ * (`found`), with no change waiting (RangeError otherwise): a VERIFIED one
+ * first goes back to UNVERIFIED, its verification cleared (0032 holds a
+ * VERIFIED supplier to the version verified); then `version`, following the
+ * current one and keeping its payee (addVersion), is made current at once.
+ * A new phone starts its own `phone_since`, so a call-back to it waits 30
+ * days. A suspended supplier stays suspended, and comes back UNVERIFIED
+ * (reactivationOf: its verified version is no longer current). Gives the
+ * supplier as it now stands.
+ */
+export async function changeDetails(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: SupplierKey,
+  found: { readonly supplier: SupplierRecord; readonly state: VerifiedState },
+  version: NewVersion & { readonly follows: VersionRecord },
+): Promise<SupplierRecord> {
+  if (found.supplier.pendingVersionId !== null) throw new RangeError('Details change only with no change waiting');
+  const change = { actor: version.actor, details: version.details ?? {} };
+  let from = found;
+  if (found.supplier.status === 'VERIFIED') {
+    await unverifySupplier(tx, states, key, found, change);
+    from = await againForChange(tx, states, key);
+  }
+  await addVersion(tx, states, keys, { ...version, of: from });
+  await states.record(
+    tx,
+    SUPPLIERS,
+    key,
+    from.state,
+    { current_version_id: version.id },
+    { ...change, action: 'supplier.details_changed', details: { ...change.details, versionId: version.id } },
+  );
+  return (await againForChange(tx, states, key)).supplier;
+}
+
+/**
+ * How many changes of its suppliers the organisation entered after `since`:
+ * every version past a supplier's first (a payee registered, details
+ * changed), never a supplier added, which has its own budget. The day's
+ * budget's count (E3-2b), in one statement.
+ */
+export async function changesEnteredSince(tx: SuppliersTransaction, orgId: string, since: Date): Promise<number> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone, for a budget; no version is decided on from it
+    .selectFrom(SUPPLIER_VERSIONS.table)
+    .select(sql<number>`pg_catalog.count(*)::int`.as('entered'))
+    .where('org_id', '=', orgId)
+    .where('version', '>', 1)
+    .where('entered_at', '>', since)
+    .executeTakeFirstOrThrow();
+  return row.entered;
+}
+
 /** A version of a supplier's details, as its signed state says: never its contacts, which contactsOf opens. */
 export interface VersionRecord {
   readonly id: string;

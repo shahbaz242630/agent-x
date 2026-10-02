@@ -26,6 +26,7 @@ import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
+import type { SupplierDetailsChanges } from './supplier-details.ts';
 import type { SupplierVerifications } from './supplier-verifications.ts';
 import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
@@ -222,6 +223,13 @@ type Asked =
       readonly payee: object;
     }
   | {
+      readonly kind: 'details' | 'detailsConfirm';
+      readonly member: object;
+      readonly keyed: IdempotentRequest;
+      readonly supplierId: string;
+      readonly change: object;
+    }
+  | {
       readonly kind: 'verify' | 'verifyConfirm';
       readonly member: object;
       readonly keyed: IdempotentRequest;
@@ -302,6 +310,16 @@ async function withSuppliers(
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
+  const detailsChanges: SupplierDetailsChanges = {
+    change: (member, keyed, supplierId, change) => {
+      asked.push({ kind: 'details', member, keyed, supplierId, change });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    changeConfirm: (member, keyed, supplierId, change) => {
+      asked.push({ kind: 'detailsConfirm', member, keyed, supplierId, change });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+  };
   const verifications: SupplierVerifications = {
     verify: (member, keyed, supplierId, callBack) => {
       asked.push({ kind: 'verify', member, keyed, supplierId, callBack });
@@ -345,6 +363,7 @@ async function withSuppliers(
     supplierPayees: payees,
     supplierPayeeChanges: payeeChanges,
     supplierVerifications: verifications,
+    supplierDetailsChanges: detailsChanges,
   });
   servers.push(app);
   await app.ready();
@@ -898,6 +917,82 @@ describe('POST /v1/suppliers/:id/payee-change/approve, then /confirm, and /withd
         )
       ).statusCode,
     ).toBe(400);
+    expect(asked).toEqual([]);
+  });
+});
+
+describe('POST /v1/suppliers/:id/details, then /confirm (E3-2b)', () => {
+  const NEW_DETAILS = {
+    displayName: 'Gulf Office Supplies LLC',
+    phone: '+971509876543',
+    email: 'Accounts@GulfOffice.example',
+    source: { kind: 'registry', ref: 'DED-CN-1234567' },
+  };
+  const KEPT = {
+    displayName: 'Gulf Office Supplies LLC',
+    contacts: { phone: '+971509876543', email: 'accounts@gulfoffice.example', tradeLicence: null },
+    source: { kind: 'registry', ref: 'DED-CN-1234567' },
+  };
+
+  it('answers the ask 202 with the step-up, passing the details as a version keeps them', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
+
+    const response = await app.inject(post(`/${SUPPLIER_ID}/details`, NEW_DETAILS));
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(asked).toMatchObject([
+      {
+        kind: 'details',
+        member: { ...MEMBER, sessionId: LIVE.sessionId },
+        keyed: { operation: 'suppliers.details' },
+        supplierId: SUPPLIER_ID,
+        change: KEPT,
+      },
+    ]);
+  });
+
+  it('answers the confirm 200 with the supplier, passing the step-up and the same details', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
+
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/details/confirm`, { ...NEW_DETAILS, stepUpChallengeId: CHALLENGE }),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(asked).toMatchObject([
+      {
+        kind: 'detailsConfirm',
+        keyed: { operation: 'suppliers.details.confirm' },
+        change: { stepUpChallengeId: CHALLENGE, details: KEPT },
+      },
+    ]);
+  });
+
+  it('answers a refusal as the use case gives it', async () => {
+    const app = await withSuppliers({
+      change: { outcome: 'refused', status: 409, code: 'SUPPLIER_DETAILS_UNCHANGED' },
+    });
+    const response = await app.inject(post(`/${SUPPLIER_ID}/details`, NEW_DETAILS));
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'SUPPLIER_DETAILS_UNCHANGED' } });
+  });
+
+  it('refuses details a version can’t hold, a payee, or a confirm without its step-up, before the use case runs', async () => {
+    const asked: Asked[] = [];
+    const app = await withSuppliers({}, asked);
+
+    for (const body of [
+      {},
+      { ...NEW_DETAILS, phone: '0501234567' },
+      { ...NEW_DETAILS, displayName: '' },
+      { ...NEW_DETAILS, iban: 'AE070331234567890123456' },
+    ]) {
+      expect((await app.inject(post(`/${SUPPLIER_ID}/details`, body))).statusCode).toBe(400);
+    }
+    expect((await app.inject(post(`/${SUPPLIER_ID}/details/confirm`, NEW_DETAILS))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
 });

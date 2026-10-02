@@ -101,6 +101,7 @@ import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
+import { createSupplierDetailsChanges } from './supplier-details.ts';
 import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
 import { createSupplierVerifications } from './supplier-verifications.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
@@ -488,7 +489,16 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
-    supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, logger }),
+    supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
+    supplierDetailsChanges: createSupplierDetailsChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     supplierPayees: createSupplierPayees({
       database,
       keys,
