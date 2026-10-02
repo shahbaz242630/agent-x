@@ -27,14 +27,13 @@
 // after a second factor removed (removal-restriction.ts) still counts as
 // eligible here, so the organisation waits for them rather than going solo;
 // whether the verifier themselves may act then is the route's access check.
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import type { Role } from './membership.ts';
 
 /** How long a verifier must have been a member (ADR-012 §1). */
 export const ESTABLISHED_DAYS = 14;
 /** How long the single-user path stays shut after an admin or approver is removed or has their role changed (ADR-012 §1). */
 export const SOLO_PATH_LOCK_DAYS = 14;
-
-const DAY_MS = 86_400_000;
 
 /** Whether a role may verify a supplier (partner, S69): an admin or a finance approver. */
 export const mayVerify = (role: string): boolean => role === 'admin' || role === 'approver';

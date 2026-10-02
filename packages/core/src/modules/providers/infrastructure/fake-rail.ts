@@ -19,7 +19,7 @@
 // names the organisation it acts for. The partner going down or losing an
 // answer (`goDown`, `loseNextAnswer`) is not a record: it holds only for the
 // fake it is set on, in that process, as the unit tests use it.
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator } from '../../../shared-kernel/index.ts';
 import { accountHint, withoutAccountNumbers } from '../domain/account-numbers.ts';
 import {
   BENEFICIARY_ROUTES,
@@ -49,7 +49,6 @@ import { type RailAccount, SANDBOX_ACCOUNTS } from './sandbox-accounts.ts';
 /** The rail's idempotency key, which our link and registration IDs are: at most 40 characters, no spaces (rail map §3, `x-idempotency-key`). */
 const PARTNER_KEY = /^[^\s]{1,40}$/;
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
 /** The fake partner's pages: its own origin, which every `authoriseUrl` it gives is on. */
 const AUTHORISE_ORIGIN = 'https://bank.fake-partner.invalid';
 const AUTHORISE_BASE = `${AUTHORISE_ORIGIN}/authorise/`;

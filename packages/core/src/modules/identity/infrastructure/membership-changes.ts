@@ -54,6 +54,7 @@ import { tellAdminsOfGrant, tellAdminsOfRemoval } from './grant-notices.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { changeHashOf, lockChallengesOf, type StepUpChallenges, stepUpDetails } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
+import { Refusal } from './refusals.ts';
 
 /** Asking to change a member's role: its operation, which the step-up challenge names as its action too. */
 export const ROLE_OPERATION = 'members.role';
@@ -92,15 +93,10 @@ export interface MembershipChanges {
   ): Promise<MembershipChangeWrite>;
 }
 
-class ChangeRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
+class ChangeRefused extends Refusal {
   constructor(status: number, code: ReasonCode) {
-    super(`a membership's change refused: ${code}`);
+    super(`a membership's change refused: ${code}`, status, code);
     this.name = 'ChangeRefused';
-    this.status = status;
-    this.code = code;
   }
 }
 

@@ -10,3 +10,7 @@ export interface Clock {
 export const systemClock: Clock = {
   now: () => new Date(),
 };
+
+/** An hour and a day, in milliseconds: the units business periods are counted in. */
+export const HOUR_MS = 3_600_000;
+export const DAY_MS = 86_400_000;

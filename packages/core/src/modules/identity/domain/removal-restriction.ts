@@ -10,10 +10,10 @@
 // doesn't count: they were already who they said, and an admin changing a
 // lost security key for a new one isn't locked out of their organisation.
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
+
 /** How long after a second factor is removed the person has no admin's or approver's powers. */
 export const REMOVAL_RESTRICTION_DAYS = 7;
-
-const DAY_MS = 86_400_000;
 
 /** When the restriction from a removal at `removedAt` ends. */
 export const restrictedUntil = (removedAt: Date): Date =>

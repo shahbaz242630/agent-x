@@ -12,6 +12,7 @@ import {
   checkedDetails,
   type EventDetails,
   type EventDetailValue,
+  UUID,
 } from '../../../shared-kernel/index.ts';
 
 export type ActorType = 'user' | 'agent' | 'system';
@@ -53,7 +54,6 @@ export class AuditEventRefused extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROCESS_NAME = /^[a-z][a-z0-9-]{0,62}$/;
 const SUBJECT_TYPE = /^[a-z][a-z_]{0,62}$/;
 /** Postgres's integer, the subject_version column's type. */

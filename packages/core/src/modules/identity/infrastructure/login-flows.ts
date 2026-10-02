@@ -8,7 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely } from 'kysely';
 
-import type { Clock } from '../../../shared-kernel/index.ts';
+import { type Clock, UUID } from '../../../shared-kernel/index.ts';
 import { isReturnPath } from '../domain/sign-in.ts';
 import type { LoginFlow } from './oidc-client.ts';
 import type { IdentityTables } from './tables.ts';
@@ -45,7 +45,6 @@ export interface LoginFlows {
 
 /** The flow ID: 32 random bytes as base64url, like a session's cookie ID. */
 const FLOW_ID = /^[A-Za-z0-9_-]{43}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const hashOf = (flowId: string): Buffer => createHash('sha256').update(flowId, 'ascii').digest();
 
 export function createLoginFlows({ clock }: { readonly clock: Clock }): LoginFlows {

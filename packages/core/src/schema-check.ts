@@ -158,13 +158,7 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
   }
   // Stopped while starting: the process isn't going on either way, and a stop is no alarm.
   if (outcome.kind === 'stopped') return false;
-  if (outcome.kind === 'drift') {
-    options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', problems: outcome.problems });
-  } else {
-    // A database that won't answer is not a database we can vouch for.
-    options.logger.error('audit.integrity_failed', { check: 'schema', when: 'start', reason: 'unreadable' });
-    options.logger.error('db.schema_unreadable', { err: outcome.error });
-  }
+  raiseSchemaAlarm(options.logger, 'start', outcome);
   return false;
 }
 
@@ -175,10 +169,20 @@ export async function schemaSoundAtStart<Schema>(options: SchemaCheckOptions<Sch
 export async function checkSchemaOnSchedule<Schema>(options: SchemaCheckOptions<Schema>): Promise<void> {
   const outcome = await checkSchema(options);
   if (outcome.kind === 'clean' || outcome.kind === 'stopped') return;
+  raiseSchemaAlarm(options.logger, 'running', outcome);
+}
+
+/** The alarm for drift or an unreadable catalogue, at start-up or on the scheduled run. */
+function raiseSchemaAlarm(
+  logger: Logger,
+  when: 'start' | 'running',
+  outcome: Extract<SchemaCheckOutcome, { kind: 'drift' | 'unreadable' }>,
+): void {
   if (outcome.kind === 'drift') {
-    options.logger.error('audit.integrity_failed', { check: 'schema', when: 'running', problems: outcome.problems });
+    logger.error('audit.integrity_failed', { check: 'schema', when, problems: outcome.problems });
     return;
   }
-  options.logger.error('audit.integrity_failed', { check: 'schema', when: 'running', reason: 'unreadable' });
-  options.logger.error('db.schema_unreadable', { err: outcome.error });
+  // A database that won't answer is not a database we can vouch for.
+  logger.error('audit.integrity_failed', { check: 'schema', when, reason: 'unreadable' });
+  logger.error('db.schema_unreadable', { err: outcome.error });
 }

@@ -36,7 +36,7 @@
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, type Transaction } from 'kysely';
 
-import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
   type ClaimedNotice,
   isAboutAMembership,
@@ -104,9 +104,7 @@ export interface Outbox {
   sweep(db: Kysely<NotificationsTables>, most: number): Promise<number>;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FAILURE = /^[a-z][a-z_]{0,63}$/;
-const DAY_MS = 86_400_000;
 
 const isId = (value: unknown): value is string => typeof value === 'string' && UUID.test(value);
 

@@ -11,7 +11,7 @@
 // could each wait on for the other.
 import type { Transaction } from 'kysely';
 
-import type { NoticeKind, NotificationsTables, Outbox } from '../../notifications/index.ts';
+import type { Notice, NoticeKind, NotificationsTables, Outbox } from '../../notifications/index.ts';
 import type { Role } from '../domain/membership.ts';
 
 /** The roles whose grant the admins are told of: a developer or a viewer is not. */
@@ -68,3 +68,18 @@ export async function tellAdminsOfRemoval(
     { orgId: removal.orgId, recipientUserId: null, kind, membershipId: removal.membershipId, role: removal.role },
   ]);
 }
+
+/**
+ * The notices about a reset of the person's second factor (or a change to
+ * how they sign in, never sent to the contacts): to them, as
+ * themselves, and to the organisation's admins but them, found as they are
+ * sent; and to its ACTIVE contacts once it was sent to them.
+ */
+export const toldOfReset = (orgId: string, kind: NoticeKind, personUserId: string, toContacts: boolean): Notice[] => {
+  const about = { orgId, kind, membershipId: null, role: null, aboutId: personUserId } as const;
+  return [
+    { ...about, recipientUserId: personUserId },
+    { ...about, recipientUserId: null },
+    ...(toContacts ? [{ ...about, recipientUserId: null, toContacts: true }] : []),
+  ];
+};

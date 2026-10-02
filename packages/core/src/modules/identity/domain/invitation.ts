@@ -12,7 +12,7 @@
 // and so does anyone deactivated there before, whatever the role (the S68
 // audit: a removed member never comes back by a link alone).
 // The database's status guard holds the same moves (0018).
-import { defineStateMachine } from '../../../shared-kernel/index.ts';
+import { defineStateMachine, HOUR_MS } from '../../../shared-kernel/index.ts';
 
 export const INVITATION = defineStateMachine({
   name: 'invitation',
@@ -37,7 +37,7 @@ export const needsConfirmation = (role: string): boolean => CONFIRMED_ROLES.some
 export const INVITATION_HOURS = 72;
 
 /** When an invitation asked for at `createdAt` ends. */
-export const invitationEnds = (createdAt: Date): Date => new Date(createdAt.getTime() + INVITATION_HOURS * 3_600_000);
+export const invitationEnds = (createdAt: Date): Date => new Date(createdAt.getTime() + INVITATION_HOURS * HOUR_MS);
 
 /**
  * How long past its end an acceptance may wait for an admin to confirm it:
@@ -48,8 +48,7 @@ export const invitationEnds = (createdAt: Date): Date => new Date(createdAt.getT
 export const CONFIRMATION_HOURS = 72;
 
 /** Until when an acceptance of an invitation ending at `expiresAt` may be confirmed. */
-export const confirmationEnds = (expiresAt: Date): Date =>
-  new Date(expiresAt.getTime() + CONFIRMATION_HOURS * 3_600_000);
+export const confirmationEnds = (expiresAt: Date): Date => new Date(expiresAt.getTime() + CONFIRMATION_HOURS * HOUR_MS);
 
 /** The longest email address there is (RFC 5321's path limit, less its brackets). */
 export const EMAIL_MAX = 254;
