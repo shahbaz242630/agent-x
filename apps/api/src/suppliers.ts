@@ -58,6 +58,8 @@
 import type { PayeeDetails } from '@agentx/core/modules/providers';
 import { visibleName } from '@agentx/core/shared-kernel';
 import {
+  CALL_NOTE_MOST,
+  callNote,
   MOST_SUPPLIERS_A_PAGE,
   NAME_CHECKS,
   normalisedIban,
@@ -103,6 +105,12 @@ import {
   type SupplierPayeeChanges,
   WITHDRAWING_ROLES,
 } from './supplier-payee-changes.ts';
+import {
+  type SupplierVerifications,
+  VERIFY_CONFIRM_OPERATION,
+  VERIFY_OPERATION,
+  VERIFYING_ROLES,
+} from './supplier-verifications.ts';
 import type { PayeeShown, SupplierChangeWrite, SupplierView } from './supplier-work.ts';
 
 /** Every member may see the organisation's suppliers. */
@@ -124,6 +132,14 @@ const ADD_BODY_LIMIT = 12_288;
 const NOTHING_BODY_LIMIT = 64;
 /** The most a confirm's body may be: a challenge's ID, with room to spare. */
 const CHALLENGE_BODY_LIMIT = 128;
+/**
+ * The most a verification's body may be: a call-back note of at most 500
+ * code points once composed, sent decomposed as at most 4 each, astral at
+ * worst, each UTF-16 unit as a `\uXXXX` escape (500 × 4 × 2 × 6 bytes), with
+ * the tick, a challenge's ID and room to spare (the B8-3 lesson: it must fit
+ * every body the schema allows).
+ */
+const VERIFY_BODY_LIMIT = 24_576;
 
 const NOTHING = z
   .strictObject({})
@@ -330,6 +346,60 @@ const PAYEE_APPROVE_CONFIRM_SCHEMA = {
   },
 };
 
+/** The verifier's call-back (partner, S74): the tick, always; the note when the name check isn't a match. */
+const CALL_BACK = {
+  calledBack: z
+    .literal(true)
+    .describe('Ticked: you called the supplier on the number on file, and they confirmed these details.'),
+  note: z
+    .string()
+    // UTF-16 units: each of its 500 characters sent as up to 4 code points, each astral (VERIFY_BODY_LIMIT).
+    .max(CALL_NOTE_MOST * 8)
+    .transform((note, context) => {
+      const { note: kept, problems } = callNote(note);
+      for (const problem of problems) context.addIssue({ code: 'custom', message: problem });
+      return problems.length > 0 ? z.NEVER : kept;
+    })
+    .optional()
+    .describe(
+      'Your note of the call: who you spoke to and what they confirmed, at most 500 characters on one line, with no phone or account numbers (it is kept for good). Needed when the bank’s name check was not a full match.',
+    ),
+};
+
+const VERIFY_SCHEMA = {
+  summary: 'Ask to verify a supplier, once you have called it back',
+  params: SUPPLIER_ID,
+  body: z.strictObject(CALL_BACK).describe('The call-back you made.'),
+  response: {
+    202: z
+      .object({
+        stepUpChallengeId: z
+          .uuid()
+          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.'),
+      })
+      .register(API_SCHEMAS, {
+        id: 'SupplierVerificationAsked',
+        description: 'Verifying a supplier, waiting for the verifier to sign in again.',
+      }),
+  },
+};
+
+const VERIFY_CONFIRM_SCHEMA = {
+  summary: 'Verify a supplier, once signed in again for it',
+  params: SUPPLIER_ID,
+  body: z
+    .strictObject({
+      stepUpChallengeId: z.uuid().describe('The step-up the ask answered with, signed in again for.'),
+      ...CALL_BACK,
+    })
+    .describe('The step-up signed in again for, with the same call-back as the ask.'),
+  response: {
+    200: SUPPLIER_CHANGED.describe(
+      'The supplier, VERIFIED: its AI agents may now ask to pay it, and everyone was told.',
+    ),
+  },
+};
+
 const PAYEE_WITHDRAW_SCHEMA = {
   summary: 'Withdraw a supplier’s new bank details waiting: at once, with no step-up',
   params: SUPPLIER_ID,
@@ -530,11 +600,13 @@ export function registerSuppliers(
     changes,
     payees,
     payeeChanges,
+    verifications,
   }: {
     registry: SupplierRegistry | undefined;
     changes: SupplierChanges | undefined;
     payees: SupplierPayees | undefined;
     payeeChanges: SupplierPayeeChanges | undefined;
+    verifications: SupplierVerifications | undefined;
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -769,6 +841,46 @@ export function registerSuppliers(
         idempotentRequest(request, member.orgId),
         request.params.id,
         request.body.stepUpChallengeId,
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/verify',
+    {
+      schema: VERIFY_SCHEMA,
+      bodyLimit: VERIFY_BODY_LIMIT,
+      config: { access: [...VERIFYING_ROLES], operation: VERIFY_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(verifications).verify(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        { note: request.body.note ?? null },
+        request.id,
+      );
+      return answerChange(written, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/suppliers/:id/verify/confirm',
+    {
+      schema: VERIFY_CONFIRM_SCHEMA,
+      bodyLimit: VERIFY_BODY_LIMIT,
+      config: { access: [...VERIFYING_ROLES], operation: VERIFY_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = inSessionOf(request);
+      const written = await need(verifications).verifyConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        { stepUpChallengeId: request.body.stepUpChallengeId, note: request.body.note ?? null },
         request.id,
       );
       return answerChange(written, request, reply);

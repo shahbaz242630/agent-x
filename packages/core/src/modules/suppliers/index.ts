@@ -33,6 +33,14 @@ export {
   type SupplierStatus,
 } from './domain/supplier.ts';
 export {
+  CALL_BACK_UNCHANGED_DAYS,
+  CALL_NOTE_MOST,
+  callNote,
+  type VerificationFacts,
+  type VerificationProblem,
+  verificationProblem,
+} from './domain/verification.ts';
+export {
   addSupplier,
   addVersion,
   confirmPayeeChange,
@@ -58,6 +66,7 @@ export {
   type SuppliersTransaction,
   suspendSupplier,
   unverifySupplier,
+  VERIFIER_RECORDED,
   type VersionCheck,
   type VersionRecord,
   verifySupplier,
@@ -88,3 +97,9 @@ export {
   supplierWithPayeeKey,
 } from './infrastructure/registrations.ts';
 export type { SuppliersTables } from './infrastructure/tables.ts';
+export {
+  MOST_VERIFICATIONS_READ,
+  MOST_VERSIONS_TO_VERIFY,
+  type VersionsToVerify,
+  versionsToVerify,
+} from './infrastructure/verifying.ts';

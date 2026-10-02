@@ -131,6 +131,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "HISTORY_TOO_LONG",
+                    "description": "The organisation's records behind this decision are longer than Agent X reads at once, so it wasn't decided. Nothing was changed. Contact Agent X support."
+                  },
+                  {
+                    "type": "string",
                     "const": "HOLD_CHANGED",
                     "description": "The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again."
                   },
@@ -311,6 +316,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "SOLO_PATH_LOCKED",
+                    "description": "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "SOURCE_NOT_SUSPENDED",
                     "description": "The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link."
                   },
@@ -326,6 +336,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "SUPPLIER_CALL_NOTE_NEEDED",
+                    "description": "The bank's name check didn't fully match the supplier's name, so a written note of the call-back is needed: who you spoke to and what they confirmed. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_CHANGED",
                     "description": "The supplier's payment details changed after the request was decided, so it is refused before hand-off."
                   },
@@ -336,8 +351,23 @@
                   },
                   {
                     "type": "string",
+                    "const": "SUPPLIER_COOLING_OFF",
+                    "description": "The supplier's bank details are still in their 24-hour cooling-off, so it can't be verified yet. Nothing was changed. Look at the supplier for when it ends."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_NAME_MISMATCH",
+                    "description": "The bank says the account holder's name doesn't match the supplier's, so it can't be verified. Nothing was changed. Call the supplier on its known number, then withdraw or replace the bank details."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_NOT_SUSPENDED",
                     "description": "The supplier is not suspended, so there is no suspension to lift. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_NOT_UNVERIFIED",
+                    "description": "The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again."
                   },
                   {
                     "type": "string",
@@ -346,8 +376,18 @@
                   },
                   {
                     "type": "string",
+                    "const": "SUPPLIER_NO_PAYEE",
+                    "description": "The supplier has no bank details registered yet, so there is nothing to verify. Nothing was changed. Register its bank details first."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_PAYEE_TAKEN",
                     "description": "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_PHONE_TOO_NEW",
+                    "description": "The supplier's phone number changed less than 30 days ago, so a call-back to it can't verify the supplier yet. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -368,6 +408,21 @@
                     "type": "string",
                     "const": "UNSUPPORTED_MEDIA_TYPE",
                     "description": "The request body's content type isn't accepted at this address, so it is refused."
+                  },
+                  {
+                    "type": "string",
+                    "const": "VERIFIER_ENTERED_DETAILS",
+                    "description": "You entered some of this supplier's details, so a second person must verify them. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "VERIFIER_GRANTED_BY_ENTERER",
+                    "description": "Your role was given or approved by a person who entered this supplier's details, so you can't be their second person. Nothing was changed. Ask another admin or finance approver."
+                  },
+                  {
+                    "type": "string",
+                    "const": "VERIFIER_TOO_NEW",
+                    "description": "You've been a member of this organisation for less than 14 days, so you can't verify a supplier yet. Nothing was changed."
                   }
                 ]
               },
@@ -1411,6 +1466,21 @@
         ],
         "additionalProperties": false,
         "description": "Confirming a supplier’s new bank details, waiting for the admin to sign in again."
+      },
+      "SupplierVerificationAsked": {
+        "type": "object",
+        "properties": {
+          "stepUpChallengeId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "stepUpChallengeId"
+        ],
+        "additionalProperties": false,
+        "description": "Verifying a supplier, waiting for the verifier to sign in again."
       },
       "PayeeRegistration": {
         "type": "object",
@@ -8360,6 +8430,216 @@
           "admin"
         ],
         "x-body-limit": 128,
+        "responses": {
+          "200": {
+            "description": "A supplier with its current details: never a payment detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierDetails"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/suppliers/{id}/verify": {
+      "post": {
+        "operationId": "suppliers.verify",
+        "summary": "Ask to verify a supplier, once you have called it back",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "calledBack": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "calledBack"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin",
+          "approver"
+        ],
+        "x-body-limit": 24576,
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierVerificationAsked"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/suppliers/{id}/verify/confirm": {
+      "post": {
+        "operationId": "suppliers.verify.confirm",
+        "summary": "Verify a supplier, once signed in again for it",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stepUpChallengeId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "calledBack": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "stepUpChallengeId",
+                  "calledBack"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin",
+          "approver"
+        ],
+        "x-body-limit": 24576,
         "responses": {
           "200": {
             "description": "A supplier with its current details: never a payment detail.",

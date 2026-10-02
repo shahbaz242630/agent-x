@@ -34,7 +34,7 @@ export async function twoPersonFactsOf(
 ): Promise<TwoPersonFactsCheck> {
   const members = await membersOf(tx, states, orgId);
   if (members.outcome === 'tampered') return members;
-  const history = await states.historyOf(tx, orgId, HISTORY_SUBJECTS, MOST_HISTORY_EVENTS);
+  const history = await states.historyOf(tx, orgId, { subjectTypes: HISTORY_SUBJECTS, limit: MOST_HISTORY_EVENTS });
   if (history.outcome === 'tampered') return history;
   return { outcome: 'read', ...twoPersonFacts(members.members, history.events) };
 }

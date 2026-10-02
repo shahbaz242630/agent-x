@@ -67,6 +67,7 @@ import {
 import {
   type AuditTrail,
   type AuditTransaction,
+  type HistoryToRead,
   type LatestSignedState,
   lockChainHead,
   type ReadEvent,
@@ -355,13 +356,14 @@ export interface SignedStates {
   /** An investigation of the organisation's hold by its ID, from its event in the log, believed only whole. */
   holdInvestigation(tx: AuditTransaction, orgId: string, id: string): Promise<InvestigationCheck>;
   /**
-   * Every event about an object of `subjectTypes` in the organisation's log,
-   * in chain order, each believed only whole (the trail's recordedEvents): a
-   * history a decision rests on, such as who granted a member's role
-   * (ADR-012 §1). One that isn't whole raises the alarm and holds the
-   * organisation. Past `limit` events it throws TooManyEventsToRead.
+   * Every event about an object of `find`'s types (one object alone, when it
+   * names one) in the organisation's log, in chain order, each believed only
+   * whole (the trail's recordedEvents): a history a decision rests on, such
+   * as who granted a member's role (ADR-012 §1). One that isn't whole raises
+   * the alarm and holds the organisation. Past `find.limit` events it throws
+   * TooManyEventsToRead.
    */
-  historyOf(tx: AuditTransaction, orgId: string, subjectTypes: readonly string[], limit: number): Promise<HistoryCheck>;
+  historyOf(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck>;
   /**
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
@@ -777,13 +779,8 @@ export function createSignedStates({
     return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
   };
 
-  const historyOf = async (
-    tx: AuditTransaction,
-    orgId: string,
-    subjectTypes: readonly string[],
-    limit: number,
-  ): Promise<HistoryCheck> => {
-    const read = await trail.recordedEvents(tx, orgId, { subjectTypes, limit });
+  const historyOf = async (tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck> => {
+    const read = await trail.recordedEvents(tx, orgId, find);
     // The organisation's own history: the alarm names it, as no one object is to blame.
     if (read.kind === 'broken') return alarm('organisation', { orgId, id: orgId }, 'log', read.seq);
     return Object.freeze({ outcome: 'read', events: read.events });

@@ -52,6 +52,8 @@ export const REASON_CODES = {
     "You're signed in, or an agent with its key, but this address answers other roles or callers only, so the request is refused.",
   HEADERS_TOO_LARGE:
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
+  HISTORY_TOO_LONG:
+    "The organisation's records behind this decision are longer than Agent X reads at once, so it wasn't decided. Nothing was changed. Contact Agent X support.",
   HOLD_CHANGED:
     'The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again.',
   IDEMPOTENCY_KEY_BUSY:
@@ -119,21 +121,35 @@ export const REASON_CODES = {
   SIGN_IN_FAILED: "The sign-in couldn't be completed, so no session was opened. Start again from the sign-in page.",
   SIGN_IN_UNAVAILABLE:
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
+  SOLO_PATH_LOCKED:
+    "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed.",
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_ADDS_SPENT:
     "The organisation has added as many suppliers as it may in 24 hours, so this one wasn't added. Try again tomorrow; if no one at the organisation added them, tell its admins at once.",
+  SUPPLIER_CALL_NOTE_NEEDED:
+    "The bank's name check didn't fully match the supplier's name, so a written note of the call-back is needed: who you spoke to and what they confirmed. Nothing was changed.",
   SUPPLIER_CHANGED:
     "The supplier's payment details changed after the request was decided, so it is refused before hand-off.",
   SUPPLIER_CHANGE_WAITING:
     "A change of this supplier's bank details is already waiting to be confirmed, so another isn't made. Confirm or withdraw that one first.",
+  SUPPLIER_COOLING_OFF:
+    "The supplier's bank details are still in their 24-hour cooling-off, so it can't be verified yet. Nothing was changed. Look at the supplier for when it ends.",
+  SUPPLIER_NAME_MISMATCH:
+    "The bank says the account holder's name doesn't match the supplier's, so it can't be verified. Nothing was changed. Call the supplier on its known number, then withdraw or replace the bank details.",
   SUPPLIER_NOT_SUSPENDED: 'The supplier is not suspended, so there is no suspension to lift. Nothing was changed.',
+  SUPPLIER_NOT_UNVERIFIED:
+    'The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again.',
   SUPPLIER_NO_CHANGE_WAITING:
     "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
+  SUPPLIER_NO_PAYEE:
+    'The supplier has no bank details registered yet, so there is nothing to verify. Nothing was changed. Register its bank details first.',
   SUPPLIER_PAYEE_TAKEN:
     "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers.",
+  SUPPLIER_PHONE_TOO_NEW:
+    "The supplier's phone number changed less than 30 days ago, so a call-back to it can't verify the supplier yet. Nothing was changed.",
   TOO_MANY_CONTACTS:
     "The organisation has more registered contact records than Agent X checks at once, so its contacts can't be read or changed. Contact Agent X support.",
   TOO_MANY_RESETS:
@@ -141,6 +157,12 @@ export const REASON_CODES = {
   UNAUTHENTICATED:
     'This address answers only a signed-in person or an agent with its key, and the request came from neither, so it is refused.',
   UNSUPPORTED_MEDIA_TYPE: "The request body's content type isn't accepted at this address, so it is refused.",
+  VERIFIER_ENTERED_DETAILS:
+    "You entered some of this supplier's details, so a second person must verify them. Nothing was changed.",
+  VERIFIER_GRANTED_BY_ENTERER:
+    "Your role was given or approved by a person who entered this supplier's details, so you can't be their second person. Nothing was changed. Ask another admin or finance approver.",
+  VERIFIER_TOO_NEW:
+    "You've been a member of this organisation for less than 14 days, so you can't verify a supplier yet. Nothing was changed.",
 } as const satisfies Readonly<Record<string, string>>;
 
 export type ReasonCode = keyof typeof REASON_CODES;

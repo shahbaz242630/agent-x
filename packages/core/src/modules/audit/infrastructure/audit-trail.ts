@@ -228,19 +228,25 @@ export interface AuditTrail {
    */
   recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck>;
   /**
-   * Every event of the organisation's about an object of `subjectTypes`, in
-   * chain order, each believed only whole as recordedEvent believes one, read
-   * with the chain's head in one statement: a history a decision rests on
-   * (who granted a member's role, ADR-012 §1). Past `limit` events it throws
+   * Every event of the organisation's about an object of `subjectTypes` (and
+   * only the one `subjectId` names, and of `actions` alone, when they do), in chain order, each
+   * believed only whole as recordedEvent believes one, read with the chain's
+   * head in one statement: a history a decision rests on (who granted a
+   * member's role, ADR-012 §1; when a supplier was last verified, E3-2a).
+   * Past `limit` events it throws
    * TooManyEventsToRead. An event deleted from the history is the chain's
    * check's and anchor's to find, as for any read of the log. Only in
    * withTenant's transaction for that organisation, like `verify`.
    */
-  recordedEvents(
-    tx: AuditTransaction,
-    orgId: string,
-    find: { readonly subjectTypes: readonly string[]; readonly limit: number },
-  ): Promise<RecordedEventsCheck>;
+  recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
+}
+
+/** A history to read (recordedEvents): its objects' types, one object and some actions alone if named, and the most events it may hold. */
+export interface HistoryToRead {
+  readonly subjectTypes: readonly string[];
+  readonly subjectId?: string;
+  readonly actions?: readonly string[];
+  readonly limit: number;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -680,15 +686,26 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     async recordedEvents(
       tx: AuditTransaction,
       orgId: string,
-      { subjectTypes, limit }: { readonly subjectTypes: readonly string[]; readonly limit: number },
+      { subjectTypes, subjectId, actions, limit }: HistoryToRead,
     ): Promise<RecordedEventsCheck> {
-      const problems = subjectTypes.flatMap(subjectTypeProblems);
+      const problems = [
+        ...subjectTypes.flatMap(subjectTypeProblems),
+        ...(subjectId === undefined || UUID.test(subjectId) ? [] : ['subject.id must be a UUID']),
+      ];
       if (problems.length > 0) throw new AuditEventRefused(problems);
       if (subjectTypes.length === 0) throw new RangeError('At least one subject type is read');
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      const rows = await eventsWithHead(tx, chain, sql`e.subject_type = any(${[...subjectTypes]}::text[])`, limit + 1);
+      const which = sql.join(
+        [
+          sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
+          ...(subjectId === undefined ? [] : [sql`e.subject_id = ${subjectId.toLowerCase()}`]),
+          ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
+        ],
+        sql` and `,
+      );
+      const rows = await eventsWithHead(tx, chain, which, limit + 1);
       const [first] = rows;
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);
