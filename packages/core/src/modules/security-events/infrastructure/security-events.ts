@@ -16,7 +16,8 @@
 //
 // Each runs in a transaction of its own whose statements give up after 10
 // seconds, a wait for a lock included.
-import { type Kysely, sql } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import type { SecurityEventsTables } from './tables.ts';
@@ -102,7 +103,7 @@ export function createSecurityEvents({
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
   const limited = <T>(db: Kysely<SecurityEventsTables>, work: (tx: Kysely<SecurityEventsTables>) => Promise<T>) =>
     db.transaction().execute(async (tx) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return work(tx);
     });
 

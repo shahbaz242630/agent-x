@@ -21,6 +21,7 @@ import {
 } from '@agentx/platform/audit-chain';
 import type { KeyProvider } from '@agentx/platform/keys';
 import { hidesField } from '@agentx/platform/observability';
+import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, sql, type Transaction } from 'kysely';
 
 import { canonicalDetails, type IdGenerator } from '../../../shared-kernel/index.ts';
@@ -262,7 +263,7 @@ export function createPlatformChain({
         .setIsolationLevel('read committed')
         .execute(async (tx) => {
           // Each statement, waits for locks included, so the pool can be closed soon after a stop.
-          await sql`set local statement_timeout = '10s'`.execute(tx);
+          await limitStatements(tx);
           return verifyChain(keys, CHAIN, readerFor(tx), anchor);
         });
     },
@@ -272,7 +273,7 @@ export function createPlatformChain({
         .transaction()
         .setIsolationLevel('read committed')
         .execute(async (tx) => {
-          await sql`set local statement_timeout = '10s'`.execute(tx);
+          await limitStatements(tx);
           const rows = await tx
             .selectFrom('platform_controls.audit_events')
             .select('details')

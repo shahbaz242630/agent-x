@@ -49,7 +49,7 @@ import { type Kysely, sql, type Transaction } from 'kysely';
 import type { KeyProvider } from '../keys/key-provider.ts';
 import type { Message } from '../keys/message.ts';
 import type { Logger } from '../observability/index.ts';
-import { assertTenant, withTenant } from './tenant.ts';
+import { assertTenant, limitStatements, withTenant } from './tenant.ts';
 
 /**
  * Who sent the request: a signed-in user, or an agent, each by its own ID.
@@ -518,7 +518,7 @@ export async function sweepIdempotencyKeys<Schema>(
  */
 export function sweepExpiredKeys<Schema>(db: Kysely<Schema>, orgId: string, most: number): Promise<number> {
   return withTenant(db, orgId, async (tx) => {
-    await sql`set local statement_timeout = '10s'`.execute(tx);
+    await limitStatements(tx);
     return sweepIdempotencyKeys(tx, orgId, most);
   });
 }

@@ -29,10 +29,10 @@
 //
 // A refusal throws inside the write, so the claim and everything written roll
 // back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql, type Transaction } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type SignedStates, withSignedStates } from '../../audit/index.ts';
@@ -197,7 +197,7 @@ export function createAcceptanceConfirmations({
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
       const done = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return idempotency.run(tx, idempotent, () => work(tx, states));
       });
       return { done, services };
@@ -216,7 +216,7 @@ export function createAcceptanceConfirmations({
     id: string,
   ): Promise<ConfirmationWrite> => {
     const read = await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-      await sql`set local statement_timeout = '10s'`.execute(tx);
+      await limitStatements(tx);
       return invitationRecord(tx, states, admin.orgId, id);
     });
     if (read.outcome === 'tampered') return { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };

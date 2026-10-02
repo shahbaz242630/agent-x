@@ -21,7 +21,8 @@
 // own with a statement timeout (B2-4a: hourly, from the API).
 import { createHash, randomBytes } from 'node:crypto';
 
-import { type ExpressionBuilder, type Kysely, sql, type Transaction } from 'kysely';
+import { limitStatements } from '@agentx/platform/db';
+import { type ExpressionBuilder, type Kysely, type Transaction } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
 import { checkEvidence, type SignInEvidence } from '../domain/sign-in.ts';
@@ -233,7 +234,7 @@ export function createSessions({
       }
       const now = clock.now();
       return db.transaction().execute(async (tx) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         // Only sessions no process could find again, whatever its idle
         // timeout: past their stored end, or unused past the longest idle
         // timeout there can be. A session between that and this process's own

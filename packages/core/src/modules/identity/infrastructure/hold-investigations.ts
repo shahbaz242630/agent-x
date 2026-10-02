@@ -13,10 +13,10 @@
 //
 // A refusal inside the write throws, so the key's claim and anything written
 // roll back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, limitStatements } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely, sql } from 'kysely';
+import { type Kysely } from 'kysely';
 
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import {
@@ -109,7 +109,7 @@ export function createHoldInvestigations({
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     try {
       return await withSignedStates(database, admin.orgId, services, async (tx, states) => {
-        await sql`set local statement_timeout = '10s'`.execute(tx);
+        await limitStatements(tx);
         return work(tx, states);
       });
     } catch (error) {
