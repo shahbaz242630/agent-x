@@ -1,12 +1,8 @@
-// The post-release smoke test (Security-Handoff §13b, partner S69): after each
-// release, staging's test agent reads what every agent reads, through the
-// public door, with its own key. A release that starts clean but is wired
-// wrong (the database, the key check's pepper, the partner switch, the door)
-// turns red here. The key is the repository secret STAGING_SMOKE_AGENT_KEY
-// (not an environment's: the job names none, or its own deployment would start
-// it again) and the address the repository secret STAGING_APP_ORIGIN, neither
-// ever in the repository; the log shows each read's path and status, never a
-// body. Node builtins only.
+// The post-release smoke test (Security-Handoff §13b; how it starts and where
+// its key lives: .github/workflows/smoke.yml): staging's test agent reads what
+// every agent reads, so a release that starts clean but is wired wrong (the
+// database, the key check's pepper, the partner switch, the door) turns red.
+// The log shows each read's path and status, never a body. Node builtins only.
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { originOf } from '../dast/scan.ts';
@@ -18,7 +14,7 @@ export const SMOKE_SCOPES = ['sources:read', 'suppliers:read'] as const;
 export const KEY_WARNING_DAYS = 14;
 
 // The shared kernel's, copied: this runs on CI's bare Node, with no packages installed.
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
 
 type Body = Record<string, unknown>;
 
@@ -114,7 +110,7 @@ function verdict(read: Read, text: string, now: Date): string {
   return problem === undefined ? '200' : `200, but ${problem}`;
 }
 
-/** Every read's line, each said as soon as it is known (a job cut off at its limit still shows how far it got), and whether all passed. */
+/** Every read's line, said as soon as known (a job cut off still shows how far it got), and whether all passed. */
 export async function smoke(
   origin: string,
   key: string,

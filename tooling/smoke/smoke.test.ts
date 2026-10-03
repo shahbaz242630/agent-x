@@ -4,12 +4,12 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { KEY_WARNING_DAYS, READS, smoke, SMOKE_SCOPES } from './smoke.ts';
+import { DAY_MS, KEY_WARNING_DAYS, READS, smoke, SMOKE_SCOPES } from './smoke.ts';
 
 const ORIGIN = 'https://app.example.test';
 const KEY = 'axk_test-key-id_test-key-body';
 const NOW = new Date('2026-10-03T09:00:00Z');
-const LATER = new Date(NOW.getTime() + 90 * 86_400_000).toISOString();
+const LATER = new Date(NOW.getTime() + 90 * DAY_MS).toISOString();
 
 const BODIES: Record<string, unknown> = {
   '/v1/agent': { agentId: 'a', scopes: [...SMOKE_SCOPES].reverse(), keyExpiresAt: LATER },
@@ -92,7 +92,7 @@ describe('Security-Handoff §13b: the post-release smoke test', () => {
   });
 
   it(`turns red ${String(KEY_WARNING_DAYS)} days before the key ends, so it is rotated in time`, async () => {
-    const at = (days: number) => new Date(NOW.getTime() + days * 86_400_000).toISOString();
+    const at = (days: number) => new Date(NOW.getTime() + days * DAY_MS).toISOString();
     const expiring = (keyExpiresAt: string) =>
       run(door({}, { ...BODIES, '/v1/agent': { scopes: SMOKE_SCOPES, keyExpiresAt } }));
     expect((await expiring(at(KEY_WARNING_DAYS - 0.01))).lines[0]).toMatch(/the key ends within 14 days: rotate it/);

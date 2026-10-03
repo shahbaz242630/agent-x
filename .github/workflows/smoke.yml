@@ -50,8 +50,7 @@ jobs:
           check-latest: false
           package-manager-cache: false
 
-      # Node builtins only: nothing is installed.
-      # The key reaches this step alone.
+      # Node builtins only, nothing installed; the key reaches this step alone.
       - name: Read what every agent reads, with the smoke agent's key
         env:
           AGENTX_SMOKE_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
