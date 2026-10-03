@@ -1356,20 +1356,10 @@ export const DNS_ALLOWED: ReadonlySet<string> = new Set(
 );
 
 /**
- * Too broad to allow: every name, a top-level zone (`com.`), or a reverse zone
- * wider than a /16 (`10.in-addr.arpa.`), each of which would let lookups of
- * names whose servers anyone can run past the rule that blocks the rest.
- */
-export const tooBroad = (domain: string): boolean => {
-  const labels = domain.split('.').filter((label) => label !== '');
-  return !domain.endsWith('.') || labels.length < 2 || (`.${domain}`.endsWith('.in-addr.arpa.') && labels.length < 4);
-};
-
-/**
  * A DNS rule that allows lets its names through before the rule that alerts
  * on or blocks every name is reached (dns-watch), so what it allows is held to
  * the reviewed list (S78): every name in every list an enabled Allow rule
- * names is on it and not too broad, and each such list is one this deployment
+ * names is on it (a test holds the list to nothing too broad), and each such list is one this deployment
  * creates (a list the snapshot doesn't hold can't be read, so it is refused).
  */
 const dnsAllow: Check = (snapshot, _expected, add) => {
@@ -1383,13 +1373,13 @@ const dnsAllow: Check = (snapshot, _expected, add) => {
       if (names === undefined) return [`a list it doesn't create (${text(at(reference, 'id'))})`];
       return list(at(names.properties, 'domains'))
         .map(String)
-        .filter((domain) => !DNS_ALLOWED.has(domain) || tooBroad(domain));
+        .filter((domain) => !DNS_ALLOWED.has(domain));
     });
     if (refused.length > 0) {
       add({
         rule: 'dns-allow',
         resource: rule.name,
-        message: `allows names outside the reviewed list (dns-allowed.json) or too broad to allow: ${refused.join(', ')}`,
+        message: `allows names outside the reviewed list (dns-allowed.json): ${refused.join(', ')}`,
       });
     }
   }

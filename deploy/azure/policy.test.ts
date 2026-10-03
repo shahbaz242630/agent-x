@@ -17,7 +17,6 @@ import {
   type RuleId,
   singleSummaryColumn,
   templateProblems,
-  tooBroad,
 } from './policy.ts';
 import {
   type BicepRun,
@@ -107,6 +106,16 @@ function expectationsOf(snapshotted: Snapshot): Expectations {
 }
 
 type Mutable = Record<string, unknown>;
+
+/**
+ * Too broad to allow: every name, a top-level zone (`com.`), or a reverse zone
+ * wider than a /16 (`10.in-addr.arpa.`), each of which would let lookups of
+ * names whose servers anyone can run past the rule that blocks the rest.
+ */
+const tooBroad = (domain: string): boolean => {
+  const labels = domain.split('.').filter((label) => label !== '');
+  return !domain.endsWith('.') || labels.length < 2 || (`.${domain}`.endsWith('.in-addr.arpa.') && labels.length < 4);
+};
 
 /** A copy of the staging snapshot with one change made to the resources `pick` selects. */
 function changed(pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot {
@@ -1218,7 +1227,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(changed(DNS_POLICY, (policy) => (policy.location = 'westeurope')))).toEqual(['in-country']);
   });
 
-  it('dns-allow: an Allow rule naming a name off the reviewed list, a name too broad, or a list it does not create', () => {
+  it('dns-allow: an Allow rule naming a name off the reviewed list, or a list it does not create', () => {
     const properties = (resource: Mutable): Mutable => inside(resource, 'properties');
     for (const extra of ['example.com.', 'com.', 'io.', 'in-addr.arpa.']) {
       const broken = changed(ALLOWED_NAMES, (names) => (properties(names).domains = [...DNS_ALLOWED, extra]));
