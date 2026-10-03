@@ -411,6 +411,40 @@ jobs:
           upload-release-assets: false
           dependency-snapshot: false
 
+  # Security-Handoff §13b: the published image's known vulnerabilities (its
+  # Node packages and the base image's own), by Grype. Report only: a newly
+  # published advisory never blocks a release, and the findings go to code
+  # scanning (category image), read at the weekly checks. The image is public,
+  # so it is scanned by digest with no registry login. Grype, not Trivy: Trivy's
+  # action tags and a release were hijacked in March 2026.
+  image-scan:
+    name: Image (main) - vulnerability scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [image-publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # to check out the repository for code scanning's paths
+      security-events: write # to put the findings in code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan the pushed image (Grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ghcr.io/shahbaz242630/agent-x@${{ needs.image-publish.outputs.digest }}
+          grype-version: v0.119.0
+          fail-build: false
+          output-format: sarif
+
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: image
+
   # Attaches the SBOM to the image as an attestation signed like the image,
   # then runs the deploy check exactly as a deployment will, and proves it
   # pins the commit.

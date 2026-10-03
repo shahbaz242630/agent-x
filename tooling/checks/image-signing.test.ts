@@ -124,7 +124,7 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
       .filter(
         ([name, candidate]) =>
           !IMAGE_JOBS.includes(name) &&
-          !['release', 'image-prune'].includes(name) &&
+          !['release', 'image-prune', 'image-scan'].includes(name) &&
           candidate.if !== "github.event_name == 'pull_request'",
       )
       .map(([name]) => name);
@@ -133,6 +133,22 @@ describe('SEC-SC-02 the image is signed only by CI on main, and verified before 
     expect([job('image-sbom').needs ?? []].flat()).toEqual(['image-publish']);
     expect([job('image-attest').needs ?? []].flat().sort()).toEqual(['image-publish', 'image-sbom']);
     expect([job('release').needs ?? []].flat().sort()).toEqual(['image-attest', 'image-publish']);
+  });
+
+  it('scans the published image by its digest, report only, in a job that can write nothing but code scanning', () => {
+    expect(job('image-scan').if).toBe(MAIN_PUSH_ONLY);
+    expect([job('image-scan').needs ?? []].flat()).toEqual(['image-publish']);
+    // Nothing waits on it: a new advisory never holds a release back.
+    expect(Object.values(jobs).filter((other) => [other.needs ?? []].flat().includes('image-scan'))).toEqual([]);
+    expect(job('image-scan').permissions).toEqual({ contents: 'read', 'security-events': 'write' });
+    const scan = steps('image-scan').find((step) => step.uses?.startsWith('anchore/scan-action@') === true);
+    expect(scan?.with?.image).toBe('ghcr.io/shahbaz242630/agent-x@${{ needs.image-publish.outputs.digest }}');
+    expect(scan?.with?.['fail-build']).toBe(false);
+    expect(
+      steps('image-scan').some((step) =>
+        /docker login|registry-/.test(`${step.run ?? ''} ${JSON.stringify(step.with ?? {})}`),
+      ),
+    ).toBe(false);
   });
 
   it('keeps the SBOM scanner, outside code, in a job that can only read the image', () => {
