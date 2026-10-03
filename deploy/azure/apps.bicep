@@ -55,6 +55,7 @@ import {
   releaseRoleName
   resourceNames
   resourceTags
+  shortName
   uniqueSuffix
 } from 'names.bicep'
 
@@ -121,6 +122,13 @@ param appMinReplicas int
 param zitadelAdminEmail string
 
 var names = resourceNames(environment, nameSuffix)
+
+// The restore drill's copy (S78): a point-in-time restore made under this name,
+// in the same subnet and private zone, which the operator's restore check reads
+// beside the live server; it exists only while a drill runs. Named here, as
+// names.bicep's serverName would with the suffix 'drill', not there: every hand
+// deploy reads names.bicep, so a change there asks for all four.
+var drillDatabaseHost = 'psql-agentx-${shortName(environment)}-drill.postgres.database.azure.com'
 var tags = resourceTags(environment)
 
 // Our own image, which can only be a digest: `appImageDigest` is separate from
@@ -587,7 +595,7 @@ var jobs = [
       {
         // The restore drill's copy, which only the restore check reads, read-only (S78).
         name: 'AGENTX_DB_DRILL_HOST'
-        value: names.drillDatabaseHost
+        value: drillDatabaseHost
       }
     ])
   }
