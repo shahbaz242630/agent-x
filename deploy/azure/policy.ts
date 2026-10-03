@@ -1296,6 +1296,14 @@ const appsEgress: Check = (snapshot, _expected, add) => {
 /** Every name, in a DNS domain list (Microsoft: a rule on the '.' domain applies to all domains). */
 const EVERY_NAME = '.';
 
+/** A DNS rule's action, which Azure reads without regard to case. */
+const dnsActionOf = (rule: PredictedResource): string =>
+  text(at(rule.properties, 'action', 'actionType')).toLowerCase();
+
+/** Whether a DNS rule is on: anything but 'Disabled', in any case. */
+const dnsRuleOn = (rule: PredictedResource): boolean =>
+  text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled';
+
 /**
  * Every lookup the network makes is judged by a DNS policy of this deployment
  * (S68 audit finding 14): its rules see what Azure's DNS answers, which the
@@ -1319,13 +1327,10 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
   );
   const rulesOf = (policy: string): readonly PredictedResource[] =>
     ofType(snapshot, TYPES.dnsPolicyRule).filter((rule) => rule.id.startsWith(`${policy}/dnsSecurityRules/`));
-  const actionOf = (rule: PredictedResource): string => text(at(rule.properties, 'action', 'actionType')).toLowerCase();
   const coversEveryName = (rule: PredictedResource): boolean =>
     list(at(rule.properties, 'dnsResolverDomainLists')).some((domains) => everyName.has(text(at(domains, 'id'))));
   const watches = (rule: PredictedResource): boolean =>
-    text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled' &&
-    ['alert', 'block'].includes(actionOf(rule)) &&
-    coversEveryName(rule);
+    dnsRuleOn(rule) && ['alert', 'block'].includes(dnsActionOf(rule)) && coversEveryName(rule);
   for (const network of ofType(snapshot, TYPES.network)) {
     const linkedTo = ofType(snapshot, TYPES.dnsPolicyLink)
       .filter((link) => at(link.properties, 'virtualNetwork', 'id') === network.id)
@@ -1333,7 +1338,7 @@ const dnsWatch: Check = (snapshot, _expected, add) => {
       .map((link) => link.id.slice(0, link.id.lastIndexOf('/virtualNetworkLinks/')));
     const judged = linkedTo.some((policy) => {
       const rules = rulesOf(policy);
-      return rules.some(watches) && !rules.some((rule) => actionOf(rule) === 'allow' && coversEveryName(rule));
+      return rules.some(watches) && !rules.some((rule) => dnsActionOf(rule) === 'allow' && coversEveryName(rule));
     });
     if (!judged) {
       add({
@@ -1359,18 +1364,18 @@ export const DNS_ALLOWED: ReadonlySet<string> = new Set(
  * A DNS rule that allows lets its names through before the rule that alerts
  * on or blocks every name is reached (dns-watch), so what it allows is held to
  * the reviewed list (S78): every name in every list an enabled Allow rule
- * names is on it (a test holds the list to nothing too broad), and each such list is one this deployment
- * creates (a list the snapshot doesn't hold can't be read, so it is refused).
+ * names is on it (a test holds the list to nothing too broad), and each such
+ * list is one this deployment creates (a list the snapshot doesn't hold can't
+ * be read, so it is refused).
  */
 const dnsAllow: Check = (snapshot, _expected, add) => {
   const lists = new Map(ofType(snapshot, TYPES.dnsDomainList).map((names) => [names.id, names]));
   for (const rule of ofType(snapshot, TYPES.dnsPolicyRule)) {
-    const allows = text(at(rule.properties, 'action', 'actionType')).toLowerCase() === 'allow';
-    const enabled = text(at(rule.properties, 'dnsSecurityRuleState')).toLowerCase() !== 'disabled';
-    if (!allows || !enabled) continue;
+    if (dnsActionOf(rule) !== 'allow' || !dnsRuleOn(rule)) continue;
     const refused = list(at(rule.properties, 'dnsResolverDomainLists')).flatMap((reference) => {
-      const names = lists.get(text(at(reference, 'id')));
-      if (names === undefined) return [`a list it doesn't create (${text(at(reference, 'id'))})`];
+      const id = text(at(reference, 'id'));
+      const names = lists.get(id);
+      if (names === undefined) return [`a list it doesn't create (${id})`];
       return list(at(names.properties, 'domains'))
         .map(String)
         .filter((domain) => !DNS_ALLOWED.has(domain));

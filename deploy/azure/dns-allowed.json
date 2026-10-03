@@ -1,11 +1,14 @@
 {
-  "about": "The names the network may look up once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026). A zone is listed only if its own name servers are Microsoft's or GitHub's, so a lookup under it can't carry data to anyone else's server; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone. The policy's dns-allow rule refuses any Allow not listed here.",
+  "about": "The names the network's lookups may be answered for once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026), each one Microsoft's or GitHub's; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone. Not listed on purpose: reverse lookups (Azure sends them to public servers, which answer that no such name exists), and the login service's internal address (answered inside the environment: it never appears in the logs). This narrows which names are answered; whether a blocked name's labels still reach its own server (Azure follows CNAME chains, so it may resolve a name before judging it) is proven before relying on it (Carry-Forward). The policy's dns-allow rule refuses any Allow not listed here.",
   "domains": [
     {
       "domain": "microsoft.com.",
       "why": "Microsoft: its container registry (mcr), packages, sign-in (login.microsoft.com) and the platform's own checks"
     },
-    { "domain": "microsoftonline.com.", "why": "Microsoft Entra sign-in for the managed identities" },
+    {
+      "domain": "microsoftonline.com.",
+      "why": "Microsoft Entra sign-in for the managed identities"
+    },
     {
       "domain": "azure.com.",
       "why": "Azure: Resource Manager, AKS packages, our Postgres server and our email service"
@@ -14,22 +17,45 @@
       "domain": "windows.net.",
       "why": "Azure storage, Azure Monitor's ingestion and certificates, and the platform's Service Bus"
     },
-    { "domain": "azmk8s.io.", "why": "The Container Apps environment's own Kubernetes API host" },
-    { "domain": "azureedge.net.", "why": "Microsoft's AKS downloads (acs-mirror) and manifests" },
-    { "domain": "azurecontainerapps.dev.", "why": "Container Apps' regional extension endpoint" },
+    {
+      "domain": "azmk8s.io.",
+      "why": "The Container Apps environment's own Kubernetes API host"
+    },
+    {
+      "domain": "acs-mirror.azureedge.net.",
+      "why": "Microsoft's AKS downloads (the zone itself is open to any customer's CDN endpoint, so only these two names)"
+    },
+    {
+      "domain": "shavamanifestazurecdnprod1.azureedge.net.",
+      "why": "Microsoft's AKS manifests"
+    },
+    {
+      "domain": "azurecontainerapps.dev.",
+      "why": "Container Apps' regional extension endpoint"
+    },
     {
       "domain": "dc.services.visualstudio.com.",
       "why": "The platform's own telemetry endpoint (not ours: ADR-013's apps send none)"
     },
-    { "domain": "vault.azure.net.", "why": "Our key vault, in Microsoft's zone for vaults" },
-    { "domain": "ghcr.io.", "why": "GitHub's container registry: our signed image" },
-    { "domain": "pkg-containers.githubusercontent.com.", "why": "Where ghcr.io serves the image's layers from" },
-    { "domain": "cluster.local.", "why": "Kubernetes' own names inside the environment, answered locally" },
+    {
+      "domain": "vault.azure.net.",
+      "why": "Our key vault, in Microsoft's zone for vaults"
+    },
+    {
+      "domain": "ghcr.io.",
+      "why": "GitHub's container registry: our signed image"
+    },
+    {
+      "domain": "pkg-containers.githubusercontent.com.",
+      "why": "Where ghcr.io serves the image's layers from"
+    },
+    {
+      "domain": "cluster.local.",
+      "why": "Kubernetes' own names inside the environment, answered locally"
+    },
     {
       "domain": "internal.cloudapp.net.",
       "why": "The environment's own machines, answered by Azure inside the network"
-    },
-    { "domain": "100.100.in-addr.arpa.", "why": "Reverse lookups of the platform's own addresses (100.100.0.0/16)" },
-    { "domain": "40.10.in-addr.arpa.", "why": "Reverse lookups of our network's addresses (10.40.0.0/16)" }
+    }
   ]
 }

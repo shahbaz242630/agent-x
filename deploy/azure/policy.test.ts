@@ -112,10 +112,12 @@ type Mutable = Record<string, unknown>;
  * wider than a /16 (`10.in-addr.arpa.`), each of which would let lookups of
  * names whose servers anyone can run past the rule that blocks the rest.
  */
-const tooBroad = (domain: string): boolean => {
+function tooBroad(domain: string): boolean {
+  if (!domain.endsWith('.')) return true;
   const labels = domain.split('.').filter((label) => label !== '');
-  return !domain.endsWith('.') || labels.length < 2 || (`.${domain}`.endsWith('.in-addr.arpa.') && labels.length < 4);
-};
+  if (labels.length < 2) return true;
+  return `.${domain}`.endsWith('.in-addr.arpa.') && labels.length < 4;
+}
 
 /** A copy of the staging snapshot with one change made to the resources `pick` selects. */
 function changed(pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot {
@@ -184,12 +186,13 @@ const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.
 const NETWORK = type('Microsoft.Network/virtualNetworks');
 const DNS_POLICY = type('Microsoft.Network/dnsResolverPolicies');
 const DNS_RULES = type('Microsoft.Network/dnsResolverPolicies/dnsSecurityRules');
-const DNS_RULE = (resource: PredictedResource) => DNS_RULES(resource) && resource.name.endsWith('/watch-every-lookup');
+const WATCH_RULE = (resource: PredictedResource) =>
+  DNS_RULES(resource) && resource.name.endsWith('/watch-every-lookup');
 const ALLOW_RULE = (resource: PredictedResource) =>
   DNS_RULES(resource) && resource.name.endsWith('/allow-needed-names');
 const DNS_LINK = type('Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks');
 const DNS_LISTS = type('Microsoft.Network/dnsResolverDomainLists');
-const DNS_NAMES = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-every-name');
+const EVERY_NAME_LIST = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-every-name');
 const ALLOWED_NAMES = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-allowed');
 const DNS_LOGS = named(/^lookups-to-workspace$/);
 const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
@@ -1187,23 +1190,23 @@ describe('SEC-OPS-09 each rule can fail', () => {
       changed(DNS_LINK, (link) => (inside(link, 'properties', 'virtualNetwork').id = `${String(link.id)}-other`)),
       // Linked to a policy this deployment doesn't create.
       changed(DNS_LINK, (link) => (link.id = String(link.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
-      without(DNS_RULE),
-      changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
-      changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'disabled')),
-      changed(DNS_RULE, (rule) => delete inside(rule, 'properties', 'action').actionType),
+      without(WATCH_RULE),
+      changed(WATCH_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
+      changed(WATCH_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'disabled')),
+      changed(WATCH_RULE, (rule) => delete inside(rule, 'properties', 'action').actionType),
       // The rule sits under a policy the network isn't linked to.
-      changed(DNS_RULE, (rule) => (rule.id = String(rule.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
-      changed(DNS_RULE, (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = elsewhere)),
-      changed(DNS_NAMES, (names) => (properties(names).domains = ['example.com.'])),
+      changed(WATCH_RULE, (rule) => (rule.id = String(rule.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
+      changed(WATCH_RULE, (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = elsewhere)),
+      changed(EVERY_NAME_LIST, (names) => (properties(names).domains = ['example.com.'])),
     ]) {
       expect(brokenRules(broken)).toEqual(['dns-watch']);
     }
     // Turned to Allow, it watches nothing and allows every name.
     expect(
-      brokenRules(changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow'))),
+      brokenRules(changed(WATCH_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow'))),
     ).toEqual(['dns-watch', 'dns-allow']);
     // A rule above it that allows every name lets each lookup through first.
-    const rule = staging.predictedResources.find(DNS_RULE);
+    const rule = staging.predictedResources.find(WATCH_RULE);
     const allowAll = structuredClone(rule) as unknown as Mutable;
     allowAll.id = `${String(rule?.id)}-allow`;
     inside(allowAll, 'properties').priority = 100;
@@ -1213,12 +1216,12 @@ describe('SEC-OPS-09 each rule can fail', () => {
     expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch', 'dns-allow']);
     // Blocking every name still sees each lookup.
     expect(
-      brokenRules(changed(DNS_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
+      brokenRules(changed(WATCH_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
     ).toEqual([]);
     // Azure reads the action and the state without regard to case.
     expect(
       brokenRules(
-        changed(DNS_RULE, (entry) => {
+        changed(WATCH_RULE, (entry) => {
           inside(entry, 'properties', 'action').actionType = 'block';
           properties(entry).dnsSecurityRuleState = 'enabled';
         }),
@@ -1257,11 +1260,11 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (rule: Mutable) => (properties(rule).dnsSecurityRuleState = 'Disabled'),
       (rule: Mutable) => (inside(rule, 'properties', 'action').actionType = 'Alert'),
     ]) {
-      const snapshot = structuredClone(changed(ALLOWED_NAMES, wide)) as unknown as { predictedResources: Mutable[] };
-      const rule = snapshot.predictedResources.find((resource) => ALLOW_RULE(resource as unknown as PredictedResource));
-      if (rule === undefined) throw new Error('no allow rule');
-      harmless(rule);
-      expect(brokenRules(snapshot as unknown as Snapshot)).toEqual([]);
+      const snapshot = changed(ALLOWED_NAMES, wide);
+      const rule = snapshot.predictedResources.find(ALLOW_RULE);
+      expect(rule).toBeDefined();
+      harmless(rule as unknown as Mutable);
+      expect(brokenRules(snapshot)).toEqual([]);
     }
   });
 
