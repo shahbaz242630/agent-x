@@ -985,7 +985,9 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
         .selectFrom('suppliers.beneficiary_registrations')
         .select(['route', 'status'])
         .where('supplier_id', '=', id)
+        // The frozen clock gives both the same time: the sequential ID keeps them in the order made.
         .orderBy('created_at')
+        .orderBy('id')
         .execute(),
     );
     expect(registrations).toEqual([
