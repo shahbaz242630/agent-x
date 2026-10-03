@@ -1040,8 +1040,20 @@ describe('deploy secrets', () => {
     ]);
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
     const deployment = done.az.deployment;
-    expect(deployment?.args).toContain('staging.secrets.bicepparam');
-    expect(deployment?.args).toContain(RESOURCE_GROUP);
+    expect(deployment?.args).toEqual([
+      'deployment',
+      'group',
+      'create',
+      '--subscription',
+      SUBSCRIPTION,
+      '--resource-group',
+      RESOURCE_GROUP,
+      '--name',
+      expect.stringMatching(/^agentx-staging-secrets-\d{8}T\d{6}Z$/),
+      '--parameters',
+      'staging.secrets.bicepparam',
+      '--confirm-with-what-if',
+    ]);
     const values = deployment?.values ?? {};
     // All but the three Zitadel issues later, which only their names write.
     expect(
