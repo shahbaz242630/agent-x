@@ -247,7 +247,6 @@ const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDeta
 
 const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
 
-/** A step-up asked: the 202's body, under its own name in the document. */
 const ADD_SCHEMA = {
   summary: 'Add a supplier, unverified',
   body: DETAILS_BODY.describe('The supplier to add, UNVERIFIED.'),
