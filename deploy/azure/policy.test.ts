@@ -8,6 +8,7 @@ import {
   at,
   bicepGuid,
   describeProblem,
+  DNS_ALLOWED,
   type Expectations,
   kqlStages,
   paramsFileProblems,
@@ -16,6 +17,7 @@ import {
   type RuleId,
   singleSummaryColumn,
   templateProblems,
+  tooBroad,
 } from './policy.ts';
 import {
   type BicepRun,
@@ -172,9 +174,14 @@ const DATABASE_RULES = (resource: PredictedResource) => RULES(resource) && resou
 const APPS_RULES = (resource: PredictedResource) => RULES(resource) && resource.name.endsWith('-apps');
 const NETWORK = type('Microsoft.Network/virtualNetworks');
 const DNS_POLICY = type('Microsoft.Network/dnsResolverPolicies');
-const DNS_RULE = type('Microsoft.Network/dnsResolverPolicies/dnsSecurityRules');
+const DNS_RULES = type('Microsoft.Network/dnsResolverPolicies/dnsSecurityRules');
+const DNS_RULE = (resource: PredictedResource) => DNS_RULES(resource) && resource.name.endsWith('/watch-every-lookup');
+const ALLOW_RULE = (resource: PredictedResource) =>
+  DNS_RULES(resource) && resource.name.endsWith('/allow-needed-names');
 const DNS_LINK = type('Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks');
-const DNS_NAMES = type('Microsoft.Network/dnsResolverDomainLists');
+const DNS_LISTS = type('Microsoft.Network/dnsResolverDomainLists');
+const DNS_NAMES = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-every-name');
+const ALLOWED_NAMES = (resource: PredictedResource) => DNS_LISTS(resource) && resource.name.endsWith('-allowed');
 const DNS_LOGS = named(/^lookups-to-workspace$/);
 const ENVIRONMENT = type('Microsoft.App/managedEnvironments');
 const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
@@ -385,6 +392,8 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Network/privateDnsZones/virtualNetworkLinks agentx-staging.private.postgres.database.azure.com/vnet-agentx-staging',
       'Microsoft.Network/dnsResolverPolicies dnspr-agentx-staging',
       'Microsoft.Network/dnsResolverDomainLists dnsdl-agentx-staging-every-name',
+      'Microsoft.Network/dnsResolverDomainLists dnsdl-agentx-staging-allowed',
+      'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules dnspr-agentx-staging/allow-needed-names',
       'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules dnspr-agentx-staging/watch-every-lookup',
       'Microsoft.Network/dnsResolverPolicies/virtualNetworkLinks dnspr-agentx-staging/network',
       'Microsoft.Insights/diagnosticSettings lookups-to-workspace',
@@ -1172,7 +1181,6 @@ describe('SEC-OPS-09 each rule can fail', () => {
       without(DNS_RULE),
       changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'Disabled')),
       changed(DNS_RULE, (rule) => (properties(rule).dnsSecurityRuleState = 'disabled')),
-      changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow')),
       changed(DNS_RULE, (rule) => delete inside(rule, 'properties', 'action').actionType),
       // The rule sits under a policy the network isn't linked to.
       changed(DNS_RULE, (rule) => (rule.id = String(rule.id).replace('/dnspr-agentx-staging/', '/elsewhere/'))),
@@ -1181,15 +1189,19 @@ describe('SEC-OPS-09 each rule can fail', () => {
     ]) {
       expect(brokenRules(broken)).toEqual(['dns-watch']);
     }
+    // Turned to Allow, it watches nothing and allows every name.
+    expect(
+      brokenRules(changed(DNS_RULE, (rule) => (inside(rule, 'properties', 'action').actionType = 'Allow'))),
+    ).toEqual(['dns-watch', 'dns-allow']);
     // A rule above it that allows every name lets each lookup through first.
     const rule = staging.predictedResources.find(DNS_RULE);
     const allowAll = structuredClone(rule) as unknown as Mutable;
     allowAll.id = `${String(rule?.id)}-allow`;
     inside(allowAll, 'properties').priority = 100;
     inside(allowAll, 'properties', 'action').actionType = 'Allow';
-    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch']);
+    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch', 'dns-allow']);
     inside(allowAll, 'properties', 'action').actionType = 'allow';
-    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch']);
+    expect(brokenRules(withExtra(allowAll))).toEqual(['dns-watch', 'dns-allow']);
     // Blocking every name still sees each lookup.
     expect(
       brokenRules(changed(DNS_RULE, (entry) => (inside(entry, 'properties', 'action').actionType = 'Block'))),
@@ -1204,6 +1216,53 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ),
     ).toEqual([]);
     expect(brokenRules(changed(DNS_POLICY, (policy) => (policy.location = 'westeurope')))).toEqual(['in-country']);
+  });
+
+  it('dns-allow: an Allow rule naming a name off the reviewed list, a name too broad, or a list it does not create', () => {
+    const properties = (resource: Mutable): Mutable => inside(resource, 'properties');
+    for (const extra of ['example.com.', 'com.', 'io.', 'in-addr.arpa.']) {
+      const broken = changed(ALLOWED_NAMES, (names) => (properties(names).domains = [...DNS_ALLOWED, extra]));
+      expect(brokenRules(broken), extra).toEqual(['dns-allow']);
+    }
+    // Allowing every name also lets each lookup past the rule that watches them.
+    expect(brokenRules(changed(ALLOWED_NAMES, (names) => (properties(names).domains = [...DNS_ALLOWED, '.'])))).toEqual(
+      ['dns-watch', 'dns-allow'],
+    );
+    const elsewhere = changed(
+      ALLOW_RULE,
+      (rule) => (first(at(rule, 'properties', 'dnsResolverDomainLists')).id = 'elsewhere'),
+    );
+    expect(brokenRules(elsewhere)).toEqual(['dns-allow']);
+    // Azure reads the action and the state without regard to case.
+    const lowerCase = (rule: Mutable): void => {
+      inside(rule, 'properties', 'action').actionType = 'allow';
+      properties(rule).dnsSecurityRuleState = 'enabled';
+    };
+    expect(brokenRules(changed(ALLOW_RULE, lowerCase))).toEqual([]);
+    // Off, or alerting rather than allowing, it lets nothing through first.
+    const wide = (names: Mutable): void => {
+      properties(names).domains = ['example.com.'];
+    };
+    expect(brokenRules(changed(ALLOWED_NAMES, wide))).toEqual(['dns-allow']);
+    for (const harmless of [
+      (rule: Mutable) => (properties(rule).dnsSecurityRuleState = 'Disabled'),
+      (rule: Mutable) => (inside(rule, 'properties', 'action').actionType = 'Alert'),
+    ]) {
+      const snapshot = structuredClone(changed(ALLOWED_NAMES, wide)) as unknown as { predictedResources: Mutable[] };
+      const rule = snapshot.predictedResources.find((resource) => ALLOW_RULE(resource as unknown as PredictedResource));
+      if (rule === undefined) throw new Error('no allow rule');
+      harmless(rule);
+      expect(brokenRules(snapshot as unknown as Snapshot)).toEqual([]);
+    }
+  });
+
+  it('dns-allow: the reviewed list holds nothing too broad, and staging allows exactly it', () => {
+    expect([...DNS_ALLOWED].filter(tooBroad)).toEqual([]);
+    for (const broad of ['.', 'com.', 'io.', 'example.com', 'arpa.', 'in-addr.arpa.', '10.in-addr.arpa.'])
+      expect(tooBroad(broad), broad).toBe(true);
+    for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.']) expect(tooBroad(narrow), narrow).toBe(false);
+    const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
+    expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
   });
 
   it('SEC-DATA-09 log-destinations: a diagnostic setting that also sends to a storage account, an event hub or a partner', () => {
