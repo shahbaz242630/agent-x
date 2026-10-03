@@ -330,6 +330,25 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     },
   );
 
+  it('sweeps past a challenge another transaction holds, never waiting on it, and leaves it for next time', async () => {
+    const { clock, challenges, binding } = await setUp();
+    const locked = await challenges.open(app, binding);
+    const free = await challenges.open(app, binding);
+    if (locked === undefined || free === undefined) throw new Error('both should open');
+    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [locked.challengeId]);
+
+      await within(5_000, challenges.sweep(app, 1000), 'the sweep');
+      expect((await rowsFor(binding.sessionId)).map((row) => row.id)).toEqual([locked.challengeId]);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it("leaves a challenge past its time to the sweep: a hold doesn't lock it", async () => {
     const { clock, challenges, binding } = await setUp();
     const old = await challenges.open(app, binding);
