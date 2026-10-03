@@ -34,6 +34,16 @@ LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x"
   org.opencontainers.image.revision="${AGENTX_RELEASE}" \
   org.opencontainers.image.description="Agent X: the API, the migration job, the database set-up job, the operator's command and the worker"
 
+# The base image's Debian packages brought to their security updates (the
+# image scan found OpenSSL and PCRE2 fixes newer than the base image), and
+# npm, npx, Corepack and Yarn removed: nothing here runs them, and their own
+# bundled packages carried known vulnerabilities (Security-Handoff §13b).
+RUN apt-get update \
+  && apt-get upgrade --yes --no-install-recommends \
+  && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-* \
+  && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 WORKDIR /app
 COPY --from=dependencies /app /app
 COPY apps/api apps/api

@@ -75,6 +75,24 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
     expect(new Set(dockerfile).size).toBe(1);
   });
 
+  it("ships no package manager, and the base image's Debian security updates, in the image that runs", () => {
+    const text = readFileSync(DOCKERFILE, 'utf8').replaceAll('\r\n', '\n');
+    const runtime = text.slice(text.lastIndexOf('\nFROM '));
+    for (const removed of [
+      '/usr/local/lib/node_modules/npm',
+      '/usr/local/lib/node_modules/corepack',
+      '/usr/local/bin/npm',
+      '/usr/local/bin/npx',
+      '/usr/local/bin/corepack',
+      '/usr/local/bin/yarn',
+    ]) {
+      expect(runtime, removed).toContain(removed);
+    }
+    expect(runtime).toMatch(/apt-get update \\\n {2}&& apt-get upgrade --yes/);
+    // As root, before the image drops to its unprivileged user.
+    expect(runtime.indexOf('apt-get upgrade')).toBeLessThan(runtime.indexOf('USER node'));
+  });
+
   it('builds on the Node major the repository runs (.nvmrc)', () => {
     const major = readFileSync('.nvmrc', 'utf8').trim();
     expect(dockerfile[0]).toMatch(new RegExp(`^node:${major}\\.[0-9]+\\.[0-9]+-`));
