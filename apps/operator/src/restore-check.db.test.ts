@@ -8,7 +8,7 @@ import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, transactionsReadOnly } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, type TestDatabase, writeTestKeys } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestClient, type TestDatabase, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
@@ -56,10 +56,15 @@ async function closeAll(): Promise<void> {
   await Promise.all(open.splice(0).map((handle) => handle.destroy()));
 }
 
+/** The test's copy, once made. */
+function theCopy(): TestDatabase {
+  if (copy === undefined) throw new Error('No copy made yet.');
+  return copy;
+}
+
 /** The check of the test's copy against its live database. */
 function check() {
-  if (copy === undefined) throw new Error('No copy made yet.');
-  return checkRestoredCopy({ copy: appOn(copy, true), live: appOn(live, true), keys });
+  return checkRestoredCopy({ copy: appOn(theCopy(), true), live: appOn(live, true), keys });
 }
 
 beforeEach(async () => {
@@ -77,48 +82,90 @@ afterAll(() => {
   keyFiles.remove();
 });
 
+/**
+ * Changes the copy as its superuser with every trigger and key check off
+ * (`session_replication_role = replica`): what a broken restore could leave,
+ * which the app's own rules would never let it write.
+ */
+async function breakCopy(change: (admin: TestClient) => Promise<unknown>): Promise<void> {
+  const admin = await theCopy().connect('admin');
+  try {
+    await admin.query('set session_replication_role = replica');
+    await change(admin);
+  } finally {
+    await admin.end();
+  }
+}
+
+/** A copy of the live database as it is now, with one organisation on it. */
+async function copyWithOrganisation(): Promise<string> {
+  const orgId = await organisationOn(live);
+  await closeAll();
+  copy = await live.copy();
+  return orgId;
+}
+
 describe('SEC-AV-06 the restore drill check', () => {
   it('passes a copy the live server is, and one it has grown on from', async () => {
-    const first = await organisationOn(live);
-    await closeAll();
-    copy = await live.copy();
+    await copyWithOrganisation();
 
     const same = await check();
-    expect(same.problems).toEqual([]);
-    expect(same.copyOrganizations).toBe(1);
-    expect(same.newSinceCopy).toBe(0);
-    expect(same.chains.map((chain) => chain.chain)).toEqual(['platform', `organisation ${first}`]);
-    for (const chain of same.chains) {
-      expect(chain.copySeq).toBeGreaterThan(0n);
-      expect(chain.liveSeq).toBe(chain.copySeq);
-    }
+    expect(same).toMatchObject({
+      problems: [],
+      chainsChecked: 2,
+      chainsHeld: 2,
+      copyOrganizations: 1,
+      newSinceCopy: 0,
+    });
+    expect(same.platformCopySeq).toBeGreaterThan(0n);
+    expect(same.platformLiveSeq).toBe(same.platformCopySeq);
 
     // The live server moves on after the restore point: the copy is still its earlier state.
     await organisationOn(live);
     const grown = await check();
-    expect(grown.problems).toEqual([]);
-    expect(grown.newSinceCopy).toBe(1);
-    const platform = grown.chains.find((chain) => chain.chain === 'platform');
-    expect(platform?.liveSeq).toBeGreaterThan(platform?.copySeq ?? 0n);
+    expect(grown).toMatchObject({ problems: [], chainsHeld: 2, newSinceCopy: 1 });
+    expect(grown.platformLiveSeq).toBeGreaterThan(grown.platformCopySeq ?? 0n);
   });
 
-  it('fails a copy whose chain does not lead to the live one', async () => {
-    await organisationOn(live);
-    await closeAll();
-    copy = await live.copy();
-    // Each side goes on alone: the platform chain forks at the copy's head.
-    await organisationOn(copy);
+  it('fails a copy whose chains do not lead to the live ones', async () => {
+    await copyWithOrganisation();
+    // Each side goes on alone: the platform chain forks at the copy's head,
+    // and the copy's own new organisation has no chain live.
+    const onlyOnCopy = await organisationOn(theCopy());
     await organisationOn(live);
     const report = await check();
-    expect(report.problems).toEqual([expect.stringMatching(/^platform on the live server, from the copy's head: /)]);
-    expect(report.chains.find((chain) => chain.chain === 'platform')?.liveSeq).toBeUndefined();
+    expect(report.problems).toEqual([
+      expect.stringMatching(/^platform on the live server, from the copy's head: anchor at \d+$/),
+      expect.stringMatching(
+        new RegExp(`^organisation ${onlyOnCopy} on the live server, from the copy's head: anchor at \\d+$`),
+      ),
+      `organisation ${onlyOnCopy}: on the copy, but not listed live`,
+    ]);
+    expect(report).toMatchObject({ chainsChecked: 3, chainsHeld: 1, platformLiveSeq: null });
+  });
+
+  it('fails a copy broken on its own side, before the live server is read', async () => {
+    await copyWithOrganisation();
+    await breakCopy((admin) => admin.query('delete from platform_controls.audit_head'));
+    const report = await check();
+    expect(report.problems).toEqual(['platform on the copy: head at 0']);
+    expect(report).toMatchObject({ chainsHeld: 1, platformCopySeq: null });
+  });
+
+  it("says a chain or a list the copy won't let it read, by the database's code alone", async () => {
+    const orgId = await copyWithOrganisation();
+    // The test server's app role (tooling/test-db), as the check connects.
+    await breakCopy((admin) => admin.query('revoke select on audit.events from agentx_app'));
+    expect((await check()).problems).toEqual([`organisation ${orgId} on the copy: unreadable (42501)`]);
+    await breakCopy((admin) => admin.query('revoke select on directory.orgs from agentx_app'));
+    const report = await check();
+    expect(report.problems).toEqual(["the organisations' lists: unreadable (42501)"]);
+    expect(report.copyOrganizations).toBe(0);
   });
 
   it('fails a copy whose directory has lost an organisation the platform chain records', async () => {
-    const orgId = await organisationOn(live);
-    await closeAll();
-    copy = await live.copy();
-    await copy.as('owner').query('delete from directory.orgs where org_id = $1', [orgId]);
+    const orgId = await copyWithOrganisation();
+    await breakCopy((admin) => admin.query('delete from directory.orgs where org_id = $1', [orgId]));
     const report = await check();
     expect(report.problems).toEqual([`organisation ${orgId}: recorded as created on the copy, but not listed`]);
   });
@@ -139,7 +186,6 @@ describe('SEC-AV-06 the restore drill check', () => {
   it('reads a copy with nothing in it: the chains start empty on both sides', async () => {
     copy = await live.copy();
     const report = await check();
-    expect(report.problems).toEqual([]);
-    expect(report.copyOrganizations).toBe(0);
+    expect(report).toMatchObject({ problems: [], chainsChecked: 1, chainsHeld: 1, copyOrganizations: 0 });
   });
 });

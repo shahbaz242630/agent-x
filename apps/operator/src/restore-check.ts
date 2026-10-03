@@ -5,8 +5,10 @@
 //
 // 1. On the copy, every chain is checked whole from its start: the platform's,
 //    and each organisation's the directory lists. Every organisation the
-//    platform chain records as created must be listed (the anchor check's
-//    rule).
+//    platform chain records as created must be listed: the anchor check's
+//    rule, one way only, as there (an organisation is recorded and listed in
+//    one transaction, and the platform chain's seals are what a listing
+//    without a record would have to get past).
 // 2. On the live server, each of those chains is checked again with the copy's
 //    head as its anchor: it passes only if the live chain is the copy's grown
 //    on, so the copy is a true earlier state of it, not merely a sound chain.
@@ -16,26 +18,23 @@
 // never raises the integrity alarm (`audit.integrity_failed` pages someone,
 // and a broken copy is the drill's finding, not an incident): every problem
 // is the run's own line, and the job's exit code.
-import { type OperatorTables } from './create-organization.ts';
-
-import { listedOrganizations } from '@agentx/core/modules/directory';
 import { createAuditTrail } from '@agentx/core/modules/audit';
+import { listedOrganizations } from '@agentx/core/modules/directory';
 import { createPlatformChain } from '@agentx/core/modules/platform-controls';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import type { AnchorPoint, ChainReport } from '@agentx/platform/audit-chain';
-import { type Database } from '@agentx/platform/db';
+import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 
-/** One chain's head on the copy and on the live server, or why it fell short. */
-interface ChainOutcome {
-  readonly chain: string;
-  readonly copySeq?: bigint;
-  readonly liveSeq?: bigint;
-  readonly problem?: string;
-}
+import type { OperatorTables } from './create-organization.ts';
 
 export interface RestoreCheckReport {
-  readonly chains: readonly ChainOutcome[];
+  /** Chains checked on the copy, and how many of those held on both sides. */
+  readonly chainsChecked: number;
+  readonly chainsHeld: number;
+  /** The platform chain's head on each side, where it was read: how far the live server is past the copy. */
+  readonly platformCopySeq: bigint | null;
+  readonly platformLiveSeq: bigint | null;
   /** Organisations the copy lists, and the live server lists past them (made since the restore point). */
   readonly copyOrganizations: number;
   readonly newSinceCopy: number;
@@ -49,20 +48,21 @@ export interface RestoreCheckSides {
   readonly keys: KeyProvider;
 }
 
-/** A chain's report as a head, or its problem in words: never an error's message, which could hold data. */
-function headOf(report: ChainReport): AnchorPoint | string {
-  return report.ok
-    ? { seq: report.seq, hash: report.hash }
-    : `${report.problem.reason} at ${String(report.problem.seq)}`;
+/** What stopped a read: the database's error code alone, never its message, which could hold data. */
+function unreadable(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'error';
+  return `unreadable (${code})`;
 }
 
-/** The check of one chain, or what stopped it: the database's error code alone. */
+/** The check of one chain as a head, or its problem in words. */
 async function reportOf(verify: () => Promise<ChainReport>): Promise<AnchorPoint | string> {
   try {
-    return headOf(await verify());
+    const report = await verify();
+    return report.ok
+      ? { seq: report.seq, hash: report.hash }
+      : `${report.problem.reason} at ${String(report.problem.seq)}`;
   } catch (error) {
-    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'error';
-    return `unreadable (${code})`;
+    return unreadable(error);
   }
 }
 
@@ -72,44 +72,56 @@ export async function checkRestoredCopy({ copy, live, keys }: RestoreCheckSides)
   const platform = createPlatformChain({ keys, ids: uuidV7Ids });
   const trail = createAuditTrail({ keys, ids: uuidV7Ids });
   const problems: string[] = [];
-  const chains: ChainOutcome[] = [];
+  let chainsChecked = 0;
+  let chainsHeld = 0;
 
+  /** One chain on both sides: its heads when it held on both, nothing when it didn't (a problem said). */
   const both = async (
     chain: string,
     verify: (database: Database<OperatorTables>, anchor: AnchorPoint | undefined) => Promise<ChainReport>,
-  ): Promise<void> => {
+  ): Promise<{ readonly copySeq: bigint; readonly liveSeq: bigint } | undefined> => {
+    chainsChecked += 1;
     const onCopy = await reportOf(() => verify(copy, undefined));
     if (typeof onCopy === 'string') {
       problems.push(`${chain} on the copy: ${onCopy}`);
-      chains.push({ chain, problem: onCopy });
-      return;
+      return undefined;
     }
     const onLive = await reportOf(() => verify(live, onCopy));
     if (typeof onLive === 'string') {
       problems.push(`${chain} on the live server, from the copy's head: ${onLive}`);
-      chains.push({ chain, copySeq: onCopy.seq, problem: onLive });
-      return;
+      return undefined;
     }
-    chains.push({ chain, copySeq: onCopy.seq, liveSeq: onLive.seq });
+    chainsHeld += 1;
+    return { copySeq: onCopy.seq, liveSeq: onLive.seq };
   };
 
-  await both('platform', (database, anchor) => platform.verifyAlone(database, anchor));
-  const [listed, recorded, liveListed] = await Promise.all([
-    listedOrganizations(copy),
-    platform.createdOrganizations(copy),
-    listedOrganizations(live),
-  ]);
+  const heads = await both('platform', (database, anchor) => platform.verifyAlone(database, anchor));
+  let lists: readonly [string[], string[], string[]];
+  try {
+    lists = await Promise.all([
+      listedOrganizations(copy),
+      platform.createdOrganizations(copy),
+      listedOrganizations(live),
+    ]);
+  } catch (error) {
+    problems.push(`the organisations' lists: ${unreadable(error)}`);
+    lists = [[], [], []];
+  }
+  const [listed, recorded, liveListed] = lists;
   const onList = new Set(listed);
+  const onLive = new Set(liveListed);
   for (const orgId of recorded) {
     if (!onList.has(orgId)) problems.push(`organisation ${orgId}: recorded as created on the copy, but not listed`);
   }
   for (const orgId of listed) {
     await both(`organisation ${orgId}`, (database, anchor) => trail.verifyAlone(database, orgId, anchor));
+    if (!onLive.has(orgId)) problems.push(`organisation ${orgId}: on the copy, but not listed live`);
   }
-  const missingLive = listed.filter((orgId) => !liveListed.includes(orgId));
-  for (const orgId of missingLive) problems.push(`organisation ${orgId}: on the copy, but not listed live`);
   return {
-    chains,
+    chainsChecked,
+    chainsHeld,
+    platformCopySeq: heads?.copySeq ?? null,
+    platformLiveSeq: heads?.liveSeq ?? null,
     copyOrganizations: listed.length,
     newSinceCopy: liveListed.filter((orgId) => !onList.has(orgId)).length,
     problems,

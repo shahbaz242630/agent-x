@@ -206,13 +206,24 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
   ],
   'copy-holds': () => [
     said({ event: 'operator.starting' }),
-    said({ event: 'operator.restore_check_done', copyOrganizations: 3, newSinceCopy: 1, problems: [] }),
+    said({
+      event: 'operator.restore_check_done',
+      chainsChecked: 4,
+      chainsHeld: 4,
+      platformCopySeq: 9,
+      platformLiveSeq: 11,
+      copyOrganizations: 3,
+      newSinceCopy: 1,
+      problems: [],
+      problemCount: 0,
+    }),
     TERMINATED,
   ],
   'copy-broken': () => [
     said({
       event: 'operator.restore_check_failed',
       problems: ["platform on the live server, from the copy's head: anchor at 7"],
+      problemCount: 3,
     }),
     TERMINATED,
   ],
@@ -1051,7 +1062,7 @@ describe("S78 the restore drill's check", () => {
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.said[1]).toBe("Checking the drill's copy against the live server, read-only.");
     expect(done.said.at(-1)).toBe(
-      'The copy holds: every chain on it checked whole, and each leads to the live one (3 organisations on the copy, 1 made since).',
+      'The copy holds: all 4 chains on it checked whole, and each leads to the live one (3 organisations on the copy, 1 made since; the platform chain at 9 on the copy, 11 live).',
     );
   });
 
@@ -1060,7 +1071,7 @@ describe("S78 the restore drill's check", () => {
     expect(done.status).toBe(1);
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.said.at(-1)).toBe(
-      "The copy does not hold: platform on the live server, from the copy's head: anchor at 7.",
+      "The copy does not hold: platform on the live server, from the copy's head: anchor at 7; and 2 more.",
     );
   });
 

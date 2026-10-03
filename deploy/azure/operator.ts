@@ -387,6 +387,11 @@ function commandLines(lines: readonly LogLine[]): Readonly<Record<string, unknow
   });
 }
 
+/** A line's problems as said, or undefined when it holds none. */
+function problemsSaid(line: Readonly<Record<string, unknown>> | undefined): string | undefined {
+  return Array.isArray(line?.problems) ? line.problems.map(String).join('; ') : undefined;
+}
+
 /** A request for the job: its file's text, what is said around its run, and how the run is judged. */
 interface JobRequest {
   /** The request file's text. */
@@ -458,7 +463,7 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: 
     return 1;
   }
   if (Array.isArray(refused?.problems) && refused[field] === id) {
-    steps.say(`The operator's command refused it, and nothing changed: ${refused.problems.map(String).join('; ')}.`);
+    steps.say(`The operator's command refused it, and nothing changed: ${String(problemsSaid(refused))}.`);
     return 1;
   }
   steps.say(
@@ -528,17 +533,22 @@ function restoreCheckOutcome(steps: JobSteps, run: Ended, lines: readonly LogLin
   const failed = said.find((line) => line.event === 'operator.restore_check_failed');
   if (done !== undefined && failed === undefined) {
     steps.say(
-      `The copy holds: every chain on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since).`,
+      `The copy holds: all ${String(done.chainsChecked)} chains on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since; the platform chain at ${String(done.platformCopySeq)} on the copy, ${String(done.platformLiveSeq)} live).`,
     );
     return 0;
   }
-  if (Array.isArray(failed?.problems)) {
-    steps.say(`The copy does not hold: ${failed.problems.map(String).join('; ')}.`);
+  const failedSaid = problemsSaid(failed);
+  if (failedSaid !== undefined) {
+    // The line names the first problems only (a log line's list is capped): the count is all of them.
+    const shown = Array.isArray(failed?.problems) ? failed.problems.length : 0;
+    const more = Number(failed?.problemCount) - shown;
+    const rest = more > 0 ? '; and ' + String(more) + ' more' : '';
+    steps.say(`The copy does not hold: ${failedSaid}${rest}.`);
     return 1;
   }
-  const refused = said.find((line) => line.event === 'operator.refused');
-  if (Array.isArray(refused?.problems)) {
-    steps.say(`The check was refused, and read nothing: ${refused.problems.map(String).join('; ')}.`);
+  const refusedSaid = problemsSaid(said.find((line) => line.event === 'operator.refused'));
+  if (refusedSaid !== undefined) {
+    steps.say(`The check was refused, and read nothing: ${refusedSaid}.`);
     return 1;
   }
   steps.say(

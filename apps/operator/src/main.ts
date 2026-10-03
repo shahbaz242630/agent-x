@@ -55,7 +55,7 @@ import {
   type Output,
 } from '@agentx/platform/observability';
 
-import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
+import { createOrganizationAsOperator } from './create-organization.ts';
 import { FirstAdminRefused, type FirstAdminTables, inviteFirstAdminAsOperator } from './invite-first-admin.ts';
 import {
   FIRST_ADMIN_USAGE,
@@ -187,6 +187,9 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
   return { words };
 }
 
+/** How many of a restore check's problems its line names, as many as a log line's list keeps. */
+const SHOWN_PROBLEMS = 50;
+
 /** The commands read by a shape of their own, by their first word: create-organization is the rest. */
 const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boolean) => Request | Problems> = new Map([
   ['invite-first-admin', firstAdminRequest],
@@ -286,7 +289,7 @@ const invitedAlready = (error: unknown): boolean =>
 async function connect(
   config: OperatorConfig,
   logger: Logger,
-  to: { readonly host: string; readonly readOnly: boolean } = { host: config.db.host, readOnly: false },
+  to?: { readonly host: string; readonly readOnly: boolean },
 ): Promise<Database<FirstAdminTables> | undefined> {
   const database = createDatabase<FirstAdminTables>(
     { ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME },
@@ -408,7 +411,8 @@ async function inviteFirst(
  */
 async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
   const drillHost = config.db.drillHost;
-  if (drillHost === null || drillHost === config.db.host) {
+  // Host names are read without regard to case, so the live server can't pass for the copy by its capitals.
+  if (drillHost === null || drillHost.toLowerCase() === config.db.host.toLowerCase()) {
     logger.error('operator.refused', {
       problems: ["AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST"],
     });
@@ -419,17 +423,16 @@ async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: L
   const live = await connect(config, logger, { host: config.db.host, readOnly: true });
   try {
     if (live === undefined) return 1;
-    const sides = { copy: copy as Database<OperatorTables>, live: live as Database<OperatorTables>, keys };
     if (!(await transactionsReadOnly(copy)) || !(await transactionsReadOnly(live))) {
       logger.error('operator.refused', { problems: ['a connection is not read-only, so nothing was read'] });
       return 1;
     }
-    const report = await checkRestoredCopy(sides);
+    const report = await checkRestoredCopy({ copy, live, keys });
+    // A log line keeps the first 50 of a list (LOGGABLE_LIMITS): the count says how many there were in all.
     const line = {
-      chains: report.chains,
-      copyOrganizations: report.copyOrganizations,
-      newSinceCopy: report.newSinceCopy,
-      problems: report.problems,
+      ...report,
+      problems: report.problems.slice(0, SHOWN_PROBLEMS),
+      problemCount: report.problems.length,
     };
     if (report.problems.length > 0) {
       logger.error('operator.restore_check_failed', line);
