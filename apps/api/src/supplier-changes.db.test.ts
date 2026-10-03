@@ -30,13 +30,12 @@ import { createDatabase, type Database, type IdempotentRequest, withTenant } fro
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
-  waitUntilQueued,
-  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -500,25 +499,13 @@ describe(`the confirmation's lock order against the admin's demotion (ADR-006 §
     changedOf(await suspend(admin, id));
     const challengeId = askedFor(await reactivate(admin, id));
     await stepUp(admin, challengeId);
-    // A demotion of the admin, part-way: their challenges locked, at its level 0b...
-    const holder = await database.connect('admin');
-    await holder.query('begin');
-    try {
-      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [challengeId]);
-      const confirming = within(20_000, confirm(admin, id, challengeId), 'the confirmation');
-      await waitUntilQueued(database.as('admin'), 1);
-      // ...then their membership (2a), which the confirmation, queued at the challenge, doesn't hold yet.
-      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
-        org,
-        admin.membershipId,
-      ]);
-      await holder.query('commit');
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, id, challengeId),
+    );
 
-      expect(changedOf(await confirming).supplier).toMatchObject({ id, status: 'UNVERIFIED' });
-    } finally {
-      await holder.query('rollback');
-      await holder.end();
-    }
+    expect(changedOf(confirmed).supplier).toMatchObject({ id, status: 'UNVERIFIED' });
   });
 });
 

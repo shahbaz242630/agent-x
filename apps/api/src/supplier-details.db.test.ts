@@ -35,7 +35,14 @@ import {
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  confirmedWhileDemoted,
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -490,5 +497,31 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
     expect(await changed(alice, supplierId, supplierDetails(shouted))).toEqual(
       refusedWith('SUPPLIER_DETAILS_UNCHANGED', 409),
     );
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a details change holds its step-up challenges before the admin’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, alice, supplierId } = await established();
+    const admin = await signedIn(alice);
+    const challengeId = askedFor(
+      await detailsChanges.change(admin, keyed(admin, DETAILS_OPERATION), supplierId, NEW_PHONE, CORRELATION),
+    );
+    await stepUp(admin, challengeId);
+
+    const answer = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: alice.membershipId },
+      () =>
+        detailsChanges.changeConfirm(
+          admin,
+          keyed(admin, DETAILS_CONFIRM_OPERATION),
+          supplierId,
+          { details: NEW_PHONE, stepUpChallengeId: challengeId },
+          CORRELATION,
+        ),
+    );
+
+    expect(answer).toMatchObject({ outcome: 'changed', supplier: { status: 'UNVERIFIED' } });
   });
 });

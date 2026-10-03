@@ -10,6 +10,7 @@ import { createDatabase, type Database, type IdempotentRequest, lockName, withTe
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   holdNamedLock,
@@ -411,25 +412,28 @@ describe(`the confirmation's lock order against the admin's demotion (ADR-006 §
     const asked = written(await add(admin));
     const challengeId = asked.stepUpChallengeId ?? '';
     await stepUp(admin, challengeId);
-    // A demotion of the admin, part-way: their challenges locked, at its level 0b...
-    const holder = await database.connect('admin');
-    await holder.query('begin');
-    try {
-      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [challengeId]);
-      const confirming = within(20_000, confirm(admin, asked.contact.id), 'the confirmation');
-      await waitUntilQueued(database.as('admin'), 1);
-      // ...then their membership (2a), which the confirmation, queued at the challenge, doesn't hold yet.
-      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
-        org,
-        admin.membershipId,
-      ]);
-      await holder.query('commit');
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, asked.contact.id),
+    );
 
-      expect(await confirming).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
-    } finally {
-      await holder.query('rollback');
-      await holder.end();
-    }
+    expect(confirmed).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
+  });
+
+  it('a removal’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin } = await organization();
+    const id = await added(admin);
+    const asked = await remove(admin, id);
+    if (asked.outcome !== 'asked') throw new Error('not asked');
+    await stepUp(admin, asked.stepUpChallengeId);
+    const removed = await confirmedWhileDemoted(
+      database,
+      { challengeId: asked.stepUpChallengeId, orgId: org, membershipId: admin.membershipId },
+      () => removeConfirm(admin, id, asked.stepUpChallengeId),
+    );
+
+    expect(removed).toMatchObject({ outcome: 'written', contact: { status: 'REMOVED' } });
   });
 });
 

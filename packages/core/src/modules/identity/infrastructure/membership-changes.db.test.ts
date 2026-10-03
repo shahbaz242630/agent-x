@@ -882,7 +882,7 @@ describe(`changing memberships at the same moment (B4-5a, ADR-006 §6, Postgres 
     );
   });
 
-  it('holds the confirming admin’s challenge before any membership, so their own demotion at the same moment waits', async () => {
+  it('pins the confirming admin’s challenges locked (lockChallengesOf) before any membership, so their own demotion at the same moment waits', async () => {
     const who = await organization();
     const viewer = await member(who.org, 'viewer');
     const mine = await steppedUp(who.admin, viewer.membershipId, DEACTIVATE);

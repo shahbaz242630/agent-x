@@ -14,9 +14,10 @@
 //    first, at ADR-006 §6's level 0b, before any row the change decides on: a
 //    demotion or deactivation of the same person locks their challenges there,
 //    then their membership, so a change that read the membership first and its
-//    challenge after would deadlock with it (S76). Every one of the session's,
-//    since some changes learn which only from a row they read. `consume` takes
-//    only a held session's.
+//    challenge after would deadlock with it (S76). Every one of the session's
+//    still in time, since some changes learn which only from a row they read;
+//    one past its time is the sweep's, never consumed. `consume` takes only a
+//    session held in its own transaction.
 // 5. `consume`: the change's own transaction deletes it and reads its
 //    evidence in one statement, only for the same session, action and change
 //    hash, verified and still in time: used once, and for nothing else
@@ -75,6 +76,8 @@ declare const held: unique symbol;
 /** A session whose challenges `hold` has locked in the change's transaction: the only kind `consume` takes. */
 export interface HeldChallenges {
   readonly sessionId: string;
+  /** The transaction holding them: a hold on any other handle has let go already. */
+  readonly db: Handle;
   readonly [held]: true;
 }
 
@@ -97,9 +100,9 @@ export interface StepUpChallenges {
     evidence: StepUpEvidence,
   ): Promise<boolean>;
   /**
-   * Locks every challenge of the session, in order of ID, for the change's
-   * own transaction, first, at ADR-006 §6's level 0b: before the change reads
-   * any row it decides on.
+   * Locks every challenge of the session still in time, in order of ID, for
+   * the change's own transaction, first, at ADR-006 §6's level 0b: before the
+   * change reads any row it decides on.
    */
   hold(db: Handle, sessionId: string): Promise<HeldChallenges>;
   /**
@@ -296,17 +299,19 @@ export function createStepUpChallenges({
           .selectFrom('identity.step_up_challenges')
           .select('id')
           .where('session_id', '=', sessionId)
+          .where('ends_at', '>', clock.now())
           .orderBy('id')
           .forUpdate()
           .execute();
       }
-      return { sessionId } as HeldChallenges;
+      return { sessionId, db } as HeldChallenges;
     },
 
     async consume(db, session, challengeId, binding, { passkeyRequired }) {
       refuse(bindingProblem(binding));
       // Held for another session: a change that checked the wrong one, which nothing must let through.
       if (session.sessionId !== binding.sessionId) throw new RangeError("the challenges held are another session's");
+      if (session.db !== db) throw new RangeError('the challenges were held in another transaction');
       if (!isId(challengeId)) return undefined;
       const row = await db
         .deleteFrom('identity.step_up_challenges')
@@ -339,7 +344,15 @@ export function createStepUpChallenges({
       const now = clock.now();
       return db.transaction().execute(async (tx) => {
         await limitStatements(tx);
-        const ended = tx.selectFrom('identity.step_up_challenges').select('id').where('ends_at', '<=', now).limit(most);
+        // Never waits on a challenge locked by a change or a demotion: it takes the rest, and that one next time.
+        const ended = tx
+          .selectFrom('identity.step_up_challenges')
+          .select('id')
+          .where('ends_at', '<=', now)
+          .orderBy('id')
+          .limit(most)
+          .forUpdate()
+          .skipLocked();
         const rows = await tx
           .deleteFrom('identity.step_up_challenges')
           .where('id', 'in', ended)

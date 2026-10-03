@@ -12,6 +12,7 @@ import { createDatabase, type Database, type IdempotentRequest, lockName, withTe
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   holdNamedLock,
@@ -651,6 +652,22 @@ describe(`sending it to the contacts (B6-3b, Postgres ${server.version})`, () =>
     clock.advanceBy(RESET_CONFIRM_HOURS * HOUR_MS);
     const fresh = { ...who.otherAdmin, sessionId: await signedIn(who.otherAdmin.userId) };
     expect(await confirm(fresh, lapsing.reset.id)).toEqual(refused(409, 'RESET_CLOSED'));
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a reset’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin, person } = await organization();
+    const asked = written(await ask(admin, person.membershipId));
+    const challengeId = asked.stepUpChallengeId ?? '';
+    await stepUp(admin, challengeId);
+    const done = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, asked.reset.id),
+    );
+
+    expect(done).toMatchObject({ outcome: 'written', status: 200, reset: { status: 'AWAITING_CONTACT' } });
   });
 });
 

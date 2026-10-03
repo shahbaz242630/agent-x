@@ -26,7 +26,14 @@ import {
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  confirmedWhileDemoted,
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -87,7 +94,7 @@ const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 let people = 0;
 
 /** A person with a session and a membership in the organisation. */
-async function member(org: string, role: Role): Promise<SessionMember> {
+async function member(org: string, role: Role): Promise<SessionMember & { readonly membershipId: string }> {
   people += 1;
   const userId = await userForSubject(
     app,
@@ -100,10 +107,11 @@ async function member(org: string, role: Role): Promise<SessionMember> {
     authTime: clock.now(),
     amr: [...PASSKEY],
   });
+  const membershipId = ids.next();
   await withSignedStates(app, org, quiet(), (tx, states) =>
-    addMembership(tx, states, { orgId: org, id: ids.next(), userId, role, joinedAt: clock.now(), actor: OPERATOR }),
+    addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
-  return { orgId: org, userId, sessionId };
+  return { orgId: org, userId, sessionId, membershipId };
 }
 
 async function organization(): Promise<string> {
@@ -420,5 +428,24 @@ describe(`reactivating a suspended source, with an admin’s passkey step-up (D2
       code: 'SOURCE_NOT_SUSPENDED',
     });
     expect((await eventsAbout(org, source.id)).at(-1)?.action).toBe('funding_source.ended');
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a reactivation holds its step-up challenges before the admin’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id));
+    const challengeId = askedFor(await reactivate(admin, source.id));
+    await stepUp(admin, challengeId);
+
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, source.id, challengeId),
+    );
+
+    expect(changedOf(confirmed)).toMatchObject({ id: source.id, status: 'ACTIVE' });
   });
 });

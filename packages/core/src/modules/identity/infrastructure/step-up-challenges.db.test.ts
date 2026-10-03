@@ -299,34 +299,62 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeUndefined();
   });
 
-  it("holds every challenge of the session until the change's transaction ends, so a demotion's lock on them waits (ADR-006 §6)", async () => {
-    const { challenges, binding } = await setUp();
-    const first = await challenges.open(app, binding);
-    const second = await challenges.open(app, binding);
-    if (first === undefined || second === undefined) throw new Error('both should open');
-    const holder = await database.connect('admin');
-    await holder.query('begin');
-    try {
-      let locking: Promise<unknown> = Promise.resolve();
-      await app.transaction().execute(async (tx) => {
-        await challenges.hold(tx, binding.sessionId);
-        // A demotion of the person, locking their challenges: queued behind this transaction.
-        locking = within(
-          20_000,
-          holder.query('select id from identity.step_up_challenges where id = any($1) order by id for update', [
-            [first.challengeId, second.challengeId],
-          ]),
-          "the demotion's lock",
-        );
-        await waitUntilQueued(database.as('admin'), 1);
-      });
+  it.each(['first', 'second'] as const)(
+    "holds every challenge of the session until the change's transaction ends, the %s too, so a demotion's lock waits (ADR-006 §6)",
+    async (which) => {
+      const { challenges, binding } = await setUp();
+      const opened = { first: await challenges.open(app, binding), second: await challenges.open(app, binding) };
+      const locked = opened[which];
+      if (locked === undefined) throw new Error('it should open');
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        let locking: Promise<unknown> = Promise.resolve();
+        await app.transaction().execute(async (tx) => {
+          await challenges.hold(tx, binding.sessionId);
+          // A demotion of the person, locking this one challenge: queued behind this transaction.
+          locking = within(
+            20_000,
+            holder.query('select id from identity.step_up_challenges where id = $1 for update', [locked.challengeId]),
+            "the demotion's lock",
+          );
+          await waitUntilQueued(database.as('admin'), 1);
+        });
 
-      // Granted once the change's transaction has ended.
-      await locking;
-    } finally {
-      await holder.query('rollback');
-      await holder.end();
-    }
+        // Granted once the change's transaction has ended.
+        await locking;
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+      }
+    },
+  );
+
+  it("leaves a challenge past its time to the sweep: a hold doesn't lock it", async () => {
+    const { clock, challenges, binding } = await setUp();
+    const old = await challenges.open(app, binding);
+    if (old === undefined) throw new Error('it should open');
+    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    await app.transaction().execute(async (tx) => {
+      await challenges.hold(tx, binding.sessionId);
+      // The sweep skips a locked challenge: this one is gone only if the hold left it.
+      await challenges.sweep(app, 1000);
+
+      expect(await rowsFor(binding.sessionId)).toEqual([]);
+    });
+  });
+
+  it('refuses challenges held in another transaction, whose lock has gone already', async () => {
+    const { challenges, binding } = await setUp();
+    const opened = await challenges.open(app, binding);
+    if (opened === undefined) throw new Error('it should open');
+    await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
+    const elsewhere = await challenges.hold(app, binding.sessionId);
+
+    await expect(
+      app.transaction().execute((tx) => challenges.consume(tx, elsewhere, opened.challengeId, binding, NEED)),
+    ).rejects.toThrow(RangeError);
+    expect(await rowsFor(binding.sessionId)).toHaveLength(1);
   });
 
   it("refuses challenges held for another session: a change can't use a hold that isn't its own", async () => {

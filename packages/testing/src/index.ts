@@ -8,7 +8,13 @@ export {
   type AuthorityTable,
 } from './db/authority-checks.ts';
 export { CATALOGUE_OPTIONS } from './db/catalogue.ts';
-export { holdNamedLock, waitUntilBlocked, waitUntilQueued } from './db/lock-wait.ts';
+export {
+  type Confirmer,
+  confirmedWhileDemoted,
+  holdNamedLock,
+  waitUntilBlocked,
+  waitUntilQueued,
+} from './db/lock-wait.ts';
 export {
   type OwnerTamper,
   type SavedHead,

@@ -22,6 +22,7 @@ import { createDatabase, type Database, type IdempotentRequest, lockName, withTe
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   holdNamedLock,
@@ -504,5 +505,22 @@ describe('reading agents', () => {
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a registration holds its step-up challenges before the member’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const challengeId = askedFor(await ask(developer));
+    await stepUp(developer, challengeId);
+
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: developer.membershipId },
+      () => confirm(developer, challengeId),
+    );
+
+    expect(registeredOf(confirmed).agent.agent).toMatchObject({ owner: developer.membershipId, status: 'ACTIVE' });
   });
 });

@@ -10,10 +10,12 @@
 //   queue, and then lets go.
 // - holdNamedLock: holds a lock no row stands for (@agentx/platform/db's
 //   holdTransactionLock), as a party part-way through its work would.
+// - confirmedWhileDemoted: a step-up confirmation run while a demotion of
+//   the confirming person is part-way, to prove its lock order (ADR-006 §6).
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { DEFAULT_WAIT_MS } from '../race.ts';
-import type { TestSession } from './test-database.ts';
+import { DEFAULT_WAIT_MS, within } from '../race.ts';
+import type { TestDatabase, TestSession } from './test-database.ts';
 
 const POLL_MS = 10;
 
@@ -100,4 +102,42 @@ export async function waitUntilQueued(
  */
 export async function holdNamedLock(client: TestSession, name: string): Promise<void> {
   await client.query('select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))', [name]);
+}
+
+/** The confirming person, as a demotion of them reaches them: their step-up challenge, organisation and membership. */
+export interface Confirmer {
+  readonly challengeId: string;
+  readonly orgId: string;
+  readonly membershipId: string;
+}
+
+/**
+ * Runs `confirm` while a demotion of the confirming person is part-way
+ * (ADR-006 §6): their step-up challenge locked first, as a demotion's level
+ * 0b locks it, then, once the confirmation queues behind it, their membership
+ * (2a). A confirmation that read the membership before holding its
+ * challenges deadlocks here, and Postgres fails one of the two (40P01); one
+ * that holds them first waits, and its answer is given back.
+ */
+export async function confirmedWhileDemoted<T>(
+  database: TestDatabase,
+  { challengeId, orgId, membershipId }: Confirmer,
+  confirm: () => Promise<T>,
+): Promise<T> {
+  const holder = await database.connect('admin');
+  await holder.query('begin');
+  try {
+    await holder.query('select id from identity.step_up_challenges where id = $1 for update', [challengeId]);
+    const confirming = within(20_000, confirm(), 'the confirmation');
+    await waitUntilQueued(database.as('admin'), 1);
+    await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+      orgId,
+      membershipId,
+    ]);
+    await holder.query('commit');
+    return await confirming;
+  } finally {
+    await holder.query('rollback');
+    await holder.end();
+  }
 }
