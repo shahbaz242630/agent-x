@@ -29,7 +29,15 @@ import { createOutbox, type NotificationsTables } from '@agentx/core/modules/not
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  waitUntilQueued,
+  within,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -481,6 +489,36 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
 
     expect(await confirm(admin, id, earlier)).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
     expect((await eventsAbout(org, id)).at(-1)?.action).toBe('supplier.suspend');
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('holds its step-up challenge before the admin’s membership, so a demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    changedOf(await suspend(admin, id));
+    const challengeId = askedFor(await reactivate(admin, id));
+    await stepUp(admin, challengeId);
+    // A demotion of the admin, part-way: their challenges locked, at its level 0b...
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [challengeId]);
+      const confirming = within(20_000, confirm(admin, id, challengeId), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      // ...then their membership (2a), which the confirmation, queued at the challenge, doesn't hold yet.
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        org,
+        admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(changedOf(await confirming).supplier).toMatchObject({ id, status: 'UNVERIFIED' });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
 
