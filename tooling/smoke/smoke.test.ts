@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-import { DAY_MS, KEY_WARNING_DAYS, READS, smoke, SMOKE_SCOPES } from './smoke.ts';
+import { DAY_MS, KEY_WARNING_DAYS, keyProblem, READS, smoke, SMOKE_SCOPES } from './smoke.ts';
 
 const ORIGIN = 'https://app.example.test';
 const KEY = 'axk_test-key-id_test-key-body';
@@ -118,6 +118,20 @@ describe('Security-Handoff §13b: the post-release smoke test', () => {
       said.push(`${line} after ${String(fake.calls.length)} calls`);
     });
     expect(said).toEqual(READS.map(({ path }, index) => `${path}: 200 after ${String(index + 1)} calls`));
+  });
+
+  it("takes a stored key of an agent key's shape, around any whitespace a paste added, and says what is wrong with any other without showing it", () => {
+    const real = `axk_${'0a'.repeat(16)}_${'A'.repeat(43)}`;
+    expect(keyProblem(real)).toBeUndefined();
+    expect(keyProblem(`${real}\r\n`)).toBeUndefined();
+    expect(keyProblem(undefined)).toBe('The repository secret STAGING_SMOKE_AGENT_KEY is not set.');
+    expect(keyProblem('  ')).toBe('The repository secret STAGING_SMOKE_AGENT_KEY is not set.');
+    const pasted = 'gh secret set STAGING_SMOKE_AGENT_KEY --repo owner/name';
+    expect(keyProblem(pasted)).toBe(
+      'The repository secret STAGING_SMOKE_AGENT_KEY is not an agent key: 55 characters (a key has 80), not starting with axk_.',
+    );
+    expect(keyProblem(`${real}x`)).toMatch(/81 characters \(a key has 80\), starting with axk_\.$/);
+    expect(keyProblem(`${real}x`)).not.toContain(real);
   });
 
   it('fails a list answer without its list', async () => {

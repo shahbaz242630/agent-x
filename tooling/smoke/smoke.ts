@@ -126,12 +126,28 @@ export async function smoke(
   return { lines, passed: lines.every((line) => line.endsWith(': 200')) };
 }
 
+/** An agent key's whole shape: `axk_`, 32 lower-case hex digits, `_`, 43 base64url characters (agent.ts's KEY_TEXT). */
+const KEY_TEXT = /^axk_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Why a stored key can't be one, said without showing any of it: its length
+ * and the start every key shares, or nothing when it has a key's shape.
+ * Whitespace a paste added around it is forgiven.
+ */
+export function keyProblem(stored: string | undefined): string | undefined {
+  const key = (stored ?? '').trim();
+  if (key === '') return 'The repository secret STAGING_SMOKE_AGENT_KEY is not set.';
+  if (KEY_TEXT.test(key)) return undefined;
+  return `The repository secret STAGING_SMOKE_AGENT_KEY is not an agent key: ${String(key.length)} characters (a key has 80), ${key.startsWith('axk_') ? 'starting' : 'not starting'} with axk_.`;
+}
+
 async function main(): Promise<number> {
-  const key = process.env.AGENTX_SMOKE_KEY ?? '';
-  if (!/^axk_\S+$/.test(key)) {
-    console.log('The repository secret STAGING_SMOKE_AGENT_KEY is not set, or is not an agent key.');
+  const problem = keyProblem(process.env.AGENTX_SMOKE_KEY);
+  if (problem !== undefined) {
+    console.log(problem);
     return 1;
   }
+  const key = (process.env.AGENTX_SMOKE_KEY ?? '').trim();
   const origin = originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN');
   const { passed } = await smoke(origin, key, {}, (line) => {
     console.log(line);
