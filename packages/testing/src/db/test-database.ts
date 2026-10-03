@@ -48,6 +48,13 @@ export interface TestDatabase {
   connect(role: TestRole): Promise<TestClient>;
   /** Closes every session and connection, and deletes the database. */
   drop(): Promise<void>;
+  /**
+   * A copy of the database as it is now, as a restore makes (the restore
+   * drill, S78): its sessions and connections are closed first, and any other
+   * connection to it must be too, since Postgres copies only a database no one
+   * is connected to. The copy is dropped by its own `drop()`.
+   */
+  copy(): Promise<TestDatabase>;
 }
 
 /**
@@ -114,9 +121,14 @@ export async function createTestDatabase(
   server: TestPostgresServer,
   options: { readonly schema: 'migrated' | 'empty' },
 ): Promise<TestDatabase> {
+  const template = options.schema === 'migrated' ? pg.escapeIdentifier(server.templateDatabase) : 'template0';
+  return databaseFrom(server, template);
+}
+
+/** A new test database made from `template` (an identifier, already quoted). */
+async function databaseFrom(server: TestPostgresServer, template: string): Promise<TestDatabase> {
   const name = `t_${randomUUID().replaceAll('-', '')}`;
   const quoted = pg.escapeIdentifier(name);
-  const template = options.schema === 'migrated' ? pg.escapeIdentifier(server.templateDatabase) : 'template0';
 
   await onServer(server, [
     `CREATE DATABASE ${quoted} TEMPLATE ${template} OWNER ${pg.escapeIdentifier(server.roles.owner.user)}`,
@@ -134,6 +146,12 @@ export async function createTestDatabase(
     return pool;
   };
   const clients: TestClient[] = [];
+  const closeAll = async (): Promise<void> => {
+    // pg's end() does nothing for a connection that is already closed, such as one the test closed itself.
+    await Promise.all(clients.map((client) => client.end()));
+    await Promise.all([...pools.values()].map((pool) => pool.end()));
+    pools.clear();
+  };
 
   return {
     name,
@@ -152,11 +170,12 @@ export async function createTestDatabase(
       return client;
     },
     drop: async () => {
-      // pg's end() does nothing for a connection that is already closed, such as one the test closed itself.
-      await Promise.all(clients.map((client) => client.end()));
-      await Promise.all([...pools.values()].map((pool) => pool.end()));
-      pools.clear();
+      await closeAll();
       await onServer(server, [`DROP DATABASE IF EXISTS ${quoted} WITH (FORCE)`]);
+    },
+    copy: async () => {
+      await closeAll();
+      return databaseFrom(server, quoted);
     },
   };
 }

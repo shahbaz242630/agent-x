@@ -4,6 +4,7 @@ export {
   type DatabaseConnectionOptions,
   type DatabaseTransaction,
   DatabaseOptionsError,
+  transactionsReadOnly,
 } from './database.ts';
 export {
   createIdempotentWrites,

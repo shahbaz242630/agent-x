@@ -2,7 +2,7 @@
 // auth, with TLS in every deployed environment). Only this folder may import
 // the driver (ADR-004 §8), so every connection is made here, with the checks
 // below, and nothing else in the product can open one.
-import { Kysely, PostgresDialect, type Transaction } from 'kysely';
+import { Kysely, PostgresDialect, sql, type Transaction } from 'kysely';
 import pg, { type PoolConfig } from 'pg';
 
 import type { Logger } from '../observability/index.ts';
@@ -25,7 +25,16 @@ export interface DatabaseConnectionOptions {
   readonly maxConnections?: number;
   /** Names the connection in Postgres's own views, e.g. `agentx-api`. Default `agentx`. */
   readonly applicationName?: string;
+  /**
+   * Every transaction read-only (the restore drill's check, S78): set in the
+   * startup packet like the search path, so it beats any setting on the
+   * database or the role, and a write is refused by Postgres itself.
+   */
+  readonly readOnly?: boolean;
 }
+
+/** The startup-packet option that makes every transaction read-only. */
+const READ_ONLY = '-c default_transaction_read_only=on';
 
 export class DatabaseOptionsError extends Error {
   constructor(problem: string) {
@@ -102,7 +111,7 @@ export function poolConfig(options: DatabaseConnectionOptions): PoolConfig & { r
     password: options.password,
     ssl: tlsSetting(options.tls),
     max,
-    options: PINNED_SEARCH_PATH,
+    options: options.readOnly === true ? `${PINNED_SEARCH_PATH} ${READ_ONLY}` : PINNED_SEARCH_PATH,
     application_name: options.applicationName ?? 'agentx',
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
@@ -142,4 +151,10 @@ export function createDatabase<Schema = unknown>(options: DatabaseConnectionOpti
   // Every idle connection could need replacing, and then one new one.
   const attempts = config.max + 1;
   return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: tenantCheckedPool(pool, logger, attempts) }) });
+}
+
+/** Whether a connection's transactions are read-only, as Postgres itself says (`readOnly`): proof asked before anything is read. */
+export async function transactionsReadOnly<Schema>(database: Database<Schema>): Promise<boolean> {
+  const shown = await sql<{ transaction_read_only: string }>`show transaction_read_only`.execute(database);
+  return shown.rows[0]?.transaction_read_only === 'on';
 }

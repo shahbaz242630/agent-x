@@ -20,6 +20,8 @@ import {
   firstAdminRequest,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
+  RESTORE_CHECK,
+  restoreCheckRequest,
 } from './request.ts';
 
 /** Failures no real input can cause (a bug, a broken disk), switched on by a test and off after it. */
@@ -480,5 +482,44 @@ describe("B4-6b the first admin's request, only ever from a file", () => {
       "the invitation's ID must be a UUIDv7, in lower case",
       "the token's hash must be 64 lower-case hex digits",
     ]);
+  });
+});
+
+describe("S78 the restore drill's check, only ever from a file", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-restore-check-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+  const requestFile = requestFilesIn(folder);
+  const DRILL = { ...ENV, AGENTX_DB_DRILL_HOST: 'drill.example.invalid' };
+  const shape = `${RESTORE_CHECK} runs only from a request file, as the one word in its list`;
+
+  it('reads its one word, then connects to the copy first, read-only', async () => {
+    const { code, events, line } = await run(['--request', requestFile(restoreCheckRequest())], DRILL);
+
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.starting', 'operator.database_unavailable']);
+    expect(line('operator.starting')).toMatchObject({ command: RESTORE_CHECK });
+  });
+
+  it('refuses it typed, or with anything after the word', async () => {
+    for (const argv of [[RESTORE_CHECK], ['--request', requestFile(JSON.stringify([RESTORE_CHECK, '--id', NEW_ID]))]]) {
+      const { code, events, line } = await run(argv, DRILL);
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.refused']);
+      expect(line('operator.refused')?.problems).toEqual([shape]);
+    }
+  });
+
+  it('refuses to start without a copy to read, or with the live server named as the copy', async () => {
+    const asked = requestFile(restoreCheckRequest());
+    for (const env of [ENV, { ...ENV, AGENTX_DB_DRILL_HOST: ENV.AGENTX_DB_HOST ?? '' }]) {
+      const { code, events, line } = await run(['--request', asked], env);
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.starting', 'operator.refused']);
+      expect(line('operator.refused')?.problems).toEqual([
+        "AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST",
+      ]);
+    }
   });
 });

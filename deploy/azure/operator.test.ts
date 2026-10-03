@@ -13,6 +13,7 @@ import {
   createOrganizationRequest,
   NO_REQUEST_PROBLEM,
   REQUEST_LIMIT_BYTES,
+  restoreCheckRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
 import type { Az, AzResult } from './deploy.ts';
@@ -26,6 +27,7 @@ import {
   parseArguments,
   parseFirstAdmin,
   REQUEST_SECRET,
+  restoreCheck,
   USAGE,
 } from './operator.ts';
 import { environmentSnapshot, inCopy } from './snapshot.ts';
@@ -150,7 +152,10 @@ type Ending =
   | 'invited'
   | 'invited-done-before'
   | 'invited-other'
-  | 'invite-refused';
+  | 'invite-refused'
+  | 'copy-holds'
+  | 'copy-broken'
+  | 'check-refused';
 
 /** Another request's ID, as if that request had run in this one's place. */
 const OTHER_ID = '0199a1b2-c3d4-7e5f-8a6b-000000000001';
@@ -199,10 +204,33 @@ const RUN_LINES: Readonly<Record<Ending, (id: string) => readonly Row[]>> = {
     }),
     TERMINATED,
   ],
+  'copy-holds': () => [
+    said({ event: 'operator.starting' }),
+    said({ event: 'operator.restore_check_done', copyOrganizations: 3, newSinceCopy: 1, problems: [] }),
+    TERMINATED,
+  ],
+  'copy-broken': () => [
+    said({
+      event: 'operator.restore_check_failed',
+      problems: ["platform on the live server, from the copy's head: anchor at 7"],
+    }),
+    TERMINATED,
+  ],
+  'check-refused': () => [
+    said({ event: 'operator.refused', problems: ['a connection is not read-only, so nothing was read'] }),
+    TERMINATED,
+  ],
 };
 
 /** The endings whose command exits 0, so Azure ends the run Succeeded. */
-const SUCCEEDS: ReadonlySet<Ending> = new Set(['created', 'created-other', 'silent', 'invited', 'invited-other']);
+const SUCCEEDS: ReadonlySet<Ending> = new Set([
+  'created',
+  'created-other',
+  'silent',
+  'invited',
+  'invited-other',
+  'copy-holds',
+]);
 
 /** How Azure settles a change: the state it ends in, or never. */
 type Settles = 'Succeeded' | 'Failed' | 'Canceled' | 'never';
@@ -994,6 +1022,77 @@ describe('what stops it, and what it leaves', () => {
     expect(messageOf(done.error)).toMatch(/^az rest --method post /);
     expect(done.az.request).toBe(NO_REQUEST);
     expect(done.said.at(-1)).toBe(tryAgain(idHeld(done.az)));
+  });
+});
+
+/** One run of the restore drill's check, with a clock that moves only when it sleeps. */
+async function check(script: Script) {
+  const az = new FakeAzure(script);
+  const lines: string[] = [];
+  let now = START.getTime();
+  const status = await restoreCheck({
+    az,
+    say: (line) => lines.push(line),
+    now: () => new Date(now),
+    sleep: (ms) => {
+      now += ms;
+      return Promise.resolve();
+    },
+  });
+  return { status, az, said: lines };
+}
+
+describe("S78 the restore drill's check", () => {
+  it('writes its one word, runs it, puts [] back and says the copy holds', async () => {
+    const done = await check({ ending: 'copy-holds' });
+
+    expect(done.status).toBe(0);
+    expect(done.az.heldAtStart).toBe(restoreCheckRequest());
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said[1]).toBe("Checking the drill's copy against the live server, read-only.");
+    expect(done.said.at(-1)).toBe(
+      'The copy holds: every chain on it checked whole, and each leads to the live one (3 organisations on the copy, 1 made since).',
+    );
+  });
+
+  it('says each problem when the copy does not hold, and ends 1', async () => {
+    const done = await check({ ending: 'copy-broken', states: ['Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.az.request).toBe(NO_REQUEST);
+    expect(done.said.at(-1)).toBe(
+      "The copy does not hold: platform on the live server, from the copy's head: anchor at 7.",
+    );
+  });
+
+  it('says a refusal read nothing, and ends 1', async () => {
+    const done = await check({ ending: 'check-refused', states: ['Failed'] });
+    expect(done.status).toBe(1);
+    expect(done.said.at(-1)).toBe(
+      'The check was refused, and read nothing: a connection is not read-only, so nothing was read.',
+    );
+  });
+
+  it("says so when none of the command's lines arrived, whether the run succeeded or not", async () => {
+    expect((await check({ ending: 'silent' })).said.at(-1)).toBe(
+      "The run succeeded, but its lines don't say what it found: they may not all have arrived. Run the same command again: it only reads.",
+    );
+    const stopped = await check({ ending: 'silent', states: ['Failed'] });
+    expect(stopped.status).toBe(1);
+    expect(stopped.said.at(-1)).toBe(
+      "The check didn't finish: read the lines above (is the drill's copy up, in the same subnet and private zone?). Run it again once it is: it only reads.",
+    );
+  });
+
+  it('takes no words after its own', async () => {
+    const lines: string[] = [];
+    await expect(
+      main(
+        ['restore-check', '--id', EARLIER_ID],
+        (line) => lines.push(line),
+        () => new FakeAzure({}),
+      ),
+    ).resolves.toBe(2);
+    expect(lines).toEqual([`say restore-check, and nothing else\n${USAGE}`]);
   });
 });
 
