@@ -144,6 +144,7 @@ module dnsPolicy 'modules/dns-policy.bicep' = {
     // uses them, and a change there asks every hand deploy to run again.
     policyName: 'dnspr-agentx-${environment}'
     domainListName: 'dnsdl-agentx-${environment}-every-name'
+    allowedListName: 'dnsdl-agentx-${environment}-allowed'
     tags: tags
     networkId: ids.network
     workspaceId: ids.workspace

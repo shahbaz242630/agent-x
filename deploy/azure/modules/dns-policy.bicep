@@ -6,13 +6,22 @@
 // Azure's DNS answers for the network, public and private, and can allow,
 // alert on or block each by name.
 //
-// This first step only watches: one rule, at the lowest priority (65000,
-// leaving 100–64999 for the rules above it), alerts on every name ('.'), so
-// each lookup lands in the workspace's DNSQueryLogs and nothing is refused.
-// The next step reads a few days of those lookups, allows the names the
-// apps and jobs need in a rule above it, and turns this one to Block
+// Two rules. Above, at priority 1000, the names the network needs are allowed
+// (dns-allowed.json, read from three days of lookups: S78); 100-999, which
+// Azure reads first, stay free for blocks that must beat it (Microsoft's threat
+// lists, a bad name under an allowed zone). Below, at the lowest priority
+// (65000), every other name ('.') is alerted on, so each lookup lands in the
+// workspace's DNSQueryLogs and nothing is refused yet: a lookup no allowed
+// name covers shows that rule's list in ResolverPolicyDomainListId. Once a few
+// days show none but the expected ones, that rule turns to Block
 // (Carry-Forward). Blocking before that could stop Azure's own services in the
 // environment, which Microsoft warns of.
+//
+// What Block can't promise (review, S78): Azure follows CNAME chains, so a
+// name can be resolved, and its labels reach its own server, before any rule
+// judges it; and a name pointing at an allowed one is answered. Block decides
+// which lookups are answered. Whether it stops labels leaving is tested from a
+// container before it is relied on (Carry-Forward).
 //
 // Cost: $0.60 per million lookups once a rule exists (Azure's price list,
 // 30 Sep 2026); staging makes well under a million a month.
@@ -20,6 +29,7 @@
 param location string
 param policyName string
 param domainListName string
+param allowedListName string
 param tags object
 param networkId string
 param workspaceId string
@@ -41,6 +51,34 @@ resource everyName 'Microsoft.Network/dnsResolverDomainLists@2025-05-01' = {
   }
 }
 
+resource allowed 'Microsoft.Network/dnsResolverDomainLists@2025-05-01' = {
+  name: allowedListName
+  location: location
+  tags: tags
+  properties: {
+    domains: map(loadJsonContent('../dns-allowed.json', 'domains'), entry => entry.domain)
+  }
+}
+
+resource allowNeededNames 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules@2025-05-01' = {
+  parent: policy
+  name: 'allow-needed-names'
+  location: location
+  tags: tags
+  properties: {
+    priority: 1000
+    action: {
+      actionType: 'Allow'
+    }
+    dnsResolverDomainLists: [
+      {
+        id: allowed.id
+      }
+    ]
+    dnsSecurityRuleState: 'Enabled'
+  }
+}
+
 resource watchEveryLookup 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRules@2025-05-01' = {
   parent: policy
   name: 'watch-every-lookup'
@@ -58,6 +96,10 @@ resource watchEveryLookup 'Microsoft.Network/dnsResolverPolicies/dnsSecurityRule
     ]
     dnsSecurityRuleState: 'Enabled'
   }
+  // One rule at a time: a policy's rules are written one after another.
+  dependsOn: [
+    allowNeededNames
+  ]
 }
 
 // One policy per network (Microsoft), in the network's own region.
