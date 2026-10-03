@@ -124,10 +124,6 @@ func resourceNames(environment string, nameSuffix string) object => {
   // checked to this name. Written here rather than read from the server, since
   // the apps' and jobs' loops need it before the deployment starts.
   databaseHost: '${serverName(environment, nameSuffix)}.postgres.database.azure.com'
-  // The restore drill's copy (S78): a point-in-time restore made under this
-  // name, in the same subnet and private zone, which the operator's restore
-  // check reads beside the live server. It exists only while a drill runs.
-  drillDatabaseHost: '${serverName(environment, 'drill')}.postgres.database.azure.com'
   appsEnvironment: 'cae-agentx-${environment}'
   // Email (communication.bicep). The service's name is its host,
   // `<name>.communication.azure.com`, which must be unique across Azure.

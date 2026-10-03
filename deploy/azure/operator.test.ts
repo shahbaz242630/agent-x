@@ -1167,6 +1167,11 @@ describe('the runner and the deployment agree', () => {
       `/mnt/secrets/${REQUEST_SECRET}`,
     ]);
     expect(at(job?.properties, 'configuration').secrets).toContainEqual({ name: REQUEST_SECRET, value: NO_REQUEST });
+    // The restore drill's copy (S78): the name the playbook restores to, beside the live server's.
+    const settings = container?.env as { name: string; value?: string }[];
+    const value = (name: string): string | undefined => settings.find((setting) => setting.name === name)?.value;
+    expect(value('AGENTX_DB_DRILL_HOST')).toBe('psql-agentx-stg-drill.postgres.database.azure.com');
+    expect(value('AGENTX_DB_HOST')).toMatch(/^psql-agentx-stg-[a-z0-9]{6}\.postgres\.database\.azure\.com$/);
   });
 });
 
