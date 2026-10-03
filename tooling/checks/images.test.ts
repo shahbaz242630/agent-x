@@ -85,10 +85,12 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
       '/usr/local/bin/npx',
       '/usr/local/bin/corepack',
       '/usr/local/bin/yarn',
+      '/usr/local/bin/yarnpkg',
+      '/opt/yarn-',
     ]) {
       expect(runtime, removed).toContain(removed);
     }
-    expect(runtime).toMatch(/apt-get update \\\n {2}&& apt-get upgrade --yes/);
+    expect(runtime).toMatch(/apt-get update \\\n {2}&& DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes/);
     // As root, before the image drops to its unprivileged user.
     expect(runtime.indexOf('apt-get upgrade')).toBeLessThan(runtime.indexOf('USER node'));
   });
