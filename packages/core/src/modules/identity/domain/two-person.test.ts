@@ -4,6 +4,7 @@
 // organisation on the single-user path until someone is eligible.
 import { describe, expect, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import type { Role } from './membership.ts';
 import {
   ESTABLISHED_DAYS,
@@ -16,9 +17,8 @@ import {
   verifierVerdict,
 } from './two-person.ts';
 
-const DAY = 86_400_000;
 const NOW = new Date('2026-10-20T12:00:00.000Z');
-const daysAgo = (days: number): Date => new Date(NOW.getTime() - days * DAY);
+const daysAgo = (days: number): Date => new Date(NOW.getTime() - days * DAY_MS);
 
 const member = (id: string, role: Role, joinedDaysAgo = 30, status: RuleMember['status'] = 'ACTIVE'): RuleMember => ({
   id: `m-${id}`,
@@ -89,7 +89,7 @@ describe('the two-person rule (SEC-PAY-04)', () => {
     expect(verdict(facts([alice, bob, young]), 'a', 'y')).toEqual({
       outcome: 'refused',
       reason: 'VERIFIER_TOO_NEW',
-      until: new Date(young.joinedAt.getTime() + 14 * DAY),
+      until: new Date(young.joinedAt.getTime() + 14 * DAY_MS),
     });
   });
 
@@ -172,12 +172,12 @@ describe('the single-user path (ADR-012 §1)', () => {
     expect(verdict(facts([alice, bob], [demoted]), 'a', 'a')).toEqual({
       outcome: 'refused',
       reason: 'SOLO_PATH_LOCKED',
-      until: new Date(daysAgo(5).getTime() + 14 * DAY),
+      until: new Date(daysAgo(5).getTime() + 14 * DAY_MS),
     });
-    expect(verdict(facts([alice, bob], [demoted]), 'a', 'a', new Date(NOW.getTime() + 9 * DAY))).toEqual({
+    expect(verdict(facts([alice, bob], [demoted]), 'a', 'a', new Date(NOW.getTime() + 9 * DAY_MS))).toEqual({
       outcome: 'single_user',
     });
-    expect(verdict(facts([alice, bob], [demoted]), 'a', 'a', new Date(NOW.getTime() + 9 * DAY - 1))).toMatchObject({
+    expect(verdict(facts([alice, bob], [demoted]), 'a', 'a', new Date(NOW.getTime() + 9 * DAY_MS - 1))).toMatchObject({
       reason: 'SOLO_PATH_LOCKED',
     });
   });
@@ -190,7 +190,7 @@ describe('the single-user path (ADR-012 §1)', () => {
       expect(verdict(facts([alice, bob], [moved]), 'a', verifier)).toEqual({
         outcome: 'refused',
         reason: 'SOLO_PATH_LOCKED',
-        until: new Date(daysAgo(1).getTime() + 14 * DAY),
+        until: new Date(daysAgo(1).getTime() + 14 * DAY_MS),
       });
     }
   });
@@ -203,10 +203,10 @@ describe('the single-user path (ADR-012 §1)', () => {
     ];
     expect(verdict(facts([alice, gone], losses), 'a', 'a')).toMatchObject({
       reason: 'SOLO_PATH_LOCKED',
-      until: new Date(daysAgo(2).getTime() + 14 * DAY),
+      until: new Date(daysAgo(2).getTime() + 14 * DAY_MS),
     });
     expect(verdict(facts([alice, gone], losses.toReversed()), 'a', 'a')).toMatchObject({
-      until: new Date(daysAgo(2).getTime() + 14 * DAY),
+      until: new Date(daysAgo(2).getTime() + 14 * DAY_MS),
     });
   });
 

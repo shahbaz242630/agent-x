@@ -14,7 +14,7 @@
 // kept encrypted, each checked here to a short alphabet of its own, so each
 // has a byte bound (the B8-3 lesson). The details were checked against an
 // independent source: a registry or the official website (ADR-012 §1).
-import { defineStateMachine, visibleName } from '../../../shared-kernel/index.ts';
+import { DAY_MS, defineStateMachine, visibleName } from '../../../shared-kernel/index.ts';
 
 export const SUPPLIER = defineStateMachine({
   name: 'supplier',
@@ -36,7 +36,7 @@ export type SupplierStatus = (typeof SUPPLIER.states)[number];
  * (ADR-012 §1: 24 hours, never less; ADR-014 §3 step 4): no one may verify it
  * before then (E3).
  */
-export const PAYEE_COOLING_OFF_MS = 24 * 3_600_000;
+export const PAYEE_COOLING_OFF_MS = DAY_MS;
 
 /** What a supplier's coming back from its brake rests on: the version verified, if any, and what is current and waiting. */
 interface VerifiedState {

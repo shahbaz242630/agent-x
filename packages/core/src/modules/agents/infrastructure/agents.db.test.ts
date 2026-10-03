@@ -7,6 +7,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
@@ -39,7 +40,6 @@ const keys = createKeyProvider(
 // Each ID has a hex letter in it, so looking one up in upper case is another string.
 const ids = new SequentialIds(0xa000_0000_0000);
 const clock = new FixedClock(new Date('2026-09-28T09:00:00Z'));
-const DAY_MS = 86_400_000;
 const inDays = (days: number) => new Date(clock.now().getTime() + days * DAY_MS);
 
 let capture: LogCapture;

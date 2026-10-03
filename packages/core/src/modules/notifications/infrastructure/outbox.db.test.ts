@@ -11,6 +11,7 @@ import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import {
   CLAIM_LEASE_MS,
   createOutbox,
@@ -29,7 +30,6 @@ let app: Database<NotificationsTables>;
 
 const START = new Date('2026-09-26T09:00:00Z');
 const MINUTE = 60_000;
-const DAY = 86_400_000;
 const ids = new SequentialIds(0xb5a0);
 const ORG = '0199a0f0-0000-7000-8000-00000000b5a1';
 const ADMIN = '0199a0f0-0000-7000-8000-00000000b5a2';
@@ -102,7 +102,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  clock.set(new Date(START.getTime() + 10_000 * DAY));
+  clock.set(new Date(START.getTime() + 10_000 * DAY_MS));
   await sql`update notifications.outbox set given_up_at = ${START}, last_failure = 'test_reset'
     where sent_at is null and given_up_at is null`.execute(app);
   await outbox.sweep(app, 1_000_000);
@@ -394,7 +394,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
 
     expect(await outbox.sent(app, claimed.id)).toBe(true);
     expect(await outbox.sent(app, claimed.id)).toBe(false);
-    clock.set(new Date(START.getTime() + DAY));
+    clock.set(new Date(START.getTime() + DAY_MS));
     expect(await outbox.claimDue(app, 10)).toEqual([]);
     expect(await rows()).toMatchObject([{ sent_at: START }]);
   });
@@ -422,7 +422,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
       { attempts: MOST_ATTEMPTS, last_failure: 'provider_unavailable', sent_at: null },
     ]);
     expect((await rows())[0]?.given_up_at).not.toBeNull();
-    clock.set(new Date(clock.now().getTime() + 10 * DAY));
+    clock.set(new Date(clock.now().getTime() + 10 * DAY_MS));
     expect(await outbox.claimDue(app, 10)).toEqual([]);
   });
 
@@ -628,7 +628,7 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     if (claimed === undefined) throw new Error('nothing claimed');
     await outbox.failed(app, claimed.id, 'no_address', true);
 
-    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY));
+    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY_MS));
     expect(await outbox.sweep(app, 10)).toBe(1);
     expect(await rows()).toEqual([]);
   });
@@ -639,9 +639,9 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     if (claimed === undefined) throw new Error('nothing claimed');
     await outbox.sent(app, claimed.id);
 
-    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY - 1));
+    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY_MS - 1));
     expect(await outbox.sweep(app, 10)).toBe(0);
-    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY));
+    clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY_MS));
     expect(await outbox.sweep(app, 10)).toBe(1);
     expect(await rows()).toMatchObject([{ recipient_user_id: OTHER_ADMIN, sent_at: null }]);
   });

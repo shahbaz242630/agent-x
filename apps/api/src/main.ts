@@ -62,7 +62,7 @@ import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
-import { systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
+import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ChainBroken } from '@agentx/platform/audit-chain';
 import { type Config, ConfigError, configFingerprint, loadConfig, partnerName } from '@agentx/platform/config';
 import {
@@ -153,7 +153,7 @@ const ANCHOR_CHECK_DEADLINE_MS = 120_000;
  * an organisation a run, each within the anchor check's deadline.
  */
 const SWEEP = { batch: 1_000, mostBatches: 100 } as const;
-const SWEEP_EVERY_MS = 3_600_000;
+const SWEEP_EVERY_MS = HOUR_MS;
 
 /**
  * The global tables' sweeps: the sign-in flows' (B2-3a-2), the ended

@@ -6,6 +6,7 @@
 import { FixedClock, findLeaks, SequentialIds } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { AccountNumberLeak } from '../domain/account-numbers.ts';
 import { type FundingSourceState, type LinkOutcome, RailUnavailable, type SourceLookup } from '../domain/rail.ts';
 import {
@@ -22,7 +23,6 @@ const OTHER_ORG = '00000000-0000-7000-8000-00000000bbbb';
 const LINK = '00000000-0000-7000-8000-00000000cccc';
 const START = new Date('2026-10-01T08:00:00Z');
 const MINUTE = 60_000;
-const DAY = 24 * 60 * MINUTE;
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
 const IBANS = SANDBOX_ACCOUNTS.flatMap((account) => account.AccountIdentifiers.map((each) => each.Identification));
 
@@ -100,7 +100,7 @@ describe('confirming a link, server to server (D1-1)', () => {
       availability: 'ACTIVE',
       consentStatus: 'Authorized',
       statusChangedAt: START,
-      consentExpiresAt: new Date(START.getTime() + 365 * DAY),
+      consentExpiresAt: new Date(START.getTime() + 365 * DAY_MS),
       controls: USUAL_CONTROLS,
       summary: { holderName: 'Jasmine AI FZ-LLC', accountType: 'sme', currency: 'AED', hint: 'AE…6026' },
     });
@@ -224,12 +224,12 @@ describe('a source’s state (D1-1)', () => {
   it('pauses while suspended and comes back', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
     const ref = { organizationId: ORG, externalRef: source.externalRef };
-    clock.advanceBy(DAY);
+    clock.advanceBy(DAY_MS);
     await bank.changeConsent(ORG, consentId, 'Suspended');
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       availability: 'SUSPENDED',
       consentStatus: 'Suspended',
-      statusChangedAt: new Date(START.getTime() + DAY),
+      statusChangedAt: new Date(START.getTime() + DAY_MS),
     });
     await bank.changeConsent(ORG, consentId, 'Authorized');
     expect(sourceOf(await rail.getSourceState(ref)).availability).toBe('ACTIVE');
@@ -249,9 +249,9 @@ describe('a source’s state (D1-1)', () => {
   it('expires at the consent’s expiry, dated then, and stays expired', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
     const ref = { organizationId: ORG, externalRef: source.externalRef };
-    clock.advanceBy(365 * DAY - 1);
+    clock.advanceBy(365 * DAY_MS - 1);
     expect(sourceOf(await rail.getSourceState(ref)).availability).toBe('ACTIVE');
-    clock.advanceBy(1 + DAY);
+    clock.advanceBy(1 + DAY_MS);
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       availability: 'UNAVAILABLE',
       consentStatus: 'Expired',
@@ -263,7 +263,7 @@ describe('a source’s state (D1-1)', () => {
   it('stays revoked past the expiry: a terminal status is never left', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
     await bank.changeConsent(ORG, consentId, 'Revoked');
-    clock.advanceBy(366 * DAY);
+    clock.advanceBy(366 * DAY_MS);
     const ref = { organizationId: ORG, externalRef: source.externalRef };
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
       consentStatus: 'Revoked',
@@ -274,7 +274,7 @@ describe('a source’s state (D1-1)', () => {
   it('keeps its reference through a renewal, with the new consent naming the one it replaced', async () => {
     const { rail, bank, clock, source, consentId } = await linked();
     const ref = { organizationId: ORG, externalRef: source.externalRef };
-    clock.advanceBy(400 * DAY);
+    clock.advanceBy(400 * DAY_MS);
     const controls = { ...USUAL_CONTROLS, maxPeriodPayments: 10 };
     const renewedId = await bank.renew(ORG, source.externalRef, controls);
     expect(sourceOf(await rail.getSourceState(ref))).toMatchObject({
@@ -282,7 +282,7 @@ describe('a source’s state (D1-1)', () => {
       accountConsentId: renewedId,
       replacesConsentId: consentId,
       availability: 'ACTIVE',
-      consentExpiresAt: new Date(START.getTime() + 765 * DAY),
+      consentExpiresAt: new Date(START.getTime() + 765 * DAY_MS),
       controls,
     });
     expect(renewedId).not.toBe(consentId);
@@ -317,7 +317,7 @@ describe('a source’s state (D1-1)', () => {
     source.consentExpiresAt.setTime(0);
     source.statusChangedAt.setTime(0);
     const again = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
-    expect(again.consentExpiresAt).toEqual(new Date(START.getTime() + 365 * DAY));
+    expect(again.consentExpiresAt).toEqual(new Date(START.getTime() + 365 * DAY_MS));
     expect(again.statusChangedAt).toEqual(START);
   });
 });

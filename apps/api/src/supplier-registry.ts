@@ -33,7 +33,7 @@ import {
   suppliersAddedSince,
   suppliersPage,
 } from '@agentx/core/modules/suppliers';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -81,8 +81,6 @@ export interface SupplierRegistry {
   show(orgId: string, supplierId: string, correlationId: string): Promise<ShowAnswer>;
   usableByAgent(orgId: string, page: SupplierPage, correlationId: string): Promise<SuppliersListed>;
 }
-
-const DAY_MS = 86_400_000;
 
 export function createSupplierRegistry({
   database,

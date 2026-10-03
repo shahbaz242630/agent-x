@@ -44,7 +44,7 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import { STEP_UP_SIGNED_IN, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
+import { STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** The most an investigation's body may be: a conclusion and a reference, with room to spare. */
 const INVESTIGATION_BODY_LIMIT = 256;
@@ -109,14 +109,7 @@ const CLEARING_BODY_LIMIT = 192;
 
 const INVESTIGATION_ID = z.uuid().describe('The investigation of the hold as it now stands, by its ID.');
 
-const ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'HoldClearingAsked',
-    description: 'Clearing the integrity hold, waiting for the admin to sign in again.',
-  });
+const ASKED = stepUpAsked('HoldClearingAsked', 'Clearing the integrity hold, waiting for the admin to sign in again.');
 
 const CLEAR_SCHEMA = {
   summary: 'Ask to clear the integrity hold',

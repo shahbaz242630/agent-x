@@ -9,6 +9,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedInvite, registerInvite } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
@@ -57,7 +58,6 @@ const services = () => ({
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
-const HOUR = 3_600_000;
 const EVIDENCE = { stepUpChallengeId: '0199a0f0-0000-7000-8000-00000000c0de', methods: 'pwd,otp,mfa' };
 
 let subjects = 0;
@@ -175,7 +175,7 @@ describe(`asking for an invitation (B4-3a, Postgres ${server.version})`, () => {
         id,
         role: 'approver',
         status: 'DRAFT',
-        expiresAt: new Date(clock.now().getTime() + INVITATION_HOURS * HOUR),
+        expiresAt: new Date(clock.now().getTime() + INVITATION_HOURS * HOUR_MS),
         stepUpChallengeId,
         byOperator: false,
         acceptedBy: null,
@@ -295,7 +295,7 @@ describe(`the table's own checks, past the module (B4-3a, Postgres ${server.vers
           role: 'viewer',
           status: 'DRAFT',
           invited_by: admin,
-          expires_at: new Date(clock.now().getTime() + HOUR),
+          expires_at: new Date(clock.now().getTime() + HOUR_MS),
           created_at: clock.now(),
           email_ciphertext: Buffer.alloc(29),
           email_key_version: 1,
@@ -435,7 +435,7 @@ describe(`opening an invitation (B4-3a, Postgres ${server.version})`, () => {
   it('reads a draft as ended at its end, and as a draft a moment before', async () => {
     const who = await organization();
     const { id } = await draft(who);
-    const ends = clock.now().getTime() + INVITATION_HOURS * HOUR;
+    const ends = clock.now().getTime() + INVITATION_HOURS * HOUR_MS;
 
     expect(await toOpen(who.org, id, new Date(ends - 1))).toMatchObject({ outcome: 'draft' });
     expect(await toOpen(who.org, id, new Date(ends))).toEqual({ outcome: 'ended' });
@@ -561,7 +561,7 @@ describe(`accepting an invitation (B4-4b, Postgres ${server.version})`, () => {
     const other = await organization();
     const { id: drafted } = await draft(who);
     const { id } = await opened(who);
-    const ends = clock.now().getTime() + INVITATION_HOURS * HOUR;
+    const ends = clock.now().getTime() + INVITATION_HOURS * HOUR_MS;
 
     expect(await toAccept(who.org, drafted)).toEqual({ outcome: 'closed' });
     expect(await toAccept(who.org, id, new Date(ends - 1))).toMatchObject({ outcome: 'open' });

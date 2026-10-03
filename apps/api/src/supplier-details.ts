@@ -36,7 +36,7 @@ import {
   changesEnteredSince,
   type SupplierDetails,
 } from '@agentx/core/modules/suppliers';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -59,8 +59,6 @@ export const DETAILS_CONFIRM_OPERATION = 'suppliers.details.confirm';
 
 /** The most changes of its suppliers an organisation may enter in any 24 hours: payee registrations' 100 and as many details changes. */
 export const MOST_CHANGES_A_DAY = 200;
-
-const DAY_MS = 86_400_000;
 
 export interface SupplierDetailsChanges {
   change(

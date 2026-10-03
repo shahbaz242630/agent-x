@@ -12,6 +12,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -44,7 +45,6 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xb63d_0000_0000);
 const ISSUER = 'https://auth.example.test';
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
-const DAY_MS = 86_400_000;
 let clock: FixedClock;
 
 const logger = () =>

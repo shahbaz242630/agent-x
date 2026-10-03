@@ -19,6 +19,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
@@ -59,7 +60,6 @@ const keys = withPepper({
 });
 const ids = new SequentialIds(0xc140_0000_0000);
 const START = new Date('2026-09-28T09:00:00Z');
-const DAY_MS = 86_400_000;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 let capture: LogCapture;

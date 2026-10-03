@@ -36,7 +36,7 @@
 import { limitStatements } from '@agentx/platform/db';
 import { type Kysely, type Transaction } from 'kysely';
 
-import { type Clock, DAY_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
+import { type Clock, DAY_MS, HOUR_MS, type IdGenerator, UUID } from '../../../shared-kernel/index.ts';
 import {
   type ClaimedNotice,
   isAboutAMembership,
@@ -54,7 +54,7 @@ export const MOST_ATTEMPTS = 8;
 export const CLAIM_LEASE_MS = 10 * 60_000;
 
 /** The waits after each failed try but the last: a minute, then longer, to six hours. */
-const BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 2 * 3_600_000, 4 * 3_600_000, 6 * 3_600_000];
+const BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, HOUR_MS, 2 * HOUR_MS, 4 * HOUR_MS, 6 * HOUR_MS];
 
 /** Why the outbox gave a notice up: its last try's lease ran out. The outbox's own; `failed` refuses it. */
 export const LEASE_EXPIRED = 'lease_expired';
