@@ -11,7 +11,7 @@ const KEY = 'axk_test-key-id_test-key-body';
 const NOW = new Date('2026-10-03T09:00:00Z');
 const LATER = new Date(NOW.getTime() + 90 * 86_400_000).toISOString();
 
-const BODIES: Record<string, object> = {
+const BODIES: Record<string, unknown> = {
   '/v1/agent': { agentId: 'a', scopes: [...SMOKE_SCOPES].reverse(), keyExpiresAt: LATER },
   '/v1/agent/funding-sources': { sources: [], next: null },
   '/v1/agent/suppliers': { suppliers: [{ id: 'kept-out-of-the-log' }], next: null },
@@ -26,7 +26,8 @@ function door(answers: Record<string, (number | 'drop')[]> = {}, bodies = BODIES
     const queue = answers[path] ?? [200];
     const next = (queue.length > 1 ? queue.shift() : queue[0]) ?? 200;
     if (next === 'drop') throw new TypeError('fetch failed');
-    return Promise.resolve(new Response(JSON.stringify(bodies[path] ?? {}), { status: next }));
+    const body = path in bodies ? bodies[path] : {};
+    return Promise.resolve(new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: next }));
   };
   return { calls, fetcher };
 }
@@ -98,6 +99,27 @@ describe('Security-Handoff §13b: the post-release smoke test', () => {
     expect((await expiring(at(KEY_WARNING_DAYS + 1))).passed).toBe(true);
   });
 
+  it('takes a 200 whose body is not a JSON object as final and wrong, never as the API asleep', async () => {
+    for (const [body, said] of [
+      ['<html>a page</html>', 'the body is not JSON'],
+      [null, 'the body is not an object'],
+    ] as const) {
+      const fake = door({}, { ...BODIES, '/v1/agent': body });
+      const result = await run(fake);
+      expect(result.lines[0]).toBe(`/v1/agent: 200, but ${said}`);
+      expect(fake.calls.filter(({ url }) => url.endsWith('/v1/agent'))).toHaveLength(1);
+    }
+  });
+
+  it('says each line as soon as its read is done', async () => {
+    const said: string[] = [];
+    const fake = door();
+    await smoke(ORIGIN, KEY, { fetcher: fake.fetcher, now: () => NOW }, (line) => {
+      said.push(`${line} after ${String(fake.calls.length)} calls`);
+    });
+    expect(said).toEqual(READS.map(({ path }, index) => `${path}: 200 after ${String(index + 1)} calls`));
+  });
+
   it('fails a list answer without its list', async () => {
     const result = await run(door({}, { ...BODIES, '/v1/agent/funding-sources': { next: null } }));
     expect(result.lines[1]).toBe('/v1/agent/funding-sources: 200, but no sources list');
@@ -109,7 +131,10 @@ describe('the smoke workflow', () => {
   const text = readFileSync(FILE, 'utf8');
   const workflow = parse(text) as {
     on: Record<string, unknown>;
-    jobs: Record<string, { if?: string; environment?: unknown; permissions?: unknown; steps?: { run?: string }[] }>;
+    jobs: Record<
+      string,
+      { if?: string; environment?: unknown; permissions?: unknown; env?: unknown; steps?: { run?: string }[] }
+    >;
   };
   const job = workflow.jobs.smoke;
 
@@ -133,6 +158,9 @@ describe('the smoke workflow', () => {
       readFileSync(`.github/workflows/${file}`, 'utf8').includes('STAGING_SMOKE_AGENT_KEY'),
     );
     expect(holding).toEqual(['smoke.yml']);
-    expect(text).toContain('AGENTX_SMOKE_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}');
+    // Only the step that reads holds it: the actions before it never see it.
+    const holders = (job?.steps ?? []).filter((step) => JSON.stringify(step).includes('STAGING_SMOKE_AGENT_KEY'));
+    expect(holders.map((step) => step.run)).toEqual(['node tooling/smoke/smoke.ts']);
+    expect(JSON.stringify(job?.env ?? {})).not.toContain('STAGING_SMOKE_AGENT_KEY');
   });
 });

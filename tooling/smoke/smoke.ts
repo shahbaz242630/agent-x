@@ -2,10 +2,11 @@
 // release, staging's test agent reads what every agent reads, through the
 // public door, with its own key. A release that starts clean but is wired
 // wrong (the database, the key check's pepper, the partner switch, the door)
-// turns red here. The key is the `staging` environment's secret
-// STAGING_SMOKE_AGENT_KEY and the address the repository secret
-// STAGING_APP_ORIGIN, neither ever in the repository; the log shows each
-// read's path and status, never a body. Node builtins only.
+// turns red here. The key is the repository secret STAGING_SMOKE_AGENT_KEY
+// (not an environment's: the job names none, or its own deployment would start
+// it again) and the address the repository secret STAGING_APP_ORIGIN, neither
+// ever in the repository; the log shows each read's path and status, never a
+// body. Node builtins only.
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { originOf } from '../dast/scan.ts';
@@ -89,10 +90,8 @@ async function readOnce(
         signal: AbortSignal.timeout(30_000),
       });
       last = String(answer.status);
-      if (answer.status === 200) {
-        const problem = read.problem((await answer.json()) as Body, now());
-        return problem === undefined ? `${read.path}: 200` : `${read.path}: 200, but ${problem}`;
-      }
+      // A 200 is final: one that isn't a JSON object (the door serving a page) is wrong, not asleep.
+      if (answer.status === 200) return `${read.path}: ${verdict(read, await answer.text(), now())}`;
       if (![502, 503, 504].includes(answer.status)) return `${read.path}: ${last}`;
     } catch {
       last = 'no answer';
@@ -102,25 +101,45 @@ async function readOnce(
   }
 }
 
-/** Every read's line, and whether all passed. */
+/** A 200's body judged: `200`, or what's wrong with it. */
+function verdict(read: Read, text: string, now: Date): string {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return '200, but the body is not JSON';
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return '200, but the body is not an object';
+  const problem = read.problem(body as Body, now);
+  return problem === undefined ? '200' : `200, but ${problem}`;
+}
+
+/** Every read's line, each said as soon as it is known (a job cut off at its limit still shows how far it got), and whether all passed. */
 export async function smoke(
   origin: string,
   key: string,
   ways: Partial<Ways> = {},
+  say: (line: string) => void = () => undefined,
 ): Promise<{ readonly lines: string[]; readonly passed: boolean }> {
   const lines: string[] = [];
-  for (const read of READS) lines.push(await readOnce(origin, key, read, { ...REAL, ...ways }));
+  for (const read of READS) {
+    const line = await readOnce(origin, key, read, { ...REAL, ...ways });
+    say(line);
+    lines.push(line);
+  }
   return { lines, passed: lines.every((line) => line.endsWith(': 200')) };
 }
 
 async function main(): Promise<number> {
   const key = process.env.AGENTX_SMOKE_KEY ?? '';
   if (!/^axk_\S+$/.test(key)) {
-    console.log('The staging environment secret STAGING_SMOKE_AGENT_KEY is not set, or is not an agent key.');
+    console.log('The repository secret STAGING_SMOKE_AGENT_KEY is not set, or is not an agent key.');
     return 1;
   }
-  const { lines, passed } = await smoke(originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN'), key);
-  for (const line of lines) console.log(line);
+  const origin = originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN');
+  const { passed } = await smoke(origin, key, {}, (line) => {
+    console.log(line);
+  });
   return passed ? 0 : 1;
 }
 
