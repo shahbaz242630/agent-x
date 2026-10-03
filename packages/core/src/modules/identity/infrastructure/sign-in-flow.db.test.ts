@@ -12,7 +12,7 @@ import { type LoginFlow, type OidcClient, SignInFailed } from './oidc-client.ts'
 import { sessionEmailOf, SessionEmailUnreadable } from './session-emails.ts';
 import { createSessions, type Sessions } from './sessions.ts';
 import { createSignIn, type SignIn, StepUpFailed } from './sign-in-flow.ts';
-import { createStepUpChallenges, type StepUpChallenges } from './step-up-challenges.ts';
+import { createStepUpChallenges, type StepUpBinding, type StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -82,6 +82,15 @@ let client: StandInClient;
 let sessions: Sessions;
 let signIn: SignIn;
 let challenges: StepUpChallenges;
+
+/** Holds the session's challenges, then consumes one, as a change's confirmation does (ADR-006 §6, level 0b). */
+const used = async (
+  challenges: StepUpChallenges,
+  db: Parameters<StepUpChallenges['consume']>[0],
+  challengeId: string,
+  binding: StepUpBinding,
+  need: { readonly passkeyRequired: boolean },
+) => challenges.consume(db, await challenges.hold(db, binding.sessionId), challengeId, binding, need);
 let clock: FixedClock;
 let subjects = 0;
 
@@ -370,7 +379,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     expect(stepped.cookie).not.toBe(done.cookie);
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
     expect(await sessions.use(app, stepped.cookie)).toMatchObject({ sessionId: done.sessionId });
-    const consumed = await challenges.consume(app, challenge.challengeId, binding(done.sessionId), NEED);
+    const consumed = await used(challenges, app, challenge.challengeId, binding(done.sessionId), NEED);
     expect(consumed?.evidence).toEqual({
       authTime: FRESH.authTime,
       amr: ['pwd', 'user', 'mfa'],
@@ -482,7 +491,7 @@ describe(`B3-3a a step-up from end to end (Postgres ${server.version})`, () => {
     await expect(failed).rejects.toBeInstanceOf(StepUpFailed);
     await expect(failed).rejects.toMatchObject({ failure });
     expect(await sessions.use(app, done.cookie)).toBeDefined();
-    expect(await challenges.consume(app, challenge.challengeId, binding(done.sessionId), NEED)).toBeUndefined();
+    expect(await used(challenges, app, challenge.challengeId, binding(done.sessionId), NEED)).toBeUndefined();
     // Still pending, so the person can try again: unless its time ran out, which is the failure.
     if (clock.now().getTime() === START.getTime()) {
       expect(await challenges.pending(app, challenge.challengeId, done.sessionId)).toMatchObject({

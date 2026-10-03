@@ -265,10 +265,12 @@ export function createFundingSourceChanges({
 
     async reactivateConfirm(member, idempotent, sourceId, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const source = await suspendedSource(tx, states, member.orgId, sourceId);
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: member.sessionId,

@@ -33,7 +33,14 @@ import {
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  confirmedWhileDemoted,
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -455,6 +462,33 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect(again).toMatchObject({ outcome: 'changed', supplier: { status: 'VERIFIED' } });
     expect(await verifiedNotices(org)).toHaveLength(2);
     expect(await ask(signedBob, supplierId)).toEqual(refusedWith('SUPPLIER_NOT_UNVERIFIED', 409));
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a verification holds its step-up challenges before the verifier’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, bob, supplierId } = await established();
+    const who = await signedIn(bob);
+    const challengeId = askedFor(await ask(who, supplierId));
+    await stepUp(who, challengeId);
+
+    const answer = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: bob.membershipId },
+      () =>
+        verifications.verifyConfirm(
+          who,
+          keyed(who, VERIFY_CONFIRM_OPERATION),
+          supplierId,
+          { stepUpChallengeId: challengeId, note: null },
+          CORRELATION,
+        ),
+    );
+
+    expect(answer).toMatchObject({
+      outcome: 'changed',
+      supplier: { status: 'VERIFIED', verifiedBy: bob.membershipId },
+    });
   });
 });
 

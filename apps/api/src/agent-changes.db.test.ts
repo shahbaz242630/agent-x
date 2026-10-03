@@ -29,6 +29,7 @@ import {
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -779,5 +780,41 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a reactivation holds its step-up challenges before the admin’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const agent = await agentOf(org, admin);
+    changedOf(await suspend(admin, agent));
+    const challengeId = askedFor(await reactivate(admin, agent));
+    await stepUp(admin, challengeId);
+
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, agent, challengeId),
+    );
+
+    expect(changedOf(confirmed).agent).toMatchObject({ id: agent, status: 'ACTIVE' });
+  });
+
+  it('a handover holds its step-up challenges before the admin’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const next = await member(org, 'developer');
+    const agent = await agentOf(org, admin);
+    const challengeId = askedFor(await handOver(admin, agent, next.membershipId));
+    await stepUp(admin, challengeId);
+
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => handOverConfirm(admin, agent, next.membershipId, challengeId),
+    );
+
+    expect(handedOf(confirmed).agent).toMatchObject({ id: agent, owner: next.membershipId });
   });
 });

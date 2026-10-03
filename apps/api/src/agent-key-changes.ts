@@ -46,7 +46,7 @@ import {
   rotatedKeyExpiresAt,
 } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
+import { changeHashOf, type HeldChallenges, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -218,10 +218,12 @@ export function createAgentKeyChanges({
     role: string,
     operation: string,
     keyEventId: string,
+    held: HeldChallenges,
     stepUpChallengeId: string,
   ) => {
     const consumed = await challenges.consume(
       tx,
+      held,
       stepUpChallengeId,
       {
         sessionId: member.sessionId,
@@ -259,12 +261,21 @@ export function createAgentKeyChanges({
       let key: string | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneKeyIssueAtATime(tx, member.orgId);
+        const held = await challenges.hold(tx, member.sessionId);
         const { role, membershipId } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
         const now = clock.now();
         await work.keyBudgetLeft(tx, member.orgId, now);
         const old = await keyToRotate(tx, states, member.orgId, named, now);
         mayRotate(role, membershipId, old.agent.owner);
-        const consumed = await steppedUp(tx, member, role, ROTATE_OPERATION, old.state.eventId, stepUpChallengeId);
+        const consumed = await steppedUp(
+          tx,
+          member,
+          role,
+          ROTATE_OPERATION,
+          old.state.eventId,
+          held,
+          stepUpChallengeId,
+        );
         const actor = { type: 'user' as const, id: member.userId };
         const issued = await work.issueKey(tx, states, {
           orgId: member.orgId,
@@ -305,9 +316,18 @@ export function createAgentKeyChanges({
 
     async revokeConfirm(member, idempotent, named, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         const { role } = await work.memberIn(tx, states, member, KEY_CHANGING_ROLES);
         const read = await keyToRevoke(tx, states, member.orgId, named);
-        const consumed = await steppedUp(tx, member, role, REVOKE_OPERATION, read.state.eventId, stepUpChallengeId);
+        const consumed = await steppedUp(
+          tx,
+          member,
+          role,
+          REVOKE_OPERATION,
+          read.state.eventId,
+          held,
+          stepUpChallengeId,
+        );
         const moved = await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
           actor: { type: 'user', id: member.userId },
           action: 'agent_key.revoked',

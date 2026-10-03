@@ -10,6 +10,7 @@ import { createDatabase, type Database, type IdempotentRequest, lockName, withTe
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   holdNamedLock,
@@ -402,6 +403,37 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('holds the admin’s step-up challenges before their membership, so a demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin } = await organization();
+    const asked = written(await add(admin));
+    const challengeId = asked.stepUpChallengeId ?? '';
+    await stepUp(admin, challengeId);
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, asked.contact.id),
+    );
+
+    expect(confirmed).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
+  });
+
+  it('a removal’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin } = await organization();
+    const id = await added(admin);
+    const asked = await remove(admin, id);
+    if (asked.outcome !== 'asked') throw new Error('not asked');
+    await stepUp(admin, asked.stepUpChallengeId);
+    const removed = await confirmedWhileDemoted(
+      database,
+      { challengeId: asked.stepUpChallengeId, orgId: org, membershipId: admin.membershipId },
+      () => removeConfirm(admin, id, asked.stepUpChallengeId),
+    );
+
+    expect(removed).toMatchObject({ outcome: 'written', contact: { status: 'REMOVED' } });
   });
 });
 

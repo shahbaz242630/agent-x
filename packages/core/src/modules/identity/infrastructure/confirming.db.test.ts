@@ -9,6 +9,7 @@ import { createDatabase, type Database, type IdempotentRequest, TenantContextErr
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -730,5 +731,24 @@ describe(`confirming at the same moment (B4-4d, Postgres ${server.version})`, ()
       await holder.query('rollback');
       await holder.end();
     }
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('an acceptance’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const who = await organization();
+    const { id, invitee } = await accepted(who);
+    const challengeId = await asked(who.admin, id);
+    await stepUp(who.admin, challengeId);
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: who.org, membershipId: who.admin.membershipId },
+      () => confirm(who.admin, id, challengeId),
+    );
+
+    expect(confirmed).toMatchObject({
+      outcome: 'written',
+      invitation: { id, status: 'ACCEPTED', acceptedBy: invitee },
+    });
   });
 });

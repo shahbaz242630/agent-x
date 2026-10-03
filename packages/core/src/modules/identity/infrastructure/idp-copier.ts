@@ -85,6 +85,7 @@ import { toldOfReset } from './grant-notices.ts';
 import type { PasskeysHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
+import { lockChallengesOf } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
 import { userOfSubject } from './users.ts';
 
@@ -192,9 +193,14 @@ export function createIdpEventCopier({
     return false;
   };
 
-  /** Ends every session of the person, locking them first (level 0b); how many ended. */
+  /**
+   * Ends every session of the person, locking them and then their challenges
+   * first (level 0b, in order of ID, as a demotion does), so the challenges
+   * the sessions' end deletes are never locked out of order; how many ended.
+   */
   const endSessions = async (tx: Parameters<typeof endSessionsOf>[0], person: string): Promise<number> => {
     await lockSessionsOf(tx, [person]);
+    await lockChallengesOf(tx, [person]);
     return endSessionsOf(tx, person);
   };
 

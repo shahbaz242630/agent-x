@@ -29,7 +29,14 @@ import { createOutbox, type NotificationsTables } from '@agentx/core/modules/not
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  confirmedWhileDemoted,
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import {
@@ -481,6 +488,24 @@ describe(`reactivating a suspended supplier, with an admin’s passkey step-up (
 
     expect(await confirm(admin, id, earlier)).toEqual({ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' });
     expect((await eventsAbout(org, id)).at(-1)?.action).toBe('supplier.suspend');
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('holds its step-up challenge before the admin’s membership, so a demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    changedOf(await suspend(admin, id));
+    const challengeId = askedFor(await reactivate(admin, id));
+    await stepUp(admin, challengeId);
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, id, challengeId),
+    );
+
+    expect(changedOf(confirmed).supplier).toMatchObject({ id, status: 'UNVERIFIED' });
   });
 });
 

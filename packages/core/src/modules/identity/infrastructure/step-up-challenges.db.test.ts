@@ -47,6 +47,15 @@ const EVIDENCE: StepUpEvidence = {
 /** An admin's change: its step-up must be proved with a passkey (SEC-HA-12). */
 const NEED = { passkeyRequired: true };
 
+/** Holds the session's challenges, then consumes one, as a change's confirmation does (ADR-006 §6, level 0b). */
+const used = async (
+  challenges: StepUpChallenges,
+  db: Parameters<StepUpChallenges['consume']>[0],
+  challengeId: string,
+  binding: StepUpBinding,
+  need: { readonly passkeyRequired: boolean },
+) => challenges.consume(db, await challenges.hold(db, binding.sessionId), challengeId, binding, need);
+
 let people = 0;
 /** A person no other test has, with a live session, and challenges on a clock of the test's own. */
 async function setUp(): Promise<{
@@ -181,14 +190,14 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     clock.advanceBy(30 * SECOND);
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
 
-    const consumed = await app.transaction().execute((tx) => challenges.consume(tx, opened.challengeId, binding, NEED));
+    const consumed = await app.transaction().execute((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
     expect(consumed).toEqual({
       ...opened,
       userId,
       verifiedAt: new Date(START.getTime() + 30 * SECOND),
       evidence: EVIDENCE,
     });
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeUndefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeUndefined();
     expect(await rowsFor(binding.sessionId)).toEqual([]);
   });
 
@@ -199,9 +208,9 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const withApp = { ...EVIDENCE, amr: ['pwd', 'otp', 'mfa'] };
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, withApp);
 
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeUndefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeUndefined();
     expect(await rowsFor(binding.sessionId)).toHaveLength(1);
-    const consumed = await challenges.consume(app, opened.challengeId, binding, { passkeyRequired: false });
+    const consumed = await used(challenges, app, opened.challengeId, binding, { passkeyRequired: false });
     expect(consumed?.evidence).toEqual(withApp);
   });
 
@@ -226,14 +235,14 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
       });
       const refusal = new Error('the first change was refused');
       const first = app.transaction().execute(async (tx) => {
-        const got = await challenges.consume(tx, opened.challengeId, binding, NEED);
+        const got = await used(challenges, tx, opened.challengeId, binding, NEED);
         consumed();
         await released;
         if (!commits) throw refusal;
         return got;
       });
       await hasConsumed;
-      const second = app.transaction().execute((tx) => challenges.consume(tx, opened.challengeId, binding, NEED));
+      const second = app.transaction().execute((tx) => used(challenges, tx, opened.challengeId, binding, NEED));
       await waitUntilQueued(database.as('admin'), 1);
       letGo();
 
@@ -257,11 +266,11 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const refusal = new Error('the change was refused');
     await expect(
       app.transaction().execute(async (tx) => {
-        expect(await challenges.consume(tx, opened.challengeId, binding, NEED)).toBeDefined();
+        expect(await used(challenges, tx, opened.challengeId, binding, NEED)).toBeDefined();
         throw refusal;
       }),
     ).rejects.toBe(refusal);
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeDefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeDefined();
   });
 
   it.each<[string, (binding: StepUpBinding, otherSessionId: string) => StepUpBinding]>([
@@ -275,19 +284,109 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     if (opened === undefined) throw new Error('no challenge');
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
 
-    expect(await challenges.consume(app, opened.challengeId, change(binding, other.sessionId), NEED)).toBeUndefined();
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeDefined();
+    expect(await used(challenges, app, opened.challengeId, change(binding, other.sessionId), NEED)).toBeUndefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeDefined();
   });
 
   it('confirms nothing before its evidence is recorded, or once out of time', async () => {
     const { clock, challenges, binding } = await setUp();
     const opened = await challenges.open(app, binding);
     if (opened === undefined) throw new Error('no challenge');
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeUndefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeUndefined();
 
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
     clock.advanceBy(STEP_UP_SECONDS * SECOND);
-    expect(await challenges.consume(app, opened.challengeId, binding, NEED)).toBeUndefined();
+    expect(await used(challenges, app, opened.challengeId, binding, NEED)).toBeUndefined();
+  });
+
+  it.each(['first', 'second'] as const)(
+    "holds every challenge of the session until the change's transaction ends, the %s too, so a demotion's lock waits (ADR-006 §6)",
+    async (which) => {
+      const { challenges, binding } = await setUp();
+      const opened = { first: await challenges.open(app, binding), second: await challenges.open(app, binding) };
+      const locked = opened[which];
+      if (locked === undefined) throw new Error('it should open');
+      const holder = await database.connect('admin');
+      await holder.query('begin');
+      try {
+        let locking: Promise<unknown> = Promise.resolve();
+        await app.transaction().execute(async (tx) => {
+          await challenges.hold(tx, binding.sessionId);
+          // A demotion of the person, locking this one challenge: queued behind this transaction.
+          locking = within(
+            20_000,
+            holder.query('select id from identity.step_up_challenges where id = $1 for update', [locked.challengeId]),
+            "the demotion's lock",
+          );
+          await waitUntilQueued(database.as('admin'), 1);
+        });
+
+        // Granted once the change's transaction has ended.
+        await locking;
+      } finally {
+        await holder.query('rollback');
+        await holder.end();
+      }
+    },
+  );
+
+  it('sweeps past a challenge another transaction holds, never waiting on it, and leaves it for next time', async () => {
+    const { clock, challenges, binding } = await setUp();
+    const locked = await challenges.open(app, binding);
+    const free = await challenges.open(app, binding);
+    if (locked === undefined || free === undefined) throw new Error('both should open');
+    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [locked.challengeId]);
+
+      await within(5_000, challenges.sweep(app, 1000), 'the sweep');
+      expect((await rowsFor(binding.sessionId)).map((row) => row.id)).toEqual([locked.challengeId]);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
+  it("leaves a challenge past its time to the sweep: a hold doesn't lock it", async () => {
+    const { clock, challenges, binding } = await setUp();
+    const old = await challenges.open(app, binding);
+    if (old === undefined) throw new Error('it should open');
+    clock.advanceBy(STEP_UP_SECONDS * SECOND);
+    await app.transaction().execute(async (tx) => {
+      await challenges.hold(tx, binding.sessionId);
+      // The sweep skips a locked challenge: this one is gone only if the hold left it.
+      await challenges.sweep(app, 1000);
+
+      expect(await rowsFor(binding.sessionId)).toEqual([]);
+    });
+  });
+
+  it('refuses challenges held in another transaction, whose lock has gone already', async () => {
+    const { challenges, binding } = await setUp();
+    const opened = await challenges.open(app, binding);
+    if (opened === undefined) throw new Error('it should open');
+    await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
+    const elsewhere = await challenges.hold(app, binding.sessionId);
+
+    await expect(
+      app.transaction().execute((tx) => challenges.consume(tx, elsewhere, opened.challengeId, binding, NEED)),
+    ).rejects.toThrow(RangeError);
+    expect(await rowsFor(binding.sessionId)).toHaveLength(1);
+  });
+
+  it("refuses challenges held for another session: a change can't use a hold that isn't its own", async () => {
+    const { challenges, binding } = await setUp();
+    const other = await setUp();
+    const opened = await challenges.open(app, binding);
+    if (opened === undefined) throw new Error('it should open');
+    await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, EVIDENCE);
+
+    await expect(
+      challenges.consume(app, await challenges.hold(app, other.binding.sessionId), opened.challengeId, binding, NEED),
+    ).rejects.toThrow(RangeError);
+    expect(await rowsFor(binding.sessionId)).toHaveLength(1);
   });
 
   it('goes with its session, which ends by being deleted', async () => {
@@ -324,7 +423,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const { challenges, binding } = await setUp();
     await expect(challenges.open(app, { ...binding, ...changes })).rejects.toThrow(RangeError);
     await expect(
-      challenges.consume(app, '0199a0f0-0000-7000-8000-000000000001', { ...binding, ...changes }, NEED),
+      used(challenges, app, '0199a0f0-0000-7000-8000-000000000001', { ...binding, ...changes }, NEED),
     ).rejects.toThrow(RangeError);
   });
 
@@ -349,7 +448,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     const opened = await challenges.open(app, binding);
     if (opened === undefined) throw new Error('no challenge');
     await challenges.recordEvidence(app, opened.challengeId, binding.sessionId, { ...EVIDENCE, idpSessionId: null });
-    expect((await challenges.consume(app, opened.challengeId, binding, NEED))?.evidence.idpSessionId).toBeNull();
+    expect((await used(challenges, app, opened.challengeId, binding, NEED))?.evidence.idpSessionId).toBeNull();
   });
 
   it('finds nothing for IDs that are not UUIDs, asking the database nothing', async () => {
@@ -358,7 +457,7 @@ describe(`step-up challenges (Postgres ${server.version})`, () => {
     expect(await challenges.pending(app, '0199a0f0-0000-7000-8000-000000000001', 'nope')).toBeUndefined();
     expect(await challenges.recordEvidence(app, 'nope', binding.sessionId, EVIDENCE)).toBe(false);
     expect(await challenges.recordEvidence(app, '0199a0f0-0000-7000-8000-000000000001', 'nope', EVIDENCE)).toBe(false);
-    expect(await challenges.consume(app, 'nope', binding, NEED)).toBeUndefined();
+    expect(await used(challenges, app, 'nope', binding, NEED)).toBeUndefined();
   });
 });
 

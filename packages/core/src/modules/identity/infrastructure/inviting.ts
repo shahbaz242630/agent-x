@@ -176,6 +176,7 @@ export function createInvitationWrites({
     async confirm(admin, idempotent, invitationId, correlationId) {
       let token: string | undefined;
       const written = await write(admin, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, admin.sessionId);
         await activeAdminId(tx, states, admin, WriteRefused);
         const read = await invitationToOpen(tx, states, keys, {
           orgId: admin.orgId,
@@ -187,6 +188,7 @@ export function createInvitationWrites({
         if (read.outcome !== 'draft') throw new WriteRefused(409, 'INVITATION_CLOSED');
         const consumed = await challenges.consume(
           tx,
+          held,
           read.stepUpChallengeId,
           {
             sessionId: admin.sessionId,

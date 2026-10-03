@@ -882,6 +882,31 @@ describe(`changing memberships at the same moment (B4-5a, ADR-006 §6, Postgres 
     );
   });
 
+  it('pins the confirming admin’s challenges locked (lockChallengesOf) before any membership, so their own demotion at the same moment waits', async () => {
+    const who = await organization();
+    const viewer = await member(who.org, 'viewer');
+    const mine = await steppedUp(who.admin, viewer.membershipId, DEACTIVATE);
+    // A demotion of the confirming admin, part-way: their challenges locked, at its level 0b...
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [mine]);
+      const confirming = within(20_000, confirm(who.admin, viewer.membershipId, DEACTIVATE, mine), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      // ...then their membership (2a), which the confirmation, queued at the challenge, doesn't hold yet.
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        who.org,
+        who.admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'written', member: { status: 'DEACTIVATED' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+
   it('waits for a challenge being used, at the member’s challenges, before their membership', async () => {
     await heldWhileDeactivating(
       // A change of the member's own uses its challenge first...

@@ -227,6 +227,7 @@ export {
   changeHashOf,
   type ConsumedStepUp,
   createStepUpChallenges,
+  type HeldChallenges,
   type PendingChallenge,
   STEP_UP_SECONDS,
   type StepUpBinding,

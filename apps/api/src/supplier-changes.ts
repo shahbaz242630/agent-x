@@ -145,10 +145,12 @@ export function createSupplierChanges({
 
     async reactivateConfirm(member, idempotent, supplierId, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const { found, suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           { sessionId: member.sessionId, action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) },
           // An admin's change: proved with a passkey (SEC-HA-12).

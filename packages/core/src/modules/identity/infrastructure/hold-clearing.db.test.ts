@@ -10,6 +10,7 @@ import { createDatabase, type Database, type IdempotentRequest } from '@agentx/p
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -557,5 +558,20 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       status: 503,
       code: 'INTEGRITY_FAILED',
     });
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a clearing’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    const cleared = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(investigationId, challengeId),
+    );
+
+    expect(cleared).toMatchObject({ outcome: 'cleared', hold: { outcome: 'clear', version: 3 } });
   });
 });

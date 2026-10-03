@@ -181,6 +181,7 @@ export function createHoldClearings({
 
     async confirm(admin, idempotent, investigationId, stepUpChallengeId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, admin.sessionId);
         const whole = await states.verifyAll(tx, admin.orgId, authorityTables, objectsChecked);
         if (whole.outcome === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
         if (whole.outcome === 'too_many') throw new Error(`more ${whole.subjectType} records than clearing checks`);
@@ -197,6 +198,7 @@ export function createHoldClearings({
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: admin.sessionId,

@@ -408,6 +408,7 @@ export function createResetChanges({
     async confirm(admin, idempotent, resetId, correlationId) {
       const services = servicesFor(correlationId);
       const done = await write(admin, idempotent, services, async (tx, states) => {
+        const held = await challenges.hold(tx, admin.sessionId);
         const personId = await listedPersonOf(tx, admin.orgId, resetId);
         if (personId === undefined) throw new ResetRefused(404, 'NOT_FOUND');
         const people = await peopleOf(tx, states, admin, personId);
@@ -421,6 +422,7 @@ export function createResetChanges({
         someoneToConfirm(contactIds);
         const consumed = await challenges.consume(
           tx,
+          held,
           reset.stepUpChallengeId,
           { sessionId: admin.sessionId, action: RESET_ASK_OPERATION, changeHash: read.changeHash },
           // An admin's change: proved with a passkey (SEC-HA-12).

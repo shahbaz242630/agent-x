@@ -163,11 +163,13 @@ export function createSupplierPayeeChanges({
       let done: Awaited<ReturnType<typeof work.write>>;
       try {
         done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+          const held = await challenges.hold(tx, member.sessionId);
           const { orgId } = member;
           const { found, version, registration } = await waitingFor(tx, states, member, supplierId, 'change');
           const current = await work.versionIn(tx, states, orgId, found.supplier.id, found.supplier.currentVersionId);
           const consumed = await challenges.consume(
             tx,
+            held,
             stepUpChallengeId,
             { sessionId: member.sessionId, action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) },
             // An admin's change: proved with a passkey (SEC-HA-12).

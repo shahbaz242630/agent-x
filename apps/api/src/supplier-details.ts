@@ -119,8 +119,9 @@ export function createSupplierDetailsChanges({
 
   /**
    * Whether this admin may change the supplier's details to `details` now,
-   * read in the write's transaction (the supplier `lock`ed as asked): the
-   * admin, the supplier and its current version; or a refusal thrown.
+   * read in the write's transaction (the supplier `lock`ed as asked), after
+   * the caller took the add lock (oneSupplierAddAtATime) first: the admin,
+   * the supplier and its current version; or a refusal thrown.
    */
   const changeable = async (
     tx: SupplierTx,
@@ -132,7 +133,6 @@ export function createSupplierDetailsChanges({
     correlationId: string,
   ) => {
     const { orgId } = member;
-    await oneSupplierAddAtATime(tx, orgId);
     const since = new Date(clock.now().getTime() - DAY_MS);
     if ((await changesEnteredSince(tx, orgId, since)) >= MOST_CHANGES_A_DAY) {
       throw new SupplierRefused(409, 'SUPPLIER_CHANGES_SPENT');
@@ -151,6 +151,7 @@ export function createSupplierDetailsChanges({
   return {
     async change(member, idempotent, supplierId, details, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await oneSupplierAddAtATime(tx, member.orgId);
         const { current } = await changeable(tx, states, member, supplierId, details, 'share', correlationId);
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
@@ -166,6 +167,8 @@ export function createSupplierDetailsChanges({
 
     async changeConfirm(member, idempotent, supplierId, { details, stepUpChallengeId }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        await oneSupplierAddAtATime(tx, member.orgId);
+        const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
         const { admin, found, current } = await changeable(
           tx,
@@ -178,6 +181,7 @@ export function createSupplierDetailsChanges({
         );
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           { sessionId: member.sessionId, action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
           // An admin's change: proved with a passkey (SEC-HA-12).

@@ -14,6 +14,7 @@ import {
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -348,6 +349,21 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     clock.advanceBy(72 * 3_600_000);
 
     expect(await confirm(admin, id)).toEqual({ outcome: 'refused', status: 409, code: 'INVITATION_CLOSED' });
+  });
+});
+
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('an invitation’s confirmation holds the admin’s step-up challenges before their membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin } = await organization();
+    const { id, challengeId } = await drafted(admin);
+    await stepUp(admin, challengeId);
+    const confirmed = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, id),
+    );
+
+    expect(confirmed).toMatchObject({ outcome: 'written', status: 200, invitation: { id, status: 'OPEN' } });
   });
 });
 

@@ -32,6 +32,7 @@ import { createDatabase, type Database, type IdempotentRequest, withTenant } fro
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   LogCapture,
@@ -455,6 +456,28 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
     expect((await notices(org)).filter(({ about_id }) => about_id === second)).toEqual([]);
     // Everything rolled back, the challenge's use included; the change is left for a withdrawal.
     expect(changedOf(await withdraw(admin, second)).supplier.pendingVersionId).toBeNull();
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a payee change holds its step-up challenges before the admin’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const registration = await waiting(admin, id);
+    const challengeId = askedFor(await approve(admin, id));
+    await stepUp(admin, challengeId);
+
+    const done = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: admin.membershipId },
+      () => confirm(admin, id, challengeId),
+    );
+
+    expect(changedOf(done).supplier).toMatchObject({
+      currentVersionId: registration.versionId,
+      payeeKey: registration.payeeKey,
+    });
   });
 });
 

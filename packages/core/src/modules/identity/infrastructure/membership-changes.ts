@@ -250,9 +250,12 @@ export function createMembershipChanges({
         const people = [admin.userId.toLowerCase(), memberUserId];
         await lockSessionsOf(tx, people);
         await lockChallengesOf(tx, people);
+        // The admin's own are among those just locked: held again, in the same order, for consume.
+        const held = await challenges.hold(tx, admin.sessionId);
         const { member, state } = await bothRead(tx, states, admin, membershipId, memberUserId, change, 'change');
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: admin.sessionId,

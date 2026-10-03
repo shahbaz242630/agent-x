@@ -261,6 +261,7 @@ export function createContactChanges({
     async confirm(admin, idempotent, contactId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         await oneAtATime(tx, admin.orgId);
+        const held = await challenges.hold(tx, admin.sessionId);
         await activeAdminId(tx, states, admin, ContactRefused);
         const read = await contactToActivate(tx, states, keys, { orgId: admin.orgId, id: contactId });
         if (read.outcome === 'missing') throw new ContactRefused(404, 'NOT_FOUND');
@@ -269,6 +270,7 @@ export function createContactChanges({
         await mustHaveRoomFor(tx, states, admin.orgId, read.change.email);
         const consumed = await challenges.consume(
           tx,
+          held,
           read.contact.stepUpChallengeId,
           { sessionId: admin.sessionId, action: CONTACT_ADD_OPERATION, changeHash: read.changeHash },
           // An admin's change: proved with a passkey (SEC-HA-12).
@@ -312,6 +314,7 @@ export function createContactChanges({
     async removeConfirm(admin, idempotent, contactId, stepUpChallengeId, correlationId) {
       const done = await write(admin, idempotent, correlationId, async (tx, states) => {
         await oneAtATime(tx, admin.orgId);
+        const held = await challenges.hold(tx, admin.sessionId);
         await activeAdminId(tx, states, admin, ContactRefused);
         const read = await contactToRemove(tx, states, { orgId: admin.orgId, id: contactId });
         if (read.outcome === 'missing') throw new ContactRefused(404, 'NOT_FOUND');
@@ -319,6 +322,7 @@ export function createContactChanges({
         if (read.outcome !== 'active') throw new ContactRefused(409, 'CONTACT_NOT_ACTIVE');
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           { sessionId: admin.sessionId, action: CONTACT_REMOVE_OPERATION, changeHash: read.changeHash },
           { passkeyRequired: true },

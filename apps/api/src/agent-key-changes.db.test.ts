@@ -34,6 +34,7 @@ import { createDatabase, type Database, type IdempotentRequest, lockName, withTe
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
 import {
+  confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
   holdNamedLock,
@@ -901,5 +902,40 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(await handOverAsk(admin, key.agentId, next.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_SPENT'));
     expect(await keysIn(org)).toBe(MOST_KEYS_ISSUED_A_DAY);
     expect(await check(key.text)).toMatchObject({ outcome: 'accepted' });
+  });
+});
+
+describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('a key rotation holds its step-up challenges before the member’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const old = await agentWithKey(org, developer);
+    const challengeId = askedFor(await rotate(developer, old));
+    await stepUp(developer, challengeId);
+
+    const write = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: developer.membershipId },
+      () => rotateConfirm(developer, old, challengeId),
+    );
+
+    expect(write).toMatchObject({ outcome: 'rotated', key: expect.stringMatching(/^axk_/) as unknown });
+  });
+
+  it('a key revocation holds its step-up challenges before the member’s membership, so their demotion at the same moment waits, never deadlocks', async () => {
+    const org = await organization();
+    const developer = await member(org, 'developer');
+    const key = await agentWithKey(org, developer);
+    const challengeId = askedFor(await revoke(developer, key));
+    await stepUp(developer, challengeId);
+
+    const write = await confirmedWhileDemoted(
+      database,
+      { challengeId, orgId: org, membershipId: developer.membershipId },
+      () => revokeConfirm(developer, key, challengeId),
+    );
+
+    expect(write.outcome).toBe('revoked');
+    expect(await check(key.text)).toEqual({ outcome: 'refused' });
   });
 });
