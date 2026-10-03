@@ -16,4 +16,6 @@ Please include what you found, where (file, route or address), how to reproduce 
 
 ## Scope
 
-This repository's code and its staging service. The project handles no real money yet. Test only against your own accounts and data, and don't degrade the service for others.
+This repository's code and its staging service. The project handles no real money yet. Don't touch other people's data or degrade the service for others; if you need a test account, ask in your report.
+
+We won't pursue legal action against good-faith research that follows this policy.
