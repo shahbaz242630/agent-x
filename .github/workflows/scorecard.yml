@@ -1,0 +1,41 @@
+# OpenSSF Scorecard: how the repository's own supply chain measures up (pinned
+# actions, branch protection, token permissions, signed releases and so on).
+# Report only: findings go to code scanning, never block a pull request, and
+# are read at the weekly checks.
+name: Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 4 * * 1' # Mondays 04:41 UTC, after the weekly sweep
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # Scorecard reads the workflows' runs
+      security-events: write # to put the findings in code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          # Kept to the repository: nothing is sent to the OpenSSF.
+          publish_results: false
+
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard

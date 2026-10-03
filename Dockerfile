@@ -5,8 +5,10 @@
 #
 # Everything that goes in is pinned: the base image by digest (SEC-SC-02), pnpm
 # by the sha512 in package.json (Corepack checks it), every dependency by the
-# lockfile (frozen). Only production dependencies of the apps are
-# installed; test helpers and test files never ship (.dockerignore).
+# lockfile (frozen). One input is not: Debian's security updates as of the
+# build, chosen over repeatable bytes (ADR-001 Amendment S77). Only production
+# dependencies of the apps are installed; test helpers and test files never
+# ship (.dockerignore).
 
 FROM node:24.21.0-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS dependencies
 
@@ -33,6 +35,15 @@ ARG AGENTX_RELEASE=local
 LABEL org.opencontainers.image.source="https://github.com/shahbaz242630/agent-x" \
   org.opencontainers.image.revision="${AGENTX_RELEASE}" \
   org.opencontainers.image.description="Agent X: the API, the migration job, the database set-up job, the operator's command and the worker"
+
+# The base image's Debian packages brought to their security updates (the
+# image scan found OpenSSL and PCRE2 fixes newer than the base image), and
+# npm, npx, Corepack and Yarn removed: nothing here runs them, and their own
+# bundled packages carried known vulnerabilities (Security-Handoff §13b).
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes --no-install-recommends -o Dpkg::Options::=--force-confold \
+  && rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /opt/yarn-* \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 WORKDIR /app
 COPY --from=dependencies /app /app
