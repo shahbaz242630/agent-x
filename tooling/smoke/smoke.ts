@@ -130,24 +130,25 @@ export async function smoke(
 const KEY_TEXT = /^axk_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/;
 
 /**
- * Why a stored key can't be one, said without showing any of it: its length
- * and the start every key shares, or nothing when it has a key's shape.
- * Whitespace a paste added around it is forgiven.
+ * The stored key, less whitespace a paste added around it, or why it can't be
+ * one, said without showing any of it: its length and the start every key shares.
  */
-export function keyProblem(stored: string | undefined): string | undefined {
+export function storedKey(stored: string | undefined): { readonly key: string } | { readonly problem: string } {
   const key = (stored ?? '').trim();
-  if (key === '') return 'The repository secret STAGING_SMOKE_AGENT_KEY is not set.';
-  if (KEY_TEXT.test(key)) return undefined;
-  return `The repository secret STAGING_SMOKE_AGENT_KEY is not an agent key: ${String(key.length)} characters (a key has 80), ${key.startsWith('axk_') ? 'starting' : 'not starting'} with axk_.`;
+  if (key === '') return { problem: 'The repository secret STAGING_SMOKE_AGENT_KEY is not set.' };
+  if (KEY_TEXT.test(key)) return { key };
+  return {
+    problem: `The repository secret STAGING_SMOKE_AGENT_KEY is not an agent key: ${String(key.length)} characters (a key has 80), ${key.startsWith('axk_') ? 'starting' : 'not starting'} with axk_.`,
+  };
 }
 
 async function main(): Promise<number> {
-  const problem = keyProblem(process.env.AGENTX_SMOKE_KEY);
-  if (problem !== undefined) {
-    console.log(problem);
+  const stored = storedKey(process.env.AGENTX_SMOKE_KEY);
+  if ('problem' in stored) {
+    console.log(stored.problem);
     return 1;
   }
-  const key = (process.env.AGENTX_SMOKE_KEY ?? '').trim();
+  const { key } = stored;
   const origin = originOf(process.env.AGENTX_SMOKE_ORIGIN, 'AGENTX_SMOKE_ORIGIN');
   const { passed } = await smoke(origin, key, {}, (line) => {
     console.log(line);
