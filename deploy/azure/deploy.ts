@@ -790,6 +790,43 @@ function succeeded(steps: Steps, name: string, ended: Ended): boolean {
 }
 
 /**
+ * Sends one hand deploy: Azure's what-if is shown and waits for the
+ * operator's "y" (`--confirm-with-what-if`), then how it ended is read back
+ * (howItEnded). The foundation is a subscription deployment (it makes the
+ * resource group); the rest go into the group. The deployment's outputs when
+ * it succeeded; undefined when it didn't, which has been said.
+ */
+function sendWithWhatIf(
+  steps: Steps,
+  subscription: string,
+  part: Deployment,
+  values: Readonly<Record<string, string>>,
+): unknown {
+  const name = deploymentName(part, steps.now());
+  const kind = part === 'foundation' ? 'sub' : 'group';
+  const where = ['--subscription', subscription, ...(kind === 'group' ? ['--resource-group', RESOURCE_GROUP] : [])];
+  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
+  const status = steps.az.interactive(
+    [
+      'deployment',
+      kind,
+      'create',
+      ...where,
+      ...(part === 'foundation' ? ['--location', REGION] : []),
+      '--name',
+      name,
+      '--parameters',
+      DEPLOYMENTS[part],
+      '--confirm-with-what-if',
+    ],
+    values,
+  );
+  if (status !== 0) return undefined;
+  const ended = howItEnded(steps, ['deployment', kind, 'show', ...where, '--name', name]);
+  return succeeded(steps, name, ended) ? (ended.outputs ?? {}) : undefined;
+}
+
+/**
  * The commit this folder is at, which a recorded deploy records: refused when
  * anything in it differs from that commit, since the record says the commit's
  * Bicep is what Azure was built from.
@@ -864,30 +901,10 @@ async function deployFoundation(steps: Steps): Promise<number> {
   const admin = await askPassword(steps.terminal, PERSON_LABELS['db-admin-password'] ?? 'the password');
   const values = { [ALERT_EMAIL]: email, [ADMIN_PASSWORD]: admin };
   checkPolicy(steps, values);
-  const name = deploymentName('foundation', steps.now());
-  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
-  const status = steps.az.interactive(
-    [
-      'deployment',
-      'sub',
-      'create',
-      '--subscription',
-      subscription,
-      '--location',
-      REGION,
-      '--name',
-      name,
-      '--parameters',
-      DEPLOYMENTS.foundation,
-      '--confirm-with-what-if',
-    ],
-    values,
-  );
-  if (status !== 0) return 1;
-  const ended = howItEnded(steps, ['deployment', 'sub', 'show', '--subscription', subscription, '--name', name]);
-  if (!succeeded(steps, name, ended)) return 1;
+  const outputs = sendWithWhatIf(steps, subscription, 'foundation', values);
+  if (outputs === undefined) return 1;
   steps.terminal.say('Deployed. What the foundation reports:');
-  for (const [key, output] of Object.entries((ended.outputs ?? {}) as Record<string, { value?: unknown }>)) {
+  for (const [key, output] of Object.entries(outputs as Record<string, { value?: unknown }>)) {
     steps.terminal.say(`  ${key}: ${text(output.value)}`);
   }
   const recorded = leaveRecord(steps, subscription, 'foundation', commit);
@@ -1137,38 +1154,7 @@ async function deploySecrets(steps: Steps, plan: SecretPlan): Promise<number> {
   }
   const values = secretValues(plan, people, steps.makers);
   checkPolicy(steps, values);
-  const name = deploymentName('secrets', steps.now());
-  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
-  const status = steps.az.interactive(
-    [
-      'deployment',
-      'group',
-      'create',
-      '--subscription',
-      subscription,
-      '--resource-group',
-      RESOURCE_GROUP,
-      '--name',
-      name,
-      '--parameters',
-      DEPLOYMENTS.secrets,
-      '--confirm-with-what-if',
-    ],
-    values,
-  );
-  if (status !== 0) return 1;
-  const ended = howItEnded(steps, [
-    'deployment',
-    'group',
-    'show',
-    '--subscription',
-    subscription,
-    '--resource-group',
-    RESOURCE_GROUP,
-    '--name',
-    name,
-  ]);
-  if (!succeeded(steps, name, ended)) return 1;
+  if (sendWithWhatIf(steps, subscription, 'secrets', values) === undefined) return 1;
   const now = secretsInVault(steps, subscription, vault);
   steps.terminal.say('Deployed. The vault now holds:');
   for (const secret of now.map((listed) => listed.name).sort()) steps.terminal.say(`  ${secret}`);
@@ -1386,38 +1372,7 @@ async function deployCertificates(steps: Steps): Promise<number> {
   }
   const values = { [CERTIFICATE_VARIABLES.authHost]: authHost, [CERTIFICATE_VARIABLES.appHost]: appHost };
   checkPolicy(steps, values);
-  const name = deploymentName('certificates', steps.now());
-  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
-  const status = steps.az.interactive(
-    [
-      'deployment',
-      'group',
-      'create',
-      '--subscription',
-      subscription,
-      '--resource-group',
-      RESOURCE_GROUP,
-      '--name',
-      name,
-      '--parameters',
-      DEPLOYMENTS.certificates,
-      '--confirm-with-what-if',
-    ],
-    values,
-  );
-  if (status !== 0) return 1;
-  const ended = howItEnded(steps, [
-    'deployment',
-    'group',
-    'show',
-    '--subscription',
-    subscription,
-    '--resource-group',
-    RESOURCE_GROUP,
-    '--name',
-    name,
-  ]);
-  if (!succeeded(steps, name, ended)) return 1;
+  if (sendWithWhatIf(steps, subscription, 'certificates', values) === undefined) return 1;
   steps.terminal.say('Deployed. The certificates, and how Azure left each:');
   const certificates = armList(
     steps,
@@ -1504,38 +1459,7 @@ async function deployApps(steps: Steps, commit: string | undefined, keepRunning:
     [APP_VARIABLES.minReplicas]: keepRunning ? '1' : '0',
   };
   checkPolicy(steps, values);
-  const name = deploymentName('apps', steps.now());
-  steps.terminal.say(`Azure's what-if follows. Read it, then answer y to deploy (${name}).`);
-  const status = steps.az.interactive(
-    [
-      'deployment',
-      'group',
-      'create',
-      '--subscription',
-      subscription,
-      '--resource-group',
-      RESOURCE_GROUP,
-      '--name',
-      name,
-      '--parameters',
-      DEPLOYMENTS.apps,
-      '--confirm-with-what-if',
-    ],
-    values,
-  );
-  if (status !== 0) return 1;
-  const ended = howItEnded(steps, [
-    'deployment',
-    'group',
-    'show',
-    '--subscription',
-    subscription,
-    '--resource-group',
-    RESOURCE_GROUP,
-    '--name',
-    name,
-  ]);
-  if (!succeeded(steps, name, ended)) return 1;
+  if (sendWithWhatIf(steps, subscription, 'apps', values) === undefined) return 1;
   const listed = (kind: 'containerapp' | 'containerapp job'): readonly { name?: unknown; state?: unknown }[] => {
     const found = azJson(steps.az, [
       ...kind.split(' '),
