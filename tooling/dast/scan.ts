@@ -137,11 +137,11 @@ export const acceptedReason = (finding: Finding): string | undefined =>
   )?.reason;
 
 /** The staging origin, checked: https, a host, nothing after it. */
-export function originOf(value: string | undefined): string {
-  if (value === undefined || value === '') throw new Error('AGENTX_DAST_ORIGIN is not set');
+export function originOf(value: string | undefined, name = 'AGENTX_DAST_ORIGIN'): string {
+  if (value === undefined || value === '') throw new Error(`${name} is not set`);
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.origin !== value.replace(/\/$/, '') || url.username !== '') {
-    throw new Error('AGENTX_DAST_ORIGIN must be an https origin alone, like https://app.example.com');
+    throw new Error(`${name} must be an https origin alone, like https://app.example.com`);
   }
   return url.origin;
 }

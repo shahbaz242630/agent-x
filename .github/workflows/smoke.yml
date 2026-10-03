@@ -1,0 +1,57 @@
+# The post-release smoke test (Security-Handoff §13b, partner S69): staging's
+# test agent reads what every agent reads, through the public door, with its
+# own key (tooling/smoke/smoke.ts), so a release that starts clean but is wired
+# wrong turns red here. It starts when the release job's staging deployment
+# succeeds: only main's release job deploys there (release-job.test.ts). Both
+# values are repository secrets, never variables, whose values the public log
+# would print; the key holds the two read scopes alone, which the test checks.
+name: Smoke (staging)
+
+on:
+  deployment_status:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-staging
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Smoke test on staging
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' ||
+      github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'staging' &&
+      github.event.deployment.ref == 'main'
+    runs-on: ubuntu-latest
+    # Three reads, each up to ~190 s while the API wakes, and the setup.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      AGENTX_SMOKE_ORIGIN: ${{ secrets.STAGING_APP_ORIGIN }}
+    steps:
+      - name: Keep the staging address out of the log
+        run: |
+          if [ -z "$AGENTX_SMOKE_ORIGIN" ]; then echo 'The repository secret STAGING_APP_ORIGIN is not set.'; exit 1; fi
+          echo "::add-mask::$AGENTX_SMOKE_ORIGIN"
+          host="${AGENTX_SMOKE_ORIGIN#https://}"
+          echo "::add-mask::${host%/}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: false
+          package-manager-cache: false
+
+      # Node builtins only, nothing installed; the key reaches this step alone.
+      - name: Read what every agent reads, with the smoke agent's key
+        env:
+          AGENTX_SMOKE_KEY: ${{ secrets.STAGING_SMOKE_AGENT_KEY }}
+        run: node tooling/smoke/smoke.ts
