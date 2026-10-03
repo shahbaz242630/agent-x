@@ -33,6 +33,8 @@ interface Manifest {
   license?: unknown;
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, unknown>;
 }
 
 const read = (file: string) => JSON.parse(readFileSync(file, 'utf8')) as Manifest;
@@ -63,8 +65,14 @@ function productionPackages(): Map<string, Manifest> {
   const workspace = new Set(queue);
   for (let dir = queue.shift(); dir !== undefined; dir = queue.shift()) {
     const manifest = read(path.join(dir, 'package.json'));
-    // An optional dependency for another platform is never installed, so its absence is no gap.
-    const optional = new Set(Object.keys(manifest.optionalDependencies ?? {}));
+    // An optional dependency for another platform is never installed, so its absence is no gap; nor is
+    // a peer's, which the package's user brings. pnpm installs a peer it can, even one named only in
+    // peerDependenciesMeta (debug's supports-color), and that one ships.
+    const optional = new Set([
+      ...Object.keys(manifest.optionalDependencies ?? {}),
+      ...Object.keys(manifest.peerDependencies ?? {}),
+      ...Object.keys(manifest.peerDependenciesMeta ?? {}),
+    ]);
     for (const name of [...Object.keys(manifest.dependencies ?? {}), ...optional]) {
       const at = installed(name, dir);
       if (at === undefined) {

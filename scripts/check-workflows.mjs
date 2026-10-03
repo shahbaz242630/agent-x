@@ -40,6 +40,8 @@ export const ALLOWED_ACTIONS = new Set([
   // Security-Handoff §13b: Grype's scan of the published image, findings to code scanning (report only).
   'anchore/scan-action',
   // Security-Handoff §13b: OpenSSF Scorecard of the repository's own setup, findings to code scanning, nothing published.
+  // A known gap: its SHA-pinned action runs the container ghcr.io/ossf/scorecard-action:v2.4.4 by tag, which could
+  // move; its job can write only code scanning results.
   'ossf/scorecard-action',
 ]);
 
