@@ -86,8 +86,9 @@ import {
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
+  STEP_UP_CONFIRM,
   STEP_UP_SIGNED_IN,
-  STEP_UP_TO_SIGN_IN,
+  stepUpAsked,
 } from './route-schemas.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
@@ -247,13 +248,6 @@ const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDeta
 const DETAILS_BODY = z.strictObject(DETAIL_FIELDS).transform(detailsKept);
 
 /** A step-up asked: the 202's body, under its own name in the document. */
-const stepUpAsked = (id: string, description: string) =>
-  z
-    .object({
-      stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-    })
-    .register(API_SCHEMAS, { id, description });
-
 const ADD_SCHEMA = {
   summary: 'Add a supplier, unverified',
   body: DETAILS_BODY.describe('The supplier to add, UNVERIFIED.'),
@@ -330,7 +324,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the supplier, once signed in again for it',
   params: SUPPLIER_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: SUPPLIER_CHANGED },
 };
 
@@ -349,7 +343,7 @@ const PAYEE_APPROVE_SCHEMA = {
 const PAYEE_APPROVE_CONFIRM_SCHEMA = {
   summary: 'Confirm a supplier’s new bank details, once signed in again for it',
   params: SUPPLIER_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: {
     200: SUPPLIER_CHANGED.describe(
       'The supplier, paying the new details once verified: unverified, its cooling-off begun, and everyone told.',

@@ -28,6 +28,7 @@ import {
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { HOUR_MS } from '../../../shared-kernel/index.ts';
 import { withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import { AccountNumberLeak, type BeneficiaryState } from '../../providers/index.ts';
@@ -83,7 +84,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xe210_0000_0000);
 const clock = new FixedClock(new Date('2026-10-02T08:00:00Z'));
-const HOUR_MS = 3_600_000;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 /** When a confirmed change's cooling-off ends, as the use case gives it (E2-2b). */
 const COOLED_OFF = new Date('2026-10-03T08:00:00Z');

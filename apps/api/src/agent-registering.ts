@@ -32,7 +32,7 @@ import {
   scopesText,
 } from '@agentx/core/modules/agents';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -101,8 +101,6 @@ export interface AgentRegistrations {
   /** The agent, with its keys: NOT_FOUND for one the organisation doesn't have. */
   show(orgId: string, agentId: string, correlationId: string): Promise<AgentFound>;
 }
-
-const DAY_MS = 86_400_000;
 
 /**
  * The pending change's SHA-256: the organisation, the name as it will be kept

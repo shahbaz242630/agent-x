@@ -24,6 +24,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -71,7 +72,6 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xb63c_0000_0000);
 const ISSUER = 'https://auth.example.test';
 const START = new Date('2026-09-27T09:00:00Z');
-const HOUR_MS = 3_600_000;
 let clock: FixedClock;
 let capture: LogCapture;
 

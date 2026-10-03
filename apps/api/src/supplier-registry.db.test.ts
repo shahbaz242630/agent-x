@@ -22,6 +22,7 @@ import {
   verifySupplier,
 } from '@agentx/core/modules/suppliers';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -65,7 +66,6 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xe120_0000_0000);
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000ab';
-const DAY_MS = 86_400_000;
 
 const DETAILS: SupplierDetails = {
   displayName: 'Gulf Office Supplies LLC',

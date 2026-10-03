@@ -25,6 +25,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -69,7 +70,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xb63b_0000_0000);
 const START = new Date('2026-09-27T09:00:00Z');
-const HOUR_MS = 3_600_000;
 let clock: FixedClock;
 let changes: ResetChanges;
 let capture: LogCapture;
@@ -248,8 +248,6 @@ async function sent({ admin, person }: Org): Promise<string> {
 }
 
 const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
-
-const DAY_MS = 24 * HOUR_MS;
 
 /** Drafts `count` resets of the person straight into the table, two days ago: records, not asked for today. */
 async function oldResets({ org, admin, person }: Pick<Org, 'org' | 'admin' | 'person'>, count: number): Promise<void> {

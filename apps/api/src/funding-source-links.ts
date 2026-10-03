@@ -65,7 +65,7 @@ import {
 } from '@agentx/core/modules/providers';
 import { createHash } from 'node:crypto';
 
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -124,8 +124,6 @@ export interface FundingSourceLinks {
     correlationId: string,
   ): Promise<LinkConfirmWrite>;
 }
-
-const DAY_MS = 86_400_000;
 
 /**
  * The link's ID, made from the write's idempotency key and whose it is (the

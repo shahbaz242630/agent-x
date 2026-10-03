@@ -100,7 +100,7 @@ import {
   unverifySupplier,
   versionOf,
 } from '@agentx/core/modules/suppliers';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -167,8 +167,6 @@ export interface SupplierPayees {
     correlationId: string,
   ): Promise<PayeeWrite>;
 }
-
-const DAY_MS = 86_400_000;
 
 /** A registration the partner may still answer: neither registered nor failed. */
 const isOpen = (registration: RegistrationRecord): boolean =>

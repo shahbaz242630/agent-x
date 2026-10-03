@@ -64,8 +64,8 @@ import {
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
-  STEP_UP_SIGNED_IN,
-  STEP_UP_TO_SIGN_IN,
+  STEP_UP_CONFIRM,
+  stepUpAsked,
 } from './route-schemas.ts';
 
 /** Every member may see the organisation's sources. */
@@ -222,14 +222,10 @@ const SUSPEND_SCHEMA = {
   response: { 200: SOURCE_CHANGED },
 };
 
-const REACTIVATION_ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'FundingSourceReactivationAsked',
-    description: 'Reactivating a bank account, waiting for the admin to sign in again.',
-  });
+const REACTIVATION_ASKED = stepUpAsked(
+  'FundingSourceReactivationAsked',
+  'Reactivating a bank account, waiting for the admin to sign in again.',
+);
 
 const REACTIVATE_SCHEMA = {
   summary: 'Ask to reactivate a suspended bank account',
@@ -241,7 +237,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the bank account, once signed in again for it',
   params: SOURCE_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: SOURCE_CHANGED },
 };
 

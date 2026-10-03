@@ -18,6 +18,7 @@ import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { addMembership, type IdentityTables, userForSubject } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -42,7 +43,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xc21a_0000_0000);
 const START = new Date('2026-09-29T09:00:00Z');
-const DAY_MS = 24 * 3_600_000;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 let clock: FixedClock;
 let capture: LogCapture;
