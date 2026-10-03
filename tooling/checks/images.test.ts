@@ -78,7 +78,7 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
   it("ships no package manager, and the base image's Debian security updates, in the image that runs", () => {
     const text = readFileSync(DOCKERFILE, 'utf8').replaceAll('\r\n', '\n');
     const runtime = text.slice(text.lastIndexOf('\nFROM '));
-    for (const removed of [
+    const removed = [
       '/usr/local/lib/node_modules/npm',
       '/usr/local/lib/node_modules/corepack',
       '/usr/local/bin/npm',
@@ -87,12 +87,14 @@ describe('SEC-SC-02 container images are pinned by digest', () => {
       '/usr/local/bin/yarn',
       '/usr/local/bin/yarnpkg',
       '/opt/yarn-',
-    ]) {
-      expect(runtime, removed).toContain(removed);
-    }
-    expect(runtime).toMatch(/apt-get update \\\n {2}&& DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes/);
-    // As root, before the image drops to its unprivileged user.
-    expect(runtime.indexOf('apt-get upgrade')).toBeLessThan(runtime.indexOf('USER node'));
+    ];
+    expect(removed.filter((path) => !runtime.includes(path))).toEqual([]);
+    // The lists first, then the upgrade, as root before the image drops to its unprivileged user.
+    const update = runtime.indexOf('apt-get update');
+    const upgrade = runtime.indexOf('DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes');
+    expect(update).toBeGreaterThan(-1);
+    expect(upgrade).toBeGreaterThan(update);
+    expect(upgrade).toBeLessThan(runtime.indexOf('USER node'));
   });
 
   it('builds on the Node major the repository runs (.nvmrc)', () => {
