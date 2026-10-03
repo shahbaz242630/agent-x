@@ -30,6 +30,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { DAY_MS, HOUR_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -77,8 +78,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xc14b_0000_0000);
 const START = new Date('2026-09-28T09:00:00Z');
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
 let clock: FixedClock;
 let changes: AgentKeyChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });

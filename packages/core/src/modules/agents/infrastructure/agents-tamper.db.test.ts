@@ -26,6 +26,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { AUTHORITY_TABLES } from '../../../authority-tables.ts';
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, type TamperSign, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
@@ -49,7 +50,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0x7a0);
 const clock = new FixedClock(new Date('2026-09-28T09:00:00Z'));
-const DAY_MS = 86_400_000;
 
 const loggerFor = (destination: LogCapture) =>
   createLogger({

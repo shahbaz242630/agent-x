@@ -45,7 +45,7 @@ import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import { CHALLENGE_BODY_LIMIT, NOTHING, NOTHING_BODY_LIMIT, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
+import { CHALLENGE_BODY_LIMIT, NOTHING, NOTHING_BODY_LIMIT, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** The organisation's ACTIVE contacts, verified, for the request with this correlation ID. */
 export type ListContacts = (
@@ -126,23 +126,14 @@ const REMOVE_SCHEMA = {
   params: ID,
   body: NOTHING,
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-      })
-      .register(API_SCHEMAS, {
-        id: 'RegisteredContactRemovalAsked',
-        description: "A contact's removal, waiting for the admin to sign in again.",
-      }),
+    202: stepUpAsked('RegisteredContactRemovalAsked', "A contact's removal, waiting for the admin to sign in again."),
   },
 };
 
 const REMOVE_CONFIRM_SCHEMA = {
   summary: 'Remove a registered contact, once signed in again for it',
   params: ID,
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with.') })
-    .describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: CHANGED },
 };
 

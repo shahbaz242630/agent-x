@@ -30,6 +30,7 @@ import {
   type SuppliersTables,
   VERIFIER_RECORDED,
 } from '@agentx/core/modules/suppliers';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -85,7 +86,6 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000ae';
 const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
-const DAY_MS = 86_400_000;
 const NOTE = 'Spoke to Sara in accounts on the registry number; she confirmed the account';
 
 const [JASMINE, OTHER] = SANDBOX_ACCOUNTS;

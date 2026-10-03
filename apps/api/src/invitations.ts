@@ -55,7 +55,7 @@ import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusal, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
-import { NOTHING } from './route-schemas.ts';
+import { NOTHING, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** The most an invitation's body may be: an address and a role, with room to spare. */
 const INVITATION_BODY_LIMIT = 1024;
@@ -175,25 +175,14 @@ const APPROVE_SCHEMA = {
   params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
   body: NOTHING,
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: z
-          .uuid()
-          .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=..., before confirming.'),
-      })
-      .register(API_SCHEMAS, {
-        id: 'ConfirmationAsked',
-        description: 'A confirmation of who accepted, waiting for the admin to sign in again.',
-      }),
+    202: stepUpAsked('ConfirmationAsked', 'A confirmation of who accepted, waiting for the admin to sign in again.'),
   },
 };
 
 const APPROVE_CONFIRM_SCHEMA = {
   summary: "Confirm who accepted an admin's or approver's invitation, once signed in again for it",
   params: z.object({ id: z.uuid().describe('The invitation, by its ID.') }),
-  body: z
-    .strictObject({ stepUpChallengeId: z.uuid().describe('The step-up the ask answered with.') })
-    .describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: DECIDED },
 };
 

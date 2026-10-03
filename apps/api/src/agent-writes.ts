@@ -32,7 +32,7 @@ import {
 } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
-import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
+import { DAY_MS, type IdGenerator, type ReasonCode } from '@agentx/core/shared-kernel';
 import {
   createIdempotentWrites,
   type Database,
@@ -74,8 +74,6 @@ interface KeyToIssue {
   /** More facts for its event, such as the step-up it was confirmed with. */
   readonly details?: AuditDetails;
 }
-
-const DAY_MS = 86_400_000;
 
 /** A refusal thrown inside a write or a read, answered as `Refused`. */
 export class AgentRefused extends Error {

@@ -9,6 +9,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -536,7 +537,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       authTime: clock.now(),
       amr: ['pwd', 'user', 'mfa'],
     });
-  const WEEK_MS = 7 * 86_400_000;
+  const WEEK_MS = 7 * DAY_MS;
 
   it.each(['user.human.mfa.u2f.token.verified', 'user.human.passwordless.token.verified'])(
     'leaves a person’s first key (%s) free: no restriction',

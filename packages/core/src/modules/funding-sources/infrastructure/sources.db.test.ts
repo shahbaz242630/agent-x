@@ -19,6 +19,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOrganization, type OrganizationsTables } from '../../organizations/index.ts';
@@ -56,7 +57,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xd2b0_0000_0000);
 const clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
-const DAY_MS = 86_400_000;
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 

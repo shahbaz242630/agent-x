@@ -34,7 +34,7 @@ import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { MEMBER, memberOf } from './members.ts';
-import { NOTHING, STEP_UP_SIGNED_IN, STEP_UP_TO_SIGN_IN } from './route-schemas.ts';
+import { NOTHING, STEP_UP_CONFIRM, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** The most an ask's body may be: a role, with room to spare. */
 const ASK_BODY_LIMIT = 128;
@@ -44,15 +44,10 @@ const CONFIRM_BODY_LIMIT = 192;
 const ROLE = z.enum(['admin', 'approver', 'developer', 'viewer']).describe('The role the member is to have.');
 const MEMBERSHIP_ID = z.object({ id: z.uuid().describe('The membership, by its ID.') });
 
-const ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'MemberChangeAsked',
-    description:
-      "A change to a member, waiting for the admin to sign in again. Every one of the member's sessions ends when it is made.",
-  });
+const ASKED = stepUpAsked(
+  'MemberChangeAsked',
+  "A change to a member, waiting for the admin to sign in again. Every one of the member's sessions ends when it is made.",
+);
 
 const CHANGED = z
   .object({ member: MEMBER })
@@ -84,7 +79,7 @@ const DEACTIVATE_SCHEMA = {
 const DEACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Deactivate a member, once signed in again for it',
   params: MEMBERSHIP_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: CHANGED },
 };
 

@@ -6,6 +6,7 @@ import { createLogger } from '@agentx/platform/observability';
 import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import {
   createSecurityEvents,
   LEAST_RETENTION_DAYS,
@@ -19,7 +20,6 @@ let database: TestDatabase;
 let app: Database<SecurityEventsTables>;
 
 const START = new Date('2026-09-24T09:00:00Z');
-const DAY = 86_400_000;
 const RETENTION = 90;
 const ids = new SequentialIds(0x5ec0);
 
@@ -57,7 +57,7 @@ afterAll(async () => {
 
 /** Each test starts from an empty table: the sweep far in the future takes every row. */
 async function empty(): Promise<void> {
-  await at(START.getTime() + 10_000 * DAY).sweep(app, 1_000_000);
+  await at(START.getTime() + 10_000 * DAY_MS).sweep(app, 1_000_000);
   expect(await all()).toEqual([]);
 }
 
@@ -194,8 +194,8 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     const oldest = START.getTime();
     // Written newest first, so the table's own order is the opposite of the sweep's.
     for (const [offset, reason] of [
-      [2 * DAY, 'old'],
-      [DAY, 'older'],
+      [2 * DAY_MS, 'old'],
+      [DAY_MS, 'older'],
       [0, 'oldest'],
     ] as const) {
       await at(oldest + offset).record(app, [event({ reason, windowStart: new Date(oldest + offset) })]);
@@ -203,16 +203,16 @@ describe(`security events (B2-5a, Postgres ${server.version})`, () => {
     const reasons = async () => (await all()).map((row) => row.reason);
 
     // One millisecond before the oldest is past its 90 days: nothing goes.
-    const past = oldest + RETENTION * DAY;
+    const past = oldest + RETENTION * DAY_MS;
     expect(await at(past - 1).sweep(app, 10)).toBe(0);
     // Past only the oldest.
     expect(await at(past).sweep(app, 10)).toBe(1);
     expect(await reasons()).toEqual(['older', 'old']);
     // Past both that are left, one at a time: the older first.
-    expect(await at(past + 2 * DAY).sweep(app, 1)).toBe(1);
+    expect(await at(past + 2 * DAY_MS).sweep(app, 1)).toBe(1);
     expect(await reasons()).toEqual(['old']);
-    expect(await at(past + 2 * DAY).sweep(app, 10)).toBe(1);
-    expect(await at(past + 2 * DAY).sweep(app, 10)).toBe(0);
+    expect(await at(past + 2 * DAY_MS).sweep(app, 10)).toBe(1);
+    expect(await at(past + 2 * DAY_MS).sweep(app, 10)).toBe(0);
   });
 
   it('refuses a sweep of no events', async () => {

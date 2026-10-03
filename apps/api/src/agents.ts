@@ -87,8 +87,9 @@ import {
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
+  STEP_UP_CONFIRM,
   STEP_UP_SIGNED_IN,
-  STEP_UP_TO_SIGN_IN,
+  stepUpAsked,
 } from './route-schemas.ts';
 
 /**
@@ -157,14 +158,7 @@ const REGISTER_SCHEMA = {
   summary: 'Ask to register an agent',
   body: z.strictObject({ name: NAME, scopes: ASKED }).describe('The agent to register, owned by you.'),
   response: {
-    202: z
-      .object({
-        stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-      })
-      .register(API_SCHEMAS, {
-        id: 'AgentRegistrationAsked',
-        description: 'Registering an agent, waiting for you to sign in again.',
-      }),
+    202: stepUpAsked('AgentRegistrationAsked', 'Registering an agent, waiting for you to sign in again.'),
   },
 };
 
@@ -196,14 +190,10 @@ const AGENT_ID = z.object({ id: z.uuid().describe('The agent, by its ID.') });
 
 const AGENT_CHANGED = AGENT_WITH_KEYS.describe('The agent and its keys, as the change left them.');
 
-const STEP_UP_ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'AgentReactivationAsked',
-    description: 'Reactivating an agent, waiting for the admin to sign in again.',
-  });
+const STEP_UP_ASKED = stepUpAsked(
+  'AgentReactivationAsked',
+  'Reactivating an agent, waiting for the admin to sign in again.',
+);
 
 const SUSPEND_SCHEMA = {
   summary: 'Suspend an agent: the kill switch, at once and with no step-up',
@@ -222,7 +212,7 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the agent, once signed in again for it',
   params: AGENT_ID,
-  body: z.strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN }).describe('The step-up signed in again for.'),
+  body: STEP_UP_CONFIRM,
   response: { 200: AGENT_CHANGED },
 };
 
@@ -230,14 +220,10 @@ const NEW_OWNER = z
   .uuid()
   .describe('The membership of the member taking the agent over: an active admin or developer.');
 
-const HAND_OVER_ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'AgentHandOverAsked',
-    description: 'Handing an agent to another owner, waiting for the admin to sign in again.',
-  });
+const HAND_OVER_ASKED = stepUpAsked(
+  'AgentHandOverAsked',
+  'Handing an agent to another owner, waiting for the admin to sign in again.',
+);
 
 const HAND_OVER_SCHEMA = {
   summary: 'Ask to hand an agent to another owner',
@@ -272,18 +258,10 @@ const KEY_NAMED = z.object({
   keyId: z.uuid().describe('Its key, by its ID.'),
 });
 
-const KEY_CHANGE_ASKED = z
-  .object({
-    stepUpChallengeId: STEP_UP_TO_SIGN_IN,
-  })
-  .register(API_SCHEMAS, {
-    id: 'AgentKeyChangeAsked',
-    description: "Rotating or revoking an agent's key, waiting for you to sign in again.",
-  });
-
-const STEP_UP_CONFIRM = z
-  .strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN })
-  .describe('The step-up signed in again for.');
+const KEY_CHANGE_ASKED = stepUpAsked(
+  'AgentKeyChangeAsked',
+  "Rotating or revoking an agent's key, waiting for you to sign in again.",
+);
 
 const ROTATE_SCHEMA = {
   summary: "Ask to rotate an agent's key: a new one, the old one kept working for the overlap",

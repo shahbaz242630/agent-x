@@ -24,6 +24,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -71,7 +72,6 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xb63c_0000_0000);
 const ISSUER = 'https://auth.example.test';
 const START = new Date('2026-09-27T09:00:00Z');
-const HOUR_MS = 3_600_000;
 let clock: FixedClock;
 let capture: LogCapture;
 
@@ -176,7 +176,7 @@ async function organization(): Promise<Org> {
   const admin = await member(org, 'admin');
   const person = await member(org, 'developer');
   const counting = await contact(org, admin);
-  clock.advanceBy(CONTACT_COOLING_OFF_DAYS * 24 * HOUR_MS);
+  clock.advanceBy(CONTACT_COOLING_OFF_DAYS * DAY_MS);
   return { org, admin, person, contact: counting };
 }
 
@@ -335,7 +335,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   // No reset left due for the next test: each one still open is carried out, far on.
-  clock.advanceBy(30 * 24 * HOUR_MS);
+  clock.advanceBy(30 * DAY_MS);
   await removalsWith(loginService().factors).run();
 });
 
@@ -375,7 +375,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       { actor: 'api', details: { person: who.person.userId, org: who.org, reset: id, at: removedAt.toISOString() } },
     ]);
     expect(await createRemovalRestriction({ database: app, clock })(who.person.userId)).toEqual(
-      new Date(removedAt.getTime() + 7 * 24 * HOUR_MS),
+      new Date(removedAt.getTime() + 7 * DAY_MS),
     );
     expect(await createRemovalRestriction({ database: app, clock })(who.admin.userId)).toBeUndefined();
 
@@ -534,7 +534,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
     const admin = await member(org, 'admin');
     const person = await member(org, 'developer', await newUser('https://other.example.test'));
     const counting = await contact(org, admin);
-    clock.advanceBy(CONTACT_COOLING_OFF_DAYS * 24 * HOUR_MS);
+    clock.advanceBy(CONTACT_COOLING_OFF_DAYS * DAY_MS);
     const id = await coolingOff({ org, admin, person, contact: counting });
     clock.advanceBy(RESET_COOLING_OFF_HOURS * HOUR_MS);
     const { asked, factors } = loginService();

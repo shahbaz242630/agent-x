@@ -23,6 +23,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
 import { createOutbox, type NotificationsTables } from '../../notifications/index.ts';
@@ -156,8 +157,6 @@ async function added(admin: InvitingAdmin, email = EMAIL): Promise<string> {
   written(await confirm(admin, asked.contact.id));
   return asked.contact.id;
 }
-
-const DAY_MS = 86_400_000;
 
 /** Drafts `count` contacts straight into the organisation's table, two days before START: records, not started today. */
 async function oldDrafts(org: string, admin: InvitingAdmin & { membershipId: string }, count: number): Promise<void> {

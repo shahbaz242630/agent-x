@@ -3,6 +3,7 @@
 // the call-back's phone and note.
 import { describe, expect, it } from 'vitest';
 
+import { DAY_MS } from '../../../shared-kernel/index.ts';
 import {
   CALL_BACK_UNCHANGED_DAYS,
   CALL_NOTE_MOST,
@@ -11,9 +12,8 @@ import {
   verificationProblem,
 } from './verification.ts';
 
-const DAY = 86_400_000;
 const NOW = new Date('2026-10-20T12:00:00.000Z');
-const daysAgo = (days: number): Date => new Date(NOW.getTime() - days * DAY);
+const daysAgo = (days: number): Date => new Date(NOW.getTime() - days * DAY_MS);
 
 /** A supplier ready to verify: added 60 days ago, its phone since then, a payee matched, cooled off an hour ago. */
 const READY: VerificationFacts = {

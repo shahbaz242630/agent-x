@@ -2,6 +2,8 @@
 // them alike in the OpenAPI document.
 import { z } from 'zod';
 
+import { API_SCHEMAS } from './api-schemas.ts';
+
 /** The most a bodyless write may be sent with: an empty object, with room to spare. */
 export const NOTHING_BODY_LIMIT = 64;
 
@@ -15,12 +17,21 @@ export const NOTHING = z
   .describe('Nothing. An empty object, or no body at all.');
 
 /** The step-up a change's ask answers with. */
-export const STEP_UP_TO_SIGN_IN = z
+const STEP_UP_TO_SIGN_IN = z
   .uuid()
   .describe('The step-up to sign in again for, at GET /v1/auth/step-up?challenge=…, before confirming.');
 
 /** The step-up a change's confirm names. */
 export const STEP_UP_SIGNED_IN = z.uuid().describe('The step-up the ask answered with, signed in again for.');
+
+/** A change's ask, answered 202 with the step-up to sign in again for; named in the OpenAPI document. */
+export const stepUpAsked = (id: string, description: string) =>
+  z.object({ stepUpChallengeId: STEP_UP_TO_SIGN_IN }).register(API_SCHEMAS, { id, description });
+
+/** A confirm's body: the step-up its ask answered with, signed in again for. */
+export const STEP_UP_CONFIRM = z
+  .strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN })
+  .describe('The step-up signed in again for.');
 
 /** A list's page: after an ID, and at most `most` of them unless fewer are asked for. */
 export const pageQuery = (most: number) =>

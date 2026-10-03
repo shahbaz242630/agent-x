@@ -20,6 +20,7 @@ import {
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { HOUR_MS } from '../../../shared-kernel/index.ts';
 import { withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import { type SupplierDetails, SupplierDetailsRefused } from '../domain/supplier.ts';
@@ -57,7 +58,6 @@ const keys = createKeyProvider(
 );
 const ids = new SequentialIds(0xe110_0000_0000);
 const clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
-const HOUR_MS = 3_600_000;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 const PHONE = '+971501234567';
