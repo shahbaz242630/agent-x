@@ -197,7 +197,7 @@ async function organization({ counting = true } = {}): Promise<Org> {
     await contact(org, admin, 'owner@example.test'),
   ] as const;
   if (!counting) return { org, admin, otherAdmin, person, contacts };
-  clock.advanceBy(CONTACT_COOLING_OFF_DAYS * 24 * HOUR_MS);
+  clock.advanceBy(CONTACT_COOLING_OFF_DAYS * DAY_MS);
   const again = async (who: Member): Promise<Member> => ({ ...who, sessionId: await signedIn(who.userId) });
   return { org, admin: await again(admin), otherAdmin: await again(otherAdmin), person: await again(person), contacts };
 }

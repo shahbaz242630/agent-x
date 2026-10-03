@@ -28,7 +28,7 @@ import {
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { HOUR_MS } from '../../../shared-kernel/index.ts';
+import { DAY_MS, HOUR_MS } from '../../../shared-kernel/index.ts';
 import { withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import { AccountNumberLeak, type BeneficiaryState } from '../../providers/index.ts';
@@ -1215,7 +1215,7 @@ describe(`the day's budget of payee registrations (E2-1b, Postgres ${server.vers
     const startedUnderLock = (orgId: string, ofSupplier: string) =>
       withSignedStates(app, orgId, services(), async (tx, states) => {
         await onePayeeChangeAtATime(tx, orgId.toUpperCase());
-        const since = new Date(clock.now().getTime() - 24 * HOUR_MS);
+        const since = new Date(clock.now().getTime() - DAY_MS);
         const before = await registrationsStartedSince(tx, orgId, since);
         await startRegistration(tx, states, {
           orgId,
