@@ -72,3 +72,32 @@ jobs:
         with:
           advanced-security: false
           version: 1.30.1
+
+  # The image main last published, scanned again each week, so an advisory
+  # published since its release still reaches code scanning when nothing merges.
+  image-scan:
+    name: Image vulnerability scan (Grype)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # to put the findings in code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan main's image (Grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          # Tagged with its commit; the newest five are kept (image-prune).
+          image: ghcr.io/shahbaz242630/agent-x:${{ github.sha }}
+          grype-version: v0.119.0
+          fail-build: false
+          output-format: sarif
+
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: image
