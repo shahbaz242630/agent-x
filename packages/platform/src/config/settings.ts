@@ -271,6 +271,8 @@ const SETTINGS = {
   AGENTX_KEYS_CURRENT: { schema: keyVersionList.optional() },
   // The database (ADR-002: one per environment; ADR-005 §3: the app's own role).
   AGENTX_DB_HOST: { schema: databaseHost },
+  // The restore drill's copy of the database (S78): the operator's restore check reads it, read-only, beside the live one.
+  AGENTX_DB_DRILL_HOST: { schema: databaseHost.optional() },
   AGENTX_DB_PORT: { schema: wholeNumber({ min: 1, max: 65_535 }), default: '5432' },
   AGENTX_DB_NAME: { schema: identifier, default: 'agentx' },
   AGENTX_DB_TLS: { schema: tlsMode, default: 'verify-full' },
@@ -398,6 +400,7 @@ export const READERS: Readonly<Record<Process, { job: string; reads: readonly Se
       'AGENTX_KEYS_DIR',
       'AGENTX_KEYS_CURRENT',
       ...LOCATION,
+      'AGENTX_DB_DRILL_HOST',
       'AGENTX_DB_USER',
       'AGENTX_DB_PASSWORD',
       'AGENTX_DB_PASSWORD_FILE',

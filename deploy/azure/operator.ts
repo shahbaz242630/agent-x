@@ -2,6 +2,11 @@
 //
 //   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
 //   node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
+//   node deploy/azure/operator.ts restore-check
+//
+// The third (S78) is the restore drill's check: run once the drill's copy of
+// the database is up, it reads the copy and the live server, read-only, and
+// says whether the copy holds (apps/operator restore-check.ts).
 //
 // The second (B4-6b) invites a new organisation's first admin. Its link's
 // token is made here, on the partner's own machine: the job is sent only the
@@ -48,6 +53,8 @@ import {
   firstAdminRequest,
   NO_REQUEST_PROBLEM,
   REQUEST_LIMIT_BYTES,
+  RESTORE_CHECK,
+  restoreCheckRequest,
   UUID_V7,
 } from '../../apps/operator/src/request.ts';
 import { invitationEmail } from '../../packages/core/src/modules/identity/domain/invitation.ts';
@@ -119,6 +126,7 @@ const tryAgain = (id: string, noun: string): string =>
 export const USAGE = `Usage:
   node deploy/azure/operator.ts create-organization --name <name> [--id <ID>]
   node deploy/azure/operator.ts invite-first-admin --org <organisation ID> --email <address> [--id <ID>]
+  node deploy/azure/operator.ts restore-check
 The name is one argument: quote it if it holds a space. --id repeats the ID an earlier run gave when its end was unclear; the same ID can never make a second organisation, or invitation.`;
 
 /** What the partner asked for: a new organisation's name, and the ID of an earlier try if this is one. */
@@ -379,10 +387,28 @@ function commandLines(lines: readonly LogLine[]): Readonly<Record<string, unknow
   });
 }
 
-/** A request for the job: what it makes, the ID that names it, and how the run's lines say so. */
+/** A line's problems as said, or undefined when it holds none. */
+function problemsSaid(line: Readonly<Record<string, unknown>> | undefined): string | undefined {
+  return Array.isArray(line?.problems) ? line.problems.map(String).join('; ') : undefined;
+}
+
+/** A request for the job: its file's text, what is said around its run, and how the run is judged. */
 interface JobRequest {
-  readonly id: string;
   /** The request file's text. */
+  readonly text: string;
+  /** Said before anything is written. */
+  readonly intro: string;
+  /** Said after any failure: how to find out what happened, and finish it. */
+  readonly tryAgain: string;
+  /** Said when [] couldn't be put back: what may still hold the request, and what takes it off. */
+  readonly mayStillHold: string;
+  /** What the run did, from its lines and Azure's end of it: 0 once done. */
+  readonly judge: (run: Ended, lines: readonly LogLine[]) => number;
+}
+
+/** A request that makes something named by its ID, which a second run of it can never make twice. */
+interface MakingRequest {
+  readonly id: string;
   readonly text: string;
   /** What it makes, as said: `organisation` or `invitation`. */
   readonly noun: string;
@@ -396,6 +422,18 @@ interface JobRequest {
   readonly doneBeforeNote: string;
 }
 
+/** A making request as the job runner takes one. */
+function making(steps: JobSteps, asked: MakingRequest): JobRequest {
+  const { id, noun } = asked;
+  return {
+    text: asked.text,
+    intro: `The new ${noun}'s ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second ${noun}, and it takes the request off the job at its end.`,
+    tryAgain: tryAgain(id, noun),
+    mayStillHold: mayStillHold(id, noun),
+    judge: (run, lines) => outcome(steps, run, lines, asked),
+  };
+}
+
 /**
  * What the run did, from the command's own lines about this request's ID and
  * Azure's end of the run: 0 once what it makes exists, made now or by an
@@ -403,7 +441,7 @@ interface JobRequest {
  * line about another ID (another request run in this one's place) is never
  * taken for this one's.
  */
-function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: JobRequest): number {
+function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: MakingRequest): number {
   const { id, noun, field } = asked;
   const said = commandLines(lines);
   const about = (event: string): boolean => said.some((line) => line.event === event && line[field] === id);
@@ -425,7 +463,7 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: 
     return 1;
   }
   if (Array.isArray(refused?.problems) && refused[field] === id) {
-    steps.say(`The operator's command refused it, and nothing changed: ${refused.problems.map(String).join('; ')}.`);
+    steps.say(`The operator's command refused it, and nothing changed: ${String(problemsSaid(refused))}.`);
     return 1;
   }
   steps.say(
@@ -439,17 +477,19 @@ function outcome(steps: JobSteps, run: Ended, lines: readonly LogLine[], asked: 
 /** Writes the request, runs it, puts [] back, and says what the run did: 0 once the organisation exists. */
 export function createOrganization(request: Request, steps: JobSteps): Promise<number> {
   const id = request.id ?? uuidV7Ids.next();
-  return runRequest(steps, () => ({
-    id,
-    text: createOrganizationRequest(request.name, id),
-    noun: 'organisation',
-    field: 'orgId',
-    made: 'operator.organization_created',
-    sayMade: () => {
-      steps.say(`Created the organisation ${id}.`);
-    },
-    doneBeforeNote: '',
-  }));
+  return runRequest(steps, () =>
+    making(steps, {
+      id,
+      text: createOrganizationRequest(request.name, id),
+      noun: 'organisation',
+      field: 'orgId',
+      made: 'operator.organization_created',
+      sayMade: () => {
+        steps.say(`Created the organisation ${id}.`);
+      },
+      doneBeforeNote: '',
+    }),
+  );
 }
 
 /**
@@ -466,7 +506,7 @@ export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps):
     if (!/^https:\/\/[a-z0-9.-]+$/.test(value)) {
       throw new Error('The API holds no https AGENTX_PUBLIC_ORIGIN, so no link could be made: nothing was written.');
     }
-    return {
+    return making(steps, {
       id,
       text: firstAdminRequest(request.orgId, request.email, id, hash),
       noun: 'invitation',
@@ -479,8 +519,57 @@ export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps):
       },
       doneBeforeNote:
         ' Its link was shown by that run alone. If it was lost, run the command again without --id: a new invitation, with a new link.',
-    };
+    });
   });
+}
+
+/**
+ * The restore drill's check (S78): what the run found, from the command's own
+ * line. 0 only when it says the copy holds; the problems are said otherwise.
+ */
+function restoreCheckOutcome(steps: JobSteps, run: Ended, lines: readonly LogLine[]): number {
+  const said = commandLines(lines);
+  const done = said.find((line) => line.event === 'operator.restore_check_done');
+  const failed = said.find((line) => line.event === 'operator.restore_check_failed');
+  // The command logs one of the two, never both.
+  if (done !== undefined) {
+    steps.say(
+      `The copy holds: all ${String(done.chainsChecked)} chains on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since; the platform chain at ${String(done.platformCopySeq)} on the copy, ${String(done.platformLiveSeq)} live).`,
+    );
+    return 0;
+  }
+  const failedSaid = problemsSaid(failed);
+  if (failedSaid !== undefined) {
+    // The line names the first problems only (a log line's list is capped): the count is all of them.
+    const shown = Array.isArray(failed?.problems) ? failed.problems.length : 0;
+    const more = Number(failed?.problemCount) - shown;
+    const rest = more > 0 ? '; and ' + String(more) + ' more' : '';
+    steps.say(`The copy does not hold: ${failedSaid}${rest}.`);
+    return 1;
+  }
+  const refusedSaid = problemsSaid(said.find((line) => line.event === 'operator.refused'));
+  if (refusedSaid !== undefined) {
+    steps.say(`The check was refused, and read nothing: ${refusedSaid}.`);
+    return 1;
+  }
+  steps.say(
+    run.status === 'Succeeded'
+      ? "The run succeeded, but its lines don't say what it found: they may not all have arrived. Run the same command again: it only reads."
+      : "The check didn't finish: read the lines above (is the drill's copy up, in the same subnet and private zone?). Run it again once it is: it only reads.",
+  );
+  return 1;
+}
+
+/** Runs the restore drill's check on the job (S78): 0 once the copy is shown to hold. */
+export function restoreCheck(steps: JobSteps): Promise<number> {
+  const again = 'Run the same command again: it only reads, so nothing is done twice.';
+  return runRequest(steps, () => ({
+    text: restoreCheckRequest(),
+    intro: "Checking the drill's copy against the live server, read-only.",
+    tryAgain: again,
+    mayStillHold: `The request may still be on ${jobName('operator')}: it only reads. ${again} It takes the request off at its end, as does deploy.ts apps.`,
+    judge: (run, lines) => restoreCheckOutcome(steps, run, lines),
+  }));
 }
 
 /** Writes a request, runs it, puts [] back, and says what the run did: 0 once what it makes exists. */
@@ -500,10 +589,7 @@ async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest
   const synced = released(job.running, api.image, api.release);
   const moved = !same(job.running.container, synced);
   const asked = prepare(api);
-  const { id, noun } = asked;
-  steps.say(
-    `The new ${noun}'s ID is ${id}. If this run's end is unclear, run the same command again with --id ${id}: it can't make a second ${noun}, and it takes the request off the job at its end.`,
-  );
+  steps.say(asked.intro);
   let execution: string;
   let run: Ended | undefined;
   try {
@@ -517,9 +603,9 @@ async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest
   } catch (error) {
     // Whatever stopped it, the request comes off the job; a failure to take it off is said, and the first error stands.
     await clearRequest(steps, target).catch((failure: unknown) => {
-      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${mayStillHold(id, noun)}`);
+      steps.say(`Putting ${NO_REQUEST} back failed too: ${reason(failure)} ${asked.mayStillHold}`);
     });
-    steps.say(tryAgain(id, noun));
+    steps.say(asked.tryAgain);
     throw error;
   }
   // The request comes off before the log is read; a failure to take it off still lets the run's outcome be said first.
@@ -529,14 +615,14 @@ async function runRequest(steps: JobSteps, prepare: (api: Running) => JobRequest
   );
   try {
     if (run === undefined) return 1;
-    const said = outcome(steps, run, await readLog(steps, target, execution, run), asked);
+    const said = asked.judge(run, await readLog(steps, target, execution, run));
     return left === undefined ? said : 1;
   } catch (error) {
     // The run ended, but what it did couldn't be read.
-    steps.say(tryAgain(id, noun));
+    steps.say(asked.tryAgain);
     throw error;
   } finally {
-    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${mayStillHold(id, noun)}`);
+    if (left !== undefined) steps.say(`Putting ${NO_REQUEST} back failed: ${reason(left)} ${asked.mayStillHold}`);
   }
 }
 
@@ -549,6 +635,10 @@ export function main(
     USAGE,
     say,
     (): ((steps: JobSteps) => Promise<number>) => {
+      if (argv[0] === RESTORE_CHECK) {
+        if (argv.length !== 1) throw new UsageError(`say ${RESTORE_CHECK}, and nothing else`);
+        return restoreCheck;
+      }
       if (argv[0] === 'invite-first-admin') {
         const request = parseFirstAdmin(argv);
         return (steps) => inviteFirstAdmin(request, steps);

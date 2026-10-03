@@ -584,6 +584,11 @@ var jobs = [
         name: 'AGENTX_DB_USER'
         value: 'agentx_app'
       }
+      {
+        // The restore drill's copy, which only the restore check reads, read-only (S78).
+        name: 'AGENTX_DB_DRILL_HOST'
+        value: names.drillDatabaseHost
+      }
     ])
   }
 ]

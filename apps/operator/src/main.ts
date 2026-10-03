@@ -8,6 +8,8 @@
 // A request file may also invite an organisation's first admin (B4-6b,
 // invite-first-admin.ts), only ever from a file: the token's hash is made
 // where the link is shown, and the address is never typed on a command line.
+// Or ask for the restore drill's check (S78, restore-check.ts): read-only,
+// against the drill's copy (AGENTX_DB_DRILL_HOST) and the live server.
 //
 // The second is how its job on Azure runs it (apps.bicep): the file holds the
 // same words and the new organisation's ID (`--id`) as a JSON list, written by
@@ -36,7 +38,13 @@ import { OrganizationRefused, organizationName } from '@agentx/core/modules/orga
 import { schemaSoundAtStart } from '@agentx/core/schema-check';
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { ConfigError, loadOperatorConfig, type OperatorConfig } from '@agentx/platform/config';
-import { assertRuntimeRole, createDatabase, type Database, UnsafeDatabaseRole } from '@agentx/platform/db';
+import {
+  assertRuntimeRole,
+  createDatabase,
+  type Database,
+  transactionsReadOnly,
+  UnsafeDatabaseRole,
+} from '@agentx/platform/db';
 import { type KeyProvider, loadKeys } from '@agentx/platform/keys';
 import {
   createLogger,
@@ -54,9 +62,11 @@ import {
   NO_REQUEST_PROBLEM,
   REQUEST_LIMIT_BYTES,
   REQUEST_USAGE,
+  RESTORE_CHECK,
   TOKEN_HASH_HEX,
   UUID_V7,
 } from './request.ts';
+import { checkRestoredCopy } from './restore-check.ts';
 
 const SERVICE = 'operator';
 
@@ -105,7 +115,8 @@ type Request =
       /** The invitation's ID. */
       readonly id: string;
       readonly tokenHash: Buffer;
-    };
+    }
+  | { readonly command: typeof RESTORE_CHECK };
 
 /** Why a request can't be done, each rule broken. */
 interface Problems {
@@ -176,6 +187,15 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
   return { words };
 }
 
+/** How many of a restore check's problems its line names, as many as a log line's list keeps. */
+const SHOWN_PROBLEMS = 50;
+
+/** The commands read by a shape of their own, by their first word: create-organization is the rest. */
+const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boolean) => Request | Problems> = new Map([
+  ['invite-first-admin', firstAdminRequest],
+  [RESTORE_CHECK, restoreCheckAsked],
+]);
+
 /**
  * What the operator asked for, or the problems. Nothing typed is repeated in
  * a problem: the name could be anywhere among the arguments, and a name is
@@ -187,7 +207,8 @@ function readRequest(argv: readonly string[]): Request | Problems {
   const fromFile = argv[0] === REQUEST_FLAG;
   const asked = fromFile ? requestWords(argv) : { words: argv };
   if ('problems' in asked) return asked;
-  if (asked.words[0] === 'invite-first-admin') return firstAdminRequest(asked.words, fromFile);
+  const own = OWN_SHAPES.get(String(asked.words[0]));
+  if (own !== undefined) return own(asked.words, fromFile);
   const [command, flag, name, ...rest] = asked.words;
   const [idFlag, id, ...more] = rest;
   const shaped = command === 'create-organization' && flag === '--name' && name !== undefined;
@@ -204,6 +225,13 @@ function readRequest(argv: readonly string[]): Request | Problems {
     if (error instanceof OrganizationRefused) return { problems: error.problems };
     throw error;
   }
+}
+
+/** The restore drill's check (S78): only from a file, like the job runs it, and nothing after its word. */
+function restoreCheckAsked(words: readonly string[], fromFile: boolean): Request | Problems {
+  return fromFile && words.length === 1
+    ? { command: RESTORE_CHECK }
+    : problem(`${RESTORE_CHECK} runs only from a request file, as the one word in its list`);
 }
 
 /**
@@ -258,9 +286,13 @@ const invitedAlready = (error: unknown): boolean =>
  * checks the role it logged in as, or closes it and returns nothing, having
  * said why.
  */
-async function connect(config: OperatorConfig, logger: Logger): Promise<Database<FirstAdminTables> | undefined> {
+async function connect(
+  config: OperatorConfig,
+  logger: Logger,
+  to?: { readonly host: string; readonly readOnly: boolean },
+): Promise<Database<FirstAdminTables> | undefined> {
   const database = createDatabase<FirstAdminTables>(
-    { ...config.db, maxConnections: 1, applicationName: APPLICATION_NAME },
+    { ...config.db, ...to, maxConnections: 1, applicationName: APPLICATION_NAME },
     logger,
   );
   try {
@@ -292,6 +324,7 @@ async function run(
   }
   logger.info('operator.starting', { command: request.command, role: config.db.user, keys: keys.describe() });
 
+  if (request.command === RESTORE_CHECK) return restoreCheck(config, keys, logger);
   const database = await connect(config, logger);
   if (database === undefined) return 1;
   if (request.command === 'invite-first-admin') return inviteFirst(config, keys, request, database, logger);
@@ -368,6 +401,51 @@ async function inviteFirst(
     return 1;
   } finally {
     await database.destroy();
+  }
+}
+
+/**
+ * The restore drill's check (S78): the exit code, 0 only when the copy holds.
+ * Both sides read-only from their first packet, each proving it before
+ * anything is read; nothing here raises the integrity alarm.
+ */
+async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
+  const drillHost = config.db.drillHost;
+  // Both are lower case (the config refuses a host that isn't), so one comparison tells them apart.
+  if (drillHost === null || drillHost === config.db.host) {
+    logger.error('operator.refused', {
+      problems: ["AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST"],
+    });
+    return 1;
+  }
+  const copy = await connect(config, logger, { host: drillHost, readOnly: true });
+  if (copy === undefined) return 1;
+  const live = await connect(config, logger, { host: config.db.host, readOnly: true });
+  try {
+    if (live === undefined) return 1;
+    if (!(await transactionsReadOnly(copy)) || !(await transactionsReadOnly(live))) {
+      logger.error('operator.refused', { problems: ['a connection is not read-only, so nothing was read'] });
+      return 1;
+    }
+    const report = await checkRestoredCopy({ copy, live, keys });
+    // A log line keeps the first 50 of a list (LOGGABLE_LIMITS): the count says how many there were in all.
+    const line = {
+      ...report,
+      problems: report.problems.slice(0, SHOWN_PROBLEMS),
+      problemCount: report.problems.length,
+    };
+    if (report.problems.length > 0) {
+      logger.error('operator.restore_check_failed', line);
+      return 1;
+    }
+    logger.info('operator.restore_check_done', line);
+    return 0;
+  } catch (error) {
+    logger.error('operator.failed', { command: RESTORE_CHECK, err: error });
+    return 1;
+  } finally {
+    await copy.destroy();
+    await live?.destroy();
   }
 }
 

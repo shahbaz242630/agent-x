@@ -68,6 +68,12 @@ export interface OperatorConfig {
     /** Never logged. */
     readonly password: string;
     readonly tls: DatabaseTlsMode;
+    /**
+     * The restore drill's copy of the server (S78), which the restore check
+     * reads beside this one, with the same role, port, database and TLS: a
+     * restored server keeps its roles and their passwords. Null where none is set.
+     */
+    readonly drillHost: string | null;
   };
   /** Where the platform mounts the command's keys, and each one's current version where it isn't 1. */
   readonly keys: KeySettings;
@@ -85,6 +91,7 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
     keysDirectory: setting(env, 'AGENTX_KEYS_DIR'),
     keysCurrent: setting(env, 'AGENTX_KEYS_CURRENT'),
     dbHost: location.host,
+    drillHost: setting(env, 'AGENTX_DB_DRILL_HOST'),
     dbPort: location.port,
     dbName: location.database,
     dbTls: location.tls,
@@ -115,6 +122,7 @@ export function loadOperatorConfig(env: Env = process.env): OperatorConfig {
       user: checks.user.value,
       password: checks.password.value,
       tls: checks.dbTls.value,
+      drillHost: checks.drillHost.value ?? null,
     }),
     keys: Object.freeze({
       directory: checks.keysDirectory.value,

@@ -28,7 +28,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from
 
 import type { OperatorTables } from './create-organization.ts';
 import { type OperatorProcess, runOperator } from './main.ts';
-import { firstAdminRequest } from './request.ts';
+import { firstAdminRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
 const faults = vi.hoisted(() => ({ create: undefined as Error | undefined }));
@@ -571,5 +571,29 @@ describe(`B4-6b the operator invites an organisation's first admin (Postgres ${s
     expect(done.line('operator.refused')).toMatchObject({ problems: ["the organisation's records can't be verified"] });
     const rows = await database.as('backup').query('select 1 from identity.invitations where id = $1', [asked.id]);
     expect(rows).toEqual([]);
+  });
+});
+
+describe("S78 the restore drill's check, run as the job runs it", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), 'agentx-operator-restore-'));
+  afterAll(() => {
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it('reads the copy and the live server, read-only, says the copy holds, and writes nothing', async () => {
+    const file = path.join(folder, 'request');
+    writeFileSync(file, restoreCheckRequest());
+    // The copy is this same database under another name for the same server
+    // (the test server listens on 127.0.0.1, which localhost names too): a copy the live server is.
+    const env = envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' });
+    const head = async () => database.as('owner').query('select seq from platform_controls.audit_head');
+    const before = await head();
+
+    const { code, events, line } = await run(['--request', file], env);
+
+    expect(events).toEqual(['operator.starting', 'operator.restore_check_done']);
+    expect(code).toBe(0);
+    expect(line('operator.restore_check_done')).toMatchObject({ problems: [], newSinceCopy: 0 });
+    expect(await head()).toEqual(before);
   });
 });

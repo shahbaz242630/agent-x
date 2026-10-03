@@ -45,7 +45,15 @@ describe("the operator's command's config loads", () => {
       release: 'local',
       run: null,
       log: { level: 'info', eventCapPerMinute: 600 },
-      db: { host: 'db', port: 5432, database: 'agentx', user: 'agentx_app', password: APP_LOGIN, tls: 'verify-full' },
+      db: {
+        host: 'db',
+        port: 5432,
+        database: 'agentx',
+        user: 'agentx_app',
+        password: APP_LOGIN,
+        tls: 'verify-full',
+        drillHost: null,
+      },
       keys: { directory: KEYS_DIR, current: {} },
     });
   });
@@ -60,6 +68,7 @@ describe("the operator's command's config loads", () => {
         AGENTX_KEYS_DIR: '/mnt/other-keys',
         AGENTX_KEYS_CURRENT: 'audit-mac:2',
         AGENTX_DB_HOST: '10.0.0.5',
+        AGENTX_DB_DRILL_HOST: 'psql-agentx-stg-drill.postgres.database.azure.com',
         AGENTX_DB_PORT: '6432',
         AGENTX_DB_NAME: 'agentx_uae',
         AGENTX_DB_TLS: 'disable',
@@ -79,6 +88,7 @@ describe("the operator's command's config loads", () => {
         user: 'agentx_app_uae',
         password: APP_LOGIN,
         tls: 'disable',
+        drillHost: 'psql-agentx-stg-drill.postgres.database.azure.com',
       },
       keys: { directory: '/mnt/other-keys', current: { 'audit-mac': 2 } },
     });

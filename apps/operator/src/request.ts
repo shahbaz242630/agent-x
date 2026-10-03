@@ -31,3 +31,9 @@ export const createOrganizationRequest = (name: string, id: string): string =>
 /** The request to invite the organisation's first admin, as its file holds it: the token's hash, never the token. */
 export const firstAdminRequest = (orgId: string, email: string, id: string, tokenHashHex: string): string =>
   JSON.stringify(['invite-first-admin', '--org', orgId, '--email', email, '--id', id, '--token-hash', tokenHashHex]);
+
+/** The restore drill's check (S78), which a request file holds as its one word: it reads, and names no ID, as it makes nothing. */
+export const RESTORE_CHECK = 'restore-check';
+
+/** The request for the restore drill's check, as its file holds it. */
+export const restoreCheckRequest = (): string => JSON.stringify([RESTORE_CHECK]);

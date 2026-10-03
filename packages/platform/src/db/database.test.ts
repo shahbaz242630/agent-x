@@ -61,6 +61,13 @@ describe('poolConfig', () => {
     expect(poolConfig({ ...OPTIONS, applicationName: 'agentx-worker' }).options).toBe(PINNED_SEARCH_PATH);
   });
 
+  it('S78: a read-only connection keeps the pin and makes every transaction read-only, in the same packet', () => {
+    expect(poolConfig({ ...OPTIONS, readOnly: true }).options).toBe(
+      `${PINNED_SEARCH_PATH} -c default_transaction_read_only=on`,
+    );
+    expect(poolConfig({ ...OPTIONS, readOnly: false }).options).toBe(PINNED_SEARCH_PATH);
+  });
+
   it('A3e: sends the very value the connection check expects, so the two cannot drift apart', () => {
     // PINNED_SEARCH_PATH_VALUE is what tenant.ts compares a live connection
     // against. Were the option built from a second hand-kept literal,
