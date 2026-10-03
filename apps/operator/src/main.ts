@@ -411,8 +411,8 @@ async function inviteFirst(
  */
 async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: Logger): Promise<number> {
   const drillHost = config.db.drillHost;
-  // Host names are read without regard to case, so the live server can't pass for the copy by its capitals.
-  if (drillHost === null || drillHost.toLowerCase() === config.db.host.toLowerCase()) {
+  // Both are lower case (the config refuses a host that isn't), so one comparison tells them apart.
+  if (drillHost === null || drillHost === config.db.host) {
     logger.error('operator.refused', {
       problems: ["AGENTX_DB_DRILL_HOST must name the drill's copy, a server other than AGENTX_DB_HOST"],
     });

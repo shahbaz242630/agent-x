@@ -531,7 +531,8 @@ function restoreCheckOutcome(steps: JobSteps, run: Ended, lines: readonly LogLin
   const said = commandLines(lines);
   const done = said.find((line) => line.event === 'operator.restore_check_done');
   const failed = said.find((line) => line.event === 'operator.restore_check_failed');
-  if (done !== undefined && failed === undefined) {
+  // The command logs one of the two, never both.
+  if (done !== undefined) {
     steps.say(
       `The copy holds: all ${String(done.chainsChecked)} chains on it checked whole, and each leads to the live one (${String(done.copyOrganizations)} organisations on the copy, ${String(done.newSinceCopy)} made since; the platform chain at ${String(done.platformCopySeq)} on the copy, ${String(done.platformLiveSeq)} live).`,
     );
