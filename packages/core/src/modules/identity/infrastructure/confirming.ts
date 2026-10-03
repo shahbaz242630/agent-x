@@ -233,6 +233,7 @@ export function createAcceptanceConfirmations({
 
     async confirm(admin, idempotent, invitationId, stepUpChallengeId, correlationId) {
       const ran = await write(admin, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, admin.sessionId);
         // The invitation first, as accepting reads it, for who accepted; then the two memberships.
         const { invitation, version } = await waiting(tx, states, admin.orgId, invitationId, { toGrant: true });
         const { acceptedBy, role } = invitation;
@@ -240,6 +241,7 @@ export function createAcceptanceConfirmations({
         const already = await bothMemberships(tx, states, admin, acceptedBy);
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: admin.sessionId,

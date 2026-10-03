@@ -166,6 +166,7 @@ export function createSupplierDetailsChanges({
 
     async changeConfirm(member, idempotent, supplierId, { details, stepUpChallengeId }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
         const { admin, found, current } = await changeable(
           tx,
@@ -178,6 +179,7 @@ export function createSupplierDetailsChanges({
         );
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           { sessionId: member.sessionId, action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
           // An admin's change: proved with a passkey (SEC-HA-12).

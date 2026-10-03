@@ -405,6 +405,34 @@ describe(`adding a registered contact (B6-1c, Postgres ${server.version})`, () =
   });
 });
 
+describe(`the confirmation's lock order against the admin's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
+  it('holds the admin’s step-up challenges before their membership, so a demotion at the same moment waits, never deadlocks', async () => {
+    const { org, admin } = await organization();
+    const asked = written(await add(admin));
+    const challengeId = asked.stepUpChallengeId ?? '';
+    await stepUp(admin, challengeId);
+    // A demotion of the admin, part-way: their challenges locked, at its level 0b...
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holder.query('select id from identity.step_up_challenges where id = $1 for update', [challengeId]);
+      const confirming = within(20_000, confirm(admin, asked.contact.id), 'the confirmation');
+      await waitUntilQueued(database.as('admin'), 1);
+      // ...then their membership (2a), which the confirmation, queued at the challenge, doesn't hold yet.
+      await holder.query('select id from identity.memberships where org_id = $1 and id = $2 for no key update', [
+        org,
+        admin.membershipId,
+      ]);
+      await holder.query('commit');
+
+      expect(await confirming).toMatchObject({ outcome: 'written', contact: { status: 'ACTIVE' } });
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
+  });
+});
+
 describe(`the organisation's budget of contacts started (B8-2, Postgres ${server.version})`, () => {
   it(`refuses a contact started past ${String(MOST_CONTACTS_STARTED_A_DAY)} in 24 hours, a confirmed one among them, writing nothing, and starts one once 24 hours have passed`, async () => {
     const { org, admin } = await organization();

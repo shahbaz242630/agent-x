@@ -152,6 +152,7 @@ export function createAgentRegistrations({
       let key: string | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneAgentAddAtATime(tx, member.orgId);
+        const held = await challenges.hold(tx, member.sessionId);
         const { membershipId, role } = await work.memberIn(tx, states, member, REGISTERING_ROLES);
         const now = clock.now();
         if ((await agentsAddedSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_AGENTS_ADDED_A_DAY) {
@@ -159,6 +160,7 @@ export function createAgentRegistrations({
         }
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: member.sessionId,

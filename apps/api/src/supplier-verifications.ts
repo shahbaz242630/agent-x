@@ -204,6 +204,7 @@ export function createSupplierVerifications({
 
     async verifyConfirm(member, idempotent, supplierId, confirm, correlationId) {
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         const { orgId } = member;
         const { verifier, found, current, nameCheck, path } = await verifiable(
           tx,
@@ -216,6 +217,7 @@ export function createSupplierVerifications({
         );
         const consumed = await challenges.consume(
           tx,
+          held,
           confirm.stepUpChallengeId,
           {
             sessionId: member.sessionId,

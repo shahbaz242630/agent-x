@@ -10,7 +10,14 @@
 //    still in time.
 // 3. `recordEvidence`: once the checks pass, what the fresh sign-in proved is
 //    recorded on it, once.
-// 4. `consume`: the change's own transaction deletes it and reads its
+// 4. `hold`: the change's own transaction locks the session's challenges
+//    first, at ADR-006 §6's level 0b, before any row the change decides on: a
+//    demotion or deactivation of the same person locks their challenges there,
+//    then their membership, so a change that read the membership first and its
+//    challenge after would deadlock with it (S76). Every one of the session's,
+//    since some changes learn which only from a row they read. `consume` takes
+//    only a held session's.
+// 5. `consume`: the change's own transaction deletes it and reads its
 //    evidence in one statement, only for the same session, action and change
 //    hash, verified and still in time: used once, and for nothing else
 //    (SEC-HA-03, 04). The evidence goes to the audit trail with the change.
@@ -63,6 +70,14 @@ export interface StepUpEvidence {
   readonly idTokenHash: Buffer;
 }
 
+declare const held: unique symbol;
+
+/** A session whose challenges `hold` has locked in the change's transaction: the only kind `consume` takes. */
+export interface HeldChallenges {
+  readonly sessionId: string;
+  readonly [held]: true;
+}
+
 /** A challenge used by its change: what it was for, and the evidence, for the audit trail. */
 export interface ConsumedStepUp extends PendingChallenge {
   readonly verifiedAt: Date;
@@ -82,6 +97,12 @@ export interface StepUpChallenges {
     evidence: StepUpEvidence,
   ): Promise<boolean>;
   /**
+   * Locks every challenge of the session, in order of ID, for the change's
+   * own transaction, first, at ADR-006 §6's level 0b: before the change reads
+   * any row it decides on.
+   */
+  hold(db: Handle, sessionId: string): Promise<HeldChallenges>;
+  /**
    * Uses the challenge for exactly this change, in the change's own
    * transaction: deleted and read in one statement, only if it binds this
    * session, action and change hash, is verified and still in time, and,
@@ -90,6 +111,7 @@ export interface StepUpChallenges {
    */
   consume(
     db: Handle,
+    session: HeldChallenges,
     challengeId: string,
     binding: StepUpBinding,
     need: { readonly passkeyRequired: boolean },
@@ -268,8 +290,23 @@ export function createStepUpChallenges({
       return recorded !== undefined;
     },
 
-    async consume(db, challengeId, binding, { passkeyRequired }) {
+    async hold(db, sessionId) {
+      if (isId(sessionId)) {
+        await db
+          .selectFrom('identity.step_up_challenges')
+          .select('id')
+          .where('session_id', '=', sessionId)
+          .orderBy('id')
+          .forUpdate()
+          .execute();
+      }
+      return { sessionId } as HeldChallenges;
+    },
+
+    async consume(db, session, challengeId, binding, { passkeyRequired }) {
       refuse(bindingProblem(binding));
+      // Held for another session: a change that checked the wrong one, which nothing must let through.
+      if (session.sessionId !== binding.sessionId) throw new RangeError("the challenges held are another session's");
       if (!isId(challengeId)) return undefined;
       const row = await db
         .deleteFrom('identity.step_up_challenges')

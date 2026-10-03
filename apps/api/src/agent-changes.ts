@@ -286,10 +286,12 @@ export function createAgentChanges({
 
     async reactivateConfirm(member, idempotent, agentId, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
+        const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: member.sessionId,
@@ -334,6 +336,7 @@ export function createAgentChanges({
       let key: string | null = null;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneKeyIssueAtATime(tx, member.orgId);
+        const held = await challenges.hold(tx, member.sessionId);
         const read = await handOverRead(tx, states, member, agentId, owner);
         const now = clock.now();
         await work.keyBudgetLeft(tx, member.orgId, now);
@@ -341,6 +344,7 @@ export function createAgentChanges({
         if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
         const consumed = await challenges.consume(
           tx,
+          held,
           stepUpChallengeId,
           {
             sessionId: member.sessionId,
