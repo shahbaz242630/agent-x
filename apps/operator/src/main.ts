@@ -187,9 +187,6 @@ function requestWords(argv: readonly string[]): { readonly words: readonly strin
   return { words };
 }
 
-/** How many of a restore check's problems its line names, as many as a log line's list keeps. */
-const SHOWN_PROBLEMS = 50;
-
 /** The commands read by a shape of their own, by their first word: create-organization is the rest. */
 const OWN_SHAPES: ReadonlyMap<string, (words: readonly string[], fromFile: boolean) => Request | Problems> = new Map([
   ['invite-first-admin', firstAdminRequest],
@@ -428,12 +425,8 @@ async function restoreCheck(config: OperatorConfig, keys: KeyProvider, logger: L
       return 1;
     }
     const report = await checkRestoredCopy({ copy, live, keys });
-    // A log line keeps the first 50 of a list (LOGGABLE_LIMITS): the count says how many there were in all.
-    const line = {
-      ...report,
-      problems: report.problems.slice(0, SHOWN_PROBLEMS),
-      problemCount: report.problems.length,
-    };
+    // The logger keeps the first 50 problems (LOGGABLE_LIMITS); the count says how many in all.
+    const line = { ...report, problemCount: report.problems.length };
     if (report.problems.length > 0) {
       logger.error('operator.restore_check_failed', line);
       return 1;

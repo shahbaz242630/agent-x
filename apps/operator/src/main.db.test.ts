@@ -32,7 +32,7 @@ import { type OperatorProcess, runOperator } from './main.ts';
 import { firstAdminRequest, restoreCheckRequest } from './request.ts';
 
 /** A failure no real run can cause yet, switched on by a test and off after it. */
-const faults = vi.hoisted(() => ({ create: undefined as Error | undefined }));
+const faults = vi.hoisted(() => ({ create: undefined as Error | undefined, readOnly: [] as boolean[] }));
 
 vi.mock('./create-organization.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./create-organization.ts')>();
@@ -45,8 +45,21 @@ vi.mock('./create-organization.ts', async (importOriginal) => {
   };
 });
 
+// Each answer pushed overrides one read-only proof, in the order the command asks.
+vi.mock('@agentx/platform/db', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/platform/db')>();
+  return {
+    ...actual,
+    transactionsReadOnly: async (...args: Parameters<typeof actual.transactionsReadOnly>) => {
+      const said = await actual.transactionsReadOnly(...args);
+      return faults.readOnly.shift() ?? said;
+    },
+  };
+});
+
 afterEach(() => {
   faults.create = undefined;
+  faults.readOnly = [];
 });
 
 const server = inject('postgres');
@@ -591,5 +604,54 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
     expect(code).toBe(0);
     expect(line('operator.restore_check_done')).toMatchObject({ problems: [], newSinceCopy: 0 });
     expect(await head()).toEqual(before);
+    // Both pools closed: no connection of the command's is left on the server.
+    await vi.waitFor(
+      async () => {
+        const open = await database
+          .as('admin')
+          .query(
+            "select 1 from pg_catalog.pg_stat_activity where datname = $1 and application_name = 'agentx-operator'",
+            [database.name],
+          );
+        expect(open).toEqual([]);
+      },
+      { timeout: 5000, interval: 100 },
+    );
+  });
+
+  it('fails a copy with a single problem, naming it', async () => {
+    const file = path.join(folder, 'request');
+    writeFileSync(file, restoreCheckRequest());
+    const env = envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' });
+    // The directory's list unreadable: one problem, on both sides at once.
+    await database.as('owner').query('revoke select on directory.orgs from agentx_app');
+    try {
+      const { code, events, line } = await run(['--request', file], env);
+
+      expect(code).toBe(1);
+      expect(events).toEqual(['operator.starting', 'operator.restore_check_failed']);
+      expect(line('operator.restore_check_failed')).toMatchObject({
+        problems: ["the organisations' lists: unreadable (42501)"],
+        problemCount: 1,
+      });
+    } finally {
+      await database.as('owner').query('grant select on directory.orgs to agentx_app');
+    }
+  });
+
+  it('reads nothing when the live server does not prove itself read-only', async () => {
+    const file = path.join(folder, 'request');
+    writeFileSync(file, restoreCheckRequest());
+    // The copy is asked first, then the live server.
+    faults.readOnly.push(true, false);
+
+    const { code, events, line } = await run(['--request', file], envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' }));
+
+    expect(code).toBe(1);
+    expect(events).toEqual(['operator.starting', 'operator.refused']);
+    expect(line('operator.refused')).toMatchObject({
+      problems: ['a connection is not read-only, so nothing was read'],
+    });
+    expect(faults.readOnly).toEqual([]);
   });
 });

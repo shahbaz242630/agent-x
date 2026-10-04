@@ -158,6 +158,22 @@ vi.mock('./retention-sweep.ts', () => ({
   },
 }));
 
+/** The tables main.ts sweeps on timers of their own, as scheduled and as stopped (row-sweep.test.ts runs the sweep). */
+const rowSweeps = vi.hoisted(() => ({ scheduled: [] as string[], stopped: [] as string[] }));
+
+vi.mock('./row-sweep.ts', () => ({
+  createRowSweep: (options: { rows: string }) => ({ rows: options.rows, run: () => Promise.resolve() }),
+  scheduleRowSweep: (sweep: { rows: string }) => {
+    rowSweeps.scheduled.push(sweep.rows);
+    return {
+      stop: () => {
+        rowSweeps.stopped.push(sweep.rows);
+        return Promise.resolve();
+      },
+    };
+  },
+}));
+
 vi.mock('./anchor-check.ts', () => ({
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
@@ -266,6 +282,8 @@ beforeEach(() => {
   sweeps.options.length = 0;
   sweeps.everyMs.length = 0;
   sweeps.stopped = 0;
+  rowSweeps.scheduled.length = 0;
+  rowSweeps.stopped.length = 0;
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
@@ -680,6 +698,23 @@ describe('the API stops cleanly on a signal', () => {
       ]);
     },
   );
+
+  it("stops every table's own sweep", async () => {
+    const { host } = await start();
+    host.emit('SIGTERM', 'SIGTERM');
+    await vi.waitFor(() => {
+      expect(host.exits).toEqual([0]);
+    });
+    const tables = [
+      'identity.flow',
+      'identity.session',
+      'identity.step_up_challenge',
+      'security.event',
+      'notifications.notice',
+    ];
+    expect(rowSweeps.scheduled).toEqual(tables);
+    expect([...rowSweeps.stopped].sort()).toEqual([...tables].sort());
+  });
 
   it('stops HTTP and the anchor check together, and closes the pool only after both, so work in flight still has it', async () => {
     const { host, server } = await start();

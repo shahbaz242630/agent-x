@@ -549,6 +549,16 @@ describe('GET /v1/agent/funding-sources: an agent sees the safe summary alone (D
     expect(asked).toEqual([{ kind: 'usableByAgent', orgId: ORG, page: { after: null, limit: 10 } }]);
   });
 
+  it('passes where the page starts, with the most a page when no limit is asked', async () => {
+    const asked: Asked[] = [];
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null } }, asked);
+
+    const response = await app.inject(asAgent(AGENT_KEY, `?after=${LAST_ID}`));
+
+    expect(response.statusCode).toBe(200);
+    expect(asked).toEqual([{ kind: 'usableByAgent', orgId: ORG, page: { after: LAST_ID, limit: 50 } }]);
+  });
+
   it('refuses a key without sources:read, before the use case runs', async () => {
     const asked: Asked[] = [];
     const { app } = await withLinks({}, asked);

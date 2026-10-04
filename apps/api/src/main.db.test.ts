@@ -423,6 +423,65 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     await stop(run);
   });
 
+  it('sweeps the sign-in flows past their end once it listens, keeping the live ones (B2-3a-2)', async () => {
+    const admin = database.as('admin');
+    for (const [fill, opened, ends] of [
+      ['a1', '20 minutes', '-10 minutes'],
+      ['a2', '1 minute', '9 minutes'],
+    ] as const) {
+      await admin.query(
+        `insert into identity.login_flows (cookie_hash, state, nonce, verifier, return_to, created_at, ends_at)
+         values (pg_catalog.decode(pg_catalog.repeat($1, 32), 'hex'), 's', 'n', pg_catalog.repeat('v', 43), '/',
+                 pg_catalog.now() - $2::interval, pg_catalog.now() + $3::interval)`,
+        [fill, opened, ends],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'identity.flow_sweep_done')).toEqual(
+        expect.objectContaining({ level: 'info', deleted: 1 }),
+      );
+    });
+    expect(
+      await admin.query<{ hash: string }>(
+        "select pg_catalog.encode(cookie_hash, 'hex') as hash from identity.login_flows",
+      ),
+    ).toEqual([{ hash: 'a2'.repeat(32) }]);
+    await stop(run);
+  });
+
+  it('sweeps the notices done past their retention once it listens, keeping the rest (B5-1b)', async () => {
+    const admin = database.as('admin');
+    const orgId = '0199a0f0-0000-7000-8000-0000000b51b0';
+    await admin.query('insert into directory.orgs (org_id) values ($1)', [orgId]);
+    // Sent past the 30 days; sent within them; past them but never sent nor given up.
+    const notices = [
+      ['0199a0f0-0000-7000-8000-0000000b51b1', '31 days', true],
+      ['0199a0f0-0000-7000-8000-0000000b51b2', '29 days', true],
+      ['0199a0f0-0000-7000-8000-0000000b51b3', '31 days', false],
+    ] as const;
+    for (const [id, age, sent] of notices) {
+      await admin.query(
+        `insert into notifications.outbox (id, org_id, kind, membership_id, role, created_at, attempts, next_attempt_at, sent_at)
+         values ($1, $2, 'role_granted', $1, 'viewer', pg_catalog.now() - $3::interval, 1,
+                 pg_catalog.now() + interval '1 day', case when $4 then pg_catalog.now() - $3::interval end)`,
+        [id, orgId, age, sent],
+      );
+    }
+
+    const run = await start(envFor('app'));
+    await vi.waitFor(() => {
+      expect(run.capture.lines().find((line) => line.event === 'notifications.notice_sweep_done')).toEqual(
+        expect.objectContaining({ level: 'info', deleted: 1 }),
+      );
+    });
+    expect(
+      await admin.query<{ id: string }>('select id from notifications.outbox where org_id = $1 order by id', [orgId]),
+    ).toEqual([{ id: notices[1][0] }, { id: notices[2][0] }]);
+    await stop(run);
+  });
+
   it('writes the rate-limit refusals it counted as it stops, before the pool closes (B2-5b)', async () => {
     const admin = database.as('admin');
     const run = await start(envFor('app', { AGENTX_RATE_LIMIT_PER_MINUTE: '10' }));

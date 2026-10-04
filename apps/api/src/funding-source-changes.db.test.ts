@@ -258,15 +258,35 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
     ]);
   });
 
-  it('believes nothing of an answer about another source, answering 503 and logging the partner’s fault', async () => {
+  it.each([
+    {
+      about: 'another source',
+      mixUp: async (admin: LinkingMember): Promise<FinancialRailAdapter> => {
+        const { source: other } = await linked(admin, 'sme-trading-business-acct-01');
+        return { ...rail, getSourceState: (ref) => rail.getSourceState({ ...ref, externalRef: other.externalRef }) };
+      },
+    },
+    {
+      about: 'another organisation',
+      // This source's own reference, answered as another real organisation's.
+      mixUp: async (): Promise<FinancialRailAdapter> => {
+        const stranger = await organization();
+        return {
+          ...rail,
+          getSourceState: async (ref) => {
+            const answer = await rail.getSourceState(ref);
+            return answer.kind === 'found'
+              ? { ...answer, source: { ...answer.source, organizationId: stranger } }
+              : answer;
+          },
+        };
+      },
+    },
+  ])('believes nothing of an answer about $about, answering 503 and logging the partner’s fault', async ({ mixUp }) => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const { source } = await linked(admin);
-    const { source: other } = await linked(admin, 'sme-trading-business-acct-01');
-    const mixedUp: FinancialRailAdapter = {
-      ...rail,
-      getSourceState: (ref) => rail.getSourceState({ ...ref, externalRef: other.externalRef }),
-    };
+    const mixedUp = await mixUp(admin);
     const capture = new LogCapture();
     const confused = createFundingSourceChanges({
       database: app,
