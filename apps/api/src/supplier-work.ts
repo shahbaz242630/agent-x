@@ -105,7 +105,7 @@ export function createSupplierWork(services: {
 }) {
   const { keys, logger } = services;
   const shared = createUseCaseWork({ ...services, Refusal: SupplierRefused });
-  const { answered, write } = shared;
+  const { answered } = shared;
 
   /** The supplier, read and verified: NOT_FOUND, or INTEGRITY_FAILED for one that can't be believed. */
   const supplierIn = async (
@@ -217,7 +217,7 @@ export function createSupplierWork(services: {
   const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
     answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
 
-  type Written = Awaited<ReturnType<typeof write>>;
+  type Written = Awaited<ReturnType<typeof shared.write>>;
 
   const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
     isUnwritten(done) ? done : view(orgId, done.result.resourceId, correlationId);
