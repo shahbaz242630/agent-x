@@ -391,6 +391,12 @@ describe(`a supplier's verification (E1-1's review, Postgres ${server.version})`
       ),
     ).rejects.toThrow(/verified_rests_on_its_version/);
     expect(await reactivate(org, id)).toMatchObject({ status: 'UNVERIFIED', verifiedVersionId: null });
+    // Nothing verified, so no clearing is recorded.
+    expect((await eventsAbout(org, id)).map(({ action }) => action)).toEqual([
+      'supplier.added',
+      'supplier.suspend',
+      'supplier.reactivate',
+    ]);
   });
 
   it('comes back UNVERIFIED, its verification cleared, when a new version became current while it was suspended', async () => {

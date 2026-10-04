@@ -135,7 +135,7 @@ describe('SEC-AV-06 the restore drill check', () => {
       ),
       `organisation ${onlyOnCopy}: on the copy, but not listed live`,
     ]);
-    expect(report).toMatchObject({ chainsChecked: 3, chainsHeld: 1, platformLiveSeq: null });
+    expect(report).toMatchObject({ chainsChecked: 3, chainsHeld: 1, platformLiveSeq: null, newSinceCopy: 1 });
   });
 
   it('fails a copy broken on its own side, before the live server is read', async () => {

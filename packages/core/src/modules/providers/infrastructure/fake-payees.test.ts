@@ -94,6 +94,7 @@ describe('a pass-through registration (D1-2)', () => {
   it.each([
     ['jasmine ai fz llc', 'match'],
     ['JASMINE AI, FZ-LLC.', 'match'],
+    ['Ｊａｓｍｉｎｅ AI FZ-LLC', 'match'],
     ['Jasmine Trading', 'partial'],
     ['Falcon Pearl General Trading LLC', 'no_match'],
   ] as const)('checks the name %j against the holder: %s', async (name, nameCheck) => {

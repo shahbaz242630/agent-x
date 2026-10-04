@@ -411,6 +411,23 @@ describe(`withSignedStates: under the chain head's lock (B1b, Postgres ${server.
     expect(lines('audit.integrity_failed')).toHaveLength(3);
   });
 
+  it('a hold waiting and a new finding: the hold set names the new finding, not the one waiting', async () => {
+    const first = await newAgent();
+    const second = await newAgent();
+    await flip(first);
+    await flip(second);
+    await withHeadLocked('for share', async () => {
+      expect(await within(15_000, check(first))).toEqual({ outcome: 'tampered', sign: 'seal' });
+    });
+
+    expect(await check(second)).toEqual({ outcome: 'tampered', sign: 'seal' });
+
+    expect((await holdEvents()).at(-1)).toMatchObject({
+      action: 'integrity_hold.set',
+      details: { objectId: second, findings: 1 },
+    });
+  });
+
   it("refuses to lock a row after the head's lock, and lets a row locked before it be read and changed", async () => {
     const first = await newAgent();
     const second = await newAgent();

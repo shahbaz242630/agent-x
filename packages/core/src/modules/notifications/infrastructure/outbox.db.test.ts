@@ -369,6 +369,20 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     expect(await outbox.claimDue(app, 10)).toEqual([]);
   });
 
+  it('hands the notices it takes over oldest first, whatever order the table gives', async () => {
+    clock.set(new Date(START.getTime() + MINUTE));
+    await app.transaction().execute((tx) => outbox.add(tx, [notice()]));
+    clock.set(START);
+    await app.transaction().execute((tx) => outbox.add(tx, [notice({ recipientUserId: OTHER_ADMIN })]));
+    // Both due at once; the newer one comes first by ID and in the table.
+    await sql`update notifications.outbox set next_attempt_at = ${START}`.execute(app);
+
+    expect((await outbox.claimDue(app, 10)).map(({ recipientUserId }) => recipientUserId)).toEqual([
+      OTHER_ADMIN,
+      ADMIN,
+    ]);
+  });
+
   it('FX-RACE lets two senders at once take different notices, never the same one', async () => {
     await app.transaction().execute((tx) => outbox.add(tx, [notice(), notice({ recipientUserId: OTHER_ADMIN })]));
 

@@ -386,13 +386,15 @@ describe('signing out', () => {
 
   it('answers the same with no session to end', async () => {
     const standIn = new StandIn();
-    const { app } = await server(standIn);
+    const { app, capture } = await server(standIn);
 
     const response = await app.inject({ method: 'POST', url: '/v1/auth/sign-out', headers: { origin: PUBLIC_ORIGIN } });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({});
     expect(standIn.signedOut).toEqual([undefined]);
+    // Nothing ended, so nothing said ended.
+    expect(capture.lines().some((line) => line.event === 'auth.signed_out')).toBe(false);
   });
 
   it('refuses a sign-out from another site, ending nothing (SEC-WEB-01)', async () => {
