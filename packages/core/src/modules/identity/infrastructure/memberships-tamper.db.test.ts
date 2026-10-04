@@ -49,13 +49,11 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0x700);
 const clock = new FixedClock(new Date('2026-09-25T09:00:00Z'));
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owner: OwnerTamper;
 let org: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 let subjects = 0;
@@ -72,7 +70,7 @@ const person = (): Promise<string> => {
 async function member(role: Role): Promise<{ user: string; id: string }> {
   const user = await person();
   const id = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id, userId: user, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { user, id };
@@ -118,7 +116,7 @@ async function deniedAndHeld(user: string, id: string, sign: TamperSign): Promis
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -129,7 +127,7 @@ afterAll(async () => {
 beforeEach(async () => {
   capture = new LogCapture();
   org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   owner = await tamperAsOwner(database, MEMBERSHIPS, org);

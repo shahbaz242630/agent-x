@@ -59,15 +59,13 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xc00);
 const clock = new FixedClock(new Date('2026-09-25T09:00:00Z'));
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owner: OwnerTamper;
 let org: string;
 let admin: string;
 let adminUser: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 let subjects = 0;
@@ -76,7 +74,7 @@ let subjects = 0;
 async function invitation(role: Role = 'viewer', email = 'sara@example.test'): Promise<string> {
   const id = ids.next();
   const { change } = invitationChange({ orgId: org, id, email, role, invitedBy: admin, createdAt: clock.now() });
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     draftInvitation(tx, states, keys, change, {
       stepUpChallengeId: ids.next(),
       createdAt: clock.now(),
@@ -95,7 +93,7 @@ const toOpen = (id: string) =>
   );
 
 const open = (id: string) =>
-  withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     openInvitation(tx, states, { orgId: org, id, actor: { type: 'user', id: adminUser }, details: {} }),
   );
 
@@ -127,7 +125,7 @@ async function deniedAndHeld(id: string, sign: TamperSign): Promise<void> {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -145,7 +143,7 @@ beforeEach(async () => {
     { issuer: 'https://auth.example.test', subject: `tamper-inviter-${String(subjects)}` },
     { ids, clock },
   );
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, async (tx, states) => {
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, async (tx, states) => {
     await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
     await addMembership(tx, states, {
       orgId: org,
@@ -183,7 +181,7 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
   it('put down to another admin', async () => {
     const id = await invitation();
     const other = ids.next();
-    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, async (tx, states) =>
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, async (tx, states) =>
       addMembership(tx, states, {
         orgId: org,
         id: other,
@@ -247,7 +245,7 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
       { issuer: 'https://auth.example.test', subject: `tamper-other-accepter-${String(subjects)}` },
       { ids, clock },
     );
-    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),
     );
     await owner.setColumn(id, 'accepted_by', other);
@@ -263,7 +261,7 @@ describe(`FX-TAMPER as the owner on an invitation: denied by the row check, and 
       { issuer: 'https://auth.example.test', subject: `tamper-waiting-${String(subjects)}` },
       { ids, clock },
     );
-    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       acceptInvitation(tx, states, { orgId: org, id, userId: person, actor: { type: 'user', id: person } }),
     );
     await owner.setColumn(id, 'status', 'ACCEPTED');
@@ -313,7 +311,7 @@ describe(`FX-TAMPER as the owner on an invitation's address: it won't open (Post
     const id = await invitation('viewer', 'sara@example.test');
     const elsewhere = ids.next();
     const elsewhereAdmin = ids.next();
-    const services = { keys, ids, logger: loggerFor(new LogCapture()) };
+    const services = { keys, ids, logger: testLogger() };
     await withSignedStates(app, elsewhere, services, async (tx, states) => {
       await createOrganization(tx, states, { id: elsewhere, name: 'Other Trading LLC', actor: OPERATOR });
       await addMembership(tx, states, {

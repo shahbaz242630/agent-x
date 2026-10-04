@@ -91,11 +91,7 @@ function keysWith(requestHash: PurposeKeys, others: Partial<Record<KeyPurpose, P
 
 const KEYS = keysWith(REQUEST_HASH_V1);
 
-function loggerFor(destination: LogCapture) {
-  return testLogger(destination);
-}
-
-const writes = (keys = KEYS) => createIdempotentWrites({ keys, logger: loggerFor(capture) });
+const writes = (keys = KEYS) => createIdempotentWrites({ keys, logger: testLogger(capture) });
 /** How long a race waits for its parties to queue: longer than the default, for a slow CI runner opening connections. */
 const QUEUE_WAIT = { timeoutMs: 20_000 };
 
@@ -175,7 +171,7 @@ const items = (orgId = ORG) =>
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   await createTenantProbe(database);
-  app = createDatabase<ProbeTables>({ ...database.connection('app'), maxConnections: 12 }, loggerFor(new LogCapture()));
+  app = createDatabase<ProbeTables>({ ...database.connection('app'), maxConnections: 12 }, testLogger());
   admin = database.as('admin');
 });
 

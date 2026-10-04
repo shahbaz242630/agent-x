@@ -58,8 +58,6 @@ const challenges = () => createStepUpChallenges({ ids, clock });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let people = 0;
 
 /** A person with a session and a membership in the organisation. */
@@ -77,7 +75,7 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
     amr: ['pwd', 'otp', 'mfa'],
   });
   const membershipId = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { orgId: org, userId, sessionId, membershipId };
@@ -85,7 +83,7 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
 
 async function organization(): Promise<{ org: string; admin: InvitingAdmin & { membershipId: string } }> {
   const org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   return { org, admin: await member(org, 'admin') };
@@ -142,7 +140,7 @@ const eventsAbout = (org: string, id: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -159,7 +157,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 });
 
@@ -320,7 +318,7 @@ describe(`confirming an invitation (B4-3b, Postgres ${server.version})`, () => {
     const { org, admin } = await organization();
     const { id, challengeId } = await drafted(admin);
     await stepUp(admin, challengeId);
-    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
         actor: OPERATOR,
         action: 'membership.deactivated',

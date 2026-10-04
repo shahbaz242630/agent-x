@@ -38,7 +38,6 @@ import {
   createTestDatabase,
   FixedClock,
   holdNamedLock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -88,8 +87,7 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 type Member = AgentMember & { readonly membershipId: string };
 
@@ -253,10 +251,7 @@ const refusal = (status: number, code: string) => ({ outcome: 'refused', status,
 
 /** The key check, as C2 will put it in front of an agent's request. */
 const check = (text: string) =>
-  createAgentKeyCheck({ database: app, keys, ids, clock, logger: loggerFor(new LogCapture()) }).check(
-    text,
-    CORRELATION,
-  );
+  createAgentKeyCheck({ database: app, keys, ids, clock, logger: testLogger() }).check(text, CORRELATION);
 
 /** The organisation's events about the key, oldest first. */
 const eventsAbout = (org: string, keyId: string) =>
@@ -275,7 +270,7 @@ const keysIn = (org: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -291,7 +286,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 });
 
@@ -706,7 +701,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
       ids,
       clock,
       challenges: challenges(),
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
     });
 
   const handOverAsk = (who: AgentMember, agentId: string, owner: string) =>

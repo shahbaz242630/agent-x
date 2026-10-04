@@ -77,8 +77,7 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 const INVITED = 'sara.khan@example.test';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 /** A person signed in, with a session holding this verified address, or none. */
@@ -160,7 +159,7 @@ const membershipOfPerson = (org: string, userId: string) => membershipFor(app, s
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -178,7 +177,7 @@ beforeEach(() => {
     ids,
     clock,
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 });
 

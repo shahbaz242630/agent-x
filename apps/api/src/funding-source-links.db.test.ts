@@ -28,7 +28,6 @@ import {
   createTestDatabase,
   FixedClock,
   holdNamedLock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -75,8 +74,6 @@ let clock: FixedClock;
 let rail: FakeRail;
 let links: FundingSourceLinks;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let people = 0;
 
 /** A person with a membership in the organisation. */
@@ -88,7 +85,7 @@ async function member(org: string, role: Role): Promise<LinkingMember & { readon
     { ids, clock },
   );
   const membershipId = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { orgId: org, userId, membershipId };
@@ -96,7 +93,7 @@ async function member(org: string, role: Role): Promise<LinkingMember & { readon
 
 async function organization(): Promise<string> {
   const org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   return org;
@@ -141,7 +138,7 @@ const rows = (org: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -159,7 +156,7 @@ beforeEach(() => {
     clock,
     rail,
     partner: 'fake',
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 });
 
@@ -202,7 +199,7 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
   it('refuses an admin whose membership is deactivated, adding nothing', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
-    await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+    await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
       states.changeStatus(tx, MEMBERSHIPS, { orgId: org, id: admin.membershipId }, 'deactivate', {
         actor: OPERATOR,
         action: 'membership.deactivated',
@@ -228,7 +225,7 @@ describe(`starting a link (D2-3b, Postgres ${server.version})`, () => {
       clock,
       rail: undefined,
       partner: 'none',
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
     });
     expect(await none.start(admin, keyed(admin, LINK_START_OPERATION), CORRELATION)).toEqual(unavailable);
     expect(await none.confirm(admin, keyed(admin, LINK_CONFIRM_OPERATION), ids.next(), CORRELATION)).toEqual(
@@ -301,7 +298,7 @@ describe(`failures passed on, never answered as refusals (D2-3b, Postgres ${serv
       clock,
       rail: { ...rail, ...stand },
       partner,
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
     });
 
   it('passes on a partner failure that isn’t a missing answer', async () => {

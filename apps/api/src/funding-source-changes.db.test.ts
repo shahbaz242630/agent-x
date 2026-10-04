@@ -80,8 +80,6 @@ let links: FundingSourceLinks;
 let reads: FundingSourceReads;
 let changes: FundingSourceChanges;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let people = 0;
 
 /** A person with a membership in the organisation. */
@@ -92,7 +90,7 @@ async function member(org: string, role: Role): Promise<LinkingMember> {
     { issuer: 'https://auth.example.test', subject: `funding-changes-${String(people)}` },
     { ids, clock },
   );
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id: ids.next(), userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { orgId: org, userId };
@@ -100,7 +98,7 @@ async function member(org: string, role: Role): Promise<LinkingMember> {
 
 async function organization(): Promise<string> {
   const org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   return org;
@@ -158,12 +156,12 @@ const changesWith = (partner: FinancialRailAdapter | undefined) =>
     ids,
     rail: partner,
     challenges: createStepUpChallenges({ ids, clock }),
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -174,7 +172,7 @@ afterAll(async () => {
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   rail = createFakeRail({ clock, ids, records: createDatabaseRecords(app) });
-  const services = { database: app, keys, ids, logger: loggerFor(new LogCapture()) };
+  const services = { database: app, keys, ids, logger: testLogger() };
   links = createFundingSourceLinks({ ...services, clock, rail, partner: 'fake' });
   reads = createFundingSourceReads({ ...services, clock });
   changes = changesWith(rail);
@@ -276,7 +274,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       rail: mixedUp,
       challenges: createStepUpChallenges({ ids, clock }),
-      logger: loggerFor(capture),
+      logger: testLogger(capture),
     });
 
     expect(await confused.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION)).toEqual({
@@ -303,7 +301,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       ids,
       rail,
       challenges: createStepUpChallenges({ ids, clock }),
-      logger: loggerFor(capture),
+      logger: testLogger(capture),
     });
 
     const answered = refreshed(await changes.refresh(admin, keyed(admin, REFRESH_OPERATION), source.id, CORRELATION));

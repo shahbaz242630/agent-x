@@ -8,7 +8,6 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
   FixedClock,
-  LogCapture,
   type OwnerTamper,
   SequentialIds,
   tamperAsOwner,
@@ -50,8 +49,7 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 const FINDING = { conclusion: 'CAUSE_REMOVED', reference: 'INC-2026-7' } as const;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 
@@ -132,8 +130,8 @@ const investigationEvents = async (): Promise<number> => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
-  investigations = createHoldInvestigations({ database: app, keys, ids, logger: loggerFor(new LogCapture()) });
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  investigations = createHoldInvestigations({ database: app, keys, ids, logger: testLogger() });
 });
 
 afterAll(async () => {

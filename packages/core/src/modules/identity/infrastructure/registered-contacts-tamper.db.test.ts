@@ -65,16 +65,14 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0xc6b00);
 const clock = new FixedClock(new Date('2026-09-27T09:00:00Z'));
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owner: OwnerTamper;
 let org: string;
 let admin: string;
 let adminUser: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 let subjects = 0;
@@ -146,7 +144,7 @@ async function deniedAndHeld(id: string, sign: TamperSign): Promise<void> {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {

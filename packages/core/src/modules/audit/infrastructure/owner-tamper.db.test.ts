@@ -106,8 +106,6 @@ const keys = createKeyProvider(
 );
 const trail: AuditTrail = createAuditTrail({ keys, ids: new SequentialIds(0x300) });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let states: SignedStates;
 let owner: OwnerTamper;
@@ -190,7 +188,7 @@ beforeAll(async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text above.
     await database.as('owner').query(statement);
   }
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -204,7 +202,7 @@ beforeEach(async () => {
   states = createSignedStates({
     keys,
     trail,
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
     onTamper: (finding) => found.push(finding),
     unrecorded: () => undefined,
   });
@@ -486,10 +484,7 @@ describe('FX-TAMPER as the owner: the S32 probe’s schema changes on an authori
       "do $$ begin execute pg_catalog.format('alter database %I set search_path = probe, pg_catalog', pg_catalog.current_database()); end $$",
     );
     // A pool of its own, so every connection opens after the setting.
-    const fresh = createDatabase<Tables>(
-      { ...database.connection('app'), maxConnections: 1 },
-      loggerFor(new LogCapture()),
-    );
+    const fresh = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 1 }, testLogger());
     try {
       expect(await guard()).toContain('a setting is pinned to this database or to a role');
       const path = await sql<{ path: string }>`select pg_catalog.current_setting('search_path') as path`.execute(fresh);

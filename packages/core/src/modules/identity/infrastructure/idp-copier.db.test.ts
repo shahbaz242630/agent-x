@@ -53,8 +53,6 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 let clock: FixedClock;
 let capture: LogCapture;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let subjects = 0;
 /** A Zitadel user ID, new each time. */
 const zitadelId = (): string => {
@@ -71,7 +69,7 @@ async function person(): Promise<{ userId: string; subject: string }> {
 /** A new organisation, with the person as a member when given one. */
 async function organization(member?: string, role: 'admin' | 'viewer' = 'viewer'): Promise<string> {
   const org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, async (tx, states) => {
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, async (tx, states) => {
     await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
     if (member !== undefined) {
       await addMembership(tx, states, {
@@ -134,7 +132,7 @@ const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
     passkeys,
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 
 /** The platform chain's copies of the event, by organisation. */
@@ -176,7 +174,7 @@ const lines = (name: string) => capture.lines().filter((line) => line.event === 
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -355,7 +353,7 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
         clock,
         issuer: ISSUER,
         outbox: sink,
-        logger: loggerFor(capture),
+        logger: testLogger(capture),
       });
 
     await copier(failing).run();

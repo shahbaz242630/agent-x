@@ -109,10 +109,6 @@ const trail: AuditTrail = createAuditTrail({ keys, ids: new SequentialIds(0x100)
 let capture: LogCapture;
 let states: SignedStates;
 
-function loggerFor(destination: LogCapture) {
-  return testLogger(destination);
-}
-
 /** What every alarm handed on, for the integrity hold. */
 let found: TamperFinding[];
 
@@ -120,7 +116,7 @@ const statesWith = (using: AuditTrail): SignedStates =>
   createSignedStates({
     keys,
     trail: using,
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
     onTamper: (finding) => found.push(finding),
     unrecorded: () => undefined,
   });
@@ -185,7 +181,7 @@ beforeAll(async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text above.
     await database.as('owner').query(statement);
   }
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 12 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 12 }, testLogger());
   attacker = database.as('admin');
 });
 

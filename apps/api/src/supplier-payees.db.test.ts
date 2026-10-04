@@ -92,8 +92,7 @@ let logs: LogCapture;
 let registry: SupplierRegistry;
 let payees: SupplierPayees;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 /** The use case over `withRail`, the partner the test gives, on the same database and clock. */
 const payeesWith = (
@@ -107,7 +106,7 @@ const payeesWith = (
     clock,
     rail: withRail === undefined || formOrigin === undefined ? withRail : { ...withRail, formOrigin },
     partner,
-    logger: loggerFor(logs),
+    logger: testLogger(logs),
   });
 
 let people = 0;
@@ -267,7 +266,7 @@ const actionsAbout = async (org: string, subjectType: string, id: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -279,7 +278,7 @@ beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   logs = new LogCapture();
   rail = createFakeRail({ clock, ids });
-  registry = createSupplierRegistry({ database: app, keys, ids, clock, logger: loggerFor(new LogCapture()) });
+  registry = createSupplierRegistry({ database: app, keys, ids, clock, logger: testLogger() });
   payees = payeesWith(rail);
 });
 

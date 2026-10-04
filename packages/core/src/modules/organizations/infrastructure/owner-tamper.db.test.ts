@@ -59,8 +59,6 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0x500);
 const trail: AuditTrail = createAuditTrail({ keys, ids });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owner: OwnerTamper;
 
@@ -73,7 +71,7 @@ const newId = (): string => {
 let org: string;
 
 /** What withSignedStates builds each transaction's signed states from, logging to this test's capture. */
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
 
 const change = (action: string) => ({ actor: { type: 'user' as const, id: newId() }, action, details: {} });
 
@@ -168,7 +166,7 @@ async function heldFor(sign: TamperSign, over: 'CLEAR' | null = 'CLEAR'): Promis
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -190,7 +188,7 @@ afterEach(async () => {
 
 /** Creates this test's organisation, as the operator's command will, logging to a capture of its own. */
 async function created(): Promise<void> {
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, {
       id: org,
       name: 'Acme Trading LLC',

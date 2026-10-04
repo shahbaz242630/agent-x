@@ -72,8 +72,6 @@ const DETAILS: SupplierDetails = {
   source: { kind: 'official_website', ref: 'https://gulfoffice.example' },
 };
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 /** The owner at the suppliers' table, at their versions', and at their registrations'. */
 let owner: OwnerTamper;
@@ -81,8 +79,8 @@ let ownerOfVersions: OwnerTamper;
 let ownerOfRegistrations: OwnerTamper;
 let org: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 /** A supplier of this test's organisation, with its first version, made logging to a capture of its own. */
@@ -247,7 +245,7 @@ const product = () =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {

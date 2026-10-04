@@ -31,7 +31,6 @@ import {
   confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -74,8 +73,7 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 type Member = AgentMember & { readonly membershipId: string };
 
@@ -211,7 +209,7 @@ const eventsAbout = (org: string, agentId: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -227,7 +225,7 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 });
 

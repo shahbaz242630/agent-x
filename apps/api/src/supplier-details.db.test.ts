@@ -39,7 +39,6 @@ import {
   confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -125,8 +124,7 @@ let detailsChanges: SupplierDetailsChanges;
 let changes: SupplierChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 interface Person {
   readonly orgId: string;
@@ -258,7 +256,7 @@ const refusedWith = (code: string, status: number) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -269,7 +267,7 @@ afterAll(async () => {
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   rail = createFakeRail({ clock, ids });
-  const services = { database: app, keys, ids, clock, logger: loggerFor(new LogCapture()) };
+  const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry(services);
   payees = createSupplierPayees({ ...services, rail, partner: 'fake' });
   const outbox = createOutbox({ ids, clock });

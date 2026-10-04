@@ -66,11 +66,10 @@ let capture: LogCapture;
 let clock: FixedClock;
 let org: string;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 const check = (text: string) =>
-  createAgentKeyCheck({ database: app, keys, ids, clock, logger: loggerFor(capture) }).check(text, 'corr-1');
+  createAgentKeyCheck({ database: app, keys, ids, clock, logger: testLogger(capture) }).check(text, 'corr-1');
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -154,7 +153,7 @@ const hold = () => withSignedStates(app, org, quiet(), (tx, states) => states.in
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -214,7 +213,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
       keys: retired,
       ids,
       clock,
-      logger: loggerFor(capture),
+      logger: testLogger(capture),
     }).check(text, 'corr-1');
 
     expect(checked).toEqual({ outcome: 'refused' });
@@ -234,7 +233,7 @@ describe(`the key check: a key that may act (C1-4a, Postgres ${server.version})`
       keys: watched,
       ids,
       clock,
-      logger: loggerFor(capture),
+      logger: testLogger(capture),
     }).check(text, 'corr-1');
 
     expect(checked).toMatchObject({ outcome: 'accepted' });
