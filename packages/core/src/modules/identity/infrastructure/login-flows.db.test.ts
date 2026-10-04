@@ -1,7 +1,6 @@
 // B2-3a-1: the sign-in flows under way (0011), on the real migrated schema, as the app role.
-import { createTestDatabase, FixedClock, LogCapture, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createLoginFlows, LOGIN_FLOW_SECONDS } from './login-flows.ts';
@@ -27,14 +26,7 @@ const newFlow = (): LoginFlow => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<IdentityTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

@@ -1,9 +1,8 @@
 // B2-3a-1: a sign-in from end to end, on the real migrated schema, as the app
 // role, with a stand-in OIDC client (the client itself: oidc-client.test.ts).
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
+import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { SignInEvidence, Subject } from '../domain/sign-in.ts';
@@ -96,14 +95,7 @@ let subjects = 0;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<IdentityTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

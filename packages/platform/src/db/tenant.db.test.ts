@@ -4,6 +4,7 @@ import {
   holdNamedLock,
   LogCapture,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -37,11 +38,7 @@ let app: Kysely<ProbeSchema>;
 /** A logger whose lines the test can read. */
 function capturedLogger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
   const capture = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  });
+  const logger = testLogger(capture);
   return { capture, logger };
 }
 

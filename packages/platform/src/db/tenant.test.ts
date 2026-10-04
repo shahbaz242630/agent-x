@@ -1,4 +1,4 @@
-import { LogCapture } from '@agentx/testing';
+import { LogCapture, testLogger } from '@agentx/testing';
 import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 
@@ -53,11 +53,7 @@ function logger(): { capture: LogCapture; logger: ReturnType<typeof createLogger
   const capture = new LogCapture();
   return {
     capture,
-    logger: createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: capture,
-    }),
+    logger: testLogger(capture),
   };
 }
 

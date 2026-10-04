@@ -10,8 +10,7 @@
 // its link, read at send time, or the notice given up once the reset no
 // longer waits (B6-3b). Its log never holds an address, nor a link.
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -198,11 +197,7 @@ function sender(
   links: ResetLinks = resetLinks(),
 ) {
   const capture = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  });
+  const logger = testLogger(capture);
   return {
     capture,
     run: createNoticeSender({
@@ -220,14 +215,7 @@ function sender(
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<NotificationsTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<NotificationsTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
   await sql`insert into directory.orgs (org_id) values (${ORG})`.execute(app);
   for (const [id, subject] of [
     [ADMIN, 'sender-admin'],
@@ -598,11 +586,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
       audience: audience(),
-      logger: createLogger({
-        service: 'test',
-        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-        destination: new LogCapture(),
-      }),
+      logger: testLogger(),
     });
     const capture = new LogCapture();
     const logged = createNoticeSender({
@@ -613,11 +597,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
       audience: audience(),
-      logger: createLogger({
-        service: 'test',
-        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-        destination: capture,
-      }),
+      logger: testLogger(capture),
     });
 
     await expect(broken.run()).resolves.toBeUndefined();

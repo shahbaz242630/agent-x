@@ -1,9 +1,8 @@
 // B4-1: the directory's list of who belongs where (0015), as the app role.
 // The memberships its entries point at are the identity module's
 // (memberships.db.test.ts); here, the entries alone.
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { listedMember, listedMembers, listedMembership, registerMember } from './members.ts';
@@ -38,14 +37,7 @@ const person = async (): Promise<string> => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

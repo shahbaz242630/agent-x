@@ -6,8 +6,7 @@
 // also when the last try's lease runs out; a notice to the admins turned
 // into one to each, once; swept once done and past the retention.
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -78,14 +77,7 @@ const rows = () => app.selectFrom('notifications.outbox').selectAll().orderBy('c
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<NotificationsTables>(
-    { ...database.connection('app'), maxConnections: 3 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<NotificationsTables>({ ...database.connection('app'), maxConnections: 3 }, testLogger());
   await sql`insert into directory.orgs (org_id) values (${ORG})`.execute(app);
   for (const [id, subject] of [
     [ADMIN, 'outbox-admin'],

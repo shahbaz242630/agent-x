@@ -15,6 +15,7 @@ import {
   findLeaks,
   LogCapture,
   type TestDatabase,
+  testLogger,
   type TestRole,
   writeTestKeys,
 } from '@agentx/testing';
@@ -207,14 +208,7 @@ describe(`APP-02 the API and its database (Postgres ${server.version})`, () => {
     expect(first.capture.lines().find((line) => line.event === 'api.start_recorded')?.seq).toBe('1');
 
     // The chain checks out with the keys the API loaded.
-    const reader = createDatabase<PlatformControlsTables>(
-      database.connection('app'),
-      createLogger({
-        service: 'test',
-        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-        destination: new LogCapture(),
-      }),
-    );
+    const reader = createDatabase<PlatformControlsTables>(database.connection('app'), testLogger());
     try {
       const chain = createPlatformChain({ keys: loadKeys({ directory: keys.directory, current: {} }), ids: uuidV7Ids });
       expect(await reader.transaction().execute((tx) => chain.verify(tx, undefined))).toMatchObject({

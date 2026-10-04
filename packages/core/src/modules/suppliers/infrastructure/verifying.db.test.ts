@@ -4,13 +4,13 @@
 // state; a version removed past the app, or its history edited, is caught.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   type TestSession,
 } from '@agentx/testing';
 import type { Transaction } from 'kysely';
@@ -59,11 +59,7 @@ let capture: LogCapture;
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  }),
+  logger: testLogger(capture),
 });
 const alarms = () => capture.lines().filter((line) => line.event === 'audit.integrity_failed');
 

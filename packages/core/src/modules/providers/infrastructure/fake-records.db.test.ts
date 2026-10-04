@@ -9,13 +9,12 @@
 // account number is ever written (PRD Phase 1: no raw bank details in the
 // database).
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
-  FixedClock,
   findLeaks,
-  LogCapture,
+  FixedClock,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
 } from '@agentx/testing';
 import { sql } from 'kysely';
@@ -48,14 +47,7 @@ const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<FakePartnerTables>(
-    { ...database.connection('app'), maxConnections: 4 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<FakePartnerTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {

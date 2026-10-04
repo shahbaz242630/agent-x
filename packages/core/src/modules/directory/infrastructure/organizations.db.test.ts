@@ -1,7 +1,6 @@
 // The directory's list of organisations (0007), as the app role.
-import { createTestDatabase, LogCapture, type TestDatabase, within } from '@agentx/testing';
+import { createTestDatabase, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { listedOrganizations, registerOrganization } from './organizations.ts';
@@ -21,14 +20,7 @@ const listed = (id: string) => app.selectFrom('directory.orgs').select('org_id')
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<DirectoryTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<DirectoryTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

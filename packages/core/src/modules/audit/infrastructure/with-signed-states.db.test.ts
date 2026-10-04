@@ -9,6 +9,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   type TestSession,
   waitUntilQueued,
 } from '@agentx/testing';
@@ -21,7 +22,6 @@ import {
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { sql, type Transaction } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -89,11 +89,7 @@ let capture: LogCapture;
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  }),
+  logger: testLogger(capture),
 });
 
 let number = 0;
@@ -179,14 +175,7 @@ beforeAll(async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text above.
     await database.as('owner').query(statement);
   }
-  app = createDatabase<Tables>(
-    { ...database.connection('app'), maxConnections: 8 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 8 }, testLogger());
   attacker = database.as('admin');
 });
 

@@ -12,6 +12,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   type TestSession,
   waitUntilQueued,
 } from '@agentx/testing';
@@ -24,7 +25,6 @@ import {
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
@@ -110,11 +110,7 @@ let capture: LogCapture;
 let states: SignedStates;
 
 function loggerFor(destination: LogCapture) {
-  return createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+  return testLogger(destination);
 }
 
 /** What every alarm handed on, for the integrity hold. */

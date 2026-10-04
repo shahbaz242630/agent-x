@@ -8,14 +8,13 @@
 // What the owner can do past the app is suppliers-tamper.db.test.ts.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
-  FixedClock,
   findLeaks,
-  LogCapture,
+  FixedClock,
   SequentialIds,
   type TestDatabase,
+  testLogger,
 } from '@agentx/testing';
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -72,11 +71,7 @@ const DETAILS: SupplierDetails = {
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  }),
+  logger: testLogger(),
 });
 
 const organization = async (): Promise<string> => {

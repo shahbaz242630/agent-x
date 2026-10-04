@@ -4,8 +4,8 @@
 // prove that whole.
 import {
   createTestDatabase,
-  LogCapture,
   type TestDatabase,
+  testLogger,
   type TestSession,
   waitUntilBlocked,
   waitUntilQueued,
@@ -13,7 +13,6 @@ import {
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import {
   pointSignedRow,
@@ -141,11 +140,7 @@ beforeAll(async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text above.
     await database.as('owner').query(statement);
   }
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  });
+  const logger = testLogger();
   app = createDatabase<ProbeTables>({ ...database.connection('app'), maxConnections: 8 }, logger);
   admin = database.as('admin');
 });

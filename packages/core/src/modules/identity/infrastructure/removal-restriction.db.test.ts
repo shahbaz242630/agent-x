@@ -8,8 +8,7 @@
 // else's removal.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
@@ -47,12 +46,7 @@ const ISSUER = 'https://auth.example.test';
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 let clock: FixedClock;
 
-const logger = () =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  });
+const logger = () => testLogger();
 
 let subjects = 0;
 

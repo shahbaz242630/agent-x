@@ -13,8 +13,7 @@ import {
   type StatusRules,
   type StatusTable,
 } from '../../packages/platform/src/db/index.ts';
-import { createLogger } from '../../packages/platform/src/observability/index.ts';
-import { LogCapture } from '../../packages/testing/src/log-scan.ts';
+import { testLogger } from '../../packages/testing/src/test-logger.ts';
 import { describe, expect, it } from 'vitest';
 
 type AgentState = 'ACTIVE' | 'SUSPENDED' | 'REVOKED';
@@ -60,11 +59,7 @@ describe("the shared-kernel's state machines fit the status change", () => {
 
   it("refuses a misspelt or unchecked event at the status change's call, not at run time", () => {
     const changer = createStatusChanger({
-      logger: createLogger({
-        service: 'test',
-        config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-        destination: new LogCapture(),
-      }),
+      logger: testLogger(),
     });
     // Never run: it is here for the type check.
     const calls = (tx: Parameters<StatusChanger['change']>[0], fromRequest: string) => [

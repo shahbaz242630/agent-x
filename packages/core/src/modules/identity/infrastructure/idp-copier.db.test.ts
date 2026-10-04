@@ -5,8 +5,14 @@
 // run starts; and what it logs (SEC-OPS-02).
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
@@ -47,12 +53,7 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 let clock: FixedClock;
 let capture: LogCapture;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 let subjects = 0;
 /** A Zitadel user ID, new each time. */

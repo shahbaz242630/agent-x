@@ -14,12 +14,12 @@
 // halves on a real server: the attack works without the pin, and doesn't with
 // it. Without the second half the first would pass on its own for the wrong
 // reason, so the unpinned control is part of the proof, not a curiosity.
-import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestDatabase, testLogger } from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
+import type { Logger } from '../observability/index.ts';
 import { createDatabase, PINNED_SEARCH_PATH, poolConfig } from './database.ts';
 import { PINNED_SEARCH_PATH_VALUE } from './search-path.ts';
 import { TenantContextError, tenantCheckedPool } from './tenant.ts';
@@ -31,15 +31,11 @@ let app: Kysely<Record<string, never>>;
 /** What the planted stand-in answers, so a shadowed call can't be mistaken for the real one (kept with the statement above). */
 const PLANTED_ANSWER = 999;
 
-function testLogger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
+function captured(): { capture: LogCapture; logger: Logger } {
   const capture = new LogCapture();
   return {
     capture,
-    logger: createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: capture,
-    }),
+    logger: testLogger(capture),
   };
 }
 
@@ -63,7 +59,7 @@ beforeAll(async () => {
     "do $$ begin execute pg_catalog.format('alter database %I set search_path = planted, pg_catalog', pg_catalog.current_database()); end $$",
   );
 
-  app = createDatabase<Record<string, never>>({ ...database.connection('app'), tls: 'disable' }, testLogger().logger);
+  app = createDatabase<Record<string, never>>({ ...database.connection('app'), tls: 'disable' }, captured().logger);
 }, 60_000);
 
 afterAll(async () => {
@@ -141,7 +137,7 @@ describe('A3e: a connection that lost the pin is refused', () => {
   it('is closed and logged rather than used, and the schemas are never echoed', async () => {
     // A pool built without the pin, so the database's setting reaches it: what
     // the app would face if poolConfig ever stopped pinning.
-    const { capture, logger } = testLogger();
+    const { capture, logger } = captured();
     const pool = new pg.Pool({ ...database.connection('app'), ssl: false, max: 2 });
     const guarded = tenantCheckedPool(pool, logger, 2);
     try {
@@ -157,7 +153,7 @@ describe('A3e: a connection that lost the pin is refused', () => {
   });
 
   it('accepts the same pool once the pin is put back', async () => {
-    const { logger } = testLogger();
+    const { logger } = captured();
     const pool = new pg.Pool({
       ...database.connection('app'),
       ssl: false,

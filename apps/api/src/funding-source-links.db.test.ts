@@ -24,7 +24,6 @@ import {
 } from '@agentx/core/modules/providers';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
@@ -32,6 +31,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -75,12 +75,7 @@ let clock: FixedClock;
 let rail: FakeRail;
 let links: FundingSourceLinks;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 let people = 0;
 

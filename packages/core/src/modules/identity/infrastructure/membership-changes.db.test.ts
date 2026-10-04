@@ -6,7 +6,6 @@ import { createHash } from 'node:crypto';
 
 import { createDatabase, type Database, type IdempotentRequest } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
@@ -14,6 +13,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -67,12 +67,7 @@ const DEACTIVATE: MembershipChange = { kind: 'deactivate' };
 const TO_APPROVER = { kind: 'role', role: 'approver' } as const satisfies MembershipChange;
 const TO_ADMIN = { kind: 'role', role: 'admin' } as const satisfies MembershipChange;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 let people = 0;

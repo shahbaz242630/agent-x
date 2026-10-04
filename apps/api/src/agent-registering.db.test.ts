@@ -21,7 +21,6 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   confirmedWhileDemoted,
   createTestDatabase,
@@ -30,6 +29,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -70,12 +70,7 @@ const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 const ASKED: AgentAsked = { name: 'Purchasing bot', scopes: ['requests:write', 'requests:read'] };
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 type Member = RegisteringMember & { readonly membershipId: string };
 

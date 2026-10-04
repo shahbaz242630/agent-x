@@ -11,7 +11,6 @@
 // clean before and after each case.
 import { createDatabase, type Database, liveSchemaProblems, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
@@ -20,6 +19,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -50,12 +50,7 @@ const ids = new SequentialIds(0xd2c0);
 const clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
 const rail = createFakeRail({ clock, ids: new SequentialIds(0xfb0_0000) });
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 let capture: LogCapture;
 let owner: OwnerTamper;
