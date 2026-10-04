@@ -9,7 +9,6 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
@@ -67,8 +66,7 @@ const DEACTIVATE: MembershipChange = { kind: 'deactivate' };
 const TO_APPROVER = { kind: 'role', role: 'approver' } as const satisfies MembershipChange;
 const TO_ADMIN = { kind: 'role', role: 'admin' } as const satisfies MembershipChange;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 /** A person signed in, with a session. */
@@ -192,7 +190,7 @@ async function asOwner(org: string, id: string, column: string, value: string) {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -208,7 +206,7 @@ beforeEach(() => {
     ids,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 });
 

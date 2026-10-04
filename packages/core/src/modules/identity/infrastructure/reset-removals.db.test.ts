@@ -78,8 +78,7 @@ let capture: LogCapture;
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000cc';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 interface Member {
   readonly userId: string;
@@ -251,7 +250,7 @@ const removalsWith = (factors: SecondFactorRemover) => {
     clock,
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 };
 
@@ -316,7 +315,7 @@ const lines = (event: string, org: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -454,7 +453,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
         clock,
         challenges: createStepUpChallenges({ ids, clock }),
         outbox: createOutbox({ ids, clock }),
-        logger: loggerFor(new LogCapture()),
+        logger: testLogger(),
       });
       const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
       expect(
@@ -603,7 +602,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       clock,
       challenges: createStepUpChallenges({ ids, clock }),
       outbox: createOutbox({ ids, clock }),
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
     });
     const admin = { orgId: who.org, userId: who.admin.userId, sessionId: who.admin.sessionId };
     // Each within far less than a statement's 10 s: nothing waits on the removal (review).
@@ -724,7 +723,7 @@ describe(`carrying out a reset whose cooling-off has passed (B6-3c, Postgres ${s
       clock,
       challenges: createStepUpChallenges({ ids, clock }),
       outbox: createOutbox({ ids, clock }),
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
     });
     const admin = { orgId: first.org, userId: first.admin.userId, sessionId: first.admin.sessionId };
     // Carried out in order of ID: while the first is removed, an admin cancels the second.

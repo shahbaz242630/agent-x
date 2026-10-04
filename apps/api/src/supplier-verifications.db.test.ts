@@ -108,8 +108,7 @@ let payeeChanges: SupplierPayeeChanges;
 let verifications: SupplierVerifications;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 interface Person {
   readonly orgId: string;
@@ -288,7 +287,7 @@ const refusedWith = (code: string, status?: number) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -299,7 +298,7 @@ afterAll(async () => {
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   rail = createFakeRail({ clock, ids });
-  const services = { database: app, keys, ids, clock, logger: loggerFor(new LogCapture()) };
+  const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry(services);
   payees = createSupplierPayees({ ...services, rail, partner: 'fake' });
   const outbox = createOutbox({ ids, clock });
@@ -512,7 +511,7 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
       keys,
       ids,
       clock,
-      logger: loggerFor(logs),
+      logger: testLogger(logs),
       challenges: challenges(),
       outbox: createOutbox({ ids, clock }),
     });

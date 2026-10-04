@@ -51,14 +51,12 @@ const keys = createKeyProvider(
 const ids = new SequentialIds(0x7a0);
 const clock = new FixedClock(new Date('2026-09-28T09:00:00Z'));
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owners: { agents: OwnerTamper; keys: OwnerTamper };
 let org: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 /** An agent of this test's organisation, owned by a stand-in membership, with a key, made logging to a capture of their own. */
@@ -147,7 +145,7 @@ async function deniedAndHeld(
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {

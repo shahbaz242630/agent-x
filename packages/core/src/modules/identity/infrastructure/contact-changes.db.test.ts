@@ -61,8 +61,6 @@ const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 const EMAIL = 'Finance.Office@Example.test';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let people = 0;
 
 /** A person with a session and a membership in the organisation. */
@@ -80,7 +78,7 @@ async function member(org: string, role: Role): Promise<InvitingAdmin & { member
     amr: ['pwd', 'user', 'mfa'],
   });
   const membershipId = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
   );
   return { orgId: org, userId, sessionId, membershipId };
@@ -99,7 +97,7 @@ async function signedInAgain<T extends InvitingAdmin>(who: T): Promise<T> {
 
 async function organization(): Promise<{ org: string; admin: InvitingAdmin & { membershipId: string } }> {
   const org = ids.next();
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, (tx, states) =>
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, (tx, states) =>
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   return { org, admin: await member(org, 'admin') };
@@ -155,7 +153,7 @@ async function added(admin: InvitingAdmin, email = EMAIL): Promise<string> {
 
 /** Drafts `count` contacts straight into the organisation's table, two days before START: records, not started today. */
 async function oldDrafts(org: string, admin: InvitingAdmin & { membershipId: string }, count: number): Promise<void> {
-  await withSignedStates(app, org, { keys, ids, logger: loggerFor(new LogCapture()) }, async (tx, states) => {
+  await withSignedStates(app, org, { keys, ids, logger: testLogger() }, async (tx, states) => {
     for (let each = 0; each < count; each += 1) {
       const { change } = contactChange({
         orgId: org,
@@ -188,7 +186,7 @@ const noticesOf = (org: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -206,7 +204,7 @@ beforeEach(() => {
     clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 });
 

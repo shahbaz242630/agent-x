@@ -77,8 +77,7 @@ let clock: FixedClock;
 let registry: SupplierRegistry;
 let capture: LogCapture;
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 
@@ -151,7 +150,7 @@ const verified = (org: string, id: string, verifier: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -162,7 +161,7 @@ afterAll(async () => {
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
   capture = new LogCapture();
-  registry = createSupplierRegistry({ database: app, keys, ids, clock, logger: loggerFor(capture) });
+  registry = createSupplierRegistry({ database: app, keys, ids, clock, logger: testLogger(capture) });
 });
 
 describe(`adding a supplier (E1-2, Postgres ${server.version})`, () => {

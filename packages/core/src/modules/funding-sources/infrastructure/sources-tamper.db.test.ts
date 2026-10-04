@@ -50,14 +50,12 @@ const ids = new SequentialIds(0xd2c0);
 const clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
 const rail = createFakeRail({ clock, ids: new SequentialIds(0xfb0_0000) });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-
 let capture: LogCapture;
 let owner: OwnerTamper;
 let org: string;
 
-const services = () => ({ keys, ids, logger: loggerFor(capture) });
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger(capture) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 
 /** A source of this test's organisation, linked through the fake partner, made logging to a capture of its own. */
@@ -134,7 +132,7 @@ async function deniedAndHeld(id: string, sign: TamperSign): Promise<void> {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {

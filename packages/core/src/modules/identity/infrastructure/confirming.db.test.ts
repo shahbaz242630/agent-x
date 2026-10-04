@@ -11,7 +11,6 @@ import {
   confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
@@ -70,8 +69,7 @@ const challenges = () => createStepUpChallenges({ ids, clock });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 /** A person signed in, with a session. */
@@ -193,7 +191,7 @@ const statusOf = async (org: string, id: string) => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -210,7 +208,7 @@ beforeEach(() => {
     clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(new LogCapture()),
+    logger: testLogger(),
   });
 });
 

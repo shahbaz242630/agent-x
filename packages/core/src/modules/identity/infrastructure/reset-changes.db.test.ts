@@ -78,8 +78,7 @@ const challenges = () => createStepUpChallenges({ ids, clock });
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 type Member = InvitingAdmin & { readonly membershipId: string };
 
@@ -308,7 +307,7 @@ const told = (kind: string, personUserId: string, contacts: boolean) => [
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {
@@ -326,7 +325,7 @@ beforeEach(() => {
     clock,
     challenges: challenges(),
     outbox: createOutbox({ ids, clock }),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
   });
 });
 
@@ -727,7 +726,7 @@ describe(`a contact confirming it by its link (B6-3b-3, Postgres ${server.versio
       ids,
       clock,
       outbox: createOutbox({ ids, clock }),
-      logger: loggerFor(capture),
+      logger: testLogger(capture),
     });
   };
 

@@ -32,7 +32,6 @@ import {
   confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
@@ -82,8 +81,7 @@ let registry: SupplierRegistry;
 let changes: SupplierChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const quiet = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 
@@ -233,7 +231,7 @@ const actions = async (org: string, id: string) => (await eventsAbout(org, id)).
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -243,7 +241,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
-  const services = { database: app, keys, ids, logger: loggerFor(new LogCapture()) };
+  const services = { database: app, keys, ids, logger: testLogger() };
   registry = createSupplierRegistry({ ...services, clock });
   changes = createSupplierChanges({ ...services, challenges: challenges(), outbox: createOutbox({ ids, clock }) });
 });

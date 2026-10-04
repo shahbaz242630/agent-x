@@ -76,11 +76,7 @@ let app: Database<ProbeTables>;
 /** The server's superuser: past every wall, for setting up and for playing the attacker. */
 let admin: TestSession;
 let capture: LogCapture;
-const changer = () => createStatusChanger({ logger: loggerFor(capture) });
-
-function loggerFor(destination: LogCapture) {
-  return testLogger(destination);
-}
+const changer = () => createStatusChanger({ logger: testLogger(capture) });
 
 const ORG = '0199a0f0-0000-7000-8000-00000000000a';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000000b';
@@ -122,7 +118,7 @@ beforeAll(async () => {
     // eslint-disable-next-line agentx/no-string-built-sql -- The fixture statements are fixed text above.
     await database.as('owner').query(statement);
   }
-  app = createDatabase<ProbeTables>({ ...database.connection('app'), maxConnections: 12 }, loggerFor(new LogCapture()));
+  app = createDatabase<ProbeTables>({ ...database.connection('app'), maxConnections: 12 }, testLogger());
   admin = database.as('admin');
 });
 

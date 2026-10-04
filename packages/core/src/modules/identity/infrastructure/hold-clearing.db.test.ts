@@ -65,8 +65,7 @@ const capture = new LogCapture();
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000bb';
 
-const loggerFor = (destination: LogCapture) => testLogger(destination);
-const services = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
+const services = () => ({ keys, ids, logger: testLogger() });
 
 let people = 0;
 type Member = ClearingAdmin & { membershipId: string; cookie: string };
@@ -142,7 +141,7 @@ const keyed = (who: ClearingAdmin, operation: string, key: string, payload: stri
 
 /** Records the investigation of the hold as it stands, as the admin does, and gives back its ID. */
 async function investigate(who: ClearingAdmin = admin): Promise<string> {
-  const investigations = createHoldInvestigations({ database: app, keys, ids, logger: loggerFor(new LogCapture()) });
+  const investigations = createHoldInvestigations({ database: app, keys, ids, logger: testLogger() });
   const finding = { conclusion: 'CAUSE_REMOVED', reference: `INC-${ids.next().slice(-6)}` } as const;
   const written = await investigations.record(
     who,
@@ -187,13 +186,13 @@ const hold = () => withSignedStates(app, org, services(), (tx, states) => states
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, loggerFor(new LogCapture()));
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
   clearings = createHoldClearings({
     database: app,
     keys,
     ids,
     challenges: challenges(),
-    logger: loggerFor(capture),
+    logger: testLogger(capture),
     authorityTables: AUTHORITY_TABLES,
   });
 });
@@ -405,7 +404,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
         keys,
         ids,
         challenges: challenges(),
-        logger: loggerFor(new LogCapture()),
+        logger: testLogger(),
         authorityTables: [],
       }),
     ).toThrow('Clearing checks every authority table first');
@@ -452,7 +451,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
       keys,
       ids,
       challenges: challenges(),
-      logger: loggerFor(new LogCapture()),
+      logger: testLogger(),
       authorityTables: AUTHORITY_TABLES,
       objectsChecked: 1,
     });
