@@ -369,6 +369,11 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     const checked = answered(await check(admin, id, first.registration.id), 'checked');
     const later = answered(await check(admin, id, first.registration.id), 'checked');
     expect(later.registration).toEqual(checked.registration);
+    // Sent again once its registration ended: answered as it stands, the partner not asked.
+    expect(answered(await start(admin, id, 'start-key'), 'started')).toMatchObject({
+      registration: { id: first.registration.id, status: 'REGISTERED' },
+      form: null,
+    });
     expect((await actionsAbout(org, 'supplier', id)).filter((action) => action.includes('payee'))).toEqual([
       'supplier.payee_change_staged',
     ]);
@@ -566,6 +571,25 @@ describe(`registering a payee through the partner's form (E2-2a, Postgres ${serv
     ]);
   });
 
+  it('sends no form for a registration a check ended while the partner was asked', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const racing: FakeRail = {
+      ...rail,
+      registerBeneficiary: async (input) => {
+        const outcome = await rail.registerBeneficiary(input);
+        await filled(org, { form: outcome.kind === 'waiting' ? { url: outcome.formUrl } : null });
+        answered(await check(admin, id, input.registrationId), 'checked');
+        return outcome;
+      },
+    };
+
+    const started = answered(await start(admin, id, undefined, payeesWith(racing)), 'started');
+
+    expect(started).toMatchObject({ registration: { status: 'REGISTERED' }, form: null });
+  });
+
   it('refuses another start, and stages no second change, while one is waiting', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
@@ -676,6 +700,13 @@ describe(`the partner not answering, or answering what can't be kept (E2-2a, Pos
 
     const losing = payeesWith(failingOnce(true));
     expect(await start(admin, id, 'lost-key', losing)).toEqual({
+      outcome: 'refused',
+      status: 503,
+      code: 'PARTNER_UNAVAILABLE',
+    });
+    // Lost again, asked by its ID: still UNKNOWN, answered PARTNER_UNAVAILABLE again, never recorded lost twice.
+    const down = payeesWith({ ...rail, getBeneficiaryState: () => Promise.reject(new RailUnavailable()) });
+    expect(await start(admin, id, 'lost-key', down)).toEqual({
       outcome: 'refused',
       status: 503,
       code: 'PARTNER_UNAVAILABLE',
@@ -961,6 +992,10 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
     const refused = answered(await passThrough(admin, id, { key: 'one-key', using: refusing }), 'started');
 
     expect(refused.registration).toMatchObject({ status: 'FAILED', failure: 'invalid_details' });
+    // The same key with the same details, once it ended: as it stands.
+    expect(
+      answered(await passThrough(admin, id, { key: 'one-key', using: refusing }), 'started').registration,
+    ).toMatchObject({ id: refused.registration.id, status: 'FAILED' });
     expect(await passThrough(admin, id, { key: 'one-key', iban: ibanOf(OTHER) })).toEqual({ outcome: 'conflict' });
   });
 
@@ -1012,6 +1047,37 @@ describe(`registering a payee with its details passed through (E2-2d, Postgres $
       'beneficiary_registration.answered',
       'beneficiary_registration.registered',
     ]);
+  });
+
+  it('answers SUPPLIER_CHANGE_WAITING when another change was staged while the partner was asked, leaving its own open', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    // Another pass-through stages its change between this one's call to the partner and its answer being kept.
+    const racing: FakeRail = {
+      ...rail,
+      registerBeneficiary: async (input) => {
+        const outcome = await rail.registerBeneficiary(input);
+        answered(await passThrough(admin, id, { iban: ibanOf(OTHER) }), 'started');
+        return outcome;
+      },
+    };
+
+    expect(await passThrough(admin, id, { using: payeesWith(racing) })).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'SUPPLIER_CHANGE_WAITING',
+    });
+    const registrations = await withTenant(app, org, (tx) =>
+      tx
+        .selectFrom('suppliers.beneficiary_registrations')
+        .select('status')
+        .where('supplier_id', '=', id)
+        .orderBy('created_at')
+        .orderBy('id')
+        .execute(),
+    );
+    expect(registrations).toEqual([{ status: 'STARTED' }, { status: 'REGISTERED' }]);
   });
 
   it('a form’s start never carries on with a pass-through still open', async () => {

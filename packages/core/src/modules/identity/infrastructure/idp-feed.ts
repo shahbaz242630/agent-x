@@ -14,7 +14,7 @@
 // - A login service that can't be reached, refuses the token, or answers
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
-import { classOfIdpEvent, type IdpEventClass, MOST_WATCHED_TYPES, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
+import { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
@@ -101,8 +101,8 @@ function eventOf(raw: unknown): IdpEvent | undefined {
 export function createIdpEventFeed(login: ZitadelCallOptions): IdpEventFeed {
   const call = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
   const unavailable = (how: string) => new IdpFeedUnavailable(how);
+  // At most MOST_WATCHED_TYPES: a frozen constant, held there by idp-event.test.ts.
   const eventTypes = Object.keys(WATCHED_IDP_EVENTS);
-  if (eventTypes.length > MOST_WATCHED_TYPES) throw new RangeError('more event types than one search takes');
 
   return {
     async eventsBetween(since, until, most) {

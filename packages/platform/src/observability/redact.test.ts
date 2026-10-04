@@ -306,6 +306,19 @@ describe('AV-8 a line over the byte limit is shortened in steps, always keeping 
       { type: 'Error', message: 'm', cause: { type: 5, message: 'z'.repeat(300) } },
       (err: unknown) => JSON.stringify(err).includes(`"causes":[": ${'z'.repeat(128)}…"]`),
     ],
+    [
+      'with more causes than the three it keeps',
+      {
+        type: 'Error',
+        message: 'm',
+        cause: {
+          type: 'A',
+          message: '1',
+          cause: { type: 'B', message: '2', cause: { type: 'C', message: '3', cause: { type: 'D', message: '4' } } },
+        },
+      },
+      (err: unknown) => JSON.stringify(err) === '{"type":"Error","message":"m","causes":["A: 1","B: 2","C: 3"]}',
+    ],
   ])('shortens an error %s', (_what, err, check) => {
     const bulky = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, 'z '.repeat(1000)]));
     const result = redacted({ event: 'test.event', err, ...bulky }) as Record<string, unknown>;

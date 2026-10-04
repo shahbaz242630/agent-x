@@ -128,9 +128,7 @@ const quoted = (name: string): string => {
 export async function loadBootstrap(directory: string, database: string): Promise<Bootstrap> {
   const problems: string[] = [];
   const statementsOf = async (file: string): Promise<string[]> => {
-    const sql = (await readFile(path.join(directory, file), 'utf8'))
-      .replaceAll('\r\n', '\n')
-      .replaceAll(DATABASE_VARIABLE, quoted(database));
+    const sql = (await readFile(path.join(directory, file), 'utf8')).replaceAll(DATABASE_VARIABLE, quoted(database));
     if (/^\s*\\/m.test(sql)) problems.push(`${file} has a psql meta-command, which only psql understands`);
     if (/:["'][A-Za-z_]/.test(sql)) problems.push(`${file} has a psql variable other than ${DATABASE_VARIABLE}`);
     const statements = splitStatements(sql);

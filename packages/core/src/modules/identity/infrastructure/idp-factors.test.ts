@@ -407,8 +407,16 @@ describe('counting a person’s security keys and passkeys (the S68 audit)', () 
     expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(0);
   });
 
+  it('counts a list of 100, the most it reads', async () => {
+    const passkeys = Array.from({ length: 100 }, (_, index) => ({ id: String(index + 1), state: READY }));
+    const { fetch } = zitadel({ factors: [], passkeys, methods: [] });
+
+    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(100);
+  });
+
   it.each([
     ['an answer not 200', () => json({}, 403), failure('reading the factors: it answered 403')],
+    ['a 2xx answer other than 200', () => json({ result: [] }, 201), failure('reading the factors: it answered 201')],
     ['a key of a state it doesn’t know', undefined, failure('a factor has no state we know')],
   ])('throws on %s, never a count', async (_what, answer, thrown) => {
     const person = everyKind();

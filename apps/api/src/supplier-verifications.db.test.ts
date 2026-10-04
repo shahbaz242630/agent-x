@@ -22,13 +22,16 @@ import { createOutbox, type NotificationsTables } from '@agentx/core/modules/not
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
+  addVersion,
   MOST_VERIFICATIONS_READ,
+  MOST_VERSIONS_TO_VERIFY,
   PAYEE_COOLING_OFF_MS,
   SUPPLIERS,
   type SupplierDetails,
   supplierOf,
   type SuppliersTables,
   VERIFIER_RECORDED,
+  versionOf,
 } from '@agentx/core/modules/suppliers';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
@@ -182,13 +185,17 @@ const askedFor = (write: SupplierChangeWrite): string => {
  * A supplier added (by `adder`, or the admin), its bank details (`account`)
  * registered by `admin` through the partner's form typed as `name`, checked
  * (by `checker`, or the admin) and confirmed with the admin's passkey: its
- * 24 h cooling-off begun.
+ * 24 h cooling-off begun. `afterAdd` runs once it is added.
  */
 async function payable(
   adminPerson: Person,
   name = HOLDER,
   account: Account = JASMINE,
-  { adder = adminPerson, checker = adminPerson }: { adder?: Person; checker?: Person } = {},
+  {
+    adder = adminPerson,
+    checker = adminPerson,
+    afterAdd,
+  }: { adder?: Person; checker?: Person; afterAdd?: (supplierId: string) => Promise<unknown> } = {},
 ): Promise<string> {
   const admin = await signedIn(adminPerson);
   const adding = await signedIn(adder);
@@ -196,6 +203,7 @@ async function payable(
   const added = await registry.add(adding, keyed(adding, ADD_OPERATION), DETAILS, CORRELATION);
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
+  await afterAdd?.(supplierId);
   const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name, iban: ibanOf(account) });
@@ -381,6 +389,19 @@ describe(`verifying a supplier, with the verifier's passkey (E3-2a, Postgres ${s
     expect((await recordedOf(org, supplierId)).details).toMatchObject({ path: 'single_user' });
   });
 
+  it('takes the single-user path when any enterer has no one else to check them, though another has', async () => {
+    const org = await organization();
+    const alice = await member(org, 'admin');
+    clock.advanceBy(15 * DAY_MS);
+    // Carol, new, added it: Alice may check her; no one but Alice may check Alice's payee.
+    const carol = await member(org, 'admin');
+    const supplierId = await payable(alice, HOLDER, JASMINE, { adder: carol });
+    clock.advanceBy(PAYEE_COOLING_OFF_MS);
+
+    expect(await verified(alice, supplierId)).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    expect((await recordedOf(org, supplierId)).details).toMatchObject({ path: 'single_user' });
+  });
+
   it('refuses a member under 14 days while another is eligible, and a viewer or developer at all', async () => {
     const { org, supplierId } = await established();
     const young = await member(org, 'admin');
@@ -533,6 +554,35 @@ describe(`verifying over what can't be believed, or read whole (E3-2a, Postgres 
       ]);
 
     expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('INTEGRITY_FAILED', 503));
+  });
+
+  it('refuses HISTORY_TOO_LONG for a supplier with more versions since its last verification than one read takes', async () => {
+    const { org, alice, bob } = await team();
+    // One version numbered at the cap, left not current (as a withdrawn change is), so its payee's is one past it.
+    const supplierId = await payable(alice, HOLDER, JASMINE, {
+      afterAdd: (id) =>
+        withSignedStates(app, org, quiet(), async (tx, states) => {
+          const found = await supplierOf(tx, states, { orgId: org, id }, 'change');
+          if (found.outcome !== 'found') throw new Error('not found');
+          const first = await versionOf(tx, states, { orgId: org, id: found.supplier.currentVersionId }, id);
+          if (first.outcome !== 'found') throw new Error('no version');
+          await addVersion(tx, states, keys, {
+            orgId: org,
+            id: ids.next(),
+            supplierId: id,
+            version: MOST_VERSIONS_TO_VERIFY,
+            supplier: DETAILS,
+            enteredBy: alice.membershipId,
+            enteredAt: clock.now(),
+            actor: OPERATOR,
+            of: found,
+            follows: first.version,
+          });
+        }),
+    });
+    clock.advanceBy(PAYEE_COOLING_OFF_MS);
+
+    expect(await ask(await signedIn(bob), supplierId)).toEqual(refusedWith('HISTORY_TOO_LONG', 409));
   });
 
   // Only its verification records are read (the review): that a read names its actions is audit-trail.db.test.ts's.

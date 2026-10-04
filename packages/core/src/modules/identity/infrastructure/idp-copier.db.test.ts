@@ -285,8 +285,11 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 
     await copierWith(feed).run();
     clock.advanceBy(10 * 60_000);
+    capture = new LogCapture();
     await copierWith(feed).run();
 
+    // A run on the timer that writes nothing logs nothing.
+    expect(lines('idp_events.copied')).toEqual([]);
     expect(await orgRecords(org)).toHaveLength(1);
     expect(await noticesOf(org)).toHaveLength(2);
     expect(await platformCopies(`user:${who.subject}:${locked.sequence}`)).toEqual([
@@ -666,6 +669,23 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       expect.not.objectContaining({ counts: 'yes' }),
     ]);
     // The tests after this one start after its clock: each starts a day on per person made.
+    for (let day = 0; day < 9; day += 1) zitadelId();
+  });
+
+  it('counts a key added exactly 7 days after a removal, even the only one: the week holds its last millisecond', async () => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
+    await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
+    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
+    clock.advanceBy(WEEK_MS);
+    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
+
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+      expect.objectContaining({ counts: 'yes' }),
+    ]);
     for (let day = 0; day < 9; day += 1) zitadelId();
   });
 

@@ -227,8 +227,7 @@ export function createOidcClient({
     const [to, sent] = routedToIssuer(issuer, internalOrigin, url, init);
     try {
       return await fetch(to, { ...sent, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
-    } catch (error) {
-      if (error instanceof SignInFailed) throw error;
+    } catch {
       throw new SignInFailed('provider_unavailable', `a call to ${new URL(to).origin} failed`);
     }
   }

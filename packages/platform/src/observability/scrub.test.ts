@@ -173,6 +173,7 @@ describe('SEC-DATA-01 scrub: IP addresses (ADR-011 §7)', () => {
     ['an IPv6 address after a colon', `peer:${SAMPLES.ipv6}`, 'peer:[ip]'],
     ['an IPv6 address in brackets with a port', '[2001:db8::1]:443', '[[ip]]:443'],
     ['a full IPv6 address ending in IPv4', '1:2:3:4:5:6:1.2.3.4', '[ip]'],
+    ['an IPv4 address with a part of 255', 'mask 255.255.255.0', 'mask [ip]'],
   ])('%s', (_what, text, expected) => {
     expect(scrub(text)).toBe(expected);
   });
@@ -186,6 +187,11 @@ describe('SEC-DATA-01 scrub: URLs keep where they point, and lose credentials, q
       'trailing punctuation, which stays',
       'see (https://api.partner.example/x?y=1).',
       'see (https://api.partner.example/x).',
+    ],
+    [
+      'a URL in square brackets, whose bracket stays',
+      'see [https://api.partner.example/x?y=1]',
+      'see [https://api.partner.example/x]',
     ],
     [
       'a database URL',
@@ -250,6 +256,10 @@ describe('scrub: ordinary log text is left alone', () => {
     ['an amount', 'AED 1,000.00'],
     ['a short word after Bearer, too short to be a token', 'Bearer abc'],
     ['an octet out of range', '256.1.1.1'],
+    [
+      'twenty digits in groups of four, past any card’s length, though their Luhn sum is right',
+      '1234 5678 9012 3456 7001',
+    ],
     ['C++-style scope', 'std::string'],
     ['a MAC address', '00:1a:2b:3c:4d:5e'],
     ['a plain http origin with a port', 'http://localhost:8080'],
