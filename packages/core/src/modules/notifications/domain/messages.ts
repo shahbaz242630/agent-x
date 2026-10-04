@@ -248,7 +248,8 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
   const why =
     notice.recipientContactId !== null
       ? "You're told because this address is one of the organisation's registered contacts."
-      : isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId
+      : // The kind check keeps a notice with neither (both null) from reading as one's own login.
+        isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId
         ? "You're told because this is your own login."
         : "You're told because you're an admin of this organisation.";
   return {

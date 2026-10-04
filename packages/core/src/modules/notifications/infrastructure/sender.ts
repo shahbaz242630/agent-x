@@ -158,8 +158,7 @@ export function createNoticeSender({
     const admins = await audience.adminsOf(notice.orgId);
     return admins
       .filter(
-        ({ membershipId, userId }) =>
-          membershipId.toLowerCase() !== notice.membershipId && userId.toLowerCase() !== aboutPerson,
+        ({ membershipId, userId }) => membershipId !== notice.membershipId && userId.toLowerCase() !== aboutPerson,
       )
       .map(({ userId }) => userId);
   };

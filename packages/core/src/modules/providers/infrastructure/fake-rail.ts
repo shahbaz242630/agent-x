@@ -348,8 +348,6 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
       answer(() => {
         partnerKey(linkId);
         return records.within(organizationId, async (held) => {
-          const known = await held.get('link', linkId);
-          if (known !== undefined) return sessionOf(known);
           const session: FakeRecord<'link'> = {
             ref: linkId,
             alias: `fake-link-${ids.next()}`,
@@ -358,8 +356,8 @@ export function createFakeRail(options: FakeRailOptions): FakeRail {
               outcome: 'open',
             },
           };
-          // Adds nothing when another call with the same ID started it at
-          // once: its session, read back, is the session.
+          // Adds nothing when a call with the same ID started it, earlier or
+          // at once: its session, read back, is the session.
           await held.add('link', session);
           return sessionOf((await held.get('link', linkId)) ?? session);
         });

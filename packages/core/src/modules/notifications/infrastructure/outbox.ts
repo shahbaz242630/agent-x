@@ -136,7 +136,7 @@ function subjectProblem(notice: Notice): string | undefined {
 }
 
 /** The wait after the `tries`-th try failed, `tries` from 1 to MOST_ATTEMPTS - 1. */
-const backoffAfter = (tries: number): number => BACKOFF_MS[Math.min(tries, BACKOFF_MS.length) - 1] ?? 0;
+const backoffAfter = (tries: number): number => BACKOFF_MS[tries - 1] ?? 0;
 
 export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readonly clock: Clock }): Outbox {
   /** Runs the work in a transaction of its own, each statement limited to 10 seconds, a wait for a lock included. */
@@ -259,7 +259,6 @@ export function createOutbox({ ids, clock }: { readonly ids: IdGenerator; readon
         throw new RangeError(`at most ${String(MOST_RECIPIENTS)} notices are written from one notice to a group`);
       }
       if (!recipients.every(isId)) throw new RangeError("a notice's recipient is not a UUID");
-      if (!isId(id)) return 'not_open';
       const now = clock.now();
       return limited(db, async (tx) => {
         const notice = await tx

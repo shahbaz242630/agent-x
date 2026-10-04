@@ -464,6 +464,31 @@ describe("an agent's keys, each verified (C1-1)", () => {
     expect(await keysOf(org, agent)).toEqual({ outcome: 'tampered', sign: 'seal' });
   });
 
+  it('leaves out a key put back under its own agent between the list and its read, raising no alarm', async () => {
+    const org = await organization();
+    const { id: agent } = await addAnAgent(org);
+    const { id: other } = await addAnAgent(org);
+    const { id } = await issue(org, other);
+    // Past the app, on a connection of its own, so it commits while the list's transaction is open.
+    const moveTo = (to: string) =>
+      database
+        .as('admin')
+        .query('update agents.agent_keys set agent_id = $1 where org_id = $2 and id = $3', [to, org, id]);
+    await moveTo(agent);
+
+    const listed = await withSignedStates(app, org, services(), (tx, states) => {
+      // Listed under `agent`, put back before its own read: row and seal then agree it is `other`'s.
+      const verifiedState: typeof states.verifiedState = async (...args) => {
+        await moveTo(other);
+        return states.verifiedState(...args);
+      };
+      return agentKeysOf(tx, { ...states, verifiedState }, org, agent);
+    });
+
+    expect(listed).toEqual({ outcome: 'listed', keys: [] });
+    expect(alarms()).toEqual([]);
+  });
+
   /** One more key than a list reads, issued to the agent in one transaction. */
   const tooManyKeys = (org: string, agent: string) =>
     withSignedStates(app, org, services(), async (tx, states) => {
@@ -742,5 +767,20 @@ describe("a page of the organisation's agents (C1-2)", () => {
     );
 
     expect(page).toMatchObject({ outcome: 'listed', agents: [{ id, name: 'Purchasing bot' }], next: null });
+  });
+
+  it('steps past an agent gone since its ID was listed: the next page still starts after it', async () => {
+    const org = await organization();
+    const { id: first } = await addAnAgent(org);
+    await addAnAgent(org);
+
+    const page = await withSignedStates(app, org, services(), (tx, states) => {
+      // A row gone since listed, with nothing in the log, reads as missing: this stands in for one.
+      const verifiedState: typeof states.verifiedState = (...args) =>
+        args[2].id === first ? Promise.resolve({ outcome: 'missing' as const }) : states.verifiedState(...args);
+      return agentsPage(tx, { ...states, verifiedState }, org, { after: null, limit: 1 });
+    });
+
+    expect(page).toEqual({ outcome: 'listed', agents: [], next: first });
   });
 });

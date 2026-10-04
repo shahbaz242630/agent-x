@@ -30,6 +30,7 @@ describe('a UAE payment consent (D1-1)', () => {
 
   it('lets a suspended consent come back, and only an authorised one be consumed', () => {
     expect(consentMayMove('Suspended', 'Authorized')).toBe(true);
+    expect(consentMayMove('Suspended', 'Expired')).toBe(true);
     expect(consentMayMove('Authorized', 'Consumed')).toBe(true);
     expect(consentMayMove('Suspended', 'Consumed')).toBe(false);
     expect(consentMayMove('AwaitingAuthorization', 'Suspended')).toBe(false);

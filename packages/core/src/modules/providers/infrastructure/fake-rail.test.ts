@@ -291,10 +291,14 @@ describe('a source’s state (D1-1)', () => {
   });
 
   it('keeps the old controls through a renewal unless new ones are approved', async () => {
-    const { rail, bank, source } = await linked();
-    await bank.renew(ORG, source.externalRef);
-    const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef: source.externalRef }));
-    expect(renewed.controls).toEqual(USUAL_CONTROLS);
+    const { rail, bank } = setUp();
+    const session = await rail.startSourceLink({ organizationId: ORG, linkId: LINK });
+    const controls = { ...USUAL_CONTROLS, period: 'week' as const, maxPaymentMinor: 100_000n };
+    await bank.approve(ORG, session.sessionRef, ACCOUNT, { controls });
+    const { externalRef } = sourceOf(await rail.confirmSourceLink({ organizationId: ORG, linkId: LINK }));
+    await bank.renew(ORG, externalRef);
+    const renewed = sourceOf(await rail.getSourceState({ organizationId: ORG, externalRef }));
+    expect(renewed.controls).toEqual(controls);
   });
 
   it('keeps its own copy of the controls a business approved', async () => {
