@@ -672,8 +672,9 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
 
     await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
 
-    const counting = counted ? expect.objectContaining : expect.not.objectContaining;
-    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([counting({ counts: 'yes' })]);
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+      counted ? expect.objectContaining({ counts: 'yes' }) : expect.not.objectContaining({ counts: 'yes' }),
+    ]);
     // The tests after this one start after its clock: each starts a day on per person made.
     for (let day = 0; day < 9; day += 1) zitadelId();
   });
