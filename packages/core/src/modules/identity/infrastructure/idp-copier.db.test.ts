@@ -653,39 +653,28 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     expect(await restrictedUntil(who.userId)).toBeUndefined();
   });
 
-  it('leaves a key added more than 7 days after a removal free, if it is the only one', async () => {
+  it.each([
+    ['leaves a key added more than 7 days after a removal free, if it is the only one', WEEK_MS + 1, false],
+    [
+      'counts a key added exactly 7 days after a removal, even the only one: the week holds its last millisecond',
+      WEEK_MS,
+      true,
+    ],
+  ])('%s', async (_what, later, counted) => {
     const who = await person();
     await organization(who.userId, 'admin');
-    // The removal, copied now; the key, a moment past 7 days later. (The copier reads only forward, so the clock moves on.)
+    // The removal, copied now; the key, `later` on. (The copier reads only forward, so the clock moves on.)
     const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
     await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
     expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
-    clock.advanceBy(WEEK_MS + 1);
+    clock.advanceBy(later);
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
     await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
 
-    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
-      expect.not.objectContaining({ counts: 'yes' }),
-    ]);
+    const counting = counted ? expect.objectContaining : expect.not.objectContaining;
+    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([counting({ counts: 'yes' })]);
     // The tests after this one start after its clock: each starts a day on per person made.
-    for (let day = 0; day < 9; day += 1) zitadelId();
-  });
-
-  it('counts a key added exactly 7 days after a removal, even the only one: the week holds its last millisecond', async () => {
-    const who = await person();
-    await organization(who.userId, 'admin');
-    const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
-    await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
-    expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
-    clock.advanceBy(WEEK_MS);
-    const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
-
-    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
-
-    expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
-      expect.objectContaining({ counts: 'yes' }),
-    ]);
     for (let day = 0; day < 9; day += 1) zitadelId();
   });
 

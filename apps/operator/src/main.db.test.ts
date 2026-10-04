@@ -588,17 +588,17 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
   afterAll(() => {
     rmSync(folder, { recursive: true, force: true });
   });
+  const file = path.join(folder, 'request');
+  writeFileSync(file, restoreCheckRequest());
+  // The copy is this same database under another name for the same server
+  // (the test server listens on 127.0.0.1, which localhost names too): a copy the live server is.
+  const drill = () => run(['--request', file], envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' }));
 
   it('reads the copy and the live server, read-only, says the copy holds, and writes nothing', async () => {
-    const file = path.join(folder, 'request');
-    writeFileSync(file, restoreCheckRequest());
-    // The copy is this same database under another name for the same server
-    // (the test server listens on 127.0.0.1, which localhost names too): a copy the live server is.
-    const env = envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' });
     const head = async () => database.as('owner').query('select seq from platform_controls.audit_head');
     const before = await head();
 
-    const { code, events, line } = await run(['--request', file], env);
+    const { code, events, line } = await drill();
 
     expect(events).toEqual(['operator.starting', 'operator.restore_check_done']);
     expect(code).toBe(0);
@@ -620,13 +620,10 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
   });
 
   it('fails a copy with a single problem, naming it', async () => {
-    const file = path.join(folder, 'request');
-    writeFileSync(file, restoreCheckRequest());
-    const env = envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' });
     // The directory's list unreadable: one problem, on both sides at once.
     await database.as('owner').query('revoke select on directory.orgs from agentx_app');
     try {
-      const { code, events, line } = await run(['--request', file], env);
+      const { code, events, line } = await drill();
 
       expect(code).toBe(1);
       expect(events).toEqual(['operator.starting', 'operator.restore_check_failed']);
@@ -640,12 +637,10 @@ describe("S78 the restore drill's check, run as the job runs it", () => {
   });
 
   it('reads nothing when the live server does not prove itself read-only', async () => {
-    const file = path.join(folder, 'request');
-    writeFileSync(file, restoreCheckRequest());
     // The copy is asked first, then the live server.
     faults.readOnly.push(true, false);
 
-    const { code, events, line } = await run(['--request', file], envFor('app', { AGENTX_DB_DRILL_HOST: 'localhost' }));
+    const { code, events, line } = await drill();
 
     expect(code).toBe(1);
     expect(events).toEqual(['operator.starting', 'operator.refused']);

@@ -80,6 +80,7 @@ export interface Outbox {
    * contact IDs (B6-1b). Says how many it wrote, or `not_open` if the notice
    * is not one to a group, or is already done; a notice given up because its
    * last try's lease ran out is done all the same (that try was only slow).
+   * `id` is one claimDue handed out.
    */
   fanOut(db: Kysely<NotificationsTables>, id: string, recipients: readonly string[]): Promise<number | 'not_open'>;
   /**
