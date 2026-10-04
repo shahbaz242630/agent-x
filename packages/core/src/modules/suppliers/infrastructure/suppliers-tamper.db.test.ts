@@ -15,7 +15,6 @@
 // list, is clean before and after each case.
 import { createDatabase, type Database, liveSchemaProblems } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
@@ -24,6 +23,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
 } from '@agentx/testing';
 import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -72,12 +72,7 @@ const DETAILS: SupplierDetails = {
   source: { kind: 'official_website', ref: 'https://gulfoffice.example' },
 };
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 let capture: LogCapture;
 /** The owner at the suppliers' table, at their versions', and at their registrations'. */

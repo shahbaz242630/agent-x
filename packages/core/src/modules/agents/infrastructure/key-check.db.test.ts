@@ -12,11 +12,11 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
   within,
 } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
@@ -66,12 +66,7 @@ let capture: LogCapture;
 let clock: FixedClock;
 let org: string;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 const check = (text: string) =>

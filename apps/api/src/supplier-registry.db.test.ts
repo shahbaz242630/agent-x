@@ -25,7 +25,6 @@ import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   FixedClock,
@@ -34,6 +33,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -77,12 +77,7 @@ let clock: FixedClock;
 let registry: SupplierRegistry;
 let capture: LogCapture;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 let people = 0;

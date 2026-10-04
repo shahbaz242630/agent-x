@@ -7,8 +7,7 @@
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, transactionsReadOnly } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, type TestClient, type TestDatabase, writeTestKeys } from '@agentx/testing';
+import { createTestDatabase, type TestClient, type TestDatabase, testLogger, writeTestKeys } from '@agentx/testing';
 import { afterAll, afterEach, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createOrganizationAsOperator, type OperatorTables } from './create-organization.ts';
@@ -18,12 +17,7 @@ const server = inject('postgres');
 const keyFiles = writeTestKeys(['audit-mac', 'field-encryption']);
 const keys = loadKeys({ directory: keyFiles.directory, current: {} }, ['audit-mac', 'field-encryption']);
 
-const quiet = () =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  });
+const quiet = () => testLogger();
 
 let live: TestDatabase;
 let copy: TestDatabase | undefined;

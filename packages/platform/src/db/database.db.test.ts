@@ -1,10 +1,9 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { createTestDatabase, LogCapture, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, type TestDatabase, testLogger } from '@agentx/testing';
 import { type Kysely, sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
 import { createDatabase } from './database.ts';
 
 const server = inject('postgres');
@@ -20,11 +19,7 @@ const backendId = async (db: Kysely<unknown>): Promise<number> => {
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   capture = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  });
+  const logger = testLogger(capture);
   app = createDatabase({ ...database.connection('app'), maxConnections: 1 }, logger);
 });
 

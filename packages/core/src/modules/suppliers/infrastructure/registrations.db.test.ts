@@ -13,15 +13,14 @@
 // suppliers-tamper.db.test.ts.
 import { createDatabase, type Database, lockName } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   findLeaks,
   FixedClock,
   holdNamedLock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -98,11 +97,7 @@ const MASKED_NAME = 'G*** O***** S******* L**';
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  }),
+  logger: testLogger(),
 });
 
 const organization = async (): Promise<string> => {

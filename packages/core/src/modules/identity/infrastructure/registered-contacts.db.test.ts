@@ -1,9 +1,15 @@
 // B6-1a: registered contacts (0022), on the real migrated schema, as the app
 // role. What the owner can do past the app is registered-contacts-tamper.db.test.ts.
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import {
+  createTestDatabase,
+  FixedClock,
+  LogCapture,
+  SequentialIds,
+  type TestDatabase,
+  testLogger,
+} from '@agentx/testing';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
@@ -52,11 +58,7 @@ let capture: LogCapture;
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  }),
+  logger: testLogger(capture),
 });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
@@ -166,14 +168,7 @@ const eventsFrom = (org: string, seq: bigint) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>(
-    { ...database.connection('app'), maxConnections: 4 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {

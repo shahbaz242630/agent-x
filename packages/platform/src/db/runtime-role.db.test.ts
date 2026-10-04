@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { createTestDatabase, LogCapture, type TestDatabase, type TestRole } from '@agentx/testing';
+import { createTestDatabase, type TestDatabase, testLogger, type TestRole } from '@agentx/testing';
 import { Kysely, PostgresDialect } from 'kysely';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
 import { createDatabase, type DatabaseConnectionOptions } from './database.ts';
 import { assertRuntimeRole, runtimeRoleProblems, UnsafeDatabaseRole } from './runtime-role.ts';
 
@@ -23,15 +22,7 @@ afterAll(async () => {
   await database.drop();
 });
 
-const open = (connection: DatabaseConnectionOptions): Kysely<unknown> =>
-  createDatabase(
-    connection,
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+const open = (connection: DatabaseConnectionOptions): Kysely<unknown> => createDatabase(connection, testLogger());
 
 async function problemsFor(connection: DatabaseConnectionOptions): Promise<string[]> {
   const db = open(connection);

@@ -33,7 +33,6 @@ import { createOrganization, type OrganizationsTables } from '@agentx/core/modul
 import { DAY_MS, HOUR_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   confirmedWhileDemoted,
   createTestDatabase,
@@ -42,6 +41,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -88,12 +88,7 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000aa';
 const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 type Member = AgentMember & { readonly membershipId: string };

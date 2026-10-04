@@ -170,6 +170,9 @@ importers:
 
   packages/testing:
     dependencies:
+      '@agentx/platform':
+        specifier: workspace:*
+        version: link:../platform
       pg:
         specifier: 8.23.0
         version: 8.23.0

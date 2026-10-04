@@ -1,10 +1,9 @@
 // B1a: an organisation's row and its directory entry (0007, 0008), on the
 // real migrated schema, as the app role, with its integrity hold started
 // CLEAR (B1b). What the owner can do past the app is owner-tamper.db.test.ts.
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database, TenantContextError, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, type AuditTrail, createAuditTrail, withSignedStates } from '../../audit/index.ts';
@@ -33,11 +32,7 @@ let capture: LogCapture;
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  }),
+  logger: testLogger(capture),
 });
 
 let number = 0;
@@ -71,14 +66,7 @@ const alarms = () => capture.lines().filter((line) => line.event === 'audit.inte
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>(
-    { ...database.connection('app'), maxConnections: 4 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {

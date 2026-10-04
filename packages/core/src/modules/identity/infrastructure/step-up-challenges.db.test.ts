@@ -6,14 +6,13 @@ import { createHash } from 'node:crypto';
 import {
   createTestDatabase,
   FixedClock,
-  LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createSessions } from './sessions.ts';
@@ -94,14 +93,7 @@ const rowsFor = (sessionId: string) =>
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<IdentityTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

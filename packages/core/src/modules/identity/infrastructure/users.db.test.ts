@@ -1,7 +1,6 @@
 // B2-1: the people who sign in (0010), on the real migrated schema, as the app role.
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
 import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -25,14 +24,7 @@ const newSubject = (): string => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<IdentityTables>(
-    { ...database.connection('app'), maxConnections: 4 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<IdentityTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
 });
 
 afterAll(async () => {

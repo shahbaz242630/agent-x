@@ -9,6 +9,7 @@ import {
   LogCapture,
   successes,
   type TestDatabase,
+  testLogger,
   type TestSession,
   waitUntilBlocked,
   waitUntilQueued,
@@ -16,7 +17,6 @@ import {
 import { type Generated, sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import { createStatusChanger, StatusChangeFailed, type StatusRules, type StatusTable } from './status.ts';
 import { TenantContextError, withTenant } from './tenant.ts';
@@ -79,11 +79,7 @@ let capture: LogCapture;
 const changer = () => createStatusChanger({ logger: loggerFor(capture) });
 
 function loggerFor(destination: LogCapture) {
-  return createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+  return testLogger(destination);
 }
 
 const ORG = '0199a0f0-0000-7000-8000-00000000000a';

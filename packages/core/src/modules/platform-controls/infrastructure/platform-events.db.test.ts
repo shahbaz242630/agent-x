@@ -4,8 +4,7 @@
 // several kinds, each by its action and facts.
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase } from '@agentx/testing';
+import { createTestDatabase, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { createPlatformChain } from './platform-chain.ts';
@@ -26,14 +25,7 @@ const ACTOR = { type: 'system', id: 'api' } as const;
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<PlatformControlsTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<PlatformControlsTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

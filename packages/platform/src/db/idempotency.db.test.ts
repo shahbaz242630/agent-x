@@ -12,6 +12,7 @@ import {
   SENSITIVE_SAMPLES,
   successes,
   type TestDatabase,
+  testLogger,
   type TestSession,
   waitUntilQueued,
 } from '@agentx/testing';
@@ -20,7 +21,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { createKeyProvider, type KeyMaterial, type KeyProvider, type PurposeKeys } from '../keys/key-provider.ts';
 import { type KeyPurpose, PURPOSES } from '../keys/purposes.ts';
-import { createLogger } from '../observability/index.ts';
 import { createDatabase, type Database } from './database.ts';
 import {
   createIdempotentWrites,
@@ -92,11 +92,7 @@ function keysWith(requestHash: PurposeKeys, others: Partial<Record<KeyPurpose, P
 const KEYS = keysWith(REQUEST_HASH_V1);
 
 function loggerFor(destination: LogCapture) {
-  return createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+  return testLogger(destination);
 }
 
 const writes = (keys = KEYS) => createIdempotentWrites({ keys, logger: loggerFor(capture) });

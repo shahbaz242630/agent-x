@@ -5,8 +5,7 @@ import {
   createMemoryAnchorStore,
 } from '@agentx/platform/audit-chain';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
-import { FixedClock, LogCapture } from '@agentx/testing';
+import { FixedClock, LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -55,11 +54,7 @@ function checking(
   organizations?: OrganisationChains,
 ) {
   const capture = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  });
+  const logger = testLogger(capture);
   const clock = new FixedClock(AT);
   const check = createAnchorCheck({
     chains,

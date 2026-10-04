@@ -8,11 +8,11 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   type TestSession,
 } from '@agentx/testing';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AuditTables, createAuditTrail, withSignedStates } from '../../audit/index.ts';
@@ -46,11 +46,7 @@ let capture: LogCapture;
 const services = () => ({
   keys,
   ids,
-  logger: createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  }),
+  logger: testLogger(capture),
 });
 
 const OPERATOR = { type: 'system' as const, id: 'test-operator' };
@@ -113,14 +109,7 @@ const facts = () => withSignedStates(app, org, services(), (tx, states) => twoPe
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>(
-    { ...database.connection('app'), maxConnections: 4 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
   attacker = database.as('admin');
 });
 

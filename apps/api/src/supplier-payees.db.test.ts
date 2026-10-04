@@ -26,7 +26,6 @@ import {
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   findLeaks,
@@ -34,6 +33,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   waitUntilQueued,
   within,
 } from '@agentx/testing';
@@ -92,12 +92,7 @@ let logs: LogCapture;
 let registry: SupplierRegistry;
 let payees: SupplierPayees;
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 /** The use case over `withRail`, the partner the test gives, on the same database and clock. */

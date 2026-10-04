@@ -28,7 +28,6 @@ import {
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   confirmedWhileDemoted,
   createTestDatabase,
@@ -36,6 +35,7 @@ import {
   LogCapture,
   SequentialIds,
   type TestDatabase,
+  testLogger,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -82,12 +82,7 @@ let registry: SupplierRegistry;
 let changes: SupplierChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 const quiet = () => ({ keys, ids, logger: loggerFor(new LogCapture()) });
 
 let people = 0;

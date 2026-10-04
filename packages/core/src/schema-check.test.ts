@@ -2,10 +2,8 @@
 // are proven against a real database in schema-guard.db.test.ts; these are
 // about the two answers a process needs (the API, the operator's command): may
 // it go on, and what does it say.
-import { LogCapture } from '@agentx/testing';
+import { LogCapture, testLogger } from '@agentx/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { createLogger } from '@agentx/platform/observability';
 
 const guard = vi.hoisted(() => ({
   result: (): Promise<string[]> => Promise.resolve([]),
@@ -27,15 +25,11 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
 const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
 
-function logger(): { capture: LogCapture; logger: ReturnType<typeof createLogger> } {
+function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> } {
   const capture = new LogCapture();
   return {
     capture,
-    logger: createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: capture,
-    }),
+    logger: testLogger(capture),
   };
 }
 

@@ -14,13 +14,14 @@ import { createPlatformChain, HEAD_WAIT_SECONDS } from '@agentx/core/modules/pla
 import { uuidV7Ids } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { loadKeys } from '@agentx/platform/keys';
-import { createLogger, type Output } from '@agentx/platform/observability';
+import { type Output } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   LogCapture,
-  type TestDatabase,
-  type TestRole,
   tamperAsOwner,
+  type TestDatabase,
+  testLogger,
+  type TestRole,
   within,
   writeTestKeys,
 } from '@agentx/testing';
@@ -59,12 +60,7 @@ let app: Database<OperatorTables>;
 /** Plain words a test can look for in every log line; never a real business. */
 const NAME = 'Zephyrine Trading Test Co';
 
-const quiet = () =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  });
+const quiet = () => testLogger();
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });

@@ -2,8 +2,7 @@
 // written a batch at a time, refused whole when anything in the batch is
 // malformed, and swept once past the retention period, oldest first.
 import { createDatabase, type Database } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { createTestDatabase, FixedClock, LogCapture, SequentialIds, type TestDatabase, within } from '@agentx/testing';
+import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger, within } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { DAY_MS } from '../../../shared-kernel/index.ts';
@@ -40,14 +39,7 @@ const all = () => app.selectFrom('security.events').selectAll().orderBy('created
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<SecurityEventsTables>(
-    { ...database.connection('app'), maxConnections: 2 },
-    createLogger({
-      service: 'test',
-      config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-      destination: new LogCapture(),
-    }),
-  );
+  app = createDatabase<SecurityEventsTables>({ ...database.connection('app'), maxConnections: 2 }, testLogger());
 });
 
 afterAll(async () => {

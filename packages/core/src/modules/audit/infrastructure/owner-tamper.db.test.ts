@@ -20,6 +20,7 @@ import {
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
+  testLogger,
 } from '@agentx/testing';
 import {
   createDatabase,
@@ -29,7 +30,6 @@ import {
   withTenant,
 } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -106,12 +106,7 @@ const keys = createKeyProvider(
 );
 const trail: AuditTrail = createAuditTrail({ keys, ids: new SequentialIds(0x300) });
 
-const loggerFor = (destination: LogCapture) =>
-  createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination,
-  });
+const loggerFor = (destination: LogCapture) => testLogger(destination);
 
 let capture: LogCapture;
 let states: SignedStates;

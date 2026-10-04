@@ -8,14 +8,13 @@ import { AsyncResource } from 'node:async_hooks';
 import { ChainBroken, type ChainReport } from '@agentx/platform/audit-chain';
 import { createDatabase, type Database, limitStatements } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
-import { createLogger } from '@agentx/platform/observability';
 import {
   createTestDatabase,
   failures,
-  LogCapture,
   race,
   SequentialIds,
   type TestDatabase,
+  testLogger,
   type TestSession,
   within,
 } from '@agentx/testing';
@@ -67,11 +66,7 @@ const tamper = async (...statements: string[]): Promise<void> => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: new LogCapture(),
-  });
+  const logger = testLogger();
   app = createDatabase<PlatformControlsTables>({ ...database.connection('app'), maxConnections: 12 }, logger);
   attacker = database.as('admin');
 });

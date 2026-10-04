@@ -1,5 +1,4 @@
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture } from '@agentx/testing';
+import { LogCapture, testLogger } from '@agentx/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRetentionSweep, type RetentionSweepOptions, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -19,11 +18,7 @@ function sweeping(
   options: Partial<RetentionSweepOptions> = {},
 ) {
   const capture = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 1000 } },
-    destination: capture,
-  });
+  const logger = testLogger(capture);
   const calls: string[] = [];
   const turns = new Map<string, number>();
   const sweep = createRetentionSweep({
