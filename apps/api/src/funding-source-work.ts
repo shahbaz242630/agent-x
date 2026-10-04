@@ -1,24 +1,18 @@
-// What every funding-source use case does the same way (D2-3b, D2-4), as
-// agent-writes.ts is for agents': the organisation's transaction with its
-// signed states, a write with its idempotency key claimed first, the member
-// read again for the decision, a source read and verified, a refusal thrown
-// inside a write so everything it did rolls back, and the partner's answer
-// told apart from its silence.
+// What every funding-source use case does the same way (D2-3b, D2-4), on
+// use-case-work.ts's shared transaction, write, read and member check: a
+// source read and verified, and the partner's answer told apart from its
+// silence.
 import { type FundingSourcesTables, sourceOf, type SourceRecord } from '@agentx/core/modules/funding-sources';
-import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import type { AuditTables, SignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
+import type { IdentityTables } from '@agentx/core/modules/identity';
 import { RailUnavailable } from '@agentx/core/modules/providers';
-import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
-import {
-  createIdempotentWrites,
-  type Database,
-  type DatabaseTransaction,
-  type IdempotentRequest,
-} from '@agentx/platform/db';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
+import type { Database, DatabaseTransaction } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import type { Refused } from './refused.ts';
+import { refused } from './refused.ts';
+import { createUseCaseWork, UseCaseRefused } from './use-case-work.ts';
 
 /** The tables the funding-source use cases work on. */
 export type FundingSourceTables = IdentityTables & FundingSourcesTables & DirectoryTables & AuditTables;
@@ -30,21 +24,10 @@ export interface FundingSourceMember {
   readonly userId: string;
 }
 
-export const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });
 export const PARTNER_UNAVAILABLE = refused(503, 'PARTNER_UNAVAILABLE');
 
 /** A refusal thrown inside a transaction, so everything it did rolls back. */
-export class FundingSourceRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
-  constructor(status: number, code: ReasonCode) {
-    super(`refused: ${code}`);
-    this.name = 'FundingSourceRefused';
-    this.status = status;
-    this.code = code;
-  }
-}
+export class FundingSourceRefused extends UseCaseRefused {}
 
 /**
  * The partner says the person hasn't finished yet (at their bank, or at its
@@ -78,72 +61,14 @@ export async function asked<T>(call: () => Promise<T>): Promise<T | 'unavailable
   }
 }
 
-export function createFundingSourceWork({
-  database,
-  keys,
-  ids,
-  logger,
-}: {
+export function createFundingSourceWork(services: {
   readonly database: Database<FundingSourceTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }) {
-  const inOrganisation = <T>(
-    orgId: string,
-    correlationId: string,
-    work: (tx: FundingSourceTx, states: SignedStates) => Promise<T>,
-  ): Promise<T> => withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
-
   return {
-    inOrganisation,
-
-    /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
-    write: async (
-      member: FundingSourceMember,
-      idempotent: IdempotentRequest,
-      correlationId: string,
-      work: (tx: FundingSourceTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-    ) => {
-      const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
-      try {
-        return await inOrganisation(member.orgId, correlationId, (tx, states) =>
-          idempotency.run(tx, idempotent, () => work(tx, states)),
-        );
-      } catch (error) {
-        if (error instanceof FundingSourceRefused) return refused(error.status, error.code);
-        throw error;
-      }
-    },
-
-    /** A read in the organisation's transaction, a refusal inside it answered. */
-    answered: async <T extends object>(
-      orgId: string,
-      correlationId: string,
-      work: (tx: FundingSourceTx, states: SignedStates) => Promise<T>,
-    ): Promise<T | Refused> => {
-      try {
-        return await inOrganisation(orgId, correlationId, work);
-      } catch (error) {
-        if (error instanceof FundingSourceRefused) return refused(error.status, error.code);
-        throw error;
-      }
-    },
-
-    /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
-    memberIn: async (
-      tx: FundingSourceTx,
-      states: SignedStates,
-      member: FundingSourceMember,
-      roles: readonly Role[],
-    ) => {
-      const membership = await membershipOf(tx, states, member.orgId, member.userId);
-      if (membership.outcome === 'tampered') throw new FundingSourceRefused(503, 'INTEGRITY_FAILED');
-      if (membership.outcome !== 'active' || !roles.includes(membership.role)) {
-        throw new FundingSourceRefused(403, 'FORBIDDEN');
-      }
-      return membership;
-    },
+    ...createUseCaseWork({ ...services, Refusal: FundingSourceRefused }),
 
     /** The source, read and verified: NOT_FOUND, or INTEGRITY_FAILED for one that can't be believed. */
     sourceIn: async (

@@ -1,10 +1,6 @@
-// What the agents' use cases share (C1-2, C1-3): the organisation's
-// transaction, each statement limited to 10 seconds; a write with its
-// idempotency key claimed first; the caller's membership read again; and an
-// agent read with its keys; a key issued, and the day's budget for issuing
-// them. A refusal is thrown inside the work as
-// AgentRefused, so everything the write did rolls back and the same key may
-// be sent again, and answered as a plain outcome.
+// What the agents' use cases share (C1-2, C1-3), on use-case-work.ts's
+// shared transaction, write, read and member check: an agent read with its
+// keys, a key issued, and the day's budget for issuing them.
 import { randomBytes } from 'node:crypto';
 
 import {
@@ -23,26 +19,15 @@ import {
   MOST_KEYS_ISSUED_A_DAY,
   type Scope,
 } from '@agentx/core/modules/agents';
-import {
-  type AuditActor,
-  type AuditDetails,
-  type AuditTables,
-  type SignedStates,
-  withSignedStates,
-} from '@agentx/core/modules/audit';
+import type { AuditActor, AuditDetails, AuditTables, SignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
-import { DAY_MS, type IdGenerator, type ReasonCode } from '@agentx/core/shared-kernel';
-import {
-  createIdempotentWrites,
-  type Database,
-  type DatabaseTransaction,
-  type IdempotentRequest,
-  type IdempotentWrite,
-} from '@agentx/platform/db';
+import type { IdentityTables, Role } from '@agentx/core/modules/identity';
+import { DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
+import type { Database, DatabaseTransaction, IdempotentRequest, IdempotentWrite } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
+import { createUseCaseWork, UseCaseRefused } from './use-case-work.ts';
 
 /** The tables the agents' use cases work on: both modules', with the directory and the audit trail. */
 export type AgentTables = IdentityTables & AgentsTables & DirectoryTables & AuditTables;
@@ -76,19 +61,7 @@ interface KeyToIssue {
 }
 
 /** A refusal thrown inside a write or a read, answered as `Refused`. */
-export class AgentRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
-  constructor(status: number, code: ReasonCode) {
-    super(`an agent's write or read refused: ${code}`);
-    this.name = 'AgentRefused';
-    this.status = status;
-    this.code = code;
-  }
-}
-
-const refusedOf = (error: AgentRefused): Refused => ({ outcome: 'refused', status: error.status, code: error.code });
+export class AgentRefused extends UseCaseRefused {}
 
 export interface AgentWork {
   /** Runs the work in the organisation's transaction, each statement limited to 10 seconds. */
@@ -138,50 +111,22 @@ export interface AgentWork {
   issueKey(tx: AgentTx, states: SignedStates, key: KeyToIssue): Promise<{ readonly id: string; readonly text: string }>;
 }
 
-export function createAgentWork({
-  database,
-  keys,
-  ids,
-  logger,
-}: {
+export function createAgentWork(services: {
   readonly database: Database<AgentTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }): AgentWork {
-  const inOrganisation: AgentWork['inOrganisation'] = (orgId, correlationId, work) =>
-    withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
+  const { keys, ids } = services;
+  const { inOrganisation, write, answered, memberIn } = createUseCaseWork({ ...services, Refusal: AgentRefused });
 
   return {
     inOrganisation,
-
-    async write(member, idempotent, correlationId, work) {
-      const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
-      try {
-        return await inOrganisation(member.orgId, correlationId, (tx, states) =>
-          idempotency.run(tx, idempotent, () => work(tx, states)),
-        );
-      } catch (error) {
-        if (error instanceof AgentRefused) return refusedOf(error);
-        throw error;
-      }
-    },
-
-    async answered(orgId, correlationId, work) {
-      try {
-        return await inOrganisation(orgId, correlationId, work);
-      } catch (error) {
-        if (error instanceof AgentRefused) return refusedOf(error);
-        throw error;
-      }
-    },
+    write,
+    answered,
 
     async memberIn(tx, states, member, roles) {
-      const membership = await membershipOf(tx, states, member.orgId, member.userId);
-      if (membership.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-      if (membership.outcome !== 'active' || !roles.includes(membership.role)) {
-        throw new AgentRefused(403, 'FORBIDDEN');
-      }
+      const membership = await memberIn(tx, states, member, roles);
       return { membershipId: membership.id, role: membership.role };
     },
 
