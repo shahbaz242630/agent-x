@@ -34,7 +34,7 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import { createIdempotentWrites, holdTransactionLock, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, holdTransactionLock, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely, Transaction } from 'kysely';
@@ -254,7 +254,7 @@ export function createContactChanges({
         });
         return { status: 202, resourceId: id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return answer(admin, correlationId, done.result.status, done.result.resourceId);
     },
 
@@ -288,7 +288,7 @@ export function createContactChanges({
         await outbox.add(tx, noticesOf(admin.orgId, read.contact.id, 'contact_added'));
         return { status: 200, resourceId: read.contact.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return answer(admin, correlationId, done.result.status, done.result.resourceId);
     },
 
@@ -307,7 +307,7 @@ export function createContactChanges({
         if (challenge === undefined) throw new ContactRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -337,7 +337,7 @@ export function createContactChanges({
         await outbox.add(tx, noticesOf(admin.orgId, read.contact.id, 'contact_removed'));
         return { status: 200, resourceId: read.contact.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return answer(admin, correlationId, done.result.status, done.result.resourceId);
     },
   };

@@ -1078,10 +1078,14 @@ describe(`a payee change put in waiting, then confirmed (stagePayeeChange, confi
       currentVersionId: change.version.id,
       payeeKey: 'fake-payee-1',
     });
-    const back = await onSupplier(org, supplierId, (tx, states, found) =>
-      reactivateSupplier(tx, states, key, found, { actor: OPERATOR }),
-    );
-    expect(back).toMatchObject({ status: 'UNVERIFIED', verifiedBy: null, verifiedVersionId: null });
+    const back = await onSupplier(org, supplierId, async (tx, states, found) => {
+      await reactivateSupplier(tx, states, key, found, { actor: OPERATOR });
+      return supplierOf(tx, states, key, 'share');
+    });
+    expect(back).toMatchObject({
+      outcome: 'found',
+      supplier: { status: 'UNVERIFIED', verifiedBy: null, verifiedVersionId: null },
+    });
   });
 
   it('refuses to confirm a change not the one waiting, not made from its registration, or for a VERIFIED supplier, before any SQL runs', async () => {

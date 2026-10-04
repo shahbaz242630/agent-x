@@ -43,7 +43,7 @@ import {
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -57,6 +57,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
+import { movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
 export const REFRESH_OPERATION = 'funding-sources.refresh';
@@ -75,11 +76,6 @@ export const REACTIVATE_CONFIRM_OPERATION = 'funding-sources.reactivate.confirm'
 export const SUSPENDING_ROLES = ['admin', 'approver'] as const;
 /** Who may give a source its authority back: an admin (ADR-003 §8). */
 export const REACTIVATING_ROLES = ['admin'] as const;
-
-/** A member acting in a session of theirs, which a step-up challenge is bound to. */
-export interface SessionMember extends FundingSourceMember {
-  readonly sessionId: string;
-}
 
 export type SourceChangeWrite =
   | { readonly outcome: 'changed'; readonly source: SourceRecord }
@@ -151,12 +147,8 @@ export function createFundingSourceChanges({
   };
 
   /** Answers the write: the source as it now stands, on a retry too. */
-  const answer = async (
-    orgId: string,
-    correlationId: string,
-    done: Awaited<ReturnType<typeof work.write>>,
-  ): Promise<SourceChangeWrite> => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+  const answer = async (orgId: string, correlationId: string, done: Written): Promise<SourceChangeWrite> => {
+    if (isUnwritten(done)) return done;
     const read = await work.answered(orgId, correlationId, (tx, states) =>
       work.sourceIn(tx, states, { orgId, id: done.result.resourceId }, 'share'),
     );
@@ -209,13 +201,14 @@ export function createFundingSourceChanges({
         const actor = { type: 'user' as const, id: member.userId };
         if (currencyMismatch) {
           if (found.source.status === 'ACTIVE') {
-            const moved = await states.changeStatus(tx, SOURCES, key, 'suspend', {
-              actor: { type: 'system', id: 'api' },
-              action: 'funding_source.suspended',
-              details: { reason: 'currency_mismatch' },
-            });
-            if (moved.outcome !== 'changed')
-              throw new Error(`a source read as ACTIVE didn't suspend: ${moved.outcome}`);
+            movedAsRead(
+              await states.changeStatus(tx, SOURCES, key, 'suspend', {
+                actor: { type: 'system', id: 'api' },
+                action: 'funding_source.suspended',
+                details: { reason: 'currency_mismatch' },
+              }),
+              "a source read as ACTIVE didn't suspend",
+            );
           }
           return { status: 200, resourceId: sourceId };
         }
@@ -234,12 +227,14 @@ export function createFundingSourceChanges({
         const { source } = await work.sourceIn(tx, states, key, 'change');
         // Pressed twice, or on a source already ended: stopped already, and answered as it is.
         if (source.status === 'ACTIVE') {
-          const moved = await states.changeStatus(tx, SOURCES, key, 'suspend', {
-            actor: { type: 'user', id: member.userId },
-            action: 'funding_source.suspended',
-            details: {},
-          });
-          if (moved.outcome !== 'changed') throw new Error(`a source read as ACTIVE didn't suspend: ${moved.outcome}`);
+          movedAsRead(
+            await states.changeStatus(tx, SOURCES, key, 'suspend', {
+              actor: { type: 'user', id: member.userId },
+              action: 'funding_source.suspended',
+              details: {},
+            }),
+            "a source read as ACTIVE didn't suspend",
+          );
         }
         return { status: 200, resourceId: source.id };
       });
@@ -259,7 +254,7 @@ export function createFundingSourceChanges({
         if (challenge === undefined) throw new FundingSourceRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -281,14 +276,14 @@ export function createFundingSourceChanges({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new FundingSourceRefused(403, 'STEP_UP_FAILED');
-        const moved = await states.changeStatus(tx, SOURCES, { orgId: member.orgId, id: source.id }, 'reactivate', {
-          actor: { type: 'user', id: member.userId },
-          action: 'funding_source.reactivated',
-          details: stepUpDetails(consumed),
-        });
-        if (moved.outcome !== 'changed') {
-          throw new Error(`a source read as SUSPENDED didn't reactivate: ${moved.outcome}`);
-        }
+        movedAsRead(
+          await states.changeStatus(tx, SOURCES, { orgId: member.orgId, id: source.id }, 'reactivate', {
+            actor: { type: 'user', id: member.userId },
+            action: 'funding_source.reactivated',
+            details: stepUpDetails(consumed),
+          }),
+          "a source read as SUSPENDED didn't reactivate",
+        );
         return { status: 200, resourceId: source.id };
       });
       return answer(member.orgId, correlationId, done);

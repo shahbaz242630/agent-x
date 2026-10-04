@@ -1,15 +1,11 @@
-// What every supplier use case does the same way (E1-2), as
-// funding-source-work.ts is for sources': the organisation's transaction
-// with its signed states, a write with its idempotency key claimed first, the
-// member read again for the decision, a supplier read and verified, and a
-// refusal thrown inside a write so everything it did rolls back. A supplier
+// What every supplier use case does the same way (E1-2), on
+// use-case-work.ts's shared transaction, write, read and member check: a
+// supplier, its versions and registrations read and verified. A supplier
 // is answered with its current version and that version's contacts, opened
 // only from the version read through its signed state, and with its payee
 // and any payee change waiting as the partner described them (E2-2b): what
 // the call-back confirms (ADR-014 §3), never an account number.
-import { type AuditTables, type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { type IdentityTables, membershipOf, type Role } from '@agentx/core/modules/identity';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
 import {
   contactsOf,
@@ -24,46 +20,23 @@ import {
   versionOf,
   type VersionRecord,
 } from '@agentx/core/modules/suppliers';
-import type { IdGenerator, ReasonCode } from '@agentx/core/shared-kernel';
-import {
-  createIdempotentWrites,
-  type Database,
-  type DatabaseTransaction,
-  type IdempotentRequest,
-} from '@agentx/platform/db';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
+import { type Database, type DatabaseTransaction, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
+import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
 /** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
-export type SupplierTables = IdentityTables & SuppliersTables & DirectoryTables & AuditTables & NotificationsTables;
+export type SupplierTables = UseCaseTables & SuppliersTables & NotificationsTables;
 export type SupplierTx = DatabaseTransaction<SupplierTables>;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */
-export interface SupplierMember {
-  readonly orgId: string;
-  readonly userId: string;
-}
+export type SupplierMember = Member;
+export type { SessionMember } from './use-case-work.ts';
 
-/** A member acting in a session of theirs, which a step-up challenge is bound to. */
-export interface SessionMember extends SupplierMember {
-  readonly sessionId: string;
-}
-
-const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });
-
-/** A refusal thrown inside a transaction, so everything it did rolls back. */
-export class SupplierRefused extends Error {
-  readonly status: number;
-  readonly code: ReasonCode;
-
-  constructor(status: number, code: ReasonCode) {
-    super(`refused: ${code}`);
-    this.name = 'SupplierRefused';
-    this.status = status;
-    this.code = code;
-  }
-}
+/** The suppliers' UseCaseRefused: the only refusal their work answers. */
+export class SupplierRefused extends UseCaseRefused {}
 
 /** A version's payee as the partner described it (E2): its registration, the masked hint, and the name check's answer. */
 export interface PayeeShown {
@@ -115,36 +88,15 @@ export const toldEveryone = (
 /** A supplier read for a decision or a change: its record, and the state a change records from. */
 type SupplierFound = Extract<Awaited<ReturnType<typeof supplierOf>>, { outcome: 'found' }>;
 
-export function createSupplierWork({
-  database,
-  keys,
-  ids,
-  logger,
-}: {
+export function createSupplierWork(services: {
   readonly database: Database<SupplierTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly logger: Logger;
 }) {
-  const inOrganisation = <T>(
-    orgId: string,
-    correlationId: string,
-    work: (tx: SupplierTx, states: SignedStates) => Promise<T>,
-  ): Promise<T> => withSignedStates(database, orgId, { keys, ids, logger: logger.child({ correlationId }) }, work);
-
-  /** A read in the organisation's transaction, a refusal inside it answered. */
-  const answered = async <T extends object>(
-    orgId: string,
-    correlationId: string,
-    work: (tx: SupplierTx, states: SignedStates) => Promise<T>,
-  ): Promise<T | Refused> => {
-    try {
-      return await inOrganisation(orgId, correlationId, work);
-    } catch (error) {
-      if (error instanceof SupplierRefused) return refused(error.status, error.code);
-      throw error;
-    }
-  };
+  const { keys, logger } = services;
+  const shared = createUseCaseWork({ ...services, Refusal: SupplierRefused });
+  const { answered } = shared;
 
   /** The supplier, read and verified: NOT_FOUND, or INTEGRITY_FAILED for one that can't be believed. */
   const supplierIn = async (
@@ -252,45 +204,19 @@ export function createSupplierWork({
     };
   };
 
-  /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
-  const write = async (
-    member: SupplierMember,
-    idempotent: IdempotentRequest,
-    correlationId: string,
-    work: (tx: SupplierTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-  ) => {
-    const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
-    try {
-      return await inOrganisation(member.orgId, correlationId, (tx, states) =>
-        idempotency.run(tx, idempotent, () => work(tx, states)),
-      );
-    } catch (error) {
-      if (error instanceof SupplierRefused) return refused(error.status, error.code);
-      throw error;
-    }
-  };
-
   /** The supplier as the members' routes show it, in a transaction of its own. */
   const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
     answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
 
-  type Written = Awaited<ReturnType<typeof write>>;
-
-  /** A write's refusal, or its key's outcome, answered as it is. */
-  const isAnswered = (done: Written): done is Extract<Written, { outcome: 'refused' | 'conflict' | 'busy' }> =>
-    done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy';
-
   const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
-    isAnswered(done) ? done : view(orgId, done.result.resourceId, correlationId);
+    isUnwritten(done) ? done : view(orgId, done.result.resourceId, correlationId);
 
   return {
-    inOrganisation,
-    answered,
+    ...shared,
     supplierIn,
     versionIn,
     registrationFor,
     contactsIn,
-    write,
     view,
 
     /** A write's answer: its refusal or its key's outcome as it is, otherwise the supplier it wrote as it now stands (on a retry too). */
@@ -298,23 +224,13 @@ export function createSupplierWork({
 
     /** A change's answer: as viewAfter, the supplier `changed`. */
     changedAfter: async (orgId: string, correlationId: string, done: Written): Promise<SupplierChangeWrite> => {
-      const answered = await viewAfter(orgId, correlationId, done);
-      if ('outcome' in answered) return answered;
-      return { outcome: 'changed', ...answered };
+      const standing = await viewAfter(orgId, correlationId, done);
+      if ('outcome' in standing) return standing;
+      return { outcome: 'changed', ...standing };
     },
 
     /** A step-up's ask answered: its refusal or its key's outcome as it is, otherwise the challenge opened (the write's resource). */
     askedAfter: (done: Written): SupplierChangeWrite =>
-      isAnswered(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
-
-    /** The member's membership, read again for this decision: active in one of `roles`, or FORBIDDEN (INTEGRITY_FAILED if tampered with). */
-    memberIn: async (tx: SupplierTx, states: SignedStates, member: SupplierMember, roles: readonly Role[]) => {
-      const membership = await membershipOf(tx, states, member.orgId, member.userId);
-      if (membership.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-      if (membership.outcome !== 'active' || !roles.includes(membership.role)) {
-        throw new SupplierRefused(403, 'FORBIDDEN');
-      }
-      return membership;
-    },
+      isUnwritten(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
   };
 }

@@ -17,6 +17,7 @@ export {
   type IdempotentWrites,
   isIdempotencyKey,
   isOperation,
+  isUnwritten,
   sweepExpiredKeys,
   sweepIdempotencyKeys,
 } from './idempotency.ts';

@@ -1,6 +1,6 @@
 // Suspending and reactivating an AI agent (ADR-012 §5, ADR-014 §8, ADR-003
 // §8, BR-03; Phase 1 C1-3). Composed in the API, as registering is
-// (agent-writes.ts): the step-up is the identity module's, the agent the
+// (agent-registering.ts): the step-up is the identity module's, the agent the
 // agents module's.
 //
 // - `suspend` (`agents.suspend`): the kill switch, one click and no step-up
@@ -67,7 +67,7 @@ import {
   stepUpDetails,
 } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -81,6 +81,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
+import { movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
 export const SUSPEND_OPERATION = 'agents.suspend';
@@ -235,12 +236,8 @@ export function createAgentChanges({
   };
 
   /** Answers the write: the agent as it now stands, on a retry too. */
-  const answer = async (
-    member: AgentMember,
-    correlationId: string,
-    done: Awaited<ReturnType<typeof work.write>>,
-  ): Promise<AgentChangeWrite> => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+  const answer = async (member: AgentMember, correlationId: string, done: Written): Promise<AgentChangeWrite> => {
+    if (isUnwritten(done)) return done;
     const agent = await work.answered(member.orgId, correlationId, (tx, states) =>
       work.withKeys(tx, states, member.orgId, done.result.resourceId),
     );
@@ -255,12 +252,14 @@ export function createAgentChanges({
         const read = await agentToChange(tx, states, member.orgId, agentId);
         // Pressed twice: already stopped, and answered as it is.
         if (read.agent.status === 'ACTIVE') {
-          const moved = await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
-            actor: { type: 'user', id: member.userId },
-            action: 'agent.suspended',
-            details: {},
-          });
-          if (moved.outcome !== 'changed') throw new Error(`an agent read as ACTIVE didn't suspend: ${moved.outcome}`);
+          movedAsRead(
+            await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
+              actor: { type: 'user', id: member.userId },
+              action: 'agent.suspended',
+              details: {},
+            }),
+            "an agent read as ACTIVE didn't suspend",
+          );
         }
         return { status: 200, resourceId: read.agent.id };
       });
@@ -280,7 +279,7 @@ export function createAgentChanges({
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -302,13 +301,14 @@ export function createAgentChanges({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new AgentRefused(403, 'STEP_UP_FAILED');
-        const moved = await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
-          actor: { type: 'user', id: member.userId },
-          action: 'agent.reactivated',
-          details: stepUpDetails(consumed),
-        });
-        if (moved.outcome !== 'changed')
-          throw new Error(`an agent read as SUSPENDED didn't reactivate: ${moved.outcome}`);
+        movedAsRead(
+          await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
+            actor: { type: 'user', id: member.userId },
+            action: 'agent.reactivated',
+            details: stepUpDetails(consumed),
+          }),
+          "an agent read as SUSPENDED didn't reactivate",
+        );
         return { status: 200, resourceId: agent.id };
       });
       return answer(member, correlationId, done);
@@ -328,7 +328,7 @@ export function createAgentChanges({
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -365,12 +365,14 @@ export function createAgentChanges({
           details: stepUpDetails(consumed),
         });
         for (const old of listed.keys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
-          const moved = await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {
-            actor,
-            action: 'agent_key.revoked',
-            details: { reason: 'handed_over' },
-          });
-          if (moved.outcome !== 'changed') throw new Error(`a key read as ACTIVE didn't revoke: ${moved.outcome}`);
+          movedAsRead(
+            await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {
+              actor,
+              action: 'agent_key.revoked',
+              details: { reason: 'handed_over' },
+            }),
+            "a key read as ACTIVE didn't revoke",
+          );
         }
         // Keys are in order of ID, so the newest live one is the last.
         const newest = listed.keys.filter((listedKey) => isLiveKey(listedKey, now)).at(-1);
@@ -385,7 +387,7 @@ export function createAgentChanges({
         key = issued.text;
         return { status: 201, resourceId: read.agent.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await work.answered(member.orgId, correlationId, (tx, states) =>
         work.withKeys(tx, states, member.orgId, done.result.resourceId),

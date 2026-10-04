@@ -101,7 +101,7 @@ import {
   versionOf,
 } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -549,7 +549,7 @@ export function createSupplierPayees({
       });
       return { status: 201, resourceId: id };
     });
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+    if (isUnwritten(done)) return done;
     // Only a check can find a registration still waiting inside its write.
     if (done.outcome === 'waiting') throw new Error('a payee start answered as still waiting');
     return registrationNow(member.orgId, supplierId, done.result.resourceId, correlationId);
@@ -666,7 +666,7 @@ export function createSupplierPayees({
         });
         return { status: 200, resourceId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return answer(
         done.outcome === 'waiting' ? 'waiting' : 'checked',
         member,

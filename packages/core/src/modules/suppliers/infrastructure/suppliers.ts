@@ -573,7 +573,8 @@ export async function suspendSupplier(
  * which read it with `change` (`found`): back VERIFIED only while it is still
  * verified (stillVerified), otherwise UNVERIFIED with anything once verified
  * cleared. One not SUSPENDED is refused (RangeError) before any SQL runs.
- * Gives the supplier as it now stands.
+ * Gives nothing, as suspendSupplier: the use case answers from the supplier
+ * read again, so a read here would be thrown away (few calls a request).
  */
 export async function reactivateSupplier(
   tx: SuppliersTransaction,
@@ -581,12 +582,11 @@ export async function reactivateSupplier(
   key: SupplierKey,
   found: { readonly supplier: SupplierRecord },
   change: SupplierChange,
-): Promise<SupplierRecord> {
+): Promise<void> {
   if (found.supplier.status !== 'SUSPENDED') throw new RangeError('Only a suspended supplier is reactivated');
   const event = reactivationOf(found.supplier);
   await move(tx, states, key, event, change);
-  if (event === 'reactivate_verified') return (await againForChange(tx, states, key)).supplier;
-  return clearVerification(tx, states, key, change);
+  if (event === 'reactivate') await clearVerification(tx, states, key, change);
 }
 
 /**

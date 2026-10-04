@@ -6,3 +6,5 @@ export interface Refused {
   readonly status: number;
   readonly code: ReasonCode;
 }
+
+export const refused = (status: number, code: ReasonCode): Refused => ({ outcome: 'refused', status, code });

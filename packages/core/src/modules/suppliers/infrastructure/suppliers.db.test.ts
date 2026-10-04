@@ -300,10 +300,15 @@ const verify = (orgId: string, id: string) =>
 const suspend = (orgId: string, id: string) =>
   onSupplier(orgId, id, (tx, states, found) => suspendSupplier(tx, states, { orgId, id }, found, { actor: OPERATOR }));
 
-const reactivate = (orgId: string, id: string) =>
-  onSupplier(orgId, id, (tx, states, found) =>
+/** Reactivates the supplier, then reads it back as it now stands: reactivateSupplier gives nothing. */
+const reactivate = async (orgId: string, id: string) => {
+  await onSupplier(orgId, id, (tx, states, found) =>
     reactivateSupplier(tx, states, { orgId, id }, found, { actor: OPERATOR }),
   );
+  const now = await read(orgId, id);
+  if (now.outcome !== 'found') throw new Error(`No supplier: ${now.outcome}`);
+  return now.supplier;
+};
 
 /** A later version of the supplier, made after reading it for change and following its current one, as a change will. */
 const later = (orgId: string, supplierId: string, version: number, supplier: SupplierDetails) =>

@@ -13,7 +13,7 @@
 //
 // A refusal inside the write throws, so the key's claim and anything written
 // roll back. Each statement is limited to 10 seconds.
-import { createIdempotentWrites, type IdempotentRequest } from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
@@ -138,7 +138,7 @@ export function createHoldInvestigations({
           return { status: 201, resourceId: id };
         }),
       );
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // Answered from the investigation's own event, re-read by the ID the answer names, on a replay too.
       const read = await inTransaction(admin, correlationId, (tx, states) =>
         states.holdInvestigation(tx, admin.orgId, done.result.resourceId),
