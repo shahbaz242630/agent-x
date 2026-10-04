@@ -95,6 +95,15 @@ export type IdempotentWrite =
   | { readonly outcome: 'busy' };
 
 /**
+ * A write's answer that is final as it stands, with nothing written to read
+ * back: a use case's refusal, or its key's conflict or busy.
+ */
+export const isUnwritten = <Written extends { readonly outcome: string }>(
+  done: Written,
+): done is Extract<Written, { readonly outcome: 'refused' | 'conflict' | 'busy' }> =>
+  done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy';
+
+/**
  * The write couldn't go ahead:
  * - `bad_request`: the organisation, client, operation, key or payload isn't
  *   in its form (the API refuses a bad key before it gets here)

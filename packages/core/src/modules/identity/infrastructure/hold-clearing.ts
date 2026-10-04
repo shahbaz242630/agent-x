@@ -26,7 +26,12 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import { createIdempotentWrites, type IdempotentRequest, type SignedStateTable } from '@agentx/platform/db';
+import {
+  createIdempotentWrites,
+  type IdempotentRequest,
+  isUnwritten,
+  type SignedStateTable,
+} from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
@@ -175,7 +180,7 @@ export function createHoldClearings({
         if (challenge === undefined) throw new ClearingRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -221,7 +226,7 @@ export function createHoldClearings({
         }
         return { status: 200, resourceId: cleared.eventId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // Answered from the hold as it now stands, on a replay too.
       const read = await withSignedStates(
         database,

@@ -23,7 +23,7 @@ import {
   type VersionRecord,
 } from '@agentx/core/modules/suppliers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, DatabaseTransaction } from '@agentx/platform/db';
+import { type Database, type DatabaseTransaction, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
@@ -219,12 +219,8 @@ export function createSupplierWork(services: {
 
   type Written = Awaited<ReturnType<typeof write>>;
 
-  /** A write's refusal, or its key's outcome, answered as it is. */
-  const isAnswered = (done: Written): done is Extract<Written, { outcome: 'refused' | 'conflict' | 'busy' }> =>
-    done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy';
-
   const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
-    isAnswered(done) ? done : view(orgId, done.result.resourceId, correlationId);
+    isUnwritten(done) ? done : view(orgId, done.result.resourceId, correlationId);
 
   return {
     ...shared,
@@ -246,6 +242,6 @@ export function createSupplierWork(services: {
 
     /** A step-up's ask answered: its refusal or its key's outcome as it is, otherwise the challenge opened (the write's resource). */
     askedAfter: (done: Written): SupplierChangeWrite =>
-      isAnswered(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
+      isUnwritten(done) ? done : { outcome: 'asked', stepUpChallengeId: done.result.resourceId },
   };
 }

@@ -43,7 +43,7 @@ import {
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { type FinancialRailAdapter, limitsInAccountCurrency, type SourceLookup } from '@agentx/core/modules/providers';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -156,7 +156,7 @@ export function createFundingSourceChanges({
     correlationId: string,
     done: Awaited<ReturnType<typeof work.write>>,
   ): Promise<SourceChangeWrite> => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+    if (isUnwritten(done)) return done;
     const read = await work.answered(orgId, correlationId, (tx, states) =>
       work.sourceIn(tx, states, { orgId, id: done.result.resourceId }, 'share'),
     );
@@ -259,7 +259,7 @@ export function createFundingSourceChanges({
         if (challenge === undefined) throw new FundingSourceRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 

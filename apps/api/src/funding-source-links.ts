@@ -66,7 +66,7 @@ import {
 import { createHash } from 'node:crypto';
 
 import { type Clock, DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -302,7 +302,7 @@ export function createFundingSourceLinks({
         }
         return { status: 201, resourceId: linkId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // Only a confirm can find its link still waiting.
       if (done.outcome === 'waiting') throw new Error('a link start answered as still waiting');
       const { resourceId } = done.result;
@@ -340,7 +340,7 @@ export function createFundingSourceLinks({
         return { status: await settle(tx, states, member, link, outcome), resourceId: linkId };
       });
       // Still waiting leaves nothing written: answered with the link as it stands, open.
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       const read = await answered(member.orgId, correlationId, (tx, states) =>
         withSource(tx, states, member.orgId, linkId),
       );

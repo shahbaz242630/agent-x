@@ -48,7 +48,7 @@ import {
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type HeldChallenges, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -241,7 +241,7 @@ export function createAgentKeyChanges({
     work.answered(member.orgId, correlationId, (tx, states) => work.withKeys(tx, states, member.orgId, agentId));
 
   const asked = (done: Awaited<ReturnType<typeof work.write>>): AgentKeyChangeWrite => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+    if (isUnwritten(done)) return done;
     return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
   };
 
@@ -297,7 +297,7 @@ export function createAgentKeyChanges({
         key = issued.text;
         return { status: 201, resourceId: old.agent.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await reread(member, correlationId, done.result.resourceId);
       if ('outcome' in agent) return agent;
@@ -336,7 +336,7 @@ export function createAgentKeyChanges({
         if (moved.outcome !== 'changed') throw new Error(`a key read as ACTIVE didn't revoke: ${moved.outcome}`);
         return { status: 200, resourceId: read.agent.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       const agent = await reread(member, correlationId, done.result.resourceId);
       if ('outcome' in agent) return agent;
       return { outcome: 'revoked', agent };

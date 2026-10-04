@@ -67,7 +67,7 @@ import {
   stepUpDetails,
 } from '@agentx/core/modules/identity';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, IdempotentRequest } from '@agentx/platform/db';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
@@ -240,7 +240,7 @@ export function createAgentChanges({
     correlationId: string,
     done: Awaited<ReturnType<typeof work.write>>,
   ): Promise<AgentChangeWrite> => {
-    if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+    if (isUnwritten(done)) return done;
     const agent = await work.answered(member.orgId, correlationId, (tx, states) =>
       work.withKeys(tx, states, member.orgId, done.result.resourceId),
     );
@@ -280,7 +280,7 @@ export function createAgentChanges({
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -328,7 +328,7 @@ export function createAgentChanges({
         if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
         return { status: 202, resourceId: challenge.challengeId };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
@@ -385,7 +385,7 @@ export function createAgentChanges({
         key = issued.text;
         return { status: 201, resourceId: read.agent.id };
       });
-      if (done.outcome === 'refused' || done.outcome === 'conflict' || done.outcome === 'busy') return done;
+      if (isUnwritten(done)) return done;
       // The key is set only by a write done now: a retry answers it as null, as it was shown once.
       const agent = await work.answered(member.orgId, correlationId, (tx, states) =>
         work.withKeys(tx, states, member.orgId, done.result.resourceId),
