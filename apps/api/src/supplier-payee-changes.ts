@@ -57,6 +57,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import type { Written } from './use-case-work.ts';
 
 /** Asking to confirm the change waiting: its operation, which the step-up challenge names as its action too. */
 export const PAYEE_APPROVE_OPERATION = 'suppliers.payee.approve';
@@ -160,7 +161,7 @@ export function createSupplierPayeeChanges({
     },
 
     async approveConfirm(member, idempotent, supplierId, stepUpChallengeId, correlationId) {
-      let done: Awaited<ReturnType<typeof work.write>>;
+      let done: Written;
       try {
         done = await work.write(member, idempotent, correlationId, async (tx, states) => {
           const held = await challenges.hold(tx, member.sessionId);

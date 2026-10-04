@@ -19,28 +19,28 @@ import {
   MOST_KEYS_ISSUED_A_DAY,
   type Scope,
 } from '@agentx/core/modules/agents';
-import type { AuditActor, AuditDetails, AuditTables, SignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
-import type { IdentityTables, Role } from '@agentx/core/modules/identity';
+import type { AuditActor, AuditDetails, SignedStates } from '@agentx/core/modules/audit';
+import type { Role } from '@agentx/core/modules/identity';
 import { DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
-import type { Database, DatabaseTransaction, IdempotentRequest, IdempotentWrite } from '@agentx/platform/db';
+import type { Database, DatabaseTransaction, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, UseCaseRefused } from './use-case-work.ts';
+import {
+  createUseCaseWork,
+  type SessionMember,
+  UseCaseRefused,
+  type UseCaseTables,
+  type Written,
+} from './use-case-work.ts';
 
-/** The tables the agents' use cases work on: both modules', with the directory and the audit trail. */
-export type AgentTables = IdentityTables & AgentsTables & DirectoryTables & AuditTables;
+/** The tables the agents' use cases work on. */
+export type AgentTables = UseCaseTables & AgentsTables;
 /** The organisation's transaction, on those tables. */
 export type AgentTx = DatabaseTransaction<AgentTables>;
 
-/** Who is acting: a signed-in member, in the organisation the access hook verified, and their session. */
-export interface AgentMember {
-  readonly orgId: string;
-  readonly userId: string;
-  /** The session a step-up binds to (ADR-003 §7). */
-  readonly sessionId: string;
-}
+/** Who is acting: a signed-in member, in their session. */
+export type AgentMember = SessionMember;
 
 /** An agent with its keys, as an answer shows it. */
 export interface AgentWithKeys {
@@ -60,7 +60,7 @@ interface KeyToIssue {
   readonly details?: AuditDetails;
 }
 
-/** A refusal thrown inside a write or a read, answered as `Refused`. */
+/** The agents' UseCaseRefused: the only refusal their work answers. */
 export class AgentRefused extends UseCaseRefused {}
 
 export interface AgentWork {
@@ -76,7 +76,7 @@ export interface AgentWork {
     idempotent: IdempotentRequest,
     correlationId: string,
     work: (tx: AgentTx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-  ): Promise<IdempotentWrite | Refused>;
+  ): Promise<Written>;
   /** Runs a read in the organisation's transaction, a refusal inside it answered. */
   answered<T extends object>(
     orgId: string,

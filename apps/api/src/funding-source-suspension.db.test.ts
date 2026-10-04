@@ -41,10 +41,10 @@ import {
   type FundingSourceChanges,
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
-  type SessionMember,
   type SourceChangeWrite,
   SUSPEND_OPERATION,
 } from './funding-source-changes.ts';
+import type { SessionMember } from './use-case-work.ts';
 import {
   createFundingSourceLinks,
   type FundingSourceLinks,

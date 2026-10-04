@@ -39,13 +39,31 @@ export class UseCaseRefused extends Error {
   }
 }
 
-/** The tables every use case's transaction has. */
-type UseCaseTables = IdentityTables & DirectoryTables & AuditTables;
+/** The tables every use case's transaction has; each area adds its own. */
+export type UseCaseTables = IdentityTables & DirectoryTables & AuditTables;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */
-interface Member {
+export interface Member {
   readonly orgId: string;
   readonly userId: string;
+}
+
+/** A member acting in a session of theirs. */
+export interface SessionMember extends Member {
+  /** The session a step-up binds to (ADR-003 §7). */
+  readonly sessionId: string;
+}
+
+/** A write's answer: its key's outcome, or the area's refusal. */
+export type Written = IdempotentWrite | Refused;
+
+/**
+ * A status move the work's own read, in this transaction, said it may make:
+ * one refused means something past the app is at work, never a refusal to
+ * answer, so it throws, rolling the write back.
+ */
+export function movedAsRead(moved: { readonly outcome: string }, what: string): void {
+  if (moved.outcome !== 'changed') throw new Error(`${what}: ${moved.outcome}`);
 }
 
 export function createUseCaseWork<Tables extends UseCaseTables>({
@@ -91,7 +109,7 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
       idempotent: IdempotentRequest,
       correlationId: string,
       work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
-    ): Promise<IdempotentWrite | Refused> => {
+    ): Promise<Written> => {
       const idempotency = createIdempotentWrites({ keys, logger: logger.child({ correlationId }) });
       return orRefused(() =>
         inOrganisation(member.orgId, correlationId, (tx, states) =>

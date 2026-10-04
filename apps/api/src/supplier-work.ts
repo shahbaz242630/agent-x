@@ -5,9 +5,7 @@
 // only from the version read through its signed state, and with its payee
 // and any payee change waiting as the partner described them (E2-2b): what
 // the call-back confirms (ADR-014 §3), never an account number.
-import type { AuditTables, SignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
-import type { IdentityTables } from '@agentx/core/modules/identity';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
 import {
   contactsOf,
@@ -27,24 +25,17 @@ import { type Database, type DatabaseTransaction, isUnwritten } from '@agentx/pl
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, UseCaseRefused } from './use-case-work.ts';
+import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
 /** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
-export type SupplierTables = IdentityTables & SuppliersTables & DirectoryTables & AuditTables & NotificationsTables;
+export type SupplierTables = UseCaseTables & SuppliersTables & NotificationsTables;
 export type SupplierTx = DatabaseTransaction<SupplierTables>;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */
-export interface SupplierMember {
-  readonly orgId: string;
-  readonly userId: string;
-}
+export type SupplierMember = Member;
+export type { SessionMember } from './use-case-work.ts';
 
-/** A member acting in a session of theirs, which a step-up challenge is bound to. */
-export interface SessionMember extends SupplierMember {
-  readonly sessionId: string;
-}
-
-/** A refusal thrown inside a transaction, so everything it did rolls back. */
+/** The suppliers' UseCaseRefused: the only refusal their work answers. */
 export class SupplierRefused extends UseCaseRefused {}
 
 /** A version's payee as the partner described it (E2): its registration, the masked hint, and the name check's answer. */
@@ -217,8 +208,6 @@ export function createSupplierWork(services: {
   const view = (orgId: string, supplierId: string, correlationId: string): Promise<SupplierView | Refused> =>
     answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, supplierId, correlationId));
 
-  type Written = Awaited<ReturnType<typeof shared.write>>;
-
   const viewAfter = async (orgId: string, correlationId: string, done: Written) =>
     isUnwritten(done) ? done : view(orgId, done.result.resourceId, correlationId);
 
@@ -235,9 +224,9 @@ export function createSupplierWork(services: {
 
     /** A change's answer: as viewAfter, the supplier `changed`. */
     changedAfter: async (orgId: string, correlationId: string, done: Written): Promise<SupplierChangeWrite> => {
-      const answered = await viewAfter(orgId, correlationId, done);
-      if ('outcome' in answered) return answered;
-      return { outcome: 'changed', ...answered };
+      const standing = await viewAfter(orgId, correlationId, done);
+      if ('outcome' in standing) return standing;
+      return { outcome: 'changed', ...standing };
     },
 
     /** A step-up's ask answered: its refusal or its key's outcome as it is, otherwise the challenge opened (the write's resource). */

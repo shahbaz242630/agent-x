@@ -1,6 +1,6 @@
 // Rotating and revoking an AI agent's key (ADR-011 §1, ADR-012 §5, ADR-014
 // §8, ADR-003 §8, BR-03; Phase 1 C1-4b). Composed in the API, as registering
-// is (agent-writes.ts): the step-up is the identity module's, the agent and
+// is (agent-registering.ts): the step-up is the identity module's, the agent and
 // its keys the agents module's. Both are admins' and developers' (as
 // registering is), each with step-up, with a passkey for an admin (SEC-HA-12).
 //
@@ -61,6 +61,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
+import { movedAsRead, type Written } from './use-case-work.ts';
 
 /** Asking to rotate a key: its operation, which the step-up challenge names as its action too. */
 export const ROTATE_OPERATION = 'agents.keys.rotate';
@@ -240,7 +241,7 @@ export function createAgentKeyChanges({
   const reread = (member: AgentMember, correlationId: string, agentId: string) =>
     work.answered(member.orgId, correlationId, (tx, states) => work.withKeys(tx, states, member.orgId, agentId));
 
-  const asked = (done: Awaited<ReturnType<typeof work.write>>): AgentKeyChangeWrite => {
+  const asked = (done: Written): AgentKeyChangeWrite => {
     if (isUnwritten(done)) return done;
     return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
   };
@@ -328,12 +329,14 @@ export function createAgentKeyChanges({
           held,
           stepUpChallengeId,
         );
-        const moved = await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
-          actor: { type: 'user', id: member.userId },
-          action: 'agent_key.revoked',
-          details: stepUpDetails(consumed),
-        });
-        if (moved.outcome !== 'changed') throw new Error(`a key read as ACTIVE didn't revoke: ${moved.outcome}`);
+        movedAsRead(
+          await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: read.key.id }, 'revoke', {
+            actor: { type: 'user', id: member.userId },
+            action: 'agent_key.revoked',
+            details: stepUpDetails(consumed),
+          }),
+          "a key read as ACTIVE didn't revoke",
+        );
         return { status: 200, resourceId: read.agent.id };
       });
       if (isUnwritten(done)) return done;

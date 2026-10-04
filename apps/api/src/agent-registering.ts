@@ -2,7 +2,7 @@
 // Phase 1 C1-2). Composed here, in the API, as ADR-004 §7 has it: the step-up
 // is the identity module's, the agent and its key the agents module's, and
 // the agents module never depends on identity. One transaction, the
-// organisation's, holds both (agent-writes.ts).
+// organisation's, holds both (use-case-work.ts).
 //
 // 1. `ask` (`agents.register`): the key claimed first; the member read again,
 //    active and an admin or developer; then a step-up challenge for their own
