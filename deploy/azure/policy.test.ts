@@ -123,7 +123,7 @@ function tooBroad(domain: string): boolean {
 /**
  * Zones any customer creates names in (S84 review of the CNAME hops): only
  * exact names there, never the zone, nor a cluster every customer's
- * endpoints share (`b01.azurefd.net.`, `d.akamaiedge.net.`).
+ * endpoints share (`b01.azurefd.net.`, `d.akamaiedge.net.`, and their kin).
  */
 const SHARED_ZONES = [
   'trafficmanager.net.',
@@ -134,7 +134,7 @@ const SHARED_ZONES = [
   'akamaiedge.net.',
   'edgekey.net.',
 ];
-const SHARED_CLUSTER = /^(?:[bz]\d+\.azurefd|d\.akamaiedge)\.net\.$/;
+const SHARED_CLUSTER = /^(?:[a-z]\d+\.azurefd|[a-z]+\.akamaiedge)\.net\.$/;
 
 /** A copy of the staging snapshot with one change made to the resources `pick` selects. */
 function changed(pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot {
@@ -1297,7 +1297,9 @@ describe('SEC-OPS-09 each rule can fail', () => {
       '10.in-addr.arpa.',
       ...SHARED_ZONES,
       'b01.azurefd.net.',
+      'a01.azurefd.net.',
       'd.akamaiedge.net.',
+      'dscb.akamaiedge.net.',
     ])
       expect(tooBroad(broad), broad).toBe(true);
     for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.', 'mcr.trafficmanager.net.', 'x.b01.azurefd.net.'])
