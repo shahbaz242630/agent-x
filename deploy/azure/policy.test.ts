@@ -113,7 +113,8 @@ type Mutable = Record<string, unknown>;
  * names whose servers anyone can run past the rule that blocks the rest.
  */
 function tooBroad(domain: string): boolean {
-  if (!domain.endsWith('.')) return true;
+  // DNS ignores case, so an upper-case entry could name a shared zone past the checks below.
+  if (!domain.endsWith('.') || domain !== domain.toLowerCase()) return true;
   const labels = domain.split('.').filter((label) => label !== '');
   if (labels.length < 2) return true;
   if (SHARED_ZONES.includes(domain) || SHARED_CLUSTER.test(domain)) return true;
@@ -1300,6 +1301,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'a01.azurefd.net.',
       'd.akamaiedge.net.',
       'dscb.akamaiedge.net.',
+      'B01.azurefd.net.',
     ])
       expect(tooBroad(broad), broad).toBe(true);
     for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.', 'mcr.trafficmanager.net.', 'x.b01.azurefd.net.'])
