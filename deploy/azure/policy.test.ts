@@ -113,11 +113,29 @@ type Mutable = Record<string, unknown>;
  * names whose servers anyone can run past the rule that blocks the rest.
  */
 function tooBroad(domain: string): boolean {
-  if (!domain.endsWith('.')) return true;
+  // DNS ignores case, so an upper-case entry could name a shared zone past the checks below.
+  if (!domain.endsWith('.') || domain !== domain.toLowerCase()) return true;
   const labels = domain.split('.').filter((label) => label !== '');
   if (labels.length < 2) return true;
+  if (SHARED_ZONES.includes(domain) || SHARED_CLUSTER.test(domain)) return true;
   return `.${domain}`.endsWith('.in-addr.arpa.') && labels.length < 4;
 }
+
+/**
+ * Zones any customer creates names in (S84 review of the CNAME hops): only
+ * exact names there, never the zone, nor a cluster every customer's
+ * endpoints share (`b01.azurefd.net.`, `d.akamaiedge.net.`, and their kin).
+ */
+const SHARED_ZONES = [
+  'trafficmanager.net.',
+  'azurefd.net.',
+  'tm-azurefd.net.',
+  'azureedge.net.',
+  'akadns.net.',
+  'akamaiedge.net.',
+  'edgekey.net.',
+];
+const SHARED_CLUSTER = /^(?:[a-z]\d+\.azurefd|[a-z]+\.akamaiedge)\.net\.$/;
 
 /** A copy of the staging snapshot with one change made to the resources `pick` selects. */
 function changed(pick: (resource: PredictedResource) => boolean, change: (resource: Mutable) => void): Snapshot {
@@ -1270,9 +1288,24 @@ describe('SEC-OPS-09 each rule can fail', () => {
 
   it('dns-allow: the reviewed list holds nothing too broad, and staging allows exactly it', () => {
     expect([...DNS_ALLOWED].filter(tooBroad)).toEqual([]);
-    for (const broad of ['.', 'com.', 'io.', 'example.com', 'arpa.', 'in-addr.arpa.', '10.in-addr.arpa.'])
+    for (const broad of [
+      '.',
+      'com.',
+      'io.',
+      'example.com',
+      'arpa.',
+      'in-addr.arpa.',
+      '10.in-addr.arpa.',
+      ...SHARED_ZONES,
+      'b01.azurefd.net.',
+      'a01.azurefd.net.',
+      'd.akamaiedge.net.',
+      'dscb.akamaiedge.net.',
+      'B01.azurefd.net.',
+    ])
       expect(tooBroad(broad), broad).toBe(true);
-    for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.']) expect(tooBroad(narrow), narrow).toBe(false);
+    for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.', 'mcr.trafficmanager.net.', 'x.b01.azurefd.net.'])
+      expect(tooBroad(narrow), narrow).toBe(false);
     const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
     expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
   });
