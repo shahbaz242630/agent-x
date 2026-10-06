@@ -3,7 +3,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_TIME_ZONE, isTimeZone, periodOf, windowStart } from './period.ts';
+import { DEFAULT_TIME_ZONE, periodOf, timeZoneOf, windowStart } from './period.ts';
 
 /** The zone's local date at an instant, as `YYYY-MM-DD`. */
 const localDate = (at: Date, zone: string): string => at.toLocaleDateString('en-CA', { timeZone: zone });
@@ -80,8 +80,28 @@ describe('periodOf', () => {
 
   it('refuses a zone the runtime doesn’t know', () => {
     expect(() => periodOf(new Date('2026-10-06T00:00:00Z'), 'Mars/Olympus_Mons')).toThrow(RangeError);
-    expect(isTimeZone('Mars/Olympus_Mons')).toBe(false);
-    expect(isTimeZone(DEFAULT_TIME_ZONE)).toBe(true);
+  });
+});
+
+describe('timeZoneOf', () => {
+  it('names a zone as the runtime does, in any spelling it takes', () => {
+    expect(timeZoneOf(DEFAULT_TIME_ZONE)).toBe(DEFAULT_TIME_ZONE);
+    expect(timeZoneOf('asia/DUBAI')).toBe(DEFAULT_TIME_ZONE);
+    expect(timeZoneOf('Etc/UTC')).toBe('UTC');
+  });
+
+  it.each(['Mars/Olympus_Mons', '+04:00', '-0300', ''])('refuses %j: unknown, or an offset with no rules', (zone) => {
+    expect(timeZoneOf(zone)).toBeUndefined();
+  });
+
+  it('names every spelling of a zone alike', () => {
+    const letters = ['a', 's', 'i', 'a', 'd', 'u', 'b', 'a', 'i'];
+    for (let mask = 0; mask < 2 ** letters.length; mask += 1) {
+      const spelled = letters.map((c, i) => ((mask >> i) & 1 ? c.toUpperCase() : c));
+      const zone = `${spelled.slice(0, 4).join('')}/${spelled.slice(4).join('')}`;
+      expect(timeZoneOf(zone)).toBe(DEFAULT_TIME_ZONE);
+    }
+    expect(periodOf(new Date('2026-10-06T08:00:00Z'), 'ASIA/DUBAI').month).toBe('2026-10');
   });
 });
 

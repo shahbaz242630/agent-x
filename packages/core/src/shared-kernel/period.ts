@@ -7,6 +7,7 @@
 // month starts at the first instant whose local date is its 1st: where the
 // clocks skip midnight that is the end of the gap, and where midnight happens
 // twice, the earlier one.
+import { HOUR_MS } from './clock.ts';
 
 /** A lineage's default time zone: AED's (PRD §3.1). */
 export const DEFAULT_TIME_ZONE = 'Asia/Dubai';
@@ -20,22 +21,35 @@ export interface Period {
   readonly end: Date;
 }
 
-/** Whether `zone` is an IANA time zone this runtime knows. */
-export function isTimeZone(zone: string): boolean {
+/**
+ * The zone as this runtime names it, for a lineage to keep: an IANA zone in
+ * any spelling Intl takes (`asia/dubai` is `Asia/Dubai`); undefined for one it
+ * doesn't know or a bare UTC offset (`+04:00`), which has no daylight-saving
+ * rules. Intl may name a zone by an older alias (`Asia/Katmandu`), which every
+ * later runtime still takes.
+ */
+export function timeZoneOf(zone: string): string | undefined {
   try {
-    new Intl.DateTimeFormat('en-US', { timeZone: zone });
-    return true;
+    const named = formatOf(zone).resolvedOptions().timeZone;
+    return /^[+-]/.test(named) ? undefined : named;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
+/** The most formatters kept: every zone Intl knows, several times over. */
+const MOST_FORMATS = 2_000;
 const formats = new Map<string, Intl.DateTimeFormat>();
 
-/** One formatter a zone, kept: building one is far slower than using it. RangeError for a zone it doesn't know. */
+/**
+ * One formatter a zone, kept, as building one is far slower than using it;
+ * RangeError for a zone it doesn't know. Kept by the spelling asked for, so
+ * the store is emptied when full: odd spellings can't grow it without end.
+ */
 function formatOf(zone: string): Intl.DateTimeFormat {
   let format = formats.get(zone);
   if (format === undefined) {
+    if (formats.size >= MOST_FORMATS) formats.clear();
     format = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hourCycle: 'h23',
@@ -63,7 +77,7 @@ function wallAt(ms: number, zone: string): number {
 const offsetAt = (ms: number, zone: string): number => wallAt(ms, zone) - Math.floor(ms / 1000) * 1000;
 
 /** The longest any zone is from UTC, with a day's margin for a transition beside it. */
-const FARTHEST_MS = 40 * 3_600_000;
+const FARTHEST_MS = 40 * HOUR_MS;
 
 /**
  * The first instant at which the zone's clock reads `wall` or later (`wall`
@@ -105,14 +119,17 @@ export function periodOf(at: Date, zone: string): Period {
   };
 }
 
+/** The longest split-check window: 31 days. */
+const MOST_WINDOW_HOURS = 31 * 24;
+
 /**
  * Where a rolling window ending at `at` begins (ADR-006 §9: the split check's,
  * default 24 hours, so splitting an order across midnight gains nothing): a
  * whole number of hours, from 1 to 31 days'.
  */
 export function windowStart(at: Date, hours: number): Date {
-  if (!Number.isInteger(hours) || hours < 1 || hours > 31 * 24) {
-    throw new RangeError('A window is a whole number of hours, from 1 to 744');
+  if (!Number.isInteger(hours) || hours < 1 || hours > MOST_WINDOW_HOURS) {
+    throw new RangeError(`A window is a whole number of hours, from 1 to ${String(MOST_WINDOW_HOURS)}`);
   }
-  return new Date(at.getTime() - hours * 3_600_000);
+  return new Date(at.getTime() - hours * HOUR_MS);
 }

@@ -52,13 +52,14 @@ export function plus(a: Money, b: Money): Money {
   return money(a.minor + b.minor, sameCurrency(a, b));
 }
 
-/** The sum of every amount, `zero` of `currency` when there are none; every one in that currency. */
+/** The sum of every amount, all in `currency`; zero of it when there are none. */
 export function total(amounts: readonly Money[], currency: string): Money {
   return amounts.reduce(plus, money(0n, currency));
 }
 
 /** -1, 0 or 1 as `a` is less than, equal to or more than `b`, of one currency. */
 export function compare(a: Money, b: Money): -1 | 0 | 1 {
+  // Refuses two currencies; the code itself isn't needed here.
   sameCurrency(a, b);
   if (a.minor === b.minor) return 0;
   return a.minor < b.minor ? -1 : 1;
