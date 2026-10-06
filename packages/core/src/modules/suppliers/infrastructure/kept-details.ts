@@ -4,6 +4,12 @@
 // kept as typed (Carry-Forward, E2-2 note a). Here, not in the domain: the
 // providers module's check reads text as a person would (ADR-004 keeps a
 // domain to its own folder and the shared kernel).
+//
+// Checked where a person types details (adding a supplier, changing its
+// details), never when a stored version is written again (a payee's
+// registration copies them): a version kept before this check is never
+// refused there, which would roll back the partner's answer. The email is
+// left out: it is checked as one address already.
 import { holdsAnIban } from '../../providers/index.ts';
 import { type SupplierDetails, SupplierDetailsRefused, supplierDetails } from '../domain/supplier.ts';
 

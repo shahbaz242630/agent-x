@@ -1,7 +1,8 @@
 -- An agent handed to another owner tells that owner and the organisation's
 -- admins (Carry-Forward, Phase 1: the new owner wasn't told). Two notice
 -- kinds, each with `aboutId` the agent's ID: one to the new owner, one to the
--- admins.
+-- admins. A new owner who is an admin gets both (as owner, and as an admin),
+-- accepted: the admins' notice excludes no one.
 
 ALTER TABLE notifications.outbox DROP CONSTRAINT outbox_kind_check;
 ALTER TABLE notifications.outbox

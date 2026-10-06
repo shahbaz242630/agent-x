@@ -255,6 +255,19 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
   };
 }
 
+/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, or as an admin. */
+function whyTold(notice: ClaimedNotice): string {
+  if (notice.recipientContactId !== null) {
+    return "You're told because this address is one of the organisation's registered contacts.";
+  }
+  // The kind check keeps a notice with neither (both null) from reading as one's own login.
+  if (isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId) {
+    return "You're told because this is your own login.";
+  }
+  if (notice.kind === 'agent_handed_to_you') return "You're told because you're the agent's new owner.";
+  return "You're told because you're an admin of this organisation.";
+}
+
 /**
  * The email telling `to` of the notice. The notice asking a contact to
  * confirm a reset takes its link, and no other notice takes one: either
@@ -268,15 +281,7 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
   if (link !== undefined) throw new RangeError("only a reset's link notice carries a link");
   const role = notice.role === null ? '' : ROLE_NAMES[notice.role];
   const wording = WORDING[notice.kind];
-  const why =
-    notice.recipientContactId !== null
-      ? "You're told because this address is one of the organisation's registered contacts."
-      : // The kind check keeps a notice with neither (both null) from reading as one's own login.
-        isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId
-        ? "You're told because this is your own login."
-        : notice.kind === 'agent_handed_to_you'
-          ? "You're told because you're the agent's new owner."
-          : "You're told because you're an admin of this organisation.";
+  const why = whyTold(notice);
   return {
     id: notice.id,
     to,
