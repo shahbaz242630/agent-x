@@ -133,7 +133,7 @@ const readableBesideIds = (text: string): string => readable(text.normalize('NFK
  * word), or a UAE IBAN's 23 characters (one with text run on after it). Only
  * these few, so a long reference that isn't an IBAN rarely passes by chance.
  */
-function holdsAnIban(text: string): boolean {
+export function holdsAnIban(text: string): boolean {
   return [...readableBesideIds(text).matchAll(IBAN)].some(([, found = '']) => {
     const candidates = [found, ...[...found.matchAll(/ /g)].map(({ index }) => found.slice(0, index))].map(compact);
     if (found.startsWith('AE')) candidates.push(compact(found).slice(0, UAE_IBAN_LENGTH));

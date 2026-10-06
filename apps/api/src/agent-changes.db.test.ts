@@ -18,6 +18,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabase,
@@ -51,7 +52,7 @@ import {
 } from './agent-changes.ts';
 import type { AgentMember } from './agent-writes.ts';
 
-type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -225,9 +226,21 @@ beforeEach(() => {
     ids,
     clock,
     challenges: challenges(),
+    outbox: createOutbox({ ids, clock }),
     logger: testLogger(),
   });
 });
+
+/** The organisation's notices: kind, whom by user ID (null: its admins, found as sent) and what about. */
+const noticesOf = (org: string) =>
+  withTenant(app, org, (tx) =>
+    tx
+      .selectFrom('notifications.outbox')
+      .select(['kind', 'recipient_user_id', 'about_id'])
+      .where('org_id', '=', org)
+      .orderBy('kind')
+      .execute(),
+  );
 
 describe(`suspending an agent: the kill switch (C1-3, Postgres ${server.version})`, () => {
   it.each<Role>(['developer', 'admin'])(
@@ -490,6 +503,11 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
         stepUpChallengeId: challengeId,
         methods: PASSKEY.join(' '),
       });
+      // The new owner is told, by their user ID, and so are the admins (0034).
+      expect(await noticesOf(org)).toEqual([
+        { kind: 'agent_handed_over', recipient_user_id: null, about_id: agent },
+        { kind: 'agent_handed_to_you', recipient_user_id: next.userId, about_id: agent },
+      ]);
     },
   );
 
@@ -524,6 +542,7 @@ describe('handing an agent to another owner, with an admin’s step-up (the S68 
       'agent.created',
       'agent.owner_changed',
     ]);
+    expect((await noticesOf(org)).map(({ kind }) => kind)).toEqual(['agent_handed_over', 'agent_handed_to_you']);
   });
 
   it.each<Role>(['developer', 'approver', 'viewer'])('refuses a %s: FORBIDDEN, asking or confirming', async (role) => {

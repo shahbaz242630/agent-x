@@ -434,6 +434,8 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
     ['a source of another kind', { ...BODY, source: { kind: 'a friend', ref: 'x' } }],
     ['a source reference of 201 characters', { ...BODY, source: { kind: 'registry', ref: 'r'.repeat(201) } }],
     ['a field it doesn’t know', { ...BODY, iban: 'AE070331234567890123456' }],
+    ['an IBAN as the name', { ...BODY, displayName: 'AE07 0331 2345 6789 0123 456' }],
+    ['an IBAN as the source reference', { ...BODY, source: { kind: 'registry', ref: 'AE070331234567890123456' } }],
     ['no phone', { displayName: 'A', source: BODY.source }],
   ])('refuses %s with 400, before the use case runs', async (_what, body) => {
     const asked: Asked[] = [];

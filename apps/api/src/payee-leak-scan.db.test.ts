@@ -27,6 +27,7 @@ import {
   type FakeRail,
   RailUnavailable,
 } from '@agentx/core/modules/providers';
+import { addSupplier } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { createLogger } from '@agentx/platform/observability';
@@ -322,9 +323,33 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
     const canary = ibanOf('AE', ['044', '7000', '1313', '2424', '3535'].join(''));
     const api = await serverWith(createFakeRail({ clock, ids, records: createDatabaseRecords(app) }));
     try {
-      // A source's reference is any printable text: an IBAN typed there is kept as typed.
-      const added = await sent(api, org, '/v1/suppliers', { ...SUPPLIER, source: { kind: 'registry', ref: canary } });
-      expect(added.statusCode).toBe(201);
+      // The API refuses an IBAN in a supplier's free text (BR-21)...
+      const refused = await sent(api, org, '/v1/suppliers', { ...SUPPLIER, source: { kind: 'registry', ref: canary } });
+      expect(refused.statusCode).toBe(400);
+      // ...so the canary is planted below it, as a version kept before that check could hold one, and read back.
+      const id = ids.next();
+      await withSignedStates(app, org, { keys, ids, logger }, (tx, states) =>
+        addSupplier(tx, states, keys, {
+          orgId: org,
+          id,
+          versionId: ids.next(),
+          supplier: {
+            displayName: 'Canary Trading LLC',
+            contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+            source: { kind: 'registry', ref: canary },
+          },
+          enteredBy: ids.next(),
+          createdAt: clock.now(),
+          actor: OPERATOR,
+        }),
+      );
+      const read = await api.inject({
+        method: 'GET',
+        url: `/v1/suppliers/${id}`,
+        headers: { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: org },
+      });
+      answers.push(read.body);
+      expect(read.statusCode).toBe(200);
     } finally {
       await api.close();
     }

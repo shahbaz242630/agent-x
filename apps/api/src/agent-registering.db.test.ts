@@ -17,6 +17,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
@@ -45,7 +46,7 @@ import {
   type RegistrationWrite,
 } from './agent-registering.ts';
 
-type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables;
+type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

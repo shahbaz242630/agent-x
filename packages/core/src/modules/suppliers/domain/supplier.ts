@@ -91,7 +91,6 @@ export class SupplierDetailsRefused extends Error {
   }
 }
 
-/** The most characters a supplier's name may have: the table's own limit. */
 /** The most characters a supplier's name, or its payee's, may be once composed. */
 export const SUPPLIER_NAME_MOST = 100;
 
