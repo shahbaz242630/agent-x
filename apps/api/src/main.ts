@@ -28,7 +28,6 @@ import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/co
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import {
   createLoginFlows,
-  createLoginSessions,
   createOidcClient,
   createSessions,
   createSignIn,
@@ -46,7 +45,6 @@ import {
   createStepUpChallenges,
   type IdentityTables,
   type LoginFlows,
-  type LoginSessions,
   membersFor,
   activeContactsFor,
   countingContactsFor,
@@ -98,6 +96,7 @@ import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
+import { loginSessionsFrom } from './login-sessions.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -200,22 +199,6 @@ function signInFrom(
     ids: uuidV7Ids,
     clock: systemClock,
     keys,
-  });
-}
-
-/**
- * Where a sign-out ends the person's sessions at the login service too
- * (Shannon AUTH-VULN-01, S88): with the reset token, whose role may end them;
- * off without it.
- */
-function loginSessionsFrom(config: Config): LoginSessions | undefined {
-  const { signIn, factorResets } = config;
-  if (signIn === undefined || factorResets === undefined) return undefined;
-  return createLoginSessions({
-    issuer: signIn.issuer,
-    internalOrigin: signIn.internalOrigin,
-    token: factorResets.token,
-    fetch: createOutboundFetch(config.outbound.allowedOrigins),
   });
 }
 

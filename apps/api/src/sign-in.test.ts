@@ -451,7 +451,10 @@ describe('signing out', () => {
       expect.objectContaining({
         event: 'auth.login_service_sign_out_failed',
         level: 'error',
-        reason: 'reading the sessions: it answered 500',
+        err: expect.objectContaining({
+          type: 'LoginSessionsUnavailable',
+          message: 'reading the sessions: it answered 500',
+        }) as unknown,
       }),
     );
   });

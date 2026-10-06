@@ -5,6 +5,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 import { describe, expect, it } from 'vitest';
 
 import { createLoginSessions, LoginSessionsUnavailable } from './login-sessions.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 
 const ISSUER = 'https://auth.example.test';
 // Plain words, built at run time, as every stand-in for a secret here.
@@ -106,15 +107,15 @@ describe('ending the sessions at the login service', () => {
   });
 
   it('throws when an ending is refused, naming the step', async () => {
-    const stub = zitadel(undefined, (method) => (method === 'DELETE' ? json({}, 403) : undefined));
+    const stub = zitadel(undefined, (method) => (method === 'DELETE' ? json({}, 500) : undefined));
 
     await expect(sessionsWith(stub.fetch).endAll(WHO)).rejects.toThrow(
-      new LoginSessionsUnavailable('ending a session: it answered 403'),
+      new LoginSessionsUnavailable('ending a session: it answered 500'),
     );
   });
 
   it.each([
-    ['a refused search', zitadel(undefined, () => json({}, 403)), 'reading the sessions: it answered 403'],
+    ['a failed search', zitadel(undefined, () => json({}, 500)), 'reading the sessions: it answered 500'],
     [
       'a call that fails',
       zitadel(undefined, () => new TypeError('fetch failed')),
@@ -132,6 +133,14 @@ describe('ending the sessions at the login service', () => {
   ])('throws on %s, ending nothing', async (_, stub, message) => {
     await expect(sessionsWith(stub.fetch).endAll(WHO)).rejects.toThrow(new LoginSessionsUnavailable(message));
     expect(stub.ended()).toEqual([]);
+  });
+
+  it.each([401, 403])('throws LoginTokenRefused for a refused token (%i), which the alert counts', async (status) => {
+    const stub = zitadel(undefined, () => json({}, status));
+
+    await expect(sessionsWith(stub.fetch).endAll(WHO)).rejects.toThrow(
+      new LoginTokenRefused(`the login service refused the token: it answered ${String(status)}`),
+    );
   });
 
   it("refuses a subject that isn't the login service's user ID, asking nothing", async () => {

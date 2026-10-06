@@ -5,6 +5,7 @@ import type { OutboundFetch } from '@agentx/platform/outbound';
 import { describe, expect, it } from 'vitest';
 
 import { createSecondFactorRemover, IdpFactorsUnavailable } from './idp-factors.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 
 const ISSUER = 'https://auth.example.test';
 // Plain words, built at run time, as every stand-in for a secret here.
@@ -279,14 +280,12 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
     });
 
     it.each([
-      [403, 'refused'],
-      [500, 'failed'],
-    ])('a removal answered %i (%s)', async (status) => {
+      [403, new LoginTokenRefused('the login service refused the token: it answered 403')],
+      [500, failure('removing a factor: it answered 500')],
+    ])('a removal answered %i', async (status, thrown) => {
       const { fetch } = zitadel(everyKind(), (method) => (method === 'DELETE' ? json({}, status) : undefined));
 
-      await expect(removerWith(fetch).removeAll(SUBJECT)).rejects.toThrow(
-        failure(`removing a factor: it answered ${String(status)}`),
-      );
+      await expect(removerWith(fetch).removeAll(SUBJECT)).rejects.toThrow(thrown);
     });
 
     it.each([
@@ -433,7 +432,12 @@ describe('counting a person’s second factors (the S68 audit; F1’s first-pass
   });
 
   it.each([
-    ['an answer not 200', () => json({}, 403), failure('reading the factors: it answered 403')],
+    ['an answer not 200', () => json({}, 500), failure('reading the factors: it answered 500')],
+    [
+      'a refused token',
+      () => json({}, 403),
+      new LoginTokenRefused('the login service refused the token: it answered 403'),
+    ],
     ['a 2xx answer other than 200', () => json({ result: [] }, 201), failure('reading the factors: it answered 201')],
     ['a key of a state it doesn’t know', undefined, failure('a factor has no state we know')],
   ])('throws on %s, never a count', async (_what, answer, thrown) => {

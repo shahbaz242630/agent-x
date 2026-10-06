@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
 import { createIdpEventFeed, IdpFeedUnavailable, MOST_EVENTS_A_PAGE } from './idp-feed.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 
 const ISSUER = 'https://auth.example.test';
 // Plain words, built at run time, as every stand-in for a secret here.
@@ -134,7 +135,7 @@ describe('the login service’s event feed (B6-2b)', () => {
     ['an answer that is not a list', () => json({ events: { a: 1 } }), 'the answer holds no list of events'],
     ['more events than asked for', () => json({ events: [EVENT, EVENT] }), 'the answer holds no list of events'],
     ['an answer that is not JSON', () => new Response('<html>', { status: 200 }), 'the answer is not JSON'],
-    ['a refused token', () => json({ code: 7 }, 403), 'it answered 403'],
+    ['an answer not 200', () => json({ code: 13 }, 500), 'it answered 500'],
     ['the login service away', () => new Error('socket hang up'), 'the call failed'],
     [
       'an answer larger than the bound',
@@ -148,6 +149,14 @@ describe('the login service’s event feed (B6-2b)', () => {
 
     await expect(failed).rejects.toThrow(IdpFeedUnavailable);
     await expect(failed).rejects.toThrow(step);
+  });
+
+  it.each([401, 403])('throws LoginTokenRefused for a refused token (%i), which the alert counts', async (status) => {
+    const { fetch } = zitadel(() => json({ code: 7 }, status));
+
+    await expect(feedWith(fetch).eventsBetween(SINCE, UNTIL, 1)).rejects.toThrow(
+      new LoginTokenRefused(`the login service refused the token: it answered ${String(status)}`),
+    );
   });
 
   it('refuses a page size out of bounds, an issuer that isn’t an origin, and a token that isn’t one', async () => {

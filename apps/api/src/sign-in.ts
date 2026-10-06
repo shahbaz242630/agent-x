@@ -208,15 +208,15 @@ export function registerSignIn(
   /**
    * Ends the person's sessions at the login service, where it may. Ours is
    * ended either way, and Agent X never reuses theirs, so a failure doesn't
-   * undo the sign-out; it is an error, as a security control failed (a reset
-   * token that stopped working shows here first).
+   * undo the sign-out; it is an error, as a security control failed, and a
+   * token refused is logged as LoginTokenRefused, which an alert counts.
    */
   const endLoginSessions = async (log: Logger, who: Subject) => {
     if (loginSessions === undefined) return;
     try {
       log.info('auth.login_service_signed_out', { ended: await loginSessions.endAll(who) });
     } catch (error) {
-      log.error('auth.login_service_sign_out_failed', { reason: error instanceof Error ? error.message : 'unknown' });
+      log.error('auth.login_service_sign_out_failed', { err: error });
     }
   };
   /** The login service couldn't be reached: logged, and answered 503 to try again; no security event, as the caller did nothing wrong. */
