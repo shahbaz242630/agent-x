@@ -19,24 +19,25 @@ export const MOST_TRIES = 3;
 /** The line written for each retry: its operation, the failure's name, and which try failed. */
 export const TRANSACTION_RETRIED = 'db.transaction_retried';
 
-/** The SQLSTATE an error carries, on itself or on its cause (a driver's error may be wrapped once). */
-function sqlStateOf(error: unknown): string | undefined {
-  if (typeof error !== 'object' || error === null) return undefined;
-  const { code, cause } = error as { code?: unknown; cause?: unknown };
-  if (typeof code === 'string') return code;
-  return typeof cause === 'object' && cause !== null && typeof (cause as { code?: unknown }).code === 'string'
-    ? (cause as { code: string }).code
-    : undefined;
+/**
+ * The failure's name when it may be tried again (a deadlock or a
+ * serialisation failure), from the SQLSTATE the driver's error carries
+ * (Kysely rethrows it unwrapped); undefined for anything else.
+ */
+function retriedFailure(error: unknown): string | undefined {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && Object.hasOwn(RETRIED, code) ? RETRIED[code] : undefined;
 }
 
 /** Whether a failed transaction may be tried again: a deadlock or a serialisation failure, nothing else. */
 export function isRetryable(error: unknown): boolean {
-  const code = sqlStateOf(error);
-  return code !== undefined && Object.hasOwn(RETRIED, code);
+  return retriedFailure(error) !== undefined;
 }
 
 /** A short wait before trying again, longer each time, with jitter so two parties don't collide again in step. */
-const pauseBefore = (tryNumber: number): Promise<void> => sleep(tryNumber * randomInt(10, 50));
+function pauseBefore(tryNumber: number): Promise<void> {
+  return sleep(tryNumber * randomInt(10, 50));
+}
 
 /**
  * Runs `transaction` (one whole transaction, opened and committed inside it)
@@ -54,8 +55,9 @@ export async function retryingTransaction<T>(
     try {
       return await transaction();
     } catch (error) {
-      if (tryNumber >= MOST_TRIES || !isRetryable(error)) throw error;
-      logger.warn(TRANSACTION_RETRIED, { operation, failure: RETRIED[sqlStateOf(error) ?? ''], try: tryNumber });
+      const failure = retriedFailure(error);
+      if (tryNumber >= MOST_TRIES || failure === undefined) throw error;
+      logger.warn(TRANSACTION_RETRIED, { operation, failure, try: tryNumber });
       await pause(tryNumber);
     }
   }

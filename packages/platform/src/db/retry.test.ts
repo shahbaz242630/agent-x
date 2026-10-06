@@ -1,20 +1,14 @@
 // ADR-006 §6: a deadlock or serialisation failure retries the whole
 // transaction, bounded, and logs each retry; nothing else is retried.
-import { LogCapture } from '@agentx/testing';
+import { LogCapture, testLogger } from '@agentx/testing';
 import { describe, expect, it } from 'vitest';
 
-import { createLogger } from '../observability/index.ts';
 import { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';
 
-const capture = () => {
+function capture() {
   const lines = new LogCapture();
-  const logger = createLogger({
-    service: 'test',
-    config: { environment: 'test', release: 'r-1', log: { level: 'info', eventCapPerMinute: 10_000 } },
-    destination: lines,
-  });
-  return { lines, logger };
-};
+  return { lines, logger: testLogger(lines) };
+}
 
 /** An error as the driver gives one, with its SQLSTATE. */
 const failure = (code: string) => Object.assign(new Error('could not serialize access'), { code });
@@ -106,10 +100,10 @@ describe('retryingTransaction', () => {
 });
 
 describe('isRetryable', () => {
-  it('reads the code on the error or on its cause', () => {
+  it('reads the code on the error, as the driver gives it', () => {
     expect(isRetryable(failure('40P01'))).toBe(true);
-    expect(isRetryable(new Error('wrapped', { cause: failure('40001') }))).toBe(true);
-    expect(isRetryable(new Error('wrapped', { cause: failure('23505') }))).toBe(false);
+    expect(isRetryable(failure('40001'))).toBe(true);
+    expect(isRetryable(failure('toString'))).toBe(false);
     expect(isRetryable({ code: 40001 })).toBe(false);
     expect(isRetryable(null)).toBe(false);
     expect(isRetryable('40P01')).toBe(false);
