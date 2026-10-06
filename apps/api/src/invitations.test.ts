@@ -53,7 +53,7 @@ const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in these tests')),
   beginStepUp: () => Promise.reject(new Error('not in these tests')),
   complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(false),
+  signOut: () => Promise.resolve(undefined),
   signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
 };
 

@@ -230,12 +230,12 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
   });
 
   describe('ending a session', () => {
-    it('ends the one its cookie ID belongs to, and no other of the same person', async () => {
+    it('ends the one its cookie ID belongs to, and no other of the same person, saying whose it was', async () => {
       const { userId, sessions } = await setUp();
       const ended = await sessions.open(app, userId, evidence);
       const kept = await sessions.open(app, userId, evidence);
 
-      expect(await sessions.end(app, ended.cookie)).toBe(true);
+      expect(await sessions.end(app, ended.cookie)).toBe(userId);
       expect(await sessions.use(app, ended.cookie)).toBeUndefined();
       expect(await rowOf(ended.sessionId)).toBeUndefined();
       expect(await sessions.use(app, kept.cookie)).toMatchObject({ sessionId: kept.sessionId });
@@ -246,11 +246,11 @@ describe(`the console's sessions (Postgres ${server.version})`, () => {
       const { sessionId, cookie } = await sessions.open(app, userId, evidence);
       clock.advanceBy(ABSOLUTE * SECOND);
 
-      expect(await sessions.end(app, cookie)).toBe(true);
+      expect(await sessions.end(app, cookie)).toBe(userId);
       expect(await rowOf(sessionId)).toBeUndefined();
-      expect(await sessions.end(app, cookie)).toBe(false);
-      expect(await sessions.end(app, 'not a cookie')).toBe(false);
-      expect(await sessions.end(app, undefined as unknown as string)).toBe(false);
+      expect(await sessions.end(app, cookie)).toBeUndefined();
+      expect(await sessions.end(app, 'not a cookie')).toBeUndefined();
+      expect(await sessions.end(app, undefined as unknown as string)).toBeUndefined();
     });
   });
 

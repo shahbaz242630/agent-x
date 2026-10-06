@@ -28,6 +28,7 @@ import { type AuditTables, createAuditTrail, holdOrganisation } from '@agentx/co
 import { type DirectoryTables, listedOrganizations } from '@agentx/core/modules/directory';
 import {
   createLoginFlows,
+  createLoginSessions,
   createOidcClient,
   createSessions,
   createSignIn,
@@ -45,6 +46,7 @@ import {
   createStepUpChallenges,
   type IdentityTables,
   type LoginFlows,
+  type LoginSessions,
   membersFor,
   activeContactsFor,
   countingContactsFor,
@@ -198,6 +200,22 @@ function signInFrom(
     ids: uuidV7Ids,
     clock: systemClock,
     keys,
+  });
+}
+
+/**
+ * Where a sign-out ends the person's sessions at the login service too
+ * (Shannon AUTH-VULN-01, S88): with the reset token, whose role may end them;
+ * off without it.
+ */
+function loginSessionsFrom(config: Config): LoginSessions | undefined {
+  const { signIn, factorResets } = config;
+  if (signIn === undefined || factorResets === undefined) return undefined;
+  return createLoginSessions({
+    issuer: signIn.issuer,
+    internalOrigin: signIn.internalOrigin,
+    token: factorResets.token,
+    fetch: createOutboundFetch(config.outbound.allowedOrigins),
   });
 }
 
@@ -397,7 +415,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     logger,
     ids: uuidV7Ids,
     healthChecks: [],
-    signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: config.sessions.absoluteSeconds },
+    signIn:
+      signIn === undefined
+        ? undefined
+        : {
+            service: signIn,
+            sessionSeconds: config.sessions.absoluteSeconds,
+            loginSessions: loginSessionsFrom(config),
+          },
     securityEvents: recorder,
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),

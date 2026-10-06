@@ -26,6 +26,7 @@ import type {
   InvitationWrites,
   HoldClearings,
   HoldInvestigations,
+  LoginSessions,
   MembershipChanges,
   RemovalRestriction,
   ResetChanges,
@@ -87,8 +88,18 @@ export interface ServerOptions {
   readonly logger: Logger;
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
-  /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
-  readonly signIn?: { readonly service: SignIn; readonly sessionSeconds: number } | undefined;
+  /**
+   * The console's sign-in (sign-in.ts), how long its sessions may live, and
+   * where a sign-out ends the person's sessions at the login service (none
+   * when not given); off when not given.
+   */
+  readonly signIn?:
+    | {
+        readonly service: SignIn;
+        readonly sessionSeconds: number;
+        readonly loginSessions?: LoginSessions | undefined;
+      }
+    | undefined;
   /** Where failed sign-ins and rate-limit hits are noted (security-recorder.ts); nowhere when not given. */
   readonly securityEvents?: SecurityEventSink | undefined;
   /** Reads a person's membership of an organisation (access.ts); without it, no one holds a role. */
@@ -289,6 +300,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerSignIn(app, {
     signIn: options.signIn?.service,
     sessionSeconds: options.signIn?.sessionSeconds ?? 0,
+    loginSessions: options.signIn?.loginSessions,
     logger,
     securityEvents,
   });

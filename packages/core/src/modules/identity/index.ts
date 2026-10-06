@@ -71,6 +71,7 @@ export {
   type SecondFactorRemover,
 } from './infrastructure/idp-factors.ts';
 export { createLoginFlows, LOGIN_FLOW_SECONDS, type LoginFlows } from './infrastructure/login-flows.ts';
+export { createLoginSessions, type LoginSessions, LoginSessionsUnavailable } from './infrastructure/login-sessions.ts';
 export {
   createSessions,
   LONGEST_IDLE_SECONDS,

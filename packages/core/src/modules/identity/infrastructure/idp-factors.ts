@@ -3,7 +3,9 @@
 // does once its cooling-off has passed. Zitadel's user API (v2), asked with
 // the token of a service user of its own holding the organisation's Org User
 // Manager role (partner, S57: no built-in role removes factors without being
-// able to delete users; this token is used for nothing else).
+// able to delete users). The same token reads passkeys (#269) and ends a
+// person's sessions at sign-out (login-sessions.ts; partner, S88: one token,
+// as the role already allows both).
 //
 // - Every second factor the person has, ready or not: app codes (TOTP), SMS
 //   and email codes, security keys (U2F) and passkeys, each by its own call,

@@ -11,8 +11,10 @@ import { type Browser, type BrowserContext, chromium, type Cookie, type Page } f
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
-import { adminQuery as sql, API_ORIGIN, serviceLogs } from './compose.ts';
+import { resetToken } from './api-sign-in.ts';
+import { adminQuery as sql, API_ORIGIN, LOGIN_ORIGIN, serviceLogs } from './compose.ts';
 import { loginDriver, where } from './login-pages.ts';
+import { zitadelClient } from './zitadel.ts';
 
 const { password, users, api } = inject('e2e');
 const user = users.signIn;
@@ -48,6 +50,23 @@ const sessions = async (): Promise<{ count: number; amr: string[] }> => {
       .filter((method) => method !== '')
       .sort(),
   };
+};
+
+/**
+ * How many sessions the login service holds for the person, read as the API
+ * reads them (with the reset token). Zitadel's search reads a projection that
+ * can trail an ending by a moment, so with `until` it reads again, for up to
+ * five seconds, until the count is what is waited for.
+ */
+const loginServiceSessions = async (until?: (count: number) => boolean): Promise<number> => {
+  const zitadel = zitadelClient(LOGIN_ORIGIN, resetToken());
+  for (let read = 1; ; read += 1) {
+    const { sessions = [] } = await zitadel.post<{ sessions?: unknown[] }>('/v2/sessions/search', {
+      queries: [{ userIdQuery: { id: subject() } }],
+    });
+    if (until === undefined || until(sessions.length) || read === 10) return sessions.length;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
 };
 
 /** The API's log events, in order. */
@@ -164,12 +183,15 @@ describe('SEC-HA-07 a sign-in through the API, in a real browser', () => {
     expect(idleEnds).toBeLessThanOrEqual(Date.parse(String(answer.body.expiresAt)));
   });
 
-  it('signs out: the session ends and the cookie is cleared', async () => {
+  it("signs out: the session ends, the cookie is cleared, and so are the person's sessions at the login service (S88)", async () => {
+    // Each sign-in so far left one there (`prompt=login`).
+    expect(await loginServiceSessions()).toBeGreaterThan(0);
     const status = await page.evaluate(async () => (await fetch('/v1/auth/sign-out', { method: 'POST' })).status);
     expect(status).toBe(200);
     expect(cookieNamed(await context.cookies(API_ORIGIN), SESSION_COOKIE)).toBeUndefined();
     expect((await sessions()).count).toBe(0);
-    expect(await apiEvents()).toContain('auth.signed_out');
+    expect(await apiEvents()).toEqual(expect.arrayContaining(['auth.signed_out', 'auth.login_service_signed_out']));
+    expect(await loginServiceSessions((count) => count === 0)).toBe(0);
   });
 
   it('B2-4b then refuses the same request as UNAUTHENTICATED, with the challenge that says how to sign in', async () => {

@@ -39,7 +39,9 @@
 //   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
 //   browser would bring no session back and every step-up would fail.
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
-//   something, so the Origin rule holds it (SEC-WEB-01).
+//   something, so the Origin rule holds it (SEC-WEB-01). Then it ends the
+//   person's sessions at the login service too (Shannon AUTH-VULN-01, S88),
+//   where it may: one it couldn't end is logged, and the sign-out stands.
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
 //   session: when and how they signed in, and when it ends. The access hook
 //   has found it (access.ts); anyone else gets its 401.
@@ -50,6 +52,7 @@
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
 import {
+  type LoginSessions,
   RETURN_PATH,
   type SignIn,
   SignInFailed,
@@ -79,6 +82,8 @@ export interface SignInRoutesOptions {
   readonly signIn: SignIn | undefined;
   /** How long the session cookie lasts: the session's absolute timeout. */
   readonly sessionSeconds: number;
+  /** Where a sign-out ends the person's sessions at the login service; nowhere when not given. */
+  readonly loginSessions?: LoginSessions | undefined;
   readonly logger: Logger;
   /** Where each failed sign-in is noted. */
   readonly securityEvents: SecurityEventSink;
@@ -187,7 +192,7 @@ type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete
 
 export function registerSignIn(
   app: FastifyInstance,
-  { signIn, sessionSeconds, logger, securityEvents }: SignInRoutesOptions,
+  { signIn, sessionSeconds, loginSessions, logger, securityEvents }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
@@ -319,8 +324,22 @@ export function registerSignIn(
     { schema: SIGN_OUT_SCHEMA, config: PUBLIC, bodyLimit: SIGN_OUT_BODY_LIMIT },
     async (request, reply) => {
       if (signIn === undefined) return off(request, reply);
-      const ended = await signIn.signOut(cookieValue(request.headers.cookie, SESSION_COOKIE));
-      if (ended) logger.child({ correlationId: request.id }).info('auth.signed_out');
+      const who = await signIn.signOut(cookieValue(request.headers.cookie, SESSION_COOKIE));
+      if (who !== undefined) {
+        const log = logger.child({ correlationId: request.id });
+        log.info('auth.signed_out');
+        if (loginSessions !== undefined) {
+          try {
+            log.info('auth.login_service_signed_out', { ended: await loginSessions.endAll(who.subject) });
+          } catch (error) {
+            // Ours is ended either way, and Agent X never reuses theirs; an error, as a security control
+            // failed (a reset token that stopped working shows here first).
+            log.error('auth.login_service_sign_out_failed', {
+              reason: error instanceof Error ? error.message : 'unknown',
+            });
+          }
+        }
+      }
       return reply
         .code(200)
         .header('set-cookie', cookie(SESSION_COOKIE, '', 'Strict', 0))

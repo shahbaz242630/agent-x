@@ -39,7 +39,7 @@ import { limitStatements } from '@agentx/platform/db';
 import { type Kysely } from 'kysely';
 
 import type { Clock, IdGenerator } from '../../../shared-kernel/index.ts';
-import { HOME_PATH, isReturnPath } from '../domain/sign-in.ts';
+import { HOME_PATH, isReturnPath, type Subject } from '../domain/sign-in.ts';
 import { earliestAuthTime, type StepUpRefusal, stepUpRefusal } from '../domain/step-up.ts';
 import type { LoginFlows } from './login-flows.ts';
 import { type LoginFlow, type OidcClient, SignInFailed, type SignInFailure } from './oidc-client.ts';
@@ -47,7 +47,7 @@ import { recordSessionEmail } from './session-emails.ts';
 import type { LiveSession, Sessions } from './sessions.ts';
 import type { StepUpChallenges } from './step-up-challenges.ts';
 import type { IdentityTables } from './tables.ts';
-import { userForSubject, userOfSubject } from './users.ts';
+import { subjectOfUser, userForSubject, userOfSubject } from './users.ts';
 
 export interface SignInBegun {
   /** The login service's address to send the browser to. */
@@ -109,8 +109,8 @@ export interface SignIn {
   beginStepUp(sessionId: string, challengeId: string, returnTo?: string): Promise<SignInBegun>;
   /** Finishes the sign-in or step-up the flow cookie names. Throws SignInFailed, or StepUpFailed for a step-up. */
   complete(input: CallbackInput): Promise<SignInCompleted>;
-  /** Ends the session this cookie belongs to, if any; true if there was one. */
-  signOut(cookie: string | undefined): Promise<boolean>;
+  /** Ends the session this cookie belongs to, if any; who it was, as they sign in, undefined if there was none. */
+  signOut(cookie: string | undefined): Promise<Subject | undefined>;
   /** The live session this cookie belongs to, its last use moved on; undefined if there is none. */
   signedIn(cookie: string): Promise<LiveSession | undefined>;
 }
@@ -230,7 +230,11 @@ export function createSignIn({
     },
 
     signOut(cookie) {
-      return cookie === undefined ? Promise.resolve(false) : limited((tx) => sessions.end(tx, cookie));
+      if (cookie === undefined) return Promise.resolve(undefined);
+      return limited(async (tx) => {
+        const userId = await sessions.end(tx, cookie);
+        return userId === undefined ? undefined : subjectOfUser(tx, userId);
+      });
     },
 
     signedIn(cookie) {
