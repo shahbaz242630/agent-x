@@ -58,6 +58,8 @@ describe('at start-up', () => {
       statusGuardedTables: statuses,
       // And the made-once guard on each whose rows are made once (E1-1's review).
       madeOnceTables: ['mandates.versions', 'suppliers.supplier_versions'],
+      // And the fixed-at-creation guard on each with columns fixed when made (Phase 2 B1).
+      fixedAtCreation: { 'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'] },
     });
   });
 

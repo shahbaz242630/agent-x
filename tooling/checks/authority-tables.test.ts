@@ -183,6 +183,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         subject: mandates.MANDATES.subject,
         fields: mandates.MANDATES.fields,
         status: mandates.MANDATE,
+        fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
         statusConditions: ['a_status_on_its_versions'],
       },
       // A version is made once and never moved, as a supplier's.

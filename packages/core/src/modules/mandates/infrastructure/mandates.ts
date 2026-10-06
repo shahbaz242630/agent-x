@@ -1,13 +1,8 @@
-// Mandates and their versions (0034). Both are authority tables (ADR-012 §2),
-// so a mandate's agent, time zone, split window, status, version in force
-// with its acceptance, and waiting draft, and everything a version says (its
-// mandate and number, purpose, currency, limits, allow-list, source, split
-// check, consent-limits setting, end, terms hash, and who drafted it and
-// when) must equal the row's latest signed event, and every read goes through
-// the audit module's verifiedState with the descriptions below. Both are on
-// the product's authority-table list (packages/core/src/authority-tables.ts),
-// at the mandate's level in the lock order (ADR-006 §6: 4), the mandate
-// before its versions.
+// Mandates and their versions (0034). Both are authority tables (ADR-012 §2):
+// every sealed field below must equal the row's latest signed event, and every
+// read goes through the audit module's verifiedState with these descriptions.
+// On the product's authority-table list at the mandate's level in the lock
+// order (ADR-006 §6: 4), the mandate before its versions.
 //
 // The steps that add, accept and move them come with their use cases (B2–B4).
 import type { SignedStateTable } from '@agentx/platform/db';
@@ -29,10 +24,14 @@ export const MANDATES = {
     { column: 'accepted_at', type: 'timestamptz' },
   ],
   rules: MANDATE,
-  // A live or ended mandate has a version in force; one waiting has one to accept (0034): CI's A3c allows this one check over the status with other columns.
+  // Fixed when the mandate is made (SEC-LIM-08): 0034's `fixed_at_creation` refuses any change after.
+  fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
+  // Live or ended with a version in force, waiting with one to accept (0034): CI's A3c
+  // allows this one check over the status with other columns.
   statusConditions: ['a_status_on_its_versions'],
 } as const satisfies SignedStateTable & {
   readonly rules: typeof MANDATE;
+  readonly fixedAtCreation: readonly string[];
   readonly statusConditions: readonly string[];
 };
 

@@ -56,6 +56,20 @@ const MADE_ONCE_FUNCTION_SQL =
   )?.[0] ?? '';
 const MADE_ONCE_BODY_HASH = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
 
+/** 0034's fixed-at-creation guard, read from the migration in the same way, and the hash schema-guard.ts holds its body to. */
+const FIXED_FUNCTION_SQL =
+  /CREATE OR REPLACE FUNCTION state_rules\.guard_fixed\(\)[\s\S]*?\$\$;/.exec(
+    readFileSync(new URL('../../../../db/migrations/0034_mandates.sql', import.meta.url), 'utf8').replace(
+      'CREATE FUNCTION state_rules.guard_fixed()',
+      'CREATE OR REPLACE FUNCTION state_rules.guard_fixed()',
+    ),
+  )?.[0] ?? '';
+const FIXED_BODY_HASH = '298c20463a182d9e3fb5a34f60e118c23ea5f6ad2dc4dafb2a189b4d9457278f';
+/** A mandate's columns fixed when it is made, as the authority list names them (Phase 2 B1). */
+const FIXED_AT_CREATION = { 'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'] } as const;
+const MANDATE_FIXED_TRIGGER = `create trigger fixed_at_creation before update on mandates.mandates for each row
+  execute function state_rules.guard_fixed('agent_id', 'time_zone', 'split_window_hours')`;
+
 const problems = async (): Promise<string[]> => liveSchemaProblems(app, ROLES);
 
 beforeAll(async () => {
@@ -151,6 +165,134 @@ describe('the made-once guard function (0032, E1-1’s review)', () => {
       await owner.query(MADE_ONCE_FUNCTION_SQL);
     }
     expect((await read())[0]?.body).toBe(MADE_ONCE_BODY_HASH);
+  });
+});
+
+describe('the fixed-at-creation guard (0034, Phase 2 B1)', () => {
+  const read = () =>
+    owner.query<{ body: string; config: string; definer: boolean }>(
+      `select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc, 'UTF8')), 'hex') as body,
+              pg_catalog.array_to_string(p.proconfig, ',') as config,
+              p.prosecdef as definer
+       from pg_catalog.pg_proc p
+       join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'state_rules' and p.proname = 'guard_fixed'`,
+    );
+  const listed = () => liveSchemaProblems(app, { ...ROLES, fixedAtCreation: FIXED_AT_CREATION });
+  const aboutIt = async () => (await listed()).filter((each) => each.includes('fixed_at_creation'));
+
+  it('is the body the migration wrote, pinned, and running with its caller’s rights', async () => {
+    const [fn] = await read();
+
+    expect(fn?.config).toBe('search_path=pg_catalog');
+    expect(fn?.definer).toBe(false);
+    expect(fn?.body).toBe(FIXED_BODY_HASH);
+  });
+
+  it('is seen replaced by one that lets every change through', async () => {
+    await owner.query(`create or replace function state_rules.guard_fixed() returns trigger
+      language plpgsql set search_path = pg_catalog as $$ begin return new; end; $$`);
+    try {
+      expect(await problems()).toContain('state_rules.guard_fixed is not the function the migration wrote');
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- 0034's own statement, read from the migration
+      await owner.query(FIXED_FUNCTION_SQL);
+    }
+    expect((await read())[0]?.body).toBe(FIXED_BODY_HASH);
+  });
+
+  it('holds a mandate as the migration built it, with nothing to say', async () => {
+    expect(await aboutIt()).toEqual([]);
+  });
+
+  it.each([
+    [
+      'dropped',
+      'drop trigger fixed_at_creation on mandates.mandates',
+      'mandates.mandates carries no fixed_at_creation',
+    ],
+    [
+      'switched off',
+      'alter table mandates.mandates disable trigger fixed_at_creation',
+      "mandates.mandates's fixed_at_creation is switched off",
+    ],
+    [
+      'handed fewer columns',
+      `drop trigger fixed_at_creation on mandates.mandates;
+       create trigger fixed_at_creation before update on mandates.mandates for each row
+         execute function state_rules.guard_fixed('agent_id', 'split_window_hours')`,
+      "mandates.mandates's fixed_at_creation is given other columns",
+    ],
+    [
+      'firing at other times',
+      `drop trigger fixed_at_creation on mandates.mandates;
+       create trigger fixed_at_creation after update on mandates.mandates for each row
+         execute function state_rules.guard_fixed('agent_id', 'time_zone', 'split_window_hours')`,
+      "mandates.mandates's fixed_at_creation fires at other times",
+    ],
+    [
+      'narrowed to some columns',
+      `drop trigger fixed_at_creation on mandates.mandates;
+       create trigger fixed_at_creation before update of agent_id on mandates.mandates for each row
+         execute function state_rules.guard_fixed('agent_id', 'time_zone', 'split_window_hours')`,
+      "mandates.mandates's fixed_at_creation fires on some columns only",
+    ],
+  ])('sees it %s', async (_case, tamper, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
+    await owner.query(tamper);
+    try {
+      expect(await aboutIt()).toEqual([problem]);
+    } finally {
+      await owner.query('drop trigger if exists fixed_at_creation on mandates.mandates');
+      await owner.query(MANDATE_FIXED_TRIGGER);
+    }
+    expect(await aboutIt()).toEqual([]);
+  });
+
+  it('refuses to guard a column the row does not have, or none at all, rather than holding nothing', async () => {
+    const write = async (guard: string) => {
+      const client = await database.connect('owner');
+      try {
+        await client.query('create temporary table fixed_probe (id int, state_event_id uuid, kept text)');
+        await client.query("insert into fixed_probe values (1, gen_random_uuid(), 'a')");
+        // eslint-disable-next-line agentx/no-string-built-sql -- one of the two fixed statements below
+        await client.query(guard);
+        return await client.query('update fixed_probe set id = 2');
+      } finally {
+        await client.end();
+      }
+    };
+    const refused: unknown = expect.objectContaining({ code: '09000' });
+
+    await expect(
+      write(`create trigger fixed_at_creation before update on fixed_probe for each row
+        execute function state_rules.guard_fixed('kept', 'nope')`),
+    ).rejects.toEqual(refused);
+    await expect(
+      write(`create trigger fixed_at_creation before update on fixed_probe for each row
+        execute function state_rules.guard_fixed()`),
+    ).rejects.toEqual(refused);
+  });
+
+  it('holds one on a table not listed to column names only', async () => {
+    await owner.query(
+      `create trigger fixed_at_creation before update on audit.events for each row
+         execute function state_rules.guard_fixed('org_id')`,
+    );
+    try {
+      expect(await aboutIt()).toEqual([]);
+    } finally {
+      await owner.query('drop trigger fixed_at_creation on audit.events');
+    }
+    await owner.query(
+      `create trigger fixed_at_creation before update on audit.events for each row
+         execute function state_rules.guard_fixed('org_id', 'X;')`,
+    );
+    try {
+      expect(await aboutIt()).toEqual(["audit.events's fixed_at_creation is given other columns"]);
+    } finally {
+      await owner.query('drop trigger fixed_at_creation on audit.events');
+    }
   });
 });
 

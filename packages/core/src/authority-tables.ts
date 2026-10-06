@@ -15,8 +15,8 @@ import type { SignedStateTable } from '@agentx/platform/db';
 
 import { AGENT_KEYS, AGENTS } from './modules/agents/index.ts';
 import { SOURCES } from './modules/funding-sources/index.ts';
-import { MANDATE_VERSIONS, MANDATES } from './modules/mandates/index.ts';
 import { FACTOR_RESETS, INVITATIONS, MEMBERSHIPS, REGISTERED_CONTACTS } from './modules/identity/index.ts';
+import { MANDATE_VERSIONS, MANDATES } from './modules/mandates/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 import { BENEFICIARY_REGISTRATIONS, SUPPLIER_VERSIONS, SUPPLIERS } from './modules/suppliers/index.ts';
 
@@ -37,6 +37,8 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly rules?: AuthorityStatusRules;
   /** Its rows are made once and never changed (a supplier's version): the made-once guard holds them (0032). */
   readonly madeOnce?: true;
+  /** Its columns fixed when a row is made (a mandate's agent, time zone and window): the fixed-at-creation guard holds them (0034). */
+  readonly fixedAtCreation?: readonly string[];
   /** The checks over its status with other columns its migration writes, by name, which CI's A3c allows it alone. */
   readonly statusConditions?: readonly string[];
 }

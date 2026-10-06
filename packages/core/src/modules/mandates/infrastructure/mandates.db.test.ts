@@ -12,6 +12,13 @@ import { type Insertable, sql, type Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import {
+  CONSENT_LIMITS,
+  DEFAULT_SPLIT_WINDOW_HOURS,
+  DEFAULT_TIME_ZONE,
+  MOST_ALLOWED_SUPPLIERS,
+  SPLIT_WINDOW_HOURS,
+} from '../domain/mandate.ts';
 import type { MandatesTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -42,8 +49,8 @@ const organisation = async (): Promise<Org> => {
   );
   await admin.query(
     `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
-     values ($1, $2, $3, 'fake', 'session-1', '2026-10-07T08:00:00Z', $4)`,
-    [org.id, link, randomUUID(), AT],
+     values ($1, $2, $3, 'fake', 'session-1', $5, $4)`,
+    [org.id, link, randomUUID(), AT, new Date(AT.getTime() + 86_400_000)],
   );
   await admin.query(
     `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
@@ -72,7 +79,7 @@ const versionRow = (org: Org, mandate: string, id: string, overrides: Partial<Ve
   supplier_ids: [randomUUID(), randomUUID()].sort().join(' '),
   funding_source_id: org.source,
   split_check: 'on',
-  consent_limits: 'strict',
+  consent_limits: CONSENT_LIMITS[0],
   ends_at: null,
   terms_hash: 'a'.repeat(64),
   drafted_by: randomUUID(),
@@ -85,8 +92,8 @@ const mandateRow = (org: Org, id: string, pending: string, overrides: Partial<Ma
   org_id: org.id,
   id,
   agent_id: org.agent,
-  time_zone: 'Asia/Dubai',
-  split_window_hours: 24,
+  time_zone: DEFAULT_TIME_ZONE,
+  split_window_hours: DEFAULT_SPLIT_WINDOW_HOURS,
   status: 'PENDING_ACCEPTANCE',
   pending_version_id: pending,
   created_at: AT,
@@ -211,6 +218,76 @@ describe('a mandate', () => {
     await expect(change(org, id, { status: 'ACTIVE' })).rejects.toEqual(refusedBy('status_guard'));
   });
 
+  it('expires only once live, suspended or not, and never comes back (status_guard)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const waiting = await drafted(org);
+    const [live, suspended] = [await accepted(org), await accepted(other)];
+    await change(other, suspended.id, { status: 'SUSPENDED' });
+
+    await expect(change(org, waiting.id, { status: 'EXPIRED' })).rejects.toEqual(refusedBy('status_guard'));
+    await expect(change(org, waiting.id, { status: 'SUSPENDED' })).rejects.toEqual(refusedBy('status_guard'));
+    await change(org, live.id, { status: 'EXPIRED' });
+    await change(other, suspended.id, { status: 'EXPIRED' });
+    await expect(change(org, live.id, { status: 'ACTIVE' })).rejects.toEqual(refusedBy('status_guard'));
+    await expect(change(org, live.id, { status: 'REVOKED' })).rejects.toEqual(refusedBy('status_guard'));
+  });
+
+  it('is superseded as B3 will: a new version accepted while live, the mandate staying ACTIVE', async () => {
+    const org = await organisation();
+    const { id, version } = await accepted(org);
+    const next = randomUUID();
+
+    await inOrg(org, async (tx) => {
+      await tx
+        .insertInto('mandates.versions')
+        .values(versionRow(org, id, next, { version: 2, monthly_limit_minor: 3_000_000n }))
+        .execute();
+      await tx.updateTable('mandates.mandates').set({ pending_version_id: next }).where('id', '=', id).execute();
+    });
+    await change(org, id, {
+      current_version_id: next,
+      pending_version_id: null,
+      accepted_by: randomUUID(),
+      accepted_at: AT,
+    });
+
+    expect(
+      await inOrg(org, (tx) =>
+        tx.selectFrom('mandates.mandates').select(['status', 'current_version_id']).where('id', '=', id).execute(),
+      ),
+    ).toEqual([{ status: 'ACTIVE', current_version_id: next }]);
+    // The version it replaced is still there, unchanged: SUPERSEDED by being no longer current.
+    expect(
+      await inOrg(org, (tx) =>
+        tx.selectFrom('mandates.versions').select('version').where('id', '=', version).execute(),
+      ),
+    ).toEqual([{ version: 1 }]);
+  });
+
+  it('never waits on the version already in force (pending_is_not_current)', async () => {
+    const org = await organisation();
+    const { id, version } = await accepted(org);
+
+    await expect(change(org, id, { pending_version_id: version })).rejects.toEqual(refusedBy('pending_is_not_current'));
+  });
+
+  it('keeps its agent, time zone and window once sealed, while the rest moves on (fixed_at_creation)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const { id } = await accepted(org);
+    // Before its first signed state, the audit module's record writes them.
+    await change(org, id, { time_zone: 'Asia/Dubai', split_window_hours: 24 });
+    await change(org, id, { state_event_id: randomUUID() });
+
+    for (const values of [
+      { time_zone: 'Pacific/Kiritimati' },
+      { split_window_hours: 1 },
+      { agent_id: other.agent },
+    ] satisfies Updateable<MandatesTables['mandates.mandates']>[]) {
+      await expect(change(org, id, values)).rejects.toEqual(refusedBy('fixed_at_creation'));
+    }
+    await change(org, id, { status: 'SUSPENDED' });
+  });
+
   it('is live or expired only with a version in force (a_status_on_its_versions)', async () => {
     const org = await organisation();
     const { id } = await drafted(org);
@@ -252,9 +329,7 @@ describe('a mandate', () => {
     const org = await organisation();
     const first = await accepted(org);
 
-    await expect(accepted(org)).rejects.toEqual(
-      expect.objectContaining({ code: '23505', constraint: 'one_live_mandate_an_agent' }),
-    );
+    await expect(accepted(org)).rejects.toEqual(refusedBy('one_live_mandate_an_agent'));
     await change(org, first.id, { status: 'SUSPENDED' });
     await expect(accepted(org)).rejects.toEqual(refusedBy('one_live_mandate_an_agent'));
     await change(org, first.id, { status: 'REVOKED' });
@@ -273,14 +348,14 @@ describe('a mandate', () => {
   it('keeps its time zone and window within bounds', async () => {
     const org = await organisation();
 
-    for (const overrides of [
-      { split_window_hours: 0 },
-      { split_window_hours: 745 },
-      { time_zone: '+04:00' },
-    ] satisfies Partial<MandateRow>[]) {
+    for (const [overrides, constraint] of [
+      [{ split_window_hours: SPLIT_WINDOW_HOURS.least - 1 }, 'mandates_split_window_hours_check'],
+      [{ split_window_hours: SPLIT_WINDOW_HOURS.most + 1 }, 'mandates_split_window_hours_check'],
+      [{ time_zone: '+04:00' }, 'mandates_time_zone_check'],
+    ] satisfies [Partial<MandateRow>, string][]) {
       const [id, version] = [randomUUID(), randomUUID()];
       await expect(add(org, mandateRow(org, id, version, overrides), versionRow(org, id, version))).rejects.toEqual(
-        expect.objectContaining({ code: '23514' }),
+        refusedBy(constraint),
       );
     }
   });
@@ -312,7 +387,7 @@ describe('a mandate version', () => {
 
   it('names up to 100 suppliers, as lower-case IDs one space apart', async () => {
     const org = await organisation();
-    const hundred = Array.from({ length: 100 }, () => randomUUID()).sort();
+    const hundred = Array.from({ length: MOST_ALLOWED_SUPPLIERS }, () => randomUUID()).sort();
 
     await drafted(org, { supplier_ids: hundred.join(' ') });
     for (const list of [
