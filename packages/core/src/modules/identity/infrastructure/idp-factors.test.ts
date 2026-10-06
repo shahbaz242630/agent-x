@@ -385,15 +385,18 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
 });
 
 describe('counting a person’s second factors (the S68 audit; F1’s first-passkey rule)', () => {
-  it('counts every kind ready to use, recovery codes as one, and nothing not ready or removed', async () => {
+  const KEY = { keys: 1, others: 0 };
+  const OTHER = { keys: 0, others: 1 };
+
+  it('counts keys apart from every other kind ready to use, recovery codes as one, nothing not ready or removed', async () => {
     const person = everyKind();
     person.factors.push({ state: 'AUTH_FACTOR_STATE_NOT_READY', u2f: { id: '312000000000000102', name: 'new' } });
     person.passkeys.push({ id: '312000000000000202', state: 'AUTH_FACTOR_STATE_REMOVED' });
     person.passkeys.push({ id: '312000000000000203', state: READY });
     const { fetch, asked } = zitadel(person);
 
-    // An app code, an SMS code and a key (the email code isn't ready), two passkeys, the recovery codes.
-    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(6);
+    // A key and two passkeys; an app code, an SMS code (the email code isn't ready) and the recovery codes.
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toEqual({ keys: 3, others: 3 });
     expect(asked.map(({ method, url }) => `${method} ${url}`)).toEqual([
       `POST ${USER}/authentication_factors/_search`,
       `POST ${USER}/passkeys/_search`,
@@ -404,29 +407,29 @@ describe('counting a person’s second factors (the S68 audit; F1’s first-pass
   });
 
   it.each([
-    ['an app code', { factors: [{ state: READY, otp: {} }], passkeys: [], methods: [] }],
-    ['an SMS code', { factors: [{ state: READY, otpSms: {} }], passkeys: [], methods: [] }],
-    ['an email code', { factors: [{ state: READY, otpEmail: {} }], passkeys: [], methods: [] }],
-    ['a security key', { factors: [{ state: READY, u2f: { id: '1' } }], passkeys: [], methods: [] }],
-    ['a passkey', { factors: [], passkeys: [{ id: '1', state: READY }], methods: [] }],
-    ['recovery codes', { factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE'] }],
-  ])('counts one for a person with %s alone', async (_what, person: Person) => {
+    ['an app code', { factors: [{ state: READY, otp: {} }], passkeys: [], methods: [] }, OTHER],
+    ['an SMS code', { factors: [{ state: READY, otpSms: {} }], passkeys: [], methods: [] }, OTHER],
+    ['an email code', { factors: [{ state: READY, otpEmail: {} }], passkeys: [], methods: [] }, OTHER],
+    ['a security key', { factors: [{ state: READY, u2f: { id: '1' } }], passkeys: [], methods: [] }, KEY],
+    ['a passkey', { factors: [], passkeys: [{ id: '1', state: READY }], methods: [] }, KEY],
+    ['recovery codes', { factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE'] }, OTHER],
+  ])('counts one for a person with %s alone', async (_what, person: Person, held) => {
     const { fetch } = zitadel(person);
 
-    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(1);
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toEqual(held);
   });
 
   it('counts none for a person with a password alone', async () => {
     const { fetch } = zitadel({ factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_PASSWORD'] });
 
-    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(0);
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toEqual({ keys: 0, others: 0 });
   });
 
   it('counts a list of 100, the most it reads', async () => {
     const passkeys = Array.from({ length: 100 }, (_, index) => ({ id: String(index + 1), state: READY }));
     const { fetch } = zitadel({ factors: [], passkeys, methods: [] });
 
-    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(100);
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toEqual({ keys: 100, others: 0 });
   });
 
   it.each([
@@ -451,6 +454,11 @@ describe('counting a person’s second factors (the S68 audit; F1’s first-pass
       'a method it doesn’t know',
       { factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_NEW'] },
       'a method is not one the login service names',
+    ],
+    [
+      'a factor of a state it doesn’t know',
+      { factors: [{ state: 'NEW', otp: {} }], passkeys: [], methods: [] },
+      'a factor has no state we know',
     ],
     [
       'a passkey of a state it doesn’t know',

@@ -514,7 +514,7 @@ export function inviteFirstAdmin(request: FirstAdminArguments, steps: JobSteps):
       made: 'operator.first_admin_invited',
       sayMade: () => {
         steps.say(
-          `Invited the first admin of ${request.orgId} (invitation ${id}). Send them this link, shown this once and kept nowhere. It works for 72 hours, signed in with the invited address:\n${value}/invitations/accept#token=${token}\nTell them to register a passkey as their first second factor: a passkey added after an app code holds back an admin's powers for 7 days.`,
+          `Invited the first admin of ${request.orgId} (invitation ${id}). Send them this link, shown this once and kept nowhere. It works for 72 hours, signed in with the invited address:\n${value}/invitations/accept#token=${token}\nTell them to register a passkey as their first second factor: a passkey added after any other second factor holds back an admin's powers for 7 days.`,
         );
       },
       doneBeforeNote:

@@ -73,7 +73,7 @@ describe('SEC-OPS-02 the login service’s events copied as the API runs it (B6-
     expect(copierWith(EMAIL).copier).toBeDefined();
   });
 
-  it('reads how many keys a person holds with the reset token when the config names it (the S68 audit)', () => {
+  it('reads the second factors a person holds with the reset token when the config names it (the S68 audit)', () => {
     // Plain words, built at run time, as every stand-in for a secret here.
     const withResets = { ...EMAIL, AGENTX_FACTOR_RESET_TOKEN: ['reset', 'words'].join('-') };
 

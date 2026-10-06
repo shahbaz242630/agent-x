@@ -48,19 +48,20 @@
 //   transaction, before anything else is locked (ADR-006 §6 level 0b).
 // - A security key or passkey added counts toward B6-3d's restriction, 7
 //   days without an admin's or approver's powers (`counts: 'yes'` on the
-//   platform chain's record), when the person now holds two or more second
-//   factors of any kind, or had one of any kind removed in the 7 days
-//   before: so a phished session can't enrol its own key and pass the
+//   platform chain's record), unless it is the person's first second factor
+//   of all: so a phished session can't enrol its own key and pass the
 //   passkey rule at once, whether the person held a key or an app code
-//   alone (F1's first-passkey review), nor remove the person's factor first
-//   and add its own. Only a key that is the person's first second factor of
-//   all doesn't count. When the count can't be read (no reset token set, or
-//   the login service's answer can't be judged), it counts: the rule fails
-//   closed.
-// - A security key or passkey removed, even by the person, counts too when a
-//   key was added in the 7 days before (the S68 review): adding one's own key
-//   and then removing the person's, within one run, leaves one key when the
-//   addition is judged, so the removal is what shows the swap.
+//   alone (F1's first-passkey review). It counts when the person now holds
+//   another factor of any kind or a second key, or holds no key at all (the
+//   login service's lists trail the event: fails closed), or had a factor
+//   of any kind removed in the 7 days before (removing the person's first,
+//   then adding one's own). When the factors can't be read (no reset token
+//   set, or an answer that can't be judged), it counts: fails closed.
+// - A second factor of any kind removed, even by the person, counts too when
+//   a key was added in the 7 days before (the S68 review; F1's for an app
+//   code): adding one's own key and then removing the person's factor,
+//   within one run, leaves the new key alone when the addition is judged, so
+//   the removal is what shows the swap.
 //
 // Impersonation (which the stack never turns on) is logged as an error;
 // rights given in the login service, and tokens issued, as warnings. A run
@@ -86,7 +87,6 @@ import {
   endsSessions,
   isToldToThePerson,
   PASSKEY_ADDED_EVENTS,
-  PASSKEY_REMOVED_EVENTS,
   SECOND_FACTOR_REMOVED_EVENTS,
 } from '../domain/idp-event.ts';
 import { restrictedUntil } from '../domain/removal-restriction.ts';
@@ -162,8 +162,8 @@ export function createIdpEventCopier({
   const trail = createAuditTrail({ keys, ids });
   const platform = createPlatformChain({ keys, ids });
 
-  /** Whether a key event of one of `types` was copied for the person in the 7 days before `event`. */
-  const keyEventWithinWeek = async (event: IdpEvent, person: string, types: readonly string[]): Promise<boolean> => {
+  /** Whether an event of one of `types` was copied for the person in the 7 days before `event`. */
+  const copiedWithinWeek = async (event: IdpEvent, person: string, types: readonly string[]): Promise<boolean> => {
     const at = await latestPlatformTimeOf(database, 'at', [
       { action: IDP_EVENT_COPIED, facts: { person }, oneOf: { type: types } },
     ]);
@@ -171,15 +171,16 @@ export function createIdpEventCopier({
   };
 
   /**
-   * Whether a key added counts toward the restriction: the person holds two
-   * or more second factors now, or had one removed in the 7 days before;
-   * and when that can't be read, it counts.
+   * Whether a key added counts toward the restriction: unless the person
+   * holds it alone, as above; and when that can't be read, it counts.
    */
   const keyAddedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
-    if (await keyEventWithinWeek(event, person, SECOND_FACTOR_REMOVED_EVENTS)) return true;
+    if (await copiedWithinWeek(event, person, SECOND_FACTOR_REMOVED_EVENTS)) return true;
     if (factors === undefined) return true;
     try {
-      return (await factors.secondFactorsHeld(event.aggregateId)) >= 2;
+      const held = await factors.secondFactorsHeld(event.aggregateId);
+      // No key listed: the lists trail the event that added one, so what else is held isn't known.
+      return held.others > 0 || held.keys !== 1;
     } catch (error) {
       logger.warn('idp_events.keys_unread', { err: error });
       return true;
@@ -187,18 +188,18 @@ export function createIdpEventCopier({
   };
 
   /**
-   * Whether a key removed counts toward the restriction, whoever removed it:
-   * a key was added in the 7 days before (a swap of the person's key for
-   * another's). The addition is copied first, as the feed gives events in
+   * Whether a second factor removed counts toward the restriction, whoever
+   * removed it: a key was added in the 7 days before (a swap of the person's
+   * factor for another's key). The addition is copied first, as the feed gives events in
    * time order.
    */
-  const keyRemovedCounts = (event: IdpEvent, person: string): Promise<boolean> =>
-    keyEventWithinWeek(event, person, PASSKEY_ADDED_EVENTS);
+  const removalCounts = (event: IdpEvent, person: string): Promise<boolean> =>
+    copiedWithinWeek(event, person, PASSKEY_ADDED_EVENTS);
 
-  /** Whether the event counts toward the restriction: a key added or removed, as above; nothing else. */
+  /** Whether the event counts toward the restriction: a key added or a factor removed, as above; nothing else. */
   const counted = (event: IdpEvent, person: string): Promise<boolean> | boolean => {
     if (PASSKEY_ADDED_EVENTS.includes(event.type)) return keyAddedCounts(event, person);
-    if (PASSKEY_REMOVED_EVENTS.includes(event.type)) return keyRemovedCounts(event, person);
+    if (SECOND_FACTOR_REMOVED_EVENTS.includes(event.type)) return removalCounts(event, person);
     return false;
   };
 
