@@ -3,7 +3,7 @@
 // does once its cooling-off has passed. Zitadel's user API (v2), asked with
 // the token of a service user of its own holding the organisation's Org User
 // Manager role (partner, S57: no built-in role removes factors without being
-// able to delete users). The same token reads passkeys (#269) and ends a
+// able to delete users). The same token reads the second factors held (#269) and ends a
 // person's sessions at sign-out (login-sessions.ts; partner, S88: one token,
 // as the role already allows both).
 //
@@ -21,6 +21,7 @@
 //   sign-in (`routedToIssuer`), and the outbound fetch's allowlist. Each
 //   answer is read strictly and bounded; anything else throws
 //   IdpFactorsUnavailable, naming the step, never the answer.
+import { field, ZITADEL_ID } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
@@ -45,9 +46,6 @@ const sleep = (ms: number) =>
 
 /** The most factors, or passkeys, one person may have that a removal reads. */
 const MOST_FACTORS = 100;
-
-/** A subject, and a factor's ID, as Zitadel makes them: digits. */
-const ZITADEL_ID = /^[0-9]{1,32}$/;
 
 /** The methods that aren't second factors, which a removal leaves. */
 const NOT_SECOND_FACTORS: ReadonlySet<string> = new Set([
@@ -110,11 +108,6 @@ export interface SecondFactorRemover {
    */
   removeAll(subject: string): Promise<number>;
 }
-
-type Answer = Readonly<Record<string, unknown>>;
-
-const field = (value: unknown, name: string): unknown =>
-  typeof value === 'object' && value !== null ? (value as Answer)[name] : undefined;
 
 /** An answer's list, empty when Zitadel leaves it out (as it does an empty one); anything else throws. */
 function listIn(answer: unknown, name: string, step: string): readonly unknown[] {

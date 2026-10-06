@@ -58,6 +58,7 @@ import {
   SignInFailed,
   type SignInFailure,
   StepUpFailed,
+  type Subject,
 } from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -204,6 +205,20 @@ export function registerSignIn(
     return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
   };
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  /**
+   * Ends the person's sessions at the login service, where it may. Ours is
+   * ended either way, and Agent X never reuses theirs, so a failure doesn't
+   * undo the sign-out; it is an error, as a security control failed (a reset
+   * token that stopped working shows here first).
+   */
+  const endLoginSessions = async (log: Logger, who: Subject) => {
+    if (loginSessions === undefined) return;
+    try {
+      log.info('auth.login_service_signed_out', { ended: await loginSessions.endAll(who) });
+    } catch (error) {
+      log.error('auth.login_service_sign_out_failed', { reason: error instanceof Error ? error.message : 'unknown' });
+    }
+  };
   /** The login service couldn't be reached: logged, and answered 503 to try again; no security event, as the caller did nothing wrong. */
   const unavailable = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
     logger.child({ correlationId: request.id }).warn('auth.sign_in_unavailable', { reason });
@@ -328,17 +343,7 @@ export function registerSignIn(
       if (who !== undefined) {
         const log = logger.child({ correlationId: request.id });
         log.info('auth.signed_out');
-        if (loginSessions !== undefined) {
-          try {
-            log.info('auth.login_service_signed_out', { ended: await loginSessions.endAll(who.subject) });
-          } catch (error) {
-            // Ours is ended either way, and Agent X never reuses theirs; an error, as a security control
-            // failed (a reset token that stopped working shows here first).
-            log.error('auth.login_service_sign_out_failed', {
-              reason: error instanceof Error ? error.message : 'unknown',
-            });
-          }
-        }
+        await endLoginSessions(log, who);
       }
       return reply
         .code(200)

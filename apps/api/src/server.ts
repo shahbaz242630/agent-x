@@ -88,15 +88,12 @@ export interface ServerOptions {
   readonly logger: Logger;
   readonly ids: IdGenerator;
   readonly healthChecks: readonly HealthCheck[];
-  /**
-   * The console's sign-in (sign-in.ts), how long its sessions may live, and
-   * where a sign-out ends the person's sessions at the login service (none
-   * when not given); off when not given.
-   */
+  /** The console's sign-in (sign-in.ts), and how long its sessions may live; off when not given. */
   readonly signIn?:
     | {
         readonly service: SignIn;
         readonly sessionSeconds: number;
+        /** Where a sign-out ends the person's sessions at the login service; nowhere when not given. */
         readonly loginSessions?: LoginSessions | undefined;
       }
     | undefined;

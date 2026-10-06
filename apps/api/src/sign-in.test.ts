@@ -9,6 +9,7 @@ import {
   type SignIn,
   SignInFailed,
   StepUpFailed,
+  type Subject,
 } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -105,7 +106,7 @@ afterEach(async () => {
 
 async function server(
   signIn: SignIn | undefined,
-  limits: { perAddress?: number; perUser?: number; loginSessions?: LoginSessions } = {},
+  options: { perAddress?: number; perUser?: number; loginSessions?: LoginSessions } = {},
 ) {
   const config = {
     http: {
@@ -113,9 +114,9 @@ async function server(
       port: 0,
       publicOrigin: PUBLIC_ORIGIN,
       trustedProxies: [],
-      rateLimitPerMinute: limits.perAddress ?? 100,
-      rateLimitPerUserPerMinute: limits.perUser ?? 100,
-      rateLimitPerAgentPerMinute: limits.perUser ?? 100,
+      rateLimitPerMinute: options.perAddress ?? 100,
+      rateLimitPerUserPerMinute: options.perUser ?? 100,
+      rateLimitPerAgentPerMinute: options.perUser ?? 100,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
@@ -134,7 +135,7 @@ async function server(
     signIn:
       signIn === undefined
         ? undefined
-        : { service: signIn, sessionSeconds: SESSION_SECONDS, loginSessions: limits.loginSessions },
+        : { service: signIn, sessionSeconds: SESSION_SECONDS, loginSessions: options.loginSessions },
     securityEvents: { note: (event) => noted.push(event) },
   });
   servers.push(app);
@@ -408,8 +409,14 @@ describe('signing out', () => {
 
   /** A stand-in for the login service's sessions: each person asked, and its answer. */
   const loginSessions = (answer: () => Promise<number>) => {
-    const asked: string[] = [];
-    return { asked, endAll: (subject: string) => (asked.push(subject), answer()) };
+    const asked: Subject[] = [];
+    return {
+      asked,
+      endAll: (who: Subject) => {
+        asked.push(who);
+        return answer();
+      },
+    };
   };
   const signOut = { method: 'POST' as const, url: '/v1/auth/sign-out' };
   const withSession = { origin: PUBLIC_ORIGIN, cookie: `${SESSION_COOKIE}=${SESSION_ID}` };
@@ -421,7 +428,7 @@ describe('signing out', () => {
     const response = await app.inject({ ...signOut, headers: withSession });
 
     expect(response.statusCode).toBe(200);
-    expect(ending.asked).toEqual([SUBJECT.subject]);
+    expect(ending.asked).toEqual([SUBJECT]);
     expect(capture.lines()).toContainEqual(
       expect.objectContaining({ event: 'auth.login_service_signed_out', ended: 3 }),
     );

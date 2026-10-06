@@ -15,6 +15,7 @@
 //   otherwise than 200 throws IdpFeedUnavailable, naming the step, never the
 //   answer.
 import { classOfIdpEvent, type IdpEventClass, WATCHED_IDP_EVENTS } from '../domain/idp-event.ts';
+import { field } from './zitadel-answer.ts';
 import { createZitadelCall, type ZitadelCallOptions } from './zitadel-call.ts';
 
 /** How long one call to the login service may take. */
@@ -60,11 +61,6 @@ export interface IdpEventFeed {
 }
 
 const AGGREGATES: ReadonlySet<string> = new Set(['user', 'org', 'instance']);
-
-type Answer = Readonly<Record<string, unknown>>;
-
-const field = (value: unknown, name: string): unknown =>
-  typeof value === 'object' && value !== null ? (value as Answer)[name] : undefined;
 
 /** The event, read strictly; undefined for one that isn't as Zitadel writes it. */
 function eventOf(raw: unknown): IdpEvent | undefined {

@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { findLeaks } from '../../packages/testing/src/log-scan.ts';
 import { resetToken } from './api-sign-in.ts';
 import { adminQuery as sql, API_ORIGIN, LOGIN_ORIGIN, serviceLogs } from './compose.ts';
-import { loginDriver, where } from './login-pages.ts';
+import { loginDriver, sleep, where } from './login-pages.ts';
 import { zitadelClient } from './zitadel.ts';
 
 const { password, users, api } = inject('e2e');
@@ -65,7 +65,7 @@ const loginServiceSessions = async (until?: (count: number) => boolean): Promise
       queries: [{ userIdQuery: { id: subject() } }],
     });
     if (until === undefined || until(sessions.length) || read === 10) return sessions.length;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleep(500);
   }
 };
 
