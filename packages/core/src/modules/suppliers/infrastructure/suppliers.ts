@@ -63,7 +63,7 @@ import {
   supplierDetails,
   type SupplierStatus,
 } from '../domain/supplier.ts';
-import { oneOf, timeOf, wholeOf } from './fields.ts';
+import { oneOf, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
 import type { RegistrationRecord } from './registrations.ts';
 import type { SuppliersTables } from './tables.ts';
 

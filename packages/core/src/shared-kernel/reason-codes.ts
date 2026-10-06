@@ -20,6 +20,8 @@ export const REASON_CODES = {
     "The organisation has issued as many agent keys as it may in 24 hours, so this one wasn't issued. Try again tomorrow; if no one at the organisation rotated them, tell its admins at once.",
   AGENT_KEY_NOT_LIVE: 'The key is revoked or expired, so there is nothing to rotate. Nothing was changed.',
   AGENT_KEY_REVOKED: 'The key is revoked already. Nothing was changed.',
+  AGENT_NOT_ACTIVE:
+    'The agent is suspended, so no mandate can be drafted for it. Lift its suspension first. Nothing was changed.',
   AGENT_NOT_SUSPENDED: 'The agent is active, so there is no suspension to lift. Nothing was changed.',
   AGENT_OWNER_NOT_ELIGIBLE:
     "The member can't own an agent: they must be an active admin or developer of the organisation. Nothing was changed.",
@@ -74,6 +76,14 @@ export const REASON_CODES = {
     "This invitation can't be accepted by you: its link isn't one we know, or you signed in with another email address. Sign in with the address you were invited at, or ask the organisation's admin for a new invitation.",
   LINK_STARTS_SPENT:
     "The organisation has started as many bank account links as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
+  MANDATE_DRAFTS_SPENT:
+    "The organisation has drafted as many mandate versions as it may in 24 hours, so this one wasn't drafted. Try again tomorrow; if no one at the organisation drafted them, tell its admins at once.",
+  MANDATE_ENDED:
+    'The mandate is revoked or expired, so it takes no new version. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_OPEN:
+    'The agent already has a mandate waiting for acceptance or in force. Draft a new version of that mandate instead. Nothing was changed.',
+  MANDATE_PAST_CONSENT:
+    "A limit is above what the funding source's bank consent allows, or the mandate's currency is not the source's, and the mandate is strict about its consent. Lower the limit, or make the mandate flexible. Nothing was changed.",
   MEMBER_DEACTIVATED:
     "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
   MEMBER_ELSEWHERE:
@@ -123,6 +133,8 @@ export const REASON_CODES = {
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
   SOLO_PATH_LOCKED:
     "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed.",
+  SOURCE_NOT_USABLE:
+    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed.",
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   STEP_UP_FAILED:
@@ -154,6 +166,8 @@ export const REASON_CODES = {
     "Another of the organisation's suppliers is already paid to this bank account, suspended ones included, so it isn't this supplier's too. Nothing was changed. Look at the organisation's suppliers.",
   SUPPLIER_PHONE_TOO_NEW:
     "The supplier's phone number changed less than 30 days ago, so a call-back to it can't verify the supplier yet. Nothing was changed.",
+  SUPPLIER_UNKNOWN:
+    "A supplier the mandate names is not one of the organisation's. Check the suppliers' IDs. Nothing was changed.",
   TOO_MANY_CONTACTS:
     "The organisation has more registered contact records than Agent X checks at once, so its contacts can't be read or changed. Contact Agent X support.",
   TOO_MANY_RESETS:

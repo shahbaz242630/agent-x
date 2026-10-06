@@ -19,4 +19,5 @@ export {
   StateMachineInvalid,
   type Transition,
 } from './state-machine.ts';
+export { type Field, minorOf, oneOf, oneOfOrNull, timeOf, wholeOf } from './verified-fields.ts';
 export { visibleName } from './visible-name.ts';

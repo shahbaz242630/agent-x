@@ -12,10 +12,10 @@ import { type Insertable, sql, type Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { DEFAULT_TIME_ZONE } from '../../../shared-kernel/index.ts';
 import {
   CONSENT_LIMITS,
   DEFAULT_SPLIT_WINDOW_HOURS,
-  DEFAULT_TIME_ZONE,
   MOST_ALLOWED_SUPPLIERS,
   SPLIT_WINDOW_HOURS,
 } from '../domain/mandate.ts';
