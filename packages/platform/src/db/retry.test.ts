@@ -50,6 +50,10 @@ describe('retryingTransaction', () => {
     ]);
   });
 
+  it('tries three times in all', () => {
+    expect(MOST_TRIES).toBe(3);
+  });
+
   it(`gives up after ${String(MOST_TRIES)} tries, throwing the last failure`, async () => {
     const { lines, logger } = capture();
     let tries = 0;
