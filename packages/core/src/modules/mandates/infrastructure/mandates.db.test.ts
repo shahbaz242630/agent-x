@@ -232,6 +232,10 @@ describe('a mandate', () => {
     await expect(change(org, id, { accepted_by: randomUUID(), accepted_at: AT })).rejects.toEqual(
       refusedBy('accepted_with_its_version'),
     );
+    // Someone, but no time (from the mutation pass).
+    await expect(
+      change(org, id, { current_version_id: version, pending_version_id: null, accepted_by: randomUUID() }),
+    ).rejects.toEqual(refusedBy('accepted_with_its_version'));
   });
 
   it('has only its own versions in force (current_is_its_own)', async () => {
