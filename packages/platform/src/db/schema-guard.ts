@@ -105,15 +105,15 @@ const MADE_ONCE_BODY = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba
 
 /**
  * The third: the fixed-at-creation guard (0034, Phase 2 B1), on an authority
- * table some of whose columns never change once its first signed state is
- * recorded (a mandate's agent, time zone and split window). It fires BEFORE
+ * table some of whose columns never change once the row is added (a
+ * mandate's agent, time zone and split window). It fires BEFORE
  * UPDATE, FOR EACH ROW (19), handed exactly the columns the authority list
  * names for the table, and its body is held by hash.
  */
 const FIXED = 'fixed_at_creation';
 const FIXED_FUNCTION = 'state_rules.guard_fixed';
 const FIXED_TYPE = 19;
-const FIXED_BODY = '298c20463a182d9e3fb5a34f60e118c23ea5f6ad2dc4dafb2a189b4d9457278f';
+const FIXED_BODY = '5d9decba2ea16c3f750767c201fa71a0afc1e98f2ec4b0d0c31815ece36c0c4b';
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([

@@ -64,7 +64,7 @@ const FIXED_FUNCTION_SQL =
       'CREATE OR REPLACE FUNCTION state_rules.guard_fixed()',
     ),
   )?.[0] ?? '';
-const FIXED_BODY_HASH = '298c20463a182d9e3fb5a34f60e118c23ea5f6ad2dc4dafb2a189b4d9457278f';
+const FIXED_BODY_HASH = '5d9decba2ea16c3f750767c201fa71a0afc1e98f2ec4b0d0c31815ece36c0c4b';
 /** A mandate's columns fixed when it is made, as the authority list names them (Phase 2 B1). */
 const FIXED_AT_CREATION = { 'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'] } as const;
 const MANDATE_FIXED_TRIGGER = `create trigger fixed_at_creation before update on mandates.mandates for each row

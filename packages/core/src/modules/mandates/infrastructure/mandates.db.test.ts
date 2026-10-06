@@ -271,12 +271,11 @@ describe('a mandate', () => {
     await expect(change(org, id, { pending_version_id: version })).rejects.toEqual(refusedBy('pending_is_not_current'));
   });
 
-  it('keeps its agent, time zone and window once sealed, while the rest moves on (fixed_at_creation)', async () => {
+  it('keeps its agent, time zone and window as made, while the rest moves on (fixed_at_creation)', async () => {
     const [org, other] = [await organisation(), await organisation()];
     const { id } = await accepted(org);
-    // Before its first signed state, the audit module's record writes them.
-    await change(org, id, { time_zone: 'Asia/Dubai', split_window_hours: 24 });
-    await change(org, id, { state_event_id: randomUUID() });
+    // The audit module's record writes them again as they are, which is no change.
+    await change(org, id, { agent_id: org.agent, time_zone: DEFAULT_TIME_ZONE, split_window_hours: 24 });
 
     for (const values of [
       { time_zone: 'Pacific/Kiritimati' },

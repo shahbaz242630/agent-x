@@ -20,9 +20,8 @@
 --   the IANA zone its months are counted in (ADR-006 §4; default Asia/Dubai,
 --   stored as the runtime names it) and the split check's rolling window
 --   (default 24 hours, ADR-006 §9). Fixed when the mandate is made
---   (SEC-LIM-08): `fixed_at_creation` refuses any change to them once its
---   first signed state is recorded, so not even the app can move a period
---   boundary, and the seal catches the owner.
+--   (SEC-LIM-08): `fixed_at_creation` refuses any change to them, so not
+--   even the app can move a period boundary, and the seal catches the owner.
 -- - `status`: PENDING_ACCEPTANCE until an admin accepts its first version
 --   (B3), then ACTIVE; SUSPENDED and back (B4); REVOKED (a draft never
 --   accepted is withdrawn the same way) and EXPIRED end it. The status guard
@@ -79,7 +78,8 @@
 -- backup role reads everything, as it must for a logical backup.
 
 -- The fixed-at-creation guard: the columns named as its arguments never change
--- once the row's first signed state is recorded; the rest of the row moves on.
+-- once the row is added (the audit module's record writes them again with the
+-- same values, which is no change); the rest of the row moves on.
 -- Like the made-once guard (0032): no rights of its own, no EXECUTE granted,
 -- its search_path pg_catalog alone, refusing to run as anything but a BEFORE
 -- UPDATE trigger for each row, and refusing a column the row doesn't have (one
@@ -103,7 +103,7 @@ BEGIN
       RAISE EXCEPTION 'state_rules.guard_fixed names a column %.% does not have', TG_TABLE_SCHEMA, TG_TABLE_NAME
         USING ERRCODE = 'triggered_action_exception';
     END IF;
-    IF OLD.state_event_id IS NOT NULL AND old_row -> fixed IS DISTINCT FROM new_row -> fixed THEN
+    IF old_row -> fixed IS DISTINCT FROM new_row -> fixed THEN
       RAISE EXCEPTION 'a row in %.% keeps % as it was made', TG_TABLE_SCHEMA, TG_TABLE_NAME, fixed
         USING ERRCODE = 'check_violation', CONSTRAINT = 'fixed_at_creation';
     END IF;
@@ -178,7 +178,7 @@ CREATE TRIGGER status_guard BEFORE INSERT OR UPDATE ON mandates.mandates
   );
 
 GRANT SELECT, INSERT ON mandates.mandates TO agentx_app;
--- agent_id, time_zone and split_window_hours only as the audit module's record seals a new mandate: `fixed_at_creation` after.
+-- agent_id, time_zone and split_window_hours only as the audit module's record seals a new mandate, unchanged: `fixed_at_creation`.
 GRANT UPDATE (
   agent_id, time_zone, split_window_hours, status, current_version_id, pending_version_id, accepted_by, accepted_at,
   state_version, state_event_id
