@@ -322,8 +322,8 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
     const canary = ibanOf('AE', ['044', '7000', '1313', '2424', '3535'].join(''));
     const api = await serverWith(createFakeRail({ clock, ids, records: createDatabaseRecords(app) }));
     try {
-      // A source's reference is any printable text: an IBAN typed there is kept as typed.
-      const added = await sent(api, org, '/v1/suppliers', { ...SUPPLIER, source: { kind: 'registry', ref: canary } });
+      // An email's local part is any printable ASCII: an IBAN typed there is kept (the free-text fields refuse one).
+      const added = await sent(api, org, '/v1/suppliers', { ...SUPPLIER, email: `${canary}@canary.example` });
       expect(added.statusCode).toBe(201);
     } finally {
       await api.close();

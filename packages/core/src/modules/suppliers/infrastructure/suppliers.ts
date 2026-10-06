@@ -60,10 +60,10 @@ import {
   SUPPLIER,
   type SupplierContacts,
   type SupplierDetails,
-  supplierDetails,
   type SupplierStatus,
 } from '../domain/supplier.ts';
 import { oneOf, timeOf, wholeOf } from './fields.ts';
+import { keptSupplierDetails } from './kept-details.ts';
 import type { RegistrationRecord } from './registrations.ts';
 import type { SuppliersTables } from './tables.ts';
 
@@ -185,7 +185,7 @@ function versionRow(
   phoneSince: Date,
   payee: PayeeReference,
 ) {
-  const kept = supplierDetails(supplier);
+  const kept = keptSupplierDetails(supplier);
   const fields = {
     supplier_id: supplierId,
     version,
@@ -297,7 +297,7 @@ export async function addVersion(
   }
   const payee = payeeOf(version);
   // Checked before any SQL runs, as the row is made below.
-  const { phone } = supplierDetails(version.supplier).contacts;
+  const { phone } = keptSupplierDetails(version.supplier).contacts;
   const before = await contactsOf(tx, keys, version.orgId, version.follows);
   const phoneSince = before.phone === phone ? version.follows.phoneSince : version.enteredAt;
   const row = versionRow(keys, version, phoneSince, payee);
