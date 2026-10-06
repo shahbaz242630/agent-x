@@ -6,8 +6,9 @@
 // removed) names the contact in `aboutId`, and one about a person's sign-in
 // changed at the login service (B6-2a), or about a reset of their second
 // factor (B6-3b), names the person, by their user ID. The one notice that
-// asks a contact to confirm a reset names the reset (0026), and one about a
-// supplier (E2-1, 0033) names the supplier.
+// asks a contact to confirm a reset names the reset (0026), one about a
+// supplier (E2-1, 0033) names the supplier, and one about an agent (0034)
+// names the agent.
 
 /** The kinds about a membership: a role given, a rejoin, and since the S68 audit a removal and a role taken away (0031). */
 const MEMBERSHIP_NOTICE_KINDS = ['role_granted', 'member_rejoined', 'member_removed', 'role_removed'] as const;
@@ -48,6 +49,9 @@ export const SUPPLIER_NOTICE_KINDS = [
   'supplier_suspended',
 ] as const;
 
+/** The kinds about an agent, `aboutId` its ID (0034): its handover, told to the admins and to its new owner. */
+export const AGENT_NOTICE_KINDS = ['agent_handed_over', 'agent_handed_to_you'] as const;
+
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
   ...CONTACT_NOTICE_KINDS,
@@ -55,6 +59,7 @@ export const NOTICE_KINDS = [
   RESET_LINK_KIND,
   ...RESET_NOTICE_KINDS,
   ...SUPPLIER_NOTICE_KINDS,
+  ...AGENT_NOTICE_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -70,6 +75,9 @@ export const isAboutAPerson = (kind: NoticeKind): boolean =>
 
 /** Whether a kind is about a supplier, `aboutId` its ID (0033). */
 export const isAboutASupplier = (kind: NoticeKind): boolean => SUPPLIER_NOTICE_KINDS.some((each) => each === kind);
+
+/** Whether a kind is about an agent, `aboutId` its ID (0034). */
+export const isAboutAnAgent = (kind: NoticeKind): boolean => AGENT_NOTICE_KINDS.some((each) => each === kind);
 
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
@@ -93,7 +101,7 @@ export interface Notice {
   readonly membershipId: string | null;
   /** The role that membership holds now; null for any other. */
   readonly role: NoticeRole | null;
-  /** What any other notice is about (B6-1b): a registered contact, a person, or a reset (the link's). */
+  /** What any other notice is about (B6-1b): a registered contact, a person, a reset (the link's), a supplier or an agent. */
   readonly aboutId?: string | null;
 }
 

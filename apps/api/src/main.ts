@@ -474,7 +474,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
     }),
-    agentChanges: createAgentChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
+    agentChanges: createAgentChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
     checkAgentKey: keyCheck.check.bind(keyCheck),
     fundingSourceLinks: createFundingSourceLinks({

@@ -43,7 +43,8 @@
 //   is left), and one new key issued and shown this once, with the scopes of
 //   the newest live key it replaces that the agent still holds, or the
 //   agent's own if none was live, expiring as a registered agent's first key
-//   does. Its status and scopes stay as they are.
+//   does. Its status and scopes stay as they are. The new owner and the
+//   organisation's admins are told, in the same transaction (0034).
 //
 // Lock order (ADR-006 §6): the idempotency key, the issue lock (a handover's
 // confirm), the members' memberships (2a, in order of ID), the agent (3), its
@@ -66,6 +67,7 @@ import {
   type StepUpChallenges,
   stepUpDetails,
 } from '@agentx/core/modules/identity';
+import type { Notice, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -172,12 +174,22 @@ const handOverHash = (agentEvent: string, owner: string): Buffer =>
 const reactivationHash = (orgId: string, suspendedBy: string): Buffer =>
   changeHashOf([REACTIVATE_OPERATION, orgId.toLowerCase(), suspendedBy.toLowerCase()]);
 
+/** A handover's notices (0034): one to the new owner, by their user ID, and one to the organisation's admins. */
+const toldOfHandover = (orgId: string, agentId: string, ownerUserId: string): Notice[] => {
+  const about = { orgId, membershipId: null, role: null, aboutId: agentId };
+  return [
+    { ...about, kind: 'agent_handed_to_you', recipientUserId: ownerUserId },
+    { ...about, kind: 'agent_handed_over', recipientUserId: null },
+  ];
+};
+
 export function createAgentChanges({
   database,
   keys,
   ids,
   clock,
   challenges,
+  outbox,
   logger,
 }: {
   readonly database: Database<AgentTables>;
@@ -185,6 +197,7 @@ export function createAgentChanges({
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly challenges: StepUpChallenges;
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): AgentChanges {
   const work = createAgentWork({ database, keys, ids, logger });
@@ -232,7 +245,7 @@ export function createAgentChanges({
       throw new AgentRefused(409, 'AGENT_OWNER_NOT_ELIGIBLE');
     }
     if (read.agent.owner === next.member.id) throw new AgentRefused(409, 'AGENT_OWNER_UNCHANGED');
-    return { ...read, owner: next.member.id };
+    return { ...read, owner: next.member.id, ownerUserId: next.member.userId };
   };
 
   /** Answers the write: the agent as it now stands, on a retry too. */
@@ -364,6 +377,7 @@ export function createAgentChanges({
           actor,
           details: stepUpDetails(consumed),
         });
+        await outbox.add(tx, toldOfHandover(member.orgId, read.agent.id, read.ownerUserId));
         for (const old of listed.keys.filter((listedKey) => listedKey.status === 'ACTIVE')) {
           movedAsRead(
             await states.changeStatus(tx, AGENT_KEYS, { orgId: member.orgId, id: old.id }, 'revoke', {

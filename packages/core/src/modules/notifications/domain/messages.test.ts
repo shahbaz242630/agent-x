@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { messageFor, type ResetLink } from './messages.ts';
 import {
+  AGENT_NOTICE_KINDS,
   type ClaimedNotice,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
@@ -201,6 +202,37 @@ describe('a notice’s email (B5-1b)', () => {
         RangeError,
       );
       expect(() => messageFor(NOTICE, 'a@example.test', link)).toThrow(RangeError);
+    });
+  });
+
+  describe('an agent handed to another owner (0034)', () => {
+    const agent = '0199a0f0-0000-7000-8000-00000000a034';
+    const aboutAgent = (kind: NoticeKind): ClaimedNotice => ({
+      ...NOTICE,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: agent,
+    });
+
+    it.each(AGENT_NOTICE_KINDS)('tells of %s, naming the agent by ID alone, and that it can change nothing', (kind) => {
+      const { subject, text } = messageFor(aboutAgent(kind), 'a@example.test');
+
+      expect(subject).toMatch(/^Agent X: an AI agent was handed/);
+      expect(`${subject} ${text}`).not.toMatch(/https?:|www\.|token|#/i);
+      expect(text).toContain(`Agent: ${agent}`);
+      expect(text).not.toContain('Registered contact:');
+      expect(text).toContain("check the organisation's AI agents");
+      expect(text).toContain("This email can't approve or change anything.");
+    });
+
+    it('tells the new owner why they are told, and the admins why they are', () => {
+      expect(messageFor(aboutAgent('agent_handed_to_you'), 'a@example.test').text).toContain(
+        "You're told because you're the agent's new owner.",
+      );
+      expect(messageFor(aboutAgent('agent_handed_over'), 'a@example.test').text).toContain(
+        "You're told because you're an admin of this organisation.",
+      );
     });
   });
 
