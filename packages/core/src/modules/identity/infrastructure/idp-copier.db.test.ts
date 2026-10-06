@@ -23,7 +23,7 @@ import { createOrganization, type OrganizationsTables } from '../../organization
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import { classOfIdpEvent } from '../domain/idp-event.ts';
 import { createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
-import { IdpFactorsUnavailable, type PasskeysHeld } from './idp-factors.ts';
+import { IdpFactorsUnavailable, type SecondFactorsHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
 import { createRemovalRestriction } from './removal-restriction.ts';
@@ -122,7 +122,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
   return { feed, asked };
 }
 
-const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
+const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
   createIdpEventCopier({
     database: app,
     feed,
@@ -131,7 +131,7 @@ const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
     clock,
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
-    passkeys,
+    factors,
     logger: testLogger(capture),
   });
 
@@ -527,8 +527,8 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 
 describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`, () => {
   /** A stand-in for the reset token's reader: the person holds this many keys, or it can't be read. */
-  const holding = (held: number | Error): PasskeysHeld => ({
-    passkeysHeld: () => (held instanceof Error ? Promise.reject(held) : Promise.resolve(held)),
+  const holding = (held: number | Error): SecondFactorsHeld => ({
+    secondFactorsHeld: () => (held instanceof Error ? Promise.reject(held) : Promise.resolve(held)),
   });
   const restrictedUntil = (userId: string) => createRemovalRestriction({ database: app, clock })(userId);
   const sessionsOf = async (userId: string) =>
@@ -557,14 +557,14 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     },
   );
 
-  it('restricts a person for 7 days from a second key added, even by themselves', async () => {
+  it('restricts a person for 7 days from a key added beside another second factor, even by themselves', async () => {
     const who = await person();
     await organization(who.userId, 'admin');
     const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
 
     let reads = 0;
-    const counting: PasskeysHeld = {
-      passkeysHeld: () => {
+    const counting: SecondFactorsHeld = {
+      secondFactorsHeld: () => {
         reads += 1;
         return Promise.resolve(2);
       },
@@ -596,6 +596,31 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
 
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
   });
+
+  it.each([
+    'user.human.mfa.otp.removed',
+    'user.human.mfa.otp.sms.removed',
+    'user.human.mfa.otp.email.removed',
+    'user.human.mfa.recoverycode.removed',
+  ])(
+    'restricts a key added within 7 days of any second factor removed (%s), even their only one (F1’s first-passkey review)',
+    async (type) => {
+      const who = await person();
+      await organization(who.userId, 'admin');
+      const removed = event(type, who.subject, {
+        editorUserId: who.subject,
+        createdAt: new Date(clock.now().getTime() - 20 * 60_000),
+      });
+      const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
+
+      await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
+
+      expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
+      expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+        expect.objectContaining({ counts: 'yes' }),
+      ]);
+    },
+  );
 
   it.each([
     ['in one run', true],
@@ -682,15 +707,15 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
   it.each([
     ['no reset token to read them with', undefined],
     ['an answer it can’t judge', holding(new IdpFactorsUnavailable('reading the factors: it answered 500'))],
-  ])('counts a key added when the keys can’t be read (%s): the rule fails closed', async (_why, passkeys) => {
+  ])('counts a key added when the factors can’t be read (%s): the rule fails closed', async (_why, factors) => {
     const who = await person();
     await organization(who.userId, 'admin');
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added]).feed, passkeys).run();
+    await copierWith(feedOf(() => [added]).feed, factors).run();
 
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
-    expect(lines('idp_events.keys_unread')).toHaveLength(passkeys === undefined ? 0 : 1);
+    expect(lines('idp_events.keys_unread')).toHaveLength(factors === undefined ? 0 : 1);
   });
 
   it('never counts an app code added, whatever the person holds', async () => {

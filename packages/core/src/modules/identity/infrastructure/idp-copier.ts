@@ -48,12 +48,15 @@
 //   transaction, before anything else is locked (ADR-006 §6 level 0b).
 // - A security key or passkey added counts toward B6-3d's restriction, 7
 //   days without an admin's or approver's powers (`counts: 'yes'` on the
-//   platform chain's record), when the person now holds two or more, or had
-//   one removed in the 7 days before: so a phished session can't enrol its
-//   own key and pass the passkey rule at once, nor remove the person's key
-//   first and add its own. A person's first key doesn't count. When the
-//   count can't be read (no reset token set, or the login service's answer
-//   can't be judged), it counts: the rule fails closed.
+//   platform chain's record), when the person now holds two or more second
+//   factors of any kind, or had one of any kind removed in the 7 days
+//   before: so a phished session can't enrol its own key and pass the
+//   passkey rule at once, whether the person held a key or an app code
+//   alone (F1's first-passkey review), nor remove the person's factor first
+//   and add its own. Only a key that is the person's first second factor of
+//   all doesn't count. When the count can't be read (no reset token set, or
+//   the login service's answer can't be judged), it counts: the rule fails
+//   closed.
 // - A security key or passkey removed, even by the person, counts too when a
 //   key was added in the 7 days before (the S68 review): adding one's own key
 //   and then removing the person's, within one run, leaves one key when the
@@ -79,10 +82,16 @@ import {
   platformEventWith,
   type PlatformControlsTables,
 } from '../../platform-controls/index.ts';
-import { endsSessions, isToldToThePerson, PASSKEY_ADDED_EVENTS, PASSKEY_REMOVED_EVENTS } from '../domain/idp-event.ts';
+import {
+  endsSessions,
+  isToldToThePerson,
+  PASSKEY_ADDED_EVENTS,
+  PASSKEY_REMOVED_EVENTS,
+  SECOND_FACTOR_REMOVED_EVENTS,
+} from '../domain/idp-event.ts';
 import { restrictedUntil } from '../domain/removal-restriction.ts';
 import { toldOfReset } from './grant-notices.ts';
-import type { PasskeysHeld } from './idp-factors.ts';
+import type { SecondFactorsHeld } from './idp-factors.ts';
 import type { IdpEvent, IdpEventFeed } from './idp-feed.ts';
 import { endSessionsOf, lockSessionsOf } from './sessions.ts';
 import { lockChallengesOf } from './step-up-challenges.ts';
@@ -135,7 +144,7 @@ export function createIdpEventCopier({
   clock,
   issuer,
   outbox,
-  passkeys,
+  factors,
   logger,
 }: {
   readonly database: Kysely<Tables>;
@@ -146,8 +155,8 @@ export function createIdpEventCopier({
   /** The login service the feed is read from: its subjects are its user IDs. */
   readonly issuer: string;
   readonly outbox: Outbox;
-  /** How many keys a person holds (the reset token's reader); undefined: every key added counts. */
-  readonly passkeys?: PasskeysHeld | undefined;
+  /** How many second factors a person holds (the reset token's reader); undefined: every key added counts. */
+  readonly factors?: SecondFactorsHeld | undefined;
   readonly logger: Logger;
 }): IdpEventCopier {
   const trail = createAuditTrail({ keys, ids });
@@ -163,14 +172,14 @@ export function createIdpEventCopier({
 
   /**
    * Whether a key added counts toward the restriction: the person holds two
-   * or more now, or had one removed in the 7 days before; and when that
-   * can't be read, it counts.
+   * or more second factors now, or had one removed in the 7 days before;
+   * and when that can't be read, it counts.
    */
   const keyAddedCounts = async (event: IdpEvent, person: string): Promise<boolean> => {
-    if (await keyEventWithinWeek(event, person, PASSKEY_REMOVED_EVENTS)) return true;
-    if (passkeys === undefined) return true;
+    if (await keyEventWithinWeek(event, person, SECOND_FACTOR_REMOVED_EVENTS)) return true;
+    if (factors === undefined) return true;
     try {
-      return (await passkeys.passkeysHeld(event.aggregateId)) >= 2;
+      return (await factors.secondFactorsHeld(event.aggregateId)) >= 2;
     } catch (error) {
       logger.warn('idp_events.keys_unread', { err: error });
       return true;

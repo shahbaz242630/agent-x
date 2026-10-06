@@ -384,34 +384,49 @@ describe('removing a person’s second factors at the login service (B6-3c)', ()
   });
 });
 
-describe('counting a person’s security keys and passkeys (the S68 audit)', () => {
-  it('counts the security keys and passkeys ready to use, and nothing else, reading nothing but the two lists', async () => {
+describe('counting a person’s second factors (the S68 audit; F1’s first-passkey rule)', () => {
+  it('counts every kind ready to use, recovery codes as one, and nothing not ready or removed', async () => {
     const person = everyKind();
     person.factors.push({ state: 'AUTH_FACTOR_STATE_NOT_READY', u2f: { id: '312000000000000102', name: 'new' } });
     person.passkeys.push({ id: '312000000000000202', state: 'AUTH_FACTOR_STATE_REMOVED' });
     person.passkeys.push({ id: '312000000000000203', state: READY });
     const { fetch, asked } = zitadel(person);
 
-    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(3);
+    // An app code, an SMS code and a key (the email code isn't ready), two passkeys, the recovery codes.
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(6);
     expect(asked.map(({ method, url }) => `${method} ${url}`)).toEqual([
       `POST ${USER}/authentication_factors/_search`,
       `POST ${USER}/passkeys/_search`,
+      `GET ${USER}/authentication_methods`,
     ]);
     expect(JSON.parse(asked[0]?.init.body as string)).toEqual({ states: [READY] });
     expect(new Headers(asked[0]?.init.headers).get('authorization')).toBe(`Bearer ${WORDS}`);
   });
 
-  it('counts none for a person with an app code alone', async () => {
-    const { fetch } = zitadel({ factors: [{ state: READY, otp: {} }], passkeys: [], methods: [] });
+  it.each([
+    ['an app code', { factors: [{ state: READY, otp: {} }], passkeys: [], methods: [] }],
+    ['an SMS code', { factors: [{ state: READY, otpSms: {} }], passkeys: [], methods: [] }],
+    ['an email code', { factors: [{ state: READY, otpEmail: {} }], passkeys: [], methods: [] }],
+    ['a security key', { factors: [{ state: READY, u2f: { id: '1' } }], passkeys: [], methods: [] }],
+    ['a passkey', { factors: [], passkeys: [{ id: '1', state: READY }], methods: [] }],
+    ['recovery codes', { factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE'] }],
+  ])('counts one for a person with %s alone', async (_what, person: Person) => {
+    const { fetch } = zitadel(person);
 
-    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(0);
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(1);
+  });
+
+  it('counts none for a person with a password alone', async () => {
+    const { fetch } = zitadel({ factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_PASSWORD'] });
+
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(0);
   });
 
   it('counts a list of 100, the most it reads', async () => {
     const passkeys = Array.from({ length: 100 }, (_, index) => ({ id: String(index + 1), state: READY }));
     const { fetch } = zitadel({ factors: [], passkeys, methods: [] });
 
-    expect(await removerWith(fetch).passkeysHeld(SUBJECT)).toBe(100);
+    expect(await removerWith(fetch).secondFactorsHeld(SUBJECT)).toBe(100);
   });
 
   it.each([
@@ -423,13 +438,35 @@ describe('counting a person’s security keys and passkeys (the S68 audit)', () 
     if (answer === undefined) person.factors.push({ state: 'SOMETHING_ELSE', u2f: { id: '1' } });
     const { fetch } = zitadel(person, answer === undefined ? undefined : () => answer());
 
-    await expect(removerWith(fetch).passkeysHeld(SUBJECT)).rejects.toThrow(thrown);
+    await expect(removerWith(fetch).secondFactorsHeld(SUBJECT)).rejects.toThrow(thrown);
+  });
+
+  it.each([
+    [
+      'a factor of a kind it doesn’t know',
+      { factors: [{ state: READY, webauthn: {} }], passkeys: [], methods: [] },
+      'a factor is not as the login service writes them',
+    ],
+    [
+      'a method it doesn’t know',
+      { factors: [], passkeys: [], methods: ['AUTHENTICATION_METHOD_TYPE_NEW'] },
+      'a method is not one the login service names',
+    ],
+    [
+      'a passkey of a state it doesn’t know',
+      { factors: [], passkeys: [{ id: '1', state: 'NEW' }], methods: [] },
+      'a passkey has no state we know',
+    ],
+  ])('throws on %s, never a count', async (_what, person: Person, thrown) => {
+    const { fetch } = zitadel(person);
+
+    await expect(removerWith(fetch).secondFactorsHeld(SUBJECT)).rejects.toThrow(failure(thrown));
   });
 
   it('refuses a subject that isn’t the login service’s user ID, asking nothing', async () => {
     const { fetch, asked } = zitadel(everyKind());
 
-    await expect(removerWith(fetch).passkeysHeld('../users')).rejects.toThrow(RangeError);
+    await expect(removerWith(fetch).secondFactorsHeld('../users')).rejects.toThrow(RangeError);
     expect(asked).toEqual([]);
   });
 });

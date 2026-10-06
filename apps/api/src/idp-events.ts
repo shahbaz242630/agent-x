@@ -65,7 +65,7 @@ export function idpEventCopierFrom({
     clock,
     issuer: signIn.issuer,
     outbox,
-    passkeys:
+    factors:
       factorResets === undefined
         ? undefined
         : createSecondFactorRemover({
