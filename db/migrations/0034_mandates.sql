@@ -38,11 +38,12 @@
 -- version no admin accepted, or moves it to another agent or time zone is
 -- caught at the next read.
 --
--- One live mandate an agent (PRD §3, the Pilot): a unique key on the agent
--- while ACTIVE or SUSPENDED (`one_live_mandate_an_agent`), so a second
--- mandate for an agent can't be accepted while one is live: the owner
--- supersedes it instead, and B2 refuses a new mandate for such an agent, which
--- could never be accepted.
+-- One open mandate an agent (PRD §3, the Pilot): a unique key on the agent
+-- while PENDING_ACCEPTANCE, ACTIVE or SUSPENDED (`one_open_mandate_an_agent`),
+-- so a second can't even be drafted while one waits or is live: the owner
+-- drafts a new version of it instead, or revokes it first. It also keeps
+-- finding the agent's open mandate one statement, however long its history
+-- (B2's review).
 --
 -- mandates.versions is one version of a mandate's terms, made once and never
 -- changed: changing any term, the split check's setting included (PRD §3.2),
@@ -157,10 +158,10 @@ CREATE TABLE mandates.mandates (
   )
 );
 
--- One live mandate an agent (PRD §3). Partial, so the status is never a key
+-- One open mandate an agent (PRD §3). Partial, so the status is never a key
 -- column: a status change stays a no-key write (ADR-006 §6).
-CREATE UNIQUE INDEX one_live_mandate_an_agent ON mandates.mandates (org_id, agent_id)
-  WHERE status IN ('ACTIVE', 'SUSPENDED');
+CREATE UNIQUE INDEX one_open_mandate_an_agent ON mandates.mandates (org_id, agent_id)
+  WHERE status IN ('PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED');
 
 ALTER TABLE mandates.mandates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mandates.mandates FORCE ROW LEVEL SECURITY;

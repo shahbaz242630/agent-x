@@ -107,10 +107,22 @@ const add = (org: Org, mandate: MandateRow, version: VersionRow) =>
     await tx.insertInto('mandates.versions').values(version).execute();
   });
 
-/** A mandate waiting for acceptance with its first draft: its ID and the draft's. */
-const drafted = async (org: Org, overrides: Partial<VersionRow> = {}) => {
+/** Another agent of the organisation, made past the app: an agent has one open mandate at a time. */
+const anotherAgent = async (org: Org): Promise<string> => {
+  const agent = randomUUID();
+  await database.as('admin').query(
+    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
+       values ($1, $2, 'Another agent', $3, 'ACTIVE', 'requests:write', $4)`,
+    [org.id, agent, randomUUID(), AT],
+  );
+  return agent;
+};
+
+/** A mandate waiting for acceptance with its first draft, for a new agent unless one is given: its ID and the draft's. */
+const drafted = async (org: Org, overrides: Partial<VersionRow> = {}, agent?: string) => {
   const [id, version] = [randomUUID(), randomUUID()];
-  await add(org, mandateRow(org, id, version), versionRow(org, id, version, overrides));
+  const agentId = agent ?? (await anotherAgent(org));
+  await add(org, mandateRow(org, id, version, { agent_id: agentId }), versionRow(org, id, version, overrides));
   return { id, version };
 };
 
@@ -121,8 +133,8 @@ const changeVersion = (org: Org, id: string, values: Updateable<MandatesTables['
   inOrg(org, (tx) => tx.updateTable('mandates.versions').set(values).where('id', '=', id).execute());
 
 /** Accepts the draft as B3 will: the version in force first, then the status. */
-const accepted = async (org: Org) => {
-  const mandate = await drafted(org);
+const accepted = async (org: Org, agent?: string) => {
+  const mandate = await drafted(org, {}, agent);
   await inOrg(org, async (tx) => {
     await tx
       .updateTable('mandates.mandates')
@@ -273,7 +285,7 @@ describe('a mandate', () => {
 
   it('keeps its agent, time zone and window as made, while the rest moves on (fixed_at_creation)', async () => {
     const [org, other] = [await organisation(), await organisation()];
-    const { id } = await accepted(org);
+    const { id } = await accepted(org, org.agent);
     // The audit module's record writes them again as they are, which is no change.
     await change(org, id, { agent_id: org.agent, time_zone: DEFAULT_TIME_ZONE, split_window_hours: 24 });
 
@@ -324,15 +336,18 @@ describe('a mandate', () => {
     ).rejects.toEqual(refusedBy('current_is_its_own'));
   });
 
-  it('is one of an agent’s while live, and another may follow once it ends (one_live_mandate_an_agent)', async () => {
+  it('is one of an agent’s while open, and another may follow once it ends (one_open_mandate_an_agent)', async () => {
     const org = await organisation();
-    const first = await accepted(org);
+    const waiting = await drafted(org, {}, org.agent);
 
-    await expect(accepted(org)).rejects.toEqual(refusedBy('one_live_mandate_an_agent'));
+    await expect(drafted(org, {}, org.agent)).rejects.toEqual(refusedBy('one_open_mandate_an_agent'));
+    await change(org, waiting.id, { status: 'REVOKED' });
+    const first = await accepted(org, org.agent);
+    await expect(drafted(org, {}, org.agent)).rejects.toEqual(refusedBy('one_open_mandate_an_agent'));
     await change(org, first.id, { status: 'SUSPENDED' });
-    await expect(accepted(org)).rejects.toEqual(refusedBy('one_live_mandate_an_agent'));
-    await change(org, first.id, { status: 'REVOKED' });
-    await accepted(org);
+    await expect(drafted(org, {}, org.agent)).rejects.toEqual(refusedBy('one_open_mandate_an_agent'));
+    await change(org, first.id, { status: 'EXPIRED' });
+    await accepted(org, org.agent);
   });
 
   it('is for an agent of its own organisation only (of_an_agent)', async () => {

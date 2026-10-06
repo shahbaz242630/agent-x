@@ -376,12 +376,12 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     {
       reason:
-        "One live mandate an agent (PRD §3, the Pilot; 0034): ACTIVE or SUSPENDED, so a second can't be accepted while one is live. Partial so the status is never a key column, and a status change stays a no-key write (ADR-006 §6)",
+        "One open mandate an agent (PRD §3, the Pilot; 0034): waiting, ACTIVE or SUSPENDED, so a second can't be drafted while one is open. Partial so the status is never a key column, and a status change stays a no-key write (ADR-006 §6)",
       table: 'mandates.mandates',
-      name: 'one_live_mandate_an_agent',
+      name: 'one_open_mandate_an_agent',
       columns: ['org_id', 'agent_id'],
-      // As Postgres prints `WHERE status IN ('ACTIVE', 'SUSPENDED')`.
-      predicate: "(status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))",
+      // As Postgres prints `WHERE status IN ('PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED')`.
+      predicate: "(status = ANY (ARRAY['PENDING_ACCEPTANCE'::text, 'ACTIVE'::text, 'SUSPENDED'::text]))",
     },
   ],
 };
