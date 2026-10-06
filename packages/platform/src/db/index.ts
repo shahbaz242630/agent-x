@@ -28,6 +28,7 @@ export {
   MigrationRefused,
   runMigrations,
 } from './migrate.ts';
+export { isRetryable, MOST_TRIES, retryingTransaction, TRANSACTION_RETRIED } from './retry.ts';
 export { assertRuntimeRole, UnsafeDatabaseRole } from './runtime-role.ts';
 export { liveSchemaProblems, type SchemaGuardOptions, type SchemaProblem } from './schema-guard.ts';
 export { SCHEMA_POLICY, type SchemaPolicy } from './schema-policy.ts';
