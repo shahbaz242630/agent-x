@@ -128,6 +128,7 @@ describe('ending the sessions at the login service', () => {
     ],
     ['an ID that is not one', zitadel(found(['../users/1'])), 'reading the sessions: an ID is not one'],
     ['a session with no ID', zitadel({ sessions: [{}] }), 'reading the sessions: an ID is not one'],
+    ['an ID that is a number', zitadel({ sessions: [{ id: 312 }] }), 'reading the sessions: an ID is not one'],
   ])('throws on %s, ending nothing', async (_, stub, message) => {
     await expect(sessionsWith(stub.fetch).endAll(WHO)).rejects.toThrow(new LoginSessionsUnavailable(message));
     expect(stub.ended()).toEqual([]);
