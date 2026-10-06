@@ -176,6 +176,13 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       // and one deleted would leave a key no request can be placed with.
       appMay: ['SELECT', 'INSERT'],
     },
+    'mandates.allowed_currencies': {
+      reason:
+        "The deployment's currencies (ADR-006 §1, ADR-010; Phase 2 B1): AED in the Pilot, the same for every organisation, which a mandate version's currency must be one of",
+      columns: ['code'],
+      // Read only: a currency is added by a migration, never by the app.
+      appMay: ['SELECT'],
+    },
     'identity.session_emails': {
       reason:
         "A session's verified email address (ADR-003 §5, B4-4a), encrypted, for an invitation to be matched against; it belongs to the person's session, which belongs to no organisation, and goes with it",
@@ -366,6 +373,15 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id', 'payee_key'],
       // As Postgres prints `WHERE payee_key IS NOT NULL` (ruleutils puts a NullTest in brackets), on 16 to 18.
       predicate: '(payee_key IS NOT NULL)',
+    },
+    {
+      reason:
+        "One live mandate an agent (PRD §3, the Pilot; 0034): ACTIVE or SUSPENDED, so a second can't be accepted while one is live. Partial so the status is never a key column, and a status change stays a no-key write (ADR-006 §6)",
+      table: 'mandates.mandates',
+      name: 'one_live_mandate_an_agent',
+      columns: ['org_id', 'agent_id'],
+      // As Postgres prints `WHERE status IN ('ACTIVE', 'SUSPENDED')`.
+      predicate: "(status = ANY (ARRAY['ACTIVE'::text, 'SUSPENDED'::text]))",
     },
   ],
 };

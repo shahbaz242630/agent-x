@@ -15,6 +15,7 @@ import type { SignedStateTable } from '@agentx/platform/db';
 
 import { AGENT_KEYS, AGENTS } from './modules/agents/index.ts';
 import { SOURCES } from './modules/funding-sources/index.ts';
+import { MANDATE_VERSIONS, MANDATES } from './modules/mandates/index.ts';
 import { FACTOR_RESETS, INVITATIONS, MEMBERSHIPS, REGISTERED_CONTACTS } from './modules/identity/index.ts';
 import { ORGANIZATIONS } from './modules/organizations/index.ts';
 import { BENEFICIARY_REGISTRATIONS, SUPPLIER_VERSIONS, SUPPLIERS } from './modules/suppliers/index.ts';
@@ -46,10 +47,11 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * accepting and confirming take them), then its registered contacts (2b,
  * B6-1a: an admin's membership is read before the contacts it changes), then
  * its factor resets (2c, B6-3a: a reset is confirmed by a contact read
- * first), then its agents (3) and their keys (3a, C1-1), then its funding
- * sources (5, D2-2), then its suppliers (6), their payee registrations (6,
- * after their supplier, E2-1) and their versions (6, after the registration
- * that gives one its reference, E1-1). Clearing the integrity hold checks
+ * first), then its agents (3) and their keys (3a, C1-1), then its mandates
+ * and their versions (4, Phase 2 B1), then its funding sources (5, D2-2),
+ * then its suppliers (6), their payee registrations (6, after their supplier,
+ * E2-1) and their versions (6, after the registration that gives one its
+ * reference, E1-1). Clearing the integrity hold checks
  * every row of each in this order (verifyAll, B3+-2c), so a new table goes in
  * at its level.
  */
@@ -61,6 +63,8 @@ export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   FACTOR_RESETS,
   AGENTS,
   AGENT_KEYS,
+  MANDATES,
+  MANDATE_VERSIONS,
   SOURCES,
   SUPPLIERS,
   BENEFICIARY_REGISTRATIONS,

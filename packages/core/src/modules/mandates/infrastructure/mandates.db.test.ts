@@ -1,0 +1,393 @@
+// B1: mandates and their versions (0034), on the real migrated schema, as the
+// app role. The steps that add and move them come with B2–B4 and their seals'
+// tamper tests with them; this holds the tables' own rules: the deployment's
+// currencies, read only; a mandate born waiting with its first draft, its
+// statuses moving only along its machine and each held to the versions it
+// needs; one live mandate an agent; limits that nest; an allow-list of
+// supplier IDs; an agent and a source of its own organisation only; versions
+// made once; and no other organisation's rows, no deletes, no key changes.
+import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
+import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
+import { type Insertable, sql, type Updateable } from 'kysely';
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+
+import type { MandatesTables } from './tables.ts';
+
+const server = inject('postgres');
+let database: TestDatabase;
+let app: Database<MandatesTables>;
+
+const AT = new Date('2026-10-06T08:00:00Z');
+
+type Tx = DatabaseTransaction<MandatesTables>;
+type MandateRow = Insertable<MandatesTables['mandates.mandates']>;
+type VersionRow = Insertable<MandatesTables['mandates.versions']>;
+
+interface Org {
+  readonly id: string;
+  readonly agent: string;
+  readonly source: string;
+}
+
+/** An organisation with an agent and a funding source, made past the app, as the steps that add them are tested elsewhere. */
+const organisation = async (): Promise<Org> => {
+  const org = { id: randomUUID(), agent: randomUUID(), source: randomUUID() };
+  const link = randomUUID();
+  const admin = database.as('admin');
+  await admin.query(
+    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
+     values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
+    [org.id, org.agent, randomUUID(), AT],
+  );
+  await admin.query(
+    `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
+     values ($1, $2, $3, 'fake', 'session-1', '2026-10-07T08:00:00Z', $4)`,
+    [org.id, link, randomUUID(), AT],
+  );
+  await admin.query(
+    `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
+       consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
+       max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
+     values ($1, $2, $3, 'fake', $4, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1', '2027-10-06T08:00:00Z', 'AED',
+       'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $5, $5)`,
+    [org.id, org.source, link, `acct-${org.source}`, AT],
+  );
+  return org;
+};
+
+const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
+
+/** A version's row, with any column given otherwise. */
+const versionRow = (org: Org, mandate: string, id: string, overrides: Partial<VersionRow> = {}): VersionRow => ({
+  org_id: org.id,
+  id,
+  mandate_id: mandate,
+  version: 1,
+  purpose: 'Office supplies',
+  currency: 'AED',
+  per_order_limit_minor: 500_000n,
+  monthly_limit_minor: 2_000_000n,
+  approval_threshold_minor: 100_000n,
+  supplier_ids: [randomUUID(), randomUUID()].sort().join(' '),
+  funding_source_id: org.source,
+  split_check: 'on',
+  consent_limits: 'strict',
+  ends_at: null,
+  terms_hash: 'a'.repeat(64),
+  drafted_by: randomUUID(),
+  drafted_at: AT,
+  ...overrides,
+});
+
+/** A mandate's row, waiting for its draft, with any column given otherwise. */
+const mandateRow = (org: Org, id: string, pending: string, overrides: Partial<MandateRow> = {}): MandateRow => ({
+  org_id: org.id,
+  id,
+  agent_id: org.agent,
+  time_zone: 'Asia/Dubai',
+  split_window_hours: 24,
+  status: 'PENDING_ACCEPTANCE',
+  pending_version_id: pending,
+  created_at: AT,
+  ...overrides,
+});
+
+/** Adds a mandate and its first draft in one transaction, as B2 will. */
+const add = (org: Org, mandate: MandateRow, version: VersionRow) =>
+  inOrg(org, async (tx) => {
+    await tx.insertInto('mandates.mandates').values(mandate).execute();
+    await tx.insertInto('mandates.versions').values(version).execute();
+  });
+
+/** A mandate waiting for acceptance with its first draft: its ID and the draft's. */
+const drafted = async (org: Org, overrides: Partial<VersionRow> = {}) => {
+  const [id, version] = [randomUUID(), randomUUID()];
+  await add(org, mandateRow(org, id, version), versionRow(org, id, version, overrides));
+  return { id, version };
+};
+
+const change = (org: Org, id: string, values: Updateable<MandatesTables['mandates.mandates']>) =>
+  inOrg(org, (tx) => tx.updateTable('mandates.mandates').set(values).where('id', '=', id).execute());
+
+const changeVersion = (org: Org, id: string, values: Updateable<MandatesTables['mandates.versions']>) =>
+  inOrg(org, (tx) => tx.updateTable('mandates.versions').set(values).where('id', '=', id).execute());
+
+/** Accepts the draft as B3 will: the version in force first, then the status. */
+const accepted = async (org: Org) => {
+  const mandate = await drafted(org);
+  await inOrg(org, async (tx) => {
+    await tx
+      .updateTable('mandates.mandates')
+      .set({
+        current_version_id: mandate.version,
+        pending_version_id: null,
+        accepted_by: randomUUID(),
+        accepted_at: AT,
+      })
+      .where('id', '=', mandate.id)
+      .execute();
+    await tx.updateTable('mandates.mandates').set({ status: 'ACTIVE' }).where('id', '=', mandate.id).execute();
+  });
+  return mandate;
+};
+
+const refusedBy = (constraint: string): unknown => expect.objectContaining({ constraint });
+const DENIED: unknown = expect.objectContaining({ code: '42501' });
+
+beforeAll(async () => {
+  database = await createTestDatabase(server, { schema: 'migrated' });
+  app = createDatabase<MandatesTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
+});
+
+afterAll(async () => {
+  await app.destroy();
+  await database.drop();
+});
+
+describe('the deployment’s currencies', () => {
+  it('are AED, which the app reads and never changes', async () => {
+    expect(await app.selectFrom('mandates.allowed_currencies').select('code').execute()).toEqual([{ code: 'AED' }]);
+    await expect(app.insertInto('mandates.allowed_currencies').values({ code: 'USD' }).execute()).rejects.toEqual(
+      DENIED,
+    );
+    await expect(app.deleteFrom('mandates.allowed_currencies').execute()).rejects.toEqual(DENIED);
+  });
+
+  it('are the only ones a version may be in', async () => {
+    const org = await organisation();
+    await expect(drafted(org, { currency: 'USD' })).rejects.toEqual(
+      expect.objectContaining({ code: '23503', constraint: 'versions_currency_fkey' }),
+    );
+  });
+});
+
+describe('a mandate', () => {
+  it('is born waiting for acceptance, with its first draft named before it is added', async () => {
+    const org = await organisation();
+    const { id, version } = await drafted(org);
+
+    expect(
+      await inOrg(org, (tx) =>
+        tx
+          .selectFrom('mandates.mandates')
+          .select(['status', 'pending_version_id', 'current_version_id'])
+          .where('id', '=', id)
+          .execute(),
+      ),
+    ).toEqual([{ status: 'PENDING_ACCEPTANCE', pending_version_id: version, current_version_id: null }]);
+  });
+
+  it('is never born in another status (status_guard)', async () => {
+    const org = await organisation();
+    const [id, version] = [randomUUID(), randomUUID()];
+
+    await expect(
+      add(org, mandateRow(org, id, version, { status: 'ACTIVE' }), versionRow(org, id, version)),
+    ).rejects.toEqual(refusedBy('status_guard'));
+  });
+
+  it('waits with a draft that is its own, checked at commit (pending_is_its_own)', async () => {
+    const org = await organisation();
+
+    await expect(
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('mandates.mandates')
+          .values(mandateRow(org, randomUUID(), randomUUID()))
+          .execute(),
+      ),
+    ).rejects.toEqual(refusedBy('pending_is_its_own'));
+  });
+
+  it('is accepted as B3 will accept it, and moves only along its machine', async () => {
+    const org = await organisation();
+    const { id } = await accepted(org);
+
+    await change(org, id, { status: 'SUSPENDED' });
+    await change(org, id, { status: 'ACTIVE' });
+    await expect(change(org, id, { status: 'PENDING_ACCEPTANCE' })).rejects.toEqual(refusedBy('status_guard'));
+    await change(org, id, { status: 'REVOKED' });
+    await expect(change(org, id, { status: 'ACTIVE' })).rejects.toEqual(refusedBy('status_guard'));
+  });
+
+  it('is live or expired only with a version in force (a_status_on_its_versions)', async () => {
+    const org = await organisation();
+    const { id } = await drafted(org);
+
+    await expect(change(org, id, { status: 'ACTIVE' })).rejects.toEqual(refusedBy('a_status_on_its_versions'));
+    // Waiting, it keeps a version to accept.
+    await expect(change(org, id, { pending_version_id: null })).rejects.toEqual(refusedBy('a_status_on_its_versions'));
+    // A draft never accepted is withdrawn by revoking it.
+    await change(org, id, { status: 'REVOKED' });
+  });
+
+  it('is accepted by someone, at a time, with its version in force (accepted_with_its_version)', async () => {
+    const org = await organisation();
+    const { id, version } = await drafted(org);
+
+    await expect(change(org, id, { current_version_id: version, pending_version_id: null })).rejects.toEqual(
+      refusedBy('accepted_with_its_version'),
+    );
+    await expect(change(org, id, { accepted_by: randomUUID(), accepted_at: AT })).rejects.toEqual(
+      refusedBy('accepted_with_its_version'),
+    );
+  });
+
+  it('has only its own versions in force (current_is_its_own)', async () => {
+    const org = await organisation();
+    const { id } = await drafted(org);
+    const other = await drafted(org);
+
+    await expect(
+      change(org, id, { current_version_id: other.version, accepted_by: randomUUID(), accepted_at: AT }),
+    ).rejects.toEqual(refusedBy('current_is_its_own'));
+  });
+
+  it('is one of an agent’s while live, and another may follow once it ends (one_live_mandate_an_agent)', async () => {
+    const org = await organisation();
+    const first = await accepted(org);
+
+    await expect(accepted(org)).rejects.toEqual(
+      expect.objectContaining({ code: '23505', constraint: 'one_live_mandate_an_agent' }),
+    );
+    await change(org, first.id, { status: 'SUSPENDED' });
+    await expect(accepted(org)).rejects.toEqual(refusedBy('one_live_mandate_an_agent'));
+    await change(org, first.id, { status: 'REVOKED' });
+    await accepted(org);
+  });
+
+  it('is for an agent of its own organisation only (of_an_agent)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const [id, version] = [randomUUID(), randomUUID()];
+
+    await expect(
+      add(org, mandateRow(org, id, version, { agent_id: other.agent }), versionRow(org, id, version)),
+    ).rejects.toEqual(refusedBy('of_an_agent'));
+  });
+
+  it('keeps its time zone and window within bounds', async () => {
+    const org = await organisation();
+
+    for (const overrides of [
+      { split_window_hours: 0 },
+      { split_window_hours: 745 },
+      { time_zone: '+04:00' },
+    ] satisfies Partial<MandateRow>[]) {
+      const [id, version] = [randomUUID(), randomUUID()];
+      await expect(add(org, mandateRow(org, id, version, overrides), versionRow(org, id, version))).rejects.toEqual(
+        expect.objectContaining({ code: '23514' }),
+      );
+    }
+  });
+});
+
+describe('a mandate version', () => {
+  it('has limits that nest: approval threshold ≤ per-order ≤ monthly (limits_nest)', async () => {
+    const org = await organisation();
+
+    await expect(drafted(org, { approval_threshold_minor: 500_001n })).rejects.toEqual(refusedBy('limits_nest'));
+    await expect(drafted(org, { per_order_limit_minor: 2_000_001n })).rejects.toEqual(refusedBy('limits_nest'));
+    await drafted(org, {
+      approval_threshold_minor: 500_000n,
+      per_order_limit_minor: 500_000n,
+      monthly_limit_minor: 500_000n,
+    });
+  });
+
+  it('has positive limits, never a fraction', async () => {
+    const org = await organisation();
+
+    await expect(drafted(org, { approval_threshold_minor: 0n })).rejects.toEqual(
+      refusedBy('versions_approval_threshold_minor_check'),
+    );
+    await expect(drafted(org, { monthly_limit_minor: '1.5' })).rejects.toEqual(
+      expect.objectContaining({ code: '22P02' }),
+    );
+  });
+
+  it('names up to 100 suppliers, as lower-case IDs one space apart', async () => {
+    const org = await organisation();
+    const hundred = Array.from({ length: 100 }, () => randomUUID()).sort();
+
+    await drafted(org, { supplier_ids: hundred.join(' ') });
+    for (const list of [
+      [...hundred, randomUUID()].join(' '),
+      hundred.slice(0, 2).join(','),
+      hundred.slice(0, 2).join('  '),
+      randomUUID().toUpperCase(),
+      '',
+    ]) {
+      await expect(drafted(org, { supplier_ids: list })).rejects.toEqual(refusedBy('versions_supplier_ids_check'));
+    }
+  });
+
+  it('draws on a source of its own organisation only (from_a_source)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+
+    await expect(drafted(org, { funding_source_id: other.source })).rejects.toEqual(refusedBy('from_a_source'));
+  });
+
+  it('ends after it was drafted, if it ends (ends_after_its_draft)', async () => {
+    const org = await organisation();
+
+    await expect(drafted(org, { ends_at: AT })).rejects.toEqual(refusedBy('ends_after_its_draft'));
+    await drafted(org, { ends_at: new Date('2027-01-01T00:00:00Z') });
+  });
+
+  it('is numbered once a mandate (one_number_a_version)', async () => {
+    const org = await organisation();
+    const { id } = await drafted(org);
+    const another = (version: number) =>
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('mandates.versions')
+          .values(versionRow(org, id, randomUUID(), { version }))
+          .execute(),
+      );
+
+    await expect(another(1)).rejects.toEqual(refusedBy('one_number_a_version'));
+    await another(2);
+  });
+
+  it('is made once: nothing in it changes after its first signed state (made_once)', async () => {
+    const org = await organisation();
+    const { version } = await drafted(org);
+
+    // Before its first signed state, the audit module's record writes it.
+    await changeVersion(org, version, { purpose: 'Office supplies' });
+    await changeVersion(org, version, { state_event_id: randomUUID() });
+    await expect(changeVersion(org, version, { monthly_limit_minor: 99_000_000n })).rejects.toEqual(
+      refusedBy('made_once'),
+    );
+  });
+});
+
+describe('the app', () => {
+  it('sees no other organisation’s mandates or versions', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const { id, version } = await drafted(org);
+
+    const seen = await inOrg(other, async (tx) => [
+      ...(await tx.selectFrom('mandates.mandates').select('id').where('id', '=', id).execute()),
+      ...(await tx.selectFrom('mandates.versions').select('id').where('id', '=', version).execute()),
+    ]);
+    expect(seen).toEqual([]);
+  });
+
+  it('never deletes, and never changes a key or a creation time', async () => {
+    const org = await organisation();
+    const { id, version } = await drafted(org);
+
+    for (const statement of [
+      (tx: Tx) => tx.deleteFrom('mandates.mandates').where('id', '=', id).execute(),
+      (tx: Tx) => tx.deleteFrom('mandates.versions').where('id', '=', version).execute(),
+      (tx: Tx) => tx.updateTable('mandates.mandates').set({ created_at: AT }).where('id', '=', id).execute(),
+      (tx: Tx) => tx.updateTable('mandates.mandates').set({ id: randomUUID() }).where('id', '=', id).execute(),
+      (tx: Tx) => tx.updateTable('mandates.versions').set({ org_id: randomUUID() }).where('id', '=', version).execute(),
+      (tx: Tx) => sql`truncate mandates.versions`.execute(tx),
+    ]) {
+      await expect(inOrg<unknown>(org, statement)).rejects.toEqual(DENIED);
+    }
+  });
+});

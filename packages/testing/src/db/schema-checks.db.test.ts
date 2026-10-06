@@ -558,6 +558,7 @@ describe('CI-06 each rule fails on a broken fixture', () => {
         };
         expect(await problemsAfter([], policy)).toEqual([
           'suppliers.suppliers: the partial unique index list gives no reason for one_supplier_a_payee',
+          'mandates.mandates: the partial unique index list gives no reason for one_live_mandate_an_agent',
         ]);
       });
     });
