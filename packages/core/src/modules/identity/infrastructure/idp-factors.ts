@@ -53,6 +53,9 @@ const NOT_SECOND_FACTORS: ReadonlySet<string> = new Set([
   'AUTHENTICATION_METHOD_TYPE_IDP',
 ]);
 
+/** Recovery codes: a second factor listed among the methods alone. */
+const RECOVERY_CODE = 'AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE';
+
 /** Every method Zitadel names (user/v2 AuthenticationMethodType): one outside it is an answer we can't judge. */
 const METHODS: ReadonlySet<string> = new Set([
   ...NOT_SECOND_FACTORS,
@@ -61,7 +64,7 @@ const METHODS: ReadonlySet<string> = new Set([
   'AUTHENTICATION_METHOD_TYPE_U2F',
   'AUTHENTICATION_METHOD_TYPE_OTP_SMS',
   'AUTHENTICATION_METHOD_TYPE_OTP_EMAIL',
-  'AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE',
+  RECOVERY_CODE,
 ]);
 
 /** A factor's or passkey's states; a removed one is gone. */
@@ -81,14 +84,20 @@ export class IdpFactorsUnavailable extends Error {
   }
 }
 
-/** How many passkey-grade factors a person holds at the login service (the S68 audit). */
-export interface PasskeysHeld {
+/** The second factors a person holds, ready to use: security keys and passkeys, and every other kind. */
+export interface FactorsHeld {
+  readonly keys: number;
+  /** App codes, SMS and email codes, and recovery codes (one, however many codes). */
+  readonly others: number;
+}
+
+/** What second factors a person holds at the login service (the S68 audit; F1's first-passkey rule). */
+export interface SecondFactorsHeld {
   /**
-   * The security keys and passkeys of the login service's user `subject`
-   * that are ready to use. Throws IdpFactorsUnavailable for an answer it
-   * can't judge.
+   * The second factors of the login service's user `subject` that are ready
+   * to use. Throws IdpFactorsUnavailable for an answer it can't judge.
    */
-  passkeysHeld(subject: string): Promise<number>;
+  secondFactorsHeld(subject: string): Promise<FactorsHeld>;
 }
 
 export interface SecondFactorRemover {
@@ -121,11 +130,19 @@ function stateOf(raw: unknown, what: string): string {
   return state;
 }
 
-/** Where a factor is removed, below the user's own path; a factor of a kind we don't know throws. */
-function removalOf(factor: unknown): string {
+/** A factor's kind; one we don't know throws. */
+function kindOf(factor: unknown): string {
   const kinds = ['otp', 'otpSms', 'otpEmail', 'u2f'].filter((kind) => field(factor, kind) !== undefined);
   const [kind] = kinds;
-  if (kinds.length !== 1) throw new IdpFactorsUnavailable('a factor is not as the login service writes them');
+  if (kinds.length !== 1 || kind === undefined) {
+    throw new IdpFactorsUnavailable('a factor is not as the login service writes them');
+  }
+  return kind;
+}
+
+/** Where a factor is removed, below the user's own path; a factor of a kind we don't know throws. */
+function removalOf(factor: unknown): string {
+  const kind = kindOf(factor);
   if (kind === 'otp') return '/totp';
   if (kind === 'otpSms') return '/otp_sms';
   if (kind === 'otpEmail') return '/otp_email';
@@ -147,7 +164,7 @@ export function createSecondFactorRemover({
 }: ZitadelCallOptions & {
   /** Waits between the reads after a removal; a test's is instant. */
   readonly pause?: (ms: number) => Promise<void>;
-}): SecondFactorRemover & PasskeysHeld {
+}): SecondFactorRemover & SecondFactorsHeld {
   const zitadel = createZitadelCall(login, { timeoutMs: CALL_TIMEOUT_MS, mostAnswerBytes: MOST_ANSWER_BYTES });
 
   /** Calls the user's path; its answer's status and body (parsed for a 200 alone). */
@@ -164,16 +181,10 @@ export function createSecondFactorRemover({
     return answer;
   };
 
-  /** Every second factor the person has now, as the paths that remove them; and any method left otherwise. */
-  const secondFactorsOf = async (subject: string): Promise<{ removals: string[]; otherMethods: string[] }> => {
+  /** The person's factors in `states`, passkeys and methods, each list read strictly. */
+  const listsOf = async (subject: string, states: readonly string[]) => {
     const factors = listIn(
-      await read(
-        subject,
-        '/authentication_factors/_search',
-        'POST',
-        { states: ['AUTH_FACTOR_STATE_NOT_READY', 'AUTH_FACTOR_STATE_READY'] },
-        'reading the factors',
-      ),
+      await read(subject, '/authentication_factors/_search', 'POST', { states }, 'reading the factors'),
       'result',
       'reading the factors',
     );
@@ -190,32 +201,33 @@ export function createSecondFactorRemover({
     if (!methods.every((method) => typeof method === 'string' && METHODS.has(method))) {
       throw new IdpFactorsUnavailable('a method is not one the login service names');
     }
+    return { factors, passkeys, methods };
+  };
+
+  /** Every second factor the person has now, as the paths that remove them; and any method left otherwise. */
+  const secondFactorsOf = async (subject: string): Promise<{ removals: string[]; otherMethods: string[] }> => {
+    const { factors, passkeys, methods } = await listsOf(subject, ['AUTH_FACTOR_STATE_NOT_READY', READY]);
     const removals = [
       ...factors.filter((factor) => stateOf(factor, 'a factor') !== REMOVED).map(removalOf),
       ...passkeys.filter((passkey) => stateOf(passkey, 'a passkey') !== REMOVED).map(passkeyRemovalOf),
-      ...(methods.includes('AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE') ? ['/recovery_codes'] : []),
+      ...(methods.includes(RECOVERY_CODE) ? ['/recovery_codes'] : []),
     ];
-    const listed = new Set(['AUTHENTICATION_METHOD_TYPE_RECOVERY_CODE', ...NOT_SECOND_FACTORS]);
+    const listed = new Set([RECOVERY_CODE, ...NOT_SECOND_FACTORS]);
     return { removals, otherMethods: methods.filter((method) => !listed.has(method as string)) as string[] };
   };
 
   return {
-    async passkeysHeld(subject) {
+    async secondFactorsHeld(subject) {
       if (!ZITADEL_ID.test(subject)) throw new RangeError("the subject must be the login service's user ID");
-      const factors = listIn(
-        await read(subject, '/authentication_factors/_search', 'POST', { states: [READY] }, 'reading the factors'),
-        'result',
-        'reading the factors',
-      );
-      const passkeys = listIn(
-        await read(subject, '/passkeys/_search', 'POST', {}, 'reading the passkeys'),
-        'result',
-        'reading the passkeys',
-      );
-      const keys = factors.filter(
-        (factor) => field(factor, 'u2f') !== undefined && stateOf(factor, 'a factor') === READY,
-      );
-      return keys.length + passkeys.filter((passkey) => stateOf(passkey, 'a passkey') === READY).length;
+      const { factors, passkeys, methods } = await listsOf(subject, [READY]);
+      // Asked for ready ones alone, each state is still judged: one we don't know throws, never a count.
+      const readyKinds = factors.filter((factor) => stateOf(factor, 'a factor') === READY).map(kindOf);
+      const readyPasskeys = passkeys.filter((passkey) => stateOf(passkey, 'a passkey') === READY);
+      const securityKeys = readyKinds.filter((kind) => kind === 'u2f').length;
+      return {
+        keys: securityKeys + readyPasskeys.length,
+        others: readyKinds.length - securityKeys + (methods.includes(RECOVERY_CODE) ? 1 : 0),
+      };
     },
 
     async removeAll(subject) {
