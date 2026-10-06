@@ -31,6 +31,7 @@ param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
 param integrityAlertName string
+param resetTokenAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -205,6 +206,50 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     }
     // Stateless: every 15 minutes the check still fails notifies again.
     autoMitigate: false
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The reset token's alarm (partner, S88): the API's one token at the login
+// service (Org User Manager) ends a person's sessions there at sign-out,
+// removes a reset's second factors and reads the factors a person holds. A
+// token that stopped working would leave sign-out quietly ending ours alone,
+// so any failure of those three tells someone at once. Stateful: it fires once
+// and resolves after a quiet window.
+resource resetTokenAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: resetTokenAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Sign-in service: a call with the reset token failed'
+    description: 'SEV-2. The API failed a call to the login service with its reset token: ending the sessions there at a sign-out, removing the second factors of a reset, or reading the factors a person holds (auth.login_service_sign_out_failed, factor_resets.removal_failed, idp_events.keys_unread). Runbook: Incident-Response-Playbook.md section M.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("auth.login_service_sign_out_failed", "factor_resets.removal_failed", "idp_events.keys_unread") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
     actions: {
       actionGroups: [actionGroupId]
     }

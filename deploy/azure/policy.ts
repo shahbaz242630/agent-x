@@ -49,6 +49,7 @@ export type RuleId =
   | 'apps-logs'
   | 'app-errors-alert'
   | 'audit-integrity-alert'
+  | 'reset-token-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -207,6 +208,15 @@ const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal"
  */
 const INTEGRITY_LINES =
   'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed")';
+
+/**
+ * The reset token's failures (partner, S88): a sign-out that couldn't end the
+ * person's sessions at the login service, a reset's removal that failed, and
+ * the factors held that couldn't be read. Our logger writes each event name
+ * exactly, so the match keeps its case.
+ */
+const RESET_TOKEN_LINES =
+  'where tostring(parse_json(Log).event) in ("auth.login_service_sign_out_failed", "factor_resets.removal_failed", "idp_events.keys_unread")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -685,7 +695,7 @@ export function singleSummaryColumn(query: string): string | undefined {
 }
 
 /**
- * Whether a SEV-1 alert sees every minute and fires on the first window with a
+ * Whether an alert sees every minute and fires on the first window with a
  * match: its window is as long as the time between runs, so no minute goes
  * unwatched, and one failing window is enough, so it never waits for more.
  */
@@ -1503,7 +1513,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-J]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-M]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -1785,6 +1795,32 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         resource: environment.name,
         message:
           "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace counts every failure of the reset token's
+ * calls (partner, S88): one line is enough to fire it, in any window.
+ */
+const resetTokenAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [RESET_TOKEN_LINES], 'count()') &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'reset-token-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any auth.login_service_sign_out_failed, factor_resets.removal_failed or idp_events.keys_unread line, watching every minute and firing on the first window",
       });
     }
   }
@@ -2716,6 +2752,7 @@ const CHECKS: readonly Check[] = [
   appsLogs,
   appErrorsAlert,
   auditIntegrityAlert,
+  resetTokenAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
