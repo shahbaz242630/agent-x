@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { MANDATE } from './mandate.ts';
 
 describe('a mandate’s status (B1)', () => {
-  it('starts PENDING_ACCEPTANCE, and moves only as 0034’s guard lists', () => {
+  it('starts PENDING_ACCEPTANCE, and moves only as 0035’s guard lists', () => {
     expect(MANDATE.initial).toBe('PENDING_ACCEPTANCE');
     expect(MANDATE.moves.map(({ from, to }) => `${from}>${to}`)).toEqual([
       'PENDING_ACCEPTANCE>ACTIVE',

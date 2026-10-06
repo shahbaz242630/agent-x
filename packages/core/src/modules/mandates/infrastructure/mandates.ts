@@ -1,4 +1,4 @@
-// Mandates and their versions (0034). Both are authority tables (ADR-012 §2):
+// Mandates and their versions (0035). Both are authority tables (ADR-012 §2):
 // every sealed field below must equal the row's latest signed event, and every
 // read goes through the audit module's verifiedState with these descriptions.
 // On the product's authority-table list at the mandate's level in the lock
@@ -24,9 +24,9 @@ export const MANDATES = {
     { column: 'accepted_at', type: 'timestamptz' },
   ],
   rules: MANDATE,
-  // Fixed when the mandate is made (SEC-LIM-08): 0034's `fixed_at_creation` refuses any change after.
+  // Fixed when the mandate is made (SEC-LIM-08): 0035's `fixed_at_creation` refuses any change after.
   fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
-  // Live or ended with a version in force, waiting with one to accept (0034): CI's A3c
+  // Live or ended with a version in force, waiting with one to accept (0035): CI's A3c
   // allows this one check over the status with other columns.
   statusConditions: ['a_status_on_its_versions'],
 } as const satisfies SignedStateTable & {
@@ -35,7 +35,7 @@ export const MANDATES = {
   readonly statusConditions: readonly string[];
 };
 
-/** A mandate version's row, as the signed state reads and records it: made once, never moved (0034's `made_once`). */
+/** A mandate version's row, as the signed state reads and records it: made once, never moved (0035's `made_once`). */
 export const MANDATE_VERSIONS = {
   table: 'mandates.versions',
   subject: 'mandate_version',

@@ -376,7 +376,7 @@ export const SCHEMA_POLICY: SchemaPolicy = {
     },
     {
       reason:
-        "One open mandate an agent (PRD §3, the Pilot; 0034): waiting, ACTIVE or SUSPENDED, so a second can't be drafted while one is open. Partial so the status is never a key column, and a status change stays a no-key write (ADR-006 §6)",
+        "One open mandate an agent (PRD §3, the Pilot; 0035): waiting, ACTIVE or SUSPENDED, so a second can't be drafted while one is open. Partial so the status is never a key column, and a status change stays a no-key write (ADR-006 §6)",
       table: 'mandates.mandates',
       name: 'one_open_mandate_an_agent',
       columns: ['org_id', 'agent_id'],

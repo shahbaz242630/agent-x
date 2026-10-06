@@ -8,7 +8,7 @@
 // version in force runs out. Superseding is not a move: a mandate stays ACTIVE
 // with a new version in force, and the one it replaces is SUPERSEDED by being
 // no longer current (PRD §4.1). The database's status guard holds the same
-// moves (0034).
+// moves (0035).
 //
 // The time zone its months are counted in and the split check's window are
 // fixed when it is made (ADR-006 §4), so a later version can't move a period

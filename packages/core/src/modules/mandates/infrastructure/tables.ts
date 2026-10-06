@@ -1,6 +1,6 @@
 import type { Generated } from 'kysely';
 
-/** The mandates schema's tables (db/migrations/0034_mandates.sql), as Kysely sees them. */
+/** The mandates schema's tables (db/migrations/0035_mandates.sql), as Kysely sees them. */
 export interface MandatesTables {
   'mandates.allowed_currencies': AllowedCurrenciesTable;
   'mandates.mandates': MandatesTable;

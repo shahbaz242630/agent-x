@@ -56,10 +56,10 @@ const MADE_ONCE_FUNCTION_SQL =
   )?.[0] ?? '';
 const MADE_ONCE_BODY_HASH = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
 
-/** 0034's fixed-at-creation guard, read from the migration in the same way, and the hash schema-guard.ts holds its body to. */
+/** 0035's fixed-at-creation guard, read from the migration in the same way, and the hash schema-guard.ts holds its body to. */
 const FIXED_FUNCTION_SQL =
   /CREATE OR REPLACE FUNCTION state_rules\.guard_fixed\(\)[\s\S]*?\$\$;/.exec(
-    readFileSync(new URL('../../../../db/migrations/0034_mandates.sql', import.meta.url), 'utf8').replace(
+    readFileSync(new URL('../../../../db/migrations/0035_mandates.sql', import.meta.url), 'utf8').replace(
       'CREATE FUNCTION state_rules.guard_fixed()',
       'CREATE OR REPLACE FUNCTION state_rules.guard_fixed()',
     ),
@@ -168,7 +168,7 @@ describe('the made-once guard function (0032, E1-1’s review)', () => {
   });
 });
 
-describe('the fixed-at-creation guard (0034, Phase 2 B1)', () => {
+describe('the fixed-at-creation guard (0035, Phase 2 B1)', () => {
   const read = () =>
     owner.query<{ body: string; config: string; definer: boolean }>(
       `select pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc, 'UTF8')), 'hex') as body,
@@ -195,7 +195,7 @@ describe('the fixed-at-creation guard (0034, Phase 2 B1)', () => {
     try {
       expect(await problems()).toContain('state_rules.guard_fixed is not the function the migration wrote');
     } finally {
-      // eslint-disable-next-line agentx/no-string-built-sql -- 0034's own statement, read from the migration
+      // eslint-disable-next-line agentx/no-string-built-sql -- 0035's own statement, read from the migration
       await owner.query(FIXED_FUNCTION_SQL);
     }
     expect((await read())[0]?.body).toBe(FIXED_BODY_HASH);

@@ -104,7 +104,7 @@ const MADE_ONCE_TYPE = 19;
 const MADE_ONCE_BODY = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
 
 /**
- * The third: the fixed-at-creation guard (0034, Phase 2 B1), on an authority
+ * The third: the fixed-at-creation guard (0035, Phase 2 B1), on an authority
  * table some of whose columns never change once the row is added (a
  * mandate's agent, time zone and split window). It fires BEFORE
  * UPDATE, FOR EACH ROW (19), handed exactly the columns the authority list
@@ -265,7 +265,7 @@ export interface SchemaGuardOptions {
    */
   readonly madeOnceTables?: readonly string[];
   /**
-   * The tables with columns fixed when a row is made (0034's
+   * The tables with columns fixed when a row is made (0035's
    * `fixed_at_creation`), by `schema.table`, each with those columns in
    * order: each must carry the guard, firing, handed exactly them. None by
    * default.
@@ -965,7 +965,7 @@ function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
 
 /**
  * The only triggers our schema has are the status guard 0004 installs, the
- * made-once guard 0032 installs and the fixed-at-creation guard 0034
+ * made-once guard 0032 installs and the fixed-at-creation guard 0035
  * installs, and each must still be that guard: a
  * planted trigger given its name would otherwise pass on its name alone. A
  * switched-off guard is drift too — Postgres keeps the row and stops running
@@ -1008,7 +1008,7 @@ function madeOnceProblems(trigger: TriggerRow): SchemaProblem[] {
 const FIXED_CALL = /state_rules\.guard_fixed\('[a-z][a-z0-9_]*'(?:, '[a-z][a-z0-9_]*')*\)$/;
 
 /**
- * The fixed-at-creation guard, still as 0034 wrote it and firing. On a table
+ * The fixed-at-creation guard, still as 0035 wrote it and firing. On a table
  * the authority list names, it is handed exactly that table's columns: one
  * handed fewer would let the others change. Elsewhere it only holds more
  * still, so column names are all it needs.

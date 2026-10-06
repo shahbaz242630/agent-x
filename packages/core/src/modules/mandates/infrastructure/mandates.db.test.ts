@@ -1,4 +1,4 @@
-// B1: mandates and their versions (0034), on the real migrated schema, as the
+// B1: mandates and their versions (0035), on the real migrated schema, as the
 // app role. The steps that add and move them come with B2–B4 and their seals'
 // tamper tests with them; this holds the tables' own rules: the deployment's
 // currencies, read only; a mandate born waiting with its first draft, its
