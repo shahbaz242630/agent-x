@@ -32,11 +32,10 @@ export function isTimeZone(zone: string): boolean {
 
 const formats = new Map<string, Intl.DateTimeFormat>();
 
-/** One formatter a zone, kept: building one is far slower than using it. */
+/** One formatter a zone, kept: building one is far slower than using it. RangeError for a zone it doesn't know. */
 function formatOf(zone: string): Intl.DateTimeFormat {
   let format = formats.get(zone);
   if (format === undefined) {
-    if (!isTimeZone(zone)) throw new RangeError(`Not a time zone: ${zone}`);
     format = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
       hourCycle: 'h23',
