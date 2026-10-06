@@ -31,7 +31,7 @@ param actionGroupId string
 param errorAlertName string
 param errorAlertThreshold int
 param integrityAlertName string
-param resetTokenAlertName string
+param tokenRefusedAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -213,20 +213,22 @@ resource integrityAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   dependsOn: [appLogs]
 }
 
-// The reset token's alarm (partner, S88): the API's one token at the login
-// service (Org User Manager) ends a person's sessions there at sign-out,
-// removes a reset's second factors and reads the factors a person holds. A
-// token that stopped working would leave sign-out quietly ending ours alone,
-// so any failure of those three tells someone at once. Stateful: it fires once
-// and resolves after a quiet window.
-resource resetTokenAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
-  name: resetTokenAlertName
+// The login service refusing a token (partner, S88): the API's tokens at
+// Zitadel end a person's sessions there at sign-out, remove a reset's second
+// factors, read the factors a person holds and read people's addresses. A
+// token that stopped working (expired, revoked, its role taken) would leave
+// sign-out quietly ending ours alone, so any refusal tells someone at once.
+// Every call logs it as the error type LoginTokenRefused (zitadel-call.ts),
+// never for a login service that is only away or waking. Stateful: it fires
+// once and resolves after a quiet window.
+resource tokenRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: tokenRefusedAlertName
   location: location
   tags: tags
   kind: 'LogAlert'
   properties: {
-    displayName: 'Sign-in service: a call with the reset token failed'
-    description: 'SEV-2. The API failed a call to the login service with its reset token: ending the sessions there at a sign-out, removing the second factors of a reset, or reading the factors a person holds (auth.login_service_sign_out_failed, factor_resets.removal_failed, idp_events.keys_unread). Runbook: Incident-Response-Playbook.md section M.'
+    displayName: 'Sign-in service: a token was refused'
+    description: 'SEV-2. The login service refused one of the API tokens (401 or 403, logged as LoginTokenRefused): sign-out no longer ends the sessions there, resets and the factor checks wait, or notices wait for their addresses. Runbook: Incident-Response-Playbook.md section M.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -237,7 +239,7 @@ resource resetTokenAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("auth.login_service_sign_out_failed", "factor_resets.removal_failed", "idp_events.keys_unread") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
