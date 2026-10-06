@@ -155,7 +155,7 @@ export function createIdpEventCopier({
   /** The login service the feed is read from: its subjects are its user IDs. */
   readonly issuer: string;
   readonly outbox: Outbox;
-  /** How many second factors a person holds (the reset token's reader); undefined: every key added counts. */
+  /** Which second factors a person holds, keys apart from others (the reset token's reader); undefined: every key added counts. */
   readonly factors?: SecondFactorsHeld | undefined;
   readonly logger: Logger;
 }): IdpEventCopier {
@@ -190,8 +190,8 @@ export function createIdpEventCopier({
   /**
    * Whether a second factor removed counts toward the restriction, whoever
    * removed it: a key was added in the 7 days before (a swap of the person's
-   * factor for another's key). The addition is copied first, as the feed gives events in
-   * time order.
+   * factor for another's key). The addition is copied first, as the feed
+   * gives events in time order.
    */
   const removalCounts = (event: IdpEvent, person: string): Promise<boolean> =>
     copiedWithinWeek(event, person, PASSKEY_ADDED_EVENTS);
