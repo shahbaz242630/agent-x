@@ -1261,9 +1261,10 @@ describe('inviting a first admin (B4-6b)', () => {
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
     expect(done.az.request).toBe(NO_REQUEST);
     const last = done.said.at(-1) ?? '';
-    const token = /#token=([A-Za-z0-9_-]{43})$/.exec(last)?.[1] ?? '';
+    const token = /#token=([A-Za-z0-9_-]{43})$/m.exec(last)?.[1] ?? '';
     expect(last).toContain(`Invited the first admin of ${ORG_ID} (invitation ${id}).`);
     expect(last).toContain(`${ORIGIN}/invitations/accept#token=`);
+    expect(last).toMatch(/\nTell them to register a passkey as their first second factor/);
     // The token the link carries is the one whose hash was sent, and it was said nowhere else, nor sent.
     expect(createHash('sha256').update(token, 'ascii').digest('hex')).toBe(hash);
     expect(done.said.slice(0, -1).join('\n')).not.toContain(token);
