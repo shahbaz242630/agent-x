@@ -273,14 +273,15 @@ describe(`a sign-in from end to end (Postgres ${server.version})`, () => {
     expect(await sessions.use(app, first.cookie)).toBeDefined();
   });
 
-  it('signs out: ends the session its cookie names, and nothing without one', async () => {
+  it('signs out: ends the session its cookie names, saying who signed in with it, and nothing without one', async () => {
     const done = await roundTrip();
 
-    expect(await signIn.signOut(undefined)).toBe(false);
+    expect(await signIn.signOut(undefined)).toBeUndefined();
     expect(await sessions.use(app, done.cookie)).toBeDefined();
-    expect(await signIn.signOut(done.cookie)).toBe(true);
+    // Who it was, as the login service knows them: a sign-out ends their sessions there too (S88).
+    expect(await signIn.signOut(done.cookie)).toEqual({ issuer: ISSUER, subject: client.subject });
     expect(await sessions.use(app, done.cookie)).toBeUndefined();
-    expect(await signIn.signOut(done.cookie)).toBe(false);
+    expect(await signIn.signOut(done.cookie)).toBeUndefined();
   });
 
   it('finds the live session a signed-in request names (B2-4b), and none once it is signed out', async () => {

@@ -42,7 +42,7 @@ export interface LoginDriver {
 /** Where the page is, for a failure message. */
 export const where = (page: Page): string => `at ${page.url()}`;
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const TOTP_STEP_MS = 30_000;
 /** How long a sent form is waited for, the page then let settle, and the one resend waited for. */

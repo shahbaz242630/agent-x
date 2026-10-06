@@ -79,7 +79,7 @@ const SIGN_IN: SignIn = {
   begin: () => Promise.reject(new Error('not in the matrix')),
   beginStepUp: () => Promise.reject(new Error('not in the matrix')),
   complete: () => Promise.reject(new Error('not in the matrix')),
-  signOut: () => Promise.resolve(false),
+  signOut: () => Promise.resolve(undefined),
   signedIn: (cookie) => {
     const index = PEOPLE.findIndex((_, at) => cookieOf(at) === cookie);
     return Promise.resolve(index === -1 ? undefined : session(index));
