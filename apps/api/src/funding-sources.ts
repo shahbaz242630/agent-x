@@ -53,7 +53,7 @@ import {
   LINKING_ROLES,
 } from './funding-source-links.ts';
 import type { FundingSourceReads } from './funding-source-reads.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -260,9 +260,7 @@ export function registerFundingSources(
   /** Answers a change: the source as it now stands, a step-up asked, or a refusal. */
   const answerChange = (written: SourceChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
     if (written.outcome === 'changed') return reply.code(200).send(sourceOf(written.source));
-    if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
-    if (written.outcome === 'refused') return refused(written, request, reply);
-    return answerRefusedWrite(written, request, reply);
+    return answerAsked(written, request, reply);
   };
 
   routes.post(

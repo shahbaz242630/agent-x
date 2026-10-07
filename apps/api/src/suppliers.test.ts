@@ -7,7 +7,7 @@
 // supplier-registry.db.test.ts, supplier-changes.db.test.ts,
 // supplier-payees.db.test.ts and supplier-payee-changes.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
+import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
 import type {
   RegistrationRecord,
   SupplierDetails,
@@ -16,13 +16,11 @@ import type {
   VersionRecord,
 } from '@agentx/core/modules/suppliers';
 import type { IdempotentRequest } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
@@ -32,9 +30,6 @@ import type { PayeeWrite, SupplierPayees } from './supplier-payees.ts';
 import type { SupplierAddWrite, SupplierPage, SupplierRegistry, SuppliersListed } from './supplier-registry.ts';
 import type { SupplierChangeWrite, SupplierView } from './supplier-work.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const SUPPLIER_ID = '0199a0f0-0000-7000-8000-0000000000e1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000e2';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-000000000033';
@@ -52,14 +47,6 @@ const LIVE: LiveSession = {
   lastSeenAt: new Date('2026-10-01T08:10:00.000Z'),
   endsAt: new Date('2099-10-01T20:00:05.000Z'),
   idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
-};
-
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
 };
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: MEMBERSHIP, role: 'admin' };
@@ -237,11 +224,7 @@ type Asked =
       readonly callBack: object;
     };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 /** A server whose use cases answer as given, noting what they were asked. */
 async function withSuppliers(
@@ -330,30 +313,9 @@ async function withSuppliers(
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
-    findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? ADMIN : ({ outcome: 'none' } as const)),
+  const app = await routeServer({
+    live: LIVE,
+    member: ADMIN,
     checkAgentKey: (text) => {
       const key = AGENT_KEYS.get(text);
       return Promise.resolve(key === undefined ? { outcome: 'refused' } : { outcome: 'accepted', key });
@@ -365,8 +327,6 @@ async function withSuppliers(
     supplierVerifications: verifications,
     supplierDetailsChanges: detailsChanges,
   });
-  servers.push(app);
-  await app.ready();
   return app;
 }
 

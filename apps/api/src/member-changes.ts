@@ -32,7 +32,7 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { MEMBER, memberOf } from './members.ts';
 import { NOTHING, STEP_UP_CONFIRM, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
@@ -94,10 +94,7 @@ export function registerMemberChanges(app: FastifyInstance, changes: MembershipC
   const ask = async (request: FastifyRequest, reply: FastifyReply, id: string, change: MembershipChange) => {
     const admin = memberInSessionOf(request);
     const written = await need(changes).ask(admin, idempotentRequest(request, admin.orgId), id, change, request.id);
-    const refused = answerRefusal(written, request, reply);
-    if (refused !== undefined) return refused;
-    if (written.outcome !== 'asked') throw new Error('an ask answered without its challenge');
-    return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+    return answerAsked(written, request, reply);
   };
 
   const confirm = async (

@@ -43,7 +43,7 @@ import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** The most an investigation's body may be: a conclusion and a reference, with room to spare. */
@@ -205,10 +205,7 @@ export function registerIntegrityHold(
         request.body.investigationId,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined) return refused;
-      if (written.outcome !== 'asked') throw new Error('an ask answered without its step-up');
-      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+      return answerAsked(written, request, reply);
     },
   );
 

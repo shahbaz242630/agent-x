@@ -54,7 +54,7 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusal, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
 import { NOTHING, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** The most an invitation's body may be: an address and a role, with room to spare. */
@@ -325,10 +325,7 @@ export function registerInvitations(
         request.params.id,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined) return refused;
-      if (written.outcome !== 'asked') throw new Error('an ask answered without its challenge');
-      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+      return answerAsked(written, request, reply);
     },
   );
 

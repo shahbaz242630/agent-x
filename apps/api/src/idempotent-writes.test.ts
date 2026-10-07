@@ -7,7 +7,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { errorBody } from './errors.ts';
-import { answerRefusedWrite, BUSY_RETRY_SECONDS, canonicalJson, idempotentRequest } from './idempotent-writes.ts';
+import {
+  answerAsked,
+  answerRefusedWrite,
+  BUSY_RETRY_SECONDS,
+  canonicalJson,
+  idempotentRequest,
+} from './idempotent-writes.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -223,6 +229,13 @@ describe('SEC-DP-07/08/09 answering what the store says', () => {
     const reply = {} as Parameters<typeof answerRefusedWrite>[2];
     expect(answerRefusedWrite(DONE, request, reply)).toBeUndefined();
     expect(answerRefusedWrite({ outcome: 'replayed', result: DONE.result }, request, reply)).toBeUndefined();
+  });
+
+  it('fails a step-up ask that answered as if it were done, never sending a challenge it lacks', () => {
+    const request = { id: FIRST_ID } as Parameters<typeof answerAsked>[1];
+    const reply = {} as Parameters<typeof answerAsked>[2];
+    expect(() => answerAsked(DONE, request, reply)).toThrow('a step-up ask answered without its challenge');
+    expect(() => answerAsked({ outcome: 'written' }, request, reply)).toThrow(/without its challenge/);
   });
 });
 

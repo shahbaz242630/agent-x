@@ -4,12 +4,10 @@
 // reads; B3's accept and B4's suspend, resume and revoke, each asked then
 // confirmed. Who reaches them is the access hook's (role-matrix.test.ts); what
 // the use case does in the database is mandate-registry.db.test.ts.
-import type { MembershipCheck, LiveSession, Role, SignIn } from '@agentx/core/modules/identity';
+import type { MembershipCheck, LiveSession, Role } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
 import type { IdempotentRequest } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
@@ -17,12 +15,9 @@ import type { AcceptAsked, MandateAcceptance, MandateAccepted } from './mandate-
 import type { MandateMove, MandateMoved, MandateMoves, MoveAsked } from './mandate-moves.ts';
 import type { MandateView } from './mandate-reads.ts';
 import type { MandateDraft, MandateRegistry, MandateWrite } from './mandate-registry.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
@@ -41,14 +36,6 @@ const LIVE: LiveSession = {
   lastSeenAt: new Date('2026-10-07T09:10:00.000Z'),
   endsAt: new Date('2099-10-07T21:00:05.000Z'),
   idleEndsAt: new Date('2099-10-07T09:40:00.000Z'),
-};
-
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
 };
 
 const AED = (minor: bigint) => money(minor, 'AED');
@@ -120,11 +107,7 @@ const DETAILS_ANSWERED = {
   pending: VERSION_ANSWERED,
 };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 interface Call {
   readonly kind: 'draft' | 'redraft' | 'list' | 'show' | 'accept' | 'acceptConfirm' | 'ask' | 'confirm';
@@ -186,36 +169,13 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     },
   };
   const member: MembershipCheck = { outcome: 'active', id: ADMIN, role };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
-    findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? member : ({ outcome: 'none' } as const)),
+  const app = await routeServer({
+    live: LIVE,
+    member,
     mandateRegistry: registry,
     mandateAcceptance: acceptance,
     mandateMoves: moves,
   });
-  servers.push(app);
-  await app.ready();
   return { app, calls };
 }
 

@@ -130,11 +130,32 @@ export function answerRefusedWrite(
  * anything else, returns undefined and the route answers it.
  */
 export function answerRefusal(
-  answer: Refused | IdempotentWrite | { readonly outcome: 'written' | 'asked' | 'shown' | 'cleared' },
+  answer: Refused | IdempotentWrite | { readonly outcome: 'written' | 'registered' | 'asked' | 'shown' | 'cleared' },
   request: FastifyRequest,
   reply: FastifyReply,
 ): FastifyReply | undefined {
   if (answer.outcome === 'refused') return sendErrorBody(reply, answer.status, answer.code, request.id);
   if (answer.outcome === 'conflict' || answer.outcome === 'busy') return answerRefusedWrite(answer, request, reply);
   return undefined;
+}
+
+/**
+ * Answers a step-up ask: 202 with its challenge, or the refusal. The ask's
+ * use case shares its answer's type with the confirm, so anything else is a
+ * failure on our side.
+ */
+export function answerAsked(
+  answer:
+    | { readonly outcome: 'asked'; readonly stepUpChallengeId: string }
+    | Refused
+    | IdempotentWrite
+    // The confirms' answers.
+    | { readonly outcome: 'written' | 'registered' | 'cleared' },
+  request: FastifyRequest,
+  reply: FastifyReply,
+): FastifyReply {
+  if (answer.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: answer.stepUpChallengeId });
+  const refused = answerRefusal(answer, request, reply);
+  if (refused === undefined) throw new Error('a step-up ask answered without its challenge');
+  return refused;
 }
