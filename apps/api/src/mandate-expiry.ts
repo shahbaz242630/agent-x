@@ -19,7 +19,6 @@
 // A run never throws: each failure is logged, naming the organisation and
 // mandate, and the run goes on to the next.
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
-import { listedOrganizations } from '@agentx/core/modules/directory';
 import { isEnded, MANDATES, mandatesPastTheirEnd } from '@agentx/core/modules/mandates';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
@@ -27,7 +26,7 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type MandateTables, mandateIn, versionIn } from './mandate-reads.ts';
+import { type MandateTables, mandateIn, toldOfMandate, versionIn } from './mandate-reads.ts';
 import { movedAsRead } from './use-case-work.ts';
 
 /** How often ended mandates are looked for, once the last run has ended: a mandate is expired within this of its end. */
@@ -39,11 +38,12 @@ const MOST_EXPIRED_A_RUN = 100;
 const ACTOR = { type: 'system', id: 'api' } as const;
 
 export interface MandateExpiry {
-  /** Expires every mandate past its end, until none is left or the signal is aborted. Never throws. */
+  /** Expires the mandates past their end, up to MOST_EXPIRED_A_RUN an organisation (the rest wait for the next run), until the signal is aborted. Never throws. */
   run(signal?: AbortSignal): Promise<void>;
 }
 
 export function createMandateExpiry({
+  list,
   database,
   keys,
   ids,
@@ -51,6 +51,8 @@ export function createMandateExpiry({
   outbox,
   logger,
 }: {
+  /** The organisations to look in: the directory's list, which main.ts passes. */
+  readonly list: () => Promise<readonly string[]>;
   readonly database: Database<MandateTables & NotificationsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
@@ -75,17 +77,15 @@ export function createMandateExpiry({
         }),
         "a mandate read as open didn't expire",
       );
-      await outbox.add(tx, [
-        { orgId, recipientUserId: null, kind: 'mandate_expired', membershipId: null, role: null, aboutId: id },
-      ]);
+      await outbox.add(tx, toldOfMandate(orgId, 'mandate_expired', id));
       return true;
     });
 
   return {
     async run(signal) {
-      let orgs: string[];
+      let orgs: readonly string[];
       try {
-        orgs = await listedOrganizations(database);
+        orgs = await list();
       } catch (error) {
         logger.warn('mandate_expiry.run_failed', { err: error });
         return;

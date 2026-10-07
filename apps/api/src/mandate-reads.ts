@@ -1,7 +1,8 @@
-// The reads the mandates' use cases share (Phase 2 B2–B3): drafting
-// (mandate-registry.ts) and accepting (mandate-acceptance.ts) each read a
-// mandate, its versions and their source the same way, and answer with the
-// mandate as it now stands.
+// The reads the mandates' use cases share (Phase 2 B2–B4): drafting
+// (mandate-registry.ts), accepting (mandate-acceptance.ts), moving
+// (mandate-moves.ts) and expiring (mandate-expiry.ts) each read a mandate,
+// its versions and their source the same way, answer with the mandate as it
+// now stands, and tell of it the same way.
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { type FundingSourcesTables, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
@@ -14,6 +15,7 @@ import {
   mandateOf,
   mandateVersionOf,
 } from '@agentx/core/modules/mandates';
+import type { Notice, NoticeKind } from '@agentx/core/modules/notifications';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { money } from '@agentx/core/shared-kernel';
 import type { DatabaseTransaction } from '@agentx/platform/db';
@@ -38,6 +40,11 @@ export interface MandateView {
   readonly current: VersionShown | null;
   readonly pending: VersionShown | null;
 }
+
+/** A mandate's notice (0036): to every admin and approver of the organisation, found as it is sent. */
+export const toldOfMandate = (orgId: string, kind: NoticeKind, mandateId: string): Notice[] => [
+  { orgId, recipientUserId: null, kind, membershipId: null, role: null, aboutId: mandateId },
+];
 
 /** What a source's bank consent allows, as the terms are checked against it. */
 export const consentOf = ({ controls: { currency, period, maxPaymentMinor, maxPeriodMinor } }: SourceRecord) =>

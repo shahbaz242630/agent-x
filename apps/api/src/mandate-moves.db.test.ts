@@ -26,11 +26,11 @@ import {
   type MandateMove,
   type MandateMoved,
   type MandateMoves,
-  type MoveAsked,
   MOVE_OPERATIONS,
 } from './mandate-moves.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
+  askedFor,
   keys,
   type Member,
   mandateWorld,
@@ -55,23 +55,14 @@ let moves: MandateMoves;
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-moves' });
 const { member, world, keyed, eventsAbout, noticesOf, stepUp, acceptedPastTheUseCase } = shared;
 
-/** A mandate drafted for the world's agent, ending at `endsAt` if given, and accepted: ACTIVE. */
-async function active(w: World, endsAt: Date | null = null): Promise<string> {
-  const { id } = await shared.drafted(registry, w, { endsAt });
-  await acceptedPastTheUseCase(w, id);
-  return id;
-}
+/** A mandate in force for the world's agent, ending at `endsAt` if given. */
+const active = (w: World, endsAt: Date | null = null) => shared.inForce(registry, w, { endsAt });
 
 const ask = (who: Member, id: string, move: MandateMove) =>
   moves.ask(who, keyed(who, MOVE_OPERATIONS[move].ask), id, move, CORRELATION);
 
 const confirm = (who: Member, id: string, move: MandateMove, challengeId: string, key?: IdempotentRequest) =>
   moves.confirm(who, key ?? keyed(who, MOVE_OPERATIONS[move].confirm), id, move, challengeId, CORRELATION);
-
-const askedFor = (write: MoveAsked): string => {
-  if (write.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(write)}`);
-  return write.stepUpChallengeId;
-};
 
 const movedOf = (write: MandateMoved) => {
   if (write.outcome !== 'moved') throw new Error(`not moved: ${JSON.stringify(write)}`);

@@ -10,7 +10,7 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
-import { acceptDraft, MANDATE_VERSIONS, mandateOf, MANDATES, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
+import { MANDATE_VERSIONS, MANDATES, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
 import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -55,12 +55,14 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000b2';
 let clock: FixedClock;
 let registry: MandateRegistry;
 
-const { quiet, member, world, termsOf, keyed, partnerSays } = mandateWorld({
-  app: () => app,
-  clock: () => clock,
-  ids,
-  name: 'mandate-registry',
-});
+const { quiet, member, world, termsOf, keyed, partnerSays, acceptedPastTheUseCase, movedPastTheUseCase } = mandateWorld(
+  {
+    app: () => app,
+    clock: () => clock,
+    ids,
+    name: 'mandate-registry',
+  },
+);
 
 /** A draft within the source's consent, for the world's agent unless another is named. */
 const draftOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}, agentId = w.agent): MandateDraft => ({
@@ -75,26 +77,6 @@ const draft = (who: Member, given: MandateDraft, key?: string) =>
 
 const redraft = (who: Member, mandateId: string, terms: MandateDraft['terms']) =>
   registry.redraft(who, keyed(who, REDRAFT_OPERATION), mandateId, terms, CORRELATION);
-
-/** Accepts the draft waiting (B3's acceptDraft), then expires the mandate. */
-async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedOf>): Promise<void> {
-  const key = { orgId: w.org, id: drafted.mandate.id };
-  const pending = drafted.pending?.version;
-  if (pending === undefined) throw new Error('no draft waiting');
-  await withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const read = await mandateOf(tx, states, key, 'change');
-    if (read.outcome !== 'found') throw new Error('the mandate was not found');
-    await acceptDraft(tx, states, read, {
-      orgId: w.org,
-      versionId: pending.id,
-      acceptedBy: pending.draftedBy,
-      acceptedAt: clock.now(),
-      actor: OPERATOR,
-      details: {},
-    });
-    await states.changeStatus(tx, MANDATES, key, 'expire', { actor: OPERATOR, action: 'mandate.expire', details: {} });
-  });
-}
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -169,13 +151,7 @@ describe('drafting a mandate (B2)', () => {
     const first = draftedOf(await draft(w.admin, draftOf(w)));
 
     expect(await draft(w.admin, draftOf(w))).toEqual(refused(409, 'MANDATE_OPEN'));
-    await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MANDATES, { orgId: w.org, id: first.mandate.id }, 'revoke', {
-        actor: OPERATOR,
-        action: 'mandate.revoke',
-        details: {},
-      }),
-    );
+    await movedPastTheUseCase(w, first.mandate.id, 'revoke');
     draftedOf(await draft(w.admin, draftOf(w)));
   });
 
@@ -276,13 +252,7 @@ describe('drafting a later version (B2)', () => {
   it('refuses one for a mandate ended, or none of the organisation’s', async () => {
     const w = await world();
     const first = draftedOf(await draft(w.admin, draftOf(w)));
-    await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MANDATES, { orgId: w.org, id: first.mandate.id }, 'revoke', {
-        actor: OPERATOR,
-        action: 'mandate.revoke',
-        details: {},
-      }),
-    );
+    await movedPastTheUseCase(w, first.mandate.id, 'revoke');
 
     expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'MANDATE_ENDED'));
     expect(await redraft(w.admin, ids.next(), draftOf(w).terms)).toEqual(refused(404, 'NOT_FOUND'));
@@ -291,7 +261,8 @@ describe('drafting a later version (B2)', () => {
   it('refuses one for a mandate expired', async () => {
     const w = await world();
     const first = draftedOf(await draft(w.admin, draftOf(w)));
-    await acceptedThenExpired(w, first);
+    await acceptedPastTheUseCase(w, first.mandate.id);
+    await movedPastTheUseCase(w, first.mandate.id, 'expire');
 
     expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'MANDATE_ENDED'));
   });

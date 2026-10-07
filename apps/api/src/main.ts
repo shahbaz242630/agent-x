@@ -709,7 +709,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   logger.info('api.factor_resets', { removing: factorRemoving.running });
   // Mandates past their end expired (Phase 2 B4), on a timer of their own.
   const expiring = scheduleRuns(
-    createMandateExpiry({ database, keys, ids: uuidV7Ids, clock: systemClock, outbox, logger }),
+    createMandateExpiry({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      outbox,
+      logger,
+    }),
     MANDATE_EXPIRY_EVERY_MS,
   );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.

@@ -29,7 +29,7 @@
 // suspended agent can't spend whatever its mandate says.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import { isEnded, type MandateRecord, MANDATES } from '@agentx/core/modules/mandates';
+import { isEnded, MANDATES } from '@agentx/core/modules/mandates';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
@@ -42,6 +42,7 @@ import {
   type MandateTx,
   mandateIn,
   type MandateView,
+  toldOfMandate,
   versionIn,
   viewIn,
 } from './mandate-reads.ts';
@@ -100,13 +101,14 @@ export interface MandateMoves {
 }
 
 /**
- * The move's SHA-256: the move, the organisation and the mandate's latest
- * event, IDs in lower case. That event is the mandate's own, read from its
- * signed state, so it names the mandate as it stood when asked: any change to
- * it since makes the step-up another change's.
+ * The move's SHA-256: the organisation and the mandate's latest event, IDs in
+ * lower case. That event is the mandate's own, read from its signed state, so
+ * it names the mandate as it stood when asked: any change to it since makes
+ * the step-up another change's. The move itself is the challenge's action,
+ * which its consume checks (B4's mutation pass: naming it here too was dead).
  */
-const moveHash = (move: MandateMove, orgId: string, mandateEvent: string): Buffer =>
-  changeHashOf([MOVE_OPERATIONS[move].ask, orgId.toLowerCase(), mandateEvent.toLowerCase()]);
+const moveHash = (orgId: string, mandateEvent: string): Buffer =>
+  changeHashOf([orgId.toLowerCase(), mandateEvent.toLowerCase()]);
 
 export function createMandateMoves({
   database,
@@ -127,14 +129,17 @@ export function createMandateMoves({
 }): MandateMoves {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
-  /** Refuses the move unless the mandate, as read, may make it now. */
-  const mayMove = async (
+  /** The mandate read (`share` or `change`) and verified: refused unless it may make the move now. */
+  const movable = async (
     tx: MandateTx,
     states: SignedStates,
     orgId: string,
-    mandate: MandateRecord,
+    mandateId: string,
     move: MandateMove,
+    lock: 'share' | 'change',
   ) => {
+    const read = await mandateIn(tx, states, orgId, mandateId, lock);
+    const { mandate } = read;
     if (move === 'revoke') {
       if (isEnded(mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
     } else if (move === 'suspend') {
@@ -146,19 +151,6 @@ export function createMandateMoves({
       const current = await versionIn(tx, states, orgId, mandate.id, mandate.currentVersionId);
       if (current.endsAt !== null && current.endsAt <= clock.now()) throw new MandateRefused(409, 'MANDATE_ENDED');
     }
-  };
-
-  /** The mandate read (`share` or `change`), verified and able to make the move. */
-  const movable = async (
-    tx: MandateTx,
-    states: SignedStates,
-    orgId: string,
-    mandateId: string,
-    move: MandateMove,
-    lock: 'share' | 'change',
-  ) => {
-    const read = await mandateIn(tx, states, orgId, mandateId, lock);
-    await mayMove(tx, states, orgId, read.mandate, move);
     return read;
   };
 
@@ -170,7 +162,7 @@ export function createMandateMoves({
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: MOVE_OPERATIONS[move].ask,
-          changeHash: moveHash(move, member.orgId, read.state.eventId),
+          changeHash: moveHash(member.orgId, read.state.eventId),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new MandateRefused(401, 'UNAUTHENTICATED');
@@ -192,7 +184,7 @@ export function createMandateMoves({
           {
             sessionId: member.sessionId,
             action: MOVE_OPERATIONS[move].ask,
-            changeHash: moveHash(move, member.orgId, read.state.eventId),
+            changeHash: moveHash(member.orgId, read.state.eventId),
           },
           // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
@@ -207,16 +199,7 @@ export function createMandateMoves({
           }),
           `a mandate read as able to ${move} didn't`,
         );
-        await outbox.add(tx, [
-          {
-            orgId: member.orgId,
-            recipientUserId: null,
-            kind: MOVED[move].notice,
-            membershipId: null,
-            role: null,
-            aboutId: id,
-          },
-        ]);
+        await outbox.add(tx, toldOfMandate(member.orgId, MOVED[move].notice, id));
         return { status: 200, resourceId: id };
       });
       if (isUnwritten(done)) return done;

@@ -27,7 +27,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import {
   ACCEPT_CONFIRM_OPERATION,
   ACCEPT_OPERATION,
-  type AcceptAsked,
   createMandateAcceptance,
   type MandateAcceptance,
   type MandateAccepted,
@@ -39,6 +38,7 @@ import {
   REDRAFT_OPERATION,
 } from './mandate-registry.ts';
 import {
+  askedFor,
   draftedOf,
   keys,
   type Member,
@@ -64,7 +64,7 @@ let acceptance: MandateAcceptance;
 
 const challenges = () => createStepUpChallenges({ ids, clock });
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-acceptance' });
-const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, stepUp } = shared;
+const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, stepUp, movedPastTheUseCase } = shared;
 
 /** A mandate drafted for the world's agent: its ID and its draft's. */
 const drafted = (w: World, overrides: Partial<MandateDraft['terms']> = {}) => shared.drafted(registry, w, overrides);
@@ -83,11 +83,6 @@ const ask = (who: Member, mandateId: string, versionId: string) =>
 const confirm = (who: Member, mandateId: string, challengeId: string, key?: IdempotentRequest) =>
   acceptance.acceptConfirm(who, key ?? keyed(who, ACCEPT_CONFIRM_OPERATION), mandateId, challengeId, CORRELATION);
 
-const askedFor = (write: AcceptAsked): string => {
-  if (write.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(write)}`);
-  return write.stepUpChallengeId;
-};
-
 const acceptedOf = (write: MandateAccepted) => {
   if (write.outcome !== 'accepted') throw new Error(`not accepted: ${JSON.stringify(write)}`);
   return write;
@@ -99,16 +94,6 @@ async function accepted(w: World, mandateId: string, versionId: string, amr: rea
   await stepUp(w.admin, challengeId, amr);
   return confirm(w.admin, mandateId, challengeId);
 }
-
-/** Moves the mandate by `event` past the use cases, as B4's do. */
-const moved = (w: World, mandateId: string, event: 'suspend' | 'resume' | 'revoke') =>
-  withSignedStates(app, w.org, quiet(), (tx, states) =>
-    states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId }, event, {
-      actor: OPERATOR,
-      action: `mandate.${event}`,
-      details: {},
-    }),
-  );
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -238,8 +223,8 @@ describe('the step-up bound to the mandate as it stood (B3)', () => {
     const second = await redrafted(w, id);
     const challengeId = askedFor(await ask(w.admin, id, second));
     await stepUp(w.admin, challengeId);
-    await moved(w, id, 'suspend');
-    await moved(w, id, 'resume');
+    await movedPastTheUseCase(w, id, 'suspend');
+    await movedPastTheUseCase(w, id, 'resume');
 
     expect(await confirm(w.admin, id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
   });
@@ -256,7 +241,7 @@ describe('what acceptance refuses (B3)', () => {
     const w = await world();
     const { id, versionId } = await drafted(w);
     expect(await ask(w.admin, ids.next(), versionId)).toEqual(refused(404, 'NOT_FOUND'));
-    await moved(w, id, 'revoke');
+    await movedPastTheUseCase(w, id, 'revoke');
     expect(await ask(w.admin, id, versionId)).toEqual(refused(409, 'MANDATE_ENDED'));
   });
 
@@ -265,7 +250,7 @@ describe('what acceptance refuses (B3)', () => {
     const { id, versionId } = await drafted(w);
     acceptedOf(await accepted(w, id, versionId));
     const second = await redrafted(w, id);
-    await moved(w, id, 'suspend');
+    await movedPastTheUseCase(w, id, 'suspend');
 
     expect(await ask(w.admin, id, second)).toEqual(refused(409, 'MANDATE_SUSPENDED'));
   });

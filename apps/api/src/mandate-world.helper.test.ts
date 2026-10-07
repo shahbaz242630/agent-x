@@ -26,7 +26,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
-import { acceptDraft, mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
+import { acceptDraft, mandateOf, MANDATES, type MandatesTables } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
@@ -75,6 +75,14 @@ export interface World {
 export const AED = (minor: bigint) => money(minor, 'AED');
 
 export const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
+
+/** The step-up an ask answered with. */
+export const askedFor = (write: { readonly outcome: string; readonly stepUpChallengeId?: string }): string => {
+  if (write.outcome !== 'asked' || write.stepUpChallengeId === undefined) {
+    throw new Error(`not asked: ${JSON.stringify(write)}`);
+  }
+  return write.stepUpChallengeId;
+};
 
 export const draftedOf = (write: MandateWrite) => {
   if (write.outcome !== 'drafted') throw new Error(`not drafted: ${JSON.stringify(write)}`);
@@ -297,6 +305,23 @@ export function mandateWorld({
     });
   }
 
+  /** A mandate drafted for the world's agent and accepted: ACTIVE. Its ID. */
+  async function inForce(registry: MandateRegistry, w: World, overrides: Partial<MandateDraft['terms']> = {}) {
+    const { id } = await drafted(registry, w, overrides);
+    await acceptedPastTheUseCase(w, id);
+    return id;
+  }
+
+  /** The mandate moved by `event`, past the use cases. */
+  const movedPastTheUseCase = (w: World, id: string, event: 'suspend' | 'resume' | 'revoke' | 'expire') =>
+    withSignedStates(app(), w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, MANDATES, { orgId: w.org, id }, event, {
+        actor: OPERATOR,
+        action: `mandate.${event}`,
+        details: {},
+      }),
+    );
+
   /** The member signs in again for the step-up, by `amr`: a passkey unless named. */
   const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
     createStepUpChallenges({ ids, clock: clock() }).recordEvidence(app(), challengeId, who.sessionId, {
@@ -317,6 +342,8 @@ export function mandateWorld({
     noticesOf,
     drafted,
     acceptedPastTheUseCase,
+    inForce,
+    movedPastTheUseCase,
     stepUp,
   };
 }

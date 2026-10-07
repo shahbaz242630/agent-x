@@ -2,10 +2,12 @@
 // app role: an ACTIVE or SUSPENDED mandate whose version in force has reached
 // its end EXPIRED by the job, as the API's, every admin and approver told;
 // one not yet ended, with no end, waiting for acceptance or ended already left
-// as it is; a run again moving nothing; a tampered mandate refused and
-// logged while the others are expired; and a stopped run.
+// as it is; a run again moving nothing; a new version with a later end
+// accepted while the job waits for the mandate (forced); a tampered mandate
+// refused and logged while the others are expired; and a stopped run.
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { mandateOf, MANDATES } from '@agentx/core/modules/mandates';
+import { listedOrganizations } from '@agentx/core/modules/directory';
+import { acceptDraft, mandateOf, MANDATES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
@@ -16,12 +18,21 @@ import {
   tamperAsOwner,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateExpiry, type MandateExpiry } from './mandate-expiry.ts';
-import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { keys, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
+import {
+  draftedOf,
+  keys,
+  mandateWorld,
+  type MandateWorldTables,
+  OPERATOR,
+  type World,
+} from './mandate-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -36,36 +47,22 @@ let registry: MandateRegistry;
 let expiry: MandateExpiry;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-expiry' });
-const { world, eventsAbout, noticesOf, acceptedPastTheUseCase, quiet } = shared;
+const { world, eventsAbout, noticesOf, movedPastTheUseCase, quiet, keyed, termsOf } = shared;
 
-/** A mandate drafted for the world's agent, ending at `endsAt`, and accepted unless `waiting`. */
-async function mandate(w: World, endsAt: Date | null, waiting = false): Promise<string> {
-  const { id } = await shared.drafted(registry, w, { endsAt });
-  if (!waiting) await acceptedPastTheUseCase(w, id);
-  return id;
-}
-
-/** Moves the mandate by `event`, past the use cases. */
-const movedPast = (w: World, id: string, event: 'suspend' | 'revoke') =>
-  withSignedStates(app, w.org, quiet(), (tx, states) =>
-    states.changeStatus(tx, MANDATES, { orgId: w.org, id }, event, {
-      actor: OPERATOR,
-      action: `mandate.${event}`,
-      details: {},
-    }),
-  );
+/** A mandate in force for the world's agent, ending at `endsAt`. */
+const inForce = (w: World, endsAt: Date | null) => shared.inForce(registry, w, { endsAt });
 
 const statusOf = async (w: World, id: string) =>
   withSignedStates(app, w.org, quiet(), async (tx, states) => {
     const read = await mandateOf(tx, states, { orgId: w.org, id }, 'share');
-    return read.outcome === 'found' ? read.mandate.status : read.outcome;
+    return read.outcome === 'found' ? read.mandate : read.outcome;
   });
 
 /** The run's lines of this event about the organisation (every test's organisations share the database). */
 const lines = (event: string, w: World) =>
   capture.lines().filter((line) => line.event === event && line.orgId === w.org);
 
-const inAnHour = () => new Date(clock.now().getTime() + HOUR);
+const inHours = (hours: number) => new Date(clock.now().getTime() + hours * HOUR);
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -82,20 +79,28 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  expiry = createMandateExpiry({ database: app, keys, ids, clock, outbox: createOutbox({ ids, clock }), logger });
+  expiry = createMandateExpiry({
+    list: () => listedOrganizations(app),
+    database: app,
+    keys,
+    ids,
+    clock,
+    outbox: createOutbox({ ids, clock }),
+    logger,
+  });
 });
 
 describe('mandates ended by the clock (B4)', () => {
   it('expires an ACTIVE mandate once its version in force reaches its end, as the API’s, every admin and approver told', async () => {
     const w = await world();
-    const id = await mandate(w, inAnHour());
+    const id = await inForce(w, inHours(1));
 
     await expiry.run();
-    expect(await statusOf(w, id)).toBe('ACTIVE');
+    expect(await statusOf(w, id)).toMatchObject({ status: 'ACTIVE' });
 
     clock.advanceBy(HOUR);
     await expiry.run();
-    expect(await statusOf(w, id)).toBe('EXPIRED');
+    expect(await statusOf(w, id)).toMatchObject({ status: 'EXPIRED' });
     expect((await eventsAbout(w.org, id)).at(-1)).toMatchObject({
       action: 'mandate.expired',
       actorType: 'system',
@@ -110,33 +115,73 @@ describe('mandates ended by the clock (B4)', () => {
 
   it('expires a SUSPENDED one too', async () => {
     const w = await world();
-    const id = await mandate(w, inAnHour());
-    await movedPast(w, id, 'suspend');
+    const id = await inForce(w, inHours(1));
+    await movedPastTheUseCase(w, id, 'suspend');
     clock.advanceBy(HOUR + 1);
 
     await expiry.run();
-    expect(await statusOf(w, id)).toBe('EXPIRED');
+    expect(await statusOf(w, id)).toMatchObject({ status: 'EXPIRED' });
   });
 
   it('leaves one with no end, one waiting for acceptance and one revoked as they are', async () => {
     const forever = await world();
-    const noEnd = await mandate(forever, null);
+    const noEnd = await inForce(forever, null);
     const waitingWorld = await world();
-    const waiting = await mandate(waitingWorld, inAnHour(), true);
+    const waiting = await shared.drafted(registry, waitingWorld, { endsAt: inHours(1) });
     const revokedWorld = await world();
-    const revoked = await mandate(revokedWorld, inAnHour());
-    await movedPast(revokedWorld, revoked, 'revoke');
+    const revoked = await inForce(revokedWorld, inHours(1));
+    await movedPastTheUseCase(revokedWorld, revoked, 'revoke');
     clock.advanceBy(2 * HOUR);
 
     await expiry.run();
-    expect(await statusOf(forever, noEnd)).toBe('ACTIVE');
-    expect(await statusOf(waitingWorld, waiting)).toBe('PENDING_ACCEPTANCE');
-    expect(await statusOf(revokedWorld, revoked)).toBe('REVOKED');
+    expect(await statusOf(forever, noEnd)).toMatchObject({ status: 'ACTIVE' });
+    expect(await statusOf(waitingWorld, waiting.id)).toMatchObject({ status: 'PENDING_ACCEPTANCE' });
+    expect(await statusOf(revokedWorld, revoked)).toMatchObject({ status: 'REVOKED' });
   });
 
-  it('refuses a mandate tampered with past the app, logged, and still expires the organisation’s others (FX-TAMPER)', async () => {
+  it('leaves one whose new version, with a later end, was accepted while the job waited for it (forced: the mandate held)', async () => {
+    const w = await world();
+    const id = await inForce(w, inHours(1));
+    const later = draftedOf(
+      await registry.redraft(
+        w.admin,
+        keyed(w.admin, REDRAFT_OPERATION),
+        id,
+        termsOf(w, { endsAt: inHours(3) }),
+        'a-correlation',
+      ),
+    ).pending?.version.id;
+    clock.advanceBy(HOUR);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    // The acceptance holds the mandate for change; the job's search, reading no lock, still finds it past its end.
+    const accepting = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const read = await mandateOf(tx, states, { orgId: w.org, id }, 'change');
+      if (read.outcome !== 'found' || later === undefined) throw new Error('no mandate, or no draft waiting');
+      holding(undefined);
+      await gate;
+      await acceptDraft(tx, states, read, {
+        orgId: w.org,
+        versionId: later,
+        acceptedBy: w.admin.membershipId,
+        acceptedAt: clock.now(),
+        actor: OPERATOR,
+        details: {},
+      });
+    });
+    await held;
+    const running = within(20_000, expiry.run(), 'the run');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+    await accepting;
+    await running;
+
+    expect(await statusOf(w, id)).toMatchObject({ status: 'ACTIVE', currentVersionId: later });
+  });
+
+  it('refuses a mandate tampered with past the app, logged, and still expires the other organisations’ (FX-TAMPER)', async () => {
     const tampered = await world();
-    const bad = await mandate(tampered, inAnHour());
+    const bad = await inForce(tampered, inHours(1));
     const owner = await tamperAsOwner(database, MANDATES, tampered.org);
     try {
       await owner.withoutStatusGuard(() =>
@@ -146,22 +191,22 @@ describe('mandates ended by the clock (B4)', () => {
       await owner.end();
     }
     const fine = await world();
-    const good = await mandate(fine, inAnHour());
+    const good = await inForce(fine, inHours(1));
     clock.advanceBy(HOUR);
 
     await expiry.run();
     expect(lines('mandate_expiry.failed', tampered)).toEqual([expect.objectContaining({ mandateId: bad })]);
-    expect(await statusOf(fine, good)).toBe('EXPIRED');
+    expect(await statusOf(fine, good)).toMatchObject({ status: 'EXPIRED' });
   });
 
   it('a run stopped expires nothing more', async () => {
     const w = await world();
-    const id = await mandate(w, inAnHour());
+    const id = await inForce(w, inHours(1));
     clock.advanceBy(HOUR);
     const stopping = new AbortController();
     stopping.abort();
 
     await expiry.run(stopping.signal);
-    expect(await statusOf(w, id)).toBe('ACTIVE');
+    expect(await statusOf(w, id)).toMatchObject({ status: 'ACTIVE' });
   });
 });
