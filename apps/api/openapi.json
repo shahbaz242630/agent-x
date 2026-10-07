@@ -132,7 +132,7 @@
                   {
                     "type": "string",
                     "const": "CURRENCY_NOT_ALLOWED",
-                    "description": "The request's currency is not the mandate's, so it is refused. Amounts are never converted. Nothing was reserved."
+                    "description": "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved."
                   },
                   {
                     "type": "string",
