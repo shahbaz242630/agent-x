@@ -104,7 +104,7 @@ CREATE TABLE mandates.policy_versions (
   state_version integer NOT NULL DEFAULT 1,
   state_event_id uuid,
   PRIMARY KEY (org_id, id),
-  CONSTRAINT one_number_a_version UNIQUE (org_id, policy_id, version),
+  CONSTRAINT one_number_a_policy_version UNIQUE (org_id, policy_id, version),
   CONSTRAINT its_policys_own UNIQUE (org_id, policy_id, id),
   CONSTRAINT of_a_policy FOREIGN KEY (org_id, policy_id) REFERENCES mandates.policies (org_id, id),
   -- A per-order cap says what happens over it; no cap, nothing to say.

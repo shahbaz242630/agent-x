@@ -685,7 +685,7 @@ describe('a policy', () => {
     }
   });
 
-  it('is numbered once a policy, each version made once (one_number_a_version, made_once)', async () => {
+  it('is numbered once a policy, each version made once (one_number_a_policy_version, made_once)', async () => {
     const org = await organisation();
     const version = await orgPolicy(org);
     const another = (number: number) =>
@@ -698,7 +698,7 @@ describe('a policy', () => {
     const changeVersion = (values: Updateable<MandatesTables['mandates.policy_versions']>) =>
       inOrg(org, (tx) => tx.updateTable('mandates.policy_versions').set(values).where('id', '=', version).execute());
 
-    await expect(another(1)).rejects.toEqual(refusedBy('one_number_a_version'));
+    await expect(another(1)).rejects.toEqual(refusedBy('one_number_a_policy_version'));
     await another(2);
     // Before its first signed state, the audit module's record writes it.
     await changeVersion({ state_event_id: randomUUID() });
