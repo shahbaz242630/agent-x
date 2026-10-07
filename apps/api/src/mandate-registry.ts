@@ -47,7 +47,7 @@ import {
   consentOf,
   MandateRefused,
   type MandateTables,
-  type MandateTx as Tx,
+  type MandateTx,
   mandateIn,
   type MandateView,
   sourceIn,
@@ -124,7 +124,7 @@ export function createMandateRegistry({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
   /** The terms against the organisation: its source, able to fund; within its consent, when strict; its suppliers. Gives the version's event its consent warnings. */
-  const termsChecked = async (tx: Tx, states: SignedStates, orgId: string, terms: MandateTerms, now: Date) => {
+  const termsChecked = async (tx: MandateTx, states: SignedStates, orgId: string, terms: MandateTerms, now: Date) => {
     // The edge checked the end on its own clock; again on ours, so the core's floor never refuses it later (a 500).
     if (terms.endsAt !== null && terms.endsAt <= now) throw new MandateRefused(400, 'BAD_REQUEST');
     const source = await sourceIn(tx, states, orgId, terms.fundingSourceId);
@@ -139,7 +139,7 @@ export function createMandateRegistry({
   };
 
   /** The budget and the drafting lock, in the order the lock order takes them, with the admin read again: the admin. */
-  const drafting = async (tx: Tx, states: SignedStates, member: Member, now: Date) => {
+  const drafting = async (tx: MandateTx, states: SignedStates, member: Member, now: Date) => {
     await oneDraftAtATime(tx, member.orgId);
     const admin = await work.memberIn(tx, states, member, DRAFTING_ROLES);
     if ((await draftsSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_DRAFTS_A_DAY) {

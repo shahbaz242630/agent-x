@@ -324,7 +324,7 @@ async function deniedAndHeld(
   ).toMatchObject({ outcome: 'held' });
 }
 
-/** Accepts the mandate's waiting draft (or `versionId`) as B3's use case does: from it read for change. */
+/** Accepts `versionId` as B3's use case does: from the mandate read for change. */
 const acceptedNow = (mandateId: string, versionId: string) =>
   withSignedStates(app, org, quiet(), async (tx, states) => {
     const read = await mandateOf(tx, states, { orgId: org, id: mandateId }, 'change');

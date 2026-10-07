@@ -21,6 +21,7 @@ import {
 } from '@agentx/core/modules/funding-sources';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
 import {
+  acceptDraft,
   MANDATE_VERSIONS,
   mandateOf,
   MANDATES,
@@ -251,7 +252,7 @@ async function partnerSays(w: World, change: Partial<FundingSourceState>): Promi
   });
 }
 
-/** Accepts the draft waiting as B3 will (the version in force, then the status), then expires the mandate. */
+/** Accepts the draft waiting (B3's acceptDraft), then expires the mandate. */
 async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedOf>): Promise<void> {
   const key = { orgId: w.org, id: drafted.mandate.id };
   const pending = drafted.pending?.version;
@@ -259,22 +260,15 @@ async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedO
   await withSignedStates(app, w.org, quiet(), async (tx, states) => {
     const read = await mandateOf(tx, states, key, 'change');
     if (read.outcome !== 'found') throw new Error('the mandate was not found');
-    const moves = { actor: OPERATOR, details: {} };
-    await states.record(
-      tx,
-      MANDATES,
-      key,
-      read.state,
-      {
-        current_version_id: pending.id,
-        pending_version_id: null,
-        accepted_by: pending.draftedBy,
-        accepted_at: clock.now(),
-      },
-      { ...moves, action: 'mandate.version_accepted' },
-    );
-    await states.changeStatus(tx, MANDATES, key, 'accept', { ...moves, action: 'mandate.accept' });
-    await states.changeStatus(tx, MANDATES, key, 'expire', { ...moves, action: 'mandate.expire' });
+    await acceptDraft(tx, states, read, {
+      orgId: w.org,
+      versionId: pending.id,
+      acceptedBy: pending.draftedBy,
+      acceptedAt: clock.now(),
+      actor: OPERATOR,
+      details: {},
+    });
+    await states.changeStatus(tx, MANDATES, key, 'expire', { actor: OPERATOR, action: 'mandate.expire', details: {} });
   });
 }
 

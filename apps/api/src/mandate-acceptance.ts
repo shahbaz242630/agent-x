@@ -23,7 +23,7 @@
 // agent's mandates in order of ID (4) and the draft, the source (5), the
 // challenge consumed, the chain head last.
 import { agentOf } from '@agentx/core/modules/agents';
-import type { SignedStates } from '@agentx/core/modules/audit';
+import type { SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import { mayFund } from '@agentx/core/modules/funding-sources';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import {
@@ -36,7 +36,6 @@ import {
   mandatesOfAgent,
 } from '@agentx/core/modules/mandates';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
-import type { VerifiedState } from '@agentx/core/modules/audit';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -129,8 +128,9 @@ async function ofAnActiveAgent(
   if (agent.outcome === 'missing') throw new Error(`A mandate's agent is missing: ${mandateId}`);
   if (agent.agent.status !== 'ACTIVE') throw new MandateRefused(409, 'AGENT_NOT_ACTIVE');
   let read: Awaited<ReturnType<typeof mandateIn>> | undefined;
+  // One read per mandate the agent has had: few, and only at acceptance. The others are verified, never changed.
   for (const id of await mandatesOfAgent(tx, orgId, agentId)) {
-    const each = await mandateIn(tx, states, orgId, id, lock);
+    const each = await mandateIn(tx, states, orgId, id, id === mandateId.toLowerCase() ? lock : 'share');
     if (id === mandateId.toLowerCase()) read = each;
   }
   // Found by its ID just before, its agent fixed for good: anything else is something past the app.
