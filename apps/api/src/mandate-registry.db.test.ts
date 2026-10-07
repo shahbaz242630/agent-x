@@ -32,6 +32,7 @@ import {
   holdNamedLock,
   LogCapture,
   SequentialIds,
+  tamperAsOwner,
   type TestDatabase,
   testLogger,
   waitUntilQueued,
@@ -351,6 +352,22 @@ describe('drafting a mandate (B2)', () => {
       }),
     );
     draftedOf(await draft(w.admin, draftOf(w)));
+  });
+
+  it('refuses to draft past an open mandate tampered with: INTEGRITY_FAILED', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    const owner = await tamperAsOwner(database, MANDATES, w.org);
+    try {
+      await owner.query(
+        "update mandates.mandates set status = 'ACTIVE', current_version_id = pending_version_id, pending_version_id = null, accepted_by = $2, accepted_at = now() where id = $1",
+        [first.mandate.id, first.pending?.version.draftedBy],
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await draft(w.admin, draftOf(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
   });
 
   it('refuses a supplier or a source not the organisation’s', async () => {
