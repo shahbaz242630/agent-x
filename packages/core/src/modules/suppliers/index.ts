@@ -40,6 +40,7 @@ export {
   type VerificationProblem,
   verificationProblem,
 } from './domain/verification.ts';
+export { ACCOUNT_NUMBER_KEPT, keptSupplierDetails } from './infrastructure/kept-details.ts';
 export {
   addSupplier,
   addVersion,

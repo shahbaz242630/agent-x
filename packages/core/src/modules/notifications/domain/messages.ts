@@ -9,7 +9,14 @@
 // link, read at send time, to a page where confirming takes a press. It
 // confirms that one reset only, and says so; nothing it holds approves a
 // payment (SEC-HA-11 is untouched).
-import { type ClaimedNotice, isAboutAPerson, isAboutASupplier, type NoticeKind, RESET_LINK_KIND } from './notice.ts';
+import {
+  type ClaimedNotice,
+  isAboutAnAgent,
+  isAboutAPerson,
+  isAboutASupplier,
+  type NoticeKind,
+  RESET_LINK_KIND,
+} from './notice.ts';
 
 /** An email as the notifier sends it. */
 export interface NoticeMessage {
@@ -52,6 +59,8 @@ const RESET_CLOSED_CHECK =
   "If you didn't expect this, sign in to Agent X, or ask the organisation's admins, and check the organisation's resets.";
 const SUPPLIERS_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's suppliers, and tell its admins at once: someone may be trying to redirect its payments.";
+const AGENTS_CHECK =
+  "If you didn't expect this, sign in to Agent X and check the organisation's AI agents, and tell its admins at once: someone may be trying to take control of an agent.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -192,6 +201,19 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       'A supplier of one of your Agent X organisations was suspended: nothing is paid to it until an admin reactivates it.',
     check: SUPPLIERS_CHECK,
   },
+  // About an agent (0034): its handover, to the admins and to its new owner.
+  agent_handed_over: {
+    subject: () => 'Agent X: an AI agent was handed to another owner',
+    firstLine: () =>
+      'An admin handed an AI agent of one of your Agent X organisations to another member. Its old keys stopped working at once, and the admin was given its one new key.',
+    check: AGENTS_CHECK,
+  },
+  agent_handed_to_you: {
+    subject: () => 'Agent X: an AI agent was handed to you',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations made you the owner of an AI agent. Its old keys stopped working at once; the admin was given its one new key, to pass to you by a way you already trust.',
+    check: AGENTS_CHECK,
+  },
 };
 
 const NEWLINE = '\n';
@@ -201,6 +223,7 @@ function aboutLine(notice: ClaimedNotice): string {
   if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
   const id = notice.aboutId ?? '';
   if (isAboutAPerson(notice.kind)) return `Person: ${id}`;
+  if (isAboutAnAgent(notice.kind)) return `Agent: ${id}`;
   return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
 }
 
@@ -232,6 +255,19 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
   };
 }
 
+/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, or as an admin. */
+function whyTold(notice: ClaimedNotice): string {
+  if (notice.recipientContactId !== null) {
+    return "You're told because this address is one of the organisation's registered contacts.";
+  }
+  // The kind check keeps a notice with neither (both null) from reading as one's own login.
+  if (isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId) {
+    return "You're told because this is your own login.";
+  }
+  if (notice.kind === 'agent_handed_to_you') return "You're told because you're the agent's new owner.";
+  return "You're told because you're an admin of this organisation.";
+}
+
 /**
  * The email telling `to` of the notice. The notice asking a contact to
  * confirm a reset takes its link, and no other notice takes one: either
@@ -245,13 +281,7 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
   if (link !== undefined) throw new RangeError("only a reset's link notice carries a link");
   const role = notice.role === null ? '' : ROLE_NAMES[notice.role];
   const wording = WORDING[notice.kind];
-  const why =
-    notice.recipientContactId !== null
-      ? "You're told because this address is one of the organisation's registered contacts."
-      : // The kind check keeps a notice with neither (both null) from reading as one's own login.
-        isAboutAPerson(notice.kind) && notice.recipientUserId === notice.aboutId
-        ? "You're told because this is your own login."
-        : "You're told because you're an admin of this organisation.";
+  const why = whyTold(notice);
   return {
     id: notice.id,
     to,

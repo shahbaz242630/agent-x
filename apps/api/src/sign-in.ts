@@ -39,7 +39,9 @@
 //   the same site as the app (ADR-003 §7: `auth.` beside `app.`), or the
 //   browser would bring no session back and every step-up would fail.
 // - `POST /v1/auth/sign-out` ends the session the browser holds. It changes
-//   something, so the Origin rule holds it (SEC-WEB-01).
+//   something, so the Origin rule holds it (SEC-WEB-01). Then it ends the
+//   person's sessions at the login service too (Shannon AUTH-VULN-01, S88),
+//   where it may: one it couldn't end is logged, and the sign-out stands.
 // - `GET /v1/auth/session` (B2-4b) answers a signed-in person with their own
 //   session: when and how they signed in, and when it ends. The access hook
 //   has found it (access.ts); anyone else gets its 401.
@@ -50,11 +52,13 @@
 // HEAD of either GET (Fastify serves one beside each): a link checker's HEAD
 // must neither start a flow nor use one up.
 import {
+  type LoginSessions,
   RETURN_PATH,
   type SignIn,
   SignInFailed,
   type SignInFailure,
   StepUpFailed,
+  type Subject,
 } from '@agentx/core/modules/identity';
 import type { Logger } from '@agentx/platform/observability';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -79,6 +83,8 @@ export interface SignInRoutesOptions {
   readonly signIn: SignIn | undefined;
   /** How long the session cookie lasts: the session's absolute timeout. */
   readonly sessionSeconds: number;
+  /** Where a sign-out ends the person's sessions at the login service; nowhere when not given. */
+  readonly loginSessions?: LoginSessions | undefined;
   readonly logger: Logger;
   /** Where each failed sign-in is noted. */
   readonly securityEvents: SecurityEventSink;
@@ -187,7 +193,7 @@ type CallbackFailure = SignInFailure | 'provider_refused' | 'callback_incomplete
 
 export function registerSignIn(
   app: FastifyInstance,
-  { signIn, sessionSeconds, logger, securityEvents }: SignInRoutesOptions,
+  { signIn, sessionSeconds, loginSessions, logger, securityEvents }: SignInRoutesOptions,
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
   /** Logs a failed sign-in, notes it as a security event, and refuses it. */
@@ -199,6 +205,20 @@ export function registerSignIn(
     return sendErrorBody(reply, 401, 'SIGN_IN_FAILED', request.id);
   };
   const off = (request: FastifyRequest, reply: FastifyReply) => sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
+  /**
+   * Ends the person's sessions at the login service, where it may. Ours is
+   * ended either way, and Agent X never reuses theirs, so a failure doesn't
+   * undo the sign-out; it is an error, as a security control failed, and a
+   * token refused is logged as LoginTokenRefused, which an alert counts.
+   */
+  const endLoginSessions = async (log: Logger, who: Subject) => {
+    if (loginSessions === undefined) return;
+    try {
+      log.info('auth.login_service_signed_out', { ended: await loginSessions.endAll(who) });
+    } catch (error) {
+      log.error('auth.login_service_sign_out_failed', { err: error });
+    }
+  };
   /** The login service couldn't be reached: logged, and answered 503 to try again; no security event, as the caller did nothing wrong. */
   const unavailable = (request: FastifyRequest, reply: FastifyReply, reason: string) => {
     logger.child({ correlationId: request.id }).warn('auth.sign_in_unavailable', { reason });
@@ -319,8 +339,12 @@ export function registerSignIn(
     { schema: SIGN_OUT_SCHEMA, config: PUBLIC, bodyLimit: SIGN_OUT_BODY_LIMIT },
     async (request, reply) => {
       if (signIn === undefined) return off(request, reply);
-      const ended = await signIn.signOut(cookieValue(request.headers.cookie, SESSION_COOKIE));
-      if (ended) logger.child({ correlationId: request.id }).info('auth.signed_out');
+      const who = await signIn.signOut(cookieValue(request.headers.cookie, SESSION_COOKIE));
+      if (who !== undefined) {
+        const log = logger.child({ correlationId: request.id });
+        log.info('auth.signed_out');
+        await endLoginSessions(log, who);
+      }
       return reply
         .code(200)
         .header('set-cookie', cookie(SESSION_COOKIE, '', 'Strict', 0))

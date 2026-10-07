@@ -23,7 +23,7 @@ import { createOrganization, type OrganizationsTables } from '../../organization
 import type { PlatformControlsTables } from '../../platform-controls/index.ts';
 import { classOfIdpEvent } from '../domain/idp-event.ts';
 import { createIdpEventCopier, IDP_EVENT_COPIED, SIGN_IN_CHANGED } from './idp-copier.ts';
-import { IdpFactorsUnavailable, type PasskeysHeld } from './idp-factors.ts';
+import { type FactorsHeld, IdpFactorsUnavailable, type SecondFactorsHeld } from './idp-factors.ts';
 import { type IdpEvent, type IdpEventFeed, IdpFeedUnavailable } from './idp-feed.ts';
 import { addMembership } from './memberships.ts';
 import { createRemovalRestriction } from './removal-restriction.ts';
@@ -122,7 +122,7 @@ function feedOf(events: () => readonly IdpEvent[] | Error) {
   return { feed, asked };
 }
 
-const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
+const copierWith = (feed: IdpEventFeed, factors?: SecondFactorsHeld) =>
   createIdpEventCopier({
     database: app,
     feed,
@@ -131,7 +131,7 @@ const copierWith = (feed: IdpEventFeed, passkeys?: PasskeysHeld) =>
     clock,
     issuer: ISSUER,
     outbox: createOutbox({ ids, clock }),
-    passkeys,
+    factors,
     logger: testLogger(capture),
   });
 
@@ -526,10 +526,12 @@ describe(`copying the login service's events (B6-2b, Postgres ${server.version})
 });
 
 describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`, () => {
-  /** A stand-in for the reset token's reader: the person holds this many keys, or it can't be read. */
-  const holding = (held: number | Error): PasskeysHeld => ({
-    passkeysHeld: () => (held instanceof Error ? Promise.reject(held) : Promise.resolve(held)),
+  /** A stand-in for the reset token's reader: the factors the person holds, or it can't be read. */
+  const holding = (held: FactorsHeld | Error): SecondFactorsHeld => ({
+    secondFactorsHeld: () => (held instanceof Error ? Promise.reject(held) : Promise.resolve(held)),
   });
+  /** The key just added, and nothing else: the person's first second factor. */
+  const FIRST_KEY = { keys: 1, others: 0 };
   const restrictedUntil = (userId: string) => createRemovalRestriction({ database: app, clock })(userId);
   const sessionsOf = async (userId: string) =>
     (await app.selectFrom('identity.sessions').select('id').where('user_id', '=', userId).execute()).length;
@@ -548,7 +550,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
       await organization(who.userId, 'admin');
       const added = event(type, who.subject, { editorUserId: who.subject });
 
-      await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+      await copierWith(feedOf(() => [added]).feed, holding(FIRST_KEY)).run();
 
       expect(await restrictedUntil(who.userId)).toBeUndefined();
       expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
@@ -557,16 +559,16 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     },
   );
 
-  it('restricts a person for 7 days from a second key added, even by themselves', async () => {
+  it('restricts a person for 7 days from a key added beside another second factor, even by themselves', async () => {
     const who = await person();
     await organization(who.userId, 'admin');
     const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
 
     let reads = 0;
-    const counting: PasskeysHeld = {
-      passkeysHeld: () => {
+    const counting: SecondFactorsHeld = {
+      secondFactorsHeld: () => {
         reads += 1;
-        return Promise.resolve(2);
+        return Promise.resolve({ keys: 2, others: 0 });
       },
     };
     const { feed } = feedOf(() => [added]);
@@ -592,30 +594,60 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     });
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [removed, added]).feed, holding(FIRST_KEY)).run();
 
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
   });
 
   it.each([
-    ['in one run', true],
-    ['in two runs', false],
+    'user.human.mfa.otp.removed',
+    'user.human.mfa.otp.sms.removed',
+    'user.human.mfa.otp.email.removed',
+    'user.human.mfa.recoverycode.removed',
   ])(
-    'restricts a swap: one’s own key added, then the person’s removed by them, %s (the S68 review)',
-    async (_how, together) => {
+    'restricts a key added within 7 days of any second factor removed (%s), even their only one (F1’s first-passkey review)',
+    async (type) => {
+      const who = await person();
+      await organization(who.userId, 'admin');
+      const removed = event(type, who.subject, {
+        editorUserId: who.subject,
+        createdAt: new Date(clock.now().getTime() - 20 * 60_000),
+      });
+      const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
+
+      await copierWith(feedOf(() => [removed, added]).feed, holding(FIRST_KEY)).run();
+
+      expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
+      expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
+        expect.objectContaining({ counts: 'yes' }),
+      ]);
+    },
+  );
+
+  it.each([
+    ['a passkey', 'user.human.passwordless.token.removed', true],
+    ['a passkey', 'user.human.passwordless.token.removed', false],
+    ['an app code', 'user.human.mfa.otp.removed', true],
+    ['an app code', 'user.human.mfa.otp.removed', false],
+    ['an SMS code', 'user.human.mfa.otp.sms.removed', true],
+    ['an email code', 'user.human.mfa.otp.email.removed', true],
+    ['recovery codes', 'user.human.mfa.recoverycode.removed', true],
+  ])(
+    'restricts a swap: one’s own key added, then the person’s %s (%s) removed by them, in one run: %s (the S68 review; F1’s)',
+    async (_what, type, together) => {
       const who = await person();
       await organization(who.userId, 'admin');
       const added = event('user.human.mfa.u2f.token.verified', who.subject, {
         editorUserId: who.subject,
         createdAt: new Date(clock.now().getTime() - 20 * 60_000),
       });
-      const removed = event('user.human.passwordless.token.removed', who.subject, { editorUserId: who.subject });
-      // Read live, the count is one: the person's key is gone by the time the addition is judged.
+      const removed = event(type, who.subject, { editorUserId: who.subject });
+      // Read live, the new key is all there is: the person's factor is gone by the time the addition is judged.
       if (together) {
-        await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+        await copierWith(feedOf(() => [added, removed]).feed, holding(FIRST_KEY)).run();
       } else {
-        await copierWith(feedOf(() => [added]).feed, holding(1)).run();
-        await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+        await copierWith(feedOf(() => [added]).feed, holding(FIRST_KEY)).run();
+        await copierWith(feedOf(() => [added, removed]).feed, holding(FIRST_KEY)).run();
       }
 
       expect(await restrictedUntil(who.userId)).toEqual(new Date(removed.createdAt.getTime() + WEEK_MS));
@@ -629,12 +661,12 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     const who = await person();
     await organization(who.userId, 'admin');
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
-    await copierWith(feedOf(() => [added]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [added]).feed, holding(FIRST_KEY)).run();
     expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toHaveLength(1);
     clock.advanceBy(WEEK_MS + 1);
     const removed = event('user.human.passwordless.token.removed', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added, removed]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [added, removed]).feed, holding(FIRST_KEY)).run();
 
     expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toEqual([
       expect.not.objectContaining({ counts: 'yes' }),
@@ -648,7 +680,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await organization(who.userId, 'admin');
     const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [removed]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [removed]).feed, holding(FIRST_KEY)).run();
 
     expect(await restrictedUntil(who.userId)).toBeUndefined();
   });
@@ -665,12 +697,12 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await organization(who.userId, 'admin');
     // The removal, copied now; the key, `later` on. (The copier reads only forward, so the clock moves on.)
     const removed = event('user.human.mfa.u2f.token.removed', who.subject, { editorUserId: who.subject });
-    await copierWith(feedOf(() => [removed]).feed, holding(0)).run();
+    await copierWith(feedOf(() => [removed]).feed, holding(FIRST_KEY)).run();
     expect(await platformCopies(`user:${who.subject}:${removed.sequence}`)).toHaveLength(1);
     clock.advanceBy(later);
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [removed, added]).feed, holding(1)).run();
+    await copierWith(feedOf(() => [removed, added]).feed, holding(FIRST_KEY)).run();
 
     expect(await platformCopies(`user:${who.subject}:${added.sequence}`)).toEqual([
       counted ? expect.objectContaining({ counts: 'yes' }) : expect.not.objectContaining({ counts: 'yes' }),
@@ -682,15 +714,28 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
   it.each([
     ['no reset token to read them with', undefined],
     ['an answer it can’t judge', holding(new IdpFactorsUnavailable('reading the factors: it answered 500'))],
-  ])('counts a key added when the keys can’t be read (%s): the rule fails closed', async (_why, passkeys) => {
+  ])('counts a key added when the factors can’t be read (%s): the rule fails closed', async (_why, factors) => {
     const who = await person();
     await organization(who.userId, 'admin');
     const added = event('user.human.mfa.u2f.token.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added]).feed, passkeys).run();
+    await copierWith(feedOf(() => [added]).feed, factors).run();
 
     expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
-    expect(lines('idp_events.keys_unread')).toHaveLength(passkeys === undefined ? 0 : 1);
+    expect(lines('idp_events.keys_unread')).toHaveLength(factors === undefined ? 0 : 1);
+  });
+
+  it.each([
+    ['beside an app code (F1’s first-passkey review)', { keys: 1, others: 1 }],
+    ['with no key listed yet: the lists trail the event', { keys: 0, others: 0 }],
+  ])('restricts a person for 7 days from a key added %s', async (_what, held) => {
+    const who = await person();
+    await organization(who.userId, 'admin');
+    const added = event('user.human.passwordless.token.verified', who.subject, { editorUserId: who.subject });
+
+    await copierWith(feedOf(() => [added]).feed, holding(held)).run();
+
+    expect(await restrictedUntil(who.userId)).toEqual(new Date(added.createdAt.getTime() + WEEK_MS));
   });
 
   it('never counts an app code added, whatever the person holds', async () => {
@@ -698,7 +743,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await organization(who.userId, 'admin');
     const added = event('user.human.mfa.otp.verified', who.subject, { editorUserId: who.subject });
 
-    await copierWith(feedOf(() => [added]).feed, holding(5)).run();
+    await copierWith(feedOf(() => [added]).feed, holding({ keys: 5, others: 5 })).run();
 
     expect(await restrictedUntil(who.userId)).toBeUndefined();
   });
@@ -718,7 +763,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     const changed = event(type, who.subject);
     const { feed } = feedOf(() => [changed]);
 
-    await copierWith(feed, holding(1)).run();
+    await copierWith(feed, holding(FIRST_KEY)).run();
 
     expect(await sessionsOf(who.userId)).toBe(0);
     const copies = await platformCopies(`user:${who.subject}:${changed.sequence}`);
@@ -730,7 +775,7 @@ describe(`the S68 audit's rules on a copied event (Postgres ${server.version})`,
     await signIn(who.userId);
     const joined = await organization(who.userId);
     clock.advanceBy(60_000);
-    await copierWith(feed, holding(1)).run();
+    await copierWith(feed, holding(FIRST_KEY)).run();
     expect(await platformCopies(`user:${who.subject}:${changed.sequence}`)).toEqual(
       expect.arrayContaining([expect.objectContaining({ org: joined })]) as unknown,
     );

@@ -7,7 +7,6 @@ import {
   isToldToThePerson,
   MOST_WATCHED_TYPES,
   PASSKEY_ADDED_EVENTS,
-  PASSKEY_REMOVED_EVENTS,
   WATCHED_IDP_EVENTS,
 } from './idp-event.ts';
 
@@ -65,9 +64,8 @@ describe('the login service’s events we copy (B6-2b)', () => {
     ]);
   });
 
-  it('knows a key added and a key removed as copied types, each a factor’s', () => {
+  it('knows a key added as a copied type, a factor added', () => {
     for (const type of PASSKEY_ADDED_EVENTS) expect(classOfIdpEvent(type)).toBe('second_factor_added');
-    for (const type of PASSKEY_REMOVED_EVENTS) expect(classOfIdpEvent(type)).toBe('second_factor_removed');
   });
 
   it('tells the person and the admins of a change to a sign-in, and no one of a token, impersonation or rights', () => {

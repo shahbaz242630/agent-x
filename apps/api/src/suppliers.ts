@@ -60,6 +60,7 @@ import { visibleName } from '@agentx/core/shared-kernel';
 import {
   CALL_NOTE_MOST,
   callNote,
+  keptSupplierDetails,
   MOST_SUPPLIERS_A_PAGE,
   NAME_CHECKS,
   normalisedIban,
@@ -69,7 +70,6 @@ import {
   type SupplierDetails,
   SUPPLIER_NAME_MOST,
   SupplierDetailsRefused,
-  supplierDetails,
   type SupplierRecord,
 } from '@agentx/core/modules/suppliers';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -237,7 +237,7 @@ const detailsKept = (body: DetailFields, context: z.RefinementCtx): SupplierDeta
     source: body.source,
   };
   try {
-    return supplierDetails(details);
+    return keptSupplierDetails(details);
   } catch (error) {
     if (!(error instanceof SupplierDetailsRefused)) throw error;
     for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });

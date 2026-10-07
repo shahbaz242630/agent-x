@@ -4,9 +4,9 @@
 // service user, given the instance's read-only role for the feed, IAM Owner
 // Viewer) on a timer of its own. Off, and nothing copied, unless the config
 // names the token (email) and sign-in, whose login service it reads. A key
-// added is judged by how many the person holds, read with the reset token
-// (Org User Manager) when the config names it; without it, every key added
-// counts toward the restriction (the S68 audit: the rule fails closed).
+// added is judged by the second factors the person holds, read with the reset
+// token (Org User Manager) when the config names it; without it, every key
+// added counts toward the restriction (the S68 audit: the rule fails closed).
 import type { AuditTables } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -65,7 +65,7 @@ export function idpEventCopierFrom({
     clock,
     issuer: signIn.issuer,
     outbox,
-    passkeys:
+    factors:
       factorResets === undefined
         ? undefined
         : createSecondFactorRemover({

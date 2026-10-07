@@ -65,8 +65,8 @@ export interface Sessions {
    * session isn't live.
    */
   rotate(db: Kysely<IdentityTables>, sessionId: string): Promise<string | undefined>;
-  /** Ends the session this cookie ID belongs to, live or not; false if there is none. */
-  end(db: Kysely<IdentityTables>, cookie: string): Promise<boolean>;
+  /** Ends the session this cookie ID belongs to, live or not; its user's ID, undefined if there is none. */
+  end(db: Kysely<IdentityTables>, cookie: string): Promise<string | undefined>;
   /**
    * Deletes up to `most` sessions no process could use again: past their
    * absolute end, or unused past the longest idle timeout there can be
@@ -218,13 +218,13 @@ export function createSessions({
     },
 
     async end(db, cookie) {
-      if (!isCookie(cookie)) return false;
+      if (!isCookie(cookie)) return undefined;
       const row = await db
         .deleteFrom('identity.sessions')
         .where('cookie_hash', '=', hashOf(cookie))
-        .returning('id')
+        .returning('user_id')
         .executeTakeFirst();
-      return row !== undefined;
+      return row?.user_id;
     },
 
     async sweep(db, most) {
