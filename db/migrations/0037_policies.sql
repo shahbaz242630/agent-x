@@ -14,8 +14,8 @@
 --   read the same way.
 -- A tenant table and an authority table (ADR-012 §2), at the mandate's level
 -- in the lock order (ADR-006 §6: 4), after the mandates. Sealed: `scope` and
--- `mandate_id`, fixed when it is made (`fixed_at_creation`), and
--- `current_version_id`, the version in force. A policy takes effect as it is
+-- `mandate_id`, which never change (its ID never does, and `one_of_each_kind`
+-- ties both to it), and `current_version_id`, the version in force. A policy takes effect as it is
 -- made, with an admin's passkey (C3): there is no acceptance, no status and
 -- no draft waiting. A policy with nothing to narrow is a version whose rules
 -- are all empty.
@@ -76,11 +76,8 @@ CREATE POLICY tenant_isolation ON mandates.policies
   USING (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
   WITH CHECK (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid);
 
-CREATE TRIGGER fixed_at_creation BEFORE UPDATE ON mandates.policies
-  FOR EACH ROW EXECUTE FUNCTION state_rules.guard_fixed('scope', 'mandate_id');
-
 GRANT SELECT, INSERT ON mandates.policies TO agentx_app;
--- scope and mandate_id only as the audit module's record seals a new policy, unchanged: `fixed_at_creation`.
+-- scope and mandate_id only as the audit module's record seals a new policy, unchanged: `one_of_each_kind`.
 GRANT UPDATE (scope, mandate_id, current_version_id, state_version, state_event_id) ON mandates.policies TO agentx_app;
 GRANT SELECT ON mandates.policies TO agentx_backup;
 

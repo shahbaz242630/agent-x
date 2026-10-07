@@ -60,7 +60,11 @@ export const MANDATE_VERSIONS = {
   madeOnce: true,
 } as const satisfies SignedStateTable & { readonly madeOnce: true };
 
-/** A policy's row, the organisation's or a mandate's (0037): no status, a version in force from the start. */
+/**
+ * A policy's row, the organisation's or a mandate's (0037): no status, a
+ * version in force from the start. What it is a policy of never changes:
+ * 0037's `one_of_each_kind` ties it to the row's ID.
+ */
 export const POLICIES = {
   table: 'mandates.policies',
   subject: 'policy',
@@ -69,9 +73,7 @@ export const POLICIES = {
     { column: 'mandate_id', type: 'uuid' },
     { column: 'current_version_id', type: 'uuid' },
   ],
-  // What it is a policy of, fixed when it is made: 0037's `fixed_at_creation` refuses any change after.
-  fixedAtCreation: ['scope', 'mandate_id'],
-} as const satisfies SignedStateTable & { readonly fixedAtCreation: readonly string[] };
+} as const satisfies SignedStateTable;
 
 /** A policy version's row, as the signed state reads and records it: made once, never moved (0037's `made_once`). */
 export const POLICY_VERSIONS = {

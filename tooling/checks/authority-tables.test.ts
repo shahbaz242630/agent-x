@@ -197,12 +197,11 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: mandates.MANDATE_VERSIONS.fields,
         madeOnce: true,
       },
-      // A policy has no status: what it is a policy of is fixed, its versions made once.
+      // A policy has no status, and its versions are made once.
       {
         table: mandates.POLICIES.table,
         subject: mandates.POLICIES.subject,
         fields: mandates.POLICIES.fields,
-        fixedAtCreation: ['scope', 'mandate_id'],
       },
       {
         table: mandates.POLICY_VERSIONS.table,

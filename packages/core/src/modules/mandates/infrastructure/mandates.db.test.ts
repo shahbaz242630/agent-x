@@ -7,8 +7,8 @@
 // supplier IDs; an agent and a source of its own organisation only; versions
 // made once; and no other organisation's rows, no deletes, no key changes.
 // C1: policies and their versions (0037) on the same tables' terms: one of
-// each kind, by its ID (the organisation's own, a mandate's own); what it is
-// a policy of fixed; a version in force of its own, checked at commit; rules
+// each kind, by its ID (the organisation's own, a mandate's own), so what it
+// is a policy of never changes; a version in force of its own, checked at commit; rules
 // that may each be empty, a per-order cap with what happens over it, rules
 // that nest, a supplier list as a mandate's; versions made once.
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
@@ -585,7 +585,7 @@ describe('a policy', () => {
     ).rejects.toEqual(refusedBy('current_is_its_own'));
   });
 
-  it('moves to a new version of its own, keeping what it is a policy of (fixed_at_creation)', async () => {
+  it('moves to a new version of its own, never to another kind (one_of_each_kind)', async () => {
     const org = await organisation();
     const { id: mandate } = await drafted(org);
     const first = await orgPolicy(org);
@@ -599,9 +599,13 @@ describe('a policy', () => {
 
     // The audit module's record writes them again as they are, which is no change.
     await changePolicy(org, org.id, { scope: 'organization', mandate_id: null, current_version_id: second });
-    await expect(changePolicy(org, org.id, { scope: 'mandate', mandate_id: mandate })).rejects.toEqual(
-      refusedBy('fixed_at_creation'),
-    );
+    for (const values of [
+      { scope: 'mandate', mandate_id: mandate },
+      { scope: 'mandate' },
+      { mandate_id: mandate },
+    ] satisfies Updateable<MandatesTables['mandates.policies']>[]) {
+      await expect(changePolicy(org, org.id, values)).rejects.toEqual(refusedBy('one_of_each_kind'));
+    }
     await changePolicy(org, org.id, { current_version_id: first });
   });
 
@@ -662,6 +666,9 @@ describe('a policy', () => {
     );
     await expect(orgPolicy(org, { approval_threshold_minor: -1n })).rejects.toEqual(
       refusedBy('policy_versions_approval_threshold_minor_check'),
+    );
+    await expect(orgPolicy(org, { per_order_cap_minor: -1n, approval_threshold_minor: null })).rejects.toEqual(
+      refusedBy('policy_versions_per_order_cap_minor_check'),
     );
     await expect(orgPolicy(org, { currency: 'USD' })).rejects.toEqual(
       expect.objectContaining({ code: '23503', constraint: 'policy_versions_currency_fkey' }),
