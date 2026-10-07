@@ -5,15 +5,9 @@
 //
 // - `list` and `show`: for the organisation's members, every source, ENDED
 //   ones too, as Agent X holds it.
-// - `usableByAgent`: for an agent with `sources:read`, only the sources that
-//   may fund a request now (`mayFund`), so nothing of one it can't use
-//   reaches it; the route answers each as the safe summary alone. The page is
-//   filtered after it is read, so a page may hold fewer than asked for, and
-//   an agent paging on can tell roughly how many others there are, never
-//   anything of them. Phase 2 narrows it to the sources its mandate names
-//   (`Carry-Forward.md`).
-import { mayFund, type SourceRecord, sourcesPage } from '@agentx/core/modules/funding-sources';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+// An agent's sources are its mandate's (agent-mandate.ts, Phase 2 B5).
+import { type SourceRecord, sourcesPage } from '@agentx/core/modules/funding-sources';
+import type { IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
@@ -35,47 +29,34 @@ export type SourceShown = { readonly outcome: 'found'; readonly source: SourceRe
 export interface FundingSourceReads {
   list(orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed>;
   show(orgId: string, sourceId: string, correlationId: string): Promise<SourceShown>;
-  usableByAgent(orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed>;
 }
 
 export function createFundingSourceReads({
   database,
   keys,
   ids,
-  clock,
   logger,
 }: {
   readonly database: Database<FundingSourceTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
-  readonly clock: Clock;
   readonly logger: Logger;
 }): FundingSourceReads {
   const work = createFundingSourceWork({ database, keys, ids, logger });
 
-  const list = async (orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed> => {
-    const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-      sourcesPage(tx, states, orgId, page),
-    );
-    if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
-    return listed;
-  };
-
   return {
-    list,
+    async list(orgId, page, correlationId) {
+      const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
+        sourcesPage(tx, states, orgId, page),
+      );
+      if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
+      return listed;
+    },
 
     show: (orgId, sourceId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
         const { source } = await work.sourceIn(tx, states, { orgId, id: sourceId }, 'share');
         return { outcome: 'found' as const, source };
       }),
-
-    async usableByAgent(orgId, page, correlationId) {
-      const listed = await list(orgId, page, correlationId);
-      if (listed.outcome === 'refused') return listed;
-      // `next` still follows the page read: a page may hold fewer than asked, and the next picks up after it.
-      const now = clock.now();
-      return { ...listed, sources: listed.sources.filter((source) => mayFund(source, now)) };
-    },
   };
 }

@@ -21,10 +21,6 @@
 //   with the step-up's ID once signed in again (a passkey) (D2-4b): 202 with
 //   the step-up, then 200 with the source, ACTIVE. 409 SOURCE_NOT_SUSPENDED
 //   for one that isn't suspended. Admins.
-// - `GET /v1/agent/funding-sources?after=&limit=` (D2-4a, SEC-AG-05): for an
-//   agent's key with `sources:read`, the sources that may fund a request now,
-//   each as the safe summary alone: its ID, currency, kind and hint. Never
-//   the holder, the partner's references, the consent or the bank's limits.
 // Refusals: 503 PARTNER_UNAVAILABLE when the partner didn't answer (nothing
 // was done; send it again) or none is set up; 409 LINK_STARTS_SPENT past the
 // day's budget; 404 NOT_FOUND for a link or source not the organisation's;
@@ -36,7 +32,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { agentOf, need } from './access.ts';
+import { need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import {
@@ -241,31 +237,6 @@ const REACTIVATE_CONFIRM_SCHEMA = {
   response: { 200: SOURCE_CHANGED },
 };
 
-const AGENT_SOURCE = z
-  .object({
-    id: z.uuid().describe('The source, by its ID.'),
-    currency: z.string().describe('The currency the bank’s limits are in.'),
-    accountType: z.enum(['retail', 'sme', 'corporate']).describe('What kind of account it is.'),
-    hint: z.string().describe('The country and the last four characters of the account number, such as AE…6026.'),
-  })
-  .register(API_SCHEMAS, {
-    id: 'AgentFundingSource',
-    description: 'A bank account the agent’s organisation may pay from now: the safe summary alone (SEC-AG-05).',
-  });
-
-const AGENT_LIST_SCHEMA = {
-  summary: 'The bank accounts your organisation may pay from now',
-  querystring: PAGE,
-  response: {
-    200: z
-      .object({
-        sources: z.array(AGENT_SOURCE).describe('Those of this page that may fund a request now, in order of ID.'),
-        next: NEXT,
-      })
-      .describe('A page of sources: it may hold fewer than asked for, and `next` still leads on.'),
-  },
-};
-
 /** The routes. Each use case does its own; without one they are still documented, and no one reaches them. */
 export function registerFundingSources(
   app: FastifyInstance,
@@ -381,29 +352,6 @@ export function registerFundingSources(
     },
   );
 
-  routes.get(
-    '/v1/agent/funding-sources',
-    { schema: AGENT_LIST_SCHEMA, config: { access: ['agent'], agentScopes: ['sources:read'] } },
-    async (request, reply) => {
-      const { orgId } = agentOf(request);
-      const listed = await need(reads).usableByAgent(
-        orgId,
-        { after: request.query.after ?? null, limit: request.query.limit ?? MOST_SOURCES_A_PAGE },
-        request.id,
-      );
-      if (listed.outcome === 'refused') return refused(listed, request, reply);
-      // The safe summary alone, field by field: nothing else of the source can reach an agent.
-      return {
-        sources: listed.sources.map((source) => ({
-          id: source.id,
-          currency: source.controls.currency,
-          accountType: source.summary.accountType,
-          hint: source.summary.hint,
-        })),
-        next: listed.next,
-      };
-    },
-  );
   routes.post(
     '/v1/funding-sources/:id/suspend',
     {

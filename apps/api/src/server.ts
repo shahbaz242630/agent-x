@@ -67,6 +67,7 @@ import { registerMandates } from './mandates.ts';
 import type { AgentChanges } from './agent-changes.ts';
 import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
+import type { AgentMandates } from './agent-mandate.ts';
 import { registerAgentSelf } from './agent-self.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceChanges } from './funding-source-changes.ts';
@@ -149,6 +150,8 @@ export interface ServerOptions {
   readonly mandateAcceptance?: MandateAcceptance | undefined;
   /** Suspending, resuming and revoking mandates (mandate-moves.ts); without it, no one reaches those routes. */
   readonly mandateMoves?: MandateMoves | undefined;
+  /** An agent's own mandate and the sources it names (agent-mandate.ts); without it, no agent reaches those routes. */
+  readonly agentMandates?: AgentMandates | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -316,7 +319,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
-  registerAgentSelf(app);
+  registerAgentSelf(app, { mandates: options.agentMandates });
   registerAgents(app, {
     registrations: options.agentRegistrations,
     changes: options.agentChanges,

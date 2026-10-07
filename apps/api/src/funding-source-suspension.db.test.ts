@@ -50,7 +50,6 @@ import {
   LINK_CONFIRM_OPERATION,
   LINK_START_OPERATION,
 } from './funding-source-links.ts';
-import { createFundingSourceReads, type FundingSourceReads } from './funding-source-reads.ts';
 
 type Tables = IdentityTables &
   FundingSourcesTables &
@@ -78,7 +77,6 @@ const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 let clock: FixedClock;
 let rail: FakeRail;
 let links: FundingSourceLinks;
-let reads: FundingSourceReads;
 let changes: FundingSourceChanges;
 const challenges = () => createStepUpChallenges({ ids, clock });
 
@@ -197,7 +195,6 @@ beforeEach(() => {
   rail = createFakeRail({ clock, ids, records: createDatabaseRecords(app) });
   const services = { database: app, keys, ids, logger: testLogger() };
   links = createFundingSourceLinks({ ...services, clock, rail, partner: 'fake' });
-  reads = createFundingSourceReads({ ...services, clock });
   changes = createFundingSourceChanges({ ...services, rail, challenges: challenges() });
 });
 
@@ -212,7 +209,6 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
 
     expect(suspended).toMatchObject({ id: source.id, status: 'SUSPENDED', availability: 'ACTIVE' });
     expect(mayFund(suspended, clock.now())).toBe(false);
-    expect(await reads.usableByAgent(org, { after: null, limit: 50 }, CORRELATION)).toMatchObject({ sources: [] });
     expect((await eventsAbout(org, source.id)).at(-1)).toMatchObject({
       action: 'funding_source.suspended',
       actor_type: 'user',
