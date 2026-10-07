@@ -1,13 +1,20 @@
 // A call to the login service's own API with its service account's token (B5-3,
 // B6-2b, B6-3c): the issuer and the token checked once, each call routed as
 // sign-in is (`routedToIssuer`), bounded in time and in the answer's size, and
-// the answer parsed only from a 200. The address book, the factor remover and
-// the event feed share it; each throws its own error, naming the step, never
-// the answer.
+// the answer parsed only from a 200. The address book, the factor remover,
+// the event feed and the sign-out's session ending share it; each throws its
+// own error, naming the step, never the answer. A token refused (401, 403) is
+// the one failure they share: LoginTokenRefused, which an alert counts by its
+// name (partner, S88), so a token that stopped working tells someone.
 import type { OutboundFetch } from '@agentx/platform/outbound';
 
 import { boundedText } from './zitadel-answer.ts';
 import { routedToIssuer } from './zitadel-route.ts';
+
+/** The login service refused the token (401 or 403): expired, revoked, or its role taken away. */
+export class LoginTokenRefused extends Error {
+  override readonly name = 'LoginTokenRefused';
+}
 
 /** A token: visible ASCII, bounded. */
 const TOKEN = /^[!-~]{1,4096}$/;
@@ -38,7 +45,8 @@ export interface ZitadelAnswer {
 /**
  * A caller with each call's time and answer bounded. A call that fails, or a
  * 200 whose answer is too large or isn't JSON, throws what `unavailable`
- * makes of how. A bad issuer or token throws RangeError here, at once.
+ * makes of how; a refused token throws LoginTokenRefused. A bad issuer or
+ * token throws RangeError here, at once.
  */
 export function createZitadelCall(
   { issuer, internalOrigin, token, fetch }: ZitadelCallOptions,
@@ -65,6 +73,9 @@ export function createZitadelCall(
     }
     if (response.status !== 200) {
       await response.body?.cancel();
+      if (response.status === 401 || response.status === 403) {
+        throw new LoginTokenRefused(`the login service refused the token: it answered ${String(response.status)}`);
+      }
       return { status: response.status, answer: undefined };
     }
     const tooLarge = unavailable(`the answer was larger than ${String(mostAnswerBytes)} bytes`);

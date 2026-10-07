@@ -76,12 +76,6 @@ export const PASSKEY_ADDED_EVENTS: readonly string[] = [
   'user.human.passwordless.token.verified',
 ];
 
-/** A security key or a passkey removed. */
-export const PASSKEY_REMOVED_EVENTS: readonly string[] = [
-  'user.human.mfa.u2f.token.removed',
-  'user.human.passwordless.token.removed',
-];
-
 /**
  * Whether a change of this class ends every Agent X session the person has
  * (the S68 audit): a second factor added or removed, the password or the

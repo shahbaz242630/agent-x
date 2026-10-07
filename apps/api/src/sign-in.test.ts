@@ -4,9 +4,12 @@
 import {
   type CallbackInput,
   type LiveSession,
+  type LoginSessions,
+  LoginSessionsUnavailable,
   type SignIn,
   SignInFailed,
   StepUpFailed,
+  type Subject,
 } from '@agentx/core/modules/identity';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
@@ -28,6 +31,7 @@ const NEW_SESSION = 'N'.repeat(43);
 const USER_ID = '0199a0f0-0000-7000-8000-000000000011';
 const RECORD_ID = '0199a0f0-0000-7000-8000-000000000022';
 const SESSION_SECONDS = 43_200;
+const SUBJECT = { issuer: 'https://auth.agentx.example', subject: '312000000000000042' };
 
 /** A live session, as the sign-in finds it for a request. */
 const LIVE: LiveSession = {
@@ -85,7 +89,7 @@ class StandIn implements SignIn {
 
   signOut(cookie: string | undefined) {
     this.signedOut.push(cookie);
-    return Promise.resolve(cookie !== undefined);
+    return Promise.resolve(cookie === undefined ? undefined : SUBJECT);
   }
 
   signedIn(cookie: string) {
@@ -100,16 +104,19 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function server(signIn: SignIn | undefined, limits: { perAddress?: number; perUser?: number } = {}) {
+async function server(
+  signIn: SignIn | undefined,
+  options: { perAddress?: number; perUser?: number; loginSessions?: LoginSessions } = {},
+) {
   const config = {
     http: {
       host: '127.0.0.1',
       port: 0,
       publicOrigin: PUBLIC_ORIGIN,
       trustedProxies: [],
-      rateLimitPerMinute: limits.perAddress ?? 100,
-      rateLimitPerUserPerMinute: limits.perUser ?? 100,
-      rateLimitPerAgentPerMinute: limits.perUser ?? 100,
+      rateLimitPerMinute: options.perAddress ?? 100,
+      rateLimitPerUserPerMinute: options.perUser ?? 100,
+      rateLimitPerAgentPerMinute: options.perUser ?? 100,
     },
     log: { level: 'info' as const, eventCapPerMinute: 10_000 },
   };
@@ -125,7 +132,10 @@ async function server(signIn: SignIn | undefined, limits: { perAddress?: number;
     logger,
     ids: new SequentialIds(),
     healthChecks: [],
-    signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: SESSION_SECONDS },
+    signIn:
+      signIn === undefined
+        ? undefined
+        : { service: signIn, sessionSeconds: SESSION_SECONDS, loginSessions: options.loginSessions },
     securityEvents: { note: (event) => noted.push(event) },
   });
   servers.push(app);
@@ -395,6 +405,67 @@ describe('signing out', () => {
     expect(standIn.signedOut).toEqual([undefined]);
     // Nothing ended, so nothing said ended.
     expect(capture.lines().some((line) => line.event === 'auth.signed_out')).toBe(false);
+  });
+
+  /** A stand-in for the login service's sessions: each person asked, and its answer. */
+  const loginSessions = (answer: () => Promise<number>) => {
+    const asked: Subject[] = [];
+    return {
+      asked,
+      endAll: (who: Subject) => {
+        asked.push(who);
+        return answer();
+      },
+    };
+  };
+  const signOut = { method: 'POST' as const, url: '/v1/auth/sign-out' };
+  const withSession = { origin: PUBLIC_ORIGIN, cookie: `${SESSION_COOKIE}=${SESSION_ID}` };
+
+  it("ends the person's sessions at the login service too (Shannon AUTH-VULN-01)", async () => {
+    const ending = loginSessions(() => Promise.resolve(3));
+    const { app, capture } = await server(new StandIn(), { loginSessions: ending });
+
+    const response = await app.inject({ ...signOut, headers: withSession });
+
+    expect(response.statusCode).toBe(200);
+    expect(ending.asked).toEqual([SUBJECT]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({ event: 'auth.login_service_signed_out', ended: 3 }),
+    );
+  });
+
+  it('stands though the login service fails: our session ended, the cookie cleared, the failure logged', async () => {
+    const ending = loginSessions(() =>
+      Promise.reject(new LoginSessionsUnavailable('reading the sessions: it answered 500')),
+    );
+    const { app, capture } = await server(new StandIn(), { loginSessions: ending });
+
+    const response = await app.inject({ ...signOut, headers: withSession });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({});
+    expect(setCookies(response.headers['set-cookie'])).toEqual([
+      `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0`,
+    ]);
+    expect(capture.lines()).toContainEqual(
+      expect.objectContaining({
+        event: 'auth.login_service_sign_out_failed',
+        level: 'error',
+        err: expect.objectContaining({
+          type: 'LoginSessionsUnavailable',
+          message: 'reading the sessions: it answered 500',
+        }) as unknown,
+      }),
+    );
+  });
+
+  it('asks the login service nothing with no session to end', async () => {
+    const ending = loginSessions(() => Promise.resolve(0));
+    const { app } = await server(new StandIn(), { loginSessions: ending });
+
+    await app.inject({ ...signOut, headers: { origin: PUBLIC_ORIGIN } });
+
+    expect(ending.asked).toEqual([]);
   });
 
   it('refuses a sign-out from another site, ending nothing (SEC-WEB-01)', async () => {

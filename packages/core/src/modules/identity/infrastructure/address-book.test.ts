@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Subject } from '../domain/sign-in.ts';
 import { AddressBookUnavailable, createAddressBook } from './address-book.ts';
+import { LoginTokenRefused } from './zitadel-call.ts';
 
 const ISSUER = 'https://auth.example.test';
 const INTERNAL = 'http://ca-agentx-stg-zitadel';
@@ -109,18 +110,23 @@ describe('SEC-HA-11 the address book', () => {
   it('throws, so the notice waits, when the login service is away, refuses the token, or answers wrongly', async () => {
     for (const answer of [
       'network' as const,
-      { status: 401 },
-      { status: 403 },
       { status: 500 },
       { status: 503 },
-      // Zitadel's refusals come as JSON: one must never read as a person with no address, given up for good.
-      { status: 401, body: '{"code":16,"message":"Errors.Token.Invalid"}' },
-      { status: 403, body: '{"code":7,"message":"No matching permissions found"}' },
       { status: 500, body: JSON.stringify(human('sara@example.test', true)) },
       { status: 200, body: 'not json' },
       { status: 200, body: `{"x":"${'y'.repeat(70 * 1024)}"}` },
     ]) {
       await expect(bookAnswering(answer).book.addressOf(USER)).rejects.toThrow(AddressBookUnavailable);
+    }
+    // A refused token is the one failure every call to the login service shares, and an alert counts (S88).
+    for (const answer of [
+      { status: 401 },
+      { status: 403 },
+      // Zitadel's refusals come as JSON: one must never read as a person with no address, given up for good.
+      { status: 401, body: '{"code":16,"message":"Errors.Token.Invalid"}' },
+      { status: 403, body: '{"code":7,"message":"No matching permissions found"}' },
+    ]) {
+      await expect(bookAnswering(answer).book.addressOf(USER)).rejects.toThrow(LoginTokenRefused);
     }
   });
 

@@ -6,6 +6,7 @@ export {
   AccountNumberLeak,
   accountHint,
   holdsAnAccountNumber,
+  holdsAnIban,
   isUaeIban,
   withoutAccountNumbers,
 } from './domain/account-numbers.ts';

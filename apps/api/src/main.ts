@@ -96,6 +96,7 @@ import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
 import { FACTOR_REMOVALS_EVERY_MS, resetRemovalsFrom } from './factor-removals.ts';
+import { loginSessionsFrom } from './login-sessions.ts';
 import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
@@ -397,7 +398,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     logger,
     ids: uuidV7Ids,
     healthChecks: [],
-    signIn: signIn === undefined ? undefined : { service: signIn, sessionSeconds: config.sessions.absoluteSeconds },
+    signIn:
+      signIn === undefined
+        ? undefined
+        : {
+            service: signIn,
+            sessionSeconds: config.sessions.absoluteSeconds,
+            loginSessions: loginSessionsFrom(config),
+          },
     securityEvents: recorder,
     findMembership: (orgId, userId, correlationId) =>
       membershipFor(database, { keys, ids: uuidV7Ids, logger: logger.child({ correlationId }) }, orgId, userId),
@@ -474,7 +482,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
     }),
-    agentChanges: createAgentChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
+    agentChanges: createAgentChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     agentKeyChanges: createAgentKeyChanges({ database, keys, ids: uuidV7Ids, clock: systemClock, challenges, logger }),
     checkAgentKey: keyCheck.check.bind(keyCheck),
     fundingSourceLinks: createFundingSourceLinks({

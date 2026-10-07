@@ -21,6 +21,7 @@ import {
 } from '@agentx/core/modules/agents';
 import type { AuditActor, AuditDetails, SignedStates } from '@agentx/core/modules/audit';
 import type { Role } from '@agentx/core/modules/identity';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -35,7 +36,7 @@ import {
 } from './use-case-work.ts';
 
 /** The tables the agents' use cases work on. */
-export type AgentTables = UseCaseTables & AgentsTables;
+export type AgentTables = UseCaseTables & AgentsTables & NotificationsTables;
 /** The organisation's transaction, on those tables. */
 export type AgentTx = DatabaseTransaction<AgentTables>;
 
