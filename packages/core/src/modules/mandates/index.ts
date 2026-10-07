@@ -1,8 +1,8 @@
 // The mandates module (ADR-004, PRD §3 `Mandate` / `MandateEvidence`, §4.1;
 // Phase 2 B): the spending authority an organisation gives one of its agents,
 // and the versions of its terms, both authority tables read through their
-// signed states (B1). Drafting and reading them (B2); accepting and moving
-// them come with B3–B4, their routes composed in the API.
+// signed states (B1). Drafting and reading them (B2), accepting them (B3),
+// and finding those past their end (B4); their use cases composed in the API.
 export {
   CONSENT_LIMITS,
   type ConsentLimits,
@@ -38,5 +38,6 @@ export {
   openMandateOfAgent,
 } from './infrastructure/drafts.ts';
 export { acceptDraft, agentOfMandate, mandatesOfAgent } from './infrastructure/acceptance.ts';
+export { mandatesPastTheirEnd } from './infrastructure/expiry.ts';
 export { MANDATE_VERSIONS, MANDATES } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';
