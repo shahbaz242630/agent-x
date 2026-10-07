@@ -3,28 +3,39 @@
 // linked through the fake partner and signed suppliers: an admin drafts one
 // for an active agent with no mandate open, on the organisation's own
 // usable source and suppliers, within the bank consent unless flexible;
-// every refusal by its code; a retry answered from the mandate; a later
-// draft replacing the one waiting, none for an ended mandate; the day's
-// budget; and every member reads them.
+// every refusal by its code; a retry answered from the mandate; two drafts at
+// once (forced); a later draft replacing the one waiting, none for a revoked
+// or expired mandate; the day's budget; and every member reads them, a
+// source changed since by the bank shown as warnings.
 import { addAgent, AGENTS, type AgentsTables } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
-import { addLink, addSource, type FundingSourcesTables, settleLink } from '@agentx/core/modules/funding-sources';
+import {
+  addLink,
+  addSource,
+  type FundingSourcesTables,
+  settleLink,
+  sourceOf,
+  updateFromPartner,
+} from '@agentx/core/modules/funding-sources';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
-import { MANDATES, type MandatesTables, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
+import { mandateOf, MANDATES, type MandatesTables, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createFakeRail } from '@agentx/core/modules/providers';
+import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
 import { money } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -74,6 +85,8 @@ interface World {
   /** The source's consent per payment, in fils. */
   readonly maxPayment: bigint;
   readonly suppliers: readonly string[];
+  /** The source as the partner answered it when linked. */
+  readonly state: FundingSourceState;
 }
 
 let people = 0;
@@ -158,7 +171,15 @@ async function world(): Promise<World> {
       }),
     );
   }
-  return { org, admin, agent, source, maxPayment: answer.source.controls.maxPaymentMinor, suppliers };
+  return {
+    org,
+    admin,
+    agent,
+    source,
+    maxPayment: answer.source.controls.maxPaymentMinor,
+    suppliers,
+    state: answer.source,
+  };
 }
 
 const AED = (minor: bigint) => money(minor, 'AED');
@@ -208,6 +229,46 @@ const draftedOf = (write: MandateWrite) => {
 };
 
 const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
+
+/** The source brought up to the partner's answer changed by `change`, as a refresh would. */
+async function partnerSays(w: World, change: Partial<FundingSourceState>): Promise<void> {
+  const key = { orgId: w.org, id: w.source };
+  await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const read = await sourceOf(tx, states, key, 'change');
+    if (read.outcome !== 'found') throw new Error('the source was not found');
+    await updateFromPartner(tx, states, key, read, {
+      state: { ...w.state, statusChangedAt: clock.now(), ...change },
+      actor: OPERATOR,
+    });
+  });
+}
+
+/** Accepts the draft waiting as B3 will (the version in force, then the status), then expires the mandate. */
+async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedOf>): Promise<void> {
+  const key = { orgId: w.org, id: drafted.mandate.id };
+  const pending = drafted.pending?.version;
+  if (pending === undefined) throw new Error('no draft waiting');
+  await withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const read = await mandateOf(tx, states, key, 'change');
+    if (read.outcome !== 'found') throw new Error('the mandate was not found');
+    const moves = { actor: OPERATOR, details: {} };
+    await states.record(
+      tx,
+      MANDATES,
+      key,
+      read.state,
+      {
+        current_version_id: pending.id,
+        pending_version_id: null,
+        accepted_by: pending.draftedBy,
+        accepted_at: clock.now(),
+      },
+      { ...moves, action: 'mandate.version_accepted' },
+    );
+    await states.changeStatus(tx, MANDATES, key, 'accept', { ...moves, action: 'mandate.accept' });
+    await states.changeStatus(tx, MANDATES, key, 'expire', { ...moves, action: 'mandate.expire' });
+  });
+}
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -303,13 +364,60 @@ describe('drafting a mandate (B2)', () => {
     );
   });
 
-  it('refuses a strict mandate past the bank consent, and keeps a flexible one with its warning', async () => {
+  it('refuses an end the edge let by that has passed on the server’s clock: 400, not 500', async () => {
+    const w = await world();
+    expect(await draft(w.admin, draftOf(w, { endsAt: clock.now() }))).toEqual(refused(400, 'BAD_REQUEST'));
+  });
+
+  it('refuses a source whose consent has run out, and still shows a mandate drawn on it', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    await partnerSays(w, { consentExpiresAt: clock.now() });
+
+    expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'SOURCE_NOT_USABLE'));
+    expect(await registry.show(w.org, first.mandate.id, CORRELATION)).toMatchObject({ outcome: 'found' });
+  });
+
+  it('refuses a strict mandate past the bank consent, and keeps a flexible one with its warning, in its event too', async () => {
     const w = await world();
     const past = { perOrderLimit: AED(w.maxPayment + 1n), monthlyLimit: AED(w.maxPayment * 2n) };
 
     expect(await draft(w.admin, draftOf(w, past))).toEqual(refused(409, 'MANDATE_PAST_CONSENT'));
     const kept = draftedOf(await draft(w.admin, draftOf(w, { ...past, consentLimits: 'flexible' })));
-    expect(kept.pending?.consentWarnings).toEqual(['the per-order limit is above the bank consent’s per payment']);
+    const warning = 'the per-order limit is above the bank consent’s per payment';
+    expect(kept.pending?.consentWarnings).toEqual([warning]);
+    const events = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['action', 'details'])
+        .where('subject_id', '=', kept.pending?.version.id ?? '')
+        .execute(),
+    );
+    expect(
+      events.map(({ action, details }) => [action, (JSON.parse(details) as Record<string, unknown>).consentWarnings]),
+    ).toEqual([['mandate_version.drafted', warning]]);
+  });
+
+  it('drafts one of two asked at once for an agent, the other refused, never both (forced: the drafting lock held)', async () => {
+    const w = await world();
+    const holder = await database.connect('admin');
+    await holder.query('begin');
+    try {
+      await holdNamedLock(holder, lockName('mandates', w.org));
+      const asking = within(
+        20_000,
+        Promise.all([draft(w.admin, draftOf(w)), draft(w.admin, draftOf(w))]),
+        'the drafts',
+      );
+      await waitUntilQueued(database.as('admin'), 2);
+      await holder.query('commit');
+      const outcomes = (await asking).map((write) => (write.outcome === 'refused' ? write.code : write.outcome));
+
+      expect(outcomes.toSorted()).toEqual(['MANDATE_OPEN', 'drafted']);
+    } finally {
+      await holder.query('rollback');
+      await holder.end();
+    }
   });
 });
 
@@ -336,6 +444,14 @@ describe('drafting a later version (B2)', () => {
 
     expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'MANDATE_ENDED'));
     expect(await redraft(w.admin, ids.next(), draftOf(w).terms)).toEqual(refused(404, 'NOT_FOUND'));
+  });
+
+  it('refuses one for a mandate expired', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    await acceptedThenExpired(w, first);
+
+    expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'MANDATE_ENDED'));
   });
 
   it(`spends the day's budget of ${String(MOST_DRAFTS_A_DAY)} drafts, and refuses the next until a day has passed`, async () => {
@@ -367,5 +483,16 @@ describe('reading mandates (B2)', () => {
       pending: { version: { version: 1 } },
     });
     expect(await registry.show(viewer.orgId, ids.next(), CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+  });
+
+  it('shows a version whose source’s currency has since changed, the change as its warning', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    await partnerSays(w, { controls: { ...w.state.controls, currency: 'USD' } });
+
+    expect(await registry.show(w.org, first.mandate.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      pending: { consentWarnings: ['the mandate is not in its funding source’s currency'] },
+    });
   });
 });

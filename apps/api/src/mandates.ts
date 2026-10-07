@@ -94,8 +94,9 @@ const termsKept = (body: TermFields, context: z.RefinementCtx): MandateTerms => 
         fundingSourceId: body.fundingSourceId,
         splitCheck: body.splitCheck ?? true,
         consentLimits: body.consentLimits ?? DEFAULT_CONSENT_LIMITS,
-        endsAt: body.endsAt === null || body.endsAt === undefined ? null : new Date(body.endsAt),
+        endsAt: body.endsAt ? new Date(body.endsAt) : null,
       },
+      // The edge has no clock of its own; the use case checks again on its clock (asDrafted).
       new Date(),
     );
   } catch (error) {
@@ -187,9 +188,12 @@ const DRAFT_SCHEMA = {
       ...TERM_FIELDS,
     })
     .transform((body, context) => {
-      const timeZone = body.timeZone === undefined ? null : (timeZoneOf(body.timeZone) ?? null);
-      if (body.timeZone !== undefined && timeZone === null) {
-        context.addIssue({ code: 'custom', message: 'the time zone is not one the IANA database names' });
+      let timeZone: string | null = null;
+      if (body.timeZone !== undefined) {
+        timeZone = timeZoneOf(body.timeZone) ?? null;
+        if (timeZone === null) {
+          context.addIssue({ code: 'custom', message: 'the time zone is not one the IANA database names' });
+        }
       }
       return {
         agentId: body.agentId,
@@ -240,7 +244,7 @@ function memberOf(request: FastifyRequest) {
   return { orgId: member.orgId, userId: person.userId };
 }
 
-const mandateOf = (mandate: MandateRecord) => ({
+const mandateBody = (mandate: MandateRecord) => ({
   id: mandate.id,
   agentId: mandate.agentId,
   timeZone: mandate.timeZone,
@@ -268,7 +272,7 @@ const versionOf = ({ version: v, consentWarnings }: VersionShown) => ({
 });
 
 const detailsOf = ({ mandate, current, pending }: MandateView) => ({
-  ...mandateOf(mandate),
+  ...mandateBody(mandate),
   acceptedBy: mandate.acceptedBy,
   acceptedAt: mandate.acceptedAt?.toISOString() ?? null,
   current: current === null ? null : versionOf(current),
@@ -335,7 +339,7 @@ export function registerMandates(app: FastifyInstance, { registry }: { registry:
       const listed = await need(registry).list(orgId, page, request.id);
       if (listed.outcome === 'refused') return sendErrorBody(reply, listed.status, listed.code, request.id);
       return {
-        mandates: listed.mandates.map((mandate) => ({ ...mandateOf(mandate), purpose: mandate.purpose })),
+        mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
         next: listed.next,
       };
     },

@@ -33,13 +33,13 @@ import {
   type VerifiedState,
 } from '../../audit/index.ts';
 import { minorOf, money, oneOf, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
-import { CONSENT_LIMITS, MANDATE, type MandateStatus } from '../domain/mandate.ts';
+import { CONSENT_LIMITS, isEnded, MANDATE, type MandateStatus, OPEN_STATES } from '../domain/mandate.ts';
 import { type MandateTerms, mandateTerms } from '../domain/terms.ts';
 import { MANDATE_VERSIONS, MANDATES } from './mandates.ts';
 import type { MandatesTables } from './tables.ts';
 
 /** A transaction on the tables mandates are drafted and read in, opened by withSignedStates for their organisation. */
-export type MandatesTransaction = Transaction<MandatesTables & AuditTables>;
+type MandatesTransaction = Transaction<MandatesTables & AuditTables>;
 
 interface MandateKey {
   readonly orgId: string;
@@ -73,13 +73,13 @@ export interface MandateVersionRecord extends MandateTerms {
 }
 
 /** A mandate read by its ID and verified, with the state a change records from; missing; or tampered with. */
-export type MandateCheck =
+type MandateCheck =
   | { readonly outcome: 'found'; readonly mandate: MandateRecord; readonly state: VerifiedState }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /** A version read by its ID and verified as one of its mandate's; missing; or tampered with. */
-export type MandateVersionCheck =
+type MandateVersionCheck =
   | { readonly outcome: 'found'; readonly version: MandateVersionRecord }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -185,7 +185,7 @@ function versionRecordOf(id: string, fields: Fields): MandateVersionRecord | und
 }
 
 /** A verified row read back into its record, or a throw: the table's checks and the seal make any other a bug. */
-function recordOf<Record>(table: SignedStateTable, id: string, record: Record | undefined): Record {
+function recordOf<Row>(table: SignedStateTable, id: string, record: Row | undefined): Row {
   if (record === undefined)
     throw new Error(`A verified ${table.subject} holds a field that isn't one of its own: ${id}`);
   return record;
@@ -262,7 +262,7 @@ interface NewVersion {
   readonly id: string;
   /** Its number: the mandate's next. A number taken is refused by the table's key. */
   readonly version: number;
-  /** As mandateTerms keeps them (checked again here); the use case has checked the suppliers and source are the organisation's. */
+  /** As mandateTerms keeps them (checked again by draftMandate or draftVersion); the use case has checked the suppliers and source are the organisation's. */
   readonly terms: MandateTerms;
   /** The membership of the member who drafted it, checked active by the use case. */
   readonly draftedBy: string;
@@ -278,9 +278,8 @@ async function addVersion(
   tx: MandatesTransaction,
   states: SignedStates,
   of: Binding,
-  { orgId, id, version, terms: given, draftedBy, draftedAt, actor, details = {} }: NewVersion,
+  { orgId, id, version, terms, draftedBy, draftedAt, actor, details = {} }: NewVersion,
 ): Promise<RecordedState> {
-  const terms = mandateTerms(given, draftedAt);
   const fields = {
     mandate_id: of.id,
     version,
@@ -311,7 +310,7 @@ async function addVersion(
 }
 
 /** A new mandate, as a use case drafts it, with its first version. */
-export interface NewMandate extends Omit<NewVersion, 'version' | 'id'> {
+interface NewMandate extends Omit<NewVersion, 'version' | 'id'> {
   /** Its ID and its first version's, made by the server. */
   readonly id: string;
   readonly versionId: string;
@@ -333,7 +332,7 @@ export async function draftMandate(
   states: SignedStates,
   { id, versionId, agentId, timeZone, splitWindowHours, ...first }: NewMandate,
 ): Promise<{ readonly mandate: RecordedState; readonly version: RecordedState }> {
-  mandateTerms(first.terms, first.draftedAt);
+  const terms = mandateTerms(first.terms, first.draftedAt);
   const binding = { id: id.toLowerCase(), agentId: agentId.toLowerCase(), timeZone, splitWindowHours };
   const mandateFields = {
     agent_id: binding.agentId,
@@ -353,9 +352,9 @@ export async function draftMandate(
   const mandate = await states.record(tx, MANDATES, { orgId: first.orgId, id }, 'new', mandateFields, {
     actor: first.actor,
     action: 'mandate.drafted',
-    details: { ...first.details, agentId: binding.agentId, versionId },
+    details: { agentId: binding.agentId, versionId },
   });
-  return { mandate, version: await addVersion(tx, states, binding, { ...first, id: versionId, version: 1 }) };
+  return { mandate, version: await addVersion(tx, states, binding, { ...first, terms, id: versionId, version: 1 }) };
 }
 
 /**
@@ -370,12 +369,10 @@ export async function draftVersion(
   of: { readonly mandate: MandateRecord; readonly state: VerifiedState },
   version: Omit<NewVersion, 'version'>,
 ): Promise<RecordedState> {
-  if (of.mandate.status === 'REVOKED' || of.mandate.status === 'EXPIRED') {
-    throw new RangeError('An ended mandate takes no new version');
-  }
-  mandateTerms(version.terms, version.draftedAt);
+  if (isEnded(of.mandate.status)) throw new RangeError('An ended mandate takes no new version');
+  const terms = mandateTerms(version.terms, version.draftedAt);
   const number = await nextVersionNumber(tx, version.orgId, of.mandate.id);
-  const recorded = await addVersion(tx, states, of.mandate, { ...version, version: number });
+  const recorded = await addVersion(tx, states, of.mandate, { ...version, terms, version: number });
   await states.record(
     tx,
     MANDATES,
@@ -404,24 +401,26 @@ async function nextVersionNumber(tx: MandatesTransaction, orgId: string, mandate
 }
 
 /**
- * The IDs of the agent's mandates, in one statement: IDs alone, each to be
- * read through its signed state before anything is decided from it (whether
- * the agent has one waiting or in force, B2).
+ * The agent's open mandate (OPEN_STATES), read (`share`) and verified, or
+ * missing when it has none, in one statement however long its history: the
+ * row's status picks it, 0035's `one_open_mandate_an_agent` keeps it to one,
+ * and the verified read means that status is the signed one.
  */
-export async function mandatesOfAgent(
+export async function openMandateOfAgent(
   tx: MandatesTransaction,
+  states: SignedStates,
   orgId: string,
   agentId: string,
-): Promise<readonly string[]> {
-  const rows = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state by the caller before it decides anything
+): Promise<MandateCheck> {
+  const row = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below
     .selectFrom(MANDATES.table)
     .select('id')
     .where('org_id', '=', orgId)
     .where('agent_id', '=', agentId)
-    .orderBy('id')
-    .execute();
-  return rows.map(({ id }) => id);
+    .where('status', 'in', OPEN_STATES)
+    .executeTakeFirst();
+  return row === undefined ? { outcome: 'missing' } : mandateOf(tx, states, { orgId, id: row.id }, 'share');
 }
 
 /** A mandate as a list shows it: its signed state, with the purpose of the version in force, or else the waiting draft's. */

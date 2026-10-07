@@ -1,7 +1,7 @@
 // B2: drafting mandates and their versions, and reading them, on the real
 // migrated schema, as the app role: a mandate born waiting with its first
 // version, both sealed and read back whole; a later draft replacing the one
-// that waited; none for an ended mandate; pages; the agent's mandates; the
+// that waited; none for an ended mandate; pages; the agent's open mandate; the
 // day's count; and (FX-TAMPER, SEC-DB-03's store half) a limit or a status
 // changed by the owner past the app, denied and the organisation held.
 import { createDatabase, type Database } from '@agentx/platform/db';
@@ -28,9 +28,9 @@ import {
   draftsSince,
   draftVersion,
   mandateOf,
-  mandatesOfAgent,
   mandatesPage,
   mandateVersionOf,
+  openMandateOfAgent,
   termsHash,
 } from './drafts.ts';
 import { MANDATE_VERSIONS, MANDATES } from './mandates.ts';
@@ -58,6 +58,8 @@ let owner: OwnerTamper;
 let ownerOfVersions: OwnerTamper;
 let org: string;
 let agent: string;
+/** Another agent: an agent has one mandate open at most (0035). */
+let otherAgent: string;
 let source: string;
 
 const services = () => ({ keys, ids, logger: testLogger(capture) });
@@ -78,13 +80,18 @@ const terms = (overrides: Partial<MandateTerms> = {}): MandateTerms => ({
 
 /** An agent and a funding source of the organisation, made past the app: the steps that add them are tested elsewhere. */
 async function seed(): Promise<void> {
-  [agent, source] = [ids.next(), ids.next()];
+  [agent, otherAgent, source] = [ids.next(), ids.next(), ids.next()];
   const link = ids.next();
   const admin = database.as('admin');
   await admin.query(
     `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
      values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
     [org, agent, ids.next(), clock.now()],
+  );
+  await admin.query(
+    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
+     values ($1, $2, 'Another agent', $3, 'ACTIVE', 'requests:write', $4)`,
+    [org, otherAgent, ids.next(), clock.now()],
   );
   await admin.query(
     `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
@@ -101,15 +108,15 @@ async function seed(): Promise<void> {
   );
 }
 
-/** A mandate drafted with its first version: their IDs. */
-async function drafted(given: MandateTerms = terms()): Promise<{ id: string; versionId: string }> {
+/** A mandate drafted with its first version, for the agent unless another is given: their IDs. */
+async function drafted(given: MandateTerms = terms(), agentId = agent): Promise<{ id: string; versionId: string }> {
   const [id, versionId] = [ids.next(), ids.next()];
   await withSignedStates(app, org, quiet(), (tx, states) =>
     draftMandate(tx, states, {
       orgId: org,
       id,
       versionId,
-      agentId: agent,
+      agentId,
       timeZone: 'Asia/Dubai',
       splitWindowHours: 24,
       terms: given,
@@ -138,6 +145,16 @@ async function redrafted(mandateId: string, given: MandateTerms = terms()): Prom
   });
   return id;
 }
+
+/** Revokes the mandate, as B4 will. */
+const revoked = (id: string) =>
+  withSignedStates(app, org, quiet(), (tx, states) =>
+    states.changeStatus(tx, MANDATES, { orgId: org, id }, 'revoke', {
+      actor: OPERATOR,
+      action: 'mandate.revoke',
+      details: {},
+    }),
+  );
 
 const read = (id: string) =>
   withSignedStates(app, org, services(), (tx, states) => mandateOf(tx, states, { orgId: org, id }, 'share'));
@@ -209,7 +226,7 @@ describe('drafting a mandate (B2)', () => {
 
   it('refuses terms it can’t have before any SQL runs', async () => {
     await expect(drafted(terms({ approvalThreshold: AED(500_001n) }))).rejects.toBeInstanceOf(MandateTermsRefused);
-    expect(await mandatesOfAgent_()).toEqual([]);
+    expect(await openOf()).toEqual({ outcome: 'missing' });
   });
 
   it('binds each version’s terms hash to the mandate, the version’s number and every term', () => {
@@ -248,30 +265,24 @@ describe('drafting a later version (B2)', () => {
 
   it('finds no version of another mandate as one of this one’s', async () => {
     const first = await drafted();
-    const second = await drafted();
+    const second = await drafted(terms(), otherAgent);
     expect(await readVersion(first.versionId, second.id)).toEqual({ outcome: 'missing' });
   });
 
   it('refuses an ended mandate', async () => {
     const { id } = await drafted();
-    await withSignedStates(app, org, quiet(), (tx, states) =>
-      states.changeStatus(tx, MANDATES, { orgId: org, id }, 'revoke', {
-        actor: OPERATOR,
-        action: 'mandate.revoke',
-        details: {},
-      }),
-    );
+    await revoked(id);
 
     await expect(redrafted(id)).rejects.toThrow('An ended mandate takes no new version');
   });
 });
 
-const mandatesOfAgent_ = () => withSignedStates(app, org, quiet(), (tx) => mandatesOfAgent(tx, org, agent));
+const openOf = () => withSignedStates(app, org, quiet(), (tx, states) => openMandateOfAgent(tx, states, org, agent));
 
 describe('reading mandates (B2)', () => {
   it('lists them a page at a time, each with the purpose of its version in force or waiting', async () => {
     const first = await drafted(terms({ purpose: 'Office supplies' }));
-    const second = await drafted(terms({ purpose: 'Cleaning' }));
+    const second = await drafted(terms({ purpose: 'Cleaning' }), otherAgent);
     const page = (after: string | null) =>
       withSignedStates(app, org, quiet(), (tx, states) => mandatesPage(tx, states, org, { after, limit: 1 }));
 
@@ -283,12 +294,15 @@ describe('reading mandates (B2)', () => {
     expect(await page(first.id)).toMatchObject({ mandates: [{ id: second.id, purpose: 'Cleaning' }], next: null });
   });
 
-  it('names the agent’s mandates by ID, and counts the day’s drafts', async () => {
+  it('finds the agent’s open mandate, none once it ended, and counts the day’s drafts', async () => {
     const first = await drafted();
     await redrafted(first.id);
+    expect(await openOf()).toMatchObject({ outcome: 'found', mandate: { id: first.id } });
+    await revoked(first.id);
+    expect(await openOf()).toEqual({ outcome: 'missing' });
     const second = await drafted();
+    expect(await openOf()).toMatchObject({ outcome: 'found', mandate: { id: second.id } });
 
-    expect(await mandatesOfAgent_()).toEqual([first.id, second.id].sort());
     const since = (at: Date) => withSignedStates(app, org, quiet(), (tx) => draftsSince(tx, org, at));
     expect(await since(new Date(clock.now().getTime() - DAY_MS))).toBe(3);
     expect(await since(clock.now())).toBe(0);

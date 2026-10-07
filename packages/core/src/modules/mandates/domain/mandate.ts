@@ -30,6 +30,12 @@ export const MANDATE = defineStateMachine({
 
 export type MandateStatus = (typeof MANDATE.states)[number];
 
+/** A draft waiting or a version in force: an agent has at most one mandate open (0035's `one_open_mandate_an_agent`). */
+export const OPEN_STATES = ['PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED'] as const satisfies readonly MandateStatus[];
+
+/** Revoked or expired: ended for good, it takes no new version. */
+export const isEnded = (status: MandateStatus): boolean => !(OPEN_STATES as readonly MandateStatus[]).includes(status);
+
 /** The split check's rolling window unless its owner sets another (ADR-006 §9): a day, so midnight can't be gamed. */
 export const DEFAULT_SPLIT_WINDOW_HOURS = 24;
 

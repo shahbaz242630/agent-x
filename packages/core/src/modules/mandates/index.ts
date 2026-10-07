@@ -8,9 +8,11 @@ export {
   type ConsentLimits,
   DEFAULT_CONSENT_LIMITS,
   DEFAULT_SPLIT_WINDOW_HOURS,
+  isEnded,
   MANDATE,
   type MandateStatus,
   MOST_ALLOWED_SUPPLIERS,
+  OPEN_STATES,
   SPLIT_WINDOW_HOURS,
 } from './domain/mandate.ts';
 export {
@@ -25,20 +27,16 @@ export {
   draftMandate,
   draftsSince,
   draftVersion,
-  type MandateCheck,
   type MandateRecord,
   type MandateShown,
   mandateOf,
-  mandatesOfAgent,
   mandatesPage,
-  type MandatesTransaction,
-  type MandateVersionCheck,
   type MandateVersionRecord,
   mandateVersionOf,
   MOST_DRAFTS_A_DAY,
   MOST_MANDATES_A_PAGE,
-  type NewMandate,
   oneDraftAtATime,
+  openMandateOfAgent,
 } from './infrastructure/drafts.ts';
 export { MANDATE_VERSIONS, MANDATES } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';

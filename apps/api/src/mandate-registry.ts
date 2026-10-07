@@ -1,38 +1,28 @@
 // Drafting and reading the organisation's mandates (PRD §3, §3.1, §7.1, BR-05,
-// BR-06; Phase 2 B2). Composed here, in the API, as ADR-004 §7 has it: the
-// member is the identity module's, the agent the agents module's, the source
-// the funding sources', the suppliers the suppliers', the mandate the
-// mandates module's.
+// BR-06; Phase 2 B2), composed here as ADR-004 §7 has it.
 //
-// - `draft` (`mandates.draft`), an admin: the key claimed first; the
-//   organisation's lock for drafting; the admin read again; the day's budget
-//   (MANDATE_DRAFTS_SPENT: versions are never retired); the agent, active
-//   (AGENT_NOT_ACTIVE); none of its mandates waiting or in force
-//   (MANDATE_OPEN: one live mandate an agent, and a second could never be
-//   accepted, B1's review); then the terms against the organisation (below);
-//   then the mandate, waiting for acceptance, with its first version. No
-//   step-up: a draft grants nothing until an admin accepts it with a passkey
-//   (B3, partner S86).
-// - `redraft` (`mandates.redraft`): a later version of the mandate, waiting
-//   in place of any that waited; none for one revoked or expired
-//   (MANDATE_ENDED).
-// - The terms against the organisation: the funding source its own and able
-//   to fund now (SOURCE_NOT_USABLE), the limits against its bank consent
-//   (MANDATE_PAST_CONSENT when strict, partner S87; flexible kept, with the
-//   warnings shown), and every supplier its own (SUPPLIER_UNKNOWN), in one
-//   statement.
-// - `list` and `show`: for the organisation's members, each mandate through
-//   its signed state, a tampered one refusing the answer, 503
-//   INTEGRITY_FAILED. `show` gives the version in force and the waiting
-//   draft, each with how it now stands against its source's bank consent
-//   (which the bank can change after the draft).
+// - `draft`, an admin: the key, the drafting lock, the admin read again, the
+//   day's budget (MANDATE_DRAFTS_SPENT), the agent active (AGENT_NOT_ACTIVE)
+//   with no mandate open (MANDATE_OPEN: a second could never be accepted, B1's
+//   review), the terms against the organisation, then the mandate with its
+//   first version. No step-up: a draft grants nothing until an admin accepts
+//   it with a passkey (B3, partner S86).
+// - `redraft`: a later version, waiting in place of any that waited; none for
+//   an ended mandate (MANDATE_ENDED).
+// - The terms against the organisation: the source its own and able to fund
+//   (SOURCE_NOT_USABLE); within its bank consent (MANDATE_PAST_CONSENT when
+//   strict, partner S87; flexible kept, its warnings in the version's event);
+//   every supplier its own (SUPPLIER_UNKNOWN), in one statement.
+// - `list` and `show`, every member: through the signed states (503
+//   INTEGRITY_FAILED); `show` gives each version with how it now stands
+//   against its source's consent, which the bank can change after the draft.
 //
 // Lock order (ADR-006 §6): the idempotency key, the drafting lock, the
 // member's membership (2a), the agent (3), the mandates (4), the source (5),
 // the chain head last; the suppliers are counted, never locked.
 import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { type FundingSourcesTables, mayFund, sourceOf } from '@agentx/core/modules/funding-sources';
+import { type FundingSourcesTables, mayFund, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   type ConsentAllows,
   consentWarnings,
@@ -40,6 +30,7 @@ import {
   draftMandate,
   draftsSince,
   draftVersion,
+  isEnded,
   type MandateRecord,
   type MandatesTables,
   type MandateShown,
@@ -47,11 +38,11 @@ import {
   MandateTermsRefused,
   type MandateVersionRecord,
   mandateOf,
-  mandatesOfAgent,
   mandatesPage,
   mandateVersionOf,
   MOST_DRAFTS_A_DAY,
   oneDraftAtATime,
+  openMandateOfAgent,
 } from '@agentx/core/modules/mandates';
 import { type SuppliersTables, suppliersFound } from '@agentx/core/modules/suppliers';
 import { type Clock, DAY_MS, DEFAULT_TIME_ZONE, type IdGenerator, money } from '@agentx/core/shared-kernel';
@@ -133,8 +124,34 @@ export interface MandateRegistry {
   ): Promise<({ readonly outcome: 'found' } & MandateView) | Refused>;
 }
 
-/** A mandate's statuses with a draft waiting or a version in force: the agent's one, while it has it. */
-const OPEN = new Set(['PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED']);
+/** What a source's bank consent allows, as the terms are checked against it. */
+const consentOf = ({ controls: { currency, period, maxPaymentMinor, maxPeriodMinor } }: SourceRecord) =>
+  ({
+    currency,
+    maxPayment: money(maxPaymentMinor, currency),
+    maxPeriod: money(maxPeriodMinor, currency),
+    limitPeriod: period,
+  }) satisfies ConsentAllows;
+
+/** Where the version's terms now go past its source's consent, whichever its setting; a currency now unlike the consent's is then the one warning. */
+function warningsNow(version: MandateVersionRecord, consent: ConsentAllows): readonly string[] {
+  try {
+    return consentWarnings({ ...version, consentLimits: 'flexible' }, consent);
+  } catch (error) {
+    if (error instanceof MandateTermsRefused) return error.problems;
+    throw error;
+  }
+}
+
+/** The core's own check of the terms refusing what the edge let by (an end that passed meanwhile): 400, not 500. */
+async function asDrafted<Result>(drafting: Promise<Result>): Promise<Result> {
+  try {
+    return await drafting;
+  } catch (error) {
+    if (error instanceof MandateTermsRefused) throw new MandateRefused(400, 'BAD_REQUEST');
+    throw error;
+  }
+}
 
 export function createMandateRegistry({
   database,
@@ -151,27 +168,21 @@ export function createMandateRegistry({
 }): MandateRegistry {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
-  /** The source's bank consent, read (`share`) and verified: SOURCE_NOT_USABLE for none of the organisation's or one that can't fund now. */
-  const consentOf = async (tx: Tx, states: SignedStates, orgId: string, sourceId: string, now: Date | null) => {
+  /** The source, read (`share`) and verified: SOURCE_NOT_USABLE for none of the organisation's. */
+  const sourceIn = async (tx: Tx, states: SignedStates, orgId: string, sourceId: string) => {
     const read = await sourceOf(tx, states, { orgId, id: sourceId }, 'share');
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    if (read.outcome === 'missing' || (now !== null && !mayFund(read.source, now))) {
-      throw new MandateRefused(409, 'SOURCE_NOT_USABLE');
-    }
-    const { currency, period, maxPaymentMinor, maxPeriodMinor } = read.source.controls;
-    return {
-      currency,
-      maxPayment: money(maxPaymentMinor, currency),
-      maxPeriod: money(maxPeriodMinor, currency),
-      limitPeriod: period,
-    } satisfies ConsentAllows;
+    if (read.outcome === 'missing') throw new MandateRefused(409, 'SOURCE_NOT_USABLE');
+    return read.source;
   };
 
-  /** The terms against the organisation: its source, able to fund; within its consent, when strict; its suppliers. */
+  /** The terms against the organisation: its source, able to fund; within its consent, when strict; its suppliers. Gives the version's event its consent warnings. */
   const termsChecked = async (tx: Tx, states: SignedStates, orgId: string, terms: MandateTerms, now: Date) => {
-    const consent = await consentOf(tx, states, orgId, terms.fundingSourceId, now);
+    const source = await sourceIn(tx, states, orgId, terms.fundingSourceId);
+    if (!mayFund(source, now)) throw new MandateRefused(409, 'SOURCE_NOT_USABLE');
+    let warnings: readonly string[];
     try {
-      consentWarnings(terms, consent);
+      warnings = consentWarnings(terms, consentOf(source));
     } catch (error) {
       if (error instanceof MandateTermsRefused) throw new MandateRefused(409, 'MANDATE_PAST_CONSENT');
       throw error;
@@ -180,6 +191,7 @@ export function createMandateRegistry({
     if (found.length !== new Set(terms.supplierIds.map((id) => id.toLowerCase())).size) {
       throw new MandateRefused(409, 'SUPPLIER_UNKNOWN');
     }
+    return { consentWarnings: warnings.length === 0 ? null : warnings.join('; ') };
   };
 
   /** The budget and the drafting lock, in the order the lock order takes them, with the admin read again: the admin. */
@@ -213,11 +225,8 @@ export function createMandateRegistry({
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     // 0035's keys hold a mandate's versions to its own.
     if (read.outcome === 'missing') throw new Error(`A mandate names a version not its own: ${mandateId}`);
-    const consent = await consentOf(tx, states, orgId, read.version.fundingSourceId, null);
-    return {
-      version: read.version,
-      consentWarnings: consentWarnings({ ...read.version, consentLimits: 'flexible' }, consent),
-    };
+    const source = await sourceIn(tx, states, orgId, read.version.fundingSourceId);
+    return { version: read.version, consentWarnings: warningsNow(read.version, consentOf(source)) };
   };
 
   const viewIn = async (tx: Tx, states: SignedStates, orgId: string, mandateId: string): Promise<MandateView> => {
@@ -247,24 +256,26 @@ export function createMandateRegistry({
         if (agent.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
         if (agent.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
         if (agent.agent.status !== 'ACTIVE') throw new MandateRefused(409, 'AGENT_NOT_ACTIVE');
-        for (const id of await mandatesOfAgent(tx, member.orgId, agent.agent.id)) {
-          const { mandate } = await mandateIn(tx, states, member.orgId, id, 'share');
-          if (OPEN.has(mandate.status)) throw new MandateRefused(409, 'MANDATE_OPEN');
-        }
-        await termsChecked(tx, states, member.orgId, terms, now);
+        const open = await openMandateOfAgent(tx, states, member.orgId, agent.agent.id);
+        if (open.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+        if (open.outcome === 'found') throw new MandateRefused(409, 'MANDATE_OPEN');
+        const details = await termsChecked(tx, states, member.orgId, terms, now);
         const id = ids.next();
-        await draftMandate(tx, states, {
-          orgId: member.orgId,
-          id,
-          versionId: ids.next(),
-          agentId: agent.agent.id,
-          timeZone: timeZone ?? DEFAULT_TIME_ZONE,
-          splitWindowHours: splitWindowHours ?? DEFAULT_SPLIT_WINDOW_HOURS,
-          terms,
-          draftedBy: admin.id,
-          draftedAt: now,
-          actor: { type: 'user', id: member.userId },
-        });
+        await asDrafted(
+          draftMandate(tx, states, {
+            orgId: member.orgId,
+            id,
+            versionId: ids.next(),
+            agentId: agent.agent.id,
+            timeZone: timeZone ?? DEFAULT_TIME_ZONE,
+            splitWindowHours: splitWindowHours ?? DEFAULT_SPLIT_WINDOW_HOURS,
+            terms,
+            draftedBy: admin.id,
+            draftedAt: now,
+            actor: { type: 'user', id: member.userId },
+            details,
+          }),
+        );
         return { status: 201, resourceId: id };
       });
       return draftedAfter(member.orgId, correlationId, done);
@@ -275,18 +286,19 @@ export function createMandateRegistry({
         const now = clock.now();
         const admin = await drafting(tx, states, member, now);
         const read = await mandateIn(tx, states, member.orgId, mandateId, 'change');
-        if (read.mandate.status === 'REVOKED' || read.mandate.status === 'EXPIRED') {
-          throw new MandateRefused(409, 'MANDATE_ENDED');
-        }
-        await termsChecked(tx, states, member.orgId, terms, now);
-        await draftVersion(tx, states, read, {
-          orgId: member.orgId,
-          id: ids.next(),
-          terms,
-          draftedBy: admin.id,
-          draftedAt: now,
-          actor: { type: 'user', id: member.userId },
-        });
+        if (isEnded(read.mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
+        const details = await termsChecked(tx, states, member.orgId, terms, now);
+        await asDrafted(
+          draftVersion(tx, states, read, {
+            orgId: member.orgId,
+            id: ids.next(),
+            terms,
+            draftedBy: admin.id,
+            draftedAt: now,
+            actor: { type: 'user', id: member.userId },
+            details,
+          }),
+        );
         return { status: 200, resourceId: read.mandate.id };
       });
       return draftedAfter(member.orgId, correlationId, done);
