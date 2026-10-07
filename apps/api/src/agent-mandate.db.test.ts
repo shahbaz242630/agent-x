@@ -28,7 +28,6 @@ let app: Database<MandateWorldTables>;
 const ids = new SequentialIds(0xb5a0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000b5';
 const HOUR = 3_600_000;
-const FIRST_PAGE = { after: null, limit: 50 };
 
 let clock: FixedClock;
 let registry: MandateRegistry;
@@ -39,8 +38,8 @@ const { world, partnerSays, movedPastTheUseCase } = shared;
 
 const inForce = (w: World, endsAt: Date | null = null) => shared.inForce(registry, w, { endsAt });
 const shown = (w: World, agentId = w.agent) => mandates.inForce(w.org, agentId, CORRELATION);
-const sourceIds = async (w: World, page: { after: string | null; limit: number } = FIRST_PAGE) => {
-  const listed = await mandates.sources(w.org, w.agent, page, CORRELATION);
+const sourceIds = async (w: World, after: string | null = null) => {
+  const listed = await mandates.sources(w.org, w.agent, after, CORRELATION);
   if (listed.outcome !== 'listed') throw new Error(`not listed: ${JSON.stringify(listed)}`);
   expect(listed.next).toBeNull();
   return listed.sources.map(({ id }) => id);
@@ -76,7 +75,7 @@ describe('an agent’s own mandate and sources (B5, SEC-AG-05)', () => {
     });
     expect(await sourceIds(w)).toEqual([w.source]);
     // Paged after the filter: past the one source, nothing.
-    expect(await sourceIds(w, { after: w.source, limit: 50 })).toEqual([]);
+    expect(await sourceIds(w, w.source)).toEqual([]);
   });
 
   it('gives a SUSPENDED mandate, so the agent learns why, and no source while it is', async () => {
@@ -134,6 +133,6 @@ describe('an agent’s own mandate and sources (B5, SEC-AG-05)', () => {
 
     const integrity = refused(503, 'INTEGRITY_FAILED');
     expect(await shown(w)).toEqual(integrity);
-    expect(await mandates.sources(w.org, w.agent, FIRST_PAGE, CORRELATION)).toEqual(integrity);
+    expect(await mandates.sources(w.org, w.agent, null, CORRELATION)).toEqual(integrity);
   });
 });

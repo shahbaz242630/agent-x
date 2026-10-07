@@ -1,6 +1,7 @@
-// The reads the mandates' use cases share (Phase 2 B2–B4): drafting
+// The reads the mandates' use cases share (Phase 2 B2–B5): drafting
 // (mandate-registry.ts), accepting (mandate-acceptance.ts), moving
-// (mandate-moves.ts) and expiring (mandate-expiry.ts) each read a mandate,
+// (mandate-moves.ts), expiring (mandate-expiry.ts) and the agent's own
+// (agent-mandate.ts) each read a mandate,
 // its versions and their source the same way, answer with the mandate as it
 // now stands, and tell of it the same way.
 import type { AgentsTables } from '@agentx/core/modules/agents';

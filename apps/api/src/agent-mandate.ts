@@ -23,20 +23,23 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import type { SourcePage } from './funding-source-reads.ts';
+import type { SourcesListed } from './funding-source-reads.ts';
 import { MandateRefused, type MandateTables, type MandateTx, sourceIn, versionIn } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork } from './use-case-work.ts';
 
 export type AgentMandateShown =
-  { readonly outcome: 'found'; readonly mandate: MandateRecord; readonly version: MandateVersionRecord } | Refused;
-
-export type AgentSourcesListed =
-  { readonly outcome: 'listed'; readonly sources: readonly SourceRecord[]; readonly next: string | null } | Refused;
+  | {
+      readonly outcome: 'found';
+      readonly mandate: MandateRecord & { readonly status: 'ACTIVE' | 'SUSPENDED' };
+      readonly version: MandateVersionRecord;
+    }
+  | Refused;
 
 export interface AgentMandates {
   inForce(orgId: string, agentId: string, correlationId: string): Promise<AgentMandateShown>;
-  sources(orgId: string, agentId: string, page: SourcePage, correlationId: string): Promise<AgentSourcesListed>;
+  /** Those after the source ID `after` (null: from the first): one at most, so no page follows. */
+  sources(orgId: string, agentId: string, after: string | null, correlationId: string): Promise<SourcesListed>;
 }
 
 export function createAgentMandates({
@@ -55,7 +58,7 @@ export function createAgentMandates({
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
   /** The agent's mandate with its version in force, unended; undefined for none (INTEGRITY_FAILED if tampered with). */
-  const inForceIn = async (tx: MandateTx, states: SignedStates, orgId: string, agentId: string) => {
+  const inForceIn = async (tx: MandateTx, states: SignedStates, orgId: string, agentId: string, now: Date) => {
     const read = await openMandateOfAgent(tx, states, orgId, agentId);
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') return undefined;
@@ -66,31 +69,32 @@ export function createAgentMandates({
       return undefined;
     }
     const version = await versionIn(tx, states, orgId, mandate.id, mandate.currentVersionId);
-    if (version.endsAt !== null && version.endsAt <= clock.now()) return undefined;
-    return { mandate, version };
+    if (version.endsAt !== null && version.endsAt <= now) return undefined;
+    return { mandate: { ...mandate, status: mandate.status }, version };
   };
 
   return {
     inForce: (orgId, agentId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
-        const found = await inForceIn(tx, states, orgId, agentId);
+        const found = await inForceIn(tx, states, orgId, agentId, clock.now());
         if (found === undefined) throw new MandateRefused(404, 'NOT_FOUND');
         return { outcome: 'found' as const, ...found };
       }),
 
-    sources: (orgId, agentId, page, correlationId) =>
+    sources: (orgId, agentId, after, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {
-        const found = await inForceIn(tx, states, orgId, agentId);
+        const now = clock.now();
+        const found = await inForceIn(tx, states, orgId, agentId, now);
         const usable: SourceRecord[] = [];
         if (found?.mandate.status === 'ACTIVE') {
           const source = await sourceIn(tx, states, orgId, found.version.fundingSourceId);
-          if (mayFund(source, clock.now())) usable.push(source);
+          if (mayFund(source, now)) usable.push(source);
         }
         // A version names one source (B1), so a page holds it or nothing, and no page follows: after the filter.
-        const after = page.after?.toLowerCase();
+        const from = after?.toLowerCase();
         return {
           outcome: 'listed' as const,
-          sources: usable.filter((s) => after === undefined || s.id > after),
+          sources: usable.filter((s) => from === undefined || s.id > from),
           next: null,
         };
       }),

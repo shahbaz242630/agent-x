@@ -44,16 +44,14 @@ export function createFundingSourceReads({
 }): FundingSourceReads {
   const work = createFundingSourceWork({ database, keys, ids, logger });
 
-  const list = async (orgId: string, page: SourcePage, correlationId: string): Promise<SourcesListed> => {
-    const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
-      sourcesPage(tx, states, orgId, page),
-    );
-    if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
-    return listed;
-  };
-
   return {
-    list,
+    async list(orgId, page, correlationId) {
+      const listed = await work.inOrganisation(orgId, correlationId, (tx, states) =>
+        sourcesPage(tx, states, orgId, page),
+      );
+      if (listed.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
+      return listed;
+    },
 
     show: (orgId, sourceId, correlationId) =>
       work.answered(orgId, correlationId, async (tx, states) => {

@@ -13,8 +13,8 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import type { AgentMandates, AgentMandateShown, AgentSourcesListed } from './agent-mandate.ts';
-import type { SourcePage } from './funding-source-reads.ts';
+import type { AgentMandates, AgentMandateShown } from './agent-mandate.ts';
+import type { SourcesListed } from './funding-source-reads.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -119,7 +119,7 @@ const SOURCE: SourceRecord = {
 
 type Asked =
   | { readonly kind: 'inForce'; readonly orgId: string; readonly agentId: string }
-  | { readonly kind: 'sources'; readonly orgId: string; readonly agentId: string; readonly page: SourcePage };
+  | { readonly kind: 'sources'; readonly orgId: string; readonly agentId: string; readonly after: string | null };
 
 const servers: FastifyInstance[] = [];
 
@@ -128,15 +128,15 @@ afterEach(async () => {
 });
 
 /** A server whose use case answers `shown` and `listed`. */
-async function withMandates(answers: { shown?: AgentMandateShown; listed?: AgentSourcesListed }) {
+async function withMandates(answers: { shown?: AgentMandateShown; listed?: SourcesListed }) {
   const asked: Asked[] = [];
   const mandates: AgentMandates = {
     inForce: (orgId, agentId) => {
       asked.push({ kind: 'inForce', orgId, agentId });
       return Promise.resolve(answers.shown ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
     },
-    sources: (orgId, agentId, page) => {
-      asked.push({ kind: 'sources', orgId, agentId, page });
+    sources: (orgId, agentId, after) => {
+      asked.push({ kind: 'sources', orgId, agentId, after });
       return Promise.resolve(answers.listed ?? { outcome: 'listed', sources: [], next: null });
     },
   };
@@ -248,14 +248,14 @@ describe('GET /v1/agent/funding-sources: the source its mandate names, the safe 
     for (const withheld of ['Jasmine', 'fake-source', 'fake-consent', 'Authorized', '5000000']) {
       expect(response.body).not.toContain(withheld);
     }
-    expect(asked).toEqual([{ kind: 'sources', orgId: ORG, agentId: AGENT_ID, page: { after: null, limit: 10 } }]);
+    expect(asked).toEqual([{ kind: 'sources', orgId: ORG, agentId: AGENT_ID, after: null }]);
   });
 
-  it('passes where the page starts, with the most a page when no limit is asked', async () => {
+  it('passes where the page starts', async () => {
     const { app, asked } = await withMandates({});
     await app.inject(asAgent(`/v1/agent/funding-sources?after=${LAST_ID}`));
 
-    expect(asked).toEqual([{ kind: 'sources', orgId: ORG, agentId: AGENT_ID, page: { after: LAST_ID, limit: 50 } }]);
+    expect(asked).toEqual([{ kind: 'sources', orgId: ORG, agentId: AGENT_ID, after: LAST_ID }]);
   });
 
   it('refuses a key without sources:read, and a member’s session, before the use case runs', async () => {

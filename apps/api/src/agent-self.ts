@@ -125,7 +125,7 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
       // Field by field: nothing else of the mandate can reach an agent.
       return {
         mandateId: mandate.id,
-        status: mandate.status as 'ACTIVE' | 'SUSPENDED',
+        status: mandate.status,
         versionId: v.id,
         version: v.version,
         purpose: v.purpose,
@@ -145,8 +145,8 @@ export function registerAgentSelf(app: FastifyInstance, { mandates }: { mandates
     { schema: SOURCES_SCHEMA, config: { access: ['agent'], agentScopes: ['sources:read'] } },
     async (request, reply) => {
       const { orgId, agentId } = agentOf(request);
-      const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_SOURCES_A_PAGE };
-      const listed = await need(mandates).sources(orgId, agentId, page, request.id);
+      // `limit` stays in the query for the paging contract (D2-4a): one source at most fits any page.
+      const listed = await need(mandates).sources(orgId, agentId, request.query.after ?? null, request.id);
       if (listed.outcome === 'refused') return sendErrorBody(reply, listed.status, listed.code, request.id);
       // The safe summary alone, field by field: nothing else of the source can reach an agent.
       return {
