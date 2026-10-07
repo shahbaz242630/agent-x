@@ -229,6 +229,7 @@ beforeAll(async () => {
     [OTHER_ADMIN, 'sender-other-admin'],
     [MEMBER, 'sender-member'],
     [VIEWER, 'sender-viewer'],
+    [APPROVER, 'sender-approver'],
   ]) {
     await sql`insert into identity.users (id, issuer, subject, created_at)
       values (${id}, 'https://auth.example.test', ${subject}, ${START})`.execute(app);
