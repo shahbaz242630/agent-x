@@ -19,6 +19,7 @@ import {
 } from '../../packages/core/src/authority-tables.ts';
 import * as agents from '../../packages/core/src/modules/agents/index.ts';
 import * as fundingSources from '../../packages/core/src/modules/funding-sources/index.ts';
+import * as mandates from '../../packages/core/src/modules/mandates/index.ts';
 import * as suppliers from '../../packages/core/src/modules/suppliers/index.ts';
 import {
   FACTOR_RESET,
@@ -100,8 +101,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a funding source (D2-2), a supplier and a supplier version (E1-1), and a beneficiary registration (E2-1)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then funding sources, then suppliers, their payee registrations, then their versions.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a funding source (D2-2), a supplier and a supplier version (E1-1), and a beneficiary registration (E2-1)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then funding sources, then suppliers, their payee registrations, then their versions.
     const [
       organizations,
       invitations,
@@ -110,6 +111,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       resets,
       agentRows,
       agentKeys,
+      mandateRows,
+      mandateVersions,
       sources,
       supplierRows,
       registrations,
@@ -124,6 +127,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(resets).toBe(FACTOR_RESETS);
     expect(agentRows).toBe(agents.AGENTS);
     expect(agentKeys).toBe(agents.AGENT_KEYS);
+    expect(mandateRows).toBe(mandates.MANDATES);
+    expect(mandateVersions).toBe(mandates.MANDATE_VERSIONS);
     expect(sources).toBe(fundingSources.SOURCES);
     expect(supplierRows).toBe(suppliers.SUPPLIERS);
     expect(registrations).toBe(suppliers.BENEFICIARY_REGISTRATIONS);
@@ -174,6 +179,21 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         status: agents.AGENT_KEY,
       },
       {
+        table: mandates.MANDATES.table,
+        subject: mandates.MANDATES.subject,
+        fields: mandates.MANDATES.fields,
+        status: mandates.MANDATE,
+        fixedAtCreation: ['agent_id', 'time_zone', 'split_window_hours'],
+        statusConditions: ['a_status_on_its_versions'],
+      },
+      // A version is made once and never moved, as a supplier's.
+      {
+        table: mandates.MANDATE_VERSIONS.table,
+        subject: mandates.MANDATE_VERSIONS.subject,
+        fields: mandates.MANDATE_VERSIONS.fields,
+        madeOnce: true,
+      },
+      {
         table: fundingSources.SOURCES.table,
         subject: fundingSources.SOURCES.subject,
         fields: fundingSources.SOURCES.fields,
@@ -215,14 +235,18 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[5]?.status).toBe(agents.AGENT);
     expect(AUTHORITY_TABLES[6]?.fields).toBe(agents.AGENT_KEYS.fields);
     expect(AUTHORITY_TABLES[6]?.status).toBe(agents.AGENT_KEY);
-    expect(AUTHORITY_TABLES[7]?.fields).toBe(fundingSources.SOURCES.fields);
-    expect(AUTHORITY_TABLES[7]?.status).toBe(fundingSources.FUNDING_SOURCE);
-    expect(AUTHORITY_TABLES[8]?.fields).toBe(suppliers.SUPPLIERS.fields);
-    expect(AUTHORITY_TABLES[8]?.status).toBe(suppliers.SUPPLIER);
-    expect(AUTHORITY_TABLES[9]?.fields).toBe(suppliers.BENEFICIARY_REGISTRATIONS.fields);
-    expect(AUTHORITY_TABLES[9]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
-    expect(AUTHORITY_TABLES[10]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
-    expect(AUTHORITY_TABLES[10]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[7]?.fields).toBe(mandates.MANDATES.fields);
+    expect(AUTHORITY_TABLES[7]?.status).toBe(mandates.MANDATE);
+    expect(AUTHORITY_TABLES[8]?.fields).toBe(mandates.MANDATE_VERSIONS.fields);
+    expect(AUTHORITY_TABLES[8]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[9]?.fields).toBe(fundingSources.SOURCES.fields);
+    expect(AUTHORITY_TABLES[9]?.status).toBe(fundingSources.FUNDING_SOURCE);
+    expect(AUTHORITY_TABLES[10]?.fields).toBe(suppliers.SUPPLIERS.fields);
+    expect(AUTHORITY_TABLES[10]?.status).toBe(suppliers.SUPPLIER);
+    expect(AUTHORITY_TABLES[11]?.fields).toBe(suppliers.BENEFICIARY_REGISTRATIONS.fields);
+    expect(AUTHORITY_TABLES[11]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
+    expect(AUTHORITY_TABLES[12]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
+    expect(AUTHORITY_TABLES[12]?.status).toBeUndefined();
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

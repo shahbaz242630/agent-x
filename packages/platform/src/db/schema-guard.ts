@@ -103,10 +103,23 @@ const MADE_ONCE_FUNCTION = 'state_rules.guard_made_once';
 const MADE_ONCE_TYPE = 19;
 const MADE_ONCE_BODY = '74904ebce12044079ee9e3169534ecbe6e82264f57527cc05d0393ba90531df0';
 
+/**
+ * The third: the fixed-at-creation guard (0035, Phase 2 B1), on an authority
+ * table some of whose columns never change once the row is added (a
+ * mandate's agent, time zone and split window). It fires BEFORE
+ * UPDATE, FOR EACH ROW (19), handed exactly the columns the authority list
+ * names for the table, and its body is held by hash.
+ */
+const FIXED = 'fixed_at_creation';
+const FIXED_FUNCTION = 'state_rules.guard_fixed';
+const FIXED_TYPE = 19;
+const FIXED_BODY = '5d9decba2ea16c3f750767c201fa71a0afc1e98f2ec4b0d0c31815ece36c0c4b';
+
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
   [STATUS_GUARD_FUNCTION, STATUS_GUARD_BODY],
   [MADE_ONCE_FUNCTION, MADE_ONCE_BODY],
+  [FIXED_FUNCTION, FIXED_BODY],
 ]);
 
 /**
@@ -251,6 +264,13 @@ export interface SchemaGuardOptions {
    * the made-once guard, firing. None by default.
    */
   readonly madeOnceTables?: readonly string[];
+  /**
+   * The tables with columns fixed when a row is made (0035's
+   * `fixed_at_creation`), by `schema.table`, each with those columns in
+   * order: each must carry the guard, firing, handed exactly them. None by
+   * default.
+   */
+  readonly fixedAtCreation?: Readonly<Record<string, readonly string[]>>;
 }
 
 /**
@@ -944,14 +964,16 @@ function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
 }
 
 /**
- * The only triggers our schema has are the status guard 0004 installs and
- * the made-once guard 0032 installs, and each must still be that guard: a
+ * The only triggers our schema has are the status guard 0004 installs, the
+ * made-once guard 0032 installs and the fixed-at-creation guard 0035
+ * installs, and each must still be that guard: a
  * planted trigger given its name would otherwise pass on its name alone. A
  * switched-off guard is drift too — Postgres keeps the row and stops running
  * it, which is tampering that leaves no trace in the table.
  */
-function triggerProblems(trigger: TriggerRow): SchemaProblem[] {
+function triggerProblems(trigger: TriggerRow, fixedCalls: ReadonlyMap<string, string>): SchemaProblem[] {
   if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) return madeOnceProblems(trigger);
+  if (trigger.name === FIXED && trigger.function === FIXED_FUNCTION) return fixedProblems(trigger, fixedCalls);
   if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
     return [`${trigger.table} carries the trigger ${quoted(trigger.name)}`];
   }
@@ -979,6 +1001,27 @@ function madeOnceProblems(trigger: TriggerRow): SchemaProblem[] {
   }
   problems.push(...narrowedProblems(trigger, MADE_ONCE));
   if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
+  return problems;
+}
+
+/** A fixed-at-creation guard handed column names, quoted, one or more. */
+const FIXED_CALL = /state_rules\.guard_fixed\('[a-z][a-z0-9_]*'(?:, '[a-z][a-z0-9_]*')*\)$/;
+
+/**
+ * The fixed-at-creation guard, still as 0035 wrote it and firing. On a table
+ * the authority list names, it is handed exactly that table's columns: one
+ * handed fewer would let the others change. Elsewhere it only holds more
+ * still, so column names are all it needs.
+ */
+function fixedProblems(trigger: TriggerRow, fixedCalls: ReadonlyMap<string, string>): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  const call = fixedCalls.get(trigger.table);
+  if (call === undefined ? !FIXED_CALL.test(trigger.definition) : !trigger.definition.endsWith(call)) {
+    problems.push(`${trigger.table}'s ${FIXED} is given other columns`);
+  }
+  if (trigger.type !== FIXED_TYPE) problems.push(`${trigger.table}'s ${FIXED} fires at other times`);
+  problems.push(...narrowedProblems(trigger, FIXED));
+  if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${FIXED} is switched off`);
   return problems;
 }
 
@@ -1282,6 +1325,7 @@ export async function liveSchemaProblems<Schema>(
     authorityTables = [],
     statusGuardedTables = [],
     madeOnceTables = [],
+    fixedAtCreation = {},
   }: SchemaGuardOptions,
 ): Promise<SchemaProblem[]> {
   const version = await serverVersion(db);
@@ -1324,6 +1368,15 @@ export async function liveSchemaProblems<Schema>(
   const { narrow, problems: listing } = narrowTables(allRelations, authorityTables, policy.fillInTables, known);
   const writableIn = columnsByTable(writable);
   const keys = wholeKeys(allForeignKeys);
+  // Each listed table's guard call as Postgres prints it, by the name its triggers carry.
+  const fixedCalls = new Map(
+    Object.entries(fixedAtCreation).flatMap(([table, fixed]) => {
+      const relation = allRelations.find((each) => each.plain === table);
+      const columns = fixed.map((column) => "'" + column + "'").join(', ');
+      const call = `${FIXED_FUNCTION}(${columns})`;
+      return relation === undefined ? [] : [[relation.name, call] as const];
+    }),
+  );
 
   const problems: SchemaProblem[] = [
     ...schemaOwnerProblems(allSchemas, ownerRole),
@@ -1335,11 +1388,12 @@ export async function liveSchemaProblems<Schema>(
     ...allFunctions.flatMap((fn) => functionProblems(fn, ownerRole)),
     // A rewrite rule can turn any statement into a different one, silently.
     ...allRules.map((rule) => `${rule.table} carries the rewrite rule ${quoted(rule.name)}`),
-    ...allTriggers.flatMap(triggerProblems),
+    ...allTriggers.flatMap((trigger) => triggerProblems(trigger, fixedCalls)),
     // And each table whose status it holds must still carry it: one dropped leaves no trigger to find above.
     // The same for each table whose rows are made once.
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
+    ...missingGuardProblems(Object.keys(fixedAtCreation), FIXED, allRelations, allTriggers),
     ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
     ...missingPartialProblems(policy.partialUniqueIndexes, allIndexes),
     // Rights: an allow-list, so a privilege nobody thought about is a problem
