@@ -25,7 +25,7 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
 import {
   DRAFT_OPERATION,
   DRAFTING_ROLES,
@@ -443,9 +443,7 @@ export function registerMandates(
         request.body.versionId,
         request.id,
       );
-      if (asked.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId });
-      if (asked.outcome === 'refused') return sendErrorBody(reply, asked.status, asked.code, request.id);
-      return answerRefusedWrite(asked, request, reply);
+      return answerAsked(asked, request, reply);
     },
   );
 
@@ -489,9 +487,7 @@ export function registerMandates(
           move,
           request.id,
         );
-        if (asked.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId });
-        if (asked.outcome === 'refused') return sendErrorBody(reply, asked.status, asked.code, request.id);
-        return answerRefusedWrite(asked, request, reply);
+        return answerAsked(asked, request, reply);
       },
     );
 

@@ -3,20 +3,16 @@
 // or turning down a link waiting under a session, only the caller's
 // organisation's, and 404 wherever the partner isn't the fake. Who reaches
 // the routes is the access hook's (role-matrix.test.ts).
-import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
+import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
-import { createLogger } from '@agentx/platform/observability';
-import { findLeaks, FixedClock, LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import { findLeaks, FixedClock, SequentialIds } from '@agentx/testing';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const OTHER_ORG = '0199a0f0-0000-7000-8000-00000000dcba';
 const LINK_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
@@ -35,53 +31,18 @@ const LIVE: LiveSession = {
   idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
 };
 
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
-};
-
 const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 /** A server whose partner is `rail` (the fake, unless none), its caller an admin of ORG and of OTHER_ORG. */
 async function withBank(rail: FakeRail | undefined) {
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
+  const app = await routeServer({
+    live: LIVE,
     findMembership: (orgId) =>
       Promise.resolve([ORG, OTHER_ORG].includes(orgId.toLowerCase()) ? ADMIN : ({ outcome: 'none' } as const)),
     fakeBank: rail?.bank,
   });
-  servers.push(app);
-  await app.ready();
   return app;
 }
 

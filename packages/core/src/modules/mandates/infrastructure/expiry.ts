@@ -15,14 +15,17 @@ import type { MandatesTables } from './tables.ts';
 
 /**
  * The IDs of the organisation's ACTIVE or SUSPENDED mandates whose version in
- * force ends at or before `now`, in order of ID, at most `most`: each to be
- * read through its signed state.
+ * force ends at or before `now`, in order of ID, after `after` when given, at
+ * most `most`: each to be read through its signed state. The job pages on
+ * past the last, so mandates that stay here (tampered with, refused on every
+ * read) can't fill a page and keep the others from their end.
  */
 export async function mandatesPastTheirEnd(
   tx: Transaction<MandatesTables>,
   orgId: string,
   now: Date,
   most: number,
+  after?: string,
 ): Promise<readonly string[]> {
   const rows = await tx
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each read through its signed state by the job before it moves anything
@@ -35,6 +38,7 @@ export async function mandatesPastTheirEnd(
     .where('m.org_id', '=', orgId)
     .where('m.status', 'in', ['ACTIVE', 'SUSPENDED'])
     .where('v.ends_at', '<=', now)
+    .where((where) => (after === undefined ? where.lit(true) : where('m.id', '>', after)))
     .orderBy('m.id')
     .limit(most)
     .execute();

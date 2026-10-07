@@ -4,7 +4,10 @@
 // one not yet ended, with no end, waiting for acceptance or ended already left
 // as it is; a run again moving nothing; a new version with a later end
 // accepted while the job waits for the mandate (forced); a tampered mandate
-// refused and logged while the others are expired; and a stopped run.
+// refused and logged while the others are expired, even those after it in a
+// full page (S90 review); a run's share, the rest left to the next; and a
+// stopped run.
+import { addAgent } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
 import { acceptDraft, mandateOf, MANDATES } from '@agentx/core/modules/mandates';
@@ -45,6 +48,8 @@ let clock: FixedClock;
 let capture: LogCapture;
 let registry: MandateRegistry;
 let expiry: MandateExpiry;
+/** The job, expiring at most `most` of an organisation's mandates a run, a page as long. */
+let expiryOf: (most?: number) => MandateExpiry;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-expiry' });
 const { world, eventsAbout, noticesOf, movedPastTheUseCase, quiet, keyed, termsOf } = shared;
@@ -79,16 +84,48 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  expiry = createMandateExpiry({
-    list: () => listedOrganizations(app),
-    database: app,
-    keys,
-    ids,
-    clock,
-    outbox: createOutbox({ ids, clock }),
-    logger,
-  });
+  expiryOf = (most) =>
+    createMandateExpiry({
+      list: () => listedOrganizations(app),
+      database: app,
+      keys,
+      ids,
+      clock,
+      outbox: createOutbox({ ids, clock }),
+      logger,
+      ...(most !== undefined && { most }),
+    });
+  expiry = expiryOf();
 });
+
+/** The mandate SUSPENDED by the table's owner, past the app and its signed state: tampered with. */
+const suspendedPastTheApp = async (w: World, id: string): Promise<void> => {
+  const owner = await tamperAsOwner(database, MANDATES, w.org);
+  try {
+    await owner.withoutStatusGuard(() =>
+      owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [id]),
+    );
+  } finally {
+    await owner.end();
+  }
+};
+
+/** The world with another active agent of its organisation, who may hold a mandate of its own. */
+const withAnotherAgent = async (w: World): Promise<World> => {
+  const agent = ids.next();
+  await withSignedStates(app, w.org, quiet(), (tx, states) =>
+    addAgent(tx, states, {
+      orgId: w.org,
+      id: agent,
+      name: 'Second agent',
+      owner: w.admin.membershipId,
+      scopes: ['requests:write'],
+      createdAt: clock.now(),
+      actor: OPERATOR,
+    }),
+  );
+  return { ...w, agent };
+};
 
 describe('mandates ended by the clock (B4)', () => {
   it('expires an ACTIVE mandate once its version in force reaches its end, as the API’s, every admin and approver told', async () => {
@@ -182,14 +219,7 @@ describe('mandates ended by the clock (B4)', () => {
   it('refuses a mandate tampered with past the app, logged, and still expires the other organisations’ (FX-TAMPER)', async () => {
     const tampered = await world();
     const bad = await inForce(tampered, inHours(1));
-    const owner = await tamperAsOwner(database, MANDATES, tampered.org);
-    try {
-      await owner.withoutStatusGuard(() =>
-        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [bad]),
-      );
-    } finally {
-      await owner.end();
-    }
+    await suspendedPastTheApp(tampered, bad);
     const fine = await world();
     const good = await inForce(fine, inHours(1));
     clock.advanceBy(HOUR);
@@ -197,6 +227,46 @@ describe('mandates ended by the clock (B4)', () => {
     await expiry.run();
     expect(lines('mandate_expiry.failed', tampered)).toEqual([expect.objectContaining({ mandateId: bad })]);
     expect(await statusOf(fine, good)).toMatchObject({ status: 'EXPIRED' });
+  });
+
+  it('pages past a tampered mandate that fills a page, expiring the one after it (S90 review)', async () => {
+    const w = await world();
+    const bad = await inForce(w, inHours(1));
+    const good = await inForce(await withAnotherAgent(w), inHours(1));
+    expect(bad < good).toBe(true);
+    await suspendedPastTheApp(w, bad);
+    clock.advanceBy(HOUR);
+
+    await expiryOf(1).run();
+    expect(lines('mandate_expiry.failed', w)).toEqual([expect.objectContaining({ mandateId: bad })]);
+    expect(await statusOf(w, good)).toMatchObject({ status: 'EXPIRED' });
+  });
+
+  it('pages past a tampered mandate yet never expires more than its share in a run (S90 review)', async () => {
+    const w = await world();
+    const bad = await inForce(w, inHours(1));
+    const good = [];
+    for (let i = 0; i < 3; i += 1) good.push(await inForce(await withAnotherAgent(w), inHours(1)));
+    await suspendedPastTheApp(w, bad);
+    clock.advanceBy(HOUR);
+
+    await expiryOf(2).run();
+    const statuses = await Promise.all(good.map(async (id) => ((await statusOf(w, id)) as { status: string }).status));
+    expect(statuses).toEqual(['EXPIRED', 'EXPIRED', 'ACTIVE']);
+  });
+
+  it('expires its share of an organisation’s mandates a run, the rest the next', async () => {
+    const w = await world();
+    const first = await inForce(w, inHours(1));
+    const second = await inForce(await withAnotherAgent(w), inHours(1));
+    clock.advanceBy(HOUR);
+
+    const job = expiryOf(1);
+    await job.run();
+    expect(await statusOf(w, first)).toMatchObject({ status: 'EXPIRED' });
+    expect(await statusOf(w, second)).toMatchObject({ status: 'ACTIVE' });
+    await job.run();
+    expect(await statusOf(w, second)).toMatchObject({ status: 'EXPIRED' });
   });
 
   it('a run stopped expires nothing more', async () => {

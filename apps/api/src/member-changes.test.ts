@@ -11,21 +11,15 @@ import type {
   MembershipChangeWrite,
   MembershipCheck,
   Role,
-  SignIn,
 } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const MEMBERSHIP = '0199a0f0-0000-7000-8000-0000000000e5';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c5';
 
@@ -41,15 +35,11 @@ const LIVE: LiveSession = {
   idleEndsAt: new Date('2026-09-25T09:40:00.000Z'),
 };
 
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
-};
-
-const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
+const ADMIN = {
+  outcome: 'active',
+  id: '0199a0f0-0000-7000-8000-000000000033',
+  role: 'admin',
+} as const satisfies MembershipCheck;
 const ADMIN_WRITING: InvitingAdmin = { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId };
 
 const CHANGED: MemberRecord = {
@@ -60,11 +50,7 @@ const CHANGED: MemberRecord = {
   joinedAt: new Date('2026-09-20T08:00:00.123Z'),
 };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 interface Call {
   readonly kind: 'ask' | 'confirm';
@@ -89,35 +75,11 @@ async function withChanges(answer: MembershipChangeWrite | Error | undefined, ro
       return answered() as Promise<MembershipChangeWrite>;
     },
   };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
-    findMembership: (orgId) =>
-      Promise.resolve(orgId.toLowerCase() === ORG ? { ...ADMIN, role } : ({ outcome: 'none' } as const)),
+  const app = await routeServer({
+    live: LIVE,
+    member: { ...ADMIN, role },
     ...(answer !== undefined && { membershipChanges: changes }),
   });
-  servers.push(app);
-  await app.ready();
   return { app, asked };
 }
 

@@ -44,7 +44,7 @@ import { z } from 'zod';
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { CHALLENGE_BODY_LIMIT, NOTHING, NOTHING_BODY_LIMIT, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** The organisation's ACTIVE contacts, verified, for the request with this correlation ID. */
@@ -237,10 +237,7 @@ export function registerRegisteredContacts(
         request.params.id,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined) return refused;
-      if (written.outcome !== 'asked') throw new Error('a removal answered without its challenge');
-      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+      return answerAsked(written, request, reply);
     },
   );
 
