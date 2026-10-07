@@ -133,10 +133,10 @@ export const REASON_CODES = {
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
   SOLO_PATH_LOCKED:
     "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed.",
-  SOURCE_NOT_USABLE:
-    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed.",
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
+  SOURCE_NOT_USABLE:
+    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed.",
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_ADDS_SPENT:

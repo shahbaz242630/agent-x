@@ -346,13 +346,13 @@
                   },
                   {
                     "type": "string",
-                    "const": "SOURCE_NOT_USABLE",
-                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed."
+                    "const": "SOURCE_NOT_SUSPENDED",
+                    "description": "The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link."
                   },
                   {
                     "type": "string",
-                    "const": "SOURCE_NOT_SUSPENDED",
-                    "description": "The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link."
+                    "const": "SOURCE_NOT_USABLE",
+                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed."
                   },
                   {
                     "type": "string",
