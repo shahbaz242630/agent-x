@@ -81,32 +81,45 @@ const TERM_FIELDS = {
 
 type TermFields = z.infer<z.ZodObject<typeof TERM_FIELDS>>;
 
-/** The terms as a version keeps them, or the problems that keep them from being one. */
-const termsKept = (body: TermFields, context: z.RefinementCtx): MandateTerms => {
+/** The terms as a version keeps them, an end checked against `now`; or `MoneyRefused` / `MandateTermsRefused`. */
+const termsOf = (body: TermFields, now: Date): MandateTerms =>
+  mandateTerms(
+    {
+      purpose: body.purpose,
+      perOrderLimit: moneyFromJson(body.perOrderLimitMinor, body.currency),
+      monthlyLimit: moneyFromJson(body.monthlyLimitMinor, body.currency),
+      approvalThreshold: moneyFromJson(body.approvalThresholdMinor, body.currency),
+      supplierIds: body.supplierIds,
+      fundingSourceId: body.fundingSourceId,
+      splitCheck: body.splitCheck ?? true,
+      consentLimits: body.consentLimits ?? DEFAULT_CONSENT_LIMITS,
+      endsAt: body.endsAt ? new Date(body.endsAt) : null,
+    },
+    now,
+  );
+
+/**
+ * Each problem that keeps the body's terms from being a version's, as a
+ * refinement: the body stays the JSON it came as, since the idempotency key's
+ * fingerprint (canonicalJson) has no form for Money's bigints.
+ */
+const termsChecked = (body: TermFields, context: z.RefinementCtx): void => {
   try {
-    return mandateTerms(
-      {
-        purpose: body.purpose,
-        perOrderLimit: moneyFromJson(body.perOrderLimitMinor, body.currency),
-        monthlyLimit: moneyFromJson(body.monthlyLimitMinor, body.currency),
-        approvalThreshold: moneyFromJson(body.approvalThresholdMinor, body.currency),
-        supplierIds: body.supplierIds,
-        fundingSourceId: body.fundingSourceId,
-        splitCheck: body.splitCheck ?? true,
-        consentLimits: body.consentLimits ?? DEFAULT_CONSENT_LIMITS,
-        endsAt: body.endsAt ? new Date(body.endsAt) : null,
-      },
-      // The edge has no clock of its own; the use case checks again on its clock (asDrafted).
-      new Date(),
-    );
+    // The edge has no clock of its own; the use case checks the end again on its clock (asDrafted).
+    termsOf(body, new Date());
   } catch (error) {
     if (error instanceof MoneyRefused) context.addIssue({ code: 'custom', message: error.message });
     else if (error instanceof MandateTermsRefused) {
       for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
     } else throw error;
-    return z.NEVER;
   }
 };
+
+/** Before any end: the handler's terms, the schema having checked them, leave a passed end to the use case's clock. */
+const ANY_END = new Date(0);
+
+/** The terms of a body its schema has passed. */
+const termsKept = (body: TermFields): MandateTerms => termsOf(body, ANY_END);
 
 const VERSION = z
   .object({
@@ -187,20 +200,11 @@ const DRAFT_SCHEMA = {
         .describe('The split check’s rolling window in hours (24 unless given): fixed for good.'),
       ...TERM_FIELDS,
     })
-    .transform((body, context) => {
-      let timeZone: string | null = null;
-      if (body.timeZone !== undefined) {
-        timeZone = timeZoneOf(body.timeZone) ?? null;
-        if (timeZone === null) {
-          context.addIssue({ code: 'custom', message: 'the time zone is not one the IANA database names' });
-        }
+    .superRefine((body, context) => {
+      if (body.timeZone !== undefined && timeZoneOf(body.timeZone) === undefined) {
+        context.addIssue({ code: 'custom', message: 'the time zone is not one the IANA database names' });
       }
-      return {
-        agentId: body.agentId,
-        timeZone,
-        splitWindowHours: body.splitWindowHours ?? null,
-        terms: termsKept(body, context),
-      };
+      termsChecked(body, context);
     })
     .describe('The mandate to draft, with its first terms.'),
   response: { 201: MANDATE_DETAILS.describe('The mandate, waiting for an admin to accept it.') },
@@ -213,7 +217,7 @@ const REDRAFT_SCHEMA = {
   params: MANDATE_ID,
   body: z
     .strictObject(TERM_FIELDS)
-    .transform(termsKept)
+    .superRefine(termsChecked)
     .describe('Every term of the new version: the agent, zone and window stay as they are.'),
   response: {
     200: MANDATE_DETAILS.describe(
@@ -300,12 +304,14 @@ export function registerMandates(app: FastifyInstance, { registry }: { registry:
     },
     async (request, reply) => {
       const member = memberOf(request);
-      const written = await need(registry).draft(
-        member,
-        idempotentRequest(request, member.orgId),
-        request.body,
-        request.id,
-      );
+      const { body } = request;
+      const draft = {
+        agentId: body.agentId,
+        timeZone: body.timeZone === undefined ? null : (timeZoneOf(body.timeZone) ?? null),
+        splitWindowHours: body.splitWindowHours ?? null,
+        terms: termsKept(body),
+      };
+      const written = await need(registry).draft(member, idempotentRequest(request, member.orgId), draft, request.id);
       return answer(written, 201, request, reply);
     },
   );
@@ -323,7 +329,7 @@ export function registerMandates(app: FastifyInstance, { registry }: { registry:
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
-        request.body,
+        termsKept(request.body),
         request.id,
       );
       return answer(written, 200, request, reply);

@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { money } from '../../../shared-kernel/index.ts';
-import { type ConsentAllows, consentWarnings, type MandateTerms, mandateTerms, MandateTermsRefused } from './terms.ts';
+import { type ConsentAllows, consentCheck, type MandateTerms, mandateTerms, MandateTermsRefused } from './terms.ts';
 
 const NOW = new Date('2026-10-06T08:00:00Z');
 const AED = (minor: number) => money(BigInt(minor), 'AED');
@@ -105,34 +105,38 @@ describe('the terms against the bank consent (partner, S86–S87)', () => {
     limitPeriod: 'month',
   };
 
-  it('fit it with no warning', () => {
-    expect(consentWarnings(TERMS, CONSENT)).toEqual([]);
+  it('fit it with no problem', () => {
+    expect(consentCheck(TERMS, CONSENT)).toEqual({ refused: false, problems: [] });
   });
 
   it('strict: refused past it, per payment and per month', () => {
-    expect(
-      refused(() => consentWarnings({ ...TERMS, perOrderLimit: AED(500_001), monthlyLimit: AED(2_000_001) }, CONSENT)),
-    ).toEqual([
-      'the per-order limit is above the bank consent’s per payment',
-      'the monthly limit is above the bank consent’s per month',
-    ]);
+    expect(consentCheck({ ...TERMS, perOrderLimit: AED(500_001), monthlyLimit: AED(2_000_001) }, CONSENT)).toEqual({
+      refused: true,
+      problems: [
+        'the per-order limit is above the bank consent’s per payment',
+        'the monthly limit is above the bank consent’s per month',
+      ],
+    });
   });
 
-  it('flexible: kept past it, with the warnings', () => {
-    expect(consentWarnings({ ...TERMS, consentLimits: 'flexible', perOrderLimit: AED(500_001) }, CONSENT)).toEqual([
-      'the per-order limit is above the bank consent’s per payment',
-    ]);
+  it('flexible: kept past it, the problems its warnings', () => {
+    expect(consentCheck({ ...TERMS, consentLimits: 'flexible', perOrderLimit: AED(500_001) }, CONSENT)).toEqual({
+      refused: false,
+      problems: ['the per-order limit is above the bank consent’s per payment'],
+    });
   });
 
   it('compares the month only with a consent counted by the month', () => {
-    expect(consentWarnings({ ...TERMS, monthlyLimit: AED(9_000_000) }, { ...CONSENT, limitPeriod: 'week' })).toEqual(
-      [],
-    );
+    expect(consentCheck({ ...TERMS, monthlyLimit: AED(9_000_000) }, { ...CONSENT, limitPeriod: 'week' })).toEqual({
+      refused: false,
+      problems: [],
+    });
   });
 
   it('refuses another currency than the consent’s, flexible or not', () => {
-    expect(
-      refused(() => consentWarnings({ ...TERMS, consentLimits: 'flexible' }, { ...CONSENT, currency: 'USD' })),
-    ).toEqual(['the mandate is not in its funding source’s currency']);
+    expect(consentCheck({ ...TERMS, consentLimits: 'flexible' }, { ...CONSENT, currency: 'USD' })).toEqual({
+      refused: true,
+      problems: ['the mandate is not in its funding source’s currency'],
+    });
   });
 });

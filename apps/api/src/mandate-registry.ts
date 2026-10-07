@@ -25,7 +25,7 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { type FundingSourcesTables, mayFund, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
 import {
   type ConsentAllows,
-  consentWarnings,
+  consentCheck,
   DEFAULT_SPLIT_WINDOW_HOURS,
   draftMandate,
   draftsSince,
@@ -35,7 +35,6 @@ import {
   type MandatesTables,
   type MandateShown,
   type MandateTerms,
-  MandateTermsRefused,
   type MandateVersionRecord,
   mandateOf,
   mandatesPage,
@@ -133,26 +132,6 @@ const consentOf = ({ controls: { currency, period, maxPaymentMinor, maxPeriodMin
     limitPeriod: period,
   }) satisfies ConsentAllows;
 
-/** Where the version's terms now go past its source's consent, whichever its setting; a currency now unlike the consent's is then the one warning. */
-function warningsNow(version: MandateVersionRecord, consent: ConsentAllows): readonly string[] {
-  try {
-    return consentWarnings({ ...version, consentLimits: 'flexible' }, consent);
-  } catch (error) {
-    if (error instanceof MandateTermsRefused) return error.problems;
-    throw error;
-  }
-}
-
-/** The core's own check of the terms refusing what the edge let by (an end that passed meanwhile): 400, not 500. */
-async function asDrafted<Result>(drafting: Promise<Result>): Promise<Result> {
-  try {
-    return await drafting;
-  } catch (error) {
-    if (error instanceof MandateTermsRefused) throw new MandateRefused(400, 'BAD_REQUEST');
-    throw error;
-  }
-}
-
 export function createMandateRegistry({
   database,
   keys,
@@ -178,15 +157,12 @@ export function createMandateRegistry({
 
   /** The terms against the organisation: its source, able to fund; within its consent, when strict; its suppliers. Gives the version's event its consent warnings. */
   const termsChecked = async (tx: Tx, states: SignedStates, orgId: string, terms: MandateTerms, now: Date) => {
+    // The edge checked the end on its own clock; again on ours, so the core's floor never refuses it later (a 500).
+    if (terms.endsAt !== null && terms.endsAt <= now) throw new MandateRefused(400, 'BAD_REQUEST');
     const source = await sourceIn(tx, states, orgId, terms.fundingSourceId);
     if (!mayFund(source, now)) throw new MandateRefused(409, 'SOURCE_NOT_USABLE');
-    let warnings: readonly string[];
-    try {
-      warnings = consentWarnings(terms, consentOf(source));
-    } catch (error) {
-      if (error instanceof MandateTermsRefused) throw new MandateRefused(409, 'MANDATE_PAST_CONSENT');
-      throw error;
-    }
+    const { refused, problems: warnings } = consentCheck(terms, consentOf(source));
+    if (refused) throw new MandateRefused(409, 'MANDATE_PAST_CONSENT');
     const found = await suppliersFound(tx, orgId, terms.supplierIds);
     if (found.length !== new Set(terms.supplierIds.map((id) => id.toLowerCase())).size) {
       throw new MandateRefused(409, 'SUPPLIER_UNKNOWN');
@@ -226,7 +202,7 @@ export function createMandateRegistry({
     // 0035's keys hold a mandate's versions to its own.
     if (read.outcome === 'missing') throw new Error(`A mandate names a version not its own: ${mandateId}`);
     const source = await sourceIn(tx, states, orgId, read.version.fundingSourceId);
-    return { version: read.version, consentWarnings: warningsNow(read.version, consentOf(source)) };
+    return { version: read.version, consentWarnings: consentCheck(read.version, consentOf(source)).problems };
   };
 
   const viewIn = async (tx: Tx, states: SignedStates, orgId: string, mandateId: string): Promise<MandateView> => {
@@ -261,21 +237,19 @@ export function createMandateRegistry({
         if (open.outcome === 'found') throw new MandateRefused(409, 'MANDATE_OPEN');
         const details = await termsChecked(tx, states, member.orgId, terms, now);
         const id = ids.next();
-        await asDrafted(
-          draftMandate(tx, states, {
-            orgId: member.orgId,
-            id,
-            versionId: ids.next(),
-            agentId: agent.agent.id,
-            timeZone: timeZone ?? DEFAULT_TIME_ZONE,
-            splitWindowHours: splitWindowHours ?? DEFAULT_SPLIT_WINDOW_HOURS,
-            terms,
-            draftedBy: admin.id,
-            draftedAt: now,
-            actor: { type: 'user', id: member.userId },
-            details,
-          }),
-        );
+        await draftMandate(tx, states, {
+          orgId: member.orgId,
+          id,
+          versionId: ids.next(),
+          agentId: agent.agent.id,
+          timeZone: timeZone ?? DEFAULT_TIME_ZONE,
+          splitWindowHours: splitWindowHours ?? DEFAULT_SPLIT_WINDOW_HOURS,
+          terms,
+          draftedBy: admin.id,
+          draftedAt: now,
+          actor: { type: 'user', id: member.userId },
+          details,
+        });
         return { status: 201, resourceId: id };
       });
       return draftedAfter(member.orgId, correlationId, done);
@@ -288,17 +262,15 @@ export function createMandateRegistry({
         const read = await mandateIn(tx, states, member.orgId, mandateId, 'change');
         if (isEnded(read.mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
         const details = await termsChecked(tx, states, member.orgId, terms, now);
-        await asDrafted(
-          draftVersion(tx, states, read, {
-            orgId: member.orgId,
-            id: ids.next(),
-            terms,
-            draftedBy: admin.id,
-            draftedAt: now,
-            actor: { type: 'user', id: member.userId },
-            details,
-          }),
-        );
+        await draftVersion(tx, states, read, {
+          orgId: member.orgId,
+          id: ids.next(),
+          terms,
+          draftedBy: admin.id,
+          draftedAt: now,
+          actor: { type: 'user', id: member.userId },
+          details,
+        });
         return { status: 200, resourceId: read.mandate.id };
       });
       return draftedAfter(member.orgId, correlationId, done);

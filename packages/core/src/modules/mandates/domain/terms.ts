@@ -85,13 +85,17 @@ export interface ConsentAllows {
 /**
  * The terms against the bank consent: per payment always; per month when the
  * consent counts by the month (another period can't be compared with a month
- * without guessing). Past it, strict terms are refused and flexible ones kept
- * with the warnings this gives back. A currency other than the consent's is
- * refused whatever the setting.
+ * without guessing). `problems` name where they go past it, whatever the
+ * setting (shown later too, as the bank can change the consent); `refused`
+ * for strict terms past it, or a currency other than the consent's whatever
+ * the setting. Flexible terms are kept, the problems their warnings.
  */
-export function consentWarnings(terms: MandateTerms, consent: ConsentAllows): readonly string[] {
+export function consentCheck(
+  terms: MandateTerms,
+  consent: ConsentAllows,
+): { readonly refused: boolean; readonly problems: readonly string[] } {
   if (terms.perOrderLimit.currency !== consent.currency) {
-    throw new MandateTermsRefused(['the mandate is not in its funding source’s currency']);
+    return { refused: true, problems: ['the mandate is not in its funding source’s currency'] };
   }
   const past: string[] = [];
   if (compare(terms.perOrderLimit, consent.maxPayment) > 0) {
@@ -100,6 +104,5 @@ export function consentWarnings(terms: MandateTerms, consent: ConsentAllows): re
   if (consent.limitPeriod === 'month' && compare(terms.monthlyLimit, consent.maxPeriod) > 0) {
     past.push('the monthly limit is above the bank consent’s per month');
   }
-  if (terms.consentLimits === 'strict' && past.length > 0) throw new MandateTermsRefused(past);
-  return past;
+  return { refused: terms.consentLimits === 'strict' && past.length > 0, problems: past };
 }

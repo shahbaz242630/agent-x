@@ -16,7 +16,7 @@ export {
 } from './domain/mandate.ts';
 export {
   type ConsentAllows,
-  consentWarnings,
+  consentCheck,
   type MandateTerms,
   mandateTerms,
   MandateTermsRefused,

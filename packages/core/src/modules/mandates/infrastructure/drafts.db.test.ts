@@ -340,6 +340,24 @@ describe('FX-TAMPER as the owner on a mandate (SEC-DB-03, the store’s half)', 
     });
   });
 
+  it('a listed mandate’s version changed past the app: the page refused, and held', async () => {
+    const { versionId } = await drafted();
+    await ownerOfVersions.query('alter table mandates.versions disable trigger made_once');
+    try {
+      await ownerOfVersions.setColumn(versionId, 'purpose', 'Anything at all');
+    } finally {
+      await ownerOfVersions.query('alter table mandates.versions enable trigger made_once');
+    }
+
+    await deniedAndHeld(
+      () =>
+        withSignedStates(app, org, services(), (tx, states) =>
+          mandatesPage(tx, states, org, { after: null, limit: 10 }),
+        ),
+      { id: versionId, subjectType: 'mandate_version', sign: 'seal' },
+    );
+  });
+
   it('a draft made ACTIVE past the app: denied, and held', async () => {
     const { id, versionId } = await drafted();
     await owner.query(
