@@ -60,10 +60,9 @@ export function createAgentMandates({
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') return undefined;
     const { mandate } = read;
-    // A draft grants nothing: PENDING_ACCEPTANCE holds a version in force only inside an acceptance (0035).
-    if (mandate.currentVersionId === null || (mandate.status !== 'ACTIVE' && mandate.status !== 'SUSPENDED')) {
-      return undefined;
-    }
+    // Open, as the query finds it and its verified read holds: a draft has no version in force, so it grants
+    // nothing; ACTIVE or SUSPENDED have one (0035; B5's mutation pass: a status check here too was dead).
+    if (mandate.currentVersionId === null) return undefined;
     const version = await versionIn(tx, states, orgId, mandate.id, mandate.currentVersionId);
     if (version.endsAt !== null && version.endsAt <= clock.now()) return undefined;
     return { mandate, version };
