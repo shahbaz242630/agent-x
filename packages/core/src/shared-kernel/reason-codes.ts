@@ -53,7 +53,7 @@ export const REASON_CODES = {
   CONTACT_NOT_ACTIVE:
     "This registered contact isn't active: it was removed already, or it was never confirmed. Nothing was changed.",
   CURRENCY_NOT_ALLOWED:
-    "The request's currency is not the mandate's, so it is refused. Amounts are never converted. Nothing was reserved.",
+    "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
   FORBIDDEN:

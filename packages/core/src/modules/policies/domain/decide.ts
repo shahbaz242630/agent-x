@@ -20,7 +20,7 @@
 //
 // Free text (the purpose, the order reference's wording) is never weighed:
 // the duplicate check comes in as the caller's finding (SEC-AG-14).
-import { compare, type Money, money, plus, type ReasonCode } from '../../../shared-kernel/index.ts';
+import { type Money, money, plus, type ReasonCode, withinLimit } from '../../../shared-kernel/index.ts';
 
 export const DECISIONS = ['DENY', 'REQUIRE_NEW_MANDATE', 'REQUIRE_APPROVAL', 'ALLOW'] as const;
 /** Strictest first: a decision's place in DECISIONS is its precedence. */
@@ -29,7 +29,7 @@ export type Decision = (typeof DECISIONS)[number];
 /** What a policy's per-order cap does to an order over it: refuse it, or send it for approval. */
 export type OverCap = 'DENY' | 'REQUIRE_APPROVAL';
 
-/** Every agent's monthly cap when the organisation has set none (partner, S91): AED 20,000. */
+/** Every agent's monthly cap when the organisation has set none (partner, S91): AED 20,000. Another currency has no default. */
 export const DEFAULT_MONTHLY_CAP: Money = money(2_000_000n, 'AED');
 
 /** The request as the agent made it, its amounts already Money (A1). */
@@ -37,7 +37,6 @@ export interface SpendAsked {
   readonly amount: Money;
   readonly supplierId: string;
   readonly fundingSourceId: string;
-  readonly at: Date;
 }
 
 /** The agent's mandate and the terms of its version in force. */
@@ -69,6 +68,8 @@ export interface PolicyRules {
 /** Everything a decision weighs. */
 export interface DecisionInput {
   readonly request: SpendAsked;
+  /** When it is decided: the server's clock, never a time the agent sends, as it decides whether the mandate has ended. */
+  readonly now: Date;
   readonly agent: { readonly id: string; readonly status: string };
   /** The agent's open mandate, or null for none. */
   readonly mandate: MandateInForce | null;
@@ -127,19 +128,24 @@ export function decide(input: DecisionInput): DecisionMade {
   if (policies.some((p) => p.supplierIds !== null && !p.supplierIds.includes(supplierId))) {
     fail('POLICY_SUPPLIER_NOT_ALLOWED');
   }
-  // Amounts are weighed only against a mandate in force, in its currency: two currencies are never compared.
+  // Amounts are weighed only against a mandate in force, and only when every one is in its currency:
+  // two currencies are never compared, and a policy or total in another one denies rather than throws.
   if (inForce) {
     if (!mandate.supplierIds.includes(supplierId)) fail('SUPPLIER_NOT_ALLOWED');
     if (input.request.fundingSourceId.toLowerCase() !== mandate.fundingSourceId) fail('SOURCE_NOT_MANDATED');
-    if (input.request.amount.currency === mandate.perOrderLimit.currency) {
+    const weighed = [
+      input.request.amount,
+      input.monthSpent,
+      input.splitOpen,
+      monthly.cap,
+      ...policies.flatMap(amountsOf),
+    ];
+    if (weighed.every(({ currency }) => currency === mandate.perOrderLimit.currency)) {
       amountChecks(input, mandate, policies, monthly.cap, fail);
     } else fail('CURRENCY_NOT_ALLOWED');
   }
 
-  const decision = failed.reduce<Decision>(
-    (strictest, { decision: d }) => (DECISIONS.indexOf(d) < DECISIONS.indexOf(strictest) ? d : strictest),
-    'ALLOW',
-  );
+  const decision = DECISIONS.find((d) => failed.some((f) => f.decision === d)) ?? 'ALLOW';
   return {
     decision,
     reasons: [...new Set(failed.map(({ code }) => code))],
@@ -153,6 +159,13 @@ export function decide(input: DecisionInput): DecisionMade {
 }
 
 type Fail = (code: ReasonCode, decision?: Decision) => void;
+
+/** More than the limit: exactly at it passes. */
+const over = (amount: Money, limit: Money): boolean => !withinLimit(amount, limit);
+
+/** Every amount a policy sets. */
+const amountsOf = (p: PolicyRules): Money[] =>
+  [p.perOrderCap?.cap ?? null, p.monthlyCap, p.approvalThreshold].filter((m) => m !== null);
 
 /** The monthly cap per agent: the mandate's policy's, else the organisation's, else the default (decision 5). */
 function monthlyCapOf(
@@ -177,7 +190,7 @@ function mandateInForce(input: DecisionInput, mandate: MandateInForce): boolean 
   return (
     mandate.status === 'ACTIVE' &&
     mandate.agentId === input.agent.id &&
-    (mandate.endsAt === null || input.request.at.getTime() < mandate.endsAt.getTime())
+    (mandate.endsAt === null || input.now.getTime() < mandate.endsAt.getTime())
   );
 }
 
@@ -190,7 +203,6 @@ function amountChecks(
   fail: Fail,
 ): void {
   const { amount } = input.request;
-  const over = (a: Money, limit: Money): boolean => compare(a, limit) > 0;
   const monthTotal = plus(input.monthSpent, amount);
 
   if (over(amount, mandate.perOrderLimit)) fail('MANDATE_ORDER_LIMIT');
@@ -200,14 +212,12 @@ function amountChecks(
   }
   if (over(monthTotal, monthlyCap)) fail('POLICY_MONTHLY_CAP');
 
-  const threshold = policies.reduce(
-    (lowest, { approvalThreshold }) =>
-      approvalThreshold !== null && over(lowest, approvalThreshold) ? approvalThreshold : lowest,
-    mandate.approvalThreshold,
-  );
-  if (over(amount, threshold)) fail('APPROVAL_THRESHOLD');
+  // Over any of the three thresholds is over the lowest.
+  const thresholds = [mandate.approvalThreshold, ...policies.flatMap((p) => p.approvalThreshold ?? [])];
+  const overThreshold = (a: Money): boolean => thresholds.some((threshold) => over(a, threshold));
+  if (overThreshold(amount)) fail('APPROVAL_THRESHOLD');
   // A split: this order alone is within the threshold, with the supplier's other open ones it isn't (ADR-014 §5).
-  else if (mandate.splitCheck && over(plus(input.splitOpen, amount), threshold)) fail('AGGREGATE_THRESHOLD');
+  else if (mandate.splitCheck && overThreshold(plus(input.splitOpen, amount))) fail('AGGREGATE_THRESHOLD');
 }
 
 /**
@@ -217,7 +227,7 @@ function amountChecks(
  */
 export function decisionInputText(input: DecisionInput): string {
   const amount = (m: Money | null): string | null => (m === null ? null : `${String(m.minor)} ${m.currency}`);
-  const rules = (p: PolicyRules | null) =>
+  const rules = (p: PolicyRules | null): unknown[] | null =>
     p === null
       ? null
       : [
@@ -229,12 +239,8 @@ export function decisionInputText(input: DecisionInput): string {
         ];
   const { request, mandate } = input;
   return JSON.stringify([
-    [
-      amount(request.amount),
-      request.supplierId.toLowerCase(),
-      request.fundingSourceId.toLowerCase(),
-      request.at.toISOString(),
-    ],
+    [amount(request.amount), request.supplierId.toLowerCase(), request.fundingSourceId.toLowerCase()],
+    input.now.toISOString(),
     [input.agent.id, input.agent.status],
     mandate === null
       ? null
@@ -258,5 +264,7 @@ export function decisionInputText(input: DecisionInput): string {
     amount(input.monthSpent),
     amount(input.splitOpen),
     input.duplicateOrder,
+    // So a change of the default changes the text too.
+    amount(DEFAULT_MONTHLY_CAP),
   ]);
 }

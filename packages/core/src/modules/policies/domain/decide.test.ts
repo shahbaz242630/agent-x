@@ -17,6 +17,7 @@ import {
   DEFAULT_MONTHLY_CAP,
   type MandateInForce,
   type PolicyRules,
+  type SpendAsked,
 } from './decide.ts';
 
 const aed = (dirhams: number): Money => money(BigInt(Math.round(dirhams * 100)), 'AED');
@@ -54,7 +55,8 @@ const NO_RULES: PolicyRules = {
 /** A request of `dirhams` that passes every check, unless `changes` say otherwise. */
 function input(dirhams: number, changes: Partial<DecisionInput> = {}): DecisionInput {
   return {
-    request: { amount: aed(dirhams), supplierId: SUPPLIER, fundingSourceId: SOURCE, at: NOW },
+    request: { amount: aed(dirhams), supplierId: SUPPLIER, fundingSourceId: SOURCE },
+    now: NOW,
     agent: { id: AGENT, status: 'ACTIVE' },
     mandate: MANDATE,
     supplierStatus: 'VERIFIED',
@@ -67,6 +69,12 @@ function input(dirhams: number, changes: Partial<DecisionInput> = {}): DecisionI
     ...changes,
   };
 }
+
+/** A request of AED 5,000 whose own fields `changes` say. */
+const asking = (changes: Partial<SpendAsked>): DecisionInput => {
+  const given = input(5_000);
+  return { ...given, request: { ...given.request, ...changes } };
+};
 
 const orgPolicy = (rules: Partial<PolicyRules>): PolicyRules => ({ ...NO_RULES, ...rules });
 const mandatePolicy = (rules: Partial<PolicyRules>): PolicyRules => ({
@@ -142,23 +150,43 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
     );
   });
 
-  it("denies a source other than the mandate's, and another currency, weighing no amount in it", () => {
-    const elsewhere = input(5_000);
-    expect(decide({ ...elsewhere, request: { ...elsewhere.request, fundingSourceId: SUPPLIER } })).toMatchObject({
+  it("denies a source other than the mandate's", () => {
+    expect(decide(asking({ fundingSourceId: SUPPLIER }))).toMatchObject({
       decision: 'DENY',
       reasons: ['SOURCE_NOT_MANDATED'],
     });
-    const usd = { ...elsewhere.request, amount: money(9_999_999_999n, 'USD') };
-    expect(decide({ ...elsewhere, request: usd })).toMatchObject({
-      decision: 'DENY',
-      reasons: ['CURRENCY_NOT_ALLOWED'],
-    });
+  });
+
+  it('denies, never throws, when any amount weighed is in another currency', () => {
+    const usd = money(1n, 'USD');
+    for (const given of [
+      asking({ amount: money(9_999_999_999n, 'USD') }),
+      input(5_000, { monthSpent: usd }),
+      input(5_000, { splitOpen: usd }),
+      input(5_000, { organizationPolicy: orgPolicy({ perOrderCap: { cap: usd, over: 'DENY' } }) }),
+      input(5_000, { organizationPolicy: orgPolicy({ monthlyCap: usd }) }),
+      input(5_000, { mandatePolicy: mandatePolicy({ approvalThreshold: usd }) }),
+    ]) {
+      expect(decide(given)).toMatchObject({ decision: 'DENY', reasons: ['CURRENCY_NOT_ALLOWED'] });
+    }
+  });
+
+  it('has a default monthly cap in AED alone: a mandate in another currency needs its own', () => {
+    const usd = (minor: bigint) => money(minor, 'USD');
+    const limits = { perOrderLimit: usd(1_000n), monthlyLimit: usd(1_000n), approvalThreshold: usd(1_000n) };
+    const inUsd = {
+      ...asking({ amount: usd(1n) }),
+      mandate: { ...MANDATE, ...limits },
+      monthSpent: usd(0n),
+      splitOpen: usd(0n),
+    };
+    expect(decide(inUsd).reasons).toEqual(['CURRENCY_NOT_ALLOWED']);
+    expect(decide({ ...inUsd, organizationPolicy: orgPolicy({ monthlyCap: usd(500n) }) }).decision).toBe('ALLOW');
   });
 
   it('reads the IDs a request names in any case', () => {
-    const asked = input(5_000).request;
-    const upper = { ...asked, supplierId: SUPPLIER.toUpperCase(), fundingSourceId: SOURCE.toUpperCase() };
-    expect(decide({ ...input(5_000), request: upper }).decision).toBe('ALLOW');
+    const upper = asking({ supplierId: SUPPLIER.toUpperCase(), fundingSourceId: SOURCE.toUpperCase() });
+    expect(decide(upper).decision).toBe('ALLOW');
   });
 
   it('denies an expired mandate over its limit, with every failing reason (precedence)', () => {
@@ -312,16 +340,14 @@ describe('decisionInputText', () => {
       { ...base, organizationPolicy: orgPolicy({ perOrderCap: { cap: aed(4_000), over: 'REQUIRE_APPROVAL' } }) },
       { ...base, mandatePolicy: NO_RULES },
       { ...base, mandate: { ...MANDATE, endsAt: NOW } },
-      { ...base, request: { ...base.request, at: new Date(NOW.getTime() + 1) } },
+      { ...base, now: new Date(NOW.getTime() + 1) },
     ]) {
       expect(decisionInputText(changed)).not.toBe(decisionInputText(base));
     }
   });
 
   it('reads IDs in any case, and keeps amounts as exact text', () => {
-    const asked = input(5_000).request;
-    const upper = { ...input(5_000), request: { ...asked, supplierId: SUPPLIER.toUpperCase() } };
-    expect(decisionInputText(upper)).toBe(decisionInputText(input(5_000)));
+    expect(decisionInputText(asking({ supplierId: SUPPLIER.toUpperCase() }))).toBe(decisionInputText(input(5_000)));
     expect(decisionInputText(input(5_000))).toContain('"500000 AED"');
     expect(decisionInputText(input(5_000, { mandate: null }))).toContain(',null,');
   });
@@ -345,7 +371,11 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
   .record({
     amount: anAed,
     supplierId: fc.constantFrom(SUPPLIER, OTHER_SUPPLIER),
-    limits: fc.tuple(minor, minor, minor).map((l) => [...l].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))),
+    fundingSourceId: fc.constantFrom(SOURCE, SUPPLIER),
+    mandateAgent: fc.constantFrom(AGENT, SOURCE),
+    // Ended an hour ago, a millisecond from now, or never.
+    endsAt: fc.constantFrom(new Date(NOW.getTime() - 3_600_000), new Date(NOW.getTime() + 1), null),
+    limits: fc.tuple(minor, minor, minor).map((l) => [...l].sort((a, b) => Number(a - b))),
     mandateSuppliers: suppliers,
     splitCheck: fc.boolean(),
     agentStatus: fc.constantFrom('ACTIVE', 'SUSPENDED'),
@@ -361,11 +391,13 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
   .map((g) => {
     const [threshold = 1n, perOrder = 1n, monthly = 1n] = g.limits;
     return input(0, {
-      request: { amount: g.amount, supplierId: g.supplierId, fundingSourceId: SOURCE, at: NOW },
+      request: { amount: g.amount, supplierId: g.supplierId, fundingSourceId: g.fundingSourceId },
       agent: { id: AGENT, status: g.agentStatus },
       mandate: {
         ...MANDATE,
         status: g.mandateStatus,
+        agentId: g.mandateAgent,
+        endsAt: g.endsAt,
         approvalThreshold: money(threshold, 'AED'),
         perOrderLimit: money(perOrder, 'AED'),
         monthlyLimit: money(monthly, 'AED'),
@@ -390,13 +422,16 @@ describe('decide: properties', () => {
       fc.property(anyInput, (given) => {
         const { decision } = decide(given);
         if (rank(decision) < rank('REQUIRE_APPROVAL')) return;
-        const { mandate, request, monthSpent } = given;
-        expect(mandate?.status).toBe('ACTIVE');
-        expect(request.amount.minor).toBeLessThanOrEqual(mandate?.perOrderLimit.minor ?? -1n);
-        expect(monthSpent.minor + request.amount.minor).toBeLessThanOrEqual(mandate?.monthlyLimit.minor ?? -1n);
-        expect(mandate?.supplierIds).toContain(request.supplierId);
-        if (decision === 'ALLOW')
-          expect(request.amount.minor).toBeLessThanOrEqual(mandate?.approvalThreshold.minor ?? -1n);
+        const { mandate, request, monthSpent, now } = given;
+        if (mandate === null) throw new Error('anyInput always has a mandate');
+        expect(mandate.status).toBe('ACTIVE');
+        expect(mandate.agentId).toBe(given.agent.id);
+        expect(mandate.endsAt === null || now < mandate.endsAt).toBe(true);
+        expect(request.fundingSourceId).toBe(mandate.fundingSourceId);
+        expect(request.amount.minor).toBeLessThanOrEqual(mandate.perOrderLimit.minor);
+        expect(monthSpent.minor + request.amount.minor).toBeLessThanOrEqual(mandate.monthlyLimit.minor);
+        expect(mandate.supplierIds).toContain(request.supplierId);
+        if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);
       }),
     );
   });
