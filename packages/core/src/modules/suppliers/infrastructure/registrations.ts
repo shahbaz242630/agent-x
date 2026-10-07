@@ -42,7 +42,7 @@ import {
   type RegistrationRoute,
   type RegistrationStatus,
 } from '../domain/registration.ts';
-import { oneOf, oneOfOrNull, timeOf, wholeOf } from './fields.ts';
+import { oneOf, oneOfOrNull, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
 import { noAccountNumberIn, type PayeeKey } from './payee-key.ts';
 import type { SuppliersTables } from './tables.ts';
 

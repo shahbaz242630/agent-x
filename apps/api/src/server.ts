@@ -60,6 +60,8 @@ import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
+import type { MandateRegistry } from './mandate-registry.ts';
+import { registerMandates } from './mandates.ts';
 import type { AgentChanges } from './agent-changes.ts';
 import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
@@ -139,6 +141,8 @@ export interface ServerOptions {
   readonly fundingSourceReads?: FundingSourceReads | undefined;
   /** Changing a funding source (funding-source-changes.ts); without it, no one reaches those routes. */
   readonly fundingSourceChanges?: FundingSourceChanges | undefined;
+  /** Drafting and reading mandates (mandate-registry.ts); without it, no one reaches those routes. */
+  readonly mandateRegistry?: MandateRegistry | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -325,6 +329,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     verifications: options.supplierVerifications,
     details: options.supplierDetailsChanges,
   });
+  registerMandates(app, { registry: options.mandateRegistry });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

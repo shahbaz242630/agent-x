@@ -63,7 +63,7 @@ import {
   supplierDetails,
   type SupplierStatus,
 } from '../domain/supplier.ts';
-import { oneOf, timeOf, wholeOf } from './fields.ts';
+import { oneOf, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
 import type { RegistrationRecord } from './registrations.ts';
 import type { SuppliersTables } from './tables.ts';
 
@@ -1040,4 +1040,26 @@ export async function suppliersAddedSince(tx: SuppliersTransaction, orgId: strin
     .where('created_at', '>', since)
     .executeTakeFirstOrThrow();
   return row.added;
+}
+
+/**
+ * Which of `ids` are the organisation's suppliers, in one statement (Phase 2
+ * B2: a mandate's allow-list names its own suppliers only): IDs alone,
+ * deciding nothing about paying one, which reads each through its signed
+ * state when it comes to it.
+ */
+export async function suppliersFound(
+  tx: SuppliersTransaction,
+  orgId: string,
+  ids: readonly string[],
+): Promise<readonly string[]> {
+  if (ids.length === 0) return [];
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, never an authority field; a payment reads each supplier through its signed state
+    .selectFrom(SUPPLIERS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('id', 'in', ids)
+    .execute();
+  return rows.map(({ id }) => id);
 }

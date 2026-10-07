@@ -1,0 +1,385 @@
+// Phase 2 B2: the mandates' routes, answering a member with each outcome of
+// the registry: a draft's body read into its terms (or refused at the edge
+// with every problem), the mandate as it now stands, every refusal, and the
+// reads. Who reaches them is the access hook's (role-matrix.test.ts); what
+// the use case does in the database is mandate-registry.db.test.ts.
+import type { MembershipCheck, LiveSession, Role, SignIn } from '@agentx/core/modules/identity';
+import { money } from '@agentx/core/shared-kernel';
+import type { IdempotentRequest } from '@agentx/platform/db';
+import { createLogger } from '@agentx/platform/observability';
+import { LogCapture, SequentialIds } from '@agentx/testing';
+import type { FastifyInstance, InjectOptions } from 'fastify';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { ORGANIZATION_HEADER } from './access.ts';
+import type { MandateDraft, MandateRegistry, MandateView, MandateWrite } from './mandate-registry.ts';
+import { buildServer } from './server.ts';
+import { SESSION_COOKIE } from './sign-in.ts';
+
+const PUBLIC_ORIGIN = 'https://app.agentx.example';
+const COOKIE = 'S'.repeat(43);
+const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
+const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
+const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
+const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
+const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
+const SUPPLIERS = ['0199a0f0-0000-7000-8000-0000000000e1', '0199a0f0-0000-7000-8000-0000000000e2'];
+const ADMIN = '0199a0f0-0000-7000-8000-000000000033';
+
+const LIVE: LiveSession = {
+  sessionId: '0199a0f0-0000-7000-8000-000000000022',
+  userId: '0199a0f0-0000-7000-8000-000000000011',
+  idpSessionId: 'V1_1',
+  authTime: new Date('2026-10-07T09:00:00.000Z'),
+  // A passkey's sign-in, as an admin needs (ADR-012 §7).
+  amr: ['pwd', 'user', 'mfa'],
+  createdAt: new Date('2026-10-07T09:00:05.000Z'),
+  lastSeenAt: new Date('2026-10-07T09:10:00.000Z'),
+  endsAt: new Date('2099-10-07T21:00:05.000Z'),
+  idleEndsAt: new Date('2099-10-07T09:40:00.000Z'),
+};
+
+const SIGN_IN: SignIn = {
+  begin: () => Promise.reject(new Error('not in these tests')),
+  beginStepUp: () => Promise.reject(new Error('not in these tests')),
+  complete: () => Promise.reject(new Error('not in these tests')),
+  signOut: () => Promise.resolve(undefined),
+  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
+};
+
+const AED = (minor: bigint) => money(minor, 'AED');
+
+const VIEW: MandateView = {
+  mandate: {
+    id: MANDATE_ID,
+    agentId: AGENT_ID,
+    timeZone: 'Asia/Dubai',
+    splitWindowHours: 24,
+    status: 'PENDING_ACCEPTANCE',
+    currentVersionId: null,
+    acceptedBy: null,
+    acceptedAt: null,
+    pendingVersionId: VERSION_ID,
+  },
+  current: null,
+  pending: {
+    version: {
+      id: VERSION_ID,
+      mandateId: MANDATE_ID,
+      version: 1,
+      purpose: 'Office supplies',
+      perOrderLimit: AED(500_000n),
+      monthlyLimit: AED(2_000_000n),
+      approvalThreshold: AED(100_000n),
+      supplierIds: SUPPLIERS,
+      fundingSourceId: SOURCE_ID,
+      splitCheck: true,
+      consentLimits: 'flexible',
+      endsAt: new Date('2027-01-01T00:00:00.000Z'),
+      termsHash: 'a'.repeat(64),
+      draftedBy: ADMIN,
+      draftedAt: new Date('2026-10-07T09:15:00.000Z'),
+    },
+    consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
+  },
+};
+
+/** The mandate as the routes answer it. */
+const VERSION_ANSWERED = {
+  id: VERSION_ID,
+  version: 1,
+  purpose: 'Office supplies',
+  currency: 'AED',
+  perOrderLimitMinor: 500_000,
+  monthlyLimitMinor: 2_000_000,
+  approvalThresholdMinor: 100_000,
+  supplierIds: SUPPLIERS,
+  fundingSourceId: SOURCE_ID,
+  splitCheck: true,
+  consentLimits: 'flexible',
+  endsAt: '2027-01-01T00:00:00.000Z',
+  termsHash: 'a'.repeat(64),
+  draftedBy: ADMIN,
+  draftedAt: '2026-10-07T09:15:00.000Z',
+  consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
+};
+
+const DETAILS_ANSWERED = {
+  id: MANDATE_ID,
+  agentId: AGENT_ID,
+  timeZone: 'Asia/Dubai',
+  splitWindowHours: 24,
+  status: 'PENDING_ACCEPTANCE',
+  acceptedBy: null,
+  acceptedAt: null,
+  current: null,
+  pending: VERSION_ANSWERED,
+};
+
+const servers: FastifyInstance[] = [];
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => server.close()));
+});
+
+interface Call {
+  readonly kind: 'draft' | 'redraft' | 'list' | 'show';
+  readonly keyed?: IdempotentRequest;
+  readonly subject?: unknown;
+}
+
+interface Answers {
+  readonly write?: MandateWrite;
+  readonly listed?: Awaited<ReturnType<MandateRegistry['list']>>;
+  readonly found?: Awaited<ReturnType<MandateRegistry['show']>>;
+}
+
+/** A server whose registry answers `answers`, the caller holding `role`. */
+async function withMandates(answers: Answers, role: Role = 'admin') {
+  const calls: Call[] = [];
+  const written = () => Promise.resolve(answers.write ?? { outcome: 'busy' as const });
+  const registry: MandateRegistry = {
+    draft: (_member, keyed, draft) => {
+      calls.push({ kind: 'draft', keyed, subject: draft });
+      return written();
+    },
+    redraft: (_member, keyed, mandateId, terms) => {
+      calls.push({ kind: 'redraft', keyed, subject: { mandateId, terms } });
+      return written();
+    },
+    list: (orgId, page) => {
+      calls.push({ kind: 'list', subject: { orgId, ...page } });
+      return Promise.resolve(answers.listed ?? { outcome: 'listed', mandates: [], next: null });
+    },
+    show: (orgId, mandateId) => {
+      calls.push({ kind: 'show', subject: { orgId, mandateId } });
+      return Promise.resolve(answers.found ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
+    },
+  };
+  const member: MembershipCheck = { outcome: 'active', id: ADMIN, role };
+  const config = {
+    http: {
+      host: '127.0.0.1',
+      port: 0,
+      publicOrigin: PUBLIC_ORIGIN,
+      trustedProxies: [],
+      rateLimitPerMinute: 1000,
+      rateLimitPerUserPerMinute: 1000,
+      rateLimitPerAgentPerMinute: 1000,
+    },
+    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
+  };
+  const app = await buildServer({
+    config,
+    logger: createLogger({
+      service: 'api',
+      config: { environment: 'test', release: 'r-1', ...config },
+      destination: new LogCapture(),
+    }),
+    ids: new SequentialIds(),
+    healthChecks: [],
+    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
+    restrictedUntil: () => Promise.resolve(undefined),
+    findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? member : ({ outcome: 'none' } as const)),
+    mandateRegistry: registry,
+  });
+  servers.push(app);
+  await app.ready();
+  return { app, calls };
+}
+
+const headers = { cookie: `${SESSION_COOKIE}=${COOKIE}`, [ORGANIZATION_HEADER]: ORG, origin: PUBLIC_ORIGIN };
+
+const post = (url: string, payload: unknown): InjectOptions => ({
+  method: 'POST',
+  url,
+  headers: { ...headers, 'idempotency-key': 'k-1', 'content-type': 'application/json' },
+  payload: JSON.stringify(payload),
+});
+
+const TERMS = {
+  purpose: 'Office supplies',
+  currency: 'AED',
+  perOrderLimitMinor: 500_000,
+  monthlyLimitMinor: 2_000_000,
+  approvalThresholdMinor: 100_000,
+  supplierIds: [SUPPLIERS[1], SUPPLIERS[0]],
+  fundingSourceId: SOURCE_ID,
+};
+
+const DRAFTED: MandateWrite = { outcome: 'drafted', ...VIEW };
+
+describe('POST /v1/mandates drafts a mandate (B2)', () => {
+  it('answers 201 with the mandate, its terms read with the defaults: strict, split check on, no end, zone and window unset', async () => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS }));
+
+    expect(reply.statusCode).toBe(201);
+    expect(reply.json()).toEqual(DETAILS_ANSWERED);
+    expect(calls).toHaveLength(1);
+    const draft = calls[0]?.subject as MandateDraft;
+    expect(draft).toMatchObject({ agentId: AGENT_ID, timeZone: null, splitWindowHours: null });
+    expect(draft.terms).toMatchObject({
+      purpose: 'Office supplies',
+      perOrderLimit: AED(500_000n),
+      supplierIds: [...SUPPLIERS].sort(),
+      splitCheck: true,
+      consentLimits: 'strict',
+      endsAt: null,
+    });
+    expect(calls[0]?.keyed).toMatchObject({ orgId: ORG, operation: 'mandates.draft', key: 'k-1' });
+  });
+
+  it('passes the zone, window, end and settings given', async () => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(
+      post('/v1/mandates', {
+        agentId: AGENT_ID,
+        timeZone: 'Europe/London',
+        splitWindowHours: 48,
+        ...TERMS,
+        splitCheck: false,
+        consentLimits: 'flexible',
+        endsAt: '2099-01-01T00:00:00.000Z',
+      }),
+    );
+
+    expect(reply.statusCode).toBe(201);
+    expect(calls[0]?.subject).toMatchObject({
+      timeZone: 'Europe/London',
+      splitWindowHours: 48,
+      terms: { splitCheck: false, consentLimits: 'flexible', endsAt: new Date('2099-01-01T00:00:00.000Z') },
+    });
+  });
+
+  it.each([
+    ['a zone the IANA database doesn’t name', { timeZone: 'Mars/Olympus' }],
+    ['an amount that is a fraction', { perOrderLimitMinor: 1.5 }],
+    ['limits that don’t nest', { approvalThresholdMinor: 600_000 }],
+    ['an end in the past', { endsAt: '2020-01-01T00:00:00.000Z' }],
+  ])('refuses %s at the edge, the registry never asked', async (_what, change) => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS, ...change }));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [{ outcome: 'refused', status: 409, code: 'MANDATE_OPEN' } as const, 409, 'MANDATE_OPEN'],
+    [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
+  ])('answers the registry’s %o as %i %s', async (write, status, code) => {
+    const { app } = await withMandates({ write });
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS }));
+
+    expect(reply.statusCode).toBe(status);
+    expect(reply.json()).toMatchObject({ error: { code } });
+  });
+
+  it('refuses a member who isn’t an admin', async () => {
+    const { app, calls } = await withMandates({ write: DRAFTED }, 'approver');
+    const reply = await app.inject(post('/v1/mandates', { agentId: AGENT_ID, ...TERMS }));
+
+    expect(reply.statusCode).toBe(403);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
+  it('answers 200 with the mandate, passing its ID and the terms', async () => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, TERMS));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual(DETAILS_ANSWERED);
+    expect(calls[0]).toMatchObject({
+      kind: 'redraft',
+      keyed: { operation: 'mandates.redraft' },
+      subject: { mandateId: MANDATE_ID, terms: { purpose: 'Office supplies' } },
+    });
+  });
+
+  it('refuses an agent named in it: the agent, zone and window stay as they are', async () => {
+    const { app, calls } = await withMandates({ write: DRAFTED });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, { ...TERMS, agentId: AGENT_ID }));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it('answers the registry’s refusal', async () => {
+    const { app } = await withMandates({ write: { outcome: 'refused', status: 409, code: 'MANDATE_ENDED' } });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/supersede`, TERMS));
+
+    expect(reply.statusCode).toBe(409);
+    expect(reply.json()).toMatchObject({ error: { code: 'MANDATE_ENDED' } });
+  });
+});
+
+describe('reading mandates (B2)', () => {
+  const get = (url: string): InjectOptions => ({ method: 'GET', url, headers });
+
+  it('lists a page to any member, each with its purpose', async () => {
+    const { app, calls } = await withMandates(
+      { listed: { outcome: 'listed', mandates: [{ ...VIEW.mandate, purpose: 'Office supplies' }], next: MANDATE_ID } },
+      'viewer',
+    );
+    const reply = await app.inject(get('/v1/mandates?limit=1'));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual({
+      mandates: [
+        {
+          id: MANDATE_ID,
+          agentId: AGENT_ID,
+          timeZone: 'Asia/Dubai',
+          splitWindowHours: 24,
+          status: 'PENDING_ACCEPTANCE',
+          purpose: 'Office supplies',
+        },
+      ],
+      next: MANDATE_ID,
+    });
+    expect(calls[0]?.subject).toEqual({ orgId: ORG, after: null, limit: 1 });
+  });
+
+  it('answers a list refused', async () => {
+    const { app } = await withMandates({ listed: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } });
+    const reply = await app.inject(get('/v1/mandates'));
+
+    expect(reply.statusCode).toBe(503);
+  });
+
+  it('shows one to any member, with its version in force and its draft', async () => {
+    const accepted: MandateView = {
+      ...VIEW,
+      mandate: {
+        ...VIEW.mandate,
+        status: 'ACTIVE',
+        currentVersionId: VERSION_ID,
+        acceptedBy: ADMIN,
+        acceptedAt: new Date('2026-10-07T10:00:00.000Z'),
+      },
+      current: VIEW.pending,
+    };
+    const { app } = await withMandates({ found: { outcome: 'found', ...accepted } }, 'viewer');
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual({
+      ...DETAILS_ANSWERED,
+      status: 'ACTIVE',
+      acceptedBy: ADMIN,
+      acceptedAt: '2026-10-07T10:00:00.000Z',
+      current: VERSION_ANSWERED,
+    });
+  });
+
+  it('answers one not found', async () => {
+    const { app } = await withMandates({});
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    expect(reply.statusCode).toBe(404);
+  });
+});

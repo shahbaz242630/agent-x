@@ -63,6 +63,7 @@ export {
   SUPPLIERS,
   type SupplierShown,
   suppliersAddedSince,
+  suppliersFound,
   suppliersPage,
   supplierOf,
   type SuppliersTransaction,

@@ -12,7 +12,7 @@ const DEPENDENCIES = {
   suppliers: ['organizations', 'providers'],
   providers: [],
   'funding-sources': ['organizations', 'providers', 'directory'],
-  mandates: ['agents', 'funding-sources', 'suppliers'],
+  mandates: ['organizations', 'agents', 'funding-sources', 'suppliers'],
   policies: [],
   'limit-reservations': ['mandates'],
   approvals: ['identity'],

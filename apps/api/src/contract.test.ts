@@ -121,6 +121,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/funding-sources',
       'GET /v1/funding-sources/{id}',
       'GET /v1/integrity-hold',
+      'GET /v1/mandates',
+      'GET /v1/mandates/{id}',
       'GET /v1/members',
       'GET /v1/registered-contacts',
       'GET /v1/suppliers',
@@ -141,6 +143,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/funding-sources',
       'HEAD /v1/funding-sources/{id}',
       'HEAD /v1/integrity-hold',
+      'HEAD /v1/mandates',
+      'HEAD /v1/mandates/{id}',
       'HEAD /v1/members',
       'HEAD /v1/registered-contacts',
       'HEAD /v1/suppliers',
@@ -174,6 +178,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/integrity-hold/clear/confirm',
       'POST /v1/integrity-hold/investigations',
       'POST /v1/invitations/accept',
+      'POST /v1/mandates',
+      'POST /v1/mandates/{id}/supersede',
       'POST /v1/members/invitations',
       'POST /v1/members/invitations/{id}/approve',
       'POST /v1/members/invitations/{id}/approve/confirm',
@@ -1174,9 +1180,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // the sources' list, one and refresh and the agent's list (D2-4a), suspend and reactivate's three (D2-4b),
     // an agent's handover and its confirm (the S68 audit), the suppliers' seven (E1-2), a payee's start and check
     // and the fake partner's form (E2-2a), a payee change's approve, confirm and withdraw (E2-2b), a payee passed
-    // through (E2-2d), a supplier's verify and its confirm (E3-2a), its details' change and confirm (E3-2b), with each
-    // GET's HEAD.
-    expect(answers).toHaveLength(95);
+    // through (E2-2d), a supplier's verify and its confirm (E3-2a), its details' change and confirm (E3-2b), the
+    // mandates' draft, supersede, list and one (Phase 2 B2), with each GET's HEAD.
+    expect(answers).toHaveLength(101);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1212,6 +1218,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'InvitationConfirmed',
       'InvitationDecided',
       'InvitationDrafted',
+      'Mandate',
+      'MandateDetails',
+      'MandateVersion',
       'Member',
       'MemberChangeAsked',
       'MemberChanged',

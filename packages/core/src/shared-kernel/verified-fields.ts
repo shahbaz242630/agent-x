@@ -1,6 +1,6 @@
 // A verified row's fields, as the audit module's verifiedState gives them
-// (canonical text, or null), read back into their kinds: for a supplier, its
-// versions and its registrations alike.
+// (canonical text, or null), read back into their kinds: for every module's
+// authority tables alike (suppliers, their registrations, mandates).
 
 /** A field's value as text or null, or undefined for one the fields don't hold at all. */
 export type Field = string | null | undefined;
@@ -29,3 +29,9 @@ export const wholeOf = (value: Field): number | null | undefined => {
   if (value === null || value === undefined) return value;
   return WHOLE.test(value) ? Number(value) : undefined;
 };
+
+const MINOR = /^[1-9][0-9]{0,18}$/;
+
+/** An amount in minor units from 1 (a bigint column), or undefined for a field missing, null or not one. */
+export const minorOf = (value: Field): bigint | undefined =>
+  typeof value === 'string' && MINOR.test(value) ? BigInt(value) : undefined;
