@@ -171,7 +171,7 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
   const member: MembershipCheck = { outcome: 'active', id: ADMIN, role };
   const app = await routeServer({
     live: LIVE,
-    member: member,
+    member,
     mandateRegistry: registry,
     mandateAcceptance: acceptance,
     mandateMoves: moves,

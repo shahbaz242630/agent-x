@@ -244,6 +244,26 @@ describe('mandates ended by the clock (B4)', () => {
     expect(await statusOf(w, good)).toMatchObject({ status: 'EXPIRED' });
   });
 
+  it('pages past a tampered mandate yet never expires more than its share in a run (S90 review)', async () => {
+    const w = await world();
+    const bad = await inForce(w, inHours(1));
+    const good = [];
+    for (let i = 0; i < 3; i += 1) good.push(await inForce(await withAnotherAgent(w), inHours(1)));
+    const owner = await tamperAsOwner(database, MANDATES, w.org);
+    try {
+      await owner.withoutStatusGuard(() =>
+        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [bad]),
+      );
+    } finally {
+      await owner.end();
+    }
+    clock.advanceBy(HOUR);
+
+    await expiryOf(2).run();
+    const statuses = await Promise.all(good.map(async (id) => ((await statusOf(w, id)) as { status: string }).status));
+    expect(statuses).toEqual(['EXPIRED', 'EXPIRED', 'ACTIVE']);
+  });
+
   it('expires its share of an organisation’s mandates a run, the rest the next', async () => {
     const w = await world();
     const first = await inForce(w, inHours(1));

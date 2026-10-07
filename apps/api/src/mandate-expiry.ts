@@ -102,10 +102,12 @@ export function createMandateExpiry({
         let after: string | undefined;
         // Until the candidates run out, or the run's share of them is expired.
         while (expired < most) {
+          // A page as long as what is left of the share, so a run never expires more.
+          const left = most - expired;
           let due: readonly string[];
           try {
             due = await withSignedStates(database, orgId, services(log), (tx) =>
-              mandatesPastTheirEnd(tx, orgId, clock.now(), most, after),
+              mandatesPastTheirEnd(tx, orgId, clock.now(), left, after),
             );
           } catch (error) {
             log.error('mandate_expiry.unreadable', { err: error });
@@ -123,7 +125,7 @@ export function createMandateExpiry({
               log.error('mandate_expiry.failed', { mandateId, err: error });
             }
           }
-          if (due.length < most) break;
+          if (due.length < left) break;
           after = due.at(-1);
         }
       }
