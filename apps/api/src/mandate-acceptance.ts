@@ -8,7 +8,9 @@
 //   confirmed is refused at once; answered 202 with the step-up.
 // - `acceptConfirm` (`mandates.accept.confirm`): the same checks again, the
 //   step-up consumed, then the draft made the version in force (ACTIVE, for a
-//   first) with the step-up's evidence and the terms hash on its event.
+//   first) with the step-up's evidence and the terms hash on its event,
+//   and every admin and approver told (0036, partner S86), in the same
+//   transaction.
 // - The checks: the agent active (AGENT_NOT_ACTIVE); every mandate of the
 //   agent verified (B2's open-mandate query trusts the row's status, S89
 //   review); this one neither ended (MANDATE_ENDED) nor suspended
@@ -35,6 +37,7 @@ import {
   type MandateVersionRecord,
   mandatesOfAgent,
 } from '@agentx/core/modules/mandates';
+import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -144,13 +147,15 @@ export function createMandateAcceptance({
   ids,
   clock,
   challenges,
+  outbox,
   logger,
 }: {
-  readonly database: Database<MandateTables>;
+  readonly database: Database<MandateTables & NotificationsTables>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
   readonly challenges: StepUpChallenges;
+  readonly outbox: Outbox;
   readonly logger: Logger;
 }): MandateAcceptance {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
@@ -229,6 +234,16 @@ export function createMandateAcceptance({
           actor: { type: 'user', id: member.userId },
           details: { ...stepUpDetails(consumed), termsHash: read.draft.termsHash },
         });
+        await outbox.add(tx, [
+          {
+            orgId: member.orgId,
+            recipientUserId: null,
+            kind: 'mandate_accepted',
+            membershipId: null,
+            role: null,
+            aboutId: read.mandate.id,
+          },
+        ]);
         return { status: 200, resourceId: read.mandate.id };
       });
       if (isUnwritten(done)) return done;

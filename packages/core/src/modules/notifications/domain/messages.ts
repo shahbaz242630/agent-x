@@ -11,6 +11,7 @@
 // payment (SEC-HA-11 is untouched).
 import {
   type ClaimedNotice,
+  isAboutAMandate,
   isAboutAnAgent,
   isAboutAPerson,
   isAboutASupplier,
@@ -61,6 +62,8 @@ const SUPPLIERS_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's suppliers, and tell its admins at once: someone may be trying to redirect its payments.";
 const AGENTS_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's AI agents, and tell its admins at once: someone may be trying to take control of an agent.";
+const MANDATES_CHECK =
+  "If you didn't expect this, sign in to Agent X and check the organisation's mandates, and tell its admins at once: a mandate is what lets an AI agent spend.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -214,16 +217,48 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       'An admin of one of your Agent X organisations made you the owner of an AI agent. Its old keys stopped working at once; the admin was given its one new key, to pass to you by a way you already trust.',
     check: AGENTS_CHECK,
   },
+  // About a mandate (0036): its moves, to every admin and approver.
+  mandate_accepted: {
+    subject: () => 'Agent X: a mandate was accepted',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations accepted a mandate, signing in again with a passkey: its terms are now in force, and the AI agent it names may spend within them.',
+    check: MANDATES_CHECK,
+  },
+  mandate_suspended: {
+    subject: () => 'Agent X: a mandate was suspended',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations suspended a mandate: the AI agent it names can spend nothing under it until it is resumed.',
+    check: MANDATES_CHECK,
+  },
+  mandate_resumed: {
+    subject: () => 'Agent X: a mandate was resumed',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations resumed a suspended mandate: the AI agent it names may spend within its terms again.',
+    check: MANDATES_CHECK,
+  },
+  mandate_revoked: {
+    subject: () => 'Agent X: a mandate was revoked',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations revoked a mandate for good: the AI agent it names can spend nothing under it again.',
+    check: MANDATES_CHECK,
+  },
+  mandate_expired: {
+    subject: () => 'Agent X: a mandate expired',
+    firstLine: () =>
+      'A mandate of one of your Agent X organisations reached its end date: the AI agent it names can spend nothing under it again.',
+    check: MANDATES_CHECK,
+  },
 };
 
 const NEWLINE = '\n';
 
-/** What a notice is about, by its ID alone: a membership, a person, a supplier, or a registered contact. */
+/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, a supplier, or a registered contact. */
 function aboutLine(notice: ClaimedNotice): string {
   if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
   const id = notice.aboutId ?? '';
   if (isAboutAPerson(notice.kind)) return `Person: ${id}`;
   if (isAboutAnAgent(notice.kind)) return `Agent: ${id}`;
+  if (isAboutAMandate(notice.kind)) return `Mandate: ${id}`;
   return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
 }
 
@@ -255,7 +290,7 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
   };
 }
 
-/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, or as an admin. */
+/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, as an admin or approver of a mandate's organisation, or as an admin. */
 function whyTold(notice: ClaimedNotice): string {
   if (notice.recipientContactId !== null) {
     return "You're told because this address is one of the organisation's registered contacts.";
@@ -265,6 +300,7 @@ function whyTold(notice: ClaimedNotice): string {
     return "You're told because this is your own login.";
   }
   if (notice.kind === 'agent_handed_to_you') return "You're told because you're the agent's new owner.";
+  if (isAboutAMandate(notice.kind)) return "You're told because you're an admin or approver of this organisation.";
   return "You're told because you're an admin of this organisation.";
 }
 

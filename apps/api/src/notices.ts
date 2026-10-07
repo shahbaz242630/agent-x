@@ -57,6 +57,11 @@ export function audienceFrom(
         .filter((member) => member.role === 'admin')
         .map((member) => ({ userId: member.userId, membershipId: member.id }));
     },
+    async adminsAndApproversOf(orgId): Promise<readonly string[]> {
+      return (await activeMembers(orgId))
+        .filter((member) => member.role === 'admin' || member.role === 'approver')
+        .map((member) => member.userId);
+    },
     async membersOf(orgId): Promise<readonly string[]> {
       return (await activeMembers(orgId)).map((member) => member.userId);
     },

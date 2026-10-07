@@ -93,7 +93,9 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     ]);
     // E2-2b: every active member, whatever their role.
     await expect(audience.membersOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m4', 'user-m5', 'user-m6']);
-    expect(asked).toEqual([ORG, ORG]);
+    // B3a: the active admins and approvers, a mandate's audience.
+    await expect(audience.adminsAndApproversOf(ORG)).resolves.toEqual(['user-m1', 'user-m3', 'user-m6']);
+    expect(asked).toEqual([ORG, ORG, ORG]);
   });
 
   it('throws for memberships that failed their check, so the notice waits and names nobody', async () => {
@@ -105,6 +107,7 @@ describe('SEC-HA-11 the notices as the API runs them', () => {
     );
     await expect(audience.adminsOf(ORG)).rejects.toThrow(AudienceTampered);
     await expect(audience.membersOf(ORG)).rejects.toThrow(AudienceTampered);
+    await expect(audience.adminsAndApproversOf(ORG)).rejects.toThrow(AudienceTampered);
   });
 
   it("B6-1b gives an organisation's ACTIVE contacts, and E2-2b those that count, as identity lists them", async () => {
