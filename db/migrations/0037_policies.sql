@@ -59,11 +59,12 @@ CREATE TABLE mandates.policies (
   state_version integer NOT NULL DEFAULT 1,
   state_event_id uuid,
   PRIMARY KEY (org_id, id),
-  -- One of each, by its ID: the organisation's own, or its mandate's.
+  -- One of each, by its ID: the organisation's own, or its mandate's. Any
+  -- other scope is the scope check's to refuse (null here, so it names it).
   CONSTRAINT one_of_each_kind CHECK (
     CASE scope
       WHEN 'organization' THEN id = org_id AND mandate_id IS NULL
-      ELSE mandate_id IS NOT NULL AND id = mandate_id
+      WHEN 'mandate' THEN mandate_id IS NOT NULL AND id = mandate_id
     END
   ),
   CONSTRAINT of_a_mandate FOREIGN KEY (org_id, mandate_id) REFERENCES mandates.mandates (org_id, id)
