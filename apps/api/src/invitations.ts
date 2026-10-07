@@ -47,14 +47,14 @@ import {
   type InvitationWrite,
   type InvitationWrites,
 } from '@agentx/core/modules/identity';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerAsked, answerRefusal, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { NOTHING, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** The most an invitation's body may be: an address and a role, with room to spare. */
@@ -234,8 +234,7 @@ export function registerInvitations(
       if (writes === undefined) throw new Error('the invitation routes ran without their writes');
       const admin = memberInSessionOf(request);
       const written = await writes.ask(admin, idempotentRequest(request, admin.orgId), request.body, request.id);
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined || written.outcome !== 'written') return refused;
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return reply.code(202).send({
         invitation: invitationOf(written),
         ...(written.invitation.status === 'DRAFT' &&
@@ -260,8 +259,7 @@ export function registerInvitations(
         request.params.id,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined || written.outcome !== 'written') return refused;
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return reply.code(200).send({
         invitation: invitationOf(written),
         ...(written.token !== undefined && { link: linkFor(publicOrigin, written.token) }),
@@ -285,8 +283,7 @@ export function registerInvitations(
         (orgId) => idempotentRequest(request, orgId),
         request.id,
       );
-      if (accepted.outcome === 'refused') return sendErrorBody(reply, accepted.status, accepted.code, request.id);
-      if (accepted.outcome !== 'accepted') return answerRefusedWrite(accepted, request, reply);
+      if (isUnwritten(accepted)) return answerRefusal(accepted, request, reply);
       return {
         organizationId: accepted.orgId,
         invitation: {
@@ -345,7 +342,8 @@ export function registerInvitations(
         request.body.stepUpChallengeId,
         request.id,
       );
-      return answerRefusal(written, request, reply) ?? decided(written);
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
+      return decided(written);
     },
   );
 
@@ -364,7 +362,8 @@ export function registerInvitations(
         request.params.id,
         request.id,
       );
-      return answerRefusal(written, request, reply) ?? decided(written);
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
+      return decided(written);
     },
   );
 }

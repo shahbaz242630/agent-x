@@ -39,14 +39,15 @@ import {
   type ResetChanges,
   type ResetChangeWrite,
 } from '@agentx/core/modules/identity';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { isUnwritten } from '@agentx/platform/db';
+import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import { NOTHING, NOTHING_BODY_LIMIT } from './route-schemas.ts';
 
 /** The most a contact's confirmation may be: its token, with room to spare. */
@@ -166,16 +167,6 @@ const resetOf = (reset: Reset) => ({
   coolingOffUntil: reset.coolingOffUntil?.toISOString() ?? null,
 });
 
-/** Answers a write that wrote nothing: refused, or its key in use for another request or still being done. */
-const refusalOf = (
-  written: Exclude<ResetChangeWrite, { outcome: 'written' }>,
-  request: FastifyRequest,
-  reply: FastifyReply,
-) =>
-  written.outcome === 'refused'
-    ? sendErrorBody(reply, written.status, written.code, request.id)
-    : answerRefusedWrite(written, request, reply);
-
 /**
  * The resets' routes. `changes` does the admins', and `confirmations` the
  * contacts'; without them the routes are still documented, and answer 404
@@ -193,9 +184,7 @@ export function registerFactorResets(
     async (request, reply) => {
       if (confirmations === undefined) return sendErrorBody(reply, 404, 'NOT_FOUND', request.id);
       const confirmed = await confirmations.confirm(request.body.token, request.id);
-      if (confirmed.outcome === 'refused') {
-        return sendErrorBody(reply, confirmed.status, confirmed.code, request.id);
-      }
+      if (confirmed.outcome === 'refused') return answerRefusal(confirmed, request, reply);
       return { coolingOffUntil: confirmed.coolingOffUntil.toISOString() };
     },
   );
@@ -203,7 +192,7 @@ export function registerFactorResets(
   routes.get('/v1/factor-resets', { schema: LIST_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
     const admin = memberInSessionOf(request);
     const list = await need(changes).list(admin.orgId, request.id);
-    if (list.outcome === 'refused') return sendErrorBody(reply, list.status, list.code, request.id);
+    if (list.outcome === 'refused') return answerRefusal(list, request, reply);
     return { resets: list.resets.map(resetOf) };
   });
 
@@ -222,7 +211,7 @@ export function registerFactorResets(
         request.params.id,
         request.id,
       );
-      if (written.outcome !== 'written') return refusalOf(written, request, reply);
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       const { reset, stepUpChallengeId } = written;
       return reply.code(202).send({
         reset: resetOf(reset),
@@ -246,7 +235,7 @@ export function registerFactorResets(
         request.params.id,
         request.id,
       );
-      if (written.outcome !== 'written') return refusalOf(written, request, reply);
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return { reset: resetOf(written.reset) };
     },
   );
@@ -266,7 +255,7 @@ export function registerFactorResets(
         request.params.id,
         request.id,
       );
-      if (written.outcome !== 'written') return refusalOf(written, request, reply);
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return { reset: resetOf(written.reset) };
     },
   );

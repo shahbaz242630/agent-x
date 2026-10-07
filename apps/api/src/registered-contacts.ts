@@ -37,6 +37,7 @@ import {
   TooManyContacts,
 } from '@agentx/core/modules/identity';
 import { systemClock } from '@agentx/core/shared-kernel';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -191,8 +192,7 @@ export function registerRegisteredContacts(
         request.body.email,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined) return refused;
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       const { contact, stepUpChallengeId } = writtenOf(written);
       return reply.code(202).send({
         contact: contactOf(contact, systemClock.now()),
@@ -216,9 +216,8 @@ export function registerRegisteredContacts(
         request.params.id,
         request.id,
       );
-      return (
-        answerRefusal(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
-      );
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
+      return { contact: contactOf(writtenOf(written).contact, systemClock.now()) };
     },
   );
 
@@ -257,9 +256,8 @@ export function registerRegisteredContacts(
         request.body.stepUpChallengeId,
         request.id,
       );
-      return (
-        answerRefusal(written, request, reply) ?? { contact: contactOf(writtenOf(written).contact, systemClock.now()) }
-      );
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
+      return { contact: contactOf(writtenOf(written).contact, systemClock.now()) };
     },
   );
 }

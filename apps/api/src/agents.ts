@@ -44,6 +44,7 @@
 // cases are agent-registering.ts, agent-changes.ts and agent-key-changes.ts.
 import { isAgentName, MOST_AGENTS_A_PAGE, SCOPES } from '@agentx/core/modules/agents';
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -79,8 +80,7 @@ import {
   ROTATE_OPERATION,
 } from './agent-key-changes.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -335,11 +335,6 @@ export function registerAgents(
   },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const refused = (
-    answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ) => sendErrorBody(reply, answer.status, answer.code, request.id);
 
   routes.get(
     '/v1/agents',
@@ -351,7 +346,7 @@ export function registerAgents(
         { after: request.query.after ?? null, limit: request.query.limit ?? MOST_AGENTS_A_PAGE },
         request.id,
       );
-      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
       return { agents: listed.agents.map(agentOf), next: listed.next };
     },
   );
@@ -362,7 +357,7 @@ export function registerAgents(
     async (request, reply) => {
       const { orgId } = memberInSessionOf(request);
       const found = await need(registrations).show(orgId, request.params.id, request.id);
-      if (found.outcome === 'refused') return refused(found, request, reply);
+      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       return withKeysOf(found);
     },
   );
@@ -403,10 +398,7 @@ export function registerAgents(
         stepUpChallengeId,
         request.id,
       );
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       if (written.outcome !== 'registered') throw new Error('a registration answered without its agent');
       return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
     },

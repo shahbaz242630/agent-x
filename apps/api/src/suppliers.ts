@@ -72,14 +72,14 @@ import {
   SupplierDetailsRefused,
   type SupplierRecord,
 } from '@agentx/core/modules/suppliers';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { agentOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -607,11 +607,6 @@ export function registerSuppliers(
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const refused = (
-    answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ) => sendErrorBody(reply, answer.status, answer.code, request.id);
 
   /** Answers a change: the supplier as it now stands, a step-up asked, or a refusal. */
   const answerChange = (written: SupplierChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
@@ -621,10 +616,7 @@ export function registerSuppliers(
 
   /** Answers a payee registration: as it now stands, still waiting, or a refusal. */
   const answerPayee = (written: PayeeWrite, request: FastifyRequest, reply: FastifyReply) => {
-    if (written.outcome === 'refused') return refused(written, request, reply);
-    if (written.outcome === 'conflict' || written.outcome === 'busy') {
-      return answerRefusedWrite(written, request, reply);
-    }
+    if (isUnwritten(written)) return answerRefusal(written, request, reply);
     const status = { started: 201, checked: 200, waiting: 202 }[written.outcome];
     return reply.code(status).send(registrationBodyOf(written));
   };
@@ -649,10 +641,7 @@ export function registerSuppliers(
         request.body,
         request.id,
       );
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return reply.code(201).send(detailsOf(written));
     },
   );
@@ -663,7 +652,7 @@ export function registerSuppliers(
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const listed = await need(registry).list(orgId, pageOf(request.query), request.id);
-      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
       return {
         suppliers: listed.suppliers.map((supplier) => supplierOf(supplier, supplier.displayName)),
         next: listed.next,
@@ -677,7 +666,7 @@ export function registerSuppliers(
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(registry).show(orgId, request.params.id, request.id);
-      if (found.outcome === 'refused') return refused(found, request, reply);
+      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       return detailsOf(found);
     },
   );
@@ -943,7 +932,7 @@ export function registerSuppliers(
     async (request, reply) => {
       const { orgId } = agentOf(request);
       const listed = await need(registry).usableByAgent(orgId, pageOf(request.query), request.id);
-      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
       // The ID and name alone, field by field: nothing else of the supplier can reach an agent.
       return {
         suppliers: listed.suppliers.map((supplier) => ({ id: supplier.id, displayName: supplier.displayName })),

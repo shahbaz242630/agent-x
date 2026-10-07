@@ -18,14 +18,14 @@ import {
   SPLIT_WINDOW_HOURS,
 } from '@agentx/core/modules/mandates';
 import { MoneyRefused, moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
-import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   DRAFT_OPERATION,
   DRAFTING_ROLES,
@@ -379,10 +379,7 @@ export function registerMandates(
 
   /** Answers a draft: the mandate as it now stands, or a refusal. */
   const answer = (written: MandateWrite, status: 200 | 201, request: FastifyRequest, reply: FastifyReply) => {
-    if (written.outcome === 'refused') return sendErrorBody(reply, written.status, written.code, request.id);
-    if (written.outcome === 'conflict' || written.outcome === 'busy') {
-      return answerRefusedWrite(written, request, reply);
-    }
+    if (isUnwritten(written)) return answerRefusal(written, request, reply);
     return reply.code(status).send(detailsOf(written));
   };
 
@@ -463,9 +460,8 @@ export function registerMandates(
         request.body.stepUpChallengeId,
         request.id,
       );
-      if (accepted.outcome === 'accepted') return reply.code(200).send(detailsOf(accepted));
-      if (accepted.outcome === 'refused') return sendErrorBody(reply, accepted.status, accepted.code, request.id);
-      return answerRefusedWrite(accepted, request, reply);
+      if (isUnwritten(accepted)) return answerRefusal(accepted, request, reply);
+      return reply.code(200).send(detailsOf(accepted));
     },
   );
 
@@ -508,9 +504,8 @@ export function registerMandates(
           request.body.stepUpChallengeId,
           request.id,
         );
-        if (moved.outcome === 'moved') return reply.code(200).send(detailsOf(moved));
-        if (moved.outcome === 'refused') return sendErrorBody(reply, moved.status, moved.code, request.id);
-        return answerRefusedWrite(moved, request, reply);
+        if (isUnwritten(moved)) return answerRefusal(moved, request, reply);
+        return reply.code(200).send(detailsOf(moved));
       },
     );
   }
@@ -522,7 +517,7 @@ export function registerMandates(
       const { orgId } = memberOf(request);
       const page = { after: request.query.after ?? null, limit: request.query.limit ?? MOST_MANDATES_A_PAGE };
       const listed = await need(registry).list(orgId, page, request.id);
-      if (listed.outcome === 'refused') return sendErrorBody(reply, listed.status, listed.code, request.id);
+      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
       return {
         mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
         next: listed.next,
@@ -536,7 +531,7 @@ export function registerMandates(
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(registry).show(orgId, request.params.id, request.id);
-      if (found.outcome === 'refused') return sendErrorBody(reply, found.status, found.code, request.id);
+      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       return detailsOf(found);
     },
   );
