@@ -60,7 +60,8 @@ export function createAgentMandates({
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') return undefined;
     const { mandate } = read;
-    // A draft grants nothing: PENDING_ACCEPTANCE holds a version in force only inside an acceptance (0035).
+    // A draft grants nothing (no version in force). The status allowlist fails closed: today the open-mandate query
+    // and 0035 make it redundant (B5's mutation pass), and it is kept so a status added later grants nothing here.
     if (mandate.currentVersionId === null || (mandate.status !== 'ACTIVE' && mandate.status !== 'SUSPENDED')) {
       return undefined;
     }
