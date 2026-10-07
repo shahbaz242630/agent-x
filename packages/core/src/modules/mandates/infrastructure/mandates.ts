@@ -1,8 +1,9 @@
-// Mandates and their versions (0035). Both are authority tables (ADR-012 §2):
+// Mandates and their versions (0035), and policies and theirs (0037). All are authority tables (ADR-012 §2):
 // every sealed field below must equal the row's latest signed event, and every
 // read goes through the audit module's verifiedState with these descriptions.
 // On the product's authority-table list at the mandate's level in the lock
-// order (ADR-006 §6: 4), the mandate before its versions.
+// order (ADR-006 §6: 4), the mandate before its versions, then policies
+// before theirs.
 //
 // The steps that add, accept and move them come with their use cases (B2–B4).
 import type { SignedStateTable } from '@agentx/platform/db';
@@ -55,6 +56,41 @@ export const MANDATE_VERSIONS = {
     { column: 'terms_hash', type: 'text' },
     { column: 'drafted_by', type: 'uuid' },
     { column: 'drafted_at', type: 'timestamptz' },
+  ],
+  madeOnce: true,
+} as const satisfies SignedStateTable & { readonly madeOnce: true };
+
+/**
+ * A policy's row, the organisation's or a mandate's (0037): no status, a
+ * version in force from the start. What it is a policy of never changes:
+ * 0037's `one_of_each_kind` ties it to the row's ID.
+ */
+export const POLICIES = {
+  table: 'mandates.policies',
+  subject: 'policy',
+  fields: [
+    { column: 'scope', type: 'text' },
+    { column: 'mandate_id', type: 'uuid' },
+    { column: 'current_version_id', type: 'uuid' },
+  ],
+} as const satisfies SignedStateTable;
+
+/** A policy version's row, as the signed state reads and records it: made once, never moved (0037's `made_once`). */
+export const POLICY_VERSIONS = {
+  table: 'mandates.policy_versions',
+  subject: 'policy_version',
+  fields: [
+    { column: 'policy_id', type: 'uuid' },
+    { column: 'version', type: 'integer' },
+    { column: 'currency', type: 'text' },
+    { column: 'per_order_cap_minor', type: 'integer' },
+    { column: 'over_per_order_cap', type: 'text' },
+    { column: 'monthly_cap_minor', type: 'integer' },
+    { column: 'approval_threshold_minor', type: 'integer' },
+    { column: 'supplier_ids', type: 'text' },
+    { column: 'rules_hash', type: 'text' },
+    { column: 'made_by', type: 'uuid' },
+    { column: 'made_at', type: 'timestamptz' },
   ],
   madeOnce: true,
 } as const satisfies SignedStateTable & { readonly madeOnce: true };

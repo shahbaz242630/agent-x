@@ -1,10 +1,12 @@
 import type { Generated } from 'kysely';
 
-/** The mandates schema's tables (db/migrations/0035_mandates.sql), as Kysely sees them. */
+/** The mandates schema's tables (db/migrations/0035_mandates.sql, 0037_policies.sql), as Kysely sees them. */
 export interface MandatesTables {
   'mandates.allowed_currencies': AllowedCurrenciesTable;
   'mandates.mandates': MandatesTable;
   'mandates.versions': MandateVersionsTable;
+  'mandates.policies': PoliciesTable;
+  'mandates.policy_versions': PolicyVersionsTable;
 }
 
 interface AllowedCurrenciesTable {
@@ -57,6 +59,43 @@ interface MandateVersionsTable {
   /** The membership of the member who drafted it. */
   drafted_by: string;
   drafted_at: Date;
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
+}
+
+interface PoliciesTable {
+  org_id: string;
+  /** The organisation's own ID for its policy, the mandate's for a mandate's. */
+  id: string;
+  /** `organization` or `mandate`. */
+  scope: string;
+  mandate_id: string | null;
+  /** The version in force. */
+  current_version_id: string;
+  created_at: Date;
+  state_version: Generated<number>;
+  state_event_id: Generated<string | null>;
+}
+
+interface PolicyVersionsTable {
+  org_id: string;
+  id: string;
+  policy_id: string;
+  version: number;
+  currency: string;
+  /** Minor units, each rule null where this policy sets none: read back as text or a bigint, never a float. */
+  per_order_cap_minor: string | bigint | null;
+  /** `DENY` or `REQUIRE_APPROVAL`, with a per-order cap alone. */
+  over_per_order_cap: string | null;
+  monthly_cap_minor: string | bigint | null;
+  approval_threshold_minor: string | bigint | null;
+  /** Lower-case supplier IDs, sorted, each once, one space apart. */
+  supplier_ids: string | null;
+  /** SHA-256 of the canonical rules, in lower-case hex. */
+  rules_hash: string;
+  /** The membership of the admin who made it. */
+  made_by: string;
+  made_at: Date;
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;
 }

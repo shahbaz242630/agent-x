@@ -6,6 +6,11 @@
 // needs; one live mandate an agent; limits that nest; an allow-list of
 // supplier IDs; an agent and a source of its own organisation only; versions
 // made once; and no other organisation's rows, no deletes, no key changes.
+// C1: policies and their versions (0037) on the same tables' terms: one of
+// each kind, by its ID (the organisation's own, a mandate's own), so what it
+// is a policy of never changes; a version in force of its own, checked at commit; rules
+// that may each be empty, a per-order cap with what happens over it, rules
+// that nest, a supplier list as a mandate's; versions made once.
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger } from '@agentx/testing';
 import { type Insertable, sql, type Updateable } from 'kysely';
@@ -30,6 +35,8 @@ const AT = new Date('2026-10-06T08:00:00Z');
 type Tx = DatabaseTransaction<MandatesTables>;
 type MandateRow = Insertable<MandatesTables['mandates.mandates']>;
 type VersionRow = Insertable<MandatesTables['mandates.versions']>;
+type PolicyRow = Insertable<MandatesTables['mandates.policies']>;
+type PolicyVersionRow = Insertable<MandatesTables['mandates.policy_versions']>;
 
 interface Org {
   readonly id: string;
@@ -150,6 +157,67 @@ const accepted = async (org: Org, agent?: string) => {
   });
   return mandate;
 };
+
+/** A policy version's row, setting every rule unless given otherwise. */
+const policyVersionRow = (
+  org: Org,
+  policy: string,
+  id: string,
+  overrides: Partial<PolicyVersionRow> = {},
+): PolicyVersionRow => ({
+  org_id: org.id,
+  id,
+  policy_id: policy,
+  version: 1,
+  currency: 'AED',
+  per_order_cap_minor: 250_000n,
+  over_per_order_cap: 'REQUIRE_APPROVAL',
+  monthly_cap_minor: 2_000_000n,
+  approval_threshold_minor: 50_000n,
+  supplier_ids: randomUUID(),
+  rules_hash: 'b'.repeat(64),
+  made_by: randomUUID(),
+  made_at: AT,
+  ...overrides,
+});
+
+/** The organisation's own policy's row (its ID the organisation's), naming its first version. */
+const orgPolicyRow = (org: Org, version: string, overrides: Partial<PolicyRow> = {}): PolicyRow => ({
+  org_id: org.id,
+  id: org.id,
+  scope: 'organization',
+  mandate_id: null,
+  current_version_id: version,
+  created_at: AT,
+  ...overrides,
+});
+
+/** Adds a policy and its first version in one transaction, as C3 will: its version's ID. */
+const addPolicy = async (org: Org, policy: PolicyRow, overrides: Partial<PolicyVersionRow> = {}) => {
+  const version = policy.current_version_id;
+  await inOrg(org, async (tx) => {
+    await tx.insertInto('mandates.policies').values(policy).execute();
+    await tx
+      .insertInto('mandates.policy_versions')
+      .values(policyVersionRow(org, policy.id, version, overrides))
+      .execute();
+  });
+  return version;
+};
+
+/** The organisation's own policy, with any rule of its first version given otherwise: that version's ID. */
+const orgPolicy = (org: Org, overrides: Partial<PolicyVersionRow> = {}) =>
+  addPolicy(org, orgPolicyRow(org, randomUUID()), overrides);
+
+/** A mandate's own policy (its ID the mandate's), with any rule of its first version given otherwise: the mandate's ID and the version's. */
+const mandatePolicy = async (org: Org, overrides: Partial<PolicyVersionRow> = {}) => {
+  const { id } = await drafted(org);
+  const row = orgPolicyRow(org, randomUUID(), { id, scope: 'mandate', mandate_id: id });
+  return { id, version: await addPolicy(org, row, overrides) };
+};
+
+const changePolicy = (org: Org, id: string, values: Updateable<MandatesTables['mandates.policies']>) =>
+  inOrg(org, (tx) => tx.updateTable('mandates.policies').set(values).where('id', '=', id).execute());
 
 const refusedBy = (constraint: string): unknown => expect.objectContaining({ constraint });
 const DENIED: unknown = expect.objectContaining({ code: '42501' });
@@ -456,14 +524,206 @@ describe('a mandate version', () => {
   });
 });
 
+describe('a policy', () => {
+  it('is the organisation’s own, by the organisation’s ID, or a mandate’s own, by the mandate’s (one_of_each_kind)', async () => {
+    const org = await organisation();
+    await orgPolicy(org);
+    const { id } = await mandatePolicy(org);
+
+    expect(
+      await inOrg(org, (tx) =>
+        tx.selectFrom('mandates.policies').select(['id', 'scope', 'mandate_id']).orderBy('scope').execute(),
+      ),
+    ).toEqual([
+      { id, scope: 'mandate', mandate_id: id },
+      { id: org.id, scope: 'organization', mandate_id: null },
+    ]);
+  });
+
+  it('is one of each kind: never another ID, nor a mandate’s without its mandate (one_of_each_kind)', async () => {
+    const org = await organisation();
+    const { id: mandate } = await drafted(org);
+
+    for (const row of [
+      orgPolicyRow(org, randomUUID(), { id: randomUUID() }),
+      orgPolicyRow(org, randomUUID(), { mandate_id: mandate }),
+      orgPolicyRow(org, randomUUID(), { id: randomUUID(), scope: 'mandate', mandate_id: mandate }),
+      orgPolicyRow(org, randomUUID(), { id: mandate, scope: 'mandate', mandate_id: null }),
+    ]) {
+      await expect(addPolicy(org, row)).rejects.toEqual(refusedBy('one_of_each_kind'));
+    }
+    await expect(addPolicy(org, orgPolicyRow(org, randomUUID(), { scope: 'agent' }))).rejects.toEqual(
+      refusedBy('policies_scope_check'),
+    );
+  });
+
+  it('is at most one of each kind (policies_pkey)', async () => {
+    const org = await organisation();
+    await orgPolicy(org);
+
+    await expect(orgPolicy(org)).rejects.toEqual(refusedBy('policies_pkey'));
+  });
+
+  it('is for a mandate of its own organisation only (of_a_mandate)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const { id } = await drafted(other);
+
+    await expect(
+      addPolicy(org, orgPolicyRow(org, randomUUID(), { id, scope: 'mandate', mandate_id: id })),
+    ).rejects.toEqual(refusedBy('of_a_mandate'));
+  });
+
+  it('has a version in force of its own from the start, checked at commit (current_is_its_own)', async () => {
+    const [org, other] = [await organisation(), await organisation()];
+    const elsewhere = await orgPolicy(other);
+
+    await expect(
+      inOrg(org, (tx) => tx.insertInto('mandates.policies').values(orgPolicyRow(org, randomUUID())).execute()),
+    ).rejects.toEqual(refusedBy('current_is_its_own'));
+    await expect(
+      inOrg(org, (tx) => tx.insertInto('mandates.policies').values(orgPolicyRow(org, elsewhere)).execute()),
+    ).rejects.toEqual(refusedBy('current_is_its_own'));
+  });
+
+  it('moves to a new version of its own, never to another kind (one_of_each_kind)', async () => {
+    const org = await organisation();
+    const { id: mandate } = await drafted(org);
+    const first = await orgPolicy(org);
+    const second = randomUUID();
+    await inOrg(org, (tx) =>
+      tx
+        .insertInto('mandates.policy_versions')
+        .values(policyVersionRow(org, org.id, second, { version: 2 }))
+        .execute(),
+    );
+
+    // The audit module's record writes them again as they are, which is no change.
+    await changePolicy(org, org.id, { scope: 'organization', mandate_id: null, current_version_id: second });
+    for (const values of [
+      { scope: 'mandate', mandate_id: mandate },
+      { scope: 'mandate' },
+      { mandate_id: mandate },
+    ] satisfies Updateable<MandatesTables['mandates.policies']>[]) {
+      await expect(changePolicy(org, org.id, values)).rejects.toEqual(refusedBy('one_of_each_kind'));
+    }
+    await changePolicy(org, org.id, { current_version_id: first });
+  });
+
+  it('may set no rule at all, or any one alone', async () => {
+    const org = await organisation();
+    const none = {
+      per_order_cap_minor: null,
+      over_per_order_cap: null,
+      monthly_cap_minor: null,
+      approval_threshold_minor: null,
+      supplier_ids: null,
+    } satisfies Partial<PolicyVersionRow>;
+    await orgPolicy(org, none);
+
+    for (const one of [
+      { per_order_cap_minor: 1n, over_per_order_cap: 'DENY' },
+      { monthly_cap_minor: 1n },
+      { approval_threshold_minor: 1n },
+      { supplier_ids: randomUUID() },
+    ] satisfies Partial<PolicyVersionRow>[]) {
+      await mandatePolicy(org, { ...none, ...one });
+    }
+  });
+
+  it('says what happens over its per-order cap, and only with one (a_cap_with_its_outcome)', async () => {
+    const org = await organisation();
+
+    await expect(orgPolicy(org, { over_per_order_cap: null })).rejects.toEqual(refusedBy('a_cap_with_its_outcome'));
+    await expect(orgPolicy(org, { per_order_cap_minor: null })).rejects.toEqual(refusedBy('a_cap_with_its_outcome'));
+    await expect(orgPolicy(org, { over_per_order_cap: 'ALLOW' })).rejects.toEqual(
+      refusedBy('policy_versions_over_per_order_cap_check'),
+    );
+    await orgPolicy(org, { over_per_order_cap: 'DENY' });
+  });
+
+  it('has rules that nest where both are set: approval threshold ≤ per-order cap ≤ monthly cap (rules_nest)', async () => {
+    const org = await organisation();
+
+    for (const rules of [
+      { approval_threshold_minor: 250_001n },
+      { per_order_cap_minor: 2_000_001n },
+      { per_order_cap_minor: null, over_per_order_cap: null, approval_threshold_minor: 2_000_001n },
+    ] satisfies Partial<PolicyVersionRow>[]) {
+      await expect(orgPolicy(org, rules)).rejects.toEqual(refusedBy('rules_nest'));
+    }
+    await orgPolicy(org, {
+      approval_threshold_minor: 250_000n,
+      per_order_cap_minor: 250_000n,
+      monthly_cap_minor: 250_000n,
+    });
+  });
+
+  it('has positive rules, in an allowed currency', async () => {
+    const org = await organisation();
+
+    await expect(orgPolicy(org, { monthly_cap_minor: 0n })).rejects.toEqual(
+      refusedBy('policy_versions_monthly_cap_minor_check'),
+    );
+    await expect(orgPolicy(org, { approval_threshold_minor: -1n })).rejects.toEqual(
+      refusedBy('policy_versions_approval_threshold_minor_check'),
+    );
+    await expect(orgPolicy(org, { per_order_cap_minor: -1n, approval_threshold_minor: null })).rejects.toEqual(
+      refusedBy('policy_versions_per_order_cap_minor_check'),
+    );
+    await expect(orgPolicy(org, { currency: 'USD' })).rejects.toEqual(
+      expect.objectContaining({ code: '23503', constraint: 'policy_versions_currency_fkey' }),
+    );
+  });
+
+  it('names its suppliers as a mandate does: up to 100 lower-case IDs one space apart', async () => {
+    const org = await organisation();
+    const hundred = Array.from({ length: MOST_ALLOWED_SUPPLIERS }, () => randomUUID()).sort();
+
+    await orgPolicy(org, { supplier_ids: hundred.join(' ') });
+    for (const list of [
+      [...hundred, randomUUID()].join(' '),
+      hundred.slice(0, 2).join(','),
+      randomUUID().toUpperCase(),
+      '',
+    ]) {
+      await expect(mandatePolicy(org, { supplier_ids: list })).rejects.toEqual(
+        refusedBy('policy_versions_supplier_ids_check'),
+      );
+    }
+  });
+
+  it('is numbered once a policy, each version made once (one_number_a_policy_version, made_once)', async () => {
+    const org = await organisation();
+    const version = await orgPolicy(org);
+    const another = (number: number) =>
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('mandates.policy_versions')
+          .values(policyVersionRow(org, org.id, randomUUID(), { version: number }))
+          .execute(),
+      );
+    const changeVersion = (values: Updateable<MandatesTables['mandates.policy_versions']>) =>
+      inOrg(org, (tx) => tx.updateTable('mandates.policy_versions').set(values).where('id', '=', version).execute());
+
+    await expect(another(1)).rejects.toEqual(refusedBy('one_number_a_policy_version'));
+    await another(2);
+    // Before its first signed state, the audit module's record writes it.
+    await changeVersion({ state_event_id: randomUUID() });
+    await expect(changeVersion({ monthly_cap_minor: 99_000_000n })).rejects.toEqual(refusedBy('made_once'));
+  });
+});
+
 describe('the app', () => {
-  it('sees no other organisation’s mandates or versions', async () => {
+  it('sees no other organisation’s mandates, policies or versions', async () => {
     const [org, other] = [await organisation(), await organisation()];
     const { id, version } = await drafted(org);
+    const policyVersion = await orgPolicy(org);
 
     const seen = await inOrg(other, async (tx) => [
       ...(await tx.selectFrom('mandates.mandates').select('id').where('id', '=', id).execute()),
       ...(await tx.selectFrom('mandates.versions').select('id').where('id', '=', version).execute()),
+      ...(await tx.selectFrom('mandates.policies').select('id').where('id', '=', org.id).execute()),
+      ...(await tx.selectFrom('mandates.policy_versions').select('id').where('id', '=', policyVersion).execute()),
     ]);
     expect(seen).toEqual([]);
   });
@@ -471,6 +731,7 @@ describe('the app', () => {
   it('never deletes, and never changes a key or a creation time', async () => {
     const org = await organisation();
     const { id, version } = await drafted(org);
+    const policyVersion = await orgPolicy(org);
 
     for (const statement of [
       (tx: Tx) => tx.deleteFrom('mandates.mandates').where('id', '=', id).execute(),
@@ -479,6 +740,16 @@ describe('the app', () => {
       (tx: Tx) => tx.updateTable('mandates.mandates').set({ id: randomUUID() }).where('id', '=', id).execute(),
       (tx: Tx) => tx.updateTable('mandates.versions').set({ org_id: randomUUID() }).where('id', '=', version).execute(),
       (tx: Tx) => sql`truncate mandates.versions`.execute(tx),
+      (tx: Tx) => tx.deleteFrom('mandates.policies').where('id', '=', org.id).execute(),
+      (tx: Tx) => tx.deleteFrom('mandates.policy_versions').where('id', '=', policyVersion).execute(),
+      (tx: Tx) => tx.updateTable('mandates.policies').set({ created_at: AT }).where('id', '=', org.id).execute(),
+      (tx: Tx) => tx.updateTable('mandates.policies').set({ id: randomUUID() }).where('id', '=', org.id).execute(),
+      (tx: Tx) =>
+        tx
+          .updateTable('mandates.policy_versions')
+          .set({ org_id: randomUUID() })
+          .where('id', '=', policyVersion)
+          .execute(),
     ]) {
       await expect(inOrg<unknown>(org, statement)).rejects.toEqual(DENIED);
     }

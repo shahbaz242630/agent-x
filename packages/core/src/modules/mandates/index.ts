@@ -39,5 +39,5 @@ export {
 } from './infrastructure/drafts.ts';
 export { acceptDraft, agentOfMandate, mandatesOfAgent } from './infrastructure/acceptance.ts';
 export { mandatesPastTheirEnd } from './infrastructure/expiry.ts';
-export { MANDATE_VERSIONS, MANDATES } from './infrastructure/mandates.ts';
+export { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';
