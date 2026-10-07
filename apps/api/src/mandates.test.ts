@@ -12,7 +12,9 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
-import type { MandateDraft, MandateRegistry, MandateView, MandateWrite } from './mandate-registry.ts';
+import type { AcceptAsked, MandateAcceptance, MandateAccepted } from './mandate-acceptance.ts';
+import type { MandateView } from './mandate-reads.ts';
+import type { MandateDraft, MandateRegistry, MandateWrite } from './mandate-registry.ts';
 import { buildServer } from './server.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
@@ -123,7 +125,8 @@ afterEach(async () => {
 });
 
 interface Call {
-  readonly kind: 'draft' | 'redraft' | 'list' | 'show';
+  readonly kind: 'draft' | 'redraft' | 'list' | 'show' | 'accept' | 'acceptConfirm';
+  readonly member?: unknown;
   readonly keyed?: IdempotentRequest;
   readonly subject?: unknown;
 }
@@ -132,12 +135,24 @@ interface Answers {
   readonly write?: MandateWrite;
   readonly listed?: Awaited<ReturnType<MandateRegistry['list']>>;
   readonly found?: Awaited<ReturnType<MandateRegistry['show']>>;
+  readonly asked?: AcceptAsked;
+  readonly accepted?: MandateAccepted;
 }
 
 /** A server whose registry answers `answers`, the caller holding `role`. */
 async function withMandates(answers: Answers, role: Role = 'admin') {
   const calls: Call[] = [];
   const written = () => Promise.resolve(answers.write ?? { outcome: 'busy' as const });
+  const acceptance: MandateAcceptance = {
+    accept: (member, keyed, mandateId, versionId) => {
+      calls.push({ kind: 'accept', member, keyed, subject: { mandateId, versionId } });
+      return Promise.resolve(answers.asked ?? { outcome: 'busy' as const });
+    },
+    acceptConfirm: (member, keyed, mandateId, stepUpChallengeId) => {
+      calls.push({ kind: 'acceptConfirm', member, keyed, subject: { mandateId, stepUpChallengeId } });
+      return Promise.resolve(answers.accepted ?? { outcome: 'busy' as const });
+    },
+  };
   const registry: MandateRegistry = {
     draft: (_member, keyed, draft) => {
       calls.push({ kind: 'draft', keyed, subject: draft });
@@ -182,6 +197,7 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     restrictedUntil: () => Promise.resolve(undefined),
     findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? member : ({ outcome: 'none' } as const)),
     mandateRegistry: registry,
+    mandateAcceptance: acceptance,
   });
   servers.push(app);
   await app.ready();
@@ -314,6 +330,113 @@ describe('POST /v1/mandates/:id/supersede drafts a later version (B2)', () => {
 
     expect(reply.statusCode).toBe(409);
     expect(reply.json()).toMatchObject({ error: { code: 'MANDATE_ENDED' } });
+  });
+});
+
+const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
+
+describe('POST /v1/mandates/:id/accept asks a passkey step-up to accept the draft (B3)', () => {
+  it('answers 202 with the step-up, passing the member in their session, the key and the draft named', async () => {
+    const { app, calls } = await withMandates({ asked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID }));
+
+    expect(reply.statusCode).toBe(202);
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(calls).toEqual([
+      {
+        kind: 'accept',
+        member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
+        keyed: expect.objectContaining({ operation: 'mandates.accept', key: 'k-1' }) as unknown,
+        subject: { mandateId: MANDATE_ID, versionId: VERSION_ID },
+      },
+    ]);
+  });
+
+  it.each([
+    ['no version', {}],
+    ['a version not named by its ID', { versionId: 'v1' }],
+    ['anything more', { versionId: VERSION_ID, terms: {} }],
+  ])('refuses a body with %s at the edge', async (_what, body) => {
+    const { app, calls } = await withMandates({});
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, body));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [{ outcome: 'refused', status: 409, code: 'MANDATE_NOT_WAITING' } as const, 409, 'MANDATE_NOT_WAITING'],
+    [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
+  ])('answers the use case’s %o as %i %s', async (asked, status, code) => {
+    const { app } = await withMandates({ asked });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID }));
+
+    expect(reply.statusCode).toBe(status);
+    expect(reply.json()).toMatchObject({ error: { code } });
+  });
+
+  it('refuses a member who isn’t an admin', async () => {
+    const { app, calls } = await withMandates({}, 'approver');
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept`, { versionId: VERSION_ID }));
+
+    expect(reply.statusCode).toBe(403);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('POST /v1/mandates/:id/accept/confirm accepts the draft (B3)', () => {
+  const ACCEPTED: MandateView = {
+    ...VIEW,
+    mandate: {
+      ...VIEW.mandate,
+      status: 'ACTIVE',
+      currentVersionId: VERSION_ID,
+      pendingVersionId: null,
+      acceptedBy: ADMIN,
+      acceptedAt: new Date('2026-10-07T10:00:00.000Z'),
+    },
+    current: VIEW.pending,
+    pending: null,
+  };
+
+  it('answers 200 with the mandate in force, passing the step-up', async () => {
+    const { app, calls } = await withMandates({ accepted: { outcome: 'accepted', ...ACCEPTED } });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept/confirm`, { stepUpChallengeId: CHALLENGE }));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual({
+      ...DETAILS_ANSWERED,
+      status: 'ACTIVE',
+      acceptedBy: ADMIN,
+      acceptedAt: '2026-10-07T10:00:00.000Z',
+      current: VERSION_ANSWERED,
+      pending: null,
+    });
+    expect(calls[0]).toMatchObject({
+      kind: 'acceptConfirm',
+      keyed: { operation: 'mandates.accept.confirm' },
+      subject: { mandateId: MANDATE_ID, stepUpChallengeId: CHALLENGE },
+    });
+  });
+
+  it('refuses a confirm with no step-up named', async () => {
+    const { app, calls } = await withMandates({});
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept/confirm`, {}));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [{ outcome: 'refused', status: 403, code: 'STEP_UP_FAILED' } as const, 403, 'STEP_UP_FAILED'],
+    [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+  ])('answers the use case’s %o as %i %s', async (accepted, status, code) => {
+    const { app } = await withMandates({ accepted });
+    const reply = await app.inject(post(`/v1/mandates/${MANDATE_ID}/accept/confirm`, { stepUpChallengeId: CHALLENGE }));
+
+    expect(reply.statusCode).toBe(status);
+    expect(reply.json()).toMatchObject({ error: { code } });
   });
 });
 

@@ -33,6 +33,7 @@ import {
   openMandateOfAgent,
   termsHash,
 } from './drafts.ts';
+import { acceptDraft, agentOfMandate, mandatesOfAgent } from './acceptance.ts';
 import { MANDATE_VERSIONS, MANDATES } from './mandates.ts';
 import type { MandatesTables } from './tables.ts';
 
@@ -322,6 +323,55 @@ async function deniedAndHeld(
     await withSignedStates(app, org, services(), (tx, states) => states.integrityHold(tx, org, 'none')),
   ).toMatchObject({ outcome: 'held' });
 }
+
+/** Accepts the mandate's waiting draft (or `versionId`) as B3's use case does: from it read for change. */
+const acceptedNow = (mandateId: string, versionId: string) =>
+  withSignedStates(app, org, quiet(), async (tx, states) => {
+    const read = await mandateOf(tx, states, { orgId: org, id: mandateId }, 'change');
+    if (read.outcome !== 'found') throw new Error('The mandate was not found');
+    await acceptDraft(tx, states, read, {
+      orgId: org,
+      versionId,
+      acceptedBy: ids.next(),
+      acceptedAt: clock.now(),
+      actor: OPERATOR,
+      details: {},
+    });
+  });
+
+describe('accepting a draft, the core (B3)', () => {
+  it('makes the draft waiting the version in force, ACTIVE for a first; a later one supersedes it, still ACTIVE', async () => {
+    const { id, versionId } = await drafted();
+    await acceptedNow(id, versionId);
+    expect(await read(id)).toMatchObject({
+      mandate: { status: 'ACTIVE', currentVersionId: versionId, pendingVersionId: null, acceptedAt: clock.now() },
+    });
+
+    const second = await redrafted(id);
+    await acceptedNow(id, second);
+    expect(await read(id)).toMatchObject({ mandate: { status: 'ACTIVE', currentVersionId: second } });
+  });
+
+  it('accepts only the draft waiting, on a mandate waiting or ACTIVE', async () => {
+    const { id, versionId } = await drafted();
+    await expect(acceptedNow(id, ids.next())).rejects.toThrow('Only the draft waiting is accepted');
+    await revoked(id);
+    await expect(acceptedNow(id, versionId)).rejects.toThrow('Only a mandate waiting or ACTIVE takes a version');
+  });
+
+  it('names a mandate’s agent, none for another organisation’s, and the agent’s mandates by ID', async () => {
+    const first = await drafted();
+    await revoked(first.id);
+    const second = await drafted();
+    const agentOf = (id: string) => withSignedStates(app, org, quiet(), (tx) => agentOfMandate(tx, org, id));
+
+    expect(await agentOf(first.id)).toBe(agent);
+    expect(await agentOf(ids.next())).toBeUndefined();
+    expect(await withSignedStates(app, org, quiet(), (tx) => mandatesOfAgent(tx, org, agent))).toEqual(
+      [first.id, second.id].sort(),
+    );
+  });
+});
 
 describe('FX-TAMPER as the owner on a mandate (SEC-DB-03, the store’s half)', () => {
   it('its monthly limit raised past the app: denied, and held', async () => {

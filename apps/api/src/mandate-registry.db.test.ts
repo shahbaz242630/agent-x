@@ -15,11 +15,18 @@ import {
   addSource,
   type FundingSourcesTables,
   settleLink,
+  SOURCES,
   sourceOf,
   updateFromPartner,
 } from '@agentx/core/modules/funding-sources';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
-import { mandateOf, MANDATES, type MandatesTables, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
+import {
+  MANDATE_VERSIONS,
+  mandateOf,
+  MANDATES,
+  type MandatesTables,
+  MOST_DRAFTS_A_DAY,
+} from '@agentx/core/modules/mandates';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
@@ -500,6 +507,30 @@ describe('reading mandates (B2)', () => {
       pending: { version: { version: 1 } },
     });
     expect(await registry.show(viewer.orgId, ids.next(), CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+  });
+
+  it('refuses to show a mandate whose version or source was changed past the app: INTEGRITY_FAILED', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    const ofSources = await tamperAsOwner(database, SOURCES, w.org);
+    try {
+      await ofSources.setColumn(w.source, 'holder_name', 'Someone Else LLC');
+    } finally {
+      await ofSources.end();
+    }
+    expect(await registry.show(w.org, first.mandate.id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+
+    const other = await world();
+    const second = draftedOf(await draft(other.admin, draftOf(other)));
+    const ofVersions = await tamperAsOwner(database, MANDATE_VERSIONS, other.org);
+    try {
+      await ofVersions.query('alter table mandates.versions disable trigger made_once');
+      await ofVersions.setColumn(second.pending?.version.id ?? '', 'purpose', 'Anything at all');
+    } finally {
+      await ofVersions.query('alter table mandates.versions enable trigger made_once');
+      await ofVersions.end();
+    }
+    expect(await registry.show(other.org, second.mandate.id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
   });
 
   it('shows a version whose source’s currency has since changed, the change as its warning', async () => {

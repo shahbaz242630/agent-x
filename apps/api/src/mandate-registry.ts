@@ -20,37 +20,41 @@
 // Lock order (ADR-006 §6): the idempotency key, the drafting lock, the
 // member's membership (2a), the agent (3), the mandates (4), the source (5),
 // the chain head last; the suppliers are counted, never locked.
-import { agentOf, type AgentsTables } from '@agentx/core/modules/agents';
+import { agentOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
-import { type FundingSourcesTables, mayFund, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
+import { mayFund } from '@agentx/core/modules/funding-sources';
 import {
-  type ConsentAllows,
   consentCheck,
   DEFAULT_SPLIT_WINDOW_HOURS,
   draftMandate,
   draftsSince,
   draftVersion,
   isEnded,
-  type MandateRecord,
-  type MandatesTables,
   type MandateShown,
   type MandateTerms,
-  type MandateVersionRecord,
-  mandateOf,
   mandatesPage,
-  mandateVersionOf,
   MOST_DRAFTS_A_DAY,
   oneDraftAtATime,
   openMandateOfAgent,
 } from '@agentx/core/modules/mandates';
-import { type SuppliersTables, suppliersFound } from '@agentx/core/modules/suppliers';
-import { type Clock, DAY_MS, DEFAULT_TIME_ZONE, type IdGenerator, money } from '@agentx/core/shared-kernel';
-import { type Database, type DatabaseTransaction, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
+import { suppliersFound } from '@agentx/core/modules/suppliers';
+import { type Clock, DAY_MS, DEFAULT_TIME_ZONE, type IdGenerator } from '@agentx/core/shared-kernel';
+import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import {
+  consentOf,
+  MandateRefused,
+  type MandateTables,
+  type MandateTx as Tx,
+  mandateIn,
+  type MandateView,
+  sourceIn,
+  viewIn,
+} from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
+import { createUseCaseWork, type Member, type Written } from './use-case-work.ts';
 
 /** Drafting a mandate, and a later version of one. */
 export const DRAFT_OPERATION = 'mandates.draft';
@@ -59,31 +63,12 @@ export const REDRAFT_OPERATION = 'mandates.redraft';
 /** Who may draft: the admins, as accept (partner, S86). */
 export const DRAFTING_ROLES = ['admin'] as const;
 
-export type MandateTables = UseCaseTables & MandatesTables & AgentsTables & FundingSourcesTables & SuppliersTables;
-type Tx = DatabaseTransaction<MandateTables>;
-
-/** The mandates' UseCaseRefused: the only refusal their work answers. */
-class MandateRefused extends UseCaseRefused {}
-
 /** A new mandate as a body gives it: its agent, the zone its months are counted in and its split window, if not the defaults, and its first terms. */
 export interface MandateDraft {
   readonly agentId: string;
   readonly timeZone: string | null;
   readonly splitWindowHours: number | null;
   readonly terms: MandateTerms;
-}
-
-/** A version as the routes show it: its terms, and how they now stand against the bank consent. */
-export interface VersionShown {
-  readonly version: MandateVersionRecord;
-  readonly consentWarnings: readonly string[];
-}
-
-/** A mandate as the routes show it: its signed state, its version in force and its waiting draft. */
-export interface MandateView {
-  readonly mandate: MandateRecord;
-  readonly current: VersionShown | null;
-  readonly pending: VersionShown | null;
 }
 
 /** Where a page starts, and how many it holds at most (MOST_MANDATES_A_PAGE). */
@@ -123,15 +108,6 @@ export interface MandateRegistry {
   ): Promise<({ readonly outcome: 'found' } & MandateView) | Refused>;
 }
 
-/** What a source's bank consent allows, as the terms are checked against it. */
-const consentOf = ({ controls: { currency, period, maxPaymentMinor, maxPeriodMinor } }: SourceRecord) =>
-  ({
-    currency,
-    maxPayment: money(maxPaymentMinor, currency),
-    maxPeriod: money(maxPeriodMinor, currency),
-    limitPeriod: period,
-  }) satisfies ConsentAllows;
-
 export function createMandateRegistry({
   database,
   keys,
@@ -146,14 +122,6 @@ export function createMandateRegistry({
   readonly logger: Logger;
 }): MandateRegistry {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
-
-  /** The source, read (`share`) and verified: SOURCE_NOT_USABLE for none of the organisation's. */
-  const sourceIn = async (tx: Tx, states: SignedStates, orgId: string, sourceId: string) => {
-    const read = await sourceOf(tx, states, { orgId, id: sourceId }, 'share');
-    if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    if (read.outcome === 'missing') throw new MandateRefused(409, 'SOURCE_NOT_USABLE');
-    return read.source;
-  };
 
   /** The terms against the organisation: its source, able to fund; within its consent, when strict; its suppliers. Gives the version's event its consent warnings. */
   const termsChecked = async (tx: Tx, states: SignedStates, orgId: string, terms: MandateTerms, now: Date) => {
@@ -178,40 +146,6 @@ export function createMandateRegistry({
       throw new MandateRefused(409, 'MANDATE_DRAFTS_SPENT');
     }
     return admin;
-  };
-
-  /** The mandate read (`share` or `change`) and verified: NOT_FOUND, or INTEGRITY_FAILED for one that can't be believed. */
-  const mandateIn = async (tx: Tx, states: SignedStates, orgId: string, id: string, lock: 'share' | 'change') => {
-    const read = await mandateOf(tx, states, { orgId, id }, lock);
-    if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    if (read.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
-    return read;
-  };
-
-  /** A version of the mandate with how it now stands against its source's consent (whichever its setting: flexible gives the list). */
-  const versionShown = async (
-    tx: Tx,
-    states: SignedStates,
-    orgId: string,
-    mandateId: string,
-    versionId: string | null,
-  ): Promise<VersionShown | null> => {
-    if (versionId === null) return null;
-    const read = await mandateVersionOf(tx, states, { orgId, id: versionId }, mandateId);
-    if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // 0035's keys hold a mandate's versions to its own.
-    if (read.outcome === 'missing') throw new Error(`A mandate names a version not its own: ${mandateId}`);
-    const source = await sourceIn(tx, states, orgId, read.version.fundingSourceId);
-    return { version: read.version, consentWarnings: consentCheck(read.version, consentOf(source)).problems };
-  };
-
-  const viewIn = async (tx: Tx, states: SignedStates, orgId: string, mandateId: string): Promise<MandateView> => {
-    const { mandate } = await mandateIn(tx, states, orgId, mandateId, 'share');
-    return {
-      mandate,
-      current: await versionShown(tx, states, orgId, mandate.id, mandate.currentVersionId),
-      pending: await versionShown(tx, states, orgId, mandate.id, mandate.pendingVersionId),
-    };
   };
 
   /** A write's answer: its refusal or its key's outcome as it is, otherwise the mandate it wrote as it now stands (on a retry too). */

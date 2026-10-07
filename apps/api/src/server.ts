@@ -60,6 +60,7 @@ import { NO_SECURITY_EVENTS, type SecurityEventSink } from './security-recorder.
 import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
+import type { MandateAcceptance } from './mandate-acceptance.ts';
 import type { MandateRegistry } from './mandate-registry.ts';
 import { registerMandates } from './mandates.ts';
 import type { AgentChanges } from './agent-changes.ts';
@@ -143,6 +144,8 @@ export interface ServerOptions {
   readonly fundingSourceChanges?: FundingSourceChanges | undefined;
   /** Drafting and reading mandates (mandate-registry.ts); without it, no one reaches those routes. */
   readonly mandateRegistry?: MandateRegistry | undefined;
+  /** Accepting a mandate's draft (mandate-acceptance.ts); without it, no one reaches those routes. */
+  readonly mandateAcceptance?: MandateAcceptance | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -329,7 +332,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     verifications: options.supplierVerifications,
     details: options.supplierDetailsChanges,
   });
-  registerMandates(app, { registry: options.mandateRegistry });
+  registerMandates(app, { registry: options.mandateRegistry, acceptance: options.mandateAcceptance });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,
