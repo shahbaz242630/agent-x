@@ -211,7 +211,7 @@ export function createMandateRegistry({
     if (versionId === null) return null;
     const read = await mandateVersionOf(tx, states, { orgId, id: versionId }, mandateId);
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // 0034's keys hold a mandate's versions to its own.
+    // 0035's keys hold a mandate's versions to its own.
     if (read.outcome === 'missing') throw new Error(`A mandate names a version not its own: ${mandateId}`);
     const consent = await consentOf(tx, states, orgId, read.version.fundingSourceId, null);
     return {

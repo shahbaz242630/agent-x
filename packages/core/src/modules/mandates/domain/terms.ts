@@ -1,7 +1,7 @@
 // A mandate version's terms (PRD §3 `Mandate`, §3.1; ADR-006 §1; BR-05,
 // BR-06; Phase 2 B2): what an agent may spend, on whom, from where, and until
 // when. Checked here before anything is written, and the module's floor after
-// it; the database's checks (0034) hold the same shapes.
+// it; the database's checks (0035) hold the same shapes.
 //
 // The limits nest: approval threshold ≤ per-order ≤ monthly (PRD §3.3: over
 // the mandate's own limits is REQUIRE_NEW_MANDATE, never an approval). All

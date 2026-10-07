@@ -229,7 +229,7 @@ export async function mandateVersionOf(
   return { outcome: 'found', version };
 }
 
-/** The facts of a mandate a version's terms are bound to: they never change (0034's `fixed_at_creation`). */
+/** The facts of a mandate a version's terms are bound to: they never change (0035's `fixed_at_creation`). */
 type Binding = Pick<MandateRecord, 'id' | 'agentId' | 'timeZone' | 'splitWindowHours'>;
 
 /** SHA-256 of the version's terms with the mandate's facts and its number, as canonical JSON, in lower-case hex. */
@@ -456,7 +456,7 @@ export async function mandatesPage(
       const read = await mandateOf(tx, states, { orgId, id }, 'share');
       if (read.outcome !== 'found') return read;
       const shown = read.mandate.currentVersionId ?? read.mandate.pendingVersionId;
-      // A revoked draft keeps the version it waited with, so every mandate has one to show (0034's checks).
+      // A revoked draft keeps the version it waited with, so every mandate has one to show (0035's checks).
       if (shown === null) throw new Error(`A verified mandate has no version to show: ${id}`);
       const version = await mandateVersionOf(tx, states, { orgId, id: shown }, id);
       if (version.outcome === 'tampered') return version;
