@@ -87,6 +87,47 @@ export function createMandateExpiry({
       return true;
     });
 
+  /** Expires the mandate as `expire` does, logging what came of it; whether it did. Never throws. */
+  const expiredLogged = async (log: Logger, orgId: string, mandateId: string): Promise<boolean> => {
+    try {
+      const expired = await expire(log, orgId, mandateId);
+      if (expired) log.info('mandate_expiry.expired', { mandateId });
+      return expired;
+    } catch (error) {
+      // A mandate that can't be believed (its alarm raised by the read), or a write that failed.
+      log.error('mandate_expiry.failed', { mandateId, err: error });
+      return false;
+    }
+  };
+
+  /** Expires the organisation's mandates past their end, up to its share; false if the signal stopped it. */
+  const expireIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
+    const log = logger.child({ orgId });
+    let expired = 0;
+    let after: string | undefined;
+    // Until the candidates run out, or the run's share of them is expired.
+    while (expired < most) {
+      // A page as long as what is left of the share, so a run never expires more.
+      const left = most - expired;
+      let due: readonly string[];
+      try {
+        due = await withSignedStates(database, orgId, services(log), (tx) =>
+          mandatesPastTheirEnd(tx, orgId, clock.now(), left, after),
+        );
+      } catch (error) {
+        log.error('mandate_expiry.unreadable', { err: error });
+        return true;
+      }
+      for (const mandateId of due) {
+        if (signal?.aborted === true) return false;
+        if (await expiredLogged(log, orgId, mandateId)) expired += 1;
+      }
+      if (due.length < left) return true;
+      after = due.at(-1);
+    }
+    return true;
+  };
+
   return {
     async run(signal) {
       let orgs: readonly string[];
@@ -97,37 +138,7 @@ export function createMandateExpiry({
         return;
       }
       for (const orgId of orgs) {
-        const log = logger.child({ orgId });
-        let expired = 0;
-        let after: string | undefined;
-        // Until the candidates run out, or the run's share of them is expired.
-        while (expired < most) {
-          // A page as long as what is left of the share, so a run never expires more.
-          const left = most - expired;
-          let due: readonly string[];
-          try {
-            due = await withSignedStates(database, orgId, services(log), (tx) =>
-              mandatesPastTheirEnd(tx, orgId, clock.now(), left, after),
-            );
-          } catch (error) {
-            log.error('mandate_expiry.unreadable', { err: error });
-            break;
-          }
-          for (const mandateId of due) {
-            if (signal?.aborted === true) return;
-            try {
-              if (await expire(log, orgId, mandateId)) {
-                log.info('mandate_expiry.expired', { mandateId });
-                expired += 1;
-              }
-            } catch (error) {
-              // A mandate that can't be believed (its alarm raised by the read), or a write that failed.
-              log.error('mandate_expiry.failed', { mandateId, err: error });
-            }
-          }
-          if (due.length < left) break;
-          after = due.at(-1);
-        }
+        if (!(await expireIn(orgId, signal))) return;
       }
     },
   };
