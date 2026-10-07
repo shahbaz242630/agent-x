@@ -5,27 +5,23 @@
 // use case reads is agent-mandate.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { SourceRecord } from '@agentx/core/modules/funding-sources';
-import type { LiveSession, SignIn } from '@agentx/core/modules/identity';
+import type { LiveSession } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AgentMandates, AgentMandateShown } from './agent-mandate.ts';
 import type { SourcesListed } from './funding-source-reads.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const MANDATE_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const VERSION_ID = '0199a0f0-0000-7000-8000-0000000000d2';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000f1';
 const SUPPLIERS = ['0199a0f0-0000-7000-8000-0000000000e1', '0199a0f0-0000-7000-8000-0000000000e2'];
 const LAST_ID = '0199a0f0-0000-7000-8000-0000000000ff';
-const COOKIE = 'S'.repeat(43);
 const TERMS_HASH = 'a'.repeat(64);
 const DRAFTER = '0199a0f0-0000-7000-8000-000000000033';
 
@@ -53,14 +49,6 @@ const LIVE: LiveSession = {
   lastSeenAt: new Date('2026-10-07T08:10:00.000Z'),
   endsAt: new Date('2099-10-07T20:00:05.000Z'),
   idleEndsAt: new Date('2099-10-07T08:40:00.000Z'),
-};
-
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
 };
 
 const FOUND: AgentMandateShown = {
@@ -121,11 +109,7 @@ type Asked =
   | { readonly kind: 'inForce'; readonly orgId: string; readonly agentId: string }
   | { readonly kind: 'sources'; readonly orgId: string; readonly agentId: string; readonly after: string | null };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 /** A server whose use case answers `shown` and `listed`. */
 async function withMandates(answers: { shown?: AgentMandateShown; listed?: SourcesListed }) {
@@ -140,29 +124,8 @@ async function withMandates(answers: { shown?: AgentMandateShown; listed?: Sourc
       return Promise.resolve(answers.listed ?? { outcome: 'listed', sources: [], next: null });
     },
   };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: 'https://app.agentx.example',
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
+  const app = await routeServer({
+    live: LIVE,
     findMembership: () => Promise.resolve({ outcome: 'active', id: DRAFTER, role: 'admin' } as const),
     checkAgentKey: (text) => {
       const key = KEYS.get(text);
@@ -170,8 +133,6 @@ async function withMandates(answers: { shown?: AgentMandateShown; listed?: Sourc
     },
     agentMandates: mandates,
   });
-  servers.push(app);
-  await app.ready();
   return { app, asked };
 }
 

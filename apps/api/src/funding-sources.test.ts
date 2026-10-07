@@ -4,23 +4,18 @@
 // database is funding-source-links.db.test.ts and
 // funding-source-changes.db.test.ts.
 import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
-import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
+import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { FundingSourceChanges, SourceChangeWrite } from './funding-source-changes.ts';
 import type { FundingSourceLinks, LinkConfirmWrite, LinkingMember, LinkStartWrite } from './funding-source-links.ts';
 import type { FundingSourceReads, SourcePage, SourceShown, SourcesListed } from './funding-source-reads.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const LINK_ID = '0199a0f0-0000-7000-8000-0000000000d1';
 const SOURCE_ID = '0199a0f0-0000-7000-8000-0000000000d2';
 const AUTHORISE_URL = 'https://bank.fake-partner.invalid/authorise/fake-link-1';
@@ -36,14 +31,6 @@ const LIVE: LiveSession = {
   lastSeenAt: new Date('2026-10-01T08:10:00.000Z'),
   endsAt: new Date('2099-10-01T20:00:05.000Z'),
   idleEndsAt: new Date('2099-10-01T08:40:00.000Z'),
-};
-
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
 };
 
 const ADMIN: MembershipCheck = { outcome: 'active', id: '0199a0f0-0000-7000-8000-000000000033', role: 'admin' };
@@ -118,11 +105,7 @@ const SOURCE_ANSWERED = {
   },
 };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 interface Call {
   readonly kind: 'start' | 'confirm';
@@ -194,36 +177,13 @@ async function withLinks(
       return Promise.resolve(answers.confirm ?? { outcome: 'busy' });
     },
   };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
-    findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? ADMIN : ({ outcome: 'none' } as const)),
+  const app = await routeServer({
+    live: LIVE,
+    member: ADMIN,
     fundingSourceLinks: links,
     fundingSourceReads: reads,
     fundingSourceChanges: changes,
   });
-  servers.push(app);
-  await app.ready();
   return { app, calls };
 }
 

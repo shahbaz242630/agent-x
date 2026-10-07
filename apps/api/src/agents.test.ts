@@ -3,11 +3,9 @@
 // (role-matrix.test.ts); what the use case does in the database is
 // agent-registering.db.test.ts.
 import type { AgentKeyRecord, AgentShown } from '@agentx/core/modules/agents';
-import type { LiveSession, MembershipCheck, Role, SignIn } from '@agentx/core/modules/identity';
+import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
-import { createLogger } from '@agentx/platform/observability';
-import { LogCapture, SequentialIds } from '@agentx/testing';
-import type { FastifyInstance, InjectOptions } from 'fastify';
+import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
@@ -21,12 +19,9 @@ import type {
   RegisteringMember,
   RegistrationWrite,
 } from './agent-registering.ts';
-import { buildServer } from './server.ts';
+import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
 
-const PUBLIC_ORIGIN = 'https://app.agentx.example';
-const COOKIE = 'S'.repeat(43);
-const ORG = '0199a0f0-0000-7000-8000-00000000abcd';
 const AGENT_ID = '0199a0f0-0000-7000-8000-0000000000a1';
 const KEY_ID = '0199a0f0-0000-7000-8000-0000000000b1';
 const CHALLENGE = '0199a0f0-0000-7000-8000-0000000000c6';
@@ -45,15 +40,7 @@ const LIVE: LiveSession = {
   idleEndsAt: new Date('2099-09-28T09:40:00.000Z'),
 };
 
-const SIGN_IN: SignIn = {
-  begin: () => Promise.reject(new Error('not in these tests')),
-  beginStepUp: () => Promise.reject(new Error('not in these tests')),
-  complete: () => Promise.reject(new Error('not in these tests')),
-  signOut: () => Promise.resolve(undefined),
-  signedIn: (cookie) => Promise.resolve(cookie === COOKIE ? LIVE : undefined),
-};
-
-const MEMBER: MembershipCheck = { outcome: 'active', id: OWNER, role: 'developer' };
+const MEMBER = { outcome: 'active', id: OWNER, role: 'developer' } as const satisfies MembershipCheck;
 const REGISTERING: RegisteringMember = { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId };
 
 const AGENT: AgentShown = {
@@ -97,11 +84,7 @@ const AGENT_ANSWERED = {
   ],
 };
 
-const servers: FastifyInstance[] = [];
-
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((server) => server.close()));
-});
+afterEach(closeServers);
 
 interface Call {
   readonly kind:
@@ -199,37 +182,13 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
       return keyChanged();
     },
   };
-  const config = {
-    http: {
-      host: '127.0.0.1',
-      port: 0,
-      publicOrigin: PUBLIC_ORIGIN,
-      trustedProxies: [],
-      rateLimitPerMinute: 1000,
-      rateLimitPerUserPerMinute: 1000,
-      rateLimitPerAgentPerMinute: 1000,
-    },
-    log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-  };
-  const app = await buildServer({
-    config,
-    logger: createLogger({
-      service: 'api',
-      config: { environment: 'test', release: 'r-1', ...config },
-      destination: new LogCapture(),
-    }),
-    ids: new SequentialIds(),
-    healthChecks: [],
-    signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
-    restrictedUntil: () => Promise.resolve(undefined),
-    findMembership: (orgId) =>
-      Promise.resolve(orgId.toLowerCase() === ORG ? { ...MEMBER, role } : ({ outcome: 'none' } as const)),
+  const app = await routeServer({
+    live: LIVE,
+    member: { ...MEMBER, role },
     agentRegistrations: registrations,
     agentChanges: changes,
     agentKeyChanges: keyChanges,
   });
-  servers.push(app);
-  await app.ready();
   return { app, calls };
 }
 
