@@ -80,7 +80,7 @@ import {
 } from './agent-key-changes.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
-import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -382,12 +382,7 @@ export function registerAgents(
         request.body,
         request.id,
       );
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
-      if (written.outcome !== 'asked') throw new Error('an ask answered without its step-up');
-      return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
+      return answerAsked(written, request, reply);
     },
   );
 
@@ -423,9 +418,7 @@ export function registerAgents(
     if (written.outcome === 'handedOver') {
       return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
     }
-    if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
-    if (written.outcome === 'refused') return refused(written, request, reply);
-    return answerRefusedWrite(written, request, reply);
+    return answerAsked(written, request, reply);
   };
 
   routes.post(
@@ -533,9 +526,7 @@ export function registerAgents(
       return reply.code(201).send({ ...withKeysOf(written.agent), key: written.key });
     }
     if (written.outcome === 'revoked') return reply.code(200).send(withKeysOf(written.agent));
-    if (written.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: written.stepUpChallengeId });
-    if (written.outcome === 'refused') return refused(written, request, reply);
-    return answerRefusedWrite(written, request, reply);
+    return answerAsked(written, request, reply);
   };
 
   const named = (params: { id: string; keyId: string }): KeyNamed => ({ agentId: params.id, keyId: params.keyId });
