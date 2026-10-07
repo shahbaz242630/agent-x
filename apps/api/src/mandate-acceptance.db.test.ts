@@ -28,6 +28,7 @@ import {
   userForSubject,
 } from '@agentx/core/modules/identity';
 import { MANDATES, type MandatesTables } from '@agentx/core/modules/mandates';
+import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
@@ -71,6 +72,7 @@ type Tables = IdentityTables &
   SuppliersTables &
   OrganizationsTables &
   DirectoryTables &
+  NotificationsTables &
   AuditTables;
 
 const server = inject('postgres');
@@ -340,7 +342,15 @@ beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-07T08:00:00Z'));
   const logger = testLogger(new LogCapture());
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  acceptance = createMandateAcceptance({ database: app, keys, ids, clock, challenges: challenges(), logger });
+  acceptance = createMandateAcceptance({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: challenges(),
+    outbox: createOutbox({ ids, clock }),
+    logger,
+  });
 });
 
 describe('accepting a mandate’s draft (B3)', () => {
@@ -362,6 +372,11 @@ describe('accepting a mandate’s draft (B3)', () => {
     expect(done.pending).toBeNull();
     const events = await eventsAbout(w.org, id);
     expect(events.map(({ action }) => action)).toEqual(['mandate.drafted', 'mandate.accepted', 'mandate.activated']);
+    expect(
+      await withTenant(app, w.org, (tx) =>
+        tx.selectFrom('notifications.outbox').select(['kind', 'about_id', 'recipient_user_id']).execute(),
+      ),
+    ).toEqual([{ kind: 'mandate_accepted', about_id: id, recipient_user_id: null }]);
     expect(events[1]?.details).toMatchObject({
       versionId,
       replaced: null,

@@ -52,6 +52,15 @@ export const SUPPLIER_NOTICE_KINDS = [
 /** The kinds about an agent, `aboutId` its ID (0034): its handover, told to the admins and to its new owner. */
 export const AGENT_NOTICE_KINDS = ['agent_handed_over', 'agent_handed_to_you'] as const;
 
+/** The kinds about a mandate, `aboutId` its ID (0036): its moves, told to every admin and approver (partner, S86). */
+export const MANDATE_NOTICE_KINDS = [
+  'mandate_accepted',
+  'mandate_suspended',
+  'mandate_resumed',
+  'mandate_revoked',
+  'mandate_expired',
+] as const;
+
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
   ...CONTACT_NOTICE_KINDS,
@@ -60,6 +69,7 @@ export const NOTICE_KINDS = [
   ...RESET_NOTICE_KINDS,
   ...SUPPLIER_NOTICE_KINDS,
   ...AGENT_NOTICE_KINDS,
+  ...MANDATE_NOTICE_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -79,6 +89,9 @@ export const isAboutASupplier = (kind: NoticeKind): boolean => SUPPLIER_NOTICE_K
 /** Whether a kind is about an agent, `aboutId` its ID (0034). */
 export const isAboutAnAgent = (kind: NoticeKind): boolean => AGENT_NOTICE_KINDS.some((each) => each === kind);
 
+/** Whether a kind is about a mandate, `aboutId` its ID (0036). */
+export const isAboutAMandate = (kind: NoticeKind): boolean => MANDATE_NOTICE_KINDS.some((each) => each === kind);
+
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
 
@@ -89,7 +102,7 @@ export interface Notice {
    * The person to tell, by their user ID; the sender finds their address.
    * Null, with no contact named and `toContacts` not set: the organisation's
    * active admins but the member the notice is about, found as it is sent
-   * (`fanOut`).
+   * (`fanOut`); for a notice about a mandate, its admins and approvers.
    */
   readonly recipientUserId: string | null;
   /** A registered contact to tell (B6-1b), by its ID; the sender reads its address. */

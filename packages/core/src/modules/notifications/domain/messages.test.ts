@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { messageFor, type ResetLink } from './messages.ts';
 import {
   AGENT_NOTICE_KINDS,
+  MANDATE_NOTICE_KINDS,
   type ClaimedNotice,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
@@ -234,6 +235,29 @@ describe('a notice’s email (B5-1b)', () => {
         "You're told because you're an admin of this organisation.",
       );
     });
+  });
+
+  describe('B3a a mandate’s moves (0036)', () => {
+    const mandate = '0199a0f0-0000-7000-8000-00000000b3a1';
+    const aboutMandate = (kind: NoticeKind): ClaimedNotice => ({
+      ...NOTICE,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: mandate,
+    });
+
+    it.each(MANDATE_NOTICE_KINDS)(
+      'tells of %s, naming the mandate by ID alone, and why an approver is told too',
+      (kind) => {
+        const message = messageFor(aboutMandate(kind), 'a@example.test');
+
+        expect(message.subject).toContain('mandate');
+        expect(message.text).toContain(`Mandate: ${mandate}`);
+        expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+        expect(message.text).toContain("This email can't approve or change anything.");
+      },
+    );
   });
 
   describe('E2-1 a change to a supplier (0033)', () => {

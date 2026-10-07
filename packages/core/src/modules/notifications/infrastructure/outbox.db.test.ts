@@ -20,7 +20,7 @@ import {
   MOST_RECIPIENTS,
   OUTBOX_RETENTION_DAYS,
 } from './outbox.ts';
-import type { Notice } from '../domain/notice.ts';
+import { type Notice, NOTICE_KINDS } from '../domain/notice.ts';
 import type { NotificationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -650,5 +650,18 @@ describe(`the notifications outbox (B5-1a, Postgres ${server.version})`, () => {
     clock.set(new Date(START.getTime() + OUTBOX_RETENTION_DAYS * DAY_MS));
     expect(await outbox.sweep(app, 10)).toBe(1);
     expect(await rows()).toMatchObject([{ recipient_user_id: OTHER_ADMIN, sent_at: null }]);
+  });
+});
+
+describe('the kinds the table takes (0036)', () => {
+  it('are exactly the kinds the module sends, so a kind added in one is added in the other', async () => {
+    const { rows: found } = await sql<{ definition: string }>`
+      select pg_catalog.pg_get_constraintdef(oid) as definition
+      from pg_catalog.pg_constraint
+      where conname = 'outbox_kind_check' and conrelid = 'notifications.outbox'::regclass
+    `.execute(app);
+    const taken = [...(found[0]?.definition ?? '').matchAll(/'([a-z_]+)'::text/g)].map(([, kind]) => kind);
+
+    expect(taken.toSorted()).toEqual([...NOTICE_KINDS].sort());
   });
 });

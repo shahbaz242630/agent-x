@@ -8,6 +8,7 @@ export { type AcsSettings, createAcsNotifier, EMAIL_API_VERSION } from './infras
 export {
   type ClaimedNotice,
   isNoticeKind,
+  MANDATE_NOTICE_KINDS,
   isNoticeRole,
   type Notice,
   NOTICE_KINDS,

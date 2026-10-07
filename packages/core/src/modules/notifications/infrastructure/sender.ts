@@ -41,7 +41,13 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
 import { messageFor, type NoticeMessage, type ResetLink } from '../domain/messages.ts';
-import { type ClaimedNotice, isAboutAPerson, isAboutASupplier, RESET_LINK_KIND } from '../domain/notice.ts';
+import {
+  type ClaimedNotice,
+  isAboutAMandate,
+  isAboutAPerson,
+  isAboutASupplier,
+  RESET_LINK_KIND,
+} from '../domain/notice.ts';
 import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
 import type { NotificationsTables } from './tables.ts';
 
@@ -92,6 +98,8 @@ export interface Admin {
 export interface Audience {
   /** Its active admins, each verified. Throws if they can't be read, or can't be believed. */
   adminsOf(orgId: string): Promise<readonly Admin[]>;
+  /** Its active admins' and approvers' user IDs, each verified (0036). Throws if they can't be read, or can't be believed. */
+  adminsAndApproversOf(orgId: string): Promise<readonly string[]>;
   /** Its active members' user IDs, every role, each verified (E2-2b). Throws if they can't be read, or can't be believed. */
   membersOf(orgId: string): Promise<readonly string[]>;
   /** Its ACTIVE registered contacts' IDs, each verified (B6-1b). Throws if they can't be read, or can't be believed. */
@@ -147,12 +155,14 @@ export function createNoticeSender({
    * about a person (their sign-in, or a reset of their second factor), by
    * their user ID (B6-2a review): that person is told apart, as themselves,
    * once. A notice about a supplier: the contacts that count now, or every
-   * active member (E2-2b).
+   * active member (E2-2b). A notice about a mandate: every admin and approver
+   * (0036).
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
     if (isAboutASupplier(notice.kind)) {
       return notice.toContacts ? audience.countingContactsOf(notice.orgId) : audience.membersOf(notice.orgId);
     }
+    if (isAboutAMandate(notice.kind)) return audience.adminsAndApproversOf(notice.orgId);
     if (notice.toContacts) return audience.contactsOf(notice.orgId);
     const aboutPerson = isAboutAPerson(notice.kind) ? notice.aboutId : null;
     const admins = await audience.adminsOf(notice.orgId);

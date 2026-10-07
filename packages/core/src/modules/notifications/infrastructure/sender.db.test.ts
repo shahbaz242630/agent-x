@@ -50,8 +50,13 @@ const ADMINS: readonly Admin[] = [
 const VIEWER = '0199a0f0-0000-7000-8000-00000000b5b6';
 /** The organisation's active members, every role (E2-2b). */
 const MEMBERS: readonly string[] = [ADMIN, VIEWER];
+/** An approver of the organisation: told of a mandate's moves with its admins (0036). */
+const APPROVER = '0199a0f0-0000-7000-8000-00000000b5b7';
+/** A mandate the notices are about (0036). */
+const MANDATE = '0199a0f0-0000-7000-8000-00000000b6b6';
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
+  [APPROVER, 'approver@example.test'],
   [OTHER_ADMIN, 'other.admin@example.test'],
   [VIEWER, 'viewer@example.test'],
 ]);
@@ -137,7 +142,9 @@ const audience = (
   members: () => readonly string[] | Error = () => MEMBERS,
   // Of the two ACTIVE contacts, only the first counts yet.
   counting: () => readonly string[] | Error = () => [CONTACT],
+  deciders: () => readonly string[] | Error = () => [ADMIN, APPROVER],
 ): Audience => ({
+  adminsAndApproversOf: group(deciders),
   adminsOf: group(admins),
   contactsOf: group(contacts),
   membersOf: group(members),
@@ -502,6 +509,49 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     ]);
     expect(sent.every(({ text }) => text.includes(`Supplier: ${SUPPLIER}`))).toBe(true);
     expect(sent.every(({ subject }) => subject.includes("a supplier's bank details"))).toBe(true);
+  });
+
+  it('B3a sends a notice about a mandate to every active admin and approver', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const accepted: Notice = {
+      orgId: ORG,
+      recipientUserId: null,
+      kind: 'mandate_accepted',
+      membershipId: null,
+      role: null,
+      aboutId: MANDATE,
+    };
+    await app.transaction().execute((tx) => outbox.add(tx, [accepted]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    // Not the other admin or the viewer, who are no admin or approver in this audience.
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'approver@example.test']);
+    expect(sent.every(({ text }) => text.includes(`Mandate: ${MANDATE}`))).toBe(true);
+  });
+
+  it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    await app.transaction().execute((tx) =>
+      outbox.add(tx, [
+        {
+          orgId: ORG,
+          recipientUserId: null,
+          kind: 'mandate_revoked',
+          membershipId: null,
+          role: null,
+          aboutId: MANDATE,
+        },
+      ]),
+    );
+    const { sent, service } = notifier();
+    const away = () => new Error('tampered');
+
+    await sender(service, addressBook(), audience(undefined, undefined, undefined, undefined, away)).run.run();
+
+    expect(sent).toEqual([]);
+    expect((await rows()).map(({ last_failure }) => last_failure)).toEqual(['audience_unavailable']);
   });
 
   it('E2-2b tries a notice about a supplier again when its members, or its counting contacts, cannot be read', async () => {
