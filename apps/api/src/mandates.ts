@@ -105,7 +105,7 @@ const termsOf = (body: TermFields, now: Date): MandateTerms =>
  */
 const termsChecked = (body: TermFields, context: z.RefinementCtx): void => {
   try {
-    // The edge has no clock of its own; the use case checks the end again on its clock (asDrafted).
+    // The edge has no clock of its own; the registry checks the end again on its clock (termsChecked).
     termsOf(body, new Date());
   } catch (error) {
     if (error instanceof MoneyRefused) context.addIssue({ code: 'custom', message: error.message });
