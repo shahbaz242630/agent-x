@@ -218,6 +218,7 @@ const IDENTITIES = type('Microsoft.ManagedIdentity/userAssignedIdentities');
 const APP_LOGS = named(/^app-logs-to-workspace$/);
 const ERRORS_ALERT = named(/-app-errors$/);
 const INTEGRITY_ALERT = named(/-audit-integrity$/);
+const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const COMMUNICATION = type('Microsoft.Communication/communicationServices');
@@ -447,6 +448,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-errors-by-type',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-audit-integrity',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-token-refused',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1109,14 +1111,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to J.
+    // The playbook's sections run from A to M.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('K')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('M')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('N')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -1717,6 +1720,43 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'alert-delivery',
       'audit-integrity-alert',
     ]);
+  });
+
+  it("token-refused-alert: no alert on a refused token, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(TOKEN_REFUSED_ALERT))).toEqual(['token-refused-alert']);
+    for (const change of [
+      // Another error type, or an event's name where the type belongs.
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "LoginSessionsUnavailable" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "LoginTokenRefused" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | where ContainerAppName == "api" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | summarize Events = count()',
+      ),
+      // One line is enough, seen in any minute.
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(TOKEN_REFUSED_ALERT, change))).toEqual(['token-refused-alert']);
+    }
+    // Off: the general alert rules object too.
+    expect(brokenRules(changed(TOKEN_REFUSED_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'token-refused-alert',
+    ]);
+    // Its runbook is the playbook's section M.
+    expect(String(at(staging.predictedResources.find(TOKEN_REFUSED_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section M\.$/,
+    );
   });
 
   it('identities: one usable in any region', () => {

@@ -49,6 +49,7 @@ export type RuleId =
   | 'apps-logs'
   | 'app-errors-alert'
   | 'audit-integrity-alert'
+  | 'token-refused-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -207,6 +208,12 @@ const ERROR_LINES = 'where tostring(parse_json(Log).level) in~ ("error", "fatal"
  */
 const INTEGRITY_LINES =
   'where tostring(parse_json(Log).event) in ("audit.integrity_failed", "audit.anchor_check_crashed")';
+
+/**
+ * A token the login service refused (partner, S88): every call to it logs one
+ * as the error type LoginTokenRefused (zitadel-call.ts), whichever token.
+ */
+const TOKEN_REFUSED_LINES = 'where tostring(parse_json(Log).err.type) == "LoginTokenRefused"';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -685,7 +692,7 @@ export function singleSummaryColumn(query: string): string | undefined {
 }
 
 /**
- * Whether a SEV-1 alert sees every minute and fires on the first window with a
+ * Whether an alert sees every minute and fires on the first window with a
  * match: its window is as long as the time between runs, so no minute goes
  * unwatched, and one failing window is enough, so it never waits for more.
  */
@@ -1503,7 +1510,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-J]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-M]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -1785,6 +1792,32 @@ const auditIntegrityAlert: Check = (snapshot, _expected, add) => {
         resource: environment.name,
         message:
           "needs an enabled, stateless SEV-1 alert on this deployment's workspace that fires on any audit.integrity_failed or audit.anchor_check_crashed line, watching every minute and firing on the first window (ADR-012 §2)",
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace counts every token the login service
+ * refused (partner, S88): one line is enough to fire it, in any window.
+ */
+const tokenRefusedAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [TOKEN_REFUSED_LINES], 'count()') &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'token-refused-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any LoginTokenRefused error line, watching every minute and firing on the first window",
       });
     }
   }
@@ -2716,6 +2749,7 @@ const CHECKS: readonly Check[] = [
   appsLogs,
   appErrorsAlert,
   auditIntegrityAlert,
+  tokenRefusedAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
