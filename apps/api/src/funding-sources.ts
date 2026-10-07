@@ -28,13 +28,13 @@
 // verified. The use cases are funding-source-links.ts, funding-source-reads.ts
 // and funding-source-changes.ts.
 import { type LinkRecord, MOST_SOURCES_A_PAGE, type SourceRecord } from '@agentx/core/modules/funding-sources';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
 import { need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { sendErrorBody } from './errors.ts';
 import {
   type FundingSourceChanges,
   REACTIVATE_CONFIRM_OPERATION,
@@ -53,7 +53,7 @@ import {
   LINKING_ROLES,
 } from './funding-source-links.ts';
 import type { FundingSourceReads } from './funding-source-reads.ts';
-import { answerAsked, answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
@@ -251,11 +251,6 @@ export function registerFundingSources(
   },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
-  const refused = (
-    answer: { outcome: 'refused'; status: number; code: Parameters<typeof sendErrorBody>[2] },
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ) => sendErrorBody(reply, answer.status, answer.code, request.id);
 
   /** Answers a change: the source as it now stands, a step-up asked, or a refusal. */
   const answerChange = (written: SourceChangeWrite, request: FastifyRequest, reply: FastifyReply) => {
@@ -273,10 +268,7 @@ export function registerFundingSources(
     async (request, reply) => {
       const member = memberOf(request);
       const written = await need(links).start(member, idempotentRequest(request, member.orgId), request.id);
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return reply.code(201).send({ link: linkOf(written.link), authoriseUrl: written.authoriseUrl });
     },
   );
@@ -296,10 +288,7 @@ export function registerFundingSources(
         request.params.linkId,
         request.id,
       );
-      if (written.outcome === 'refused') return refused(written, request, reply);
-      if (written.outcome === 'conflict' || written.outcome === 'busy') {
-        return answerRefusedWrite(written, request, reply);
-      }
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       return reply
         .code(written.link.outcome === 'open' ? 202 : 200)
         .send({ link: linkOf(written.link), source: written.source === null ? null : sourceOf(written.source) });
@@ -315,7 +304,7 @@ export function registerFundingSources(
         { after: request.query.after ?? null, limit: request.query.limit ?? MOST_SOURCES_A_PAGE },
         request.id,
       );
-      if (listed.outcome === 'refused') return refused(listed, request, reply);
+      if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
       return { sources: listed.sources.map(sourceOf), next: listed.next };
     },
   );
@@ -326,7 +315,7 @@ export function registerFundingSources(
     async (request, reply) => {
       const { orgId } = memberOf(request);
       const found = await need(reads).show(orgId, request.params.id, request.id);
-      if (found.outcome === 'refused') return refused(found, request, reply);
+      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       return sourceOf(found.source);
     },
   );

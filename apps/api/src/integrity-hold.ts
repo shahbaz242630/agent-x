@@ -37,6 +37,7 @@ import {
   INVESTIGATION_REFERENCE_MAX,
   isIncidentReference,
 } from '@agentx/core/modules/audit';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -154,8 +155,7 @@ export function registerIntegrityHold(
   routes.get('/v1/integrity-hold', { schema: SHOW_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
     const { orgId, userId } = memberInSessionOf(request);
     const shown = await need(investigations).show({ orgId, userId }, request.id);
-    const refused = answerRefusal(shown, request, reply);
-    if (refused !== undefined || shown.outcome !== 'shown') return refused;
+    if (shown.outcome === 'refused') return answerRefusal(shown, request, reply);
     return { hold: holdOf(shown.hold) };
   });
 
@@ -174,8 +174,7 @@ export function registerIntegrityHold(
         request.body,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined || written.outcome !== 'written') return refused;
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       const { investigation } = written;
       return reply.code(201).send({
         investigation: {
@@ -225,8 +224,7 @@ export function registerIntegrityHold(
         request.body.stepUpChallengeId,
         request.id,
       );
-      const refused = answerRefusal(written, request, reply);
-      if (refused !== undefined) return refused;
+      if (isUnwritten(written)) return answerRefusal(written, request, reply);
       if (written.outcome !== 'cleared') throw new Error('a clearing answered without the hold');
       return { hold: holdOf(written.hold) };
     },

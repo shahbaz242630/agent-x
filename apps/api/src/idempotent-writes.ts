@@ -16,7 +16,7 @@
 // - conflict: 409 IDEMPOTENCY_KEY_REUSED, the key used for another request;
 // - busy: 409 IDEMPOTENCY_KEY_BUSY with Retry-After, another request with the
 //   key still being done.
-import { isIdempotencyKey, type IdempotentRequest, type IdempotentWrite } from '@agentx/platform/db';
+import { isIdempotencyKey, type IdempotentRequest, type IdempotentWrite, isUnwritten } from '@agentx/platform/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { sendErrorBody } from './errors.ts';
@@ -104,39 +104,24 @@ export function idempotentRequest(request: FastifyRequest, orgId: string): Idemp
 }
 
 /**
- * Answers a write the store refused to do (a conflict, or busy), returning the
- * reply; for a write done or replayed, returns undefined and the route answers
- * from the resource.
- */
-export function answerRefusedWrite(
-  outcome: IdempotentWrite,
-  request: FastifyRequest,
-  reply: FastifyReply,
-): FastifyReply | undefined {
-  if (outcome.outcome === 'conflict') return sendErrorBody(reply, 409, 'IDEMPOTENCY_KEY_REUSED', request.id);
-  if (outcome.outcome === 'busy') {
-    return sendErrorBody(
-      reply.header('retry-after', String(BUSY_RETRY_SECONDS)),
-      409,
-      'IDEMPOTENCY_KEY_BUSY',
-      request.id,
-    );
-  }
-  return undefined;
-}
-
-/**
- * Answers a use case's refusal, or a write the store refused to do; for
- * anything else, returns undefined and the route answers it.
+ * Answers what is final as it stands: a use case's refusal, or a write the
+ * store refused to do (its key used for another request, or still being
+ * done). A write route takes it for whatever `isUnwritten` finds; a read
+ * route, for its refusal.
  */
 export function answerRefusal(
-  answer: Refused | IdempotentWrite | { readonly outcome: 'written' | 'registered' | 'asked' | 'shown' | 'cleared' },
+  answer: Refused | { readonly outcome: 'conflict' | 'busy' },
   request: FastifyRequest,
   reply: FastifyReply,
-): FastifyReply | undefined {
+): FastifyReply {
   if (answer.outcome === 'refused') return sendErrorBody(reply, answer.status, answer.code, request.id);
-  if (answer.outcome === 'conflict' || answer.outcome === 'busy') return answerRefusedWrite(answer, request, reply);
-  return undefined;
+  if (answer.outcome === 'conflict') return sendErrorBody(reply, 409, 'IDEMPOTENCY_KEY_REUSED', request.id);
+  return sendErrorBody(
+    reply.header('retry-after', String(BUSY_RETRY_SECONDS)),
+    409,
+    'IDEMPOTENCY_KEY_BUSY',
+    request.id,
+  );
 }
 
 /**
@@ -155,7 +140,6 @@ export function answerAsked(
   reply: FastifyReply,
 ): FastifyReply {
   if (answer.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: answer.stepUpChallengeId });
-  const refused = answerRefusal(answer, request, reply);
-  if (refused === undefined) throw new Error('a step-up ask answered without its challenge');
-  return refused;
+  if (isUnwritten(answer)) return answerRefusal(answer, request, reply);
+  throw new Error('a step-up ask answered without its challenge');
 }

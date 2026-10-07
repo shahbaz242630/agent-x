@@ -1,5 +1,5 @@
 import type { LiveSession, SignIn } from '@agentx/core/modules/identity';
-import type { IdempotentRequest, IdempotentWrite } from '@agentx/platform/db';
+import { type IdempotentRequest, type IdempotentWrite, isUnwritten } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance, InjectOptions } from 'fastify';
@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { errorBody } from './errors.ts';
 import {
   answerAsked,
-  answerRefusedWrite,
+  answerRefusal,
   BUSY_RETRY_SECONDS,
   canonicalJson,
   idempotentRequest,
@@ -97,9 +97,7 @@ async function withWrite(answer: (asked: IdempotentRequest) => IdempotentWrite) 
       const idempotent = idempotentRequest(request, ORG);
       asked.push(idempotent);
       const outcome = answer(idempotent);
-      const refused = answerRefusedWrite(outcome, request, reply);
-      if (refused !== undefined) return refused;
-      if (outcome.outcome === 'conflict' || outcome.outcome === 'busy') throw new Error('unreachable');
+      if (isUnwritten(outcome)) return answerRefusal(outcome, request, reply);
       return reply.code(outcome.result.status).send({ id: outcome.result.resourceId });
     },
   );
@@ -222,13 +220,6 @@ describe('SEC-DP-07/08/09 answering what the store says', () => {
     expect(response.json()).toEqual(errorBody('IDEMPOTENCY_KEY_BUSY', FIRST_ID));
     expect(response.headers['retry-after']).toBe(String(BUSY_RETRY_SECONDS));
     expect(BUSY_RETRY_SECONDS).toBeGreaterThanOrEqual(5);
-  });
-
-  it('leaves a write done, or replayed, for the route to answer', () => {
-    const request = { id: FIRST_ID } as Parameters<typeof answerRefusedWrite>[1];
-    const reply = {} as Parameters<typeof answerRefusedWrite>[2];
-    expect(answerRefusedWrite(DONE, request, reply)).toBeUndefined();
-    expect(answerRefusedWrite({ outcome: 'replayed', result: DONE.result }, request, reply)).toBeUndefined();
   });
 
   it('fails a step-up ask that answered as if it were done, never sending a challenge it lacks', () => {

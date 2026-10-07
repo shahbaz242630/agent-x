@@ -26,6 +26,7 @@ import {
   ROLE_CONFIRM_OPERATION,
   ROLE_OPERATION,
 } from '@agentx/core/modules/identity';
+import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
@@ -113,8 +114,7 @@ export function registerMemberChanges(app: FastifyInstance, changes: MembershipC
       stepUpChallengeId,
       request.id,
     );
-    const refused = answerRefusal(written, request, reply);
-    if (refused !== undefined) return refused;
+    if (isUnwritten(written)) return answerRefusal(written, request, reply);
     if (written.outcome !== 'written') throw new Error('a confirmation answered without its member');
     return { member: memberOf(written.member) };
   };
