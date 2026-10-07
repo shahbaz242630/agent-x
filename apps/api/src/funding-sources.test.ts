@@ -1,9 +1,8 @@
-// D2-3b, D2-4a: the funding sources' routes, answering a member or an agent
-// with each outcome of the use cases. Who reaches them is the access hook's
+// D2-3b, D2-4a: the funding sources' routes, answering a member with each
+// outcome of the use cases (an agent's: agent-self.test.ts). Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use cases do with the partner and the
 // database is funding-source-links.db.test.ts and
 // funding-source-changes.db.test.ts.
-import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
 import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/identity';
 import type { IdempotentRequest } from '@agentx/platform/db';
@@ -134,7 +133,7 @@ interface Call {
 
 /** A read or a change asked of the D2-4a use cases. */
 type Asked =
-  | { readonly kind: 'list' | 'usableByAgent'; readonly orgId: string; readonly page: SourcePage }
+  | { readonly kind: 'list'; readonly orgId: string; readonly page: SourcePage }
   | { readonly kind: 'show'; readonly orgId: string; readonly sourceId: string }
   | {
       readonly kind: 'refresh' | 'suspend' | 'reactivate' | 'reactivateConfirm';
@@ -143,20 +142,6 @@ type Asked =
       readonly sourceId: string;
       readonly stepUpChallengeId?: string;
     };
-
-const AGENT_KEY = `axk_${'a'.repeat(32)}_${'b'.repeat(43)}`;
-const AGENT_KEY_WITHOUT_SOURCES = `axk_${'c'.repeat(32)}_${'b'.repeat(43)}`;
-const acceptedKey = (scopes: AcceptedKey['scopes']): AcceptedKey => ({
-  orgId: ORG,
-  agentId: '0199a0f0-0000-7000-8000-0000000000a1',
-  keyId: '0199a0f0-0000-7000-8000-0000000000b1',
-  scopes,
-  expiresAt: new Date('2099-12-28T09:00:00.000Z'),
-});
-const AGENT_KEYS: ReadonlyMap<string, AcceptedKey> = new Map([
-  [AGENT_KEY, acceptedKey(['sources:read'])],
-  [AGENT_KEY_WITHOUT_SOURCES, acceptedKey(['requests:read'])],
-]);
 
 /** A server whose use cases answer `start`, `confirm`, the reads and `refresh`. */
 async function withLinks(
@@ -179,10 +164,6 @@ async function withLinks(
     show: (orgId, sourceId) => {
       asked.push({ kind: 'show', orgId, sourceId });
       return Promise.resolve(answers.show ?? { outcome: 'refused', status: 404, code: 'NOT_FOUND' });
-    },
-    usableByAgent: (orgId, page) => {
-      asked.push({ kind: 'usableByAgent', orgId, page });
-      return Promise.resolve(answers.list ?? { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
     },
   };
   const changes: FundingSourceChanges = {
@@ -237,10 +218,6 @@ async function withLinks(
     signIn: { service: SIGN_IN, sessionSeconds: 43_200 },
     restrictedUntil: () => Promise.resolve(undefined),
     findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? ADMIN : ({ outcome: 'none' } as const)),
-    checkAgentKey: (text) => {
-      const key = AGENT_KEYS.get(text);
-      return Promise.resolve(key === undefined ? { outcome: 'refused' } : { outcome: 'accepted', key });
-    },
     fundingSourceLinks: links,
     fundingSourceReads: reads,
     fundingSourceChanges: changes,
@@ -522,68 +499,6 @@ describe('POST /v1/funding-sources/:id/refresh asks the partner how it stands (D
 
     expect((await app.inject(refresh(SOURCE_ID, { availability: 'ACTIVE' }))).statusCode).toBe(400);
     expect(asked).toEqual([]);
-  });
-});
-
-describe('GET /v1/agent/funding-sources: an agent sees the safe summary alone (D2-4a, SEC-AG-05)', () => {
-  const asAgent = (key: string, query = ''): InjectOptions => ({
-    method: 'GET',
-    url: `/v1/agent/funding-sources${query}`,
-    headers: { authorization: `Bearer ${key}` },
-  });
-
-  it('answers each usable source’s ID, currency, kind and hint, and nothing else of it', async () => {
-    const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID } }, asked);
-
-    const response = await app.inject(asAgent(AGENT_KEY, '?limit=10'));
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
-      sources: [{ id: SOURCE_ID, currency: 'AED', accountType: 'sme', hint: 'AE…6026' }],
-      next: LAST_ID,
-    });
-    for (const withheld of ['Jasmine', 'fake-source', 'fake-consent', 'Authorized', '5000000', LINK_ID]) {
-      expect(response.body).not.toContain(withheld);
-    }
-    expect(asked).toEqual([{ kind: 'usableByAgent', orgId: ORG, page: { after: null, limit: 10 } }]);
-  });
-
-  it('passes where the page starts, with the most a page when no limit is asked', async () => {
-    const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null } }, asked);
-
-    const response = await app.inject(asAgent(AGENT_KEY, `?after=${LAST_ID}`));
-
-    expect(response.statusCode).toBe(200);
-    expect(asked).toEqual([{ kind: 'usableByAgent', orgId: ORG, page: { after: LAST_ID, limit: 50 } }]);
-  });
-
-  it('refuses a key without sources:read, before the use case runs', async () => {
-    const asked: Asked[] = [];
-    const { app } = await withLinks({}, asked);
-
-    const response = await app.inject(asAgent(AGENT_KEY_WITHOUT_SOURCES));
-
-    expect(response.statusCode).toBe(403);
-    expect(response.json()).toMatchObject({ error: { code: 'INSUFFICIENT_SCOPE' } });
-    expect(asked).toEqual([]);
-  });
-
-  it('refuses a member’s session: agent routes are the agents’ alone', async () => {
-    const asked: Asked[] = [];
-    const { app } = await withLinks({}, asked);
-
-    const response = await app.inject(read('/v1/agent/funding-sources'));
-
-    expect([401, 403]).toContain(response.statusCode);
-    expect(asked).toEqual([]);
-  });
-
-  it('answers 503 INTEGRITY_FAILED as the use case refuses', async () => {
-    const { app } = await withLinks({ list: { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' } });
-
-    expect((await app.inject(asAgent(AGENT_KEY))).statusCode).toBe(503);
   });
 });
 

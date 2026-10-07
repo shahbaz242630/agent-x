@@ -94,6 +94,7 @@ import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
+import { createAgentMandates } from './agent-mandate.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { createMandateMoves } from './mandate-moves.ts';
@@ -509,7 +510,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       partner: partnerName(config.partner),
       logger,
     }),
-    fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, logger }),
     fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
     mandateRegistry: createMandateRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateAcceptance: createMandateAcceptance({
@@ -521,6 +522,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       outbox,
       logger,
     }),
+    agentMandates: createAgentMandates({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,
       keys,

@@ -23,7 +23,6 @@ import {
   type FinancialRailAdapter,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
-import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -174,7 +173,7 @@ beforeEach(() => {
   rail = createFakeRail({ clock, ids, records: createDatabaseRecords(app) });
   const services = { database: app, keys, ids, logger: testLogger() };
   links = createFundingSourceLinks({ ...services, clock, rail, partner: 'fake' });
-  reads = createFundingSourceReads({ ...services, clock });
+  reads = createFundingSourceReads(services);
   changes = changesWith(rail);
 });
 
@@ -448,31 +447,7 @@ describe(`reading the organisation’s sources (D2-4a, Postgres ${server.version
     const withheld = { outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' };
 
     expect(await reads.list(org, FIRST_PAGE, CORRELATION)).toEqual(withheld);
-    expect(await reads.usableByAgent(org, FIRST_PAGE, CORRELATION)).toEqual(withheld);
     expect(await reads.show(org, source.id, CORRELATION)).toEqual(withheld);
     expect(await refresh(admin, source.id)).toEqual(withheld);
-  });
-
-  it('gives an agent only the sources that may fund a request now (SEC-AG-05)', async () => {
-    const org = await organization();
-    const admin = await member(org, 'admin');
-    const usable = await linked(admin);
-    const atTheBank = await linked(admin, 'sme-trading-business-acct-01');
-    await rail.bank.changeConsent(org, atTheBank.consentId, 'Suspended');
-    clock.advanceBy(60_000);
-    await refresh(admin, atTheBank.source.id);
-
-    expect(await reads.usableByAgent(org, FIRST_PAGE, CORRELATION)).toEqual({
-      outcome: 'listed',
-      sources: [usable.source],
-      next: null,
-    });
-    // Past the consent's expiry, none may fund one.
-    clock.advanceBy(366 * DAY_MS);
-    expect(await reads.usableByAgent(org, FIRST_PAGE, CORRELATION)).toEqual({
-      outcome: 'listed',
-      sources: [],
-      next: null,
-    });
   });
 });
