@@ -119,6 +119,10 @@ describe('the terms against the bank consent (partner, S86–S87)', () => {
     });
   });
 
+  it('strict: refused past it by one limit alone', () => {
+    expect(consentCheck({ ...TERMS, perOrderLimit: AED(500_001) }, CONSENT)).toMatchObject({ refused: true });
+  });
+
   it('flexible: kept past it, the problems its warnings', () => {
     expect(consentCheck({ ...TERMS, consentLimits: 'flexible', perOrderLimit: AED(500_001) }, CONSENT)).toEqual({
       refused: false,
