@@ -404,7 +404,10 @@ async function nextVersionNumber(tx: MandatesTransaction, orgId: string, mandate
  * The agent's open mandate (OPEN_STATES), read (`share`) and verified, or
  * missing when it has none, in one statement however long its history: the
  * row's status picks it, 0035's `one_open_mandate_an_agent` keeps it to one,
- * and the verified read means that status is the signed one.
+ * and the verified read means that status is the signed one. A row flipped
+ * past the app from open to ended isn't read here, so a draft could follow
+ * it: a draft grants nothing, and acceptance (B3) verifies every mandate of
+ * the agent before one goes live, as any read of the flipped row does.
  */
 export async function openMandateOfAgent(
   tx: MandatesTransaction,
@@ -413,7 +416,7 @@ export async function openMandateOfAgent(
   agentId: string,
 ): Promise<MandateCheck> {
   const row = await tx
-    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- an ID alone, read through its signed state just below; a status flipped to ended is B3's to catch (above)
     .selectFrom(MANDATES.table)
     .select('id')
     .where('org_id', '=', orgId)

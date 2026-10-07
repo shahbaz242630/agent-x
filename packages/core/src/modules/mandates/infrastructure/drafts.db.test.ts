@@ -349,4 +349,12 @@ describe('FX-TAMPER as the owner on a mandate (SEC-DB-03, the store’s half)', 
 
     await deniedAndHeld(() => read(id), { id, subjectType: 'mandate', sign: 'seal' });
   });
+
+  it('a draft made REVOKED past the app, hiding it from the open-mandate query: its read denied, and held', async () => {
+    const { id } = await drafted();
+    await owner.query("update mandates.mandates set status = 'REVOKED' where id = $1", [id]);
+
+    expect(await openOf()).toEqual({ outcome: 'missing' });
+    await deniedAndHeld(() => read(id), { id, subjectType: 'mandate', sign: 'seal' });
+  });
 });
