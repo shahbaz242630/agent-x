@@ -304,7 +304,7 @@ const eventsAbout = async (org: string, mandateId: string) =>
   ).map(({ action, details }) => ({ action, details: JSON.parse(details) as Record<string, unknown> }));
 
 /** Moves the mandate by `event`, as B4 will. */
-const moved = (w: World, mandateId: string, event: 'suspend' | 'revoke') =>
+const moved = (w: World, mandateId: string, event: 'suspend' | 'resume' | 'revoke') =>
   withSignedStates(app, w.org, quiet(), (tx, states) =>
     states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId }, event, {
       actor: OPERATOR,
@@ -430,6 +430,21 @@ describe('the step-up an acceptance needs (B3, SEC-HA-12)', () => {
 
     expect(await confirm(w.admin, id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
     expect(await ask(w.admin, id, versionId)).toEqual(refused(409, 'MANDATE_NOT_WAITING'));
+  });
+});
+
+describe('the step-up bound to the mandate as it stood (B3)', () => {
+  it('refuses a step-up asked before the mandate changed, though its draft is the same: suspended and resumed between', async () => {
+    const w = await world();
+    const { id, versionId } = await drafted(w);
+    acceptedOf(await accepted(w, id, versionId));
+    const second = await redrafted(w, id);
+    const challengeId = askedFor(await ask(w.admin, id, second));
+    await stepUp(w.admin, challengeId);
+    await moved(w, id, 'suspend');
+    await moved(w, id, 'resume');
+
+    expect(await confirm(w.admin, id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
   });
 });
 
