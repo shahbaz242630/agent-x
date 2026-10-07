@@ -14,7 +14,8 @@
 //    (B1e-3), the sign-in flows' sweep (B2-3a-2), the ended sessions'
 //    sweep (B2-4a), the security events' retention sweep (B2-5a) and the
 //    notices' sweep (B5-1b); and the security events' recorder, writing its
-//    counts each minute (B2-5b). Role grants write their notices to the
+//    counts each minute (B2-5b); and mandates past their end expired, each
+//    five minutes (Phase 2 B4). Role grants write their notices to the
 //    outbox (B5-1b); the sender sends them by email, each minute, once the
 //    config names email (B5-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
@@ -94,6 +95,8 @@ import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
+import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
+import { createMandateMoves } from './mandate-moves.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -518,6 +521,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       outbox,
       logger,
     }),
+    mandateMoves: createMandateMoves({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
     supplierDetailsChanges: createSupplierDetailsChanges({
@@ -695,6 +707,19 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
   });
   const factorRemoving = scheduleRunsIfAny(removals, FACTOR_REMOVALS_EVERY_MS);
   logger.info('api.factor_resets', { removing: factorRemoving.running });
+  // Mandates past their end expired (Phase 2 B4), on a timer of their own.
+  const expiring = scheduleRuns(
+    createMandateExpiry({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      outbox,
+      logger,
+    }),
+    MANDATE_EXPIRY_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -713,6 +738,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           noticeSending?.stop(),
           idpCopying.stop(),
           factorRemoving.stop(),
+          expiring.stop(),
           recording.stop(),
         ]);
       },

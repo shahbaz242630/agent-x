@@ -51,6 +51,7 @@ import {
   mandateIn,
   type MandateView,
   sourceIn,
+  toldOfMandate,
   versionIn,
   viewIn,
 } from './mandate-reads.ts';
@@ -234,16 +235,7 @@ export function createMandateAcceptance({
           actor: { type: 'user', id: member.userId },
           details: { ...stepUpDetails(consumed), termsHash: read.draft.termsHash },
         });
-        await outbox.add(tx, [
-          {
-            orgId: member.orgId,
-            recipientUserId: null,
-            kind: 'mandate_accepted',
-            membershipId: null,
-            role: null,
-            aboutId: read.mandate.id,
-          },
-        ]);
+        await outbox.add(tx, toldOfMandate(member.orgId, 'mandate_accepted', read.mandate.id));
         return { status: 200, resourceId: read.mandate.id };
       });
       if (isUnwritten(done)) return done;

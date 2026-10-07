@@ -81,7 +81,9 @@ export const REASON_CODES = {
   MANDATE_DRAFT_EXPIRED:
     "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed.",
   MANDATE_ENDED:
-    'The mandate is revoked or expired, so it takes no new version. Draft a new mandate for the agent instead. Nothing was changed.',
+    'The mandate is revoked or expired, or its end date has passed, so it can no longer change. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',
+  MANDATE_NOT_SUSPENDED: 'The mandate is not suspended, so there is no suspension to lift. Nothing was changed.',
   MANDATE_NOT_WAITING:
     'The version named is not the draft waiting for acceptance: none waits, or a newer draft replaced it. Look at the mandate again and accept the draft it shows. Nothing was changed.',
   MANDATE_OPEN:

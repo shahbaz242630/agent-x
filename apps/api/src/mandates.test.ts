@@ -1,7 +1,8 @@
 // Phase 2 B2: the mandates' routes, answering a member with each outcome of
 // the registry: a draft's body read into its terms (or refused at the edge
 // with every problem), the mandate as it now stands, every refusal, and the
-// reads. Who reaches them is the access hook's (role-matrix.test.ts); what
+// reads; B3's accept and B4's suspend, resume and revoke, each asked then
+// confirmed. Who reaches them is the access hook's (role-matrix.test.ts); what
 // the use case does in the database is mandate-registry.db.test.ts.
 import type { MembershipCheck, LiveSession, Role, SignIn } from '@agentx/core/modules/identity';
 import { money } from '@agentx/core/shared-kernel';
@@ -13,6 +14,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AcceptAsked, MandateAcceptance, MandateAccepted } from './mandate-acceptance.ts';
+import type { MandateMove, MandateMoved, MandateMoves, MoveAsked } from './mandate-moves.ts';
 import type { MandateView } from './mandate-reads.ts';
 import type { MandateDraft, MandateRegistry, MandateWrite } from './mandate-registry.ts';
 import { buildServer } from './server.ts';
@@ -125,7 +127,7 @@ afterEach(async () => {
 });
 
 interface Call {
-  readonly kind: 'draft' | 'redraft' | 'list' | 'show' | 'accept' | 'acceptConfirm';
+  readonly kind: 'draft' | 'redraft' | 'list' | 'show' | 'accept' | 'acceptConfirm' | 'ask' | 'confirm';
   readonly member?: unknown;
   readonly keyed?: IdempotentRequest;
   readonly subject?: unknown;
@@ -137,6 +139,8 @@ interface Answers {
   readonly found?: Awaited<ReturnType<MandateRegistry['show']>>;
   readonly asked?: AcceptAsked;
   readonly accepted?: MandateAccepted;
+  readonly moveAsked?: MoveAsked;
+  readonly moved?: MandateMoved;
 }
 
 /** A server whose registry answers `answers`, the caller holding `role`. */
@@ -151,6 +155,16 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     acceptConfirm: (member, keyed, mandateId, stepUpChallengeId) => {
       calls.push({ kind: 'acceptConfirm', member, keyed, subject: { mandateId, stepUpChallengeId } });
       return Promise.resolve(answers.accepted ?? { outcome: 'busy' as const });
+    },
+  };
+  const moves: MandateMoves = {
+    ask: (member, keyed, mandateId, move) => {
+      calls.push({ kind: 'ask', member, keyed, subject: { mandateId, move } });
+      return Promise.resolve(answers.moveAsked ?? { outcome: 'busy' as const });
+    },
+    confirm: (member, keyed, mandateId, move, stepUpChallengeId) => {
+      calls.push({ kind: 'confirm', member, keyed, subject: { mandateId, move, stepUpChallengeId } });
+      return Promise.resolve(answers.moved ?? { outcome: 'busy' as const });
     },
   };
   const registry: MandateRegistry = {
@@ -198,6 +212,7 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     findMembership: (orgId) => Promise.resolve(orgId.toLowerCase() === ORG ? member : ({ outcome: 'none' } as const)),
     mandateRegistry: registry,
     mandateAcceptance: acceptance,
+    mandateMoves: moves,
   });
   servers.push(app);
   await app.ready();
@@ -437,6 +452,79 @@ describe('POST /v1/mandates/:id/accept/confirm accepts the draft (B3)', () => {
 
     expect(reply.statusCode).toBe(status);
     expect(reply.json()).toMatchObject({ error: { code } });
+  });
+});
+
+describe.each<{ move: MandateMove; status: string }>([
+  { move: 'suspend', status: 'SUSPENDED' },
+  { move: 'resume', status: 'ACTIVE' },
+  { move: 'revoke', status: 'REVOKED' },
+])('POST /v1/mandates/:id/$move, then …/confirm (B4)', ({ move, status }) => {
+  const ask = `/v1/mandates/${MANDATE_ID}/${move}`;
+  const MOVED: MandateMoved = {
+    outcome: 'moved',
+    ...VIEW,
+    mandate: { ...VIEW.mandate, status } as MandateView['mandate'],
+  };
+
+  it('asks a passkey step-up: 202, passing the member in their session, the key and the move', async () => {
+    const { app, calls } = await withMandates({ moveAsked: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
+    const reply = await app.inject(post(ask, {}));
+
+    expect(reply.statusCode).toBe(202);
+    expect(reply.json()).toEqual({ stepUpChallengeId: CHALLENGE });
+    expect(calls).toEqual([
+      {
+        kind: 'ask',
+        member: { orgId: ORG, userId: LIVE.userId, sessionId: LIVE.sessionId },
+        keyed: expect.objectContaining({ operation: `mandates.${move}`, key: 'k-1' }) as unknown,
+        subject: { mandateId: MANDATE_ID, move },
+      },
+    ]);
+  });
+
+  it('confirms: 200 with the mandate moved, passing the step-up', async () => {
+    const { app, calls } = await withMandates({ moved: MOVED });
+    const reply = await app.inject(post(`${ask}/confirm`, { stepUpChallengeId: CHALLENGE }));
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.json()).toEqual({ ...DETAILS_ANSWERED, status });
+    expect(calls[0]).toMatchObject({
+      kind: 'confirm',
+      keyed: { operation: `mandates.${move}.confirm` },
+      subject: { mandateId: MANDATE_ID, move, stepUpChallengeId: CHALLENGE },
+    });
+  });
+
+  it('refuses a body on the ask, and a confirm with no step-up named, at the edge', async () => {
+    const { app, calls } = await withMandates({});
+
+    expect((await app.inject(post(ask, { reason: 'x' }))).statusCode).toBe(400);
+    expect((await app.inject(post(`${ask}/confirm`, {}))).statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [{ outcome: 'refused', status: 409, code: 'MANDATE_ENDED' } as const, 409, 'MANDATE_ENDED'],
+    [{ outcome: 'conflict' } as const, 409, 'IDEMPOTENCY_KEY_REUSED'],
+    [{ outcome: 'busy' } as const, 409, 'IDEMPOTENCY_KEY_BUSY'],
+  ])('answers the use case’s %o as %i %s, on the ask and the confirm', async (answer, code, reason) => {
+    const { app } = await withMandates({ moveAsked: answer, moved: answer });
+    for (const reply of [
+      await app.inject(post(ask, {})),
+      await app.inject(post(`${ask}/confirm`, { stepUpChallengeId: CHALLENGE })),
+    ]) {
+      expect(reply.statusCode).toBe(code);
+      expect(reply.json()).toMatchObject({ error: { code: reason } });
+    }
+  });
+
+  it('refuses a member who isn’t an admin', async () => {
+    const { app, calls } = await withMandates({}, 'approver');
+
+    expect((await app.inject(post(ask, {}))).statusCode).toBe(403);
+    expect((await app.inject(post(`${ask}/confirm`, { stepUpChallengeId: CHALLENGE }))).statusCode).toBe(403);
+    expect(calls).toEqual([]);
   });
 });
 

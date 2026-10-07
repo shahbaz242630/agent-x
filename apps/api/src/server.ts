@@ -61,6 +61,7 @@ import { registerSignIn } from './sign-in.ts';
 import { registerIntegrityHold } from './integrity-hold.ts';
 import { registerInvitations } from './invitations.ts';
 import type { MandateAcceptance } from './mandate-acceptance.ts';
+import type { MandateMoves } from './mandate-moves.ts';
 import type { MandateRegistry } from './mandate-registry.ts';
 import { registerMandates } from './mandates.ts';
 import type { AgentChanges } from './agent-changes.ts';
@@ -146,6 +147,8 @@ export interface ServerOptions {
   readonly mandateRegistry?: MandateRegistry | undefined;
   /** Accepting a mandate's draft (mandate-acceptance.ts); without it, no one reaches those routes. */
   readonly mandateAcceptance?: MandateAcceptance | undefined;
+  /** Suspending, resuming and revoking mandates (mandate-moves.ts); without it, no one reaches those routes. */
+  readonly mandateMoves?: MandateMoves | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -332,7 +335,11 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     verifications: options.supplierVerifications,
     details: options.supplierDetailsChanges,
   });
-  registerMandates(app, { registry: options.mandateRegistry, acceptance: options.mandateAcceptance });
+  registerMandates(app, {
+    registry: options.mandateRegistry,
+    acceptance: options.mandateAcceptance,
+    moves: options.mandateMoves,
+  });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

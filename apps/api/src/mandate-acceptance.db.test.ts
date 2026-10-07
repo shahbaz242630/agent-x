@@ -6,35 +6,12 @@
 // on the accept event; every refusal by its code; a step-up that isn't a
 // passkey, has run out or was asked for another draft; a tampered mandate of
 // the agent; and the lock order against the admin's demotion.
-import { createHash } from 'node:crypto';
-
-import { addAgent, AGENTS, type AgentsTables } from '@agentx/core/modules/agents';
-import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
-import {
-  addLink,
-  addSource,
-  type FundingSourcesTables,
-  settleLink,
-  sourceOf,
-  updateFromPartner,
-} from '@agentx/core/modules/funding-sources';
-import {
-  addMembership,
-  createSessions,
-  createStepUpChallenges,
-  type IdentityTables,
-  type Role,
-  userForSubject,
-} from '@agentx/core/modules/identity';
-import { MANDATES, type MandatesTables } from '@agentx/core/modules/mandates';
-import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
-import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
-import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
-import { money } from '@agentx/core/shared-kernel';
+import { AGENTS } from '@agentx/core/modules/agents';
+import { withSignedStates } from '@agentx/core/modules/audit';
+import { createStepUpChallenges } from '@agentx/core/modules/identity';
+import { MANDATES } from '@agentx/core/modules/mandates';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
-import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
   confirmedWhileDemoted,
   createTestDatabase,
@@ -50,205 +27,47 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 import {
   ACCEPT_CONFIRM_OPERATION,
   ACCEPT_OPERATION,
-  type AcceptAsked,
   createMandateAcceptance,
   type MandateAcceptance,
   type MandateAccepted,
 } from './mandate-acceptance.ts';
 import {
   createMandateRegistry,
-  DRAFT_OPERATION,
   type MandateDraft,
   type MandateRegistry,
-  type MandateWrite,
   REDRAFT_OPERATION,
 } from './mandate-registry.ts';
-import type { SessionMember } from './use-case-work.ts';
-
-type Tables = IdentityTables &
-  MandatesTables &
-  AgentsTables &
-  FundingSourcesTables &
-  SuppliersTables &
-  OrganizationsTables &
-  DirectoryTables &
-  NotificationsTables &
-  AuditTables;
+import {
+  askedFor,
+  draftedOf,
+  keys,
+  type Member,
+  mandateWorld,
+  type MandateWorldTables,
+  OPERATOR,
+  PASSKEY,
+  refused,
+  type World,
+} from './mandate-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<Tables>;
+let app: Database<MandateWorldTables>;
 
-const keys = createKeyProvider(
-  Object.fromEntries(
-    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
-  ),
-);
 const ids = new SequentialIds(0xb3a0_0000_0000);
-const OPERATOR = { type: 'system' as const, id: 'test-operator' };
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000b3';
-const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
-const PASSKEY = ['pwd', 'user', 'mfa'] as const;
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 
 let clock: FixedClock;
 let registry: MandateRegistry;
 let acceptance: MandateAcceptance;
 
-const quiet = () => ({ keys, ids, logger: testLogger() });
 const challenges = () => createStepUpChallenges({ ids, clock });
-
-type Member = SessionMember & { readonly membershipId: string };
-
-interface World {
-  readonly org: string;
-  readonly admin: Member;
-  readonly agent: string;
-  readonly source: string;
-  readonly state: FundingSourceState;
-  readonly suppliers: readonly string[];
-}
-
-let people = 0;
-
-/** A person with a session and a membership in the organisation. */
-async function member(org: string, role: Role): Promise<Member> {
-  people += 1;
-  const userId = await userForSubject(
-    app,
-    { issuer: 'https://auth.example.test', subject: `mandate-acceptance-${String(people)}` },
-    { ids, clock },
-  );
-  const sessions = createSessions({ ids, clock, timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
-  const { sessionId } = await sessions.open(app, userId, {
-    idpSessionId: 'V1_1',
-    authTime: clock.now(),
-    amr: [...PASSKEY],
-  });
-  const membershipId = ids.next();
-  await withSignedStates(app, org, quiet(), (tx, states) =>
-    addMembership(tx, states, { orgId: org, id: membershipId, userId, role, joinedAt: clock.now(), actor: OPERATOR }),
-  );
-  return { orgId: org, userId, sessionId, membershipId };
-}
-
-/** An organisation with an admin, an active agent, a source linked through the fake partner, and two suppliers. */
-async function world(): Promise<World> {
-  const org = ids.next();
-  await withSignedStates(app, org, quiet(), (tx, states) =>
-    createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
-  );
-  const admin = await member(org, 'admin');
-  const agent = ids.next();
-  await withSignedStates(app, org, quiet(), (tx, states) =>
-    addAgent(tx, states, {
-      orgId: org,
-      id: agent,
-      name: 'Purchasing agent',
-      owner: admin.membershipId,
-      scopes: ['requests:write'],
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    }),
-  );
-  const rail = createFakeRail({ clock, ids: new SequentialIds(0xfa0_b300_0000) });
-  const linkId = ids.next();
-  const session = await rail.startSourceLink({ organizationId: org, linkId });
-  await rail.bank.approve(org, session.sessionRef, ACCOUNT);
-  const answer = await rail.confirmSourceLink({ organizationId: org, linkId });
-  if (answer.kind !== 'linked') throw new Error(`not linked: ${answer.kind}`);
-  await withTenant(app, org, (tx) =>
-    addLink(tx, {
-      orgId: org,
-      id: linkId,
-      startedBy: ids.next(),
-      partner: 'fake',
-      sessionRef: session.sessionRef,
-      expiresAt: session.expiresAt,
-      createdAt: clock.now(),
-    }),
-  );
-  const source = ids.next();
-  await withSignedStates(app, org, quiet(), async (tx, states) => {
-    await addSource(tx, states, {
-      orgId: org,
-      id: source,
-      linkId,
-      partner: 'fake',
-      state: answer.source,
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    });
-    await settleLink(tx, { orgId: org, id: linkId }, { outcome: 'linked', sourceId: source }, clock.now());
-  });
-  const suppliers = [ids.next(), ids.next()];
-  for (const id of suppliers) {
-    await withSignedStates(app, org, quiet(), (tx, states) =>
-      addSupplier(tx, states, keys, {
-        orgId: org,
-        id,
-        versionId: ids.next(),
-        supplier: {
-          displayName: 'Gulf Office Supplies LLC',
-          contacts: { phone: '+971501234567', email: null, tradeLicence: null },
-          source: { kind: 'registry', ref: 'DED-123456' },
-        },
-        enteredBy: ids.next(),
-        createdAt: clock.now(),
-        actor: OPERATOR,
-      }),
-    );
-  }
-  return { org, admin, agent, source, state: answer.source, suppliers };
-}
-
-const AED = (minor: bigint) => money(minor, 'AED');
-
-const termsOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}): MandateDraft['terms'] => {
-  const most = w.state.controls.maxPaymentMinor;
-  return {
-    purpose: 'Office supplies',
-    perOrderLimit: AED(most),
-    monthlyLimit: AED(most * 2n),
-    approvalThreshold: AED(most / 2n),
-    supplierIds: [...w.suppliers].sort(),
-    fundingSourceId: w.source,
-    splitCheck: true,
-    consentLimits: 'strict',
-    endsAt: null,
-    ...overrides,
-  };
-};
-
-let keysUsed = 0;
-const keyed = (who: Member, operation: string): IdempotentRequest => {
-  keysUsed += 1;
-  return {
-    orgId: who.orgId,
-    client: { kind: 'user', id: who.userId },
-    operation,
-    key: `key-${String(keysUsed)}`,
-    payload: '{}',
-  };
-};
-
-const draftedOf = (write: MandateWrite) => {
-  if (write.outcome !== 'drafted') throw new Error(`not drafted: ${JSON.stringify(write)}`);
-  return write;
-};
+const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-acceptance' });
+const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, stepUp, movedPastTheUseCase } = shared;
 
 /** A mandate drafted for the world's agent: its ID and its draft's. */
-async function drafted(w: World, overrides: Partial<MandateDraft['terms']> = {}) {
-  const write = draftedOf(
-    await registry.draft(
-      w.admin,
-      keyed(w.admin, DRAFT_OPERATION),
-      { agentId: w.agent, timeZone: null, splitWindowHours: null, terms: termsOf(w, overrides) },
-      CORRELATION,
-    ),
-  );
-  return { id: write.mandate.id, versionId: write.pending?.version.id ?? '' };
-}
+const drafted = (w: World, overrides: Partial<MandateDraft['terms']> = {}) => shared.drafted(registry, w, overrides);
 
 /** A later draft of the mandate: its ID. */
 async function redrafted(w: World, mandateId: string, overrides: Partial<MandateDraft['terms']> = {}) {
@@ -264,23 +83,10 @@ const ask = (who: Member, mandateId: string, versionId: string) =>
 const confirm = (who: Member, mandateId: string, challengeId: string, key?: IdempotentRequest) =>
   acceptance.acceptConfirm(who, key ?? keyed(who, ACCEPT_CONFIRM_OPERATION), mandateId, challengeId, CORRELATION);
 
-const askedFor = (write: AcceptAsked): string => {
-  if (write.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(write)}`);
-  return write.stepUpChallengeId;
-};
-
 const acceptedOf = (write: MandateAccepted) => {
   if (write.outcome !== 'accepted') throw new Error(`not accepted: ${JSON.stringify(write)}`);
   return write;
 };
-
-const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
-  challenges().recordEvidence(app, challengeId, who.sessionId, {
-    authTime: clock.now(),
-    amr,
-    idpSessionId: 'V1_2',
-    idTokenHash: createHash('sha256').update('an ID token').digest(),
-  });
 
 /** Asks, signs in again with `amr` and confirms: the confirm's answer. */
 async function accepted(w: World, mandateId: string, versionId: string, amr: readonly string[] = PASSKEY) {
@@ -289,48 +95,9 @@ async function accepted(w: World, mandateId: string, versionId: string, amr: rea
   return confirm(w.admin, mandateId, challengeId);
 }
 
-const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
-
-/** The mandate's events, oldest first, with their details read. */
-const eventsAbout = async (org: string, mandateId: string) =>
-  (
-    await withTenant(app, org, (tx) =>
-      tx
-        .selectFrom('audit.events')
-        .select(['action', 'details'])
-        .where('subject_type', '=', 'mandate')
-        .where('subject_id', '=', mandateId)
-        .orderBy('seq')
-        .execute(),
-    )
-  ).map(({ action, details }) => ({ action, details: JSON.parse(details) as Record<string, unknown> }));
-
-/** Moves the mandate by `event`, as B4 will. */
-const moved = (w: World, mandateId: string, event: 'suspend' | 'resume' | 'revoke') =>
-  withSignedStates(app, w.org, quiet(), (tx, states) =>
-    states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId }, event, {
-      actor: OPERATOR,
-      action: `mandate.${event}`,
-      details: {},
-    }),
-  );
-
-/** The source brought up to the partner's answer changed by `change`, as a refresh would. */
-async function partnerSays(w: World, change: Partial<FundingSourceState>): Promise<void> {
-  const key = { orgId: w.org, id: w.source };
-  await withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const read = await sourceOf(tx, states, key, 'change');
-    if (read.outcome !== 'found') throw new Error('the source was not found');
-    await updateFromPartner(tx, states, key, read, {
-      state: { ...w.state, statusChangedAt: clock.now(), ...change },
-      actor: OPERATOR,
-    });
-  });
-}
-
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  app = createDatabase<MandateWorldTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -456,8 +223,8 @@ describe('the step-up bound to the mandate as it stood (B3)', () => {
     const second = await redrafted(w, id);
     const challengeId = askedFor(await ask(w.admin, id, second));
     await stepUp(w.admin, challengeId);
-    await moved(w, id, 'suspend');
-    await moved(w, id, 'resume');
+    await movedPastTheUseCase(w, id, 'suspend');
+    await movedPastTheUseCase(w, id, 'resume');
 
     expect(await confirm(w.admin, id, challengeId)).toEqual(refused(403, 'STEP_UP_FAILED'));
   });
@@ -474,7 +241,7 @@ describe('what acceptance refuses (B3)', () => {
     const w = await world();
     const { id, versionId } = await drafted(w);
     expect(await ask(w.admin, ids.next(), versionId)).toEqual(refused(404, 'NOT_FOUND'));
-    await moved(w, id, 'revoke');
+    await movedPastTheUseCase(w, id, 'revoke');
     expect(await ask(w.admin, id, versionId)).toEqual(refused(409, 'MANDATE_ENDED'));
   });
 
@@ -483,7 +250,7 @@ describe('what acceptance refuses (B3)', () => {
     const { id, versionId } = await drafted(w);
     acceptedOf(await accepted(w, id, versionId));
     const second = await redrafted(w, id);
-    await moved(w, id, 'suspend');
+    await movedPastTheUseCase(w, id, 'suspend');
 
     expect(await ask(w.admin, id, second)).toEqual(refused(409, 'MANDATE_SUSPENDED'));
   });
