@@ -9,6 +9,9 @@ const DATABASE_TESTS = '**/*.db.test.ts';
 /** Tests that need the compose stack up (ADR-010 §7): run by `pnpm e2e`, never here. */
 const END_TO_END_TESTS = '**/*.e2e.test.ts';
 
+/** Helpers several test files share: named as tests, which alone may import @agentx/testing, but holding none. */
+const TEST_HELPERS = '**/*.helper.test.ts';
+
 export default defineConfig({
   test: {
     projects: [
@@ -16,7 +19,7 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['packages/*/src/**/*.test.{ts,tsx}', 'apps/*/src/**/*.test.{ts,tsx}'],
-          exclude: [...configDefaults.exclude, DATABASE_TESTS],
+          exclude: [...configDefaults.exclude, DATABASE_TESTS, TEST_HELPERS],
         },
       },
       {

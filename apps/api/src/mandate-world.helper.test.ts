@@ -1,0 +1,265 @@
+// The mandates' database tests' shared world (Phase 2 B4; S89's simplify
+// review): an organisation with an admin, an active agent, a funding source
+// linked through the fake partner and two signed suppliers, the people and
+// keys the use cases take, and the reads the tests make of them. A helper,
+// not a test: Vitest leaves `*.helper.test.ts` out (vitest.config.ts), and
+// the name keeps it with the tests, which alone may import @agentx/testing.
+import { addAgent, type AgentsTables } from '@agentx/core/modules/agents';
+import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
+import type { DirectoryTables } from '@agentx/core/modules/directory';
+import {
+  addLink,
+  addSource,
+  type FundingSourcesTables,
+  settleLink,
+  sourceOf,
+  updateFromPartner,
+} from '@agentx/core/modules/funding-sources';
+import {
+  addMembership,
+  createSessions,
+  type IdentityTables,
+  type Role,
+  userForSubject,
+} from '@agentx/core/modules/identity';
+import type { MandatesTables } from '@agentx/core/modules/mandates';
+import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
+import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
+import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
+import { money } from '@agentx/core/shared-kernel';
+import { type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
+import { type FixedClock, SequentialIds, testLogger } from '@agentx/testing';
+
+import type { MandateDraft, MandateWrite } from './mandate-registry.ts';
+import type { SessionMember } from './use-case-work.ts';
+
+export type MandateWorldTables = IdentityTables &
+  MandatesTables &
+  AgentsTables &
+  FundingSourcesTables &
+  SuppliersTables &
+  OrganizationsTables &
+  DirectoryTables &
+  NotificationsTables &
+  AuditTables;
+
+export const keys = createKeyProvider(
+  Object.fromEntries(
+    PURPOSES.map((purpose, index) => [purpose, { current: 1, versions: new Map([[1, Buffer.alloc(32, index + 1)]]) }]),
+  ),
+);
+export const OPERATOR = { type: 'system' as const, id: 'test-operator' };
+export const PASSKEY = ['pwd', 'user', 'mfa'] as const;
+const ACCOUNT = 'sme-rak-trading-emirati-acct-01';
+
+export type Member = SessionMember & { readonly membershipId: string };
+
+export interface World {
+  readonly org: string;
+  readonly admin: Member;
+  readonly agent: string;
+  readonly source: string;
+  /** The source's consent per payment, in fils. */
+  readonly maxPayment: bigint;
+  /** The source as the partner answered it when linked. */
+  readonly state: FundingSourceState;
+  readonly suppliers: readonly string[];
+}
+
+export const AED = (minor: bigint) => money(minor, 'AED');
+
+export const refused = (status: number, code: string) => ({ outcome: 'refused', status, code });
+
+export const draftedOf = (write: MandateWrite) => {
+  if (write.outcome !== 'drafted') throw new Error(`not drafted: ${JSON.stringify(write)}`);
+  return write;
+};
+
+/**
+ * The world's makers and reads for one test file: `app` and `clock` are read
+ * at each call, as the file sets them in its hooks; `name` keeps its people's
+ * subjects apart from another file's.
+ */
+export function mandateWorld({
+  app,
+  clock,
+  ids,
+  name,
+}: {
+  readonly app: () => Database<MandateWorldTables>;
+  readonly clock: () => FixedClock;
+  readonly ids: SequentialIds;
+  readonly name: string;
+}) {
+  const quiet = () => ({ keys, ids, logger: testLogger() });
+  let people = 0;
+  let keysUsed = 0;
+
+  /** A person with a session (signed in with a passkey) and a membership in the organisation. */
+  async function member(org: string, role: Role): Promise<Member> {
+    people += 1;
+    const userId = await userForSubject(
+      app(),
+      { issuer: 'https://auth.example.test', subject: `${name}-${String(people)}` },
+      { ids, clock: clock() },
+    );
+    const sessions = createSessions({ ids, clock: clock(), timeouts: { idleSeconds: 1800, absoluteSeconds: 43_200 } });
+    const { sessionId } = await sessions.open(app(), userId, {
+      idpSessionId: 'V1_1',
+      authTime: clock().now(),
+      amr: [...PASSKEY],
+    });
+    const membershipId = ids.next();
+    await withSignedStates(app(), org, quiet(), (tx, states) =>
+      addMembership(tx, states, {
+        orgId: org,
+        id: membershipId,
+        userId,
+        role,
+        joinedAt: clock().now(),
+        actor: OPERATOR,
+      }),
+    );
+    return { orgId: org, userId, sessionId, membershipId };
+  }
+
+  /** An organisation with an admin, an active agent, a source linked through the fake partner, and two suppliers. */
+  async function world(): Promise<World> {
+    const now = clock().now();
+    const org = ids.next();
+    await withSignedStates(app(), org, quiet(), (tx, states) =>
+      createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
+    );
+    const admin = await member(org, 'admin');
+    const agent = ids.next();
+    await withSignedStates(app(), org, quiet(), (tx, states) =>
+      addAgent(tx, states, {
+        orgId: org,
+        id: agent,
+        name: 'Purchasing agent',
+        owner: admin.membershipId,
+        scopes: ['requests:write'],
+        createdAt: now,
+        actor: OPERATOR,
+      }),
+    );
+    // Each world's partner is a fake of its own, so its IDs may repeat another world's.
+    const rail = createFakeRail({ clock: clock(), ids: new SequentialIds(0xfa0_0000_0000) });
+    const linkId = ids.next();
+    const session = await rail.startSourceLink({ organizationId: org, linkId });
+    await rail.bank.approve(org, session.sessionRef, ACCOUNT);
+    const answer = await rail.confirmSourceLink({ organizationId: org, linkId });
+    if (answer.kind !== 'linked') throw new Error(`not linked: ${answer.kind}`);
+    await withTenant(app(), org, (tx) =>
+      addLink(tx, {
+        orgId: org,
+        id: linkId,
+        startedBy: ids.next(),
+        partner: 'fake',
+        sessionRef: session.sessionRef,
+        expiresAt: session.expiresAt,
+        createdAt: now,
+      }),
+    );
+    const source = ids.next();
+    await withSignedStates(app(), org, quiet(), async (tx, states) => {
+      await addSource(tx, states, {
+        orgId: org,
+        id: source,
+        linkId,
+        partner: 'fake',
+        state: answer.source,
+        createdAt: now,
+        actor: OPERATOR,
+      });
+      await settleLink(tx, { orgId: org, id: linkId }, { outcome: 'linked', sourceId: source }, now);
+    });
+    const suppliers = [ids.next(), ids.next()];
+    for (const id of suppliers) {
+      await withSignedStates(app(), org, quiet(), (tx, states) =>
+        addSupplier(tx, states, keys, {
+          orgId: org,
+          id,
+          versionId: ids.next(),
+          supplier: {
+            displayName: 'Gulf Office Supplies LLC',
+            contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+            source: { kind: 'registry', ref: 'DED-123456' },
+          },
+          enteredBy: ids.next(),
+          createdAt: now,
+          actor: OPERATOR,
+        }),
+      );
+    }
+    const maxPayment = answer.source.controls.maxPaymentMinor;
+    return { org, admin, agent, source, maxPayment, state: answer.source, suppliers };
+  }
+
+  /** Terms within the source's consent: the per-order limit what it allows per payment. */
+  const termsOf = (w: World, overrides: Partial<MandateDraft['terms']> = {}): MandateDraft['terms'] => ({
+    purpose: 'Office supplies',
+    perOrderLimit: AED(w.maxPayment),
+    monthlyLimit: AED(w.maxPayment * 2n),
+    approvalThreshold: AED(w.maxPayment / 2n),
+    supplierIds: [...w.suppliers].sort(),
+    fundingSourceId: w.source,
+    splitCheck: true,
+    consentLimits: 'strict',
+    endsAt: null,
+    ...overrides,
+  });
+
+  /** A write's idempotency key: a fresh one unless named. */
+  const keyed = (who: SessionMember | Member, operation: string, key?: string): IdempotentRequest => {
+    keysUsed += 1;
+    return {
+      orgId: who.orgId,
+      client: { kind: 'user', id: who.userId },
+      operation,
+      key: key ?? `key-${String(keysUsed)}`,
+      payload: '{}',
+    };
+  };
+
+  /** The source brought up to the partner's answer changed by `change`, as a refresh would. */
+  async function partnerSays(w: World, change: Partial<FundingSourceState>): Promise<void> {
+    const key = { orgId: w.org, id: w.source };
+    await withSignedStates(app(), w.org, quiet(), async (tx, states) => {
+      const read = await sourceOf(tx, states, key, 'change');
+      if (read.outcome !== 'found') throw new Error('the source was not found');
+      await updateFromPartner(tx, states, key, read, {
+        state: { ...w.state, statusChangedAt: clock().now(), ...change },
+        actor: OPERATOR,
+      });
+    });
+  }
+
+  /** The mandate's events, oldest first, with their details read. */
+  const eventsAbout = async (org: string, mandateId: string) =>
+    (
+      await withTenant(app(), org, (tx) =>
+        tx
+          .selectFrom('audit.events')
+          .select(['action', 'actor_type', 'details'])
+          .where('subject_type', '=', 'mandate')
+          .where('subject_id', '=', mandateId)
+          .orderBy('seq')
+          .execute(),
+      )
+    ).map(({ action, actor_type, details }) => ({
+      action,
+      actorType: actor_type,
+      details: JSON.parse(details) as Record<string, unknown>,
+    }));
+
+  /** The organisation's notices, as the outbox holds them. */
+  const noticesOf = (org: string) =>
+    withTenant(app(), org, (tx) =>
+      tx.selectFrom('notifications.outbox').select(['kind', 'about_id', 'recipient_user_id']).orderBy('id').execute(),
+    );
+
+  return { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, noticesOf };
+}
