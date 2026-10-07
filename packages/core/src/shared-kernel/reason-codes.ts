@@ -26,10 +26,14 @@ export const REASON_CODES = {
   AGENT_OWNER_NOT_ELIGIBLE:
     "The member can't own an agent: they must be an active admin or developer of the organisation. Nothing was changed.",
   AGENT_OWNER_UNCHANGED: 'The member already owns the agent, so nothing was changed.',
+  AGENT_SUSPENDED:
+    "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing was reserved.",
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
     "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
+  APPROVAL_THRESHOLD:
+    "The amount is above the approval threshold, the lowest of the mandate's and its policies', so a person must approve it.",
   BAD_REQUEST: "The request is malformed, so it can't be read.",
   BANK_ACCOUNT_UNKNOWN:
     "The staging bank holds no account by this ID, so nothing was approved. List the bank's accounts and pick one of them.",
@@ -48,6 +52,8 @@ export const REASON_CODES = {
   CONTACT_EXISTS: "This address is already one of the organisation's registered contacts, so it was not added again.",
   CONTACT_NOT_ACTIVE:
     "This registered contact isn't active: it was removed already, or it was never confirmed. Nothing was changed.",
+  CURRENCY_NOT_ALLOWED:
+    "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved.",
   DUPLICATE_ORDER_REFERENCE:
     'An earlier request for the same supplier and order reference is still open, has an unknown outcome or was paid, so this one is refused.',
   FORBIDDEN:
@@ -82,12 +88,18 @@ export const REASON_CODES = {
     "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed.",
   MANDATE_ENDED:
     'The mandate is revoked or expired, or its end date has passed, so it can no longer change. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_MONTHLY_LIMIT:
+    "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit, so it is refused and no approval can allow it. It needs a new mandate version with a higher limit, or capacity freeing up. Nothing was reserved.",
   MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',
+  MANDATE_NOT_IN_FORCE:
+    'The agent has no mandate in force: none was accepted yet, or it is suspended, revoked or expired, or its end date has passed. So the request is refused. Nothing was reserved.',
   MANDATE_NOT_SUSPENDED: 'The mandate is not suspended, so there is no suspension to lift. Nothing was changed.',
   MANDATE_NOT_WAITING:
     'The version named is not the draft waiting for acceptance: none waits, or a newer draft replaced it. Look at the mandate again and accept the draft it shows. Nothing was changed.',
   MANDATE_OPEN:
     'The agent already has a mandate waiting for acceptance or in force. Draft a new version of that mandate instead. Nothing was changed.',
+  MANDATE_ORDER_LIMIT:
+    "The amount is above the mandate's per-order limit, so it is refused and no approval can allow it. Only a new mandate version with a higher limit could. Nothing was reserved.",
   MANDATE_PAST_CONSENT:
     "A limit is above what the funding source's bank consent allows, or the mandate's currency is not the source's, and the mandate is strict about its consent. Lower the limit, or make the mandate flexible. Nothing was changed.",
   MANDATE_SUSPENDED:
@@ -124,6 +136,12 @@ export const REASON_CODES = {
   PAYEE_ROUTE_NOT_OFFERED:
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
+  POLICY_MONTHLY_CAP:
+    "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies (AED 20,000 unless the organisation set another), so it is refused. Nothing was reserved.",
+  POLICY_ORDER_CAP:
+    "The amount is above a per-order cap the organisation's policies set, so it is refused or sent for approval, as that policy says.",
+  POLICY_SUPPLIER_NOT_ALLOWED:
+    "The organisation's policies don't allow payments to this supplier, so the request is refused. Nothing was reserved.",
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
@@ -141,6 +159,8 @@ export const REASON_CODES = {
     "The sign-in service couldn't be reached just now, so no session was opened. Wait the number of seconds in the Retry-After header, then start again from the sign-in page.",
   SOLO_PATH_LOCKED:
     "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed.",
+  SOURCE_NOT_MANDATED:
+    "The funding source named is not the mandate's, so the request is refused. Use the mandate's funding source. Nothing was reserved.",
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   SOURCE_NOT_USABLE:
@@ -163,9 +183,13 @@ export const REASON_CODES = {
     "These are the supplier's details already, so nothing was changed, and it stays as verified as it was.",
   SUPPLIER_NAME_MISMATCH:
     "The bank says the account holder's name doesn't match the supplier's, so it can't be verified. Nothing was changed. Call the supplier on its known number, then withdraw or replace the bank details.",
+  SUPPLIER_NOT_ALLOWED:
+    "The mandate doesn't allow payments to this supplier, so the request is refused. Nothing was reserved.",
   SUPPLIER_NOT_SUSPENDED: 'The supplier is not suspended, so there is no suspension to lift. Nothing was changed.',
   SUPPLIER_NOT_UNVERIFIED:
     'The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again.',
+  SUPPLIER_NOT_VERIFIED:
+    "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing was reserved.",
   SUPPLIER_NO_CHANGE_WAITING:
     "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
   SUPPLIER_NO_PAYEE:

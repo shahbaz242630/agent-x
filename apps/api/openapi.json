@@ -61,6 +61,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_SUSPENDED",
+                    "description": "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGGREGATE_THRESHOLD",
                     "description": "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it."
                   },
@@ -68,6 +73,11 @@
                     "type": "string",
                     "const": "ALREADY_A_MEMBER",
                     "description": "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change."
+                  },
+                  {
+                    "type": "string",
+                    "const": "APPROVAL_THRESHOLD",
+                    "description": "The amount is above the approval threshold, the lowest of the mandate's and its policies', so a person must approve it."
                   },
                   {
                     "type": "string",
@@ -118,6 +128,11 @@
                     "type": "string",
                     "const": "CONTACT_NOT_ACTIVE",
                     "description": "This registered contact isn't active: it was removed already, or it was never confirmed. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "CURRENCY_NOT_ALLOWED",
+                    "description": "An amount weighed is not in the mandate's currency: the request's, or a limit the organisation's policies set (AED 20,000 a month per agent is the default in AED only). Amounts are never converted, so the request is refused. Nothing was reserved."
                   },
                   {
                     "type": "string",
@@ -206,8 +221,18 @@
                   },
                   {
                     "type": "string",
+                    "const": "MANDATE_MONTHLY_LIMIT",
+                    "description": "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit, so it is refused and no approval can allow it. It needs a new mandate version with a higher limit, or capacity freeing up. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
                     "const": "MANDATE_NOT_ACTIVE",
                     "description": "The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "MANDATE_NOT_IN_FORCE",
+                    "description": "The agent has no mandate in force: none was accepted yet, or it is suspended, revoked or expired, or its end date has passed. So the request is refused. Nothing was reserved."
                   },
                   {
                     "type": "string",
@@ -223,6 +248,11 @@
                     "type": "string",
                     "const": "MANDATE_OPEN",
                     "description": "The agent already has a mandate waiting for acceptance or in force. Draft a new version of that mandate instead. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "MANDATE_ORDER_LIMIT",
+                    "description": "The amount is above the mandate's per-order limit, so it is refused and no approval can allow it. Only a new mandate version with a higher limit could. Nothing was reserved."
                   },
                   {
                     "type": "string",
@@ -321,6 +351,21 @@
                   },
                   {
                     "type": "string",
+                    "const": "POLICY_MONTHLY_CAP",
+                    "description": "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies (AED 20,000 unless the organisation set another), so it is refused. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
+                    "const": "POLICY_ORDER_CAP",
+                    "description": "The amount is above a per-order cap the organisation's policies set, so it is refused or sent for approval, as that policy says."
+                  },
+                  {
+                    "type": "string",
+                    "const": "POLICY_SUPPLIER_NOT_ALLOWED",
+                    "description": "The organisation's policies don't allow payments to this supplier, so the request is refused. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
                     "const": "RATE_LIMITED",
                     "description": "Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again."
                   },
@@ -368,6 +413,11 @@
                     "type": "string",
                     "const": "SOLO_PATH_LOCKED",
                     "description": "No one else can verify this supplier yet, and an admin or finance approver was removed or had their role changed in the last 14 days, so it can't be verified by one person alone until then. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SOURCE_NOT_MANDATED",
+                    "description": "The funding source named is not the mandate's, so the request is refused. Use the mandate's funding source. Nothing was reserved."
                   },
                   {
                     "type": "string",
@@ -426,6 +476,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "SUPPLIER_NOT_ALLOWED",
+                    "description": "The mandate doesn't allow payments to this supplier, so the request is refused. Nothing was reserved."
+                  },
+                  {
+                    "type": "string",
                     "const": "SUPPLIER_NOT_SUSPENDED",
                     "description": "The supplier is not suspended, so there is no suspension to lift. Nothing was changed."
                   },
@@ -433,6 +488,11 @@
                     "type": "string",
                     "const": "SUPPLIER_NOT_UNVERIFIED",
                     "description": "The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again."
+                  },
+                  {
+                    "type": "string",
+                    "const": "SUPPLIER_NOT_VERIFIED",
+                    "description": "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing was reserved."
                   },
                   {
                     "type": "string",

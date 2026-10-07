@@ -14,6 +14,7 @@
     "./modules/notifications": "./src/modules/notifications/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",
     "./modules/platform-controls": "./src/modules/platform-controls/index.ts",
+    "./modules/policies": "./src/modules/policies/index.ts",
     "./modules/providers": "./src/modules/providers/index.ts",
     "./modules/security-events": "./src/modules/security-events/index.ts",
     "./modules/suppliers": "./src/modules/suppliers/index.ts",
