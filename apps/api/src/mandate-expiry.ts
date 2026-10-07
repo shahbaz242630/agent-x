@@ -34,7 +34,7 @@ import { movedAsRead } from './use-case-work.ts';
 export const MANDATE_EXPIRY_EVERY_MS = 5 * 60_000;
 
 /** How many of an organisation's mandates one run expires: the rest wait for the next. */
-export const MOST_EXPIRED_A_RUN = 100;
+const MOST_EXPIRED_A_RUN = 100;
 
 const ACTOR = { type: 'system', id: 'api' } as const;
 
