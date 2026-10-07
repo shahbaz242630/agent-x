@@ -7,8 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { messageFor, type ResetLink } from './messages.ts';
 import {
   AGENT_NOTICE_KINDS,
-  MANDATE_NOTICE_KINDS,
   type ClaimedNotice,
+  MANDATE_NOTICE_KINDS,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
   type SignInNoticeKind,
