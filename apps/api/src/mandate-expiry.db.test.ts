@@ -98,6 +98,18 @@ beforeEach(() => {
   expiry = expiryOf();
 });
 
+/** The mandate SUSPENDED by the table's owner, past the app and its signed state: tampered with. */
+const suspendedPastTheApp = async (w: World, id: string): Promise<void> => {
+  const owner = await tamperAsOwner(database, MANDATES, w.org);
+  try {
+    await owner.withoutStatusGuard(() =>
+      owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [id]),
+    );
+  } finally {
+    await owner.end();
+  }
+};
+
 /** The world with another active agent of its organisation, who may hold a mandate of its own. */
 const withAnotherAgent = async (w: World): Promise<World> => {
   const agent = ids.next();
@@ -207,14 +219,7 @@ describe('mandates ended by the clock (B4)', () => {
   it('refuses a mandate tampered with past the app, logged, and still expires the other organisations’ (FX-TAMPER)', async () => {
     const tampered = await world();
     const bad = await inForce(tampered, inHours(1));
-    const owner = await tamperAsOwner(database, MANDATES, tampered.org);
-    try {
-      await owner.withoutStatusGuard(() =>
-        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [bad]),
-      );
-    } finally {
-      await owner.end();
-    }
+    await suspendedPastTheApp(tampered, bad);
     const fine = await world();
     const good = await inForce(fine, inHours(1));
     clock.advanceBy(HOUR);
@@ -229,14 +234,7 @@ describe('mandates ended by the clock (B4)', () => {
     const bad = await inForce(w, inHours(1));
     const good = await inForce(await withAnotherAgent(w), inHours(1));
     expect(bad < good).toBe(true);
-    const owner = await tamperAsOwner(database, MANDATES, w.org);
-    try {
-      await owner.withoutStatusGuard(() =>
-        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [bad]),
-      );
-    } finally {
-      await owner.end();
-    }
+    await suspendedPastTheApp(w, bad);
     clock.advanceBy(HOUR);
 
     await expiryOf(1).run();
@@ -249,14 +247,7 @@ describe('mandates ended by the clock (B4)', () => {
     const bad = await inForce(w, inHours(1));
     const good = [];
     for (let i = 0; i < 3; i += 1) good.push(await inForce(await withAnotherAgent(w), inHours(1)));
-    const owner = await tamperAsOwner(database, MANDATES, w.org);
-    try {
-      await owner.withoutStatusGuard(() =>
-        owner.query("update mandates.mandates set status = 'SUSPENDED' where id = $1", [bad]),
-      );
-    } finally {
-      await owner.end();
-    }
+    await suspendedPastTheApp(w, bad);
     clock.advanceBy(HOUR);
 
     await expiryOf(2).run();
