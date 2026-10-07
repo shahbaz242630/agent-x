@@ -6,8 +6,6 @@
 // on the accept event; every refusal by its code; a step-up that isn't a
 // passkey, has run out or was asked for another draft; a tampered mandate of
 // the agent; and the lock order against the admin's demotion.
-import { createHash } from 'node:crypto';
-
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
@@ -36,7 +34,6 @@ import {
 } from './mandate-acceptance.ts';
 import {
   createMandateRegistry,
-  DRAFT_OPERATION,
   type MandateDraft,
   type MandateRegistry,
   REDRAFT_OPERATION,
@@ -66,25 +63,11 @@ let registry: MandateRegistry;
 let acceptance: MandateAcceptance;
 
 const challenges = () => createStepUpChallenges({ ids, clock });
-const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout } = mandateWorld({
-  app: () => app,
-  clock: () => clock,
-  ids,
-  name: 'mandate-acceptance',
-});
+const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'mandate-acceptance' });
+const { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, stepUp } = shared;
 
 /** A mandate drafted for the world's agent: its ID and its draft's. */
-async function drafted(w: World, overrides: Partial<MandateDraft['terms']> = {}) {
-  const write = draftedOf(
-    await registry.draft(
-      w.admin,
-      keyed(w.admin, DRAFT_OPERATION),
-      { agentId: w.agent, timeZone: null, splitWindowHours: null, terms: termsOf(w, overrides) },
-      CORRELATION,
-    ),
-  );
-  return { id: write.mandate.id, versionId: write.pending?.version.id ?? '' };
-}
+const drafted = (w: World, overrides: Partial<MandateDraft['terms']> = {}) => shared.drafted(registry, w, overrides);
 
 /** A later draft of the mandate: its ID. */
 async function redrafted(w: World, mandateId: string, overrides: Partial<MandateDraft['terms']> = {}) {
@@ -109,14 +92,6 @@ const acceptedOf = (write: MandateAccepted) => {
   if (write.outcome !== 'accepted') throw new Error(`not accepted: ${JSON.stringify(write)}`);
   return write;
 };
-
-const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
-  challenges().recordEvidence(app, challengeId, who.sessionId, {
-    authTime: clock.now(),
-    amr,
-    idpSessionId: 'V1_2',
-    idTokenHash: createHash('sha256').update('an ID token').digest(),
-  });
 
 /** Asks, signs in again with `amr` and confirms: the confirm's answer. */
 async function accepted(w: World, mandateId: string, versionId: string, amr: readonly string[] = PASSKEY) {

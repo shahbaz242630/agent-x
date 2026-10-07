@@ -1,9 +1,12 @@
 // The mandates' database tests' shared world (Phase 2 B4; S89's simplify
 // review): an organisation with an admin, an active agent, a funding source
 // linked through the fake partner and two signed suppliers, the people and
-// keys the use cases take, and the reads the tests make of them. A helper,
+// keys the use cases take, a mandate drafted and accepted, the step-up's
+// sign-in, and the reads the tests make of them. A helper,
 // not a test: Vitest leaves `*.helper.test.ts` out (vitest.config.ts), and
 // the name keeps it with the tests, which alone may import @agentx/testing.
+import { createHash } from 'node:crypto';
+
 import { addAgent, type AgentsTables } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
@@ -18,11 +21,12 @@ import {
 import {
   addMembership,
   createSessions,
+  createStepUpChallenges,
   type IdentityTables,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
-import type { MandatesTables } from '@agentx/core/modules/mandates';
+import { acceptDraft, mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
@@ -32,7 +36,7 @@ import { type Database, type IdempotentRequest, withTenant } from '@agentx/platf
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { type FixedClock, SequentialIds, testLogger } from '@agentx/testing';
 
-import type { MandateDraft, MandateWrite } from './mandate-registry.ts';
+import { DRAFT_OPERATION, type MandateDraft, type MandateRegistry, type MandateWrite } from './mandate-registry.ts';
 import type { SessionMember } from './use-case-work.ts';
 
 export type MandateWorldTables = IdentityTables &
@@ -261,5 +265,58 @@ export function mandateWorld({
       tx.selectFrom('notifications.outbox').select(['kind', 'about_id', 'recipient_user_id']).orderBy('id').execute(),
     );
 
-  return { quiet, member, world, termsOf, keyed, partnerSays, eventsAbout, noticesOf };
+  /** A mandate drafted by the registry for the world's agent: its ID and its draft's. */
+  async function drafted(registry: MandateRegistry, w: World, overrides: Partial<MandateDraft['terms']> = {}) {
+    const write = draftedOf(
+      await registry.draft(
+        w.admin,
+        keyed(w.admin, DRAFT_OPERATION),
+        { agentId: w.agent, timeZone: null, splitWindowHours: null, terms: termsOf(w, overrides) },
+        'test-correlation',
+      ),
+    );
+    return { id: write.mandate.id, versionId: write.pending?.version.id ?? '' };
+  }
+
+  /** The draft waiting made the version in force (B3's acceptDraft, past the use case): ACTIVE, for a first. */
+  async function acceptedPastTheUseCase(w: World, mandateId: string): Promise<void> {
+    const key = { orgId: w.org, id: mandateId };
+    await withSignedStates(app(), w.org, quiet(), async (tx, states) => {
+      const read = await mandateOf(tx, states, key, 'change');
+      if (read.outcome !== 'found') throw new Error('the mandate was not found');
+      const versionId = read.mandate.pendingVersionId;
+      if (versionId === null) throw new Error('no draft waiting');
+      await acceptDraft(tx, states, read, {
+        orgId: w.org,
+        versionId,
+        acceptedBy: w.admin.membershipId,
+        acceptedAt: clock().now(),
+        actor: OPERATOR,
+        details: {},
+      });
+    });
+  }
+
+  /** The member signs in again for the step-up, by `amr`: a passkey unless named. */
+  const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
+    createStepUpChallenges({ ids, clock: clock() }).recordEvidence(app(), challengeId, who.sessionId, {
+      authTime: clock().now(),
+      amr,
+      idpSessionId: 'V1_2',
+      idTokenHash: createHash('sha256').update('an ID token').digest(),
+    });
+
+  return {
+    quiet,
+    member,
+    world,
+    termsOf,
+    keyed,
+    partnerSays,
+    eventsAbout,
+    noticesOf,
+    drafted,
+    acceptedPastTheUseCase,
+    stepUp,
+  };
 }

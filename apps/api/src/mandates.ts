@@ -1,7 +1,8 @@
 // The mandate routes (PRD §7.1, BR-05, BR-06; Phase 2 B2): an admin drafts a
 // mandate for one of the organisation's agents, and later versions of it;
 // every member reads them. A draft grants nothing until an admin accepts it
-// with a passkey (B3). Amounts are whole minor units (fils), as integers
+// with a passkey (B3). An admin suspends, resumes or revokes one the same way,
+// asking then confirming with a passkey (B4). Amounts are whole minor units (fils), as integers
 // (ADR-006 §1), checked at the edge as safe integers and kept as bigints.
 import {
   CONSENT_LIMITS,
@@ -38,8 +39,17 @@ import {
   ACCEPTING_ROLES,
   type MandateAcceptance,
 } from './mandate-acceptance.ts';
+import { MANDATE_MOVES, type MandateMove, type MandateMoves, MOVE_OPERATIONS, MOVING_ROLES } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
-import { CHALLENGE_BODY_LIMIT, NEXT, pageQuery, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
+import {
+  CHALLENGE_BODY_LIMIT,
+  NEXT,
+  NOTHING,
+  NOTHING_BODY_LIMIT,
+  pageQuery,
+  STEP_UP_CONFIRM,
+  stepUpAsked,
+} from './route-schemas.ts';
 
 /** Every member may see the organisation's mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -256,6 +266,46 @@ const ACCEPT_CONFIRM_SCHEMA = {
   },
 };
 
+/** Each move's words in its routes' schemas. */
+const MOVE_WORDS = {
+  suspend: {
+    asked: ['MandateSuspensionAsked', 'Suspending a mandate, waiting for the admin to sign in again.'],
+    ask: 'Ask to suspend a mandate in force (the brake), signing in again with a passkey',
+    confirm: 'Suspend the mandate, once signed in again for it with a passkey',
+    moved: 'The mandate, SUSPENDED: its agent can spend nothing under it until it is resumed.',
+  },
+  resume: {
+    asked: ['MandateResumptionAsked', 'Resuming a suspended mandate, waiting for the admin to sign in again.'],
+    ask: 'Ask to resume a suspended mandate, signing in again with a passkey',
+    confirm: 'Resume the mandate, once signed in again for it with a passkey',
+    moved: 'The mandate, ACTIVE again, with its version in force as it was.',
+  },
+  revoke: {
+    asked: ['MandateRevocationAsked', 'Revoking a mandate, waiting for the admin to sign in again.'],
+    ask: 'Ask to revoke a mandate, waiting or in force, signing in again with a passkey',
+    confirm: 'Revoke the mandate for good, once signed in again for it with a passkey',
+    moved: 'The mandate, REVOKED: it ends for good, and the agent may be given a new one.',
+  },
+} as const satisfies Record<MandateMove, unknown>;
+
+const moveSchemas = (move: MandateMove) => {
+  const words = MOVE_WORDS[move];
+  return {
+    ask: {
+      summary: words.ask,
+      params: MANDATE_ID,
+      body: NOTHING,
+      response: { 202: stepUpAsked(words.asked[0], words.asked[1]) },
+    },
+    confirm: {
+      summary: words.confirm,
+      params: MANDATE_ID,
+      body: STEP_UP_CONFIRM,
+      response: { 200: MANDATE_DETAILS.describe(words.moved) },
+    },
+  };
+};
+
 const LIST_SCHEMA = {
   summary: "Your organisation's mandates",
   querystring: pageQuery(MOST_MANDATES_A_PAGE),
@@ -315,7 +365,15 @@ const detailsOf = ({ mandate, current, pending }: MandateView) => ({
 
 export function registerMandates(
   app: FastifyInstance,
-  { registry, acceptance }: { registry: MandateRegistry | undefined; acceptance: MandateAcceptance | undefined },
+  {
+    registry,
+    acceptance,
+    moves,
+  }: {
+    registry: MandateRegistry | undefined;
+    acceptance: MandateAcceptance | undefined;
+    moves: MandateMoves | undefined;
+  },
 ) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
@@ -412,6 +470,54 @@ export function registerMandates(
       return answerRefusedWrite(accepted, request, reply);
     },
   );
+
+  for (const move of MANDATE_MOVES) {
+    const schemas = moveSchemas(move);
+    routes.post(
+      `/v1/mandates/:id/${move}`,
+      {
+        schema: schemas.ask,
+        bodyLimit: NOTHING_BODY_LIMIT,
+        config: { access: [...MOVING_ROLES], operation: MOVE_OPERATIONS[move].ask },
+      },
+      async (request, reply) => {
+        const member = memberInSessionOf(request);
+        const asked = await need(moves).ask(
+          member,
+          idempotentRequest(request, member.orgId),
+          request.params.id,
+          move,
+          request.id,
+        );
+        if (asked.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId });
+        if (asked.outcome === 'refused') return sendErrorBody(reply, asked.status, asked.code, request.id);
+        return answerRefusedWrite(asked, request, reply);
+      },
+    );
+
+    routes.post(
+      `/v1/mandates/:id/${move}/confirm`,
+      {
+        schema: schemas.confirm,
+        bodyLimit: CHALLENGE_BODY_LIMIT,
+        config: { access: [...MOVING_ROLES], operation: MOVE_OPERATIONS[move].confirm },
+      },
+      async (request, reply) => {
+        const member = memberInSessionOf(request);
+        const moved = await need(moves).confirm(
+          member,
+          idempotentRequest(request, member.orgId),
+          request.params.id,
+          move,
+          request.body.stepUpChallengeId,
+          request.id,
+        );
+        if (moved.outcome === 'moved') return reply.code(200).send(detailsOf(moved));
+        if (moved.outcome === 'refused') return sendErrorBody(reply, moved.status, moved.code, request.id);
+        return answerRefusedWrite(moved, request, reply);
+      },
+    );
+  }
 
   routes.get(
     '/v1/mandates',
