@@ -155,7 +155,7 @@ export function registerIntegrityHold(
   routes.get('/v1/integrity-hold', { schema: SHOW_SCHEMA, config: { access: ['admin'] } }, async (request, reply) => {
     const { orgId, userId } = memberInSessionOf(request);
     const shown = await need(investigations).show({ orgId, userId }, request.id);
-    if (isUnwritten(shown)) return answerRefusal(shown, request, reply);
+    if (shown.outcome === 'refused') return answerRefusal(shown, request, reply);
     return { hold: holdOf(shown.hold) };
   });
 
