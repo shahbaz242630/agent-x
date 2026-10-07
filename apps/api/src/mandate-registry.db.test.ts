@@ -15,11 +15,19 @@ import {
   addSource,
   type FundingSourcesTables,
   settleLink,
+  SOURCES,
   sourceOf,
   updateFromPartner,
 } from '@agentx/core/modules/funding-sources';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
-import { mandateOf, MANDATES, type MandatesTables, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
+import {
+  acceptDraft,
+  MANDATE_VERSIONS,
+  mandateOf,
+  MANDATES,
+  type MandatesTables,
+  MOST_DRAFTS_A_DAY,
+} from '@agentx/core/modules/mandates';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
@@ -244,7 +252,7 @@ async function partnerSays(w: World, change: Partial<FundingSourceState>): Promi
   });
 }
 
-/** Accepts the draft waiting as B3 will (the version in force, then the status), then expires the mandate. */
+/** Accepts the draft waiting (B3's acceptDraft), then expires the mandate. */
 async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedOf>): Promise<void> {
   const key = { orgId: w.org, id: drafted.mandate.id };
   const pending = drafted.pending?.version;
@@ -252,22 +260,15 @@ async function acceptedThenExpired(w: World, drafted: ReturnType<typeof draftedO
   await withSignedStates(app, w.org, quiet(), async (tx, states) => {
     const read = await mandateOf(tx, states, key, 'change');
     if (read.outcome !== 'found') throw new Error('the mandate was not found');
-    const moves = { actor: OPERATOR, details: {} };
-    await states.record(
-      tx,
-      MANDATES,
-      key,
-      read.state,
-      {
-        current_version_id: pending.id,
-        pending_version_id: null,
-        accepted_by: pending.draftedBy,
-        accepted_at: clock.now(),
-      },
-      { ...moves, action: 'mandate.version_accepted' },
-    );
-    await states.changeStatus(tx, MANDATES, key, 'accept', { ...moves, action: 'mandate.accept' });
-    await states.changeStatus(tx, MANDATES, key, 'expire', { ...moves, action: 'mandate.expire' });
+    await acceptDraft(tx, states, read, {
+      orgId: w.org,
+      versionId: pending.id,
+      acceptedBy: pending.draftedBy,
+      acceptedAt: clock.now(),
+      actor: OPERATOR,
+      details: {},
+    });
+    await states.changeStatus(tx, MANDATES, key, 'expire', { actor: OPERATOR, action: 'mandate.expire', details: {} });
   });
 }
 
@@ -500,6 +501,30 @@ describe('reading mandates (B2)', () => {
       pending: { version: { version: 1 } },
     });
     expect(await registry.show(viewer.orgId, ids.next(), CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+  });
+
+  it('refuses to show a mandate whose version or source was changed past the app: INTEGRITY_FAILED', async () => {
+    const w = await world();
+    const first = draftedOf(await draft(w.admin, draftOf(w)));
+    const ofSources = await tamperAsOwner(database, SOURCES, w.org);
+    try {
+      await ofSources.setColumn(w.source, 'holder_name', 'Someone Else LLC');
+    } finally {
+      await ofSources.end();
+    }
+    expect(await registry.show(w.org, first.mandate.id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+
+    const other = await world();
+    const second = draftedOf(await draft(other.admin, draftOf(other)));
+    const ofVersions = await tamperAsOwner(database, MANDATE_VERSIONS, other.org);
+    try {
+      await ofVersions.query('alter table mandates.versions disable trigger made_once');
+      await ofVersions.setColumn(second.pending?.version.id ?? '', 'purpose', 'Anything at all');
+    } finally {
+      await ofVersions.query('alter table mandates.versions enable trigger made_once');
+      await ofVersions.end();
+    }
+    expect(await registry.show(other.org, second.mandate.id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
   });
 
   it('shows a version whose source’s currency has since changed, the change as its warning', async () => {

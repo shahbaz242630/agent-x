@@ -78,12 +78,18 @@ export const REASON_CODES = {
     "The organisation has started as many bank account links as it may in 24 hours, so this one wasn't started. Try again tomorrow; if no one at the organisation started them, tell its admins at once.",
   MANDATE_DRAFTS_SPENT:
     "The organisation has drafted as many mandate versions as it may in 24 hours, so this one wasn't drafted. Try again tomorrow; if no one at the organisation drafted them, tell its admins at once.",
+  MANDATE_DRAFT_EXPIRED:
+    "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed.",
   MANDATE_ENDED:
     'The mandate is revoked or expired, so it takes no new version. Draft a new mandate for the agent instead. Nothing was changed.',
+  MANDATE_NOT_WAITING:
+    'The version named is not the draft waiting for acceptance: none waits, or a newer draft replaced it. Look at the mandate again and accept the draft it shows. Nothing was changed.',
   MANDATE_OPEN:
     'The agent already has a mandate waiting for acceptance or in force. Draft a new version of that mandate instead. Nothing was changed.',
   MANDATE_PAST_CONSENT:
     "A limit is above what the funding source's bank consent allows, or the mandate's currency is not the source's, and the mandate is strict about its consent. Lower the limit, or make the mandate flexible. Nothing was changed.",
+  MANDATE_SUSPENDED:
+    'The mandate is suspended, so no new version can be accepted until it is resumed. Nothing was changed.',
   MEMBER_DEACTIVATED:
     "This member was deactivated, so their role can't be changed and they can't be deactivated again. Invite them again to bring them back.",
   MEMBER_ELSEWHERE:

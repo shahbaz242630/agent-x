@@ -196,8 +196,18 @@
                   },
                   {
                     "type": "string",
+                    "const": "MANDATE_DRAFT_EXPIRED",
+                    "description": "The draft's end date has passed, so it can't be accepted. Draft a new version with a later end. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "MANDATE_ENDED",
                     "description": "The mandate is revoked or expired, so it takes no new version. Draft a new mandate for the agent instead. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "MANDATE_NOT_WAITING",
+                    "description": "The version named is not the draft waiting for acceptance: none waits, or a newer draft replaced it. Look at the mandate again and accept the draft it shows. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -208,6 +218,11 @@
                     "type": "string",
                     "const": "MANDATE_PAST_CONSENT",
                     "description": "A limit is above what the funding source's bank consent allows, or the mandate's currency is not the source's, and the mandate is strict about its consent. Lower the limit, or make the mandate flexible. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
+                    "const": "MANDATE_SUSPENDED",
+                    "description": "The mandate is suspended, so no new version can be accepted until it is resumed. Nothing was changed."
                   },
                   {
                     "type": "string",
@@ -1000,6 +1015,21 @@
         ],
         "additionalProperties": false,
         "description": "A mandate with its version in force and the draft waiting."
+      },
+      "MandateAcceptanceAsked": {
+        "type": "object",
+        "properties": {
+          "stepUpChallengeId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "stepUpChallengeId"
+        ],
+        "additionalProperties": false,
+        "description": "Accepting a mandate’s draft, waiting for the admin to sign in again."
       },
       "AgentSelf": {
         "type": "object",
@@ -9982,6 +10012,198 @@
           "admin"
         ],
         "x-body-limit": 16384,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateDetails"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/accept": {
+      "post": {
+        "operationId": "mandates.accept",
+        "summary": "Ask to accept the draft waiting, signing in again with a passkey",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "versionId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "versionId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 128,
+        "responses": {
+          "202": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateAcceptanceAsked"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/accept/confirm": {
+      "post": {
+        "operationId": "mandates.accept.confirm",
+        "summary": "Accept the draft, once signed in again for it with a passkey",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stepUpChallengeId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "stepUpChallengeId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[!-~]{1,255}$"
+            },
+            "in": "header",
+            "name": "idempotency-key",
+            "required": true,
+            "description": "Makes the write safe to retry: 1 to 255 visible ASCII characters, new for each change. The same key with the same request answers as the first did; with another request, it is refused."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin"
+        ],
+        "x-body-limit": 128,
         "responses": {
           "200": {
             "description": "Default Response",

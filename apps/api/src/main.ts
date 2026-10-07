@@ -93,6 +93,7 @@ import { createFundingSourceLinks, railFor } from './funding-source-links.ts';
 import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
+import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -508,6 +509,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
     mandateRegistry: createMandateRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    mandateAcceptance: createMandateAcceptance({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      logger,
+    }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
     supplierDetailsChanges: createSupplierDetailsChanges({

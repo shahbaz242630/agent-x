@@ -21,7 +21,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { need } from './access.ts';
+import { memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { sendErrorBody } from './errors.ts';
 import { answerRefusedWrite, idempotentRequest } from './idempotent-writes.ts';
@@ -29,12 +29,17 @@ import {
   DRAFT_OPERATION,
   DRAFTING_ROLES,
   type MandateRegistry,
-  type MandateView,
   type MandateWrite,
   REDRAFT_OPERATION,
-  type VersionShown,
 } from './mandate-registry.ts';
-import { NEXT, pageQuery } from './route-schemas.ts';
+import {
+  ACCEPT_CONFIRM_OPERATION,
+  ACCEPT_OPERATION,
+  ACCEPTING_ROLES,
+  type MandateAcceptance,
+} from './mandate-acceptance.ts';
+import type { MandateView, VersionShown } from './mandate-reads.ts';
+import { CHALLENGE_BODY_LIMIT, NEXT, pageQuery, STEP_UP_CONFIRM, stepUpAsked } from './route-schemas.ts';
 
 /** Every member may see the organisation's mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -226,6 +231,31 @@ const REDRAFT_SCHEMA = {
   },
 };
 
+/** The most an accept's body may be: a version's ID, with room to spare. */
+const ACCEPT_BODY_LIMIT = 128;
+
+const ACCEPT_SCHEMA = {
+  summary: 'Ask to accept the draft waiting, signing in again with a passkey',
+  params: MANDATE_ID,
+  body: z
+    .strictObject({ versionId: z.uuid().describe('The draft waiting, as you read it: its terms are what you accept.') })
+    .describe('The draft to accept.'),
+  response: {
+    202: stepUpAsked('MandateAcceptanceAsked', 'Accepting a mandate’s draft, waiting for the admin to sign in again.'),
+  },
+};
+
+const ACCEPT_CONFIRM_SCHEMA = {
+  summary: 'Accept the draft, once signed in again for it with a passkey',
+  params: MANDATE_ID,
+  body: STEP_UP_CONFIRM,
+  response: {
+    200: MANDATE_DETAILS.describe(
+      'The mandate with the draft in force (ACTIVE, if it was its first), the version it replaced superseded.',
+    ),
+  },
+};
+
 const LIST_SCHEMA = {
   summary: "Your organisation's mandates",
   querystring: pageQuery(MOST_MANDATES_A_PAGE),
@@ -283,7 +313,10 @@ const detailsOf = ({ mandate, current, pending }: MandateView) => ({
   pending: pending === null ? null : versionOf(pending),
 });
 
-export function registerMandates(app: FastifyInstance, { registry }: { registry: MandateRegistry | undefined }) {
+export function registerMandates(
+  app: FastifyInstance,
+  { registry, acceptance }: { registry: MandateRegistry | undefined; acceptance: MandateAcceptance | undefined },
+) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
   /** Answers a draft: the mandate as it now stands, or a refusal. */
@@ -333,6 +366,50 @@ export function registerMandates(app: FastifyInstance, { registry }: { registry:
         request.id,
       );
       return answer(written, 200, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/mandates/:id/accept',
+    {
+      schema: ACCEPT_SCHEMA,
+      bodyLimit: ACCEPT_BODY_LIMIT,
+      config: { access: [...ACCEPTING_ROLES], operation: ACCEPT_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const asked = await need(acceptance).accept(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.versionId,
+        request.id,
+      );
+      if (asked.outcome === 'asked') return reply.code(202).send({ stepUpChallengeId: asked.stepUpChallengeId });
+      if (asked.outcome === 'refused') return sendErrorBody(reply, asked.status, asked.code, request.id);
+      return answerRefusedWrite(asked, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/mandates/:id/accept/confirm',
+    {
+      schema: ACCEPT_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...ACCEPTING_ROLES], operation: ACCEPT_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const accepted = await need(acceptance).acceptConfirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      if (accepted.outcome === 'accepted') return reply.code(200).send(detailsOf(accepted));
+      if (accepted.outcome === 'refused') return sendErrorBody(reply, accepted.status, accepted.code, request.id);
+      return answerRefusedWrite(accepted, request, reply);
     },
   );
 

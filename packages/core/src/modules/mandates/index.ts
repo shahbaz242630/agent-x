@@ -37,5 +37,6 @@ export {
   oneDraftAtATime,
   openMandateOfAgent,
 } from './infrastructure/drafts.ts';
+export { acceptDraft, agentOfMandate, mandatesOfAgent } from './infrastructure/acceptance.ts';
 export { MANDATE_VERSIONS, MANDATES } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';
