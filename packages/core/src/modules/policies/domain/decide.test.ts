@@ -240,6 +240,10 @@ describe('decide: a narrower policy (SEC-LIM-11, decision 5)', () => {
     });
     expect(decide(input(5_000, { mandatePolicy: narrowed })).reasons).toEqual(['POLICY_SUPPLIER_NOT_ALLOWED']);
     expect(decide(input(5_000, { mandatePolicy: orgPolicy({ supplierIds: [SUPPLIER] }) })).decision).toBe('ALLOW');
+    // An empty list allows no one: never read as no list.
+    expect(decide(input(5_000, { mandatePolicy: orgPolicy({ supplierIds: [] }) })).reasons).toEqual([
+      'POLICY_SUPPLIER_NOT_ALLOWED',
+    ]);
   });
 
   it("weighs a policy's supplier list with no mandate in force too", () => {
