@@ -11,8 +11,8 @@
 // refuses one the log already holds a state for.
 import type { Transaction } from 'kysely';
 
-import type { AuditActor, AuditTables, SignedStates } from '../../audit/index.ts';
-import type { Decision } from '../../policies/index.ts';
+import type { AuditActor, AuditTables, SignedStates, TamperSign, VerifiedState } from '../../audit/index.ts';
+import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
 import { SPEND_REQUESTS } from './requests.ts';
@@ -128,7 +128,11 @@ export interface SpendRequestRecord {
   readonly status: SpendRequestStatus;
 }
 
-const DECISIONS: readonly Decision[] = ['ALLOW', 'DENY', 'REQUIRE_APPROVAL', 'REQUIRE_NEW_MANDATE'];
+/** A spend request read by its ID and verified; missing; or tampered with. */
+export type SpendRequestCheck =
+  | { readonly outcome: 'found'; readonly request: SpendRequestRecord; readonly state: VerifiedState }
+  | { readonly outcome: 'missing' }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
  * The request, by its ID, read (`share`) and verified, in the caller's
@@ -139,17 +143,15 @@ export async function requestOf(
   tx: RequestsTransaction,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
-) {
+): Promise<SpendRequestCheck> {
   const state = await states.verifiedState(tx, SPEND_REQUESTS, key, 'share');
   if (state.outcome !== 'verified') return state;
   const field = (column: string): string | undefined => state.fields.get(column) ?? undefined;
-  const [agentId, supplierId, fundingSourceId, currency, orderReference] = [
-    'agent_id',
-    'supplier_id',
-    'funding_source_id',
-    'currency',
-    'order_reference',
-  ].map(field);
+  const agentId = field('agent_id');
+  const supplierId = field('supplier_id');
+  const fundingSourceId = field('funding_source_id');
+  const currency = field('currency');
+  const orderReference = field('order_reference');
   const minor = minorOf(state.fields.get('amount_minor'));
   const decision = oneOf(DECISIONS, state.fields.get('decision'));
   const status = oneOf(SPEND_REQUEST.states, state.fields.get('status'));
@@ -166,12 +168,12 @@ export async function requestOf(
   ) {
     throw new Error(`A verified spend request holds a field that isn't one of its own: ${key.id}`);
   }
-  const codes = state.fields.get('reason_codes');
-  const reasons = codes === null || codes === undefined ? [] : codes.split(' ');
-  if (!reasons.every(isReasonCode))
+  const reasons = field('reason_codes')?.split(' ') ?? [];
+  if (!reasons.every(isReasonCode)) {
     throw new Error(`A verified spend request holds a reason that isn't one: ${key.id}`);
+  }
   return {
-    outcome: 'found' as const,
+    outcome: 'found',
     request: {
       id: key.id.toLowerCase(),
       agentId,
@@ -183,7 +185,7 @@ export async function requestOf(
       decision,
       reasons,
       status,
-    } satisfies SpendRequestRecord,
+    },
     state,
   };
 }

@@ -5,9 +5,9 @@
 // sign-in, and the reads the tests make of them. A helper,
 // not a test: Vitest leaves `*.helper.test.ts` out (vitest.config.ts), and
 // the name keeps it with the tests, which alone may import @agentx/testing.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
-import { addAgent, type AgentsTables } from '@agentx/core/modules/agents';
+import { addAgent, addAgentKey, type AgentsTables, keySecretMessage } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -31,7 +31,7 @@ import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
 import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
-import { money } from '@agentx/core/shared-kernel';
+import { DAY_MS, money } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { type FixedClock, SequentialIds, testLogger } from '@agentx/testing';
@@ -249,15 +249,15 @@ export function mandateWorld({
     });
   }
 
-  /** The mandate's events, oldest first, with their details read. */
-  const eventsAbout = async (org: string, mandateId: string) =>
+  /** The object's events (a mandate's unless named), oldest first, with their details read. */
+  const eventsAbout = async (org: string, objectId: string, subject = 'mandate') =>
     (
       await withTenant(app(), org, (tx) =>
         tx
           .selectFrom('audit.events')
           .select(['action', 'actor_type', 'details'])
-          .where('subject_type', '=', 'mandate')
-          .where('subject_id', '=', mandateId)
+          .where('subject_type', '=', subject)
+          .where('subject_id', '=', objectId)
           .orderBy('seq')
           .execute(),
       )
@@ -322,6 +322,26 @@ export function mandateWorld({
       }),
     );
 
+  /** A key of the agent (the world's unless named), live for 90 days: as the agent's key check finds it. */
+  async function agentKey(w: World, agentId = w.agent): Promise<{ orgId: string; agentId: string; keyId: string }> {
+    const keyId = ids.next();
+    const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, randomBytes(32)));
+    await withSignedStates(app(), w.org, quiet(), (tx, states) =>
+      addAgentKey(tx, states, {
+        orgId: w.org,
+        id: keyId,
+        agentId,
+        scopes: ['requests:write'],
+        secretMac: mac,
+        secretKeyVersion: keyVersion,
+        expiresAt: new Date(clock().now().getTime() + 90 * DAY_MS),
+        createdAt: clock().now(),
+        actor: OPERATOR,
+      }),
+    );
+    return { orgId: w.org, agentId, keyId };
+  }
+
   /** The member signs in again for the step-up, by `amr`: a passkey unless named. */
   const stepUp = (who: Member, challengeId: string, amr: readonly string[] = PASSKEY) =>
     createStepUpChallenges({ ids, clock: clock() }).recordEvidence(app(), challengeId, who.sessionId, {
@@ -344,6 +364,7 @@ export function mandateWorld({
     acceptedPastTheUseCase,
     inForce,
     movedPastTheUseCase,
+    agentKey,
     stepUp,
   };
 }

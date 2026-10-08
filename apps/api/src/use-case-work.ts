@@ -103,8 +103,11 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
   return {
     inOrganisation,
 
-    /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
-    /** For a member or an agent: only its organisation is read. */
+    /**
+     * The write with its key claimed first; a refusal is answered, with
+     * everything it did rolled back. A member's or an agent's: only its
+     * organisation is read.
+     */
     write: (
       member: Pick<Member, 'orgId'>,
       idempotent: IdempotentRequest,

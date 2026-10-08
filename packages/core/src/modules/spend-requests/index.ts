@@ -12,6 +12,7 @@ export {
   type NewRequest,
   requestOf,
   signRequest,
+  type SpendRequestCheck,
   type SpendRequestRecord,
 } from './infrastructure/decisions.ts';
 export { claimOrder, hasOpenClaim, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
