@@ -4,7 +4,8 @@
 // A write route opens its organisation's withTenant transaction and, before
 // anything else in it, runs its write through `createIdempotentWrites().run`
 // with `idempotentRequest(request, orgId)`:
-// - the client is the signed-in person (agents come at C2), never a credential;
+// - the client is the signed-in person, or the agent its key is (D4r), never a
+//   credential;
 // - the operation is the route's own (write-operations.ts), the key its
 //   Idempotency-Key header, both checked before the body was read;
 // - the payload is the request's normalized input: the canonical JSON of its
@@ -82,21 +83,25 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
- * The idempotency store's request for a signed-in person's write to this
- * route, in the organisation the route found for them. A route without an
- * operation, a request without its key or its person, is a failure on our
- * side: the contract and the hooks before the route make each impossible.
+ * The idempotency store's request for a write to this route by a signed-in
+ * person or an agent, in the organisation the route found for them. A route
+ * without an operation, a request without its key or its caller, is a failure
+ * on our side: the contract and the hooks before the route make each
+ * impossible.
  */
 export function idempotentRequest(request: FastifyRequest, orgId: string): IdempotentRequest {
   const { operation } = request.routeOptions.config;
   if (operation === undefined) throw new Error('an idempotent write ran on a route that names no operation');
   const key = request.headers[IDEMPOTENCY_KEY_HEADER];
   if (!isIdempotencyKey(key)) throw new Error('an idempotent write ran without a well-formed key');
-  const person = request.person;
-  if (person === null) throw new Error('an idempotent write ran without a signed-in person');
+  const { person, agent } = request;
+  let client: IdempotentRequest['client'];
+  if (person !== null) client = { kind: 'user', id: person.userId };
+  else if (agent !== null) client = { kind: 'agent', id: agent.agentId };
+  else throw new Error('an idempotent write ran without a signed-in person or an agent');
   return {
     orgId,
-    client: { kind: 'user', id: person.userId },
+    client,
     operation,
     key,
     payload: canonicalJson({ params: request.params ?? {}, query: request.query ?? {}, body: request.body ?? null }),

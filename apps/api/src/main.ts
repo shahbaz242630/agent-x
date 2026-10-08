@@ -56,12 +56,15 @@ import {
   type StepUpChallenges,
   type SignIn,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { MandatesTables } from '@agentx/core/modules/mandates';
+import type { OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createPlatformChain, type PlatformControlsTables } from '@agentx/core/modules/platform-controls';
 import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -95,6 +98,7 @@ import { createFundingSourceReads } from './funding-source-reads.ts';
 import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
+import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
@@ -122,6 +126,9 @@ type ApiTables = PlatformControlsTables &
   AgentsTables &
   FundingSourcesTables &
   MandatesTables &
+  SpendRequestsTables &
+  LimitReservationsTables &
+  OrganizationsTables &
   SuppliersTables &
   FakePartnerTables &
   DirectoryTables &
@@ -525,6 +532,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     agentMandates: createAgentMandates({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    spendRequestDecisions: createSpendRequestDecisions({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,
       keys,

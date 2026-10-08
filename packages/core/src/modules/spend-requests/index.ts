@@ -3,8 +3,17 @@
 // signed state, and the order claims that keep one order from being paid
 // twice (D1), with the duplicate check and claiming an order (D3); a request
 // made VALIDATING with its decision and moved by it (D4). Deciding and
-// reserving are composed in the API (decideAndReserve); the agent's route
-// comes with D4r.
+// reserving are composed in the API (decideAndReserve), the agent asking
+// through its route (D4r), its text checked here, with the bank reference its
+// order reference becomes (decision 8).
+export {
+  askedText,
+  BANK_REFERENCE_MOST,
+  bankReferenceOf,
+  ORDER_REFERENCE_MOST,
+  REQUEST_PURPOSE_MOST,
+  SpendAskRefused,
+} from './domain/asked.ts';
 export { SPEND_REQUEST, type SpendRequestStatus } from './domain/spend-request.ts';
 export {
   holdsCapacity,
