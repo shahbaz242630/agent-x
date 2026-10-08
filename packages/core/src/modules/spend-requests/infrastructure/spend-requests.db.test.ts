@@ -239,6 +239,16 @@ const claimedThenCancelled = async (org: Org): Promise<string> => {
   return row.id;
 };
 
+/** A request's columns naming the supplier and the version weighed. */
+const onSupplier = (supplier: Supplier) => ({ supplier_id: supplier.id, supplier_version_id: supplier.version });
+
+/** One supplier a payee at a time (0033): the key moves from one to another, past the app, claims keeping it. */
+const movePayeeKey = async (from: Supplier, to: Supplier, key: string) => {
+  const admin = database.as('admin');
+  await admin.query('update suppliers.suppliers set payee_key = null where id = $1', [from.id]);
+  await admin.query('update suppliers.suppliers set payee_key = $2 where id = $1', [to.id, key]);
+};
+
 const refusedBy = (constraint: string, code?: string): unknown =>
   expect.objectContaining(code === undefined ? { constraint } : { code, constraint });
 const DENIED: unknown = expect.objectContaining({ code: '42501' });
@@ -553,15 +563,17 @@ describe('an order claim', () => {
   it('holds an order once by its payee too: a supplier re-created with the same account is refused', async () => {
     const org = await organisation();
     const [first, second] = [await supplierOf(org.id, 'payee-1'), await supplierOf(org.id)];
-    const on = (supplier: Supplier) => ({ supplier_id: supplier.id, supplier_version_id: supplier.version });
-    await claim(org, claimRow(org, await approved(org, on(first)), { supplier_id: first.id, payee_key: 'payee-1' }));
-    // One supplier a payee at a time (0033): the first's key moves to the second, its claim keeping it.
-    const admin = database.as('admin');
-    await admin.query('update suppliers.suppliers set payee_key = null where id = $1', [first.id]);
-    await admin.query(`update suppliers.suppliers set payee_key = 'payee-1' where id = $1`, [second.id]);
+    await claim(
+      org,
+      claimRow(org, await approved(org, onSupplier(first)), { supplier_id: first.id, payee_key: 'payee-1' }),
+    );
+    await movePayeeKey(first, second, 'payee-1');
 
     await expect(
-      claim(org, claimRow(org, await approved(org, on(second)), { supplier_id: second.id, payee_key: 'payee-1' })),
+      claim(
+        org,
+        claimRow(org, await approved(org, onSupplier(second)), { supplier_id: second.id, payee_key: 'payee-1' }),
+      ),
     ).rejects.toEqual(refusedBy('one_open_claim_a_payee_order', '23505'));
   });
 
@@ -675,7 +687,7 @@ describe('the duplicate check and claiming an order (D3)', () => {
   const reference = fc
     .array(fc.constantFrom(...PIECES), { minLength: 1, maxLength: 40 })
     .map((pieces) => pieces.join(''))
-    .filter((written) => written.trim() !== '' && written.replace(/[\s\u3000\u00a0]/gu, '') !== '');
+    .filter((written) => written.trim() !== '');
 
   const check = (org: Org, written: string, order: { supplierId?: string; payeeKey?: string | null } = {}) =>
     inOrg(org, (tx) =>
@@ -686,22 +698,29 @@ describe('the duplicate check and claiming an order (D3)', () => {
       }),
     );
 
-  const claimed = (
-    org: Org,
-    request: string,
-    { supplier = org.supplier.id, payeeKey = null as string | null, reference = 'PO-2026/0042' } = {},
-  ) =>
-    inOrg(org, (tx) =>
-      claimOrder(tx, {
-        orgId: org.id,
-        id: randomUUID(),
-        requestId: request,
-        supplierId: supplier,
-        payeeKey,
-        reference,
-        claimedAt: AT,
-      }),
-    );
+  interface ClaimOptions {
+    readonly id?: string;
+    readonly supplier?: string;
+    readonly payeeKey?: string | null;
+    readonly reference?: string;
+  }
+
+  /** What claimOrder is given for the request's order: by default its first supplier's PO-2026/0042, no payee key. */
+  const claimOf = (org: Org, request: string, options: ClaimOptions = {}) => ({
+    orgId: org.id,
+    id: options.id ?? randomUUID(),
+    requestId: request,
+    supplierId: options.supplier ?? org.supplier.id,
+    payeeKey: options.payeeKey ?? null,
+    reference: options.reference ?? 'PO-2026/0042',
+    claimedAt: AT,
+  });
+
+  const claimed = (org: Org, request: string, options: ClaimOptions = {}) =>
+    inOrg(org, (tx) => claimOrder(tx, claimOf(org, request, options)));
+
+  const released = (org: Org, request: string) =>
+    inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }));
 
   it('works out the canonical form exactly as the request’s own order_key (ADR-006 §5)', async () => {
     const org = await organisation();
@@ -743,8 +762,8 @@ describe('the duplicate check and claiming an order (D3)', () => {
     expect(await check(org, 'PO-2026/0042', { supplierId: (await supplierOf(org.id)).id })).toBe(false);
 
     await change(org, request, { status: 'CANCELLED' });
-    expect(await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }))).toBe(true);
-    expect(await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }))).toBe(false);
+    expect(await released(org, request)).toBe(true);
+    expect(await released(org, request)).toBe(false);
     expect(await check(org, 'PO-2026/0042')).toBe(false);
   });
 
@@ -764,23 +783,8 @@ describe('the duplicate check and claiming an order (D3)', () => {
     expect(await claimed(org, await approved(org))).toBe('claimed');
     const again = await approved(org, { order_reference: 'po-2026/0042 ' });
     const after = await inOrg(org, async (tx) => {
-      const outcome = await claimOrder(tx, {
-        orgId: org.id,
-        id: randomUUID(),
-        requestId: again,
-        supplierId: org.supplier.id,
-        payeeKey: null,
-        reference: 'po-2026/0042 ',
-        claimedAt: AT,
-      });
-      return {
-        outcome,
-        seen: await hasOpenClaim(tx, {
-          supplierId: org.supplier.id,
-          payeeKey: null,
-          reference: 'PO-2026/0042',
-        }),
-      };
+      const outcome = await claimOrder(tx, claimOf(org, again, { reference: 'po-2026/0042 ' }));
+      return { outcome, seen: await hasOpenClaim(tx, claimOf(org, again)) };
     });
     expect(after).toEqual({ outcome: 'taken', seen: true });
   });
@@ -788,46 +792,32 @@ describe('the duplicate check and claiming an order (D3)', () => {
   it('answers taken for an order another supplier claimed under the same payee key (ADR-014 §3)', async () => {
     const org = await organisation();
     const [first, second] = [await supplierOf(org.id, 'payee-1'), await supplierOf(org.id)];
-    const on = (supplier: Supplier) => ({ supplier_id: supplier.id, supplier_version_id: supplier.version });
-    expect(await claimed(org, await approved(org, on(first)), { supplier: first.id, payeeKey: 'payee-1' })).toBe(
-      'claimed',
-    );
-    // One supplier a payee at a time (0033): the key moves to the second, the first's claim keeping it.
-    const admin = database.as('admin');
-    await admin.query('update suppliers.suppliers set payee_key = null where id = $1', [first.id]);
-    await admin.query(`update suppliers.suppliers set payee_key = 'payee-1' where id = $1`, [second.id]);
+    expect(
+      await claimed(org, await approved(org, onSupplier(first)), { supplier: first.id, payeeKey: 'payee-1' }),
+    ).toBe('claimed');
+    await movePayeeKey(first, second, 'payee-1');
 
-    expect(await claimed(org, await approved(org, on(second)), { supplier: second.id, payeeKey: 'payee-1' })).toBe(
-      'taken',
-    );
+    expect(
+      await claimed(org, await approved(org, onSupplier(second)), { supplier: second.id, payeeKey: 'payee-1' }),
+    ).toBe('taken');
   });
 
-  it('fails, never answering taken, for a request claimed again or a claim ID used again (the review)', async () => {
+  it('fails, never answering taken, for a request claimed again or a claim ID used again', async () => {
     const org = await organisation();
     const request = await approved(org);
     const id = randomUUID();
-    const claimWith = (claimId: string, requestId: string, reference = 'PO-2026/0042') =>
-      inOrg(org, (tx) =>
-        claimOrder(tx, {
-          orgId: org.id,
-          id: claimId,
-          requestId,
-          supplierId: org.supplier.id,
-          payeeKey: null,
-          reference,
-          claimedAt: AT,
-        }),
-      );
-    expect(await claimWith(id, request)).toBe('claimed');
+    expect(await claimed(org, request, { id })).toBe('claimed');
     const conflicted = /no other request’s open claim/u;
 
     // Its own claim still open, and the same ID for another order.
-    await expect(claimWith(randomUUID(), request)).rejects.toThrow(conflicted);
-    await expect(claimWith(id, await approved(org, { order_reference: 'PO-7' }), 'PO-7')).rejects.toThrow(conflicted);
+    await expect(claimed(org, request)).rejects.toThrow(conflicted);
+    await expect(
+      claimed(org, await approved(org, { order_reference: 'PO-7' }), { id, reference: 'PO-7' }),
+    ).rejects.toThrow(conflicted);
     // Its own claim released.
     await change(org, request, { status: 'CANCELLED' });
-    await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }));
-    await expect(claimWith(randomUUID(), request)).rejects.toThrow(conflicted);
+    await released(org, request);
+    await expect(claimed(org, request)).rejects.toThrow(conflicted);
   });
 
   it('claims the request’s own order and supplier, or fails: never another', async () => {

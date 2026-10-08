@@ -1,7 +1,6 @@
 // Order claims (0039; ADR-006 §5, §11; ADR-014 §3, §5; Phase 2 D3): the
 // database's safety net against paying one order twice, and the duplicate
-// check the decision rests on (`duplicateOrder`, SEC-AG-14), built first in
-// Phase 2 and never held up by the split check.
+// check the decision rests on (`duplicateOrder`, SEC-AG-14).
 //
 // An order is compared by its canonical form (NFKC, case-folded, trimmed,
 // spaces collapsed), which the database works out: a request's `order_key`
@@ -14,9 +13,8 @@
 // The caller (D4) holds the supplier FOR NO KEY UPDATE first (ADR-006 §6: 6),
 // which serialises the check and the claim for one supplier. Two suppliers
 // sharing a payee key aren't serialised by it, so the claim itself may still
-// find the order taken: `claimOrder` answers `taken` without failing the
-// transaction (the second waits on the first's unique entry, then does
-// nothing), and the caller starts again, its check then seeing the claim.
+// find the order taken (the second waits on the first's unique entry, then
+// does nothing), and the caller starts again, its check then seeing the claim.
 import { type Expression, sql, type Transaction } from 'kysely';
 
 import type { SpendRequestsTables } from './tables.ts';
@@ -32,13 +30,15 @@ export interface OrderOf {
   readonly supplierId: string;
   /** The supplier's payee key as it is (ADR-014 §3); null when it has none. */
   readonly payeeKey: string | null;
+  /** The order reference as the agent wrote it. */
+  readonly reference: string;
 }
 
 /**
  * The open claims on the order: by the same supplier, or by the same payee key
  * where there is one; the organisation's alone, by its tenant wall (withTenant).
  */
-const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf & { readonly reference: string }) =>
+const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
   tx
     .selectFrom('spend_requests.order_claims')
     .select('id')
@@ -52,18 +52,15 @@ const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf & { readonly referen
     .limit(1);
 
 /** Whether the order is already claimed and not released, in canonical form. */
-export async function hasOpenClaim(
-  tx: ClaimsTransaction,
-  order: OrderOf & { readonly reference: string },
-): Promise<boolean> {
+export async function hasOpenClaim(tx: ClaimsTransaction, order: OrderOf): Promise<boolean> {
   return (await openClaimsOn(tx, order).executeTakeFirst()) !== undefined;
 }
 
 /**
  * Claims a request's order, on its own supplier and order: `claimed`, or
  * `taken` when another request's open claim already holds it (left to the
- * caller to start again, the transaction still usable). A supplier or order not the
- * request's, a payee key not the supplier's, or a request not holding
+ * caller to start again, the transaction still usable). A supplier or order
+ * not the request's, a payee key not the supplier's, or a request not holding
  * capacity fails (0039's `for_its_request` and `claim_guard`).
  */
 export async function claimOrder(
@@ -72,8 +69,6 @@ export async function claimOrder(
     readonly orgId: string;
     readonly id: string;
     readonly requestId: string;
-    /** The order reference as the request was made with it. */
-    readonly reference: string;
     readonly claimedAt: Date;
   },
 ): Promise<'claimed' | 'taken'> {
@@ -88,14 +83,14 @@ export async function claimOrder(
       order_reference: orderKeyOf(claim.reference),
       claimed_at: claim.claimedAt,
     })
-    // An open claim on the order leaves it unmade, the transaction still usable. Postgres takes one
-    // conflict target and the order has two partial keys, so any key's conflict lands here: checked below.
+    // Postgres takes one conflict target and the order has two partial keys, so any key's conflict lands here:
+    // checked below.
     .onConflict((conflict) => conflict.doNothing())
     .returning('id')
     .executeTakeFirst();
   if (made !== undefined) return 'claimed';
-  // Taken only by another request's open claim; the request's own claim or a reused ID is the caller's bug,
-  // which a restart would only meet again (the review).
+  // Taken only by another request's open claim: the request's own claim or a reused ID is a caller's bug,
+  // which a restart would only meet again.
   const other = await openClaimsOn(tx, claim).where('request_id', '<>', claim.requestId).executeTakeFirst();
   if (other === undefined) throw new Error('an order claim conflicted with no other request’s open claim on its order');
   return 'taken';
