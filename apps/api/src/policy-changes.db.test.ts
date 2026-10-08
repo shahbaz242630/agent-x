@@ -10,16 +10,20 @@
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { type PolicyRules, POLICIES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
+import { DAY_MS } from '@agentx/core/shared-kernel';
+import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import {
   confirmedWhileDemoted,
   createTestDatabase,
   FixedClock,
+  holdNamedLock,
   LogCapture,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
   testLogger,
+  waitUntilQueued,
+  within,
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -51,6 +55,14 @@ const ids = new SequentialIds(0xc3b0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000c3';
 const APP_CODE = ['pwd', 'otp', 'mfa'] as const;
 const ORGANIZATION: PolicyTarget = { scope: 'organization' };
+/** Rules in a currency the deployment doesn't take, and no mandate is in. */
+const IN_USD: PolicyRules = {
+  currency: 'USD',
+  perOrderCap: null,
+  monthlyCap: null,
+  approvalThreshold: null,
+  supplierIds: null,
+};
 
 let clock: FixedClock;
 let registry: MandateRegistry;
@@ -59,7 +71,7 @@ let changes: PolicyChanges;
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'policy-changes' });
 const { member, world, keyed, noticesOf, stepUp } = shared;
 
-/** Rules that set only a monthly cap of `minor` fils, unless `changes` say more. */
+/** Rules that set only a monthly cap of `minor` fils, unless `more` says otherwise. */
 const rules = (minor: bigint, more: Partial<PolicyRules> = {}): PolicyRules => ({
   currency: 'AED',
   perOrderCap: null,
@@ -104,6 +116,74 @@ const policyEvents = (org: string) =>
       .orderBy('seq')
       .execute(),
   );
+
+/**
+ * `count` versions made now, past the app, of a mandate's policy: the day's
+ * budget's count alone, leaving the organisation's own policy never set.
+ */
+async function madePastTheApp(w: World, count: number): Promise<void> {
+  const mandateId = await shared.inForce(registry, w);
+  await withTenant(app, w.org, async (tx) => {
+    await tx
+      .insertInto('mandates.policies')
+      .values({
+        org_id: w.org,
+        id: mandateId,
+        scope: 'mandate',
+        mandate_id: mandateId,
+        current_version_id: mandateId,
+        created_at: clock.now(),
+      })
+      .execute();
+    for (let version = 1; version <= count; version += 1) {
+      await tx
+        .insertInto('mandates.policy_versions')
+        .values({
+          org_id: w.org,
+          id: version === 1 ? mandateId : ids.next(),
+          policy_id: mandateId,
+          version,
+          currency: 'AED',
+          per_order_cap_minor: null,
+          over_per_order_cap: null,
+          monthly_cap_minor: null,
+          approval_threshold_minor: null,
+          supplier_ids: null,
+          rules_hash: '0'.repeat(64),
+          made_by: w.admin.membershipId,
+          made_at: clock.now(),
+        })
+        .execute();
+    }
+  });
+}
+
+/** Two confirms of the organisation's policy, each with its own step-up, sent while the policies' lock is held, then let go. */
+async function twoConfirmsAtOnce(w: World) {
+  const asked = [rules(1_000n), rules(2_000n)];
+  const challenges: string[] = [];
+  for (const each of asked) {
+    const challengeId = askedFor(await ask(w.admin, ORGANIZATION, each));
+    await stepUp(w.admin, challengeId);
+    challenges.push(challengeId);
+  }
+  const holder = await database.connect('admin');
+  await holder.query('begin');
+  try {
+    await holdNamedLock(holder, lockName('policies', w.org));
+    const confirming = within(
+      20_000,
+      Promise.all(asked.map((each, i) => confirm(w.admin, ORGANIZATION, each, challenges[i] ?? ''))),
+      'the confirms',
+    );
+    await waitUntilQueued(database.as('admin'), 2);
+    await holder.query('commit');
+    return (await confirming).map((write) => (write.outcome === 'refused' ? write.code : write.outcome)).toSorted();
+  } finally {
+    await holder.query('rollback');
+    await holder.end();
+  }
+}
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -188,51 +268,22 @@ describe('the organisation’s policy (C3, decision 5)', () => {
 
   it('refuses a currency the deployment doesn’t take, and a supplier not the organisation’s', async () => {
     const w = await world();
-    const usd = { currency: 'USD', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null };
-    expect(await ask(w.admin, ORGANIZATION, usd)).toEqual(refused(409, 'POLICY_CURRENCY_REFUSED'));
+    expect(await ask(w.admin, ORGANIZATION, IN_USD)).toEqual(refused(409, 'POLICY_CURRENCY_REFUSED'));
     expect(await ask(w.admin, ORGANIZATION, rules(1n, { supplierIds: [ids.next()] }))).toEqual(
       refused(409, 'POLICY_SUPPLIER_UNKNOWN'),
     );
   });
 
-  it('refuses the 101st change in a day: POLICY_CHANGES_SPENT, and takes one again a day later', async () => {
+  it('refuses the 101st change in a day: POLICY_CHANGES_SPENT, and takes one again once a day has passed', async () => {
     const w = await world();
-    await withTenant(app, w.org, async (tx) => {
-      // The budget's count alone, past the app: 100 versions of the organisation's policy made in the last day.
-      await tx
-        .insertInto('mandates.policies')
-        .values({
-          org_id: w.org,
-          id: w.org,
-          scope: 'organization',
-          mandate_id: null,
-          current_version_id: w.org,
-          created_at: clock.now(),
-        })
-        .execute();
-      for (let version = 1; version <= 100; version += 1) {
-        await tx
-          .insertInto('mandates.policy_versions')
-          .values({
-            org_id: w.org,
-            id: version === 1 ? w.org : ids.next(),
-            policy_id: w.org,
-            version,
-            currency: 'AED',
-            per_order_cap_minor: null,
-            over_per_order_cap: null,
-            monthly_cap_minor: null,
-            approval_threshold_minor: null,
-            supplier_ids: null,
-            rules_hash: '0'.repeat(64),
-            made_by: w.admin.membershipId,
-            made_at: clock.now(),
-          })
-          .execute();
-      }
-    });
+    await madePastTheApp(w, 100);
 
     expect(await ask(w.admin, ORGANIZATION, rules(1n))).toEqual(refused(409, 'POLICY_CHANGES_SPENT'));
+    clock.advanceBy(DAY_MS - 1);
+    expect(await ask(w.admin, ORGANIZATION, rules(1n))).toEqual(refused(409, 'POLICY_CHANGES_SPENT'));
+    clock.advanceBy(1);
+    // A day on, the first admin's session has ended: another, signed in now.
+    expect((await ask(await member(w.org, 'admin'), ORGANIZATION, rules(1n))).outcome).toBe('asked');
   });
 
   it.each(['approver', 'developer', 'viewer'] as const)('refuses a %s: FORBIDDEN', async (role) => {
@@ -331,8 +382,7 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
   it('refuses one for a mandate ended, unknown, or in another currency', async () => {
     const w = await world();
     const id = await shared.inForce(registry, w);
-    const usd = { currency: 'USD', perOrderCap: null, monthlyCap: null, approvalThreshold: null, supplierIds: null };
-    expect(await ask(w.admin, { scope: 'mandate', mandateId: id }, usd)).toEqual(
+    expect(await ask(w.admin, { scope: 'mandate', mandateId: id }, IN_USD)).toEqual(
       refused(409, 'POLICY_CURRENCY_REFUSED'),
     );
     await shared.movedPastTheUseCase(w, id, 'revoke');
@@ -351,6 +401,20 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
     await shared.movedPastTheUseCase(w, id, 'revoke');
 
     expect(await confirm(w.admin, target, rules(1_000n), challengeId)).toEqual(refused(409, 'MANDATE_ENDED'));
+  });
+});
+
+describe(`two changes at once (forced: the policies' lock held, Postgres ${server.version})`, () => {
+  it('two confirms of a policy never set: one makes it, the other’s step-up was for the policy as it stood', async () => {
+    const w = await world();
+    expect(await twoConfirmsAtOnce(w)).toEqual(['STEP_UP_FAILED', 'changed']);
+    expect(await policyEvents(w.org)).toHaveLength(2);
+  });
+
+  it('two confirms with one change left in the day: one made, the other POLICY_CHANGES_SPENT, never 101', async () => {
+    const w = await world();
+    await madePastTheApp(w, 99);
+    expect(await twoConfirmsAtOnce(w)).toEqual(['POLICY_CHANGES_SPENT', 'changed']);
   });
 });
 

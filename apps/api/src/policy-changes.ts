@@ -24,8 +24,8 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the policies' lock (confirm),
 // the session's challenges (0b, confirm), the admin's membership (2a), the
-// mandate (4) and its version, the policy (4, after the mandates) and its
-// version, the challenge consumed, the chain head last.
+// mandate (4) and its version, the policy (4, after the mandates), the
+// challenge consumed, the new version, the chain head last.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import {
@@ -52,7 +52,14 @@ import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/plat
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { MandateRefused, type MandateTables, type MandateTx, mandateIn, versionIn } from './mandate-reads.ts';
+import {
+  MandateRefused,
+  type MandateTables,
+  type MandateTx,
+  mandateIn,
+  toldAdminsAndApprovers,
+  versionIn,
+} from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
@@ -122,12 +129,18 @@ const NOTICE = { organization: 'organization_policy_changed', mandate: 'mandate_
  * lower case: any change to the policy since the ask, or other rules, make the
  * step-up another change's.
  */
-const changeHash = (scope: PolicyScope, orgId: string, policyId: string, event: string | null, rules: PolicyRules) =>
+const changeHash = (
+  scope: PolicyScope,
+  orgId: string,
+  policyId: string,
+  existing: { readonly state: { readonly eventId: string } } | null,
+  rules: PolicyRules,
+) =>
   changeHashOf([
     POLICY_OPERATIONS[scope].ask,
     orgId.toLowerCase(),
     policyId.toLowerCase(),
-    event?.toLowerCase() ?? '',
+    existing?.state.eventId.toLowerCase() ?? '',
     rulesHash(rules),
   ]);
 
@@ -213,23 +226,21 @@ export function createPolicyChanges({
   };
 
   /** The policy as it now stands, or none set. */
-  const viewIn = async (
+  const policyViewIn = async (
     tx: MandateTx,
     states: SignedStates,
     orgId: string,
     target: PolicyTarget,
   ): Promise<PolicyView> => {
-    let id = orgId.toLowerCase();
-    let mandateId: string | null = null;
-    if (target.scope === 'mandate') {
-      ({ id } = (await mandateIn(tx, states, orgId, target.mandateId, 'share')).mandate);
-      mandateId = id;
-    }
+    const id =
+      target.scope === 'organization'
+        ? orgId.toLowerCase()
+        : (await mandateIn(tx, states, orgId, target.mandateId, 'share')).mandate.id;
     const read = await policyIn(tx, states, orgId, id, 'share');
     return {
       scope: target.scope,
       id,
-      mandateId,
+      mandateId: target.scope === 'mandate' ? id : null,
       current: read === null ? null : await currentOf(tx, states, orgId, read.policy),
     };
   };
@@ -242,7 +253,7 @@ export function createPolicyChanges({
         const challenge = await challenges.open(tx, {
           sessionId: member.sessionId,
           action: POLICY_OPERATIONS[target.scope].ask,
-          changeHash: changeHash(target.scope, member.orgId, id, existing?.state.eventId ?? null, rules),
+          changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
         });
         // The session ended since the access hook found it.
         if (challenge === undefined) throw new MandateRefused(401, 'UNAUTHENTICATED');
@@ -265,7 +276,7 @@ export function createPolicyChanges({
           {
             sessionId: member.sessionId,
             action: POLICY_OPERATIONS[target.scope].ask,
-            changeHash: changeHash(target.scope, member.orgId, id, existing?.state.eventId ?? null, rules),
+            changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
           },
           // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
@@ -283,27 +294,18 @@ export function createPolicyChanges({
           actor: { type: 'user', id: member.userId },
           details: stepUpDetails(consumed),
         });
-        await outbox.add(tx, [
-          {
-            orgId: member.orgId,
-            recipientUserId: null,
-            kind: NOTICE[target.scope],
-            membershipId: null,
-            role: null,
-            aboutId: id,
-          },
-        ]);
+        await outbox.add(tx, toldAdminsAndApprovers(member.orgId, NOTICE[target.scope], id));
         return { status: 200, resourceId: id };
       });
       if (isUnwritten(done)) return done;
       const view = await work.answered(member.orgId, correlationId, (tx, states) =>
-        viewIn(tx, states, member.orgId, target),
+        policyViewIn(tx, states, member.orgId, target),
       );
       return 'outcome' in view ? view : { outcome: 'changed', ...view };
     },
 
     async show(orgId, target, correlationId) {
-      const view = await work.answered(orgId, correlationId, (tx, states) => viewIn(tx, states, orgId, target));
+      const view = await work.answered(orgId, correlationId, (tx, states) => policyViewIn(tx, states, orgId, target));
       return 'outcome' in view ? view : { outcome: 'found', ...view };
     },
   };

@@ -207,6 +207,33 @@ describe.each(PATHS)('changing %s policy (C3)', (_whose, path, target, operation
     expect(calls).toEqual([]);
   });
 
+  it.each([
+    ['in lower case', 'aed'],
+    ['of a NUL', String.fromCharCode(0)],
+    ['of four letters', 'AEDX'],
+  ])('refuses a currency %s at the edge, though the body sets no amount', async (_what, currency) => {
+    const { app, calls } = await withPolicies({});
+    const reply = await app.inject(post(`${path}/change`, { currency }));
+
+    expect(reply.statusCode).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
+  it('takes the longest body the document allows within the body limit: 100 suppliers, every character escaped (B8-3)', async () => {
+    const { app } = await withPolicies({ changed: { outcome: 'changed', ...VIEW } });
+    const escaped = (text: string) =>
+      // ASCII alone, one UTF-16 unit each.
+      text.replaceAll(/./g, (c) => String.fromCharCode(92) + 'u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+    const suppliers = Array.from({ length: 100 }, (_, i) => `0199a0f0-0000-7000-8000-${String(i).padStart(12, '0')}`);
+    const body = JSON.stringify({ ...RULES, supplierIds: ['@'], stepUpChallengeId: CHALLENGE }).replace(
+      '"@"',
+      suppliers.map((id) => `"${escaped(id)}"`).join(','),
+    );
+    const reply = await app.inject({ ...post(`${path}/change/confirm`, {}), payload: body });
+
+    expect(reply.statusCode).toBe(200);
+  });
+
   it('refuses a confirm with no step-up named', async () => {
     const { app, calls } = await withPolicies({});
     const reply = await app.inject(post(`${path}/change/confirm`, RULES));

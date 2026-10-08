@@ -185,7 +185,7 @@ function versionRecordOf(id: string, fields: Fields): MandateVersionRecord | und
 }
 
 /** A verified row read back into its record, or a throw: the table's checks and the seal make any other a bug. */
-function recordOf<Row>(table: SignedStateTable, id: string, record: Row | undefined): Row {
+export function recordOf<Row>(table: SignedStateTable, id: string, record: Row | undefined): Row {
   if (record === undefined)
     throw new Error(`A verified ${table.subject} holds a field that isn't one of its own: ${id}`);
   return record;

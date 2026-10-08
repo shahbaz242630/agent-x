@@ -42,9 +42,9 @@ export interface MandateView {
   readonly pending: VersionShown | null;
 }
 
-/** A mandate's notice (0036): to every admin and approver of the organisation, found as it is sent. */
-export const toldOfMandate = (orgId: string, kind: NoticeKind, mandateId: string): Notice[] => [
-  { orgId, recipientUserId: null, kind, membershipId: null, role: null, aboutId: mandateId },
+/** A notice about a mandate or a policy (0036, 0038): to every admin and approver of the organisation, found as it is sent. */
+export const toldAdminsAndApprovers = (orgId: string, kind: NoticeKind, aboutId: string): Notice[] => [
+  { orgId, recipientUserId: null, kind, membershipId: null, role: null, aboutId },
 ];
 
 /** What a source's bank consent allows, as the terms are checked against it. */

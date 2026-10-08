@@ -42,7 +42,9 @@ import {
 import { MANDATE_MOVES, type MandateMove, type MandateMoves, MOVE_OPERATIONS, MOVING_ROLES } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
 import {
+  AMOUNT,
   CHALLENGE_BODY_LIMIT,
+  MANDATE_ID,
   NEXT,
   NOTHING,
   NOTHING_BODY_LIMIT,
@@ -63,10 +65,6 @@ const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
  * every body the schema allows).
  */
 const DRAFT_BODY_LIMIT = 16_384;
-
-const AMOUNT = z
-  .number()
-  .describe('Whole minor units (fils for AED): an integer from 1 to 2^53 − 1, never a string or a fraction.');
 
 /** A version's terms as a body sends them. */
 const TERM_FIELDS = {
@@ -224,8 +222,6 @@ const DRAFT_SCHEMA = {
     .describe('The mandate to draft, with its first terms.'),
   response: { 201: MANDATE_DETAILS.describe('The mandate, waiting for an admin to accept it.') },
 };
-
-const MANDATE_ID = z.object({ id: z.uuid().describe('The mandate, by its ID.') });
 
 const REDRAFT_SCHEMA = {
   summary: 'Draft a new version of a mandate, waiting for acceptance',

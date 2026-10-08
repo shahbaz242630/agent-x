@@ -50,11 +50,13 @@ export class PolicyRulesRefused extends Error {
 export function policyRules(rules: PolicyRules): PolicyRules {
   const problems: string[] = [];
   const { perOrderCap, monthlyCap, approvalThreshold } = rules;
-  const amounts = [perOrderCap?.cap ?? null, monthlyCap, approvalThreshold].filter((m) => m !== null);
+  const cap = perOrderCap?.cap ?? null;
+  // An ISO 4217 code even with no amount to carry it, so no other text reaches a query.
+  if (!/^[A-Z]{3}$/.test(rules.currency)) problems.push('the currency is not an ISO 4217 code');
+  const amounts = [cap, monthlyCap, approvalThreshold].filter((m) => m !== null);
   if (amounts.some(({ currency }) => currency !== rules.currency))
     problems.push('the rules are not all in one currency');
   else {
-    const cap = perOrderCap?.cap ?? null;
     const above = (a: Money | null, b: Money | null) => a !== null && b !== null && compare(a, b) > 0;
     if (above(approvalThreshold, cap)) problems.push('the approval threshold is above the per-order cap');
     if (above(cap, monthlyCap)) problems.push('the per-order cap is above the monthly cap');

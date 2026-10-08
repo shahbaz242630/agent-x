@@ -25,6 +25,7 @@ import type {
 } from '../../audit/index.ts';
 import { type Money, minorOf, money, oneOf, oneOfOrNull, timeOf, wholeOf } from '../../../shared-kernel/index.ts';
 import { OVER_CAP, POLICY_SCOPES, type PolicyRules, type PolicyScope, policyRules } from '../domain/policy.ts';
+import { recordOf } from './drafts.ts';
 import { POLICIES, POLICY_VERSIONS } from './mandates.ts';
 import type { MandatesTables } from './tables.ts';
 
@@ -66,12 +67,6 @@ type PolicyVersionCheck =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 type Fields = ReadonlyMap<string, string | null>;
-
-/** A verified row read back into its record, or a throw: the table's checks and the seal make any other a bug. */
-function recordOf<Row>(subject: string, id: string, record: Row | undefined): Row {
-  if (record === undefined) throw new Error(`A verified ${subject} holds a field that isn't one of its own: ${id}`);
-  return record;
-}
 
 function policyRecordOf(id: string, fields: Fields): PolicyRecord | undefined {
   const scope = oneOf(POLICY_SCOPES, fields.get('scope'));
@@ -152,7 +147,7 @@ export async function policyOf(
   const state = await states.verifiedState(tx, POLICIES, key, lock);
   if (state.outcome !== 'verified') return state;
   const id = key.id.toLowerCase();
-  return { outcome: 'found', policy: recordOf(POLICIES.subject, id, policyRecordOf(id, state.fields)), state };
+  return { outcome: 'found', policy: recordOf(POLICIES, id, policyRecordOf(id, state.fields)), state };
 }
 
 /** The version, by its ID, read (`share`) and verified: found only as a version of `policyId`. */
@@ -165,7 +160,7 @@ export async function policyVersionOf(
   const state = await states.verifiedState(tx, POLICY_VERSIONS, key, 'share');
   if (state.outcome !== 'verified') return state;
   const id = key.id.toLowerCase();
-  const version = recordOf(POLICY_VERSIONS.subject, id, versionRecordOf(id, state.fields));
+  const version = recordOf(POLICY_VERSIONS, id, versionRecordOf(id, state.fields));
   if (version.policyId !== policyId.toLowerCase()) return { outcome: 'missing' };
   return { outcome: 'found', version };
 }

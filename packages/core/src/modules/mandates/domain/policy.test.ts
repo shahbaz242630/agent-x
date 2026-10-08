@@ -6,7 +6,8 @@ import { money } from '../../../shared-kernel/index.ts';
 import { type PolicyRules, policyRules, PolicyRulesRefused, widerThanMandate } from './policy.ts';
 import type { MandateTerms } from './terms.ts';
 
-const aed = (dirhams: number) => money(BigInt(dirhams * 100), 'AED');
+const aed = (dirhams: number) => money(BigInt(dirhams) * 100n, 'AED');
+const fils = (minor: bigint) => money(minor, 'AED');
 const A = '01a0ce75-93de-71d7-ba13-0000000000a1';
 const B = '01a0ce75-93de-71d7-ba13-0000000000a2';
 
@@ -71,6 +72,11 @@ describe('policyRules', () => {
       'the approval threshold is above the monthly cap',
     ],
     ['an amount in another currency', { monthlyCap: money(1n, 'USD') }, 'the rules are not all in one currency'],
+    [
+      'a currency that is no ISO 4217 code, with no amount',
+      { currency: 'aed' },
+      'the currency is not an ISO 4217 code',
+    ],
     ['an empty supplier list', { supplierIds: [] }, 'a supplier list names 1 to 100 suppliers'],
     [
       '101 suppliers',
@@ -105,9 +111,9 @@ describe('widerThanMandate (SEC-LIM-11)', () => {
   it('names each rule above the mandate’s, and a supplier it doesn’t name', () => {
     const wider = {
       ...NONE,
-      perOrderCap: { cap: aed(25_000.01), over: 'DENY' as const },
-      monthlyCap: aed(50_000.01),
-      approvalThreshold: aed(10_000.01),
+      perOrderCap: { cap: fils(2_500_001n), over: 'DENY' as const },
+      monthlyCap: fils(5_000_001n),
+      approvalThreshold: fils(1_000_001n),
       supplierIds: [A, '01a0ce75-93de-71d7-ba13-0000000000ff'],
     };
     expect(widerThanMandate(wider, TERMS)).toEqual([

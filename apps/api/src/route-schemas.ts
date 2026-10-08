@@ -4,6 +4,14 @@ import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
 
+/** An amount as a body sends it (ADR-006 §1): whole minor units, checked at the edge as a safe integer. */
+export const AMOUNT = z
+  .number()
+  .describe('Whole minor units (fils for AED): an integer from 1 to 2^53 − 1, never a string or a fraction.');
+
+/** A mandate named in a route's path. */
+export const MANDATE_ID = z.object({ id: z.uuid().describe('The mandate, by its ID.') });
+
 /** The most a bodyless write may be sent with: an empty object, with room to spare. */
 export const NOTHING_BODY_LIMIT = 64;
 

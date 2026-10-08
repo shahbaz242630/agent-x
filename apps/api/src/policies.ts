@@ -29,25 +29,25 @@ import {
   type PolicyTarget,
   type PolicyView,
 } from './policy-changes.ts';
-import { STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
+import { AMOUNT, MANDATE_ID, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** Every member may see the organisation's policies, as its mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
 
 /**
- * The most a change's body may be: 100 supplier IDs of 38 bytes with their
- * quotes and commas, the amounts, the currency and a challenge's ID, with room
- * to spare (the B8-3 lesson: it must fit every body the schema allows).
+ * The most a change's body may be: 100 supplier IDs written as the longest
+ * JSON can (each character a `\uXXXX` escape: 219 bytes with its quotes and
+ * comma), the amounts, the currency and a challenge's ID, with room to spare
+ * (the B8-3 lesson: it must fit every body the schema allows).
  */
-const RULES_BODY_LIMIT = 8_192;
-
-const AMOUNT = z
-  .number()
-  .describe('Whole minor units (fils for AED): an integer from 1 to 2^53 − 1, never a string or a fraction.');
+const RULES_BODY_LIMIT = 32_768;
 
 /** A policy's rules as a body sends them: each left out, or null, where the policy sets none. */
 const RULE_FIELDS = {
-  currency: z.string().describe('The rules’ currency: AED in the Pilot, a mandate’s own for its policy.'),
+  currency: z
+    .string()
+    .regex(/^[A-Z]{3}$/)
+    .describe('The rules’ currency, an ISO 4217 code: AED in the Pilot, a mandate’s own for its policy.'),
   perOrderCap: z
     .strictObject({
       capMinor: AMOUNT.describe('The most one request may be under this policy.'),
@@ -134,8 +134,6 @@ const POLICY = z
   })
   .register(API_SCHEMAS, { id: 'Policy', description: 'A policy and the rules in force.' });
 
-const MANDATE_ID = z.object({ id: z.uuid().describe('The mandate, by its ID.') });
-
 /** Each kind's words, params and paths. */
 const KINDS = {
   organization: {
@@ -219,9 +217,8 @@ export function registerPolicies(app: FastifyInstance, { changes }: { changes: P
     const { path } = KINDS[kind];
 
     routes.get(path, { schema: schemas.show, config: { access: [...READING_ROLES] } }, async (request, reply) => {
-      const { member } = request;
-      if (member === null) throw new Error('a policies route ran without a member');
-      const found = await need(changes).show(member.orgId, targetOf(kind, request), request.id);
+      const { orgId } = memberInSessionOf(request);
+      const found = await need(changes).show(orgId, targetOf(kind, request), request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       return policyBody(found);
     });
