@@ -532,6 +532,28 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     expect(sent.every(({ text }) => text.includes(`Mandate: ${MANDATE}`))).toBe(true);
   });
 
+  it.each([
+    ['organization_policy_changed', `Organisation: ${ORG}`],
+    ['mandate_policy_changed', `Mandate: ${MANDATE}`],
+  ] as const)('C3a sends %s to every active admin and approver, naming what it is about', async (kind, about) => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const changed: Notice = {
+      orgId: ORG,
+      recipientUserId: null,
+      kind,
+      membershipId: null,
+      role: null,
+      aboutId: kind === 'organization_policy_changed' ? ORG : MANDATE,
+    };
+    await app.transaction().execute((tx) => outbox.add(tx, [changed]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'approver@example.test']);
+    expect(sent.every(({ text }) => text.includes(about))).toBe(true);
+  });
+
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) =>
