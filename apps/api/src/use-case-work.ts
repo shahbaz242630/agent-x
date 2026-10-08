@@ -104,8 +104,9 @@ export function createUseCaseWork<Tables extends UseCaseTables>({
     inOrganisation,
 
     /** The write with its key claimed first; a refusal is answered, with everything it did rolled back. */
+    /** For a member or an agent: only its organisation is read. */
     write: (
-      member: Member,
+      member: Pick<Member, 'orgId'>,
       idempotent: IdempotentRequest,
       correlationId: string,
       work: (tx: Tx, states: SignedStates) => Promise<{ status: number; resourceId: string }>,
