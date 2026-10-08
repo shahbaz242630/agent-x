@@ -136,12 +136,20 @@ export const REASON_CODES = {
   PAYEE_ROUTE_NOT_OFFERED:
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
+  POLICY_CHANGES_SPENT:
+    "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
+  POLICY_CURRENCY_REFUSED:
+    "The policy's currency isn't one Agent X takes here (AED in the Pilot), or a mandate's policy isn't in its mandate's currency. Nothing was changed.",
   POLICY_MONTHLY_CAP:
     "With what the agent has already spent or holds this month, this request is above the agent's monthly cap set by the organisation's policies (AED 20,000 unless the organisation set another), so it is refused. Nothing was reserved.",
   POLICY_ORDER_CAP:
     "The amount is above a per-order cap the organisation's policies set, so it is refused or sent for approval, as that policy says.",
   POLICY_SUPPLIER_NOT_ALLOWED:
     "The organisation's policies don't allow payments to this supplier, so the request is refused. Nothing was reserved.",
+  POLICY_SUPPLIER_UNKNOWN:
+    "A supplier the policy names is not one of the organisation's. Check the suppliers' IDs. Nothing was changed.",
+  POLICY_WIDER_THAN_MANDATE:
+    "A mandate's policy may only narrow it, and a rule here goes past the mandate's terms: a cap or threshold above the mandate's own, or a supplier the mandate doesn't name. Nothing was changed.",
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',

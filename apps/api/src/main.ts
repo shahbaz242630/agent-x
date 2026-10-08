@@ -98,6 +98,7 @@ import { createAgentMandates } from './agent-mandate.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { createMandateMoves } from './mandate-moves.ts';
+import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
@@ -524,6 +525,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     agentMandates: createAgentMandates({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
+    policyChanges: createPolicyChanges({
       database,
       keys,
       ids: uuidV7Ids,

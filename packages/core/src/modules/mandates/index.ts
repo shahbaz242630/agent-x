@@ -38,6 +38,28 @@ export {
   openMandateOfAgent,
 } from './infrastructure/drafts.ts';
 export { acceptDraft, agentOfMandate, mandatesOfAgent } from './infrastructure/acceptance.ts';
+export {
+  OVER_CAP,
+  type OverCap,
+  POLICY_SCOPES,
+  type PolicyRules,
+  PolicyRulesRefused,
+  type PolicyScope,
+  policyRules,
+  widerThanMandate,
+} from './domain/policy.ts';
+export {
+  currencyAllowed,
+  MOST_POLICY_CHANGES_A_DAY,
+  onePolicyChangeAtATime,
+  policyChangesSince,
+  policyOf,
+  type PolicyRecord,
+  type PolicyVersionRecord,
+  policyVersionOf,
+  rulesHash,
+  setPolicy,
+} from './infrastructure/policies.ts';
 export { mandatesPastTheirEnd } from './infrastructure/expiry.ts';
 export { MANDATE_VERSIONS, MANDATES, POLICIES, POLICY_VERSIONS } from './infrastructure/mandates.ts';
 export type { MandatesTables } from './infrastructure/tables.ts';
