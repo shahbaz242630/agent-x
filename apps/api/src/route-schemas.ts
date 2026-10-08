@@ -1,5 +1,6 @@
 // The pieces many routes' schemas share, written once so every route says
 // them alike in the OpenAPI document.
+import { MoneyRefused } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
@@ -11,6 +12,27 @@ export const AMOUNT = z
 
 /** A mandate named in a route's path. */
 export const MANDATE_ID = z.object({ id: z.uuid().describe('The mandate, by its ID.') });
+
+/**
+ * Each problem `read` finds in a body, as a refinement's issues: money that
+ * can't be, or the domain's own refusal and every problem it names. The body
+ * stays the JSON it came as, since the idempotency key's fingerprint has no
+ * form for Money's bigints (S89). Anything else is a bug, thrown.
+ */
+export function issuesOf(
+  read: () => unknown,
+  Refusal: new (...args: never[]) => Error & { readonly problems: readonly string[] },
+  context: z.RefinementCtx,
+): void {
+  try {
+    read();
+  } catch (error) {
+    if (error instanceof MoneyRefused) context.addIssue({ code: 'custom', message: error.message });
+    else if (error instanceof Refusal) {
+      for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
+    } else throw error;
+  }
+}
 
 /** The most a bodyless write may be sent with: an empty object, with room to spare. */
 export const NOTHING_BODY_LIMIT = 64;

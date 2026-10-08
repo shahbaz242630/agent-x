@@ -13,7 +13,7 @@ import {
   policyRules,
   type PolicyVersionRecord,
 } from '@agentx/core/modules/mandates';
-import { MoneyRefused, moneyFromJson } from '@agentx/core/shared-kernel';
+import { moneyFromJson } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -29,7 +29,7 @@ import {
   type PolicyTarget,
   type PolicyView,
 } from './policy-changes.ts';
-import { AMOUNT, MANDATE_ID, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
+import { AMOUNT, issuesOf, MANDATE_ID, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** Every member may see the organisation's policies, as its mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -88,20 +88,9 @@ const rulesOf = (body: RuleFields): PolicyRules => {
   });
 };
 
-/**
- * Each problem that keeps the body's rules from being a policy's, as a
- * refinement: the body stays the JSON it came as, since the idempotency key's
- * fingerprint has no form for Money's bigints (S89).
- */
+/** Each problem that keeps the body's rules from being a policy's, as a refinement. */
 const rulesChecked = (body: RuleFields, context: z.RefinementCtx): void => {
-  try {
-    rulesOf(body);
-  } catch (error) {
-    if (error instanceof MoneyRefused) context.addIssue({ code: 'custom', message: error.message });
-    else if (error instanceof PolicyRulesRefused) {
-      for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
-    } else throw error;
-  }
+  issuesOf(() => rulesOf(body), PolicyRulesRefused, context);
 };
 
 const POLICY_VERSION = z

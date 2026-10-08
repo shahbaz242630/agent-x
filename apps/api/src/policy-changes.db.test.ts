@@ -8,7 +8,8 @@
 // passkey, was asked for other rules or for the policy as it stood before; a
 // policy deleted past the app; and the lock order against the admin's demotion.
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
-import { type PolicyRules, POLICIES } from '@agentx/core/modules/mandates';
+import { withSignedStates } from '@agentx/core/modules/audit';
+import { policyOf, type PolicyRules, policyVersionOf, POLICIES } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
@@ -333,6 +334,74 @@ describe('the organisation’s policy (C3, decision 5)', () => {
     expect(await changes.show(w.org, ORGANIZATION, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await ask(w.admin, ORGANIZATION, rules(1n))).toEqual(refused(503, 'INTEGRITY_FAILED'));
   });
+});
+
+describe('a policy’s verified fields read back (C3)', () => {
+  /** The policy and its version as read with one field of the verified state replaced (`undefined`: left out). */
+  const readWith = (w: World, subject: 'policy' | 'policy_version', column: string, value: string | null | undefined) =>
+    withSignedStates(app, w.org, shared.quiet(), async (tx, states) => {
+      // A seal can only hold what record wrote, which the table holds to its own values: this stands in for a bug there.
+      const verifiedState: typeof states.verifiedState = async (...args) => {
+        const state = await states.verifiedState(...args);
+        if (state.outcome !== 'verified' || args[1].subject !== subject) return state;
+        const fields = new Map(state.fields);
+        if (value === undefined) fields.delete(column);
+        else fields.set(column, value);
+        return { ...state, fields };
+      };
+      const read = await policyOf(tx, { ...states, verifiedState }, { orgId: w.org, id: w.org }, 'share');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      return policyVersionOf(
+        tx,
+        { ...states, verifiedState },
+        { orgId: w.org, id: read.policy.currentVersionId },
+        w.org,
+      );
+    });
+
+  /** Every rule set, so each field has a value of its own to replace. */
+  const everyRule = (w: World) =>
+    rules(1_000_000n, {
+      perOrderCap: { cap: AED(500_000n), over: 'DENY' },
+      approvalThreshold: AED(100_000n),
+      supplierIds: [...w.suppliers],
+    });
+
+  it('reads every rule back as it was set', async () => {
+    const w = await world();
+    changedOf(await changed(w, ORGANIZATION, everyRule(w)));
+
+    expect(await readWith(w, 'policy', 'scope', 'organization')).toMatchObject({
+      outcome: 'found',
+      version: { ...everyRule(w), supplierIds: [...w.suppliers].sort(), version: 1 },
+    });
+  });
+
+  it.each<['policy' | 'policy_version', string, string | null | undefined]>([
+    ['policy', 'scope', 'everyone'],
+    ['policy', 'mandate_id', undefined],
+    ['policy', 'current_version_id', null],
+    ['policy_version', 'policy_id', null],
+    ['policy_version', 'currency', undefined],
+    ['policy_version', 'version', 'first'],
+    ['policy_version', 'made_at', 'never'],
+    ['policy_version', 'over_per_order_cap', 'MAYBE'],
+    ['policy_version', 'over_per_order_cap', null],
+    ['policy_version', 'per_order_cap_minor', null],
+    ['policy_version', 'monthly_cap_minor', '1.5'],
+    ['policy_version', 'approval_threshold_minor', undefined],
+    ['policy_version', 'supplier_ids', undefined],
+  ])(
+    'throws on a verified %s holding a %s that is none of its own (%s), rather than read it',
+    async (subject, column, value) => {
+      const w = await world();
+      changedOf(await changed(w, ORGANIZATION, everyRule(w)));
+
+      await expect(readWith(w, subject, column, value)).rejects.toThrow(
+        `A verified ${subject} holds a field that isn't one of its own`,
+      );
+    },
+  );
 });
 
 describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
