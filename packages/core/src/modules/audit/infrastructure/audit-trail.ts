@@ -74,7 +74,7 @@ import {
   subjectKeyProblems,
   subjectTypeProblems,
 } from '../domain/event.ts';
-import { HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
+import { HISTORY_CHECK_SUBJECT, HOLD_SUBJECT, INVESTIGATION_SUBJECT } from '../domain/integrity-hold.ts';
 import type { AuditTables } from './tables.ts';
 
 /** A transaction on the audit tables, opened by withTenant for the organisation. */
@@ -210,12 +210,26 @@ export interface AuditTrail {
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
   /**
    * The IDs of every object of this type the organisation's log holds any
-   * event about, sealed or not, in order (a uuid, so lower case): at most `limit`
-   * and one more, so the caller can tell a list cut short. For finding an
-   * object whose row is gone. Only in withTenant's transaction for that
-   * organisation, like `verify`.
+   * event about, sealed or not, in order (a uuid, so lower case), after the ID
+   * `after` (null from the start): at most `limit` and one more, so the caller
+   * can tell a list cut short. For finding an object whose row is gone. Only
+   * in withTenant's transaction for that organisation, like `verify`.
    */
-  subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]>;
+  subjectIds(
+    tx: AuditTransaction,
+    orgId: string,
+    type: string,
+    limit: number,
+    after?: string | null,
+  ): Promise<string[]>;
+  /**
+   * The action of the newest event about the object, as the table holds it,
+   * believed in nothing: no hash, MAC or head is checked, so it decides
+   * nothing and raises no alarm. Only a cheap look for a job deciding whether
+   * to make the verified read at all; null for none. Only in withTenant's
+   * transaction for that organisation, like `verify`.
+   */
+  newestActionUnverified(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<string | null>;
   /**
    * One event of the organisation's, found by its own ID, or as the first
    * event about an object recorded once (an investigation of the hold): read
@@ -489,7 +503,7 @@ function readerFor(tx: AuditTransaction, orgId: string): ChainReader {
  * The subject types only the integrity hold's own steps record: the hold, and
  * its investigations (B3+-2b), which clearing it rests on.
  */
-const HOLD_SUBJECTS: ReadonlySet<string> = new Set([HOLD_SUBJECT, INVESTIGATION_SUBJECT]);
+const HOLD_SUBJECTS: ReadonlySet<string> = new Set([HOLD_SUBJECT, INVESTIGATION_SUBJECT, HISTORY_CHECK_SUBJECT]);
 
 /**
  * Each trail's recording step for the integrity hold's own events, which the
@@ -643,21 +657,50 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       });
     },
 
-    async subjectIds(tx: AuditTransaction, orgId: string, type: string, limit: number): Promise<string[]> {
+    async subjectIds(
+      tx: AuditTransaction,
+      orgId: string,
+      type: string,
+      limit: number,
+      after: string | null = null,
+    ): Promise<string[]> {
       const problems = subjectTypeProblems(type);
       if (problems.length > 0) throw new AuditEventRefused(problems);
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+      if (after !== null && !UUID.test(after)) throw new RangeError('A subject is named by a UUID');
       await assertTenant(tx, orgId);
-      const rows = await tx
+      let query = tx
         .selectFrom('audit.events')
         .select('subject_id')
         .distinct()
         .where('org_id', '=', chainOf(orgId).orgId)
-        .where('subject_type', '=', type)
+        .where('subject_type', '=', type);
+      if (after !== null) query = query.where('subject_id', '>', after.toLowerCase());
+      const rows = await query
         .orderBy('subject_id')
         .limit(limit + 1)
         .execute();
       return rows.map(({ subject_id: id }) => id);
+    },
+
+    async newestActionUnverified(
+      tx: AuditTransaction,
+      orgId: string,
+      subject: AuditSubjectKey,
+    ): Promise<string | null> {
+      const problems = subjectKeyProblems(subject);
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      await assertTenant(tx, orgId);
+      const row = await tx
+        .selectFrom('audit.events')
+        .select('action')
+        .where('org_id', '=', chainOf(orgId).orgId)
+        .where('subject_type', '=', subject.type)
+        .where('subject_id', '=', subject.id.toLowerCase())
+        .orderBy('seq', 'desc')
+        .limit(1)
+        .executeTakeFirst();
+      return row?.action ?? null;
     },
 
     async recordedEvent(tx: AuditTransaction, orgId: string, find: EventToFind): Promise<RecordedEventCheck> {

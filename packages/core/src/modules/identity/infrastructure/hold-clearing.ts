@@ -16,7 +16,8 @@
 //    memberships), so a hold is never cleared over a record still tampered
 //    with (a table whose rows only grow, spend requests, in the rows that can
 //    still act, so clearing stays bounded however long the history, and the
-//    record the hold names, whatever its status); then the organisation's whole audit chain checked (the S68 audit:
+//    record the hold names, whatever its status; the whole history, ended rows
+//    too, checked in batches by the API's job after this investigation, D1c); then the organisation's whole audit chain checked (the S68 audit:
 //    every link, hash, MAC and its head), so a hold set for a chain found
 //    broken, an event deleted, say, is never cleared while it stays broken:
 //    a broken chain is an operator's restore (Incident playbook), never an
@@ -158,6 +159,24 @@ export function createHoldClearings({
   };
 
   /**
+   * A growing table's whole history, ended rows too, checked in batches by the
+   * API's job after this investigation was recorded (Phase 2 D1c, partner
+   * decision 7): clearing waits for it. The investigation is of the HELD state
+   * cleared, which clearIntegrityHold checks.
+   */
+  const historyWhole = async (
+    tx: MembershipsTransaction,
+    states: SignedStates,
+    orgId: string,
+    investigationId: string,
+  ): Promise<void> => {
+    if (!authorityTables.some(({ liveStatuses }) => liveStatuses !== undefined)) return;
+    const checked = await states.historyChecked(tx, orgId, investigationId);
+    if (checked === 'tampered') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+    if (checked === 'unchecked') throw new ClearingRefused(409, 'HISTORY_UNCHECKED');
+  };
+
+  /**
    * Runs the write in the organisation's transaction, its key claimed first;
    * a refusal is answered, with everything it did rolled back.
    */
@@ -234,6 +253,8 @@ export function createHoldClearings({
           { passkeyRequired: true },
         );
         if (consumed === undefined) throw new ClearingRefused(403, 'STEP_UP_FAILED');
+        // After the step-up, so a step-up refused says so first; a refusal here rolls its consuming back too.
+        await historyWhole(tx, states, admin.orgId, investigationId);
         const cleared = await states.clearIntegrityHold(tx, admin.orgId, {
           actor: { type: 'user', id: admin.userId },
           holdEventId,

@@ -323,6 +323,63 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 
+  it('records the whole history checked after an investigation, read back for that investigation alone (Phase 2 D1c)', async () => {
+    await holdThenRepair();
+    const { holdEventId, investigationId } = await investigated();
+    const checked = (id: string) => inOrg((tx, states) => states.historyChecked(tx, org, id));
+
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, holdEventId))).toBe(investigationId);
+    expect(await checked(investigationId)).toBe('unchecked');
+    await inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 3));
+    expect(await checked(investigationId)).toBe('checked');
+    // A newer investigation of the same HELD state is the one checked after next, and isn't yet.
+    const newer = await investigated();
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, holdEventId))).toBe(newer.investigationId);
+    expect(await checked(newer.investigationId)).toBe('unchecked');
+    // Another HELD state has no investigation of its own yet.
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, newId()))).toBeNull();
+  });
+
+  it('records a history checked only while the hold stands in the HELD state its investigation is of', async () => {
+    const message =
+      'A history is recorded checked only while the hold stands in the HELD state its investigation is of';
+    await holdThenRepair();
+    const { holdEventId, investigationId } = await investigated();
+    // No such investigation.
+    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, newId(), 0))).rejects.toThrow(message);
+    // Cleared since, then held again: the investigation is of a HELD state the hold has left.
+    expect(await clear({ holdEventId, investigationId })).toMatchObject({ outcome: 'cleared' });
+    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 0))).rejects.toThrow(
+      message,
+    );
+    await holdThenRepair();
+    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 0))).rejects.toThrow(
+      message,
+    );
+  });
+
+  it('checks a table’s whole history in batches: every row, and every object the log holds whose row is gone', async () => {
+    const ids = [newId(), newId(), newId()];
+    for (const id of ids) await inOrg((tx, states) => insertAgent(tx, states, id));
+    const every = [org, ...ids].sort();
+    const batch = (after: string | null) => inOrg((tx, states) => states.checkHistoryBatch(tx, org, AGENTS, after, 2));
+
+    const first = await batch(null);
+    expect(first).toEqual({ outcome: 'checked', objects: 2, last: every[1], done: false });
+    const second = await batch(first.outcome === 'checked' ? first.last : null);
+    expect(second).toEqual({ outcome: 'checked', objects: 2, last: every[3], done: true });
+    // Past the end: nothing left.
+    expect(await batch(every[3] ?? null)).toEqual({ outcome: 'checked', objects: 0, last: every[3], done: true });
+
+    // A row deleted is found from the log, as verifyAll finds one: the first batch holds it.
+    const gone = every[1] ?? '';
+    await owner.deleteRow(gone);
+    expect(await batch(null)).toEqual({
+      outcome: 'tampered',
+      findings: [{ orgId: org, subjectType: 'agent', objectId: gone, sign: 'deleted' }],
+    });
+  });
+
   it('reads the hold with the chain head locked, which comes last: no row is read after it', async () => {
     await holdThenRepair();
     const asked = await investigated();
