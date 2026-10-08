@@ -15,7 +15,8 @@
 //    lock order (ADR-006 §6: the organisation, then its invitations and
 //    memberships), so a hold is never cleared over a record still tampered
 //    with (a table whose rows only grow, spend requests, in the rows that can
-//    still act: so clearing stays bounded however long the history); then the organisation's whole audit chain checked (the S68 audit:
+//    still act, so clearing stays bounded however long the history, and the
+//    record the hold names, whatever its status); then the organisation's whole audit chain checked (the S68 audit:
 //    every link, hash, MAC and its head), so a hold set for a chain found
 //    broken, an event deleted, say, is never cleared while it stays broken:
 //    a broken chain is an operator's restore (Incident playbook), never an
@@ -136,6 +137,27 @@ export function createHoldClearings({
   };
 
   /**
+   * The record the hold was set for, verified whatever its status: a growing
+   * table is checked above in its live rows alone, so an ended request the
+   * hold names is read here. Locked last of the rows (a request's level, 8).
+   */
+  const namedRecordWhole = async (
+    tx: MembershipsTransaction,
+    states: SignedStates,
+    orgId: string,
+    holdEventId: string,
+  ): Promise<void> => {
+    const found = await trail.recordedEvent(tx, orgId, { eventId: holdEventId });
+    if (found.kind !== 'recorded') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+    const { foundOn, objectId } = found.event.details;
+    const table = authorityTables.find(({ subject }) => subject === foundOn);
+    // The chain, or a subject no table holds: checked above, or nothing to read.
+    if (table === undefined || typeof objectId !== 'string') return;
+    const check = await states.verifiedState(tx, table, { orgId, id: objectId }, 'share');
+    if (check.outcome !== 'verified') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+  };
+
+  /**
    * Runs the write in the organisation's transaction, its key claimed first;
    * a refusal is answered, with everything it did rolled back.
    */
@@ -198,6 +220,7 @@ export function createHoldClearings({
         }
         await activeAdminId(tx, states, admin, ClearingRefused);
         const holdEventId = await heldEventOf(tx, states, admin.orgId);
+        await namedRecordWhole(tx, states, admin.orgId, holdEventId);
         const consumed = await challenges.consume(
           tx,
           held,

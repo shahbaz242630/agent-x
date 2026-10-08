@@ -422,6 +422,20 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     }
   });
 
+  it('leaves a live row moved to an end, or deleted, to the clearing’s other checks: not judged here (Phase 2 D1b)', async () => {
+    const moved = await newRequest('LIVE');
+    const deleted = await newRequest('LIVE');
+    const requests = await tamperAsOwner(database, REQUESTS, org);
+    try {
+      await requests.setColumn(moved, 'status', 'ENDED');
+      await requests.deleteRow(deleted);
+
+      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
+    } finally {
+      await requests.end();
+    }
+  });
+
   it("refuses the integrity hold's own subject type, whose state has no row", async () => {
     const hold = {
       table: 'probe.agents',

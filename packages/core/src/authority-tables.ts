@@ -60,9 +60,10 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * after the mandates, Phase 2 C1), then its funding sources (5, D2-2),
  * then its suppliers (6), their payee registrations (6, after their supplier,
  * E2-1) and their versions (6, after the registration that gives one its
- * reference, E1-1), then its spend requests (8, Phase 2 D1). Clearing the integrity hold checks
- * every row of each in this order (verifyAll, B3+-2c), so a new table goes in
- * at its level.
+ * reference, E1-1), then its spend requests (8, Phase 2 D1). Clearing the
+ * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
+ * table with `liveStatuses`, its live rows), so a new table goes in at its
+ * level.
  */
 export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   ORGANIZATIONS,

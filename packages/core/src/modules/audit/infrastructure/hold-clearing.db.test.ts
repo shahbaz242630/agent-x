@@ -287,7 +287,7 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
     await inOrg((tx, states) => states.verifyAll(tx, org, [AGENTS], 100));
     await expect(
       inOrg((tx, states) => states.clearIntegrityHold(tx, org, { actor: ADMIN, stepUp: STEP_UP, ...asked })),
-    ).rejects.toThrow("A hold is cleared only once verifyAll has found every one of the organisation's records whole");
+    ).rejects.toThrow("A hold is cleared only once verifyAll has found the organisation's records whole");
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 

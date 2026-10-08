@@ -136,21 +136,24 @@ export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * Every object of the tables checked (verifyAll): all verified, with how many
- * there were; some tampered with, each finding named (every alarm is already
- * raised); or more objects in one table than the limit, with none judged.
- */
-/**
  * A table verifyAll checks: all of it, or, for one whose rows only grow (a
  * spend request's, Phase 2 D1), its rows in `liveStatuses` alone: those that
- * can still act. An ended row is verified wherever it is read again, and one
- * moved back to a live status is listed, so checked; a live row deleted is
- * left to the reconciliation of claims and reservations (E1).
+ * can still act. One moved back to a live status is listed, so checked; an
+ * ended one, or a live one moved to an end or deleted, is not judged here:
+ * clearing reads the record its hold names, the whole history is checked in
+ * batches before a clearing is confirmed (Phase 2 D1c), and claims and
+ * reservations are reconciled with the log (E1).
  */
 export interface CheckedTable extends SignedStateTable {
   readonly liveStatuses?: readonly string[];
 }
 
+/**
+ * Every object of the tables checked (verifyAll; a growing table's live rows):
+ * all verified, with how many there were; some tampered with, each finding
+ * named (every alarm is already raised); or more objects in one table than the
+ * limit, with none judged.
+ */
 export type OrganisationCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
   | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
@@ -381,9 +384,10 @@ export interface SignedStates {
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
    * it with, from the HELD state recorded by `holdEventId`, after that
-   * state's investigation, and only once verifyAll has verified every
-   * authority object of the organisation in this same transaction (otherwise
-   * `basis`): a hold is never cleared over a record still tampered with. The
+   * state's investigation, and only once verifyAll has verified the
+   * organisation's authority objects (a growing table's live rows) in this
+   * same transaction (otherwise `basis`): a hold is never cleared over a
+   * record still tampered with. The
    * hold is read with the chain head's lock, which comes last (ADR-006 §6).
    */
   clearIntegrityHold(
@@ -972,7 +976,7 @@ export function createSignedStates({
       if (verifiedWhole.get(tx)?.has(orgId.toLowerCase()) !== true) {
         throw new SignedStateFailed(
           'basis',
-          "A hold is cleared only once verifyAll has found every one of the organisation's records whole, in the same transaction",
+          "A hold is cleared only once verifyAll has found the organisation's records whole, in the same transaction",
         );
       }
       const hold = await integrityHold(tx, orgId, 'head');
