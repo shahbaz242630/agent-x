@@ -43,9 +43,9 @@ import type { Kysely } from 'kysely';
 import { messageFor, type NoticeMessage, type ResetLink } from '../domain/messages.ts';
 import {
   type ClaimedNotice,
-  isAboutAMandate,
   isAboutAPerson,
   isAboutASupplier,
+  isToAdminsAndApprovers,
   RESET_LINK_KIND,
 } from '../domain/notice.ts';
 import { LEASE_EXPIRED, type Outbox } from './outbox.ts';
@@ -155,14 +155,14 @@ export function createNoticeSender({
    * about a person (their sign-in, or a reset of their second factor), by
    * their user ID (B6-2a review): that person is told apart, as themselves,
    * once. A notice about a supplier: the contacts that count now, or every
-   * active member (E2-2b). A notice about a mandate: every admin and approver
-   * (0036).
+   * active member (E2-2b). A notice about a mandate, or the organisation's
+   * policy: every admin and approver (0036, 0038).
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
     if (isAboutASupplier(notice.kind)) {
       return notice.toContacts ? audience.countingContactsOf(notice.orgId) : audience.membersOf(notice.orgId);
     }
-    if (isAboutAMandate(notice.kind)) return audience.adminsAndApproversOf(notice.orgId);
+    if (isToAdminsAndApprovers(notice.kind)) return audience.adminsAndApproversOf(notice.orgId);
     if (notice.toContacts) return audience.contactsOf(notice.orgId);
     const aboutPerson = isAboutAPerson(notice.kind) ? notice.aboutId : null;
     const admins = await audience.adminsOf(notice.orgId);

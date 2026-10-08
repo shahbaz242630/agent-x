@@ -9,6 +9,7 @@ import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
   MANDATE_NOTICE_KINDS,
+  ORGANIZATION_NOTICE_KINDS,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
   type SignInNoticeKind,
@@ -256,6 +257,22 @@ describe('a notice’s email (B5-1b)', () => {
         expect(message.text).toContain(`Mandate: ${mandate}`);
         expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
         expect(message.text).toContain("This email can't approve or change anything.");
+      },
+    );
+  });
+
+  describe('C3a a change of the organisation’s own policy (0038)', () => {
+    const org = '0199a0f0-0000-7000-8000-00000000c3a1';
+
+    it.each(ORGANIZATION_NOTICE_KINDS)(
+      'tells of %s, naming the organisation by ID alone, admins and approvers',
+      (kind) => {
+        const message = messageFor({ ...NOTICE, kind, membershipId: null, role: null, aboutId: org }, 'a@example.test');
+
+        expect(message.subject).toContain('policy');
+        expect(message.text).toContain(`Organisation: ${org}`);
+        expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+        expect(message.text).toContain("check the organisation's policies");
       },
     );
   });
