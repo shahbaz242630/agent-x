@@ -20,6 +20,7 @@ import {
 import * as agents from '../../packages/core/src/modules/agents/index.ts';
 import * as fundingSources from '../../packages/core/src/modules/funding-sources/index.ts';
 import * as mandates from '../../packages/core/src/modules/mandates/index.ts';
+import * as spendRequests from '../../packages/core/src/modules/spend-requests/index.ts';
 import * as suppliers from '../../packages/core/src/modules/suppliers/index.ts';
 import {
   FACTOR_RESET,
@@ -101,8 +102,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(misnamed).toBeDefined();
   });
 
-  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), and a beneficiary registration (E2-1)", () => {
-    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions.
+  it("holds each module's own description, not a copy: the organisation's row (B1a), a membership (B4-1), an invitation (B4-3a), a registered contact (B6-1a), a factor reset (B6-3a), an agent and an agent key (C1-1), a mandate and a mandate version (Phase 2 B1), a policy and a policy version (Phase 2 C1), a funding source (D2-2), a supplier and a supplier version (E1-1), a beneficiary registration (E2-1), and a spend request (Phase 2 D1)", () => {
+    // In the lock order (ADR-006 §6): the organisation, then invitations before memberships, then contacts, then resets, then agents before their keys, then mandates before their versions, then policies before theirs, then funding sources, then suppliers, their payee registrations, then their versions, then spend requests.
     const [
       organizations,
       invitations,
@@ -119,6 +120,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
       supplierRows,
       registrations,
       supplierVersions,
+      requests,
       ...others
     ] = PRODUCT_AUTHORITY_TABLES;
 
@@ -137,6 +139,7 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(supplierRows).toBe(suppliers.SUPPLIERS);
     expect(registrations).toBe(suppliers.BENEFICIARY_REGISTRATIONS);
     expect(supplierVersions).toBe(suppliers.SUPPLIER_VERSIONS);
+    expect(requests).toBe(spendRequests.SPEND_REQUESTS);
     expect(others).toEqual([]);
     // CI's view of them takes the same fields and the same machine, as `status`.
     expect(AUTHORITY_TABLES).toEqual([
@@ -236,6 +239,15 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: suppliers.SUPPLIER_VERSIONS.fields,
         madeOnce: true,
       },
+      // All but its status fixed when it is made, each status held to its decision.
+      {
+        table: spendRequests.SPEND_REQUESTS.table,
+        subject: spendRequests.SPEND_REQUESTS.subject,
+        fields: spendRequests.SPEND_REQUESTS.fields,
+        status: spendRequests.SPEND_REQUEST,
+        fixedAtCreation: spendRequests.SPEND_REQUESTS.fixedAtCreation,
+        statusConditions: ['a_status_on_its_decision'],
+      },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
     expect(AUTHORITY_TABLES[0]?.status).toBe(ORGANIZATION);
@@ -267,6 +279,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
     expect(AUTHORITY_TABLES[13]?.status).toBe(suppliers.BENEFICIARY_REGISTRATION);
     expect(AUTHORITY_TABLES[14]?.fields).toBe(suppliers.SUPPLIER_VERSIONS.fields);
     expect(AUTHORITY_TABLES[14]?.status).toBeUndefined();
+    expect(AUTHORITY_TABLES[15]?.fields).toBe(spendRequests.SPEND_REQUESTS.fields);
+    expect(AUTHORITY_TABLES[15]?.status).toBe(spendRequests.SPEND_REQUEST);
   });
 
   it('names no table the schema policy lists as a fill-in table, so each table is held to one list of columns (A5b)', () => {

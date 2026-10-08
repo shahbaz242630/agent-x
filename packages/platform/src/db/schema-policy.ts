@@ -353,6 +353,11 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         "The fake partner's own records on staging (0028): it moves a link's or a payee's state and keeps an alias; never a record deleted, nor its reference or organisation changed",
       columns: ['alias', 'body'],
     },
+    'spend_requests.order_claims': {
+      reason:
+        "An order's claim (ADR-006 §11, 0039): the app adds it and only ever releases it, once its request or payment ends. A claim deleted, or its order, supplier or payee changed, would let the same order be paid twice",
+      columns: ['released_at'],
+    },
   },
   requiredForeignKeys: [
     {
@@ -382,6 +387,22 @@ export const SCHEMA_POLICY: SchemaPolicy = {
       columns: ['org_id', 'agent_id'],
       // As Postgres prints `WHERE status IN ('PENDING_ACCEPTANCE', 'ACTIVE', 'SUSPENDED')`.
       predicate: "(status = ANY (ARRAY['PENDING_ACCEPTANCE'::text, 'ACTIVE'::text, 'SUSPENDED'::text]))",
+    },
+    {
+      reason:
+        'One open claim an order by its supplier (ADR-006 §11, PRD §3.2; 0039): a second request for the same order waits on the first and is refused. Partial so a released claim (its request denied, cancelled or expired, its payment failed) no longer holds the order, and released_at is never a key column: a release stays a no-key write (ADR-006 §6)',
+      table: 'spend_requests.order_claims',
+      name: 'one_open_claim_a_supplier_order',
+      columns: ['org_id', 'supplier_id', 'order_reference'],
+      predicate: '(released_at IS NULL)',
+    },
+    {
+      reason:
+        "One open claim an order by its payee where the supplier has a payee key (ADR-014 §3; 0039): the same invoice to a supplier re-created with the same account. Partial as the supplier's claim is, and for claims with no payee key, which the supplier's alone holds",
+      table: 'spend_requests.order_claims',
+      name: 'one_open_claim_a_payee_order',
+      columns: ['org_id', 'payee_key', 'order_reference'],
+      predicate: '((released_at IS NULL) AND (payee_key IS NOT NULL))',
     },
   ],
 };

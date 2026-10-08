@@ -24,6 +24,7 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 
 const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
 const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
+const { SPEND_REQUESTS } = await import('./modules/spend-requests/index.ts');
 
 function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> } {
   const capture = new LogCapture();
@@ -59,7 +60,11 @@ describe('at start-up', () => {
       // And the made-once guard on each whose rows are made once (E1-1's review).
       madeOnceTables: ['mandates.versions', 'mandates.policy_versions', 'suppliers.supplier_versions'],
       // And the fixed-at-creation guard on each with columns fixed when made (Phase 2 B1).
-      fixedAtCreation: { 'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'] },
+      // Phase 2 D1: a spend request's all but its status.
+      fixedAtCreation: {
+        'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'],
+        'spend_requests.requests': SPEND_REQUESTS.fixedAtCreation,
+      },
     });
   });
 
