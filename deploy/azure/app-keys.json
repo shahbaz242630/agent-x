@@ -4,5 +4,6 @@
   "key-audit-mac-v1",
   "key-payee-index-v1",
   "key-field-encryption-v1",
-  "key-audit-anchor-v1"
+  "key-audit-anchor-v1",
+  "key-decision-hash-v1"
 ]

@@ -1073,9 +1073,11 @@ describe('deploy secrets', () => {
       }
     }
     done.terminal.neverSaid(Object.values(values));
-    expect(done.terminal.said.slice(-18, -2)).toEqual([...everything].sort().map((name) => `  ${name}`));
+    expect(done.terminal.said.slice(-(everything.length + 2), -2)).toEqual(
+      [...everything].sort().map((name) => `  ${name}`),
+    );
     expect(done.terminal.said.slice(-2)).toEqual([
-      "The app's 6 keys are there, and none that was there before was written again.",
+      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
       `Recorded on job-agentx-stg-migrate: secrets sent ${COMMIT}. CI's release takes it for what secrets reads.`,
     ]);
   });
@@ -1187,7 +1189,7 @@ describe('deploy secrets', () => {
     expect(written).toEqual(['AGENTX_AZURE_APP_KEYS', 'AGENTX_AZURE_ZITADEL_MASTERKEY']);
     done.terminal.neverSaid(Object.values(done.az.deployment?.values ?? {}).filter((value) => value !== ''));
     expect(done.terminal.said.at(-2)).toBe(
-      "The app's 6 keys are there, and none that was there before was written again.",
+      `The app's ${String(APP_KEYS.length)} keys are there, and none that was there before was written again.`,
     );
     expect(done.az.tags['agentx-deployed-secrets']).toBe(COMMIT);
   });

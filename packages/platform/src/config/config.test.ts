@@ -286,7 +286,7 @@ describe('SEC-AV-03 config refuses to start when a setting is wrong', () => {
     it('names every purpose it knows, so the operator can see the right spelling', () => {
       expect(problemsWith({ ...MINIMAL, AGENTX_KEYS_CURRENT: 'audit:2' })).toEqual([
         "AGENTX_KEYS_CURRENT: entry 1 is not a key's current version. Write each as <purpose>:<version>, " +
-          'the purpose one of agent-key-pepper, request-hash, audit-mac, payee-index, field-encryption, audit-anchor ' +
+          'the purpose one of agent-key-pepper, request-hash, audit-mac, payee-index, field-encryption, audit-anchor, decision-hash ' +
           'and the version a whole number from 1, comma-separated with no spaces',
       ]);
     });
