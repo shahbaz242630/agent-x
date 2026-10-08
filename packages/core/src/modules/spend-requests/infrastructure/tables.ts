@@ -1,4 +1,4 @@
-import type { Generated } from 'kysely';
+import type { Generated, GeneratedAlways } from 'kysely';
 
 /** The spend_requests schema's tables (db/migrations/0039_spend_requests.sql), as Kysely sees them. */
 export interface SpendRequestsTables {
@@ -43,6 +43,10 @@ interface RequestsTable {
   /** These two are written by the signed state's steps alone (the audit module's record). */
   state_version: Generated<number>;
   state_event_id: Generated<string | null>;
+  /** Given by the database: the order reference's canonical form, which its claim carries (ADR-006 §5). */
+  order_key: GeneratedAlways<string>;
+  /** Given by the database: the source, for a request holding capacity alone. */
+  held_source_id: GeneratedAlways<string | null>;
 }
 
 interface OrderClaimsTable {
@@ -52,7 +56,7 @@ interface OrderClaimsTable {
   supplier_id: string;
   /** The supplier's payee key when it has one (ADR-014 §3). */
   payee_key: string | null;
-  /** Canonical: lower case, words one space apart (ADR-006 §5). */
+  /** Its request's `order_key`. */
   order_reference: string;
   claimed_at: Date;
   /** When its request or payment ended so the order may be asked for again; open until then. */

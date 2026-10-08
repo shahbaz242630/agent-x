@@ -4,33 +4,11 @@
 // this description. On the product's authority-table list at the request's
 // level in the lock order (ADR-006 §6: 8).
 //
-// The steps that decide, add and move them come with D4 and Phase 3. Order
-// claims are not sealed: a scheduled reconciliation checks them (E1).
+// Deciding, adding and moving them come with D2–D4r. Order claims are not
+// sealed: a scheduled reconciliation checks them (E1).
 import type { SignedStateTable } from '@agentx/platform/db';
 
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
-
-/** Everything but the status: fixed when the request is made (0039's `fixed_at_creation`). */
-const FIXED = [
-  'agent_id',
-  'agent_key_id',
-  'mandate_id',
-  'mandate_version_id',
-  'organization_policy_version_id',
-  'mandate_policy_version_id',
-  'supplier_id',
-  'supplier_version_id',
-  'funding_source_id',
-  'amount_minor',
-  'currency',
-  'purpose',
-  'order_reference',
-  'idempotency_key',
-  'input_hash',
-  'input_hash_key_version',
-  'decision',
-  'reason_codes',
-] as const;
 
 /** A spend request's row, as the signed state reads, records and moves it. */
 export const SPEND_REQUESTS = {
@@ -58,11 +36,28 @@ export const SPEND_REQUESTS = {
     { column: 'status', type: 'text' },
   ],
   rules: SPEND_REQUEST,
-  fixedAtCreation: FIXED,
-  // Each status held to the decisions that can reach it (0039): CI's A3c allows this one check over the status with other columns.
-  statusConditions: ['a_status_on_its_decision'],
+  // Everything but the status, fixed when the request is made: 0039's `fixed_at_creation` refuses any change after.
+  fixedAtCreation: [
+    'agent_id',
+    'agent_key_id',
+    'mandate_id',
+    'mandate_version_id',
+    'organization_policy_version_id',
+    'mandate_policy_version_id',
+    'supplier_id',
+    'supplier_version_id',
+    'funding_source_id',
+    'amount_minor',
+    'currency',
+    'purpose',
+    'order_reference',
+    'idempotency_key',
+    'input_hash',
+    'input_hash_key_version',
+    'decision',
+    'reason_codes',
+  ],
 } as const satisfies SignedStateTable & {
   readonly rules: typeof SPEND_REQUEST;
   readonly fixedAtCreation: readonly string[];
-  readonly statusConditions: readonly string[];
 };

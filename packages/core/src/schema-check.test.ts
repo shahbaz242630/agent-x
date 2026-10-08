@@ -24,7 +24,6 @@ vi.mock('@agentx/platform/db', async (importOriginal) => {
 
 const { checkSchemaOnSchedule, OWNER_ROLE, schemaSoundAtStart } = await import('./schema-check.ts');
 const { AUTHORITY_TABLES } = await import('./authority-tables.ts');
-const { SPEND_REQUESTS } = await import('./modules/spend-requests/index.ts');
 
 function logger(): { capture: LogCapture; logger: ReturnType<typeof testLogger> } {
   const capture = new LogCapture();
@@ -39,6 +38,28 @@ const options = (log: ReturnType<typeof logger>) => ({
   appRole: 'agentx_app',
   logger: log.logger,
 });
+
+// A spend request's columns fixed when it is made (0039): all but its status.
+const SPEND_REQUESTS_FIXED = [
+  'agent_id',
+  'agent_key_id',
+  'mandate_id',
+  'mandate_version_id',
+  'organization_policy_version_id',
+  'mandate_policy_version_id',
+  'supplier_id',
+  'supplier_version_id',
+  'funding_source_id',
+  'amount_minor',
+  'currency',
+  'purpose',
+  'order_reference',
+  'idempotency_key',
+  'input_hash',
+  'input_hash_key_version',
+  'decision',
+  'reason_codes',
+];
 
 beforeEach(() => {
   guard.result = (): Promise<string[]> => Promise.resolve([]);
@@ -63,7 +84,7 @@ describe('at start-up', () => {
       // Phase 2 D1: a spend request's all but its status.
       fixedAtCreation: {
         'mandates.mandates': ['agent_id', 'time_zone', 'split_window_hours'],
-        'spend_requests.requests': SPEND_REQUESTS.fixedAtCreation,
+        'spend_requests.requests': SPEND_REQUESTS_FIXED,
       },
     });
   });

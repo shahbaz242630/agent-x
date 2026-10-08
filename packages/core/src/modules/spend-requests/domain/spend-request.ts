@@ -1,14 +1,8 @@
-// A spend request (PRD §3 `SpendRequest`, §4.2, §5.2; BR-09; Phase 2 D1):
-// what an agent asked to pay, and the decision made on it.
-//
-// The decision is made before the row is added (ADR-006 §7), so a request is
-// born VALIDATING with its decision in it and moved by that decision in the
-// same transaction: DENIED (DENY or REQUIRE_NEW_MANDATE), APPROVAL_REQUIRED or
-// APPROVED. PRD's CREATED is the API's receipt, before any row. An approval
-// waiting is approved, rejected, expired or cancelled; an approved request is
-// made ready and handed off, or denied by the re-check before hand-off, or
-// cancelled. After hand-off the outcome is its transaction's (PRD §4.2). The
-// database's status guard holds the same moves (0039).
+// A spend request's status (PRD §4.2; BR-09; Phase 2 D1): born VALIDATING
+// with its decision and moved by it in the same transaction (`allow`,
+// `require_approval` or `deny`); `approve` is the approver's alone. The
+// database's status guard holds the same moves, and `decided_move` holds each
+// request to its own decision (0039).
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 
 export const SPEND_REQUEST = defineStateMachine({
@@ -27,7 +21,8 @@ export const SPEND_REQUEST = defineStateMachine({
   events: {
     deny: { from: ['VALIDATING', 'APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'], to: 'DENIED' },
     require_approval: { from: ['VALIDATING'], to: 'APPROVAL_REQUIRED' },
-    approve: { from: ['VALIDATING', 'APPROVAL_REQUIRED'], to: 'APPROVED' },
+    allow: { from: ['VALIDATING'], to: 'APPROVED' },
+    approve: { from: ['APPROVAL_REQUIRED'], to: 'APPROVED' },
     expire: { from: ['APPROVAL_REQUIRED'], to: 'EXPIRED' },
     cancel: { from: ['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'], to: 'CANCELLED' },
     make_ready: { from: ['APPROVED'], to: 'INSTRUCTION_READY' },

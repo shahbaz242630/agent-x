@@ -27,11 +27,4 @@ describe('a spend request’s status (D1)', () => {
     const ended = ['DENIED', 'EXPIRED', 'CANCELLED', 'HANDED_OFF'];
     expect(SPEND_REQUEST.moves.filter(({ from }) => ended.includes(from))).toEqual([]);
   });
-
-  it('never goes back to VALIDATING, nor is handed off unless made ready', () => {
-    expect(SPEND_REQUEST.moves.filter(({ to }) => to === 'VALIDATING')).toEqual([]);
-    expect(SPEND_REQUEST.moves.filter(({ to }) => to === 'HANDED_OFF')).toEqual([
-      { from: 'INSTRUCTION_READY', to: 'HANDED_OFF' },
-    ]);
-  });
 });

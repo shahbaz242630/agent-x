@@ -168,6 +168,96 @@ describe('the made-once guard function (0032, E1-1’s review)', () => {
   });
 });
 
+describe('the table guards (0039, Phase 2 D1)', () => {
+  const read = () =>
+    owner.query<{ name: string; body: string; config: string; definer: boolean }>(
+      `select p.proname as name,
+              pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p.prosrc, 'UTF8')), 'hex') as body,
+              pg_catalog.array_to_string(p.proconfig, ',') as config,
+              p.prosecdef as definer
+       from pg_catalog.pg_proc p
+       join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'spend_requests'
+       order by p.proname`,
+    );
+  const aboutThem = async () =>
+    (await problems()).filter((each) => each.includes('decided_move') || each.includes('claim_guard'));
+
+  it('are the bodies the migration wrote, pinned, and running with their caller’s rights', async () => {
+    expect(await read()).toEqual([
+      {
+        name: 'guard_claim',
+        body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+      {
+        name: 'guard_decided_move',
+        body: '8d0507da95a4277aaa641df8d889d72120be2baeefb9be8f5966b40191d94280',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'dropped',
+      'drop trigger decided_move on spend_requests.requests',
+      'spend_requests.requests carries no decided_move',
+    ],
+    [
+      'switched off',
+      'alter table spend_requests.order_claims disable trigger claim_guard',
+      "spend_requests.order_claims's claim_guard is switched off",
+    ],
+    [
+      'firing at other times',
+      `drop trigger claim_guard on spend_requests.order_claims;
+       create trigger claim_guard before update on spend_requests.order_claims for each row
+         execute function spend_requests.guard_claim()`,
+      "spend_requests.order_claims's claim_guard fires at other times",
+    ],
+    [
+      'moved to another table',
+      `drop trigger decided_move on spend_requests.requests;
+       create trigger decided_move before update on spend_requests.order_claims for each row
+         execute function spend_requests.guard_decided_move()`,
+      'spend_requests.order_claims carries the trigger "decided_move"',
+    ],
+  ])('sees one %s', async (_case, tamper, problem) => {
+    // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
+    await owner.query(tamper);
+    try {
+      expect(await aboutThem()).toContain(problem);
+    } finally {
+      await owner.query(`drop trigger if exists decided_move on spend_requests.order_claims;
+        drop trigger if exists decided_move on spend_requests.requests;
+        drop trigger if exists claim_guard on spend_requests.order_claims;
+        create trigger decided_move before update on spend_requests.requests for each row
+          execute function spend_requests.guard_decided_move();
+        create trigger claim_guard before insert or update on spend_requests.order_claims for each row
+          execute function spend_requests.guard_claim()`);
+    }
+    expect(await aboutThem()).toEqual([]);
+  });
+
+  it('sees one replaced by a function that lets everything through', async () => {
+    const [kept] = /CREATE FUNCTION spend_requests\.guard_claim\(\)[\s\S]*?\$\$;/.exec(
+      readFileSync(new URL('../../../../db/migrations/0039_spend_requests.sql', import.meta.url), 'utf8'),
+    ) ?? [''];
+    await owner.query(`create or replace function spend_requests.guard_claim() returns trigger
+      language plpgsql set search_path = pg_catalog as $$ begin return new; end; $$`);
+    try {
+      expect(await problems()).toContain('spend_requests.guard_claim is not the function the migration wrote');
+    } finally {
+      // eslint-disable-next-line agentx/no-string-built-sql -- 0039's own statement, read from the migration
+      await owner.query(kept.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+    }
+    expect(await aboutThem()).toEqual([]);
+  });
+});
+
 describe('the fixed-at-creation guard (0035, Phase 2 B1)', () => {
   const read = () =>
     owner.query<{ body: string; config: string; definer: boolean }>(

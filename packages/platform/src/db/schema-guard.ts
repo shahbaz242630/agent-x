@@ -115,11 +115,46 @@ const FIXED_FUNCTION = 'state_rules.guard_fixed';
 const FIXED_TYPE = 19;
 const FIXED_BODY = '5d9decba2ea16c3f750767c201fa71a0afc1e98f2ec4b0d0c31815ece36c0c4b';
 
+/** A guard written for one table alone: its trigger, function, when it fires and its body's hash. */
+interface TableGuard {
+  readonly table: string;
+  readonly name: string;
+  readonly function: string;
+  readonly type: number;
+  readonly body: string;
+}
+
+/**
+ * The guards written for one table alone (0039, Phase 2 D1): each on its
+ * table by its name, calling its function with no arguments, firing as
+ * written (BEFORE, FOR EACH ROW: 19 on UPDATE, 23 on INSERT or UPDATE), its
+ * body held by hash.
+ */
+const TABLE_GUARDS: readonly TableGuard[] = [
+  {
+    // A request leaves VALIDATING only where its decision leads.
+    table: 'spend_requests.requests',
+    name: 'decided_move',
+    function: 'spend_requests.guard_decided_move',
+    type: 19,
+    body: '8d0507da95a4277aaa641df8d889d72120be2baeefb9be8f5966b40191d94280',
+  },
+  {
+    // An order claimed for a request holding capacity, with its supplier's payee key; released once, after its request ends.
+    table: 'spend_requests.order_claims',
+    name: 'claim_guard',
+    function: 'spend_requests.guard_claim',
+    type: 23,
+    body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
+  },
+];
+
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */
 const GUARD_BODIES: ReadonlyMap<string, string> = new Map([
   [STATUS_GUARD_FUNCTION, STATUS_GUARD_BODY],
   [MADE_ONCE_FUNCTION, MADE_ONCE_BODY],
   [FIXED_FUNCTION, FIXED_BODY],
+  ...TABLE_GUARDS.map((guard) => [guard.function, guard.body] as const),
 ]);
 
 /**
@@ -948,8 +983,7 @@ function tenantPolicyProblems(table: string, found: readonly PolicyRow[]): Schem
 }
 
 /**
- * Functions: the status guard and the made-once guard are the only ones our
- * schemas hold, and each must still be the function its migration wrote,
+ * Functions: the guards above are the only ones our schemas hold, and each must still be the function its migration wrote,
  * running with its caller's rights and looking names up where it pinned them.
  */
 function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
@@ -965,13 +999,17 @@ function functionProblems(fn: FunctionRow, ownerRole: string): SchemaProblem[] {
 
 /**
  * The only triggers our schema has are the status guard 0004 installs, the
- * made-once guard 0032 installs and the fixed-at-creation guard 0035
- * installs, and each must still be that guard: a
+ * made-once guard 0032 installs, the fixed-at-creation guard 0035 installs
+ * and the table guards 0039 installs, and each must still be that guard: a
  * planted trigger given its name would otherwise pass on its name alone. A
  * switched-off guard is drift too — Postgres keeps the row and stops running
  * it, which is tampering that leaves no trace in the table.
  */
 function triggerProblems(trigger: TriggerRow, fixedCalls: ReadonlyMap<string, string>): SchemaProblem[] {
+  const own = TABLE_GUARDS.find(
+    (guard) => guard.table === trigger.table && guard.name === trigger.name && guard.function === trigger.function,
+  );
+  if (own !== undefined) return tableGuardProblems(trigger, own);
   if (trigger.name === MADE_ONCE && trigger.function === MADE_ONCE_FUNCTION) return madeOnceProblems(trigger);
   if (trigger.name === FIXED && trigger.function === FIXED_FUNCTION) return fixedProblems(trigger, fixedCalls);
   if (trigger.name !== STATUS_GUARD || trigger.function !== STATUS_GUARD_FUNCTION) {
@@ -1001,6 +1039,17 @@ function madeOnceProblems(trigger: TriggerRow): SchemaProblem[] {
   }
   problems.push(...narrowedProblems(trigger, MADE_ONCE));
   if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${MADE_ONCE} is switched off`);
+  return problems;
+}
+
+/** A table's own guard, still as its migration wrote it and firing. */
+function tableGuardProblems(trigger: TriggerRow, guard: TableGuard): SchemaProblem[] {
+  const problems: SchemaProblem[] = [];
+  if (trigger.type !== guard.type || !trigger.definition.endsWith(`${guard.function}()`)) {
+    problems.push(`${trigger.table}'s ${guard.name} fires at other times`);
+  }
+  problems.push(...narrowedProblems(trigger, guard.name));
+  if (trigger.enabled !== 'O') problems.push(`${trigger.table}'s ${guard.name} is switched off`);
   return problems;
 }
 
@@ -1394,6 +1443,7 @@ export async function liveSchemaProblems<Schema>(
     ...missingGuardProblems(statusGuardedTables, STATUS_GUARD, allRelations, allTriggers),
     ...missingGuardProblems(madeOnceTables, MADE_ONCE, allRelations, allTriggers),
     ...missingGuardProblems(Object.keys(fixedAtCreation), FIXED, allRelations, allTriggers),
+    ...TABLE_GUARDS.flatMap((guard) => missingGuardProblems([guard.table], guard.name, allRelations, allTriggers)),
     ...allIndexes.flatMap((index) => indexProblems(index, globalTables.has(index.table), policy.partialUniqueIndexes)),
     ...missingPartialProblems(policy.partialUniqueIndexes, allIndexes),
     // Rights: an allow-list, so a privilege nobody thought about is a problem

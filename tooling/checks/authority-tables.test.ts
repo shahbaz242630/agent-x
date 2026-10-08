@@ -239,14 +239,32 @@ describe('the authority-table registry takes the modules’ own descriptions', (
         fields: suppliers.SUPPLIER_VERSIONS.fields,
         madeOnce: true,
       },
-      // All but its status fixed when it is made, each status held to its decision.
+      // All but its status fixed when it is made.
       {
         table: spendRequests.SPEND_REQUESTS.table,
         subject: spendRequests.SPEND_REQUESTS.subject,
         fields: spendRequests.SPEND_REQUESTS.fields,
         status: spendRequests.SPEND_REQUEST,
-        fixedAtCreation: spendRequests.SPEND_REQUESTS.fixedAtCreation,
-        statusConditions: ['a_status_on_its_decision'],
+        fixedAtCreation: [
+          'agent_id',
+          'agent_key_id',
+          'mandate_id',
+          'mandate_version_id',
+          'organization_policy_version_id',
+          'mandate_policy_version_id',
+          'supplier_id',
+          'supplier_version_id',
+          'funding_source_id',
+          'amount_minor',
+          'currency',
+          'purpose',
+          'order_reference',
+          'idempotency_key',
+          'input_hash',
+          'input_hash_key_version',
+          'decision',
+          'reason_codes',
+        ],
       },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
