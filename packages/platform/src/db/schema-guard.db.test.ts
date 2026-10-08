@@ -203,7 +203,7 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       },
       {
         name: 'guard_held_for_request',
-        body: '39d9b968995e62e0b165162efc7794503a0d0d9b30e0d6eef20bcf4e8c846b37',
+        body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
         config: 'search_path=pg_catalog',
         definer: false,
       },

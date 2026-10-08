@@ -170,7 +170,7 @@ const TABLE_GUARDS: readonly TableGuard[] = [
     name: 'held_for_its_request',
     function: 'spend_requests.guard_held_for_request',
     type: 23,
-    body: '39d9b968995e62e0b165162efc7794503a0d0d9b30e0d6eef20bcf4e8c846b37',
+    body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
   },
 ];
 

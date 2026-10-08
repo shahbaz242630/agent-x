@@ -464,6 +464,10 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
       await expect(reserve(org, { payee_key: 'PK-1', ...values })).rejects.toEqual(refusedBy('held_for_its_request'));
     }
     await reserve(org, { payee_key: 'PK-1' });
+    // Another supplier with no payee key, as the request's has none: the supplier alone tells them apart.
+    const plain = await organisation();
+    await period(plain);
+    await expect(reserve(plain, { supplier_id: org.supplier })).rejects.toEqual(refusedBy('held_for_its_request'));
   });
 
   it.each([

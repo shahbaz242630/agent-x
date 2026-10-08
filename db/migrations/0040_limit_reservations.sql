@@ -250,8 +250,7 @@ BEGIN
   IF NEW.state IS NOT DISTINCT FROM OLD.state THEN
     RETURN NEW;
   END IF;
-  IF NEW.state = 'RELEASED' AND (request.status IS NULL
-     OR request.status IN ('VALIDATING', 'APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY')) THEN
+  IF NEW.state = 'RELEASED' AND request.status IN ('VALIDATING', 'APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY') THEN
     RAISE EXCEPTION 'a reservation is released only once its request has ended, not while %', request.status
       USING ERRCODE = 'check_violation', CONSTRAINT = 'held_for_its_request';
   END IF;
