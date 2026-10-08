@@ -15,7 +15,9 @@
 --   Phase 3: the key on its evidence);
 -- - what was asked, as the agent sent it: the amount in minor units (ADR-006
 --   §1), its currency, the purpose, the supplier, the funding source, the
---   order reference as written (ADR-006 §5: the raw value, as evidence), and
+--   order reference as written (ADR-006 §5: the raw value, as evidence: the
+--   supplier's own invoice or order number, in any script, partner S93; the
+--   rail's 35-character payment reference is made from it at hand-off), and
 --   its idempotency key (PRD §3; the idempotency table's own row goes after
 --   its retention, this stays);
 -- - what it was weighed against (PRD §5.2: "exact versions"): the mandate and
@@ -58,11 +60,12 @@
 -- supplier has one (ADR-014 §3: the same invoice to a supplier re-created
 -- with the same account). One open claim a key: a second request for the same
 -- order waits on the first and is refused. The canonical form (ADR-006 §5:
--- NFKC, trimmed, case-folded, spaces collapsed) is the request's own
--- `order_key`, worked out here from the reference as written: for the rail's
--- ASCII, NFKC changes nothing and case-folding is A–Z to a–z (by translate,
--- never a locale's lower()). A claim must carry exactly it, so no bug in the
--- app's own canonical form can claim another. One claim a request, on its
+-- NFKC, case-folded, trimmed, spaces collapsed) is the request's own
+-- `order_key`, worked out here from the reference as written, so the app
+-- never works it out itself and no bug of its own can claim another order:
+-- NFKC turns full-width letters and the other Unicode spaces into plain ones,
+-- and case-folding is the database's lower() (one database's claims are only
+-- ever compared with its own). A claim must carry exactly it. One claim a request, on its
 -- request's own supplier and order, with that supplier's payee key as it is
 -- when claimed (`claim_guard`), and only for a request that holds capacity.
 -- A claim is released (`released_at`) once, and only after its request ends:
@@ -108,9 +111,10 @@ CREATE TABLE spend_requests.requests (
   amount_minor bigint NOT NULL CHECK (amount_minor > 0),
   currency text NOT NULL REFERENCES mandates.allowed_currencies (code),
   purpose text NOT NULL CHECK (pg_catalog.char_length(purpose) BETWEEN 1 AND 200 AND purpose !~ '[[:cntrl:]]'),
-  -- As the agent wrote it: the rail's creditor reference, 1 to 35 of its ASCII
-  -- characters, not blank (the rail map; checked at our edge too).
-  order_reference text NOT NULL CHECK (order_reference ~ '^[A-Za-z0-9 /?:().,''+-]{1,35}$' AND order_reference ~ '[^ ]'),
+  -- As the agent wrote it: up to 100 characters, none a control; not blank (`an_order_not_blank`).
+  order_reference text NOT NULL CHECK (
+    pg_catalog.char_length(order_reference) BETWEEN 1 AND 100 AND order_reference !~ '[[:cntrl:]]'
+  ),
   idempotency_key text NOT NULL CHECK (pg_catalog.octet_length(idempotency_key) BETWEEN 1 AND 255),
   input_hash text NOT NULL CHECK (input_hash ~ '^[0-9a-f]{64}$'),
   input_hash_key_version integer NOT NULL CHECK (input_hash_key_version >= 1),
@@ -127,10 +131,7 @@ CREATE TABLE spend_requests.requests (
   -- Given by the database from sealed fields, never written: the order's
   -- canonical form, and the source a request holding capacity rests on.
   order_key text NOT NULL GENERATED ALWAYS AS (
-    pg_catalog.regexp_replace(
-      pg_catalog.btrim(pg_catalog.translate(order_reference, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')),
-      ' +', ' ', 'g'
-    )
+    pg_catalog.regexp_replace(pg_catalog.btrim(pg_catalog.lower(pg_catalog.normalize(order_reference, 'NFKC'))), ' +', ' ', 'g')
   ) STORED,
   held_source_id uuid GENERATED ALWAYS AS (
     CASE WHEN decision IN ('ALLOW', 'REQUIRE_APPROVAL') THEN funding_source_id END
@@ -159,6 +160,7 @@ CREATE TABLE spend_requests.requests (
   CONSTRAINT a_mandate_policy_with_its_mandate CHECK (mandate_policy_version_id IS NULL OR mandate_id IS NOT NULL),
   -- Reasons for every decision but ALLOW, none for ALLOW.
   CONSTRAINT reasons_with_the_decision CHECK ((decision = 'ALLOW') = (reason_codes IS NULL)),
+  CONSTRAINT an_order_not_blank CHECK (order_key <> ''),
   -- Capacity is held only on a mandate version and a supplier version.
   CONSTRAINT holds_on_what_it_weighed CHECK (
     decision NOT IN ('ALLOW', 'REQUIRE_APPROVAL') OR (mandate_version_id IS NOT NULL AND supplier_version_id IS NOT NULL)

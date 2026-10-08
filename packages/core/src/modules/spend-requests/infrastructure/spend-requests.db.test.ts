@@ -448,25 +448,45 @@ describe('a spend request', () => {
     }
   });
 
-  it('keeps its order reference as written, in the rail’s 1 to 35 ASCII characters, not blank', async () => {
+  it('keeps its order reference as written: the supplier’s own number, any script, up to 100 characters', async () => {
     const org = await organisation();
-    await add(org, requestRow(org, { order_reference: " Inv 7/B (26): 1,200.50+VAT-'x'? " }));
-    for (const reference of ['', '   ', 'a'.repeat(36), 'فاتورة', 'PO_1', 'PO#1', 'Café']) {
+    for (const reference of ['PO#1', 'INV_22', 'فاتورة ١٢', 'Café/7', 'a'.repeat(100)]) {
+      await add(org, requestRow(org, { order_reference: reference }));
+    }
+    for (const reference of ['a'.repeat(101), 'line\nbreak', 'tab\there']) {
       await expect(add(org, requestRow(org, { order_reference: reference }))).rejects.toEqual(
         refusedBy('requests_order_reference_check'),
       );
     }
+    // Empty, or blank once its spaces, the Unicode ones too, are taken away.
+    for (const reference of ['', '   ', '\u00a0\u2003']) {
+      await expect(add(org, requestRow(org, { order_reference: reference }))).rejects.toEqual(
+        refusedBy('an_order_not_blank'),
+      );
+    }
   });
 
-  it('works out its order’s canonical form: case-folded, trimmed, spaces collapsed (ADR-006 §5)', async () => {
+  it('works out its order’s canonical form: NFKC, case-folded, trimmed, spaces collapsed (ADR-006 §5)', async () => {
     const org = await organisation();
-    const row = requestRow(org, { order_reference: '  Inv 7/B   (26)  Q-ZA ' });
-    await add(org, row);
+    const keyOf = async (reference: string) => {
+      const row = requestRow(org, { order_reference: reference });
+      await add(org, row);
+      return (
+        await inOrg(org, (tx) =>
+          tx
+            .selectFrom('spend_requests.requests')
+            .select('order_key')
+            .where('id', '=', row.id)
+            .executeTakeFirstOrThrow(),
+        )
+      ).order_key;
+    };
 
-    const read = await inOrg(org, (tx) =>
-      tx.selectFrom('spend_requests.requests').select('order_key').where('id', '=', row.id).executeTakeFirstOrThrow(),
-    );
-    expect(read).toEqual({ order_key: 'inv 7/b (26) q-za' });
+    expect(await keyOf('  Inv 7/B   (26)  Q-ZA ')).toBe('inv 7/b (26) q-za');
+    // Full-width letters and digits, a no-break and an em space: the same order as plain text.
+    expect(await keyOf('\uff29\uff2e\uff36\u00a0\u2003\uff12\uff12')).toBe('inv 22');
+    expect(await keyOf('ÉCOLE #9')).toBe('école #9');
+    expect(await keyOf('  فاتورة   ١٢ ')).toBe('فاتورة ١٢');
   });
 
   it('keeps a keyed hash of what it weighed, with its key’s version, and its idempotency key', async () => {
@@ -503,6 +523,18 @@ describe('an order claim', () => {
     );
     await changeClaim(org, first, { released_at: AT });
     await claim(org, claimRow(org, await approved(org)));
+  });
+
+  it('holds the same order written another way: case, spaces, full-width letters (ADR-006 §5)', async () => {
+    const org = await organisation();
+    await claim(org, claimRow(org, await approved(org)));
+
+    for (const written of [' po-2026/0042', 'PO-2026/0042  ', 'ＰＯ-2026/0042']) {
+      const again = await approved(org, { order_reference: written });
+      await expect(claim(org, claimRow(org, again))).rejects.toEqual(
+        refusedBy('one_open_claim_a_supplier_order', '23505'),
+      );
+    }
   });
 
   it('holds the same order for another supplier apart, and another order for the same one', async () => {
