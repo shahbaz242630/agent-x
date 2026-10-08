@@ -67,7 +67,7 @@ const AGENTS_CHECK =
 const MANDATES_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's mandates, and tell its admins at once: a mandate is what lets an AI agent spend.";
 const POLICIES_CHECK =
-  "If you didn't expect this, sign in to Agent X and check the organisation's policies, and tell its admins at once: a policy sets how much its AI agents may spend.";
+  "If you didn't expect this, sign in to Agent X and check the organisation's policies, and tell its admins at once: a policy sets how much, and whom, its AI agents may pay.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -262,7 +262,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   organization_policy_changed: {
     subject: () => "Agent X: the organisation's policy was changed",
     firstLine: () =>
-      'An admin of one of your Agent X organisations changed its policy, signing in again with a passkey: its rules are in force now for every AI agent of the organisation.',
+      "An admin of one of your Agent X organisations changed its policy, signing in again with a passkey: its rules are in force now for the organisation's AI agents.",
     check: POLICIES_CHECK,
   },
 };
