@@ -230,7 +230,7 @@ export function createSpendRequestDecisions({
     };
     const made = decide(input);
     const requestId = ids.next();
-    const hash = keys.mac('request-hash', [
+    const hash = keys.mac('decision-hash', [
       'spend-request-decision',
       orgId.toLowerCase(),
       requestId,
