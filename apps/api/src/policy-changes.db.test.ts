@@ -28,6 +28,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { ABOVE_THE_CAP, DRAFT_ABOVE_THE_CAP } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
   AED,
@@ -470,6 +471,64 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
     await shared.movedPastTheUseCase(w, id, 'revoke');
 
     expect(await confirm(w.admin, target, rules(1_000n), challengeId)).toEqual(refused(409, 'MANDATE_ENDED'));
+  });
+});
+
+describe('a mandate shows the cap its agent is held to (C3c, partner S92: never quiet)', () => {
+  /** AED 30,000 a month, above the default; AED 10,000 an order: flexible, so a sandbox consent below them only warns. */
+  const ABOVE_DEFAULT = {
+    perOrderLimit: AED(1_000_000n),
+    approvalThreshold: AED(500_000n),
+    monthlyLimit: AED(3_000_000n),
+    consentLimits: 'flexible' as const,
+  };
+
+  const shownOf = async (w: World, id: string) => {
+    const view = await registry.show(w.org, id, CORRELATION);
+    if (view.outcome !== 'found') throw new Error(`not found: ${JSON.stringify(view)}`);
+    return view;
+  };
+
+  it('warns while the policies hold the agent below the mandate’s monthly limit, until its own policy raises the cap', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, ABOVE_DEFAULT);
+    const shown = async () => {
+      const { agentMonthlyCap, current } = await shownOf(w, id);
+      return { from: agentMonthlyCap.from, cap: agentMonthlyCap.cap, warnings: current?.capWarnings };
+    };
+
+    // None set: the default, AED 20,000, below the mandate's AED 30,000.
+    expect(await shown()).toEqual({ from: 'default', cap: AED(2_000_000n), warnings: [ABOVE_THE_CAP] });
+    changedOf(await changed(w, ORGANIZATION, rules(3_000_000n)));
+    expect(await shown()).toEqual({ from: 'organization-policy', cap: AED(3_000_000n), warnings: [] });
+    changedOf(await changed(w, { scope: 'mandate', mandateId: id }, rules(2_999_999n)));
+    expect(await shown()).toEqual({ from: 'mandate-policy', cap: AED(2_999_999n), warnings: [ABOVE_THE_CAP] });
+    changedOf(await changed(w, { scope: 'mandate', mandateId: id }, rules(3_000_000n)));
+    expect(await shown()).toEqual({ from: 'mandate-policy', cap: AED(3_000_000n), warnings: [] });
+  });
+
+  it('warns of a draft above the cap in its own words: the cap is raised once it is accepted', async () => {
+    const w = await world();
+    const { id } = await shared.drafted(registry, w, ABOVE_DEFAULT);
+
+    expect((await shownOf(w, id)).pending?.capWarnings).toEqual([DRAFT_ABOVE_THE_CAP]);
+  });
+
+  it('a tampered organisation policy: INTEGRITY_FAILED, never the default shown in its place (FX-TAMPER)', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w, ABOVE_DEFAULT);
+    changedOf(await changed(w, ORGANIZATION, rules(3_000_000n)));
+    const owner = await tamperAsOwner(database, POLICIES, w.org);
+    try {
+      await owner.query(
+        'with gone as (delete from mandates.policies where id = $1) delete from mandates.policy_versions where policy_id = $1',
+        [w.org],
+      );
+    } finally {
+      await owner.end();
+    }
+
+    expect(await registry.show(w.org, id, CORRELATION)).toEqual(refused(503, 'INTEGRITY_FAILED'));
   });
 });
 

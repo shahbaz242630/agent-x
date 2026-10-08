@@ -10,6 +10,7 @@ export {
   decide,
   DEFAULT_MONTHLY_CAP,
   type MandateInForce,
+  monthlyCapOf,
   type MonthlyCapFrom,
   type OverCap,
   type PolicyRules,

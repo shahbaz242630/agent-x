@@ -19,7 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { type AgentMandates, createAgentMandates } from './agent-mandate.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, mandateWorld, type MandateWorldTables, refused, type World } from './mandate-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -72,6 +72,8 @@ describe('an agent’s own mandate and sources (B5, SEC-AG-05)', () => {
       outcome: 'found',
       mandate: { id, status: 'ACTIVE', agentId: w.agent },
       version: { version: 1, fundingSourceId: w.source, supplierIds: [...w.suppliers].sort() },
+      // C3c: no policy set, the default cap.
+      monthlyCap: AED(2_000_000n),
     });
     expect(await sourceIds(w)).toEqual([w.source]);
     // Paged after the filter: past the one source, nothing.

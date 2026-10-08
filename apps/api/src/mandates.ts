@@ -148,6 +148,11 @@ const VERSION = z
       .describe(
         'Where these terms now go past the funding source’s bank consent: the bank may refuse such a payment. Empty when they fit.',
       ),
+    capWarnings: z
+      .array(z.string())
+      .describe(
+        'Where the monthly cap the organisation’s policies hold the agent to (agentMonthlyCap) is below these terms: payments past it are refused. Empty when they fit.',
+      ),
   })
   .register(API_SCHEMAS, { id: 'MandateVersion', description: 'One version of a mandate’s terms, made once.' });
 
@@ -179,6 +184,17 @@ const MANDATE_DETAILS = z
     acceptedAt: z.iso.datetime().nullable(),
     current: VERSION.nullable().describe('The version in force, or null until one is accepted.'),
     pending: VERSION.nullable().describe('A draft waiting for acceptance, or null.'),
+    agentMonthlyCap: z
+      .object({
+        capMinor: z.number().describe('Whole minor units.'),
+        currency: z.string(),
+        from: z
+          .enum(['mandate-policy', 'organization-policy', 'default'])
+          .describe('The mandate’s own policy, the organisation’s, or the default (AED 20,000).'),
+      })
+      .describe(
+        'The monthly cap the organisation’s policies hold the agent to: below the mandate’s own monthly limit, it is the one that applies.',
+      ),
   })
   .register(API_SCHEMAS, {
     id: 'MandateDetails',
@@ -322,7 +338,7 @@ const mandateBody = (mandate: MandateRecord) => ({
   status: mandate.status,
 });
 
-const versionOf = ({ version: v, consentWarnings }: VersionShown) => ({
+const versionOf = ({ version: v, consentWarnings, capWarnings }: VersionShown) => ({
   id: v.id,
   version: v.version,
   purpose: v.purpose,
@@ -339,14 +355,20 @@ const versionOf = ({ version: v, consentWarnings }: VersionShown) => ({
   draftedBy: v.draftedBy,
   draftedAt: v.draftedAt.toISOString(),
   consentWarnings: [...consentWarnings],
+  capWarnings: [...capWarnings],
 });
 
-const detailsOf = ({ mandate, current, pending }: MandateView) => ({
+const detailsOf = ({ mandate, current, pending, agentMonthlyCap }: MandateView) => ({
   ...mandateBody(mandate),
   acceptedBy: mandate.acceptedBy,
   acceptedAt: mandate.acceptedAt?.toISOString() ?? null,
   current: current === null ? null : versionOf(current),
   pending: pending === null ? null : versionOf(pending),
+  agentMonthlyCap: {
+    capMinor: Number(agentMonthlyCap.cap.minor),
+    currency: agentMonthlyCap.cap.currency,
+    from: agentMonthlyCap.from,
+  },
 });
 
 export function registerMandates(

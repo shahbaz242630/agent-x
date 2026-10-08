@@ -947,6 +947,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "capWarnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -965,7 +971,8 @@
           "termsHash",
           "draftedBy",
           "draftedAt",
-          "consentWarnings"
+          "consentWarnings",
+          "capWarnings"
         ],
         "additionalProperties": false,
         "description": "One version of a mandate’s terms, made once."
@@ -1090,6 +1097,31 @@
                 "type": "null"
               }
             ]
+          },
+          "agentMonthlyCap": {
+            "type": "object",
+            "properties": {
+              "capMinor": {
+                "type": "number"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string",
+                "enum": [
+                  "mandate-policy",
+                  "organization-policy",
+                  "default"
+                ]
+              }
+            },
+            "required": [
+              "capMinor",
+              "currency",
+              "from"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1101,7 +1133,8 @@
           "acceptedBy",
           "acceptedAt",
           "current",
-          "pending"
+          "pending",
+          "agentMonthlyCap"
         ],
         "additionalProperties": false,
         "description": "A mandate with its version in force and the draft waiting."
@@ -1354,6 +1387,9 @@
           "monthlyLimitMinor": {
             "type": "number"
           },
+          "monthlyCapMinor": {
+            "type": "number"
+          },
           "supplierIds": {
             "type": "array",
             "items": {
@@ -1392,6 +1428,7 @@
           "currency",
           "perOrderLimitMinor",
           "monthlyLimitMinor",
+          "monthlyCapMinor",
           "supplierIds",
           "fundingSourceId",
           "timeZone",

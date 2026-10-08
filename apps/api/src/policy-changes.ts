@@ -35,12 +35,10 @@ import {
   onePolicyChangeAtATime,
   policyChangesSince,
   policyOf,
-  type PolicyRecord,
   type PolicyRules,
   policyRules,
   type PolicyScope,
   type PolicyVersionRecord,
-  policyVersionOf,
   rulesHash,
   setPolicy,
   widerThanMandate,
@@ -57,6 +55,7 @@ import {
   type MandateTables,
   type MandateTx,
   mandateIn,
+  policyRulesIn,
   toldAdminsAndApprovers,
   versionIn,
 } from './mandate-reads.ts';
@@ -170,15 +169,6 @@ export function createPolicyChanges({
     return read.outcome === 'missing' ? null : read;
   };
 
-  /** The policy's version in force, read and verified. */
-  const currentOf = async (tx: MandateTx, states: SignedStates, orgId: string, policy: PolicyRecord) => {
-    const read = await policyVersionOf(tx, states, { orgId, id: policy.currentVersionId }, policy.id);
-    if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-    // 0037's `current_is_its_own` holds a policy's version in force to its own.
-    if (read.outcome === 'missing') throw new Error(`A policy names a version not its own: ${policy.id}`);
-    return read.version;
-  };
-
   /** Which policy the target names, its ID: the mandate read (`share`) and open for a mandate's, with its rules within it. */
   const targeted = async (
     tx: MandateTx,
@@ -236,12 +226,12 @@ export function createPolicyChanges({
       target.scope === 'organization'
         ? orgId.toLowerCase()
         : (await mandateIn(tx, states, orgId, target.mandateId, 'share')).mandate.id;
-    const read = await policyIn(tx, states, orgId, id, 'share');
+    const read = await policyRulesIn(tx, states, orgId, id);
     return {
       scope: target.scope,
       id,
       mandateId: target.scope === 'mandate' ? id : null,
-      current: read === null ? null : await currentOf(tx, states, orgId, read.policy),
+      current: read?.current ?? null,
     };
   };
 

@@ -167,10 +167,14 @@ const over = (amount: Money, limit: Money): boolean => !withinLimit(amount, limi
 const amountsOf = (p: PolicyRules): Money[] =>
   [p.perOrderCap?.cap ?? null, p.monthlyCap, p.approvalThreshold].filter((m) => m !== null);
 
-/** The monthly cap per agent: the mandate's policy's, else the organisation's, else the default (decision 5). */
-function monthlyCapOf(
-  organizationPolicy: PolicyRules | null,
-  mandatePolicy: PolicyRules | null,
+/**
+ * The monthly cap per agent: the mandate's policy's, else the organisation's,
+ * else the default (decision 5). Also what a mandate shows its agent held to
+ * (C3c, partner S92: never quiet).
+ */
+export function monthlyCapOf(
+  organizationPolicy: Pick<PolicyRules, 'monthlyCap'> | null,
+  mandatePolicy: Pick<PolicyRules, 'monthlyCap'> | null,
 ): { readonly cap: Money; readonly from: MonthlyCapFrom } {
   if (mandatePolicy?.monthlyCap) return { cap: mandatePolicy.monthlyCap, from: 'mandate-policy' };
   if (organizationPolicy?.monthlyCap) return { cap: organizationPolicy.monthlyCap, from: 'organization-policy' };

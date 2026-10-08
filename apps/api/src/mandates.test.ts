@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ORGANIZATION_HEADER } from './access.ts';
 import type { AcceptAsked, MandateAcceptance, MandateAccepted } from './mandate-acceptance.ts';
 import type { MandateMove, MandateMoved, MandateMoves, MoveAsked } from './mandate-moves.ts';
-import type { MandateView } from './mandate-reads.ts';
+import { ABOVE_THE_CAP, type MandateView } from './mandate-reads.ts';
 import type { MandateDraft, MandateRegistry, MandateWrite } from './mandate-registry.ts';
 import { closeServers, COOKIE, ORG, PUBLIC_ORIGIN, routeServer } from './route-server.helper.test.ts';
 import { SESSION_COOKIE } from './sign-in.ts';
@@ -72,7 +72,10 @@ const VIEW: MandateView = {
       draftedAt: new Date('2026-10-07T09:15:00.000Z'),
     },
     consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
+    capWarnings: [],
   },
+  // C3c: the default cap, equal to the version's monthly limit, so no warning.
+  agentMonthlyCap: { cap: AED(2_000_000n), from: 'default' },
 };
 
 /** The mandate as the routes answer it. */
@@ -93,6 +96,7 @@ const VERSION_ANSWERED = {
   draftedBy: ADMIN,
   draftedAt: '2026-10-07T09:15:00.000Z',
   consentWarnings: ['the per-order limit is above the bank consent’s per payment'],
+  capWarnings: [],
 };
 
 const DETAILS_ANSWERED = {
@@ -105,6 +109,7 @@ const DETAILS_ANSWERED = {
   acceptedAt: null,
   current: null,
   pending: VERSION_ANSWERED,
+  agentMonthlyCap: { capMinor: 2_000_000, currency: 'AED', from: 'default' },
 };
 
 afterEach(closeServers);
@@ -544,6 +549,22 @@ describe('reading mandates (B2)', () => {
       acceptedBy: ADMIN,
       acceptedAt: '2026-10-07T10:00:00.000Z',
       current: VERSION_ANSWERED,
+    });
+  });
+
+  it('shows the cap the policies hold its agent to, and warns where it is below the terms (C3c, never quiet)', async () => {
+    const pending = VIEW.pending === null ? null : { ...VIEW.pending, capWarnings: [ABOVE_THE_CAP] };
+    const held: MandateView = {
+      ...VIEW,
+      pending,
+      agentMonthlyCap: { cap: AED(800_000n), from: 'organization-policy' },
+    };
+    const { app } = await withMandates({ found: { outcome: 'found', ...held } }, 'viewer');
+    const reply = await app.inject(get(`/v1/mandates/${MANDATE_ID}`));
+
+    expect(reply.json()).toMatchObject({
+      pending: { capWarnings: [ABOVE_THE_CAP] },
+      agentMonthlyCap: { capMinor: 800_000, currency: 'AED', from: 'organization-policy' },
     });
   });
 

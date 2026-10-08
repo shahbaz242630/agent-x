@@ -225,7 +225,7 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
   mandate_accepted: {
     subject: () => 'Agent X: a mandate was accepted',
     firstLine: () =>
-      'An admin of one of your Agent X organisations accepted a mandate, signing in again with a passkey: its terms are now in force, and the AI agent it names may spend within them.',
+      'An admin of one of your Agent X organisations accepted a mandate, signing in again with a passkey: its terms are now in force, and the AI agent it names may spend within them. Where the organisation’s policies hold the agent to a lower monthly cap (AED 20,000 unless set), the lower cap applies: the mandate shows it.',
     check: MANDATES_CHECK,
   },
   mandate_suspended: {
