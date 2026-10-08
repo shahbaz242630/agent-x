@@ -40,6 +40,11 @@ export interface AuthorityTableEntry extends SignedStateTable {
   readonly madeOnce?: true;
   /** Its columns fixed when a row is made (a mandate's agent, time zone and window): the fixed-at-creation guard holds them (0035). */
   readonly fixedAtCreation?: readonly string[];
+  /**
+   * Its rows only grow (a spend request's): clearing the integrity hold checks
+   * those in these statuses alone, the ones that can still act (CheckedTable).
+   */
+  readonly liveStatuses?: readonly string[];
   /** The checks over its status with other columns its migration writes, by name, which CI's A3c allows it alone. */
   readonly statusConditions?: readonly string[];
 }
@@ -55,9 +60,10 @@ export interface AuthorityTableEntry extends SignedStateTable {
  * after the mandates, Phase 2 C1), then its funding sources (5, D2-2),
  * then its suppliers (6), their payee registrations (6, after their supplier,
  * E2-1) and their versions (6, after the registration that gives one its
- * reference, E1-1), then its spend requests (8, Phase 2 D1). Clearing the integrity hold checks
- * every row of each in this order (verifyAll, B3+-2c), so a new table goes in
- * at its level.
+ * reference, E1-1), then its spend requests (8, Phase 2 D1). Clearing the
+ * integrity hold checks every row of each in this order (verifyAll, B3+-2c; a
+ * table with `liveStatuses`, its live rows), so a new table goes in at its
+ * level.
  */
 export const AUTHORITY_TABLES: readonly AuthorityTableEntry[] = [
   ORGANIZATIONS,

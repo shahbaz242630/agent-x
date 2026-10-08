@@ -136,9 +136,23 @@ export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * Every object of the tables checked (verifyAll): all verified, with how many
- * there were; some tampered with, each finding named (every alarm is already
- * raised); or more objects in one table than the limit, with none judged.
+ * A table verifyAll checks: all of it, or, for one whose rows only grow (a
+ * spend request's, Phase 2 D1), its rows in `liveStatuses` alone: those that
+ * can still act. One moved back to a live status is listed, so checked; an
+ * ended one, or a live one moved to an end or deleted, is not judged here:
+ * clearing reads the record its hold names, the whole history is checked in
+ * batches before a clearing is confirmed (Phase 2 D1c), and claims and
+ * reservations are reconciled with the log (E1).
+ */
+export interface CheckedTable extends SignedStateTable {
+  readonly liveStatuses?: readonly string[];
+}
+
+/**
+ * Every object of the tables checked (verifyAll; a growing table's live rows):
+ * all verified, with how many there were; some tampered with, each finding
+ * named (every alarm is already raised); or more objects in one table than the
+ * limit, with none judged.
  */
 export type OrganisationCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
@@ -273,12 +287,13 @@ export interface SignedStates {
    * `deleted` too (its seals stripped as well), with its alarm. Table by
    * table in the order given, which must be the lock order's (ADR-006 §6),
    * and by ID within each. Past `limit` rows, or objects in the log, in one
-   * table: `too_many`, with nothing more judged.
+   * table: `too_many`, with nothing more judged. A table with `liveStatuses`
+   * is checked in its live rows alone (CheckedTable).
    */
   verifyAll(
     tx: AuditTransaction,
     orgId: string,
-    tables: readonly SignedStateTable[],
+    tables: readonly CheckedTable[],
     limit: number,
   ): Promise<OrganisationCheck>;
   /**
@@ -369,9 +384,10 @@ export interface SignedStates {
    * Clears the organisation's hold (ADR-012 §2, B3+-2c): a person, never the
    * app or an operator alone (invariant 13), with the step-up they confirmed
    * it with, from the HELD state recorded by `holdEventId`, after that
-   * state's investigation, and only once verifyAll has verified every
-   * authority object of the organisation in this same transaction (otherwise
-   * `basis`): a hold is never cleared over a record still tampered with. The
+   * state's investigation, and only once verifyAll has verified the
+   * organisation's authority objects (a growing table's live rows) in this
+   * same transaction (otherwise `basis`): a hold is never cleared over a
+   * record still tampered with. The
    * hold is read with the chain head's lock, which comes last (ADR-006 §6).
    */
   clearIntegrityHold(
@@ -791,15 +807,17 @@ export function createSignedStates({
     async verifyAll(
       tx: AuditTransaction,
       orgId: string,
-      tables: readonly SignedStateTable[],
+      tables: readonly CheckedTable[],
       limit: number,
     ): Promise<OrganisationCheck> {
       const findings: TamperFinding[] = [];
       let objects = 0;
       for (const table of tables) {
         notTheHold(table);
-        const rowIds = await signedRowIds(tx, table, orgId, limit);
-        const loggedIds = await trail.subjectIds(tx, orgId, table.subject, limit);
+        const live = table.liveStatuses ?? null;
+        const rowIds = await signedRowIds(tx, table, orgId, limit, null, live);
+        // A growing table's log lists every object it ever had, ended ones too.
+        const loggedIds = live === null ? await trail.subjectIds(tx, orgId, table.subject, limit) : [];
         const every = [...new Set([...rowIds, ...loggedIds])].sort();
         if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
         for (const id of every) {
@@ -958,7 +976,7 @@ export function createSignedStates({
       if (verifiedWhole.get(tx)?.has(orgId.toLowerCase()) !== true) {
         throw new SignedStateFailed(
           'basis',
-          "A hold is cleared only once verifyAll has found every one of the organisation's records whole, in the same transaction",
+          "A hold is cleared only once verifyAll has found the organisation's records whole, in the same transaction",
         );
       }
       const hold = await integrityHold(tx, orgId, 'head');

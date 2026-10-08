@@ -257,9 +257,10 @@ export async function readSignedRow<Schema>(
 /**
  * The IDs of the table's rows in the organisation, in order (Postgres gives a
  * uuid as text in lower case), after the row `after` (null from the start),
- * at most `limit` and one more, so the caller can tell a list cut short. Locks
- * nothing: each row is read again through readSignedRow. Only in withTenant's
- * transaction for the organisation, like readSignedRow.
+ * at most `limit` and one more, so the caller can tell a list cut short; only
+ * rows in one of `statuses` when given. Locks nothing: each row is read again
+ * through readSignedRow. Only in withTenant's transaction for the
+ * organisation, like readSignedRow.
  */
 export async function signedRowIds<Schema>(
   tx: Transaction<Schema>,
@@ -267,16 +268,20 @@ export async function signedRowIds<Schema>(
   orgId: string,
   limit: number,
   after: string | null = null,
+  statuses: readonly string[] | null = null,
 ): Promise<string[]> {
   checkTable(table);
   if (!UUID.test(orgId) || (after !== null && !UUID.test(after)))
     throw new RangeError('A signed row is named by UUIDs');
   if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
+  // None at all would list nothing, which a caller would read as nothing to check.
+  if (statuses?.length === 0) throw new RangeError('Rows are listed in at least one status');
   await assertTenant(tx, orgId);
   const { rows } = await sql<{ id: string }>`
     select target.id::text as id from ${sql.table(table.table)} as target
     where target.org_id = ${orgId}
     ${after === null ? sql`` : sql`and target.id > ${after}`}
+    ${statuses === null ? sql`` : sql`and target.status = any(${[...statuses]}::text[])`}
     order by target.id
     limit ${limit + 1}
   `.execute(tx);

@@ -442,6 +442,38 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     expect(await ask(investigationId)).toEqual({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' });
   });
 
+  it('refuses while the record its hold names is tampered with, in a table checked in its live rows alone (Phase 2 D1b)', async () => {
+    const row = await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    // Memberships checked as a growing table is, in a status none of these has: verifyAll lists none of them.
+    const liveOnly = createHoldClearings({
+      database: app,
+      keys,
+      ids,
+      challenges: challenges(),
+      logger: testLogger(),
+      authorityTables: AUTHORITY_TABLES.map((table) =>
+        table === MEMBERSHIPS ? { ...table, liveStatuses: ['DEACTIVATED'] } : table,
+      ),
+    });
+    const confirmLiveOnly = () =>
+      liveOnly.confirm(
+        admin,
+        keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
+        investigationId,
+        challengeId,
+        CORRELATION,
+      );
+    await row.tamper();
+
+    expect(await confirmLiveOnly()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    // Put back as it was signed, it clears.
+    await row.restore();
+    expect(await confirmLiveOnly()).toMatchObject({ outcome: 'cleared' });
+  });
+
   it('fails rather than judge part of a table past the objects it checks, leaving it HELD', async () => {
     await holdThenRepair();
     const investigationId = await investigate();
