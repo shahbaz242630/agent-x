@@ -15,6 +15,7 @@
 // nor a digit (spaces of every kind, marks, controls, punctuation) read as
 // one space, so `AE12-9991-…`, `AE12:9991:…` or an IBAN grouped with
 // non-breaking spaces is found as one grouped with spaces.
+import { asciiDigits } from '../../../shared-kernel/index.ts';
 
 /** The characters of a known account number that, in a row, count as the number itself. */
 const RUN = 8;
@@ -36,21 +37,6 @@ const SEPARATORS = /[^\p{L}\p{Nd}]+/gu;
  */
 const AN_ID =
   /(?<![\p{L}\p{Nd}])[\dA-Fa-f]{8}-[\dA-Fa-f]{4}-[\dA-Fa-f]{4}-[\dA-Fa-f]{4}-[\dA-Fa-f]{12}(?![\p{L}\p{Nd}])/gu;
-
-/** A digit of any script. */
-const ANY_DIGIT = /\p{Nd}/gu;
-
-/**
- * A digit's value: Unicode keeps each script's digits 0 to 9 in a row, and
- * rows of them in runs (the mathematical digits' five), so the value is its
- * place counted from the start of its run.
- */
-function digitValue(digit: string): string {
-  const code = digit.codePointAt(0) ?? 0;
-  let start = code;
-  while (start > 0 && /\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
-  return String((code - start) % 10);
-}
 
 /** Cyrillic and Greek capitals a reader takes for Latin ones. */
 const LOOKALIKES: Readonly<Record<string, string>> = {
@@ -88,10 +74,7 @@ const LOOKALIKE = new RegExp(`[${Object.keys(LOOKALIKES).join('')}]`, 'gu');
 
 /** The text as the checks read it: folded, upper case, each digit its value, lookalikes Latin, each run of anything else one space. */
 const readable = (text: string): string =>
-  text
-    .normalize('NFKC')
-    .toUpperCase()
-    .replaceAll(ANY_DIGIT, digitValue)
+  asciiDigits(text.normalize('NFKC').toUpperCase())
     .replaceAll(LOOKALIKE, (letter) => LOOKALIKES[letter] ?? letter)
     .replaceAll(SEPARATORS, ' ');
 

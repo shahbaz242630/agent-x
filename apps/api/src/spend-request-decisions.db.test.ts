@@ -12,8 +12,9 @@
 // a released reservation and another agent's never); a retry answered as it
 // was; what is refused with nothing made (a currency not taken, a revoked or
 // expired key or another agent's, a frozen organisation, a tampered
-// mandate); and no request ever left VALIDATING.
-import { addAgent, AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+// mandate); the agent's route over HTTP with its real key check (D4r); and
+// no request ever left VALIDATING.
+import { addAgent, AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
@@ -33,9 +34,10 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { closeServers, routeServer } from './route-server.helper.test.ts';
 import {
   AED,
   keys,
@@ -216,6 +218,8 @@ beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
+
+afterEach(closeServers);
 
 afterAll(async () => {
   await app.destroy();
@@ -647,6 +651,45 @@ describe('the lock order (ADR-006 §6, forced)', () => {
 
     expect(answers).toEqual([refused(409, 'ORG_FROZEN')]);
     expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+});
+
+describe("through the agent's route (D4r)", () => {
+  it('answers the agent’s request over HTTP with its key, the bank reference that differs, and a retry as it was', async () => {
+    const { w, mandateId, acting } = await ready();
+    const logger = testLogger(new LogCapture());
+    const keyCheck = createAgentKeyCheck({ database: app, keys, ids, clock, logger });
+    const api = await routeServer({ checkAgentKey: keyCheck.check.bind(keyCheck), spendRequestDecisions: decisions });
+    const post = (orderReference: string) =>
+      api.inject({
+        method: 'POST',
+        url: '/v1/spend-requests',
+        headers: { authorization: `Bearer ${acting.text}`, 'idempotency-key': 'route-1' },
+        payload: {
+          amountMinor: 1_000_000,
+          currency: 'AED',
+          supplierId: w.suppliers[0],
+          fundingSourceId: w.source,
+          orderReference,
+          purpose: 'Printer paper',
+        },
+      });
+
+    const first = await post('INV_22');
+    expect(first.statusCode).toBe(201);
+    expect(first.json()).toMatchObject({
+      status: 'APPROVED',
+      decision: 'ALLOW',
+      mandateId,
+      amountMinor: 1_000_000,
+      orderReference: 'INV_22',
+      bankReference: 'INV-22',
+    });
+    const again = await post('INV_22');
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toEqual(first.json());
+    expect((await post('INV_23')).json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_REUSED' } });
+    expect((await made(w.org)).requests).toBe(1);
   });
 });
 

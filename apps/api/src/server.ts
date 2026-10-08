@@ -71,6 +71,8 @@ import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
 import type { AgentMandates } from './agent-mandate.ts';
 import { registerAgentSelf } from './agent-self.ts';
+import type { SpendRequestDecisions } from './spend-request-decisions.ts';
+import { registerSpendRequests } from './spend-requests.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceChanges } from './funding-source-changes.ts';
 import type { FundingSourceLinks } from './funding-source-links.ts';
@@ -155,6 +157,8 @@ export interface ServerOptions {
   readonly policyChanges?: PolicyChanges | undefined;
   /** An agent's own mandate and the sources it names (agent-mandate.ts); without it, no agent reaches those routes. */
   readonly agentMandates?: AgentMandates | undefined;
+  /** Deciding an agent's spend requests (spend-request-decisions.ts); without it, no agent reaches that route. */
+  readonly spendRequestDecisions?: SpendRequestDecisions | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -323,6 +327,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
   registerAgentSelf(app, { mandates: options.agentMandates });
+  registerSpendRequests(app, { decisions: options.spendRequestDecisions });
   registerAgents(app, {
     registrations: options.agentRegistrations,
     changes: options.agentChanges,

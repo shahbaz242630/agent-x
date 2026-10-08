@@ -1,3 +1,4 @@
+import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, SignIn } from '@agentx/core/modules/identity';
 import { type IdempotentRequest, type IdempotentWrite, isUnwritten } from '@agentx/platform/db';
 import { createLogger } from '@agentx/platform/observability';
@@ -173,11 +174,13 @@ describe('what a write route can never hand the store', () => {
     operation?: string | undefined;
     key?: string | undefined;
     person?: LiveSession | null;
+    agent?: AcceptedKey | null;
   }) =>
     ({
       routeOptions: { config: { operation: 'operation' in changes ? changes.operation : 'items.rename' } },
       headers: 'key' in changes ? { 'idempotency-key': changes.key } : { 'idempotency-key': 'k-1' },
       person: 'person' in changes ? changes.person : LIVE,
+      agent: changes.agent ?? null,
       params: undefined,
       query: undefined,
       body: undefined,
@@ -187,9 +190,24 @@ describe('what a write route can never hand the store', () => {
     ['a route that names no operation', { operation: undefined }, 'names no operation'],
     ['a request without its key', { key: undefined }, 'without a well-formed key'],
     ['a request with a malformed key', { key: 'two words' }, 'without a well-formed key'],
-    ['a request without a signed-in person', { person: null }, 'without a signed-in person'],
+    ['a request without a signed-in person or an agent', { person: null }, 'without a signed-in person or an agent'],
   ])('fails on our side for %s', (_what, changes, message) => {
     expect(() => idempotentRequest(requestLike(changes), ORG)).toThrow(message);
+  });
+
+  it("names an agent's write by its agent, and a person's by the person", () => {
+    const agent: AcceptedKey = {
+      orgId: ORG,
+      agentId: '0199a0f0-0000-7000-8000-0000000000a1',
+      keyId: '0199a0f0-0000-7000-8000-0000000000b1',
+      scopes: ['requests:write'],
+      expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    };
+    expect(idempotentRequest(requestLike({ person: null, agent }), ORG).client).toEqual({
+      kind: 'agent',
+      id: agent.agentId,
+    });
+    expect(idempotentRequest(requestLike({}), ORG).client).toEqual({ kind: 'user', id: LIVE.userId });
   });
 
   it('takes a request with no params, query or body as empty ones', () => {

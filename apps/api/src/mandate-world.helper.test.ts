@@ -7,7 +7,7 @@
 // the name keeps it with the tests, which alone may import @agentx/testing.
 import { createHash, randomBytes } from 'node:crypto';
 
-import { addAgent, addAgentKey, type AgentsTables, keySecretMessage } from '@agentx/core/modules/agents';
+import { addAgent, addAgentKey, agentKeyText, type AgentsTables, keySecretMessage } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -322,10 +322,17 @@ export function mandateWorld({
       }),
     );
 
-  /** A key of the agent (the world's unless named), live for 90 days: as the agent's key check finds it. */
-  async function agentKey(w: World, agentId = w.agent): Promise<{ orgId: string; agentId: string; keyId: string }> {
+  /**
+   * A key of the agent (the world's unless named), live for 90 days: as the
+   * agent's key check finds it, with its text as the agent sends it.
+   */
+  async function agentKey(
+    w: World,
+    agentId = w.agent,
+  ): Promise<{ orgId: string; agentId: string; keyId: string; text: string }> {
     const keyId = ids.next();
-    const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, randomBytes(32)));
+    const secret = randomBytes(32);
+    const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, secret));
     await withSignedStates(app(), w.org, quiet(), (tx, states) =>
       addAgentKey(tx, states, {
         orgId: w.org,
@@ -339,7 +346,7 @@ export function mandateWorld({
         actor: OPERATOR,
       }),
     );
-    return { orgId: w.org, agentId, keyId };
+    return { orgId: w.org, agentId, keyId, text: agentKeyText(keyId, secret) };
   }
 
   /** The member signs in again for the step-up, by `amr`: a passkey unless named. */
