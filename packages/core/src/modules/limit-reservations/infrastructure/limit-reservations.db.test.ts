@@ -1,13 +1,5 @@
-// D2: an agent's time zone, monthly periods and reservations (0040), on the
-// real migrated schema, as the app role. Reserving through them comes with D4
-// and its forced lock tests with it; this holds the tables' own rules: one
-// zone an agent, kept; one period an agent a month, locked and never changed,
-// a lock a second request waits on; a reservation born HELD in the agent's
-// month it was made in, moved only along its machine, settled once at its
-// end, changed in nothing else, in a period that exists; one a request, made
-// only for a request just decided to hold capacity, holding exactly what it
-// asked, released only once it has ended and blocked or finalised only once
-// handed off (D2's review); and no other organisation's rows, no deletes.
+// D2: the tables' own rules (0040), on the real migrated schema, as the app
+// role. Reserving through them, and its forced lock tests, come with D4.
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilBlocked } from '@agentx/testing';
 import type { Insertable, Updateable } from 'kysely';
@@ -216,14 +208,6 @@ const stateOf = (org: Org, id: string) =>
 const refusedBy = (constraint: string): unknown => expect.objectContaining({ constraint });
 const DENIED: unknown = expect.objectContaining({ code: '42501' });
 
-/** The path from HELD to each state, along the machine. */
-const PATH_TO: Readonly<Record<string, readonly string[]>> = {
-  HELD: [],
-  BLOCKED_UNKNOWN: ['BLOCKED_UNKNOWN'],
-  FINALISED: ['FINALISED'],
-  RELEASED: ['RELEASED'],
-};
-
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<LimitReservationsTables>({ ...database.connection('app'), maxConnections: 4 }, testLogger());
@@ -299,6 +283,9 @@ describe("an agent's period", () => {
     await expect(
       inOrg(org, (tx) => tx.updateTable('limit_reservations.agent_periods').set({ month: '2026-11' }).execute()),
     ).rejects.toEqual(DENIED);
+    await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.agent_periods').execute())).rejects.toEqual(
+      DENIED,
+    );
   });
 
   it('makes a second request for the same month wait until the first commits', async () => {
@@ -343,7 +330,8 @@ describe('a reservation', () => {
     await period(org);
     for (const from of RESERVATION.states) {
       for (const to of RESERVATION.states.filter((state) => state !== from)) {
-        const id = await moved(org, ...(PATH_TO[from] ?? []));
+        // Every state is one move from HELD.
+        const id = await moved(org, ...(from === 'HELD' ? [] : [from]));
         const allowed = RESERVATION.moves.some((move) => move.from === from && move.to === to);
         const moving = change(org, id, moveTo(to));
         if (allowed) {
@@ -393,9 +381,6 @@ describe('a reservation', () => {
     await expect(
       inOrg(org, (tx) => tx.deleteFrom('limit_reservations.reservations').where('id', '=', id).execute()),
     ).rejects.toEqual(DENIED);
-    await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.agent_periods').execute())).rejects.toEqual(
-      DENIED,
-    );
   });
 
   it('is one a request', async () => {

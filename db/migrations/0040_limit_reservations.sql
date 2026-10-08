@@ -1,4 +1,4 @@
--- An agent's monthly periods and the reservations held against its limits
+-- An agent's time zone, monthly periods and the reservations held against its limits
 -- (PRD §3.1–3.2; ADR-006 §6–§10, as amended for partner decision 4; BR-08,
 -- BR-22; Phase 2 D2): the lock every monthly check serialises on, and the
 -- rows that are the monthly total and the split total, with no running sum
@@ -118,7 +118,6 @@ CREATE TRIGGER period_lock_only BEFORE UPDATE ON limit_reservations.agent_period
   FOR EACH ROW EXECUTE FUNCTION limit_reservations.guard_period();
 
 GRANT SELECT, INSERT ON limit_reservations.agent_periods TO agentx_app;
--- Only for the row lock: `period_lock_only` refuses every UPDATE.
 GRANT UPDATE (created_at) ON limit_reservations.agent_periods TO agentx_app;
 GRANT SELECT ON limit_reservations.agent_periods TO agentx_backup;
 
@@ -157,8 +156,6 @@ CREATE POLICY tenant_isolation ON limit_reservations.reservations
   USING (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)
   WITH CHECK (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid);
 
--- Born HELD; HELD or BLOCKED_UNKNOWN moves on, FINALISED and RELEASED are ends;
--- settled_at written only as it reaches one.
 CREATE FUNCTION limit_reservations.guard_reservation() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
@@ -209,10 +206,7 @@ GRANT SELECT, INSERT ON limit_reservations.reservations TO agentx_app;
 GRANT UPDATE (state, settled_at) ON limit_reservations.reservations TO agentx_app;
 GRANT SELECT ON limit_reservations.reservations TO agentx_backup;
 
--- spend-requests' own rule on the reservation of each of its requests (see
--- above): made for a request just decided to hold capacity, holding exactly
--- what it asked; released only once it has ended; blocked or finalised only
--- once it is handed off (its payment's outcome, Phase 4).
+-- `held_for_its_request`: spend-requests' rule on its requests' reservations (see the header).
 CREATE FUNCTION spend_requests.guard_held_for_request() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
