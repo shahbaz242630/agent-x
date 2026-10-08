@@ -147,6 +147,31 @@ const TABLE_GUARDS: readonly TableGuard[] = [
     type: 23,
     body: 'e1e611bdc0fbcd13e60ddaf0163089449a39b28558f2baa13f1bd4439cdaeb52',
   },
+  {
+    // An agent's period is only locked, never changed (0040).
+    table: 'limit_reservations.agent_periods',
+    name: 'period_lock_only',
+    function: 'limit_reservations.guard_period',
+    type: 19,
+    body: 'dbae7bca1942da16d78a8b0aef8e281c3e422636cbc50d788d58cf464f354aac',
+  },
+  {
+    // A reservation born HELD in the agent's month, moved only along its machine, settled once at its end (0040).
+    table: 'limit_reservations.reservations',
+    name: 'reservation_moves',
+    function: 'limit_reservations.guard_reservation',
+    type: 23,
+    body: 'd6e2d63604045e005281804090ea9ce483a5329bb6add5a4292516f96e868b77',
+  },
+  {
+    // spend-requests' rule on a reservation: for a request just decided to hold capacity, exactly what it asked;
+    // released only once it has ended, blocked or finalised only once handed off (0040, D2's review).
+    table: 'limit_reservations.reservations',
+    name: 'held_for_its_request',
+    function: 'spend_requests.guard_held_for_request',
+    type: 23,
+    body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
+  },
 ];
 
 /** The functions our schemas may hold, each with the SHA-256 of the body its migration wrote. */

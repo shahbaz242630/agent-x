@@ -10,6 +10,7 @@
     "./modules/directory": "./src/modules/directory/index.ts",
     "./modules/funding-sources": "./src/modules/funding-sources/index.ts",
     "./modules/identity": "./src/modules/identity/index.ts",
+    "./modules/limit-reservations": "./src/modules/limit-reservations/index.ts",
     "./modules/mandates": "./src/modules/mandates/index.ts",
     "./modules/notifications": "./src/modules/notifications/index.ts",
     "./modules/organizations": "./src/modules/organizations/index.ts",

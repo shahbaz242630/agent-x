@@ -168,7 +168,7 @@ describe('the made-once guard function (0032, E1-1’s review)', () => {
   });
 });
 
-describe('the table guards (0039, Phase 2 D1)', () => {
+describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
   const read = () =>
     owner.query<{ name: string; body: string; config: string; definer: boolean }>(
       `select p.proname as name,
@@ -177,11 +177,15 @@ describe('the table guards (0039, Phase 2 D1)', () => {
               p.prosecdef as definer
        from pg_catalog.pg_proc p
        join pg_catalog.pg_namespace n on n.oid = p.pronamespace
-       where n.nspname = 'spend_requests'
+       where n.nspname in ('spend_requests', 'limit_reservations')
        order by p.proname`,
     );
   const aboutThem = async () =>
-    (await problems()).filter((each) => each.includes('decided_move') || each.includes('claim_guard'));
+    (await problems()).filter((each) =>
+      ['decided_move', 'claim_guard', 'period_lock_only', 'reservation_moves', 'held_for_its_request'].some((name) =>
+        each.includes(name),
+      ),
+    );
 
   it('are the bodies the migration wrote, pinned, and running with their caller’s rights', async () => {
     expect(await read()).toEqual([
@@ -194,6 +198,24 @@ describe('the table guards (0039, Phase 2 D1)', () => {
       {
         name: 'guard_decided_move',
         body: '8d0507da95a4277aaa641df8d889d72120be2baeefb9be8f5966b40191d94280',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+      {
+        name: 'guard_held_for_request',
+        body: 'd0b0b8f9d8853eccb566418ce454cb7ee6930ec0b08a83125134cc99a9abefe7',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+      {
+        name: 'guard_period',
+        body: 'dbae7bca1942da16d78a8b0aef8e281c3e422636cbc50d788d58cf464f354aac',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+      {
+        name: 'guard_reservation',
+        body: 'd6e2d63604045e005281804090ea9ce483a5329bb6add5a4292516f96e868b77',
         config: 'search_path=pg_catalog',
         definer: false,
       },
@@ -225,6 +247,28 @@ describe('the table guards (0039, Phase 2 D1)', () => {
          execute function spend_requests.guard_decided_move()`,
       'spend_requests.order_claims carries the trigger "decided_move"',
     ],
+    [
+      'dropped (0040)',
+      'drop trigger period_lock_only on limit_reservations.agent_periods',
+      'limit_reservations.agent_periods carries no period_lock_only',
+    ],
+    [
+      'switched off (0040)',
+      'alter table limit_reservations.reservations disable trigger reservation_moves',
+      "limit_reservations.reservations's reservation_moves is switched off",
+    ],
+    [
+      'firing at other times (0040)',
+      `drop trigger reservation_moves on limit_reservations.reservations;
+       create trigger reservation_moves before update on limit_reservations.reservations for each row
+         execute function limit_reservations.guard_reservation()`,
+      "limit_reservations.reservations's reservation_moves fires at other times",
+    ],
+    [
+      'dropped (0040, its request’s)',
+      'drop trigger held_for_its_request on limit_reservations.reservations',
+      'limit_reservations.reservations carries no held_for_its_request',
+    ],
   ])('sees one %s', async (_case, tamper, problem) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
     await owner.query(tamper);
@@ -237,7 +281,16 @@ describe('the table guards (0039, Phase 2 D1)', () => {
         create trigger decided_move before update on spend_requests.requests for each row
           execute function spend_requests.guard_decided_move();
         create trigger claim_guard before insert or update on spend_requests.order_claims for each row
-          execute function spend_requests.guard_claim()`);
+          execute function spend_requests.guard_claim();
+        drop trigger if exists period_lock_only on limit_reservations.agent_periods;
+        drop trigger if exists reservation_moves on limit_reservations.reservations;
+        drop trigger if exists held_for_its_request on limit_reservations.reservations;
+        create trigger held_for_its_request before insert or update on limit_reservations.reservations for each row
+          execute function spend_requests.guard_held_for_request();
+        create trigger period_lock_only before update on limit_reservations.agent_periods for each row
+          execute function limit_reservations.guard_period();
+        create trigger reservation_moves before insert or update on limit_reservations.reservations for each row
+          execute function limit_reservations.guard_reservation()`);
     }
     expect(await aboutThem()).toEqual([]);
   });
