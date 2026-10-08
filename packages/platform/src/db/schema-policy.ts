@@ -358,6 +358,16 @@ export const SCHEMA_POLICY: SchemaPolicy = {
         "An order's claim (ADR-006 §11, 0039): the app adds it and only ever releases it, once its request or payment ends. A claim deleted, or its order, supplier or payee changed, would let the same order be paid twice",
       columns: ['released_at'],
     },
+    'limit_reservations.agent_periods': {
+      reason:
+        "An agent's month, only a lock target (ADR-006 §6–§7, partner decision 4; 0040): UPDATE on one column only because Postgres asks for it before a row lock, and `period_lock_only` refuses every change. A period deleted would let a request go on without the lock its monthly total serialises on",
+      columns: ['created_at'],
+    },
+    'limit_reservations.reservations': {
+      reason:
+        'The capacity a request holds (ADR-006 §8, §10; 0040): the app adds it and moves its state along `reservation_moves`. A reservation deleted, or its amount, agent or month changed, would give capacity back unseen',
+      columns: ['state', 'settled_at'],
+    },
   },
   requiredForeignKeys: [
     {
