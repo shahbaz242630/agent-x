@@ -7,20 +7,21 @@
 // asked again however written (SEC-DP-10); the agent's month across its
 // mandates (decision 4) and both policies weighed (decision 5); two decisions
 // on one agent's month, and one waiting on a revocation, forced through the
-// lock order (SEC-LIM-01); a retry answered as it was; what is refused with
-// nothing made (a currency not taken, a revoked key, a frozen organisation, a
-// tampered mandate); and no request ever left VALIDATING.
-import { randomBytes } from 'node:crypto';
-
-import { addAgentKey, AGENT_KEYS, keySecretMessage } from '@agentx/core/modules/agents';
-import { withSignedStates } from '@agentx/core/modules/audit';
+// lock order (SEC-LIM-01), as are the duplicate check on one supplier, a key's
+// revocation and a freeze; only the agent's own month counted (another month,
+// a released reservation and another agent's never); a retry answered as it
+// was; what is refused with nothing made (a currency not taken, a revoked or
+// expired key or another agent's, a frozen organisation, a tampered
+// mandate); and no request ever left VALIDATING.
+import { addAgent, AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
 import { DAY_MS, money } from '@agentx/core/shared-kernel';
-import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
+import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -67,27 +68,7 @@ let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-decisions' });
-const { world, quiet, movedPastTheUseCase } = shared;
-
-/** The world's agent with a key of its own, as its key's check would find it. */
-async function actingFor(w: World): Promise<AgentActing> {
-  const keyId = ids.next();
-  const { mac, keyVersion } = keys.mac('agent-key-pepper', keySecretMessage(keyId, randomBytes(32)));
-  await withSignedStates(app, w.org, quiet(), (tx, states) =>
-    addAgentKey(tx, states, {
-      orgId: w.org,
-      id: keyId,
-      agentId: w.agent,
-      scopes: ['requests:write'],
-      secretMac: mac,
-      secretKeyVersion: keyVersion,
-      expiresAt: new Date(clock.now().getTime() + 90 * DAY_MS),
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    }),
-  );
-  return { orgId: w.org, agentId: w.agent, keyId };
-}
+const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout } = shared;
 
 /** The supplier verified by the world's admin, as E3 does. */
 const verified = (w: World, id: string) =>
@@ -106,11 +87,14 @@ const verified = (w: World, id: string) =>
  * (AED 50,000 an order, 100,000 a month, approval above 25,000) changed by
  * `terms`, so the default cap (AED 20,000 a month) binds first.
  */
-async function ready(terms: Parameters<typeof shared.termsOf>[1] = {}, mandate = true) {
+async function ready({
+  terms = {},
+  mandate = true,
+}: { terms?: Parameters<typeof shared.termsOf>[1]; mandate?: boolean } = {}) {
   const w = await world();
   for (const supplier of w.suppliers) await verified(w, supplier);
   const mandateId = mandate ? await shared.inForce(registry, w, terms) : null;
-  return { w, mandateId, acting: await actingFor(w) };
+  return { w, mandateId, acting: await agentKey(w) };
 }
 
 /** Within every limit unless changed: AED 10,000 to the first supplier, from the source. */
@@ -169,18 +153,6 @@ const made = (org: string) =>
     months: (await tx.selectFrom('limit_reservations.agent_periods').select('month').execute()).length,
   }));
 
-/** The request's events, oldest first. */
-const eventsAbout = (org: string, requestId: string) =>
-  withTenant(app, org, (tx) =>
-    tx
-      .selectFrom('audit.events')
-      .select(['action', 'actor_type', 'details'])
-      .where('subject_type', '=', 'spend_request')
-      .where('subject_id', '=', requestId)
-      .orderBy('seq')
-      .execute(),
-  );
-
 /** The policy's rules set past the use case (C3b's setPolicy): only a monthly cap of `minor` fils. */
 const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string | null, minor: bigint) => {
   const rules: PolicyRules = {
@@ -205,6 +177,40 @@ const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string |
     }),
   );
 };
+
+/**
+ * The requests `asked` sends, made while `holding`'s transaction holds its
+ * locks open (it calls its `wait` once they are taken), each queued behind it
+ * before it is let go: their answers.
+ */
+async function whileHeld(
+  holding: (wait: () => Promise<void>) => Promise<unknown>,
+  asked: () => Promise<SpendRequestDecided>[],
+): Promise<SpendRequestDecided[]> {
+  const { promise: held, resolve: holds } = Promise.withResolvers<undefined>();
+  const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+  const holder = holding(async () => {
+    holds(undefined);
+    await gate;
+  });
+  await held;
+  const asking = asked().map((answer, n) => within(20_000, answer, `request ${String(n)}`));
+  await waitUntilQueued(database.as('admin'), asking.length);
+  open(undefined);
+  await holder;
+  return Promise.all(asking);
+}
+
+/** A status move of the organisation, its agent or a key, in its own transaction, which `wait`s once it is made. */
+const movedIn = (
+  w: World,
+  wait: () => Promise<void>,
+  move: (tx: DatabaseTransaction<Tables>, states: SignedStates) => Promise<unknown>,
+) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    await move(tx, states);
+    await wait();
+  });
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
@@ -264,9 +270,9 @@ describe('deciding a spend request and reserving it (D4)', () => {
     });
     expect(claim).toMatchObject({ supplier_id: w.suppliers[0], order_reference: 'inv-1001', released_at: null });
     // Signed twice: received VALIDATING, then moved by its decision.
-    expect(await eventsAbout(w.org, request.id)).toEqual([
-      expect.objectContaining({ action: 'spend_request.received', actor_type: 'agent' }),
-      expect.objectContaining({ action: 'spend_request.decided', actor_type: 'agent' }),
+    expect(await eventsAbout(w.org, request.id, 'spend_request')).toEqual([
+      expect.objectContaining({ action: 'spend_request.received', actorType: 'agent' }),
+      expect.objectContaining({ action: 'spend_request.decided', actorType: 'agent' }),
     ]);
     // The agent's months are named in its first mandate's zone, kept for good.
     expect(
@@ -277,7 +283,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
   });
 
   it('sends one over the approval threshold for approval, its capacity held while it waits', async () => {
-    const { w, acting } = await ready({ approvalThreshold: AED(500_000n) });
+    const { w, acting } = await ready({ terms: { approvalThreshold: AED(500_000n) } });
 
     const request = decidedOf(await ask(acting, asking(w)));
 
@@ -292,7 +298,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
   });
 
   it('denies one over the mandate’s own limit as REQUIRE_NEW_MANDATE, holding nothing (SEC-LIM-06)', async () => {
-    const { w, acting } = await ready({ perOrderLimit: AED(100_000n), approvalThreshold: AED(50_000n) });
+    const { w, acting } = await ready({ terms: { perOrderLimit: AED(100_000n), approvalThreshold: AED(50_000n) } });
 
     const request = decidedOf(await ask(acting, asking(w, { amount: AED(150_000n) })));
 
@@ -310,7 +316,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
   });
 
   it('records a request with no mandate, DENIED, locking no month', async () => {
-    const { w, acting } = await ready({}, false);
+    const { w, acting } = await ready({ mandate: false });
     await shared.drafted(registry, w);
 
     const request = decidedOf(await ask(acting, asking(w)));
@@ -344,7 +350,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
   it('denies an unverified supplier, recording the version weighed', async () => {
     const w = await world();
     await shared.inForce(registry, w);
-    const acting = await actingFor(w);
+    const acting = await agentKey(w);
 
     const request = decidedOf(await ask(acting, asking(w)));
 
@@ -443,6 +449,81 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect((await made(w.org)).requests).toBe(1);
   });
 
+  it('counts only the agent’s own month: a new month starts afresh (decision 4)', async () => {
+    const { w, acting } = await ready();
+    expect(decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n) }))).decision).toBe('ALLOW');
+    // 1 November in Dubai: the October reservation no longer counts.
+    clock.advanceBy(24 * DAY_MS);
+
+    const next = decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-2' })));
+
+    expect(next.decision).toBe('ALLOW');
+    expect((await heldBy(w.org, next.id)).reservation).toMatchObject({ month: '2026-11' });
+  });
+
+  it('frees a released reservation’s capacity, and never counts another agent’s', async () => {
+    const { w, acting } = await ready();
+    const first = decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n) })));
+    // Ended and given back past the use cases (cancel and expiry come with D7 and D8).
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: first.id }, 'deny', {
+        actor: OPERATOR,
+        action: 'spend_request.denied',
+        details: {},
+      }),
+    );
+    await withTenant(app, w.org, async (tx) => {
+      await tx
+        .updateTable('limit_reservations.reservations')
+        .set({ state: 'RELEASED', settled_at: clock.now() })
+        .where('request_id', '=', first.id)
+        .execute();
+      await releaseClaim(tx, { requestId: first.id, releasedAt: clock.now() });
+    });
+    expect(decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-2' }))).decision).toBe(
+      'ALLOW',
+    );
+
+    const other = ids.next();
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      addAgent(tx, states, {
+        orgId: w.org,
+        id: other,
+        name: 'Second purchasing agent',
+        owner: w.admin.membershipId,
+        scopes: ['requests:write'],
+        createdAt: clock.now(),
+        actor: OPERATOR,
+      }),
+    );
+    const theirs = { ...w, agent: other };
+    await shared.inForce(registry, theirs);
+    const theirKey = await agentKey(theirs);
+    // AED 15,000 held by the first agent this month; the second's own month is empty.
+    expect(
+      decidedOf(await ask(theirKey, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-3' }))).decision,
+    ).toBe('ALLOW');
+    // A key is its own agent's alone.
+    expect(await ask({ ...acting, keyId: theirKey.keyId }, asking(w, { orderReference: 'INV-4' }))).toEqual(
+      refused(401, 'UNAUTHENTICATED'),
+    );
+  });
+
+  it('denies a suspended agent, and refuses its key once expired', async () => {
+    const { w, acting } = await ready();
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+        actor: OPERATOR,
+        action: 'agent.suspended',
+        details: {},
+      }),
+    );
+    expect(decidedOf(await ask(acting, asking(w)))).toMatchObject({ decision: 'DENY', reasons: ['AGENT_SUSPENDED'] });
+
+    clock.advanceBy(90 * DAY_MS);
+    expect(await ask(acting, asking(w, { orderReference: 'INV-2' }))).toEqual(refused(401, 'UNAUTHENTICATED'));
+  });
+
   it('refuses a mandate tampered with past the app, making nothing (FX-TAMPER)', async () => {
     const { w, mandateId, acting } = await ready();
     const owner = await tamperAsOwner(database, MANDATES, w.org);
@@ -466,61 +547,106 @@ describe('the lock order (ADR-006 §6, forced)', () => {
     expect(decidedOf(await ask(acting, asking(w, { amount: AED(100_000n), orderReference: 'INV-0' }))).decision).toBe(
       'ALLOW',
     );
-    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
-    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
-    const holder = withTenant(app, w.org, async (tx) => {
-      await tx
-        .selectFrom('limit_reservations.agent_periods')
-        .select('month')
-        .where('agent_id', '=', w.agent)
-        .forNoKeyUpdate()
-        .execute();
-      holding(undefined);
-      await gate;
-    });
-    await held;
-    // Each alone fits; the two together are AED 1,000 past the cap. On two suppliers, so only the month serialises them.
-    const both = [0, 1].map((n) =>
-      within(
-        20_000,
-        ask(acting, asking(w, { supplierId: w.suppliers[n] ?? '', orderReference: `INV-${String(n + 1)}` })),
-        `decision ${String(n)}`,
-      ),
-    );
-    await waitUntilQueued(database.as('admin'), 2);
-    open(undefined);
-    await holder;
 
-    const decided = (await Promise.all(both)).map((answer) => decidedOf(answer).decision).sort();
-    expect(decided).toEqual(['ALLOW', 'DENY']);
-    const held2 = await withTenant(app, w.org, (tx) =>
+    // Each alone fits; the two together are AED 1,000 past the cap. On two suppliers, so only the month serialises them.
+    const answers = await whileHeld(
+      (wait) =>
+        withTenant(app, w.org, async (tx) => {
+          await tx
+            .selectFrom('limit_reservations.agent_periods')
+            .select('month')
+            .where('agent_id', '=', w.agent)
+            .forNoKeyUpdate()
+            .execute();
+          await wait();
+        }),
+      () =>
+        [0, 1].map((n) =>
+          ask(acting, asking(w, { supplierId: w.suppliers[n] ?? '', orderReference: `INV-${String(n + 1)}` })),
+        ),
+    );
+
+    expect(answers.map((answer) => decidedOf(answer).decision).sort()).toEqual(['ALLOW', 'DENY']);
+    const reservations = await withTenant(app, w.org, (tx) =>
       tx.selectFrom('limit_reservations.reservations').select('amount_minor').execute(),
     );
-    expect(held2.reduce((sum, { amount_minor }) => sum + BigInt(amount_minor), 0n)).toBe(1_100_000n);
+    expect(reservations.reduce((sum, { amount_minor }) => sum + BigInt(amount_minor), 0n)).toBe(1_100_000n);
+  });
+
+  it('runs two requests for one supplier’s order one after the other: the second is the duplicate (SEC-DP-10)', async () => {
+    const { w, acting } = await ready();
+    const supplier = w.suppliers[0] ?? '';
+
+    const answers = await whileHeld(
+      (wait) =>
+        withSignedStates(app, w.org, quiet(), async (tx, states) => {
+          await supplierOf(tx, states, { orgId: w.org, id: supplier }, 'change');
+          await wait();
+        }),
+      () => [0, 1].map(() => ask(acting, asking(w, { amount: AED(100_000n) }))),
+    );
+
+    expect(answers.map((answer) => decidedOf(answer)).sort((a, b) => a.decision.localeCompare(b.decision))).toEqual([
+      expect.objectContaining({ decision: 'ALLOW' }),
+      expect.objectContaining({ decision: 'DENY', reasons: ['DUPLICATE_ORDER_REFERENCE'] }),
+    ]);
   });
 
   it('waits for a revocation holding the mandate, then denies (MANDATE_NOT_IN_FORCE)', async () => {
     const { w, mandateId, acting } = await ready();
-    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
-    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
-    const revoking = withSignedStates(app, w.org, quiet(), async (tx, states) => {
-      await states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId ?? '' }, 'revoke', {
-        actor: OPERATOR,
-        action: 'mandate.revoke',
-        details: {},
-      });
-      holding(undefined);
-      await gate;
-    });
-    await held;
-    const deciding = within(20_000, ask(acting, asking(w)), 'the decision');
-    await waitUntilQueued(database.as('admin'), 1);
-    open(undefined);
-    await revoking;
 
-    const request = decidedOf(await deciding);
+    const [answer] = await whileHeld(
+      (wait) =>
+        movedIn(w, wait, (tx, states) =>
+          states.changeStatus(tx, MANDATES, { orgId: w.org, id: mandateId ?? '' }, 'revoke', {
+            actor: OPERATOR,
+            action: 'mandate.revoke',
+            details: {},
+          }),
+        ),
+      () => [ask(acting, asking(w))],
+    );
+
+    const request = decidedOf(answer ?? { outcome: 'busy' });
     expect(request).toMatchObject({ mandateId, decision: 'DENY', reasons: ['MANDATE_NOT_IN_FORCE'] });
     expect(await heldBy(w.org, request.id)).toMatchObject({ reservation: undefined, claim: undefined });
+  });
+
+  it('waits for a key’s revocation, then refuses the request', async () => {
+    const { w, acting } = await ready();
+
+    const answers = await whileHeld(
+      (wait) =>
+        movedIn(w, wait, (tx, states) =>
+          states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: acting.keyId }, 'revoke', {
+            actor: OPERATOR,
+            action: 'agent_key.revoked',
+            details: {},
+          }),
+        ),
+      () => [ask(acting, asking(w))],
+    );
+
+    expect(answers).toEqual([refused(401, 'UNAUTHENTICATED')]);
+  });
+
+  it('waits for a freeze, then refuses the request with nothing made (ORG_FROZEN)', async () => {
+    const { w, acting } = await ready();
+
+    const answers = await whileHeld(
+      (wait) =>
+        movedIn(w, wait, (tx, states) =>
+          states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'freeze', {
+            actor: OPERATOR,
+            action: 'organization.freeze',
+            details: {},
+          }),
+        ),
+      () => [ask(acting, asking(w))],
+    );
+
+    expect(answers).toEqual([refused(409, 'ORG_FROZEN')]);
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
   });
 });
 

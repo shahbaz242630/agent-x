@@ -43,7 +43,7 @@ import {
   monthSpent,
   reserve,
 } from '@agentx/core/modules/limit-reservations';
-import { currencyAllowed, openMandateOfAgent } from '@agentx/core/modules/mandates';
+import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   decide,
@@ -119,16 +119,8 @@ export interface SpendRequestDecisions {
 }
 
 /** A policy's version in force as the engine weighs it; null for one never set. */
-const rulesOf = (read: Awaited<ReturnType<typeof policyRulesIn>>): PolicyRules | null =>
-  read === null
-    ? null
-    : {
-        versionId: read.current.id,
-        perOrderCap: read.current.perOrderCap,
-        monthlyCap: read.current.monthlyCap,
-        approvalThreshold: read.current.approvalThreshold,
-        supplierIds: read.current.supplierIds,
-      };
+const rulesOf = (read: { readonly current: PolicyVersionRecord } | null): PolicyRules | null =>
+  read === null ? null : { ...read.current, versionId: read.current.id };
 
 /** A read tampered with refuses the request: nothing is decided on what can't be believed. */
 const believed = (read: { readonly outcome: string }): void => {
@@ -162,9 +154,8 @@ async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, 
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
   believed(open);
   let mandate: (MandateInForce & { readonly timeZone: string }) | null = null;
-  const versionId = open.outcome === 'found' ? open.mandate.currentVersionId : null;
-  if (open.outcome === 'found' && versionId !== null) {
-    const version = await versionIn(tx, states, orgId, open.mandate.id, versionId);
+  if (open.outcome === 'found' && open.mandate.currentVersionId !== null) {
+    const version = await versionIn(tx, states, orgId, open.mandate.id, open.mandate.currentVersionId);
     mandate = { ...version, ...open.mandate, versionId: version.id };
   }
   const mandatePolicy = mandate === null ? null : rulesOf(await policyRulesIn(tx, states, orgId, mandate.id));
@@ -220,7 +211,7 @@ export function createSpendRequestDecisions({
     // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
     const month =
       mandate === null ? null : await lockAgentMonth(tx, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
-    const spent = month === null ? 0n : await monthSpent(tx, { agentId, month: month.month });
+    const spent = month === null ? 0n : await monthSpent(tx, { agentId, month });
     const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
 
     const input: DecisionInput = {
@@ -277,7 +268,7 @@ export function createSpendRequestDecisions({
         requestId,
         agentId: agent.id,
         mandateId: mandate.id,
-        month: month.month,
+        month,
         supplierId: order.supplierId,
         payeeKey: order.payeeKey,
         amountMinor: asked.amount.minor,
@@ -301,15 +292,13 @@ export function createSpendRequestDecisions({
         })),
       );
       if (isUnwritten(done)) return done;
-      const read = await work.answered(agent.orgId, correlationId, async (tx, states) => {
+      return work.answered(agent.orgId, correlationId, async (tx, states) => {
         const found = await requestOf(tx, states, { orgId: agent.orgId, id: done.result.resourceId });
-        if (found.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+        believed(found);
         // Requests are never deleted (0039's grants): one just made, or answered for its key, is there.
-        if (found.outcome === 'missing')
-          throw new Error(`A decided spend request is missing: ${done.result.resourceId}`);
-        return found.request;
+        if (found.outcome !== 'found') throw new Error(`A decided spend request is missing: ${done.result.resourceId}`);
+        return { outcome: 'decided' as const, request: found.request };
       });
-      return 'outcome' in read ? read : { outcome: 'decided', request: read };
     },
   };
 }

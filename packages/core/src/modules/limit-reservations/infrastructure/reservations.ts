@@ -20,22 +20,16 @@ import type { LimitReservationsTables } from './tables.ts';
 
 type ReservationsTransaction = Transaction<LimitReservationsTables>;
 
-/** The agent's month a decision weighs: the zone it is named in, and its name. */
-export interface AgentMonth {
-  readonly timeZone: string;
-  readonly month: string;
-}
-
 /**
- * The agent's month at `at`, its period row locked FOR NO KEY UPDATE: two
- * decisions for one agent's month run one after the other. The zone is the
- * agent's kept one; `zoneIfNew` (the mandate in force's) only for an agent
- * with none yet.
+ * The agent's month at `at` (`YYYY-MM`), its period row locked FOR NO KEY
+ * UPDATE: two decisions for one agent's month run one after the other. Named
+ * in the agent's kept zone; `zoneIfNew` (the mandate in force's) only for an
+ * agent with none yet.
  */
 export async function lockAgentMonth(
   tx: ReservationsTransaction,
   { orgId, agentId, zoneIfNew, at }: { orgId: string; agentId: string; zoneIfNew: string; at: Date },
-): Promise<AgentMonth> {
+): Promise<string> {
   await tx
     .insertInto('limit_reservations.agent_zones')
     .values({ org_id: orgId, agent_id: agentId, time_zone: zoneIfNew, created_at: at })
@@ -59,7 +53,7 @@ export async function lockAgentMonth(
     .where('month', '=', month)
     .forNoKeyUpdate()
     .executeTakeFirstOrThrow();
-  return { timeZone, month };
+  return month;
 }
 
 /** The agent's month's total in minor units: every reservation but a released one, under any of its mandates. */

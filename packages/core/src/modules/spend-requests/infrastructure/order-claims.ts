@@ -11,10 +11,11 @@
 // `for_its_request` key holds it to its request's own supplier and `order_key`.
 //
 // The caller (D4) holds the supplier FOR NO KEY UPDATE first (ADR-006 §6: 6),
-// which serialises the check and the claim for one supplier. Two suppliers
-// sharing a payee key aren't serialised by it, so the claim itself may still
-// find the order taken (the second waits on the first's unique entry, then
-// does nothing), and the caller starts again, its check then seeing the claim.
+// which serialises the check and the claim for one supplier, and its payee
+// key with it: no two suppliers hold one key at once (0033's
+// `one_supplier_a_payee`), and a key moves only by a change of the supplier
+// holding it, which that lock waits for. So D4 never meets `taken` (it fails
+// the request if it does); the answer stays for any caller without the lock.
 import { type Expression, sql, type Transaction } from 'kysely';
 
 import type { SpendRequestsTables } from './tables.ts';
