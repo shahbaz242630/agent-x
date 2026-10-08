@@ -182,7 +182,9 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
     );
   const aboutThem = async () =>
     (await problems()).filter((each) =>
-      ['decided_move', 'claim_guard', 'period_lock_only', 'reservation_moves'].some((name) => each.includes(name)),
+      ['decided_move', 'claim_guard', 'period_lock_only', 'reservation_moves', 'held_for_its_request'].some((name) =>
+        each.includes(name),
+      ),
     );
 
   it('are the bodies the migration wrote, pinned, and running with their caller’s rights', async () => {
@@ -200,6 +202,12 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
         definer: false,
       },
       {
+        name: 'guard_held_for_request',
+        body: '39d9b968995e62e0b165162efc7794503a0d0d9b30e0d6eef20bcf4e8c846b37',
+        config: 'search_path=pg_catalog',
+        definer: false,
+      },
+      {
         name: 'guard_period',
         body: 'dbae7bca1942da16d78a8b0aef8e281c3e422636cbc50d788d58cf464f354aac',
         config: 'search_path=pg_catalog',
@@ -207,7 +215,7 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
       },
       {
         name: 'guard_reservation',
-        body: 'aeeadff4d49cccf97333779e5685fa7107fd2df5be1750a5b09e1ac0ae78c6ec',
+        body: 'd6e2d63604045e005281804090ea9ce483a5329bb6add5a4292516f96e868b77',
         config: 'search_path=pg_catalog',
         definer: false,
       },
@@ -256,6 +264,11 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
          execute function limit_reservations.guard_reservation()`,
       "limit_reservations.reservations's reservation_moves fires at other times",
     ],
+    [
+      'dropped (0040, its request’s)',
+      'drop trigger held_for_its_request on limit_reservations.reservations',
+      'limit_reservations.reservations carries no held_for_its_request',
+    ],
   ])('sees one %s', async (_case, tamper, problem) => {
     // eslint-disable-next-line agentx/no-string-built-sql -- one of the fixed statements above
     await owner.query(tamper);
@@ -271,6 +284,9 @@ describe('the table guards (0039, Phase 2 D1; 0040, D2)', () => {
           execute function spend_requests.guard_claim();
         drop trigger if exists period_lock_only on limit_reservations.agent_periods;
         drop trigger if exists reservation_moves on limit_reservations.reservations;
+        drop trigger if exists held_for_its_request on limit_reservations.reservations;
+        create trigger held_for_its_request before insert or update on limit_reservations.reservations for each row
+          execute function spend_requests.guard_held_for_request();
         create trigger period_lock_only before update on limit_reservations.agent_periods for each row
           execute function limit_reservations.guard_period();
         create trigger reservation_moves before insert or update on limit_reservations.reservations for each row

@@ -1,11 +1,13 @@
-// D2: an agent's monthly periods and its reservations (0040), on the real
-// migrated schema, as the app role. Reserving through them comes with D4 and
-// its forced lock tests with it; this holds the tables' own rules: one period
-// an agent a month, locked and never changed, a lock a second request waits
-// on; a reservation born HELD, moved only along its machine, settled once at
-// its end, changed in nothing else; under its agent's own mandate and in a
-// period that exists; one a request; and no other organisation's rows, no
-// deletes.
+// D2: an agent's time zone, monthly periods and reservations (0040), on the
+// real migrated schema, as the app role. Reserving through them comes with D4
+// and its forced lock tests with it; this holds the tables' own rules: one
+// zone an agent, kept; one period an agent a month, locked and never changed,
+// a lock a second request waits on; a reservation born HELD in the agent's
+// month it was made in, moved only along its machine, settled once at its
+// end, changed in nothing else, in a period that exists; one a request, made
+// only for a request just decided to hold capacity, holding exactly what it
+// asked, released only once it has ended and blocked or finalised only once
+// handed off (D2's review); and no other organisation's rows, no deletes.
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, type TestDatabase, testLogger, waitUntilBlocked } from '@agentx/testing';
 import type { Insertable, Updateable } from 'kysely';
@@ -29,19 +31,32 @@ type ReservationRow = Insertable<LimitReservationsTables['limit_reservations.res
 interface Org {
   readonly id: string;
   readonly agent: string;
+  readonly key: string;
   readonly mandate: string;
+  readonly version: string;
+  readonly source: string;
   readonly supplier: string;
+  readonly supplierVersion: string;
 }
 
 /**
- * An organisation with an agent, a supplier and the agent's mandate on a
- * funding source, made past the app in one statement, as the steps that add
- * them are tested elsewhere: only the rows a reservation's keys point at.
+ * An organisation with an agent and its key, a supplier and the agent's
+ * mandate on a funding source, made past the app, as the steps that add them
+ * are tested elsewhere: only the rows a reservation and its request point at.
  */
-const organisation = async (): Promise<Org> => {
-  const org: Org = { id: randomUUID(), agent: randomUUID(), mandate: randomUUID(), supplier: randomUUID() };
-  const ids = { source: randomUUID(), link: randomUUID(), version: randomUUID(), supplierVersion: randomUUID() };
-  await database.as('admin').query(
+const organisation = async (payeeKey: string | null = null): Promise<Org> => {
+  const org: Org = {
+    id: randomUUID(),
+    agent: randomUUID(),
+    key: randomUUID(),
+    mandate: randomUUID(),
+    version: randomUUID(),
+    source: randomUUID(),
+    supplier: randomUUID(),
+    supplierVersion: randomUUID(),
+  };
+  const admin = database.as('admin');
+  await admin.query(
     `with o as (insert into directory.orgs (org_id) values ($1) returning org_id),
      a as (insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
        select org_id, $2, 'Purchasing agent', $2, 'ACTIVE', 'requests:write', $8 from o returning org_id),
@@ -54,7 +69,7 @@ const organisation = async (): Promise<Org> => {
          '2027-10-06T08:00:00Z', 'AED', 'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $8, $8
        from l returning org_id),
      su as (insert into suppliers.suppliers (org_id, id, status, current_version_id, payee_key, created_at)
-       select org_id, $7, 'UNVERIFIED', $9, null, $8 from s returning org_id),
+       select org_id, $7, 'UNVERIFIED', $9, $12, $8 from s returning org_id),
      sv as (insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts,
          phone_ciphertext, contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
        select org_id, $9, $7, 1, 'Gulf Office Supplies LLC', 'phone', pg_catalog.decode(pg_catalog.repeat('00', 40), 'hex'),
@@ -71,36 +86,87 @@ const organisation = async (): Promise<Org> => {
       org.id,
       org.agent,
       org.mandate,
-      ids.source,
-      ids.link,
-      ids.version,
+      org.source,
+      randomUUID(),
+      org.version,
       org.supplier,
       AT,
-      ids.supplierVersion,
+      org.supplierVersion,
       'a'.repeat(64),
-      `acct-${ids.source}`,
+      `acct-${org.source}`,
+      payeeKey,
     ],
+  );
+  await admin.query(
+    `with d as (insert into directory.agent_keys (key_id, org_id) values ($2, $1) returning org_id)
+     insert into agents.agent_keys (org_id, id, agent_id, status, scopes, secret_mac, secret_key_version, expires_at,
+       created_at)
+     select org_id, $2, $3, 'ACTIVE', 'requests:write', $4, 1, '2027-10-08T08:00:00Z', $5 from d`,
+    [org.id, org.key, org.agent, 'c'.repeat(64), AT],
   );
   return org;
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
 
-/** The agent's period for the month, added if it isn't there, as D4 adds it. */
-const period = (org: Org, month = MONTH, agent = org.agent) =>
-  inOrg(org, (tx) =>
-    tx
-      .insertInto('limit_reservations.agent_periods')
-      .values({ org_id: org.id, agent_id: agent, month, created_at: AT })
+/** The agent's zone, then its period for the month, each added if it isn't there, as D4 adds them. */
+const period = (org: Org, month = MONTH, zone = 'Asia/Dubai') =>
+  inOrg(org, async (tx) => {
+    await tx
+      .insertInto('limit_reservations.agent_zones')
+      .values({ org_id: org.id, agent_id: org.agent, time_zone: zone, created_at: AT })
       .onConflict((conflict) => conflict.doNothing())
-      .execute(),
-  );
+      .execute();
+    await tx
+      .insertInto('limit_reservations.agent_periods')
+      .values({ org_id: org.id, agent_id: org.agent, month, created_at: AT })
+      .onConflict((conflict) => conflict.doNothing())
+      .execute();
+  });
 
-/** A HELD reservation in the agent's month, with any column given otherwise. */
-const reservationRow = (org: Org, overrides: Partial<ReservationRow> = {}): ReservationRow => ({
+/** The agent's spend request for AED 250, VALIDATING with its decision as D4 adds it, made past the app: its ID. */
+const requestOf = async (org: Org, decision = 'ALLOW'): Promise<string> => {
+  const id = randomUUID();
+  await database.as('admin').query(
+    `insert into spend_requests.requests (org_id, id, agent_id, agent_key_id, mandate_id, mandate_version_id,
+       supplier_id, supplier_version_id, funding_source_id, amount_minor, currency, purpose, order_reference,
+       idempotency_key, input_hash, input_hash_key_version, decision, reason_codes, status, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 25000, 'AED', 'Printer paper', 'PO-1', $10, $11, 1, $12, $13,
+       'VALIDATING', $14)`,
+    [
+      org.id,
+      id,
+      org.agent,
+      org.key,
+      org.mandate,
+      org.version,
+      org.supplier,
+      org.supplierVersion,
+      org.source,
+      randomUUID(),
+      'd'.repeat(64),
+      decision,
+      decision === 'ALLOW' ? null : 'APPROVAL_THRESHOLD',
+      AT,
+    ],
+  );
+  return id;
+};
+
+/** Moves a request through the statuses given, each in its own statement, past the app. */
+const moveRequest = async (org: Org, id: string, ...statuses: string[]) => {
+  for (const status of statuses) {
+    await database
+      .as('admin')
+      .query('update spend_requests.requests set status = $3 where org_id = $1 and id = $2', [org.id, id, status]);
+  }
+};
+
+/** A HELD reservation for the request, in the agent's month, with any column given otherwise. */
+const reservationRow = (org: Org, request: string, overrides: Partial<ReservationRow> = {}): ReservationRow => ({
   org_id: org.id,
   id: randomUUID(),
-  request_id: randomUUID(),
+  request_id: request,
   agent_id: org.agent,
   mandate_id: org.mandate,
   month: MONTH,
@@ -114,10 +180,14 @@ const reservationRow = (org: Org, overrides: Partial<ReservationRow> = {}): Rese
   ...overrides,
 });
 
-const reserve = async (org: Org, row: ReservationRow): Promise<string> => {
+const add = async (org: Org, row: ReservationRow): Promise<string> => {
   await inOrg(org, (tx) => tx.insertInto('limit_reservations.reservations').values(row).execute());
   return row.id;
 };
+
+/** A reservation for a new ALLOW request, with any column given otherwise. */
+const reserve = async (org: Org, overrides: Partial<ReservationRow> = {}): Promise<string> =>
+  add(org, reservationRow(org, await requestOf(org), overrides));
 
 const change = (org: Org, id: string, values: Updateable<LimitReservationsTables['limit_reservations.reservations']>) =>
   inOrg(org, (tx) => tx.updateTable('limit_reservations.reservations').set(values).where('id', '=', id).execute());
@@ -125,9 +195,11 @@ const change = (org: Org, id: string, values: Updateable<LimitReservationsTables
 /** The values that move a reservation to `state`: settled as it reaches an end. */
 const moveTo = (state: string) => ({ state, settled_at: state === 'FINALISED' || state === 'RELEASED' ? LATER : null });
 
-/** A reservation moved through the states given, each in its own statement. */
+/** A reservation whose request is handed off, so it may follow its payment, moved through the states given. */
 const moved = async (org: Org, ...states: string[]): Promise<string> => {
-  const id = await reserve(org, reservationRow(org));
+  const request = await requestOf(org);
+  const id = await add(org, reservationRow(org, request));
+  await moveRequest(org, request, 'APPROVED', 'INSTRUCTION_READY', 'HANDED_OFF');
   for (const state of states) await change(org, id, moveTo(state));
   return id;
 };
@@ -160,6 +232,36 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.destroy();
   await database.drop();
+});
+
+describe("an agent's zone", () => {
+  it('is kept as first added: a later mandate in another zone never moves the agent’s month edges', async () => {
+    const org = await organisation();
+    await period(org, MONTH, 'Asia/Dubai');
+    await period(org, '2026-11', 'Pacific/Kiritimati');
+    const zones = await inOrg(org, (tx) =>
+      tx.selectFrom('limit_reservations.agent_zones').select('time_zone').execute(),
+    );
+    expect(zones).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    await expect(
+      inOrg(org, (tx) =>
+        tx.updateTable('limit_reservations.agent_zones').set({ time_zone: 'Pacific/Kiritimati' }).execute(),
+      ),
+    ).rejects.toEqual(DENIED);
+    await expect(inOrg(org, (tx) => tx.deleteFrom('limit_reservations.agent_zones').execute())).rejects.toEqual(DENIED);
+  });
+
+  it('comes before any period of the agent', async () => {
+    const org = await organisation();
+    await expect(
+      inOrg(org, (tx) =>
+        tx
+          .insertInto('limit_reservations.agent_periods')
+          .values({ org_id: org.id, agent_id: org.agent, month: MONTH, created_at: AT })
+          .execute(),
+      ),
+    ).rejects.toEqual(refusedBy('of_an_agents_zone'));
+  });
 });
 
 describe("an agent's period", () => {
@@ -229,10 +331,10 @@ describe('a reservation', () => {
   it('is born HELD, unsettled', async () => {
     const org = await organisation();
     await period(org);
-    const id = await reserve(org, reservationRow(org));
+    const id = await reserve(org);
     expect(await stateOf(org, id)).toEqual({ state: 'HELD', settled_at: null });
     for (const state of ['FINALISED', 'RELEASED', 'BLOCKED_UNKNOWN']) {
-      await expect(reserve(org, reservationRow(org, moveTo(state)))).rejects.toEqual(refusedBy('reservation_moves'));
+      await expect(reserve(org, moveTo(state))).rejects.toEqual(refusedBy('reservation_moves'));
     }
   });
 
@@ -284,6 +386,7 @@ describe('a reservation', () => {
       { mandate_id: randomUUID() },
       { request_id: randomUUID() },
       { reserved_at: LATER },
+      { payee_key: 'PK-1' },
     ]) {
       await expect(change(org, id, values)).rejects.toEqual(DENIED);
     }
@@ -298,58 +401,141 @@ describe('a reservation', () => {
   it('is one a request', async () => {
     const org = await organisation();
     await period(org);
-    const request = randomUUID();
-    await reserve(org, reservationRow(org, { request_id: request }));
-    await expect(reserve(org, reservationRow(org, { request_id: request }))).rejects.toEqual(
-      refusedBy('one_reservation_a_request'),
-    );
+    const request = await requestOf(org);
+    await add(org, reservationRow(org, request));
+    await expect(add(org, reservationRow(org, request))).rejects.toEqual(refusedBy('one_reservation_a_request'));
   });
 
-  it("is under its agent's own mandate, in a period of that agent that exists", async () => {
+  it("counts in the agent's month it was made in, by the agent's zone, in a period that exists", async () => {
     const org = await organisation();
-    const other = await organisation();
     await period(org);
-    // Another agent's mandate, or one of another organisation.
-    await expect(reserve(org, reservationRow(org, { agent_id: randomUUID() }))).rejects.toEqual(
-      refusedBy('under_its_agents_mandate'),
-    );
-    await expect(reserve(org, reservationRow(org, { mandate_id: other.mandate }))).rejects.toEqual(
-      refusedBy('under_its_agents_mandate'),
-    );
-    // A month with no period row: no reservation without its lock target.
-    await expect(reserve(org, reservationRow(org, { month: '2026-11' }))).rejects.toEqual(
+    // 8 Oct is October in Dubai, not November.
+    await expect(reserve(org, { month: '2026-11' })).rejects.toEqual(refusedBy('reservation_moves'));
+    // 31 Oct 21:00 UTC is 1 Nov in Dubai: its month, but no period row yet, so no lock taken.
+    const late = new Date('2026-10-31T21:00:00Z');
+    await expect(reserve(org, { reserved_at: late, month: '2026-10' })).rejects.toEqual(refusedBy('reservation_moves'));
+    await expect(reserve(org, { reserved_at: late, month: '2026-11' })).rejects.toEqual(
       refusedBy('in_its_agents_period'),
     );
+    await period(org, '2026-11');
+    await reserve(org, { reserved_at: late, month: '2026-11' });
   });
 
-  it('holds a whole amount above zero, in a currency the deployment allows', async () => {
+  it("is named by the agent's own zone, whatever zone it was first given", async () => {
+    const org = await organisation();
+    // Kiritimati is UTC+14: 31 Oct 12:00 UTC is already 1 Nov there.
+    await period(org, '2026-11', 'Pacific/Kiritimati');
+    const there = new Date('2026-10-31T12:00:00Z');
+    await expect(reserve(org, { reserved_at: there, month: '2026-10' })).rejects.toEqual(
+      refusedBy('reservation_moves'),
+    );
+    await reserve(org, { reserved_at: there, month: '2026-11' });
+  });
+});
+
+describe("a reservation's request (`held_for_its_request`, D2's review)", () => {
+  it('is one just decided to hold capacity: VALIDATING, with ALLOW or REQUIRE_APPROVAL', async () => {
     const org = await organisation();
     await period(org);
-    await expect(reserve(org, reservationRow(org, { amount_minor: 0n }))).rejects.toThrow(/check constraint/);
-    await expect(reserve(org, reservationRow(org, { currency: 'USD' }))).rejects.toThrow(/foreign key/);
-    await expect(reserve(org, reservationRow(org, { payee_key: 'a payee key' }))).rejects.toThrow(/check constraint/);
+    await add(org, reservationRow(org, await requestOf(org, 'REQUIRE_APPROVAL')));
+    for (const decision of ['DENY', 'REQUIRE_NEW_MANDATE']) {
+      await expect(add(org, reservationRow(org, await requestOf(org, decision)))).rejects.toEqual(
+        refusedBy('held_for_its_request'),
+      );
+    }
+    // Decided and moved on already, or no request at all.
+    const approved = await requestOf(org);
+    await moveRequest(org, approved, 'APPROVED');
+    await expect(add(org, reservationRow(org, approved))).rejects.toEqual(refusedBy('held_for_its_request'));
+    await expect(add(org, reservationRow(org, randomUUID()))).rejects.toEqual(refusedBy('held_for_its_request'));
+  });
+
+  it("is held to exactly what it asked: its agent, mandate, supplier and amount, and the supplier's payee key", async () => {
+    const org = await organisation('PK-1');
+    await period(org);
+    for (const values of [
+      { agent_id: randomUUID() },
+      { mandate_id: randomUUID() },
+      { supplier_id: randomUUID() },
+      { amount_minor: 24_999n },
+      { payee_key: null },
+      { payee_key: 'PK-2' },
+    ]) {
+      await expect(reserve(org, { payee_key: 'PK-1', ...values })).rejects.toEqual(refusedBy('held_for_its_request'));
+    }
+    await reserve(org, { payee_key: 'PK-1' });
+  });
+
+  it.each([
+    ['VALIDATING', []],
+    ['APPROVAL_REQUIRED', ['APPROVAL_REQUIRED']],
+    ['APPROVED', ['APPROVAL_REQUIRED', 'APPROVED']],
+    ['INSTRUCTION_READY', ['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY']],
+  ])('keeps its capacity while the request is %s: released only once it has ended', async (_status, path) => {
+    const org = await organisation();
+    await period(org);
+    const request = await requestOf(org, 'REQUIRE_APPROVAL');
+    const id = await add(org, reservationRow(org, request));
+    await moveRequest(org, request, ...path);
+    for (const state of ['RELEASED', 'BLOCKED_UNKNOWN', 'FINALISED']) {
+      await expect(change(org, id, moveTo(state))).rejects.toEqual(refusedBy('held_for_its_request'));
+    }
+    // Cancelled (from VALIDATING, by way of its decided status).
+    await moveRequest(org, request, ...(path.length === 0 ? ['APPROVAL_REQUIRED'] : []), 'CANCELLED');
+    await change(org, id, moveTo('RELEASED'));
+    expect((await stateOf(org, id)).state).toBe('RELEASED');
+  });
+
+  it('follows a payment only once the request is handed off: never blocked or finalised for one ended without', async () => {
+    const org = await organisation();
+    await period(org);
+    const request = await requestOf(org, 'REQUIRE_APPROVAL');
+    const id = await add(org, reservationRow(org, request));
+    await moveRequest(org, request, 'APPROVAL_REQUIRED', 'EXPIRED');
+    for (const state of ['BLOCKED_UNKNOWN', 'FINALISED']) {
+      await expect(change(org, id, moveTo(state))).rejects.toEqual(refusedBy('held_for_its_request'));
+    }
   });
 });
 
 describe('the tenant wall', () => {
-  it("keeps every organisation's periods and reservations to itself", async () => {
+  it("keeps every organisation's zones, periods and reservations to itself", async () => {
     const org = await organisation();
     const other = await organisation();
     await period(org);
-    await reserve(org, reservationRow(org));
+    await reserve(org);
     const seen = await inOrg(other, async (tx) => [
+      ...(await tx.selectFrom('limit_reservations.agent_zones').select('org_id').execute()),
       ...(await tx.selectFrom('limit_reservations.agent_periods').select('org_id').execute()),
       ...(await tx.selectFrom('limit_reservations.reservations').select('org_id').execute()),
     ]);
     expect(seen).toEqual([]);
-    // Nor written as another's.
-    await expect(
-      inOrg(other, (tx) =>
+  });
+
+  it("refuses writing another organisation's", async () => {
+    const org = await organisation();
+    const other = await organisation();
+    await period(org);
+    const request = await requestOf(org);
+    for (const write of [
+      (tx: Tx) =>
+        tx
+          .insertInto('limit_reservations.agent_zones')
+          .values({ org_id: org.id, agent_id: randomUUID(), time_zone: 'Asia/Dubai', created_at: AT })
+          .execute(),
+      (tx: Tx) =>
         tx
           .insertInto('limit_reservations.agent_periods')
           .values({ org_id: org.id, agent_id: org.agent, month: '2026-12', created_at: AT })
           .execute(),
+    ]) {
+      await expect(inOrg(other, write)).rejects.toThrow(/row-level security/);
+    }
+    // A reservation's guard runs first, and finds no such request behind the wall.
+    await expect(
+      inOrg(other, (tx) =>
+        tx.insertInto('limit_reservations.reservations').values(reservationRow(org, request)).execute(),
       ),
-    ).rejects.toThrow(/row-level security/);
+    ).rejects.toEqual(refusedBy('held_for_its_request'));
   });
 });

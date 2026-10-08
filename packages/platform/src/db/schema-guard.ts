@@ -156,12 +156,21 @@ const TABLE_GUARDS: readonly TableGuard[] = [
     body: 'dbae7bca1942da16d78a8b0aef8e281c3e422636cbc50d788d58cf464f354aac',
   },
   {
-    // A reservation born HELD and moved only along its machine, settled once at its end (0040).
+    // A reservation born HELD in the agent's month, moved only along its machine, settled once at its end (0040).
     table: 'limit_reservations.reservations',
     name: 'reservation_moves',
     function: 'limit_reservations.guard_reservation',
     type: 23,
-    body: 'aeeadff4d49cccf97333779e5685fa7107fd2df5be1750a5b09e1ac0ae78c6ec',
+    body: 'd6e2d63604045e005281804090ea9ce483a5329bb6add5a4292516f96e868b77',
+  },
+  {
+    // spend-requests' rule on a reservation: for a request just decided to hold capacity, exactly what it asked;
+    // released only once it has ended, blocked or finalised only once handed off (0040, D2's review).
+    table: 'limit_reservations.reservations',
+    name: 'held_for_its_request',
+    function: 'spend_requests.guard_held_for_request',
+    type: 23,
+    body: '39d9b968995e62e0b165162efc7794503a0d0d9b30e0d6eef20bcf4e8c846b37',
   },
 ];
 

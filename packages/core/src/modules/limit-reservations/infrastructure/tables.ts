@@ -1,14 +1,23 @@
 /** The limit_reservations schema's tables (db/migrations/0040_limit_reservations.sql), as Kysely sees them. */
 export interface LimitReservationsTables {
+  'limit_reservations.agent_zones': AgentZonesTable;
   'limit_reservations.agent_periods': AgentPeriodsTable;
   'limit_reservations.reservations': ReservationsTable;
+}
+
+/** The time zone an agent's months are named in: its first reservation's mandate's, kept for good. */
+interface AgentZonesTable {
+  org_id: string;
+  agent_id: string;
+  time_zone: string;
+  created_at: Date;
 }
 
 /** Only a lock target: one row an agent a month, never changed (partner decision 4). */
 interface AgentPeriodsTable {
   org_id: string;
   agent_id: string;
-  /** `YYYY-MM`, as `periodOf` names it in the agent's mandate's time zone. */
+  /** `YYYY-MM`, as `periodOf` names it in the agent's zone. */
   month: string;
   created_at: Date;
 }
