@@ -62,17 +62,20 @@ export function policyRules(rules: PolicyRules): PolicyRules {
     if (above(cap, monthlyCap)) problems.push('the per-order cap is above the monthly cap');
     if (above(approvalThreshold, monthlyCap)) problems.push('the approval threshold is above the monthly cap');
   }
-  let supplierIds: string[] | null = null;
-  if (rules.supplierIds !== null) {
-    supplierIds = [...new Set(rules.supplierIds.map((id) => id.toLowerCase()))].sort();
-    if (supplierIds.length === 0 || supplierIds.length > MOST_ALLOWED_SUPPLIERS) {
-      problems.push(`a supplier list names 1 to ${String(MOST_ALLOWED_SUPPLIERS)} suppliers`);
-    }
-    if (supplierIds.length !== rules.supplierIds.length) problems.push('a supplier is named twice');
-    if (!supplierIds.every((id) => UUID.test(id))) problems.push('a supplier is not named by its ID');
-  }
+  const supplierIds = rules.supplierIds === null ? null : suppliersKept(rules.supplierIds, problems);
   if (problems.length > 0) throw new PolicyRulesRefused(problems);
   return { ...rules, supplierIds };
+}
+
+/** A supplier list in lower case, sorted, each once, its problems added to `problems`. */
+function suppliersKept(given: readonly string[], problems: string[]): string[] {
+  const kept = [...new Set(given.map((id) => id.toLowerCase()))].sort();
+  if (kept.length === 0 || kept.length > MOST_ALLOWED_SUPPLIERS) {
+    problems.push(`a supplier list names 1 to ${String(MOST_ALLOWED_SUPPLIERS)} suppliers`);
+  }
+  if (kept.length !== given.length) problems.push('a supplier is named twice');
+  if (!kept.every((id) => UUID.test(id))) problems.push('a supplier is not named by its ID');
+  return kept;
 }
 
 /**
