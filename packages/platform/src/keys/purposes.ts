@@ -23,6 +23,13 @@ export const KEY_PURPOSES = {
   'field-encryption': { kind: 'aead', rotates: true },
   /** ADR-011 §3: signs the audit chains' heads, so an outsider can check them with its public key. */
   'audit-anchor': { kind: 'signing', rotates: true },
+  /**
+   * PRD §5.2: the evaluated-input hash every spend request's decision keeps as
+   * evidence (Phase 2 D4). Its own key, as a request hash's version may be
+   * retired once the idempotency retention has passed, while a decision's is
+   * checked for good: rotated by a new version, the old ones never retired.
+   */
+  'decision-hash': { kind: 'mac', rotates: true },
 } as const satisfies Readonly<Record<string, { readonly kind: KeyKind; readonly rotates: boolean }>>;
 
 export type KeyPurpose = keyof typeof KEY_PURPOSES;
