@@ -29,18 +29,19 @@ export const orderKeyOf = (reference: Expression<string> | string) =>
 
 /** The order a request asks to pay: to its supplier, under the supplier's payee key when it has one. */
 export interface OrderOf {
-  readonly orgId: string;
   readonly supplierId: string;
   /** The supplier's payee key as it is (ADR-014 §3); null when it has none. */
   readonly payeeKey: string | null;
 }
 
-/** The open claims on the order: by the same supplier, or by the same payee key where there is one. */
+/**
+ * The open claims on the order: by the same supplier, or by the same payee key
+ * where there is one; the organisation's alone, by its tenant wall (withTenant).
+ */
 const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf & { readonly reference: string }) =>
   tx
     .selectFrom('spend_requests.order_claims')
     .select('id')
-    .where('org_id', '=', order.orgId)
     .where('released_at', 'is', null)
     .where('order_reference', '=', orderKeyOf(order.reference))
     .where((where) =>
@@ -68,6 +69,7 @@ export async function hasOpenClaim(
 export async function claimOrder(
   tx: ClaimsTransaction,
   claim: OrderOf & {
+    readonly orgId: string;
     readonly id: string;
     readonly requestId: string;
     /** The order reference as the request was made with it. */
@@ -105,12 +107,11 @@ export async function claimOrder(
  */
 export async function releaseClaim(
   tx: ClaimsTransaction,
-  release: { readonly orgId: string; readonly requestId: string; readonly releasedAt: Date },
+  release: { readonly requestId: string; readonly releasedAt: Date },
 ): Promise<boolean> {
   const released = await tx
     .updateTable('spend_requests.order_claims')
     .set({ released_at: release.releasedAt })
-    .where('org_id', '=', release.orgId)
     .where('request_id', '=', release.requestId)
     .where('released_at', 'is', null)
     .executeTakeFirst();

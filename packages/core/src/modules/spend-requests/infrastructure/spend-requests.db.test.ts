@@ -680,7 +680,6 @@ describe('the duplicate check and claiming an order (D3)', () => {
   const check = (org: Org, written: string, order: { supplierId?: string; payeeKey?: string | null } = {}) =>
     inOrg(org, (tx) =>
       hasOpenClaim(tx, {
-        orgId: org.id,
         supplierId: order.supplierId ?? org.supplier.id,
         payeeKey: order.payeeKey ?? null,
         reference: written,
@@ -744,12 +743,8 @@ describe('the duplicate check and claiming an order (D3)', () => {
     expect(await check(org, 'PO-2026/0042', { supplierId: (await supplierOf(org.id)).id })).toBe(false);
 
     await change(org, request, { status: 'CANCELLED' });
-    expect(await inOrg(org, (tx) => releaseClaim(tx, { orgId: org.id, requestId: request, releasedAt: AT }))).toBe(
-      true,
-    );
-    expect(await inOrg(org, (tx) => releaseClaim(tx, { orgId: org.id, requestId: request, releasedAt: AT }))).toBe(
-      false,
-    );
+    expect(await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }))).toBe(true);
+    expect(await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }))).toBe(false);
     expect(await check(org, 'PO-2026/0042')).toBe(false);
   });
 
@@ -781,7 +776,6 @@ describe('the duplicate check and claiming an order (D3)', () => {
       return {
         outcome,
         seen: await hasOpenClaim(tx, {
-          orgId: org.id,
           supplierId: org.supplier.id,
           payeeKey: null,
           reference: 'PO-2026/0042',
@@ -832,7 +826,7 @@ describe('the duplicate check and claiming an order (D3)', () => {
     await expect(claimWith(id, await approved(org, { order_reference: 'PO-7' }), 'PO-7')).rejects.toThrow(conflicted);
     // Its own claim released.
     await change(org, request, { status: 'CANCELLED' });
-    await inOrg(org, (tx) => releaseClaim(tx, { orgId: org.id, requestId: request, releasedAt: AT }));
+    await inOrg(org, (tx) => releaseClaim(tx, { requestId: request, releasedAt: AT }));
     await expect(claimWith(randomUUID(), request)).rejects.toThrow(conflicted);
   });
 
