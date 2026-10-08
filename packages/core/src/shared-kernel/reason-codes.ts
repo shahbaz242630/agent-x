@@ -62,6 +62,8 @@ export const REASON_CODES = {
     "The request's headers are larger than accepted, so it is refused. Large cookies are the usual cause.",
   HISTORY_TOO_LONG:
     "The organisation's records behind this decision are longer than Agent X reads at once, so it wasn't decided. Nothing was changed. Contact Agent X support.",
+  HISTORY_UNCHECKED:
+    "The integrity hold can only be cleared once Agent X has checked the organisation's whole history of spend requests, which it does in the background while the hold stands. It hasn't finished yet, so nothing was changed. Try again in a few minutes.",
   HOLD_CHANGED:
     'The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again.',
   IDEMPOTENCY_KEY_BUSY:

@@ -21,6 +21,8 @@
 // investigation of the hold as it stands; 403 STEP_UP_FAILED for another
 // step-up, or one begun for a HELD state the hold has since left (cleared and
 // set again); 409 HOLD_CHANGED when it is cleared while this clearing is made;
+// 409 HISTORY_UNCHECKED until the API's job has checked every spend request
+// while the hold stood (Phase 2 D1c);
 // 503 INTEGRITY_FAILED when the hold, or any record, can't be verified (the
 // hold stays). The use cases are the identity module's hold-investigations.ts
 // and hold-clearing.ts; the hold is the audit module's.

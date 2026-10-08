@@ -156,6 +156,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "HISTORY_UNCHECKED",
+                    "description": "The integrity hold can only be cleared once Agent X has checked the organisation's whole history of spend requests, which it does in the background while the hold stands. It hasn't finished yet, so nothing was changed. Try again in a few minutes."
+                  },
+                  {
+                    "type": "string",
                     "const": "HOLD_CHANGED",
                     "description": "The integrity hold was cleared by someone else while this clearing was being made, so nothing was changed. Look at the hold again."
                   },

@@ -29,7 +29,9 @@ export {
 export {
   type CheckedTable,
   type ClearingStepUp,
+  type HistoryBatch,
   type HistoryCheck,
+  type HistoryCheckRecord,
   type HoldClearing,
   type OrganisationCheck,
   type HoldInvestigation,

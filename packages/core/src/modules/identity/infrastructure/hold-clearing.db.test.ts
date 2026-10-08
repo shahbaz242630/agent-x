@@ -175,10 +175,20 @@ const stepUp = (who: ClearingAdmin, challengeId: string, amr: readonly string[] 
   });
 
 /** Asks, signs in again, and gives back the challenge. */
-async function steppedUp(investigationId: string, who: ClearingAdmin = admin): Promise<string> {
+/** The API's job's record that the HELD state's whole history was checked (Phase 2 D1c), as it makes it. */
+const historyChecked = () =>
+  withSignedStates(app, org, services(), async (tx, states) => {
+    const now = await states.integrityHold(tx, org, 'none');
+    if (now.outcome !== 'held') throw new Error('the hold should be HELD');
+    await states.recordHistoryChecked(tx, org, now.eventId, 0);
+  });
+
+/** Asked and signed in again, the HELD state's history checked meanwhile unless `history` is false. */
+async function steppedUp(investigationId: string, who: ClearingAdmin = admin, history = true): Promise<string> {
   const answer = await ask(investigationId, who);
   if (answer.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(answer)}`);
   await stepUp(who, answer.stepUpChallengeId);
+  if (history) await historyChecked();
   return answer.stepUpChallengeId;
 }
 
@@ -277,6 +287,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const answer = await ask(investigationId);
     if (answer.outcome !== 'asked') throw new Error(`not asked: ${answer.outcome}`);
     await stepUp(admin, answer.stepUpChallengeId, ['pwd', 'otp', 'mfa']);
+    await historyChecked();
 
     expect(await confirm(investigationId, answer.stepUpChallengeId)).toEqual({
       outcome: 'refused',
@@ -291,6 +302,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const investigationId = await investigate();
     const answer = await ask(investigationId);
     const challengeId = answer.outcome === 'asked' ? answer.stepUpChallengeId : ids.next();
+    await historyChecked();
 
     expect(await confirm(investigationId, challengeId)).toEqual({
       outcome: 'refused',
@@ -442,6 +454,46 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     expect(await ask(investigationId)).toEqual({ outcome: 'refused', status: 401, code: 'UNAUTHENTICATED' });
   });
 
+  it('refuses until the HELD state’s whole history is checked, as HISTORY_UNCHECKED, leaving it HELD (Phase 2 D1c)', async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId, admin, false);
+
+    expect(await confirm(investigationId, challengeId)).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'HISTORY_UNCHECKED',
+    });
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    // Once the API's job has recorded it, the same step-up clears it.
+    await historyChecked();
+    expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
+  });
+
+  it('asks for no history check when no table is a growing one', async () => {
+    await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId, admin, false);
+    const noGrowing = createHoldClearings({
+      database: app,
+      keys,
+      ids,
+      challenges: challenges(),
+      logger: testLogger(),
+      authorityTables: AUTHORITY_TABLES.filter((table) => table.liveStatuses === undefined),
+    });
+
+    expect(
+      await noGrowing.confirm(
+        admin,
+        keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
+        investigationId,
+        challengeId,
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'cleared' });
+  });
+
   it('refuses while the record its hold names is tampered with, in a table checked in its live rows alone (Phase 2 D1b)', async () => {
     const row = await holdThenRepair();
     const investigationId = await investigate();
@@ -559,6 +611,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     await read(row.id);
     await row.restore();
     expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
+    await historyChecked();
 
     expect(await confirm(investigationId, challengeId, admin, 'confirm-2')).toEqual({
       outcome: 'refused',

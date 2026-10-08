@@ -58,6 +58,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { UUID } from '../../../shared-kernel/index.ts';
 import { type AuditActor, type AuditDetails, AuditEventRefused } from '../domain/event.ts';
 import {
+  HISTORY_CHECK_SUBJECT,
   HOLD_SUBJECT,
   INTEGRITY_HOLD,
   INVESTIGATION_SUBJECT,
@@ -158,6 +159,23 @@ export type OrganisationCheck =
   | { readonly outcome: 'verified'; readonly objects: number }
   | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] }
   | { readonly outcome: 'too_many'; readonly subjectType: string };
+
+/**
+ * One batch of a growing table's whole history (checkHistoryBatch): its
+ * objects after `after`, every status and every one the log holds an event
+ * about, verified; with the last ID judged, to start the next batch after,
+ * and whether none was left past it. Or some tampered with, each named (every
+ * alarm is already raised).
+ */
+export type HistoryBatch =
+  | { readonly outcome: 'checked'; readonly objects: number; readonly last: string | null; readonly done: boolean }
+  | { readonly outcome: 'tampered'; readonly findings: readonly TamperFinding[] };
+
+/**
+ * Whether a HELD state's whole history was checked (historyChecked): checked,
+ * not yet, or the record of it can't be believed (the alarm is raised).
+ */
+export type HistoryCheckRecord = 'checked' | 'unchecked' | 'tampered';
 
 /**
  * The hold as its newest signed event holds it, for showing (holdRecord):
@@ -325,6 +343,34 @@ export interface SignedStates {
     change: SignedChange,
   ): Promise<SignedStatusChange<State>>;
   /**
+   * One batch of a growing table's whole history (Phase 2 D1c): the objects
+   * after `after` (null from the start), its rows in every status and every
+   * object the log holds an event about, at most `size`, each verified as
+   * verifyAll does and locked `share`. In the caller's transaction, which
+   * must be withSignedStates' for the organisation.
+   */
+  checkHistoryBatch(
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    after: string | null,
+    size: number,
+  ): Promise<HistoryBatch>;
+  /**
+   * Records that the HELD state `holdEventId` names had its whole history
+   * checked (`objects` of them), by the API's job: refused (`basis`) unless
+   * the hold is HELD in that state still, read with the chain head's lock.
+   */
+  recordHistoryChecked(tx: AuditTransaction, orgId: string, holdEventId: string, objects: number): Promise<void>;
+  /**
+   * Whether the hold's newest event, as the table holds it and believed in
+   * nothing, set it: a cheap look for a job before it makes the verified read
+   * (holdRecord), which alone decides anything. Raises no alarm.
+   */
+  mayBeHeld(tx: AuditTransaction, orgId: string): Promise<boolean>;
+  /** Whether the HELD state `holdEventId` names had its whole history checked. */
+  historyChecked(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<HistoryCheckRecord>;
+  /**
    * The organisation's integrity hold, from the log, in the caller's
    * transaction (withTenant's for it). Anything the hold stops goes ahead
    * only on `clear`. A decision that must not pass a hold being set, as a
@@ -465,6 +511,8 @@ function investigationIn(found: Extract<RecordedEventCheck, { kind: 'recorded' }
 const STATUS = 'status';
 /** Who sets a hold: the app itself, on a tamper sign. */
 const HOLDER: AuditActor = Object.freeze({ type: 'system', id: 'integrity-hold' });
+/** Who records a HELD state's history checked: the API's job (Phase 2 D1c). */
+const HISTORY_CHECKER: AuditActor = Object.freeze({ type: 'system', id: 'api' });
 
 type HoldStatus = (typeof INTEGRITY_HOLD.states)[number];
 
@@ -794,6 +842,28 @@ export function createSignedStates({
     return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
   };
 
+  /** Each object verified as verifyAll does, locked `share`: the findings, each with its alarm raised. */
+  const judged = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    ids: readonly string[],
+  ): Promise<TamperFinding[]> => {
+    const findings: TamperFinding[] = [];
+    for (const id of ids) {
+      const key = { orgId, id };
+      const check = await verifiedState(tx, table, key, 'share');
+      // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
+      const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
+      if (found.outcome === 'tampered') {
+        findings.push(
+          Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: found.sign }),
+        );
+      }
+    }
+    return findings;
+  };
+
   const historyOf = async (tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<HistoryCheck> => {
     const read = await trail.recordedEvents(tx, orgId, find);
     // The organisation's own history: the alarm names it, as no one object is to blame.
@@ -820,22 +890,70 @@ export function createSignedStates({
         const loggedIds = live === null ? await trail.subjectIds(tx, orgId, table.subject, limit) : [];
         const every = [...new Set([...rowIds, ...loggedIds])].sort();
         if (every.length > limit) return Object.freeze({ outcome: 'too_many', subjectType: table.subject });
-        for (const id of every) {
-          const key = { orgId, id };
-          const check = await verifiedState(tx, table, key, 'share');
-          // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
-          const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
-          if (found.outcome === 'tampered') {
-            findings.push(
-              Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: found.sign }),
-            );
-          }
-          objects += 1;
-        }
+        findings.push(...(await judged(tx, orgId, table, every)));
+        objects += every.length;
       }
       if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
       verifiedWhole.set(tx, (verifiedWhole.get(tx) ?? new Set<string>()).add(orgId.toLowerCase()));
       return Object.freeze({ outcome: 'verified', objects });
+    },
+
+    async checkHistoryBatch(
+      tx: AuditTransaction,
+      orgId: string,
+      table: SignedStateTable,
+      after: string | null,
+      size: number,
+    ): Promise<HistoryBatch> {
+      notTheHold(table);
+      const rowIds = await signedRowIds(tx, table, orgId, size, after);
+      const loggedIds = await trail.subjectIds(tx, orgId, table.subject, size, after);
+      // Each list holds one more than `size` at most, so its first `size` of the two together are the next ones.
+      const next = [...new Set([...rowIds, ...loggedIds])].sort();
+      const batch = next.slice(0, size);
+      const findings = await judged(tx, orgId, table, batch);
+      if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
+      return Object.freeze({
+        outcome: 'checked',
+        objects: batch.length,
+        last: batch.at(-1) ?? after,
+        done: next.length <= size,
+      });
+    },
+
+    async recordHistoryChecked(
+      tx: AuditTransaction,
+      orgId: string,
+      holdEventId: string,
+      objects: number,
+    ): Promise<void> {
+      if (!UUID.test(holdEventId)) throw new RangeError('A HELD state is named by its event ID');
+      if (!Number.isSafeInteger(objects) || objects < 0) throw new RangeError('A count of objects is a whole number');
+      const hold = await integrityHold(tx, orgId, 'head');
+      if (hold.outcome !== 'held' || hold.eventId !== holdEventId.toLowerCase()) {
+        throw new SignedStateFailed('basis', "A HELD state's history is recorded only while the hold stands in it");
+      }
+      await recordHoldEvent(trail, tx, orgId, {
+        actor: HISTORY_CHECKER,
+        action: 'integrity_hold.history_checked',
+        subject: { type: HISTORY_CHECK_SUBJECT, id: holdEventId, version: 1 },
+        details: { holdVersion: hold.version, objects },
+      });
+    },
+
+    async mayBeHeld(tx: AuditTransaction, orgId: string): Promise<boolean> {
+      const newest = await trail.newestActionUnverified(tx, orgId, { type: HOLD_SUBJECT, id: orgId });
+      return newest === 'integrity_hold.set';
+    },
+
+    async historyChecked(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<HistoryCheckRecord> {
+      const id = holdEventId.toLowerCase();
+      const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: HISTORY_CHECK_SUBJECT, id } });
+      if (found.kind === 'broken') {
+        alarm(HISTORY_CHECK_SUBJECT, { orgId, id }, 'log', found.seq);
+        return 'tampered';
+      }
+      return found.kind === 'recorded' ? 'checked' : 'unchecked';
     },
 
     async record(

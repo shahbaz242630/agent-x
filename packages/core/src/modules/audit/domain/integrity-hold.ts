@@ -40,6 +40,15 @@ export const HOLD_SUBJECT = 'integrity_hold';
 export const INVESTIGATION_SUBJECT = 'hold_investigation';
 
 /**
+ * A HELD state's whole history checked (Phase 2 D1c, partner decision 7):
+ * every object of each growing table (a spend request's), ended ones too,
+ * verified in batches while the hold stood, recorded as one event about the
+ * HELD state's event ID. Clearing that state is refused until it is there.
+ * Only the audit module records one, as it does the hold's own events.
+ */
+export const HISTORY_CHECK_SUBJECT = 'hold_history_check';
+
+/**
  * What an investigation concluded: the cause was found and taken away (the
  * access that tampered revoked, say), or there was no tampering (a fault
  * raised the alarm). Either way clearing still checks every record first.
