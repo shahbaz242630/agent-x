@@ -42,7 +42,7 @@ import {
   type MandateTx,
   mandateIn,
   type MandateView,
-  toldOfMandate,
+  toldAdminsAndApprovers,
   versionIn,
   viewIn,
 } from './mandate-reads.ts';
@@ -199,7 +199,7 @@ export function createMandateMoves({
           }),
           `a mandate read as able to ${move} didn't`,
         );
-        await outbox.add(tx, toldOfMandate(member.orgId, MOVED[move].notice, id));
+        await outbox.add(tx, toldAdminsAndApprovers(member.orgId, MOVED[move].notice, id));
         return { status: 200, resourceId: id };
       });
       if (isUnwritten(done)) return done;

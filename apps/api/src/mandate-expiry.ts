@@ -29,7 +29,7 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { type MandateTables, mandateIn, toldOfMandate, versionIn } from './mandate-reads.ts';
+import { type MandateTables, mandateIn, toldAdminsAndApprovers, versionIn } from './mandate-reads.ts';
 import { movedAsRead } from './use-case-work.ts';
 
 /** How often ended mandates are looked for, once the last run has ended: a mandate is expired within this of its end. */
@@ -83,7 +83,7 @@ export function createMandateExpiry({
         }),
         "a mandate read as open didn't expire",
       );
-      await outbox.add(tx, toldOfMandate(orgId, 'mandate_expired', id));
+      await outbox.add(tx, toldAdminsAndApprovers(orgId, 'mandate_expired', id));
       return true;
     });
 

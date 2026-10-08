@@ -64,6 +64,8 @@ import type { MandateAcceptance } from './mandate-acceptance.ts';
 import type { MandateMoves } from './mandate-moves.ts';
 import type { MandateRegistry } from './mandate-registry.ts';
 import { registerMandates } from './mandates.ts';
+import { registerPolicies } from './policies.ts';
+import type { PolicyChanges } from './policy-changes.ts';
 import type { AgentChanges } from './agent-changes.ts';
 import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
@@ -150,6 +152,7 @@ export interface ServerOptions {
   readonly mandateAcceptance?: MandateAcceptance | undefined;
   /** Suspending, resuming and revoking mandates (mandate-moves.ts); without it, no one reaches those routes. */
   readonly mandateMoves?: MandateMoves | undefined;
+  readonly policyChanges?: PolicyChanges | undefined;
   /** An agent's own mandate and the sources it names (agent-mandate.ts); without it, no agent reaches those routes. */
   readonly agentMandates?: AgentMandates | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
@@ -343,6 +346,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     acceptance: options.mandateAcceptance,
     moves: options.mandateMoves,
   });
+  registerPolicies(app, { changes: options.policyChanges });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

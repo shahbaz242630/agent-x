@@ -17,7 +17,7 @@ import {
   PURPOSE_MOST,
   SPLIT_WINDOW_HOURS,
 } from '@agentx/core/modules/mandates';
-import { MoneyRefused, moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
+import { moneyFromJson, timeZoneOf } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -42,7 +42,10 @@ import {
 import { MANDATE_MOVES, type MandateMove, type MandateMoves, MOVE_OPERATIONS, MOVING_ROLES } from './mandate-moves.ts';
 import type { MandateView, VersionShown } from './mandate-reads.ts';
 import {
+  AMOUNT,
   CHALLENGE_BODY_LIMIT,
+  issuesOf,
+  MANDATE_ID,
   NEXT,
   NOTHING,
   NOTHING_BODY_LIMIT,
@@ -63,10 +66,6 @@ const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
  * every body the schema allows).
  */
 const DRAFT_BODY_LIMIT = 16_384;
-
-const AMOUNT = z
-  .number()
-  .describe('Whole minor units (fils for AED): an integer from 1 to 2^53 − 1, never a string or a fraction.');
 
 /** A version's terms as a body sends them. */
 const TERM_FIELDS = {
@@ -113,21 +112,10 @@ const termsOf = (body: TermFields, now: Date): MandateTerms =>
     now,
   );
 
-/**
- * Each problem that keeps the body's terms from being a version's, as a
- * refinement: the body stays the JSON it came as, since the idempotency key's
- * fingerprint (canonicalJson) has no form for Money's bigints.
- */
+/** Each problem that keeps the body's terms from being a version's, as a refinement. */
 const termsChecked = (body: TermFields, context: z.RefinementCtx): void => {
-  try {
-    // The edge has no clock of its own; the registry checks the end again on its clock (termsChecked).
-    termsOf(body, new Date());
-  } catch (error) {
-    if (error instanceof MoneyRefused) context.addIssue({ code: 'custom', message: error.message });
-    else if (error instanceof MandateTermsRefused) {
-      for (const problem of error.problems) context.addIssue({ code: 'custom', message: problem });
-    } else throw error;
-  }
+  // The edge has no clock of its own; the registry checks the end again on its clock (termsChecked).
+  issuesOf(() => termsOf(body, new Date()), MandateTermsRefused, context);
 };
 
 /** Before any end: the handler's terms, the schema having checked them, leave a passed end to the use case's clock. */
@@ -224,8 +212,6 @@ const DRAFT_SCHEMA = {
     .describe('The mandate to draft, with its first terms.'),
   response: { 201: MANDATE_DETAILS.describe('The mandate, waiting for an admin to accept it.') },
 };
-
-const MANDATE_ID = z.object({ id: z.uuid().describe('The mandate, by its ID.') });
 
 const REDRAFT_SCHEMA = {
   summary: 'Draft a new version of a mandate, waiting for acceptance',
