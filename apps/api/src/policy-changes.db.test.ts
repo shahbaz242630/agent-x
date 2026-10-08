@@ -28,6 +28,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { ABOVE_THE_CAP } from './mandate-reads.ts';
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import {
   AED,
@@ -470,6 +471,30 @@ describe('a mandate’s policy (C3, SEC-LIM-11)', () => {
     await shared.movedPastTheUseCase(w, id, 'revoke');
 
     expect(await confirm(w.admin, target, rules(1_000n), challengeId)).toEqual(refused(409, 'MANDATE_ENDED'));
+  });
+});
+
+describe('a mandate shows the cap its agent is held to (C3c, partner S92: never quiet)', () => {
+  it('warns while the policies hold the agent below the mandate’s monthly limit, until its own policy raises the cap', async () => {
+    const w = await world();
+    const id = await shared.inForce(registry, w);
+    const shown = async () => {
+      const view = await registry.show(w.org, id, CORRELATION);
+      if (view.outcome !== 'found') throw new Error(`not found: ${JSON.stringify(view)}`);
+      return { from: view.agentMonthlyCap.from, cap: view.agentMonthlyCap.cap, warnings: view.current?.capWarnings };
+    };
+    const monthly = w.maxPayment * 2n;
+
+    // None set: the default, AED 20,000, warned of only where the mandate's limit is above it.
+    expect(await shown()).toEqual({
+      from: 'default',
+      cap: AED(2_000_000n),
+      warnings: monthly > 2_000_000n ? [ABOVE_THE_CAP] : [],
+    });
+    changedOf(await changed(w, ORGANIZATION, rules(monthly - 1n)));
+    expect(await shown()).toEqual({ from: 'organization-policy', cap: AED(monthly - 1n), warnings: [ABOVE_THE_CAP] });
+    changedOf(await changed(w, { scope: 'mandate', mandateId: id }, rules(monthly)));
+    expect(await shown()).toEqual({ from: 'mandate-policy', cap: AED(monthly), warnings: [] });
   });
 });
 
