@@ -35,15 +35,9 @@ export interface OrderOf {
   readonly payeeKey: string | null;
 }
 
-/**
- * Whether the order is already claimed and not released: by the same
- * supplier, or by the same payee key where there is one, in canonical form.
- */
-export async function hasOpenClaim(
-  tx: ClaimsTransaction,
-  order: OrderOf & { readonly reference: string },
-): Promise<boolean> {
-  const found = await tx
+/** The open claims on the order: by the same supplier, or by the same payee key where there is one. */
+const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf & { readonly reference: string }) =>
+  tx
     .selectFrom('spend_requests.order_claims')
     .select('id')
     .where('org_id', '=', order.orgId)
@@ -54,15 +48,20 @@ export async function hasOpenClaim(
         ? where('supplier_id', '=', order.supplierId)
         : where.or([where('supplier_id', '=', order.supplierId), where('payee_key', '=', order.payeeKey)]),
     )
-    .limit(1)
-    .executeTakeFirst();
-  return found !== undefined;
+    .limit(1);
+
+/** Whether the order is already claimed and not released, in canonical form. */
+export async function hasOpenClaim(
+  tx: ClaimsTransaction,
+  order: OrderOf & { readonly reference: string },
+): Promise<boolean> {
+  return (await openClaimsOn(tx, order).executeTakeFirst()) !== undefined;
 }
 
 /**
- * Claims a request's order, on its own supplier and order: `claimed`,
- * or `taken` when an open claim already holds it (left to the caller to start
- * again, the transaction still usable). A supplier or order not the
+ * Claims a request's order, on its own supplier and order: `claimed`, or
+ * `taken` when another request's open claim already holds it (left to the
+ * caller to start again, the transaction still usable). A supplier or order not the
  * request's, a payee key not the supplier's, or a request not holding
  * capacity fails (0039's `for_its_request` and `claim_guard`).
  */
@@ -87,11 +86,17 @@ export async function claimOrder(
       order_reference: orderKeyOf(claim.reference),
       claimed_at: claim.claimedAt,
     })
-    // Any open claim on the order (or the request's own) leaves it unmade, the transaction still usable.
+    // An open claim on the order leaves it unmade, the transaction still usable. Postgres takes one
+    // conflict target and the order has two partial keys, so any key's conflict lands here: checked below.
     .onConflict((conflict) => conflict.doNothing())
     .returning('id')
     .executeTakeFirst();
-  return made === undefined ? 'taken' : 'claimed';
+  if (made !== undefined) return 'claimed';
+  // Taken only by another request's open claim; the request's own claim or a reused ID is the caller's bug,
+  // which a restart would only meet again (the review).
+  const other = await openClaimsOn(tx, claim).where('request_id', '<>', claim.requestId).executeTakeFirst();
+  if (other === undefined) throw new Error('an order claim conflicted with no other request’s open claim on its order');
+  return 'taken';
 }
 
 /**
