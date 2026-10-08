@@ -14,7 +14,8 @@
 //    authority object of the organisation verified against the log, in the
 //    lock order (ADR-006 §6: the organisation, then its invitations and
 //    memberships), so a hold is never cleared over a record still tampered
-//    with; then the organisation's whole audit chain checked (the S68 audit:
+//    with (a table whose rows only grow, spend requests, in the rows that can
+//    still act: so clearing stays bounded however long the history); then the organisation's whole audit chain checked (the S68 audit:
 //    every link, hash, MAC and its head), so a hold set for a chain found
 //    broken, an event deleted, say, is never cleared while it stays broken:
 //    a broken chain is an operator's restore (Incident playbook), never an
@@ -26,12 +27,7 @@
 // A refusal throws inside the write, so the claim and everything written roll
 // back and the same key may be sent again. Each statement is limited to 10
 // seconds.
-import {
-  createIdempotentWrites,
-  type IdempotentRequest,
-  isUnwritten,
-  type SignedStateTable,
-} from '@agentx/platform/db';
+import { createIdempotentWrites, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 import { type Kysely } from 'kysely';
@@ -39,6 +35,7 @@ import { type Kysely } from 'kysely';
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import {
   type AuditTables,
+  type CheckedTable,
   createAuditTrail,
   type HoldRecord,
   type SignedStates,
@@ -122,8 +119,8 @@ export function createHoldClearings({
   readonly ids: IdGenerator;
   readonly challenges: StepUpChallenges;
   readonly logger: Logger;
-  /** Every authority table, in the lock order (the product's AUTHORITY_TABLES). */
-  readonly authorityTables: readonly SignedStateTable[];
+  /** Every authority table, in the lock order (the product's AUTHORITY_TABLES); a growing one checked in its live rows. */
+  readonly authorityTables: readonly CheckedTable[];
   /** The most objects of one table checked before clearing; past it, the clearing fails rather than judge part. */
   readonly objectsChecked?: number;
 }): HoldClearings {

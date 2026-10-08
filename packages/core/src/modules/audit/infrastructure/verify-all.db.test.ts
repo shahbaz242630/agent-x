@@ -33,7 +33,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 import { AuditEventRefused } from '../domain/event.ts';
 import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
-import { createSignedStates, type SignedStates, type TamperFinding, type TamperSign } from './signed-states.ts';
+import {
+  type CheckedTable,
+  createSignedStates,
+  type SignedStates,
+  type TamperFinding,
+  type TamperSign,
+} from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
 
 /** Two stand-in authority tables, each sealing a label: not a status, so a test can record a change to it. */
@@ -48,18 +54,35 @@ const KEYS = {
   fields: [{ column: 'label', type: 'text' }],
 } as const satisfies SignedStateTable;
 
+/** A stand-in for a table whose rows only grow (spend requests, Phase 2 D1): checked in its LIVE rows alone. */
+const REQUESTS = {
+  table: 'probe.requests',
+  subject: 'spend_request',
+  fields: [{ column: 'status', type: 'text' }],
+  liveStatuses: ['LIVE'],
+} as const satisfies CheckedTable;
+
 const TENANT_POLICY =
   "using (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid) with check (org_id = nullif(pg_catalog.current_setting('app.org_id', true), '')::uuid)";
 
 /** Made by the owner, as a migration would make them, so the schema guard starts with nothing to report. */
-const FIXTURE = ['agents', 'keys'].flatMap((name) => [
-  `create table probe.${name} (org_id uuid not null, id uuid not null, label text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))`,
-  `alter table probe.${name} enable row level security`,
-  `alter table probe.${name} force row level security`,
-  `create policy tenant_isolation on probe.${name} ${TENANT_POLICY}`,
-  `grant select, insert on probe.${name} to agentx_app`,
-  `grant update (label, state_version, state_event_id) on probe.${name} to agentx_app`,
-]);
+const FIXTURE = ['agents', 'keys']
+  .flatMap((name) => [
+    `create table probe.${name} (org_id uuid not null, id uuid not null, label text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))`,
+    `alter table probe.${name} enable row level security`,
+    `alter table probe.${name} force row level security`,
+    `create policy tenant_isolation on probe.${name} ${TENANT_POLICY}`,
+    `grant select, insert on probe.${name} to agentx_app`,
+    `grant update (label, state_version, state_event_id) on probe.${name} to agentx_app`,
+  ])
+  .concat([
+    'create table probe.requests (org_id uuid not null, id uuid not null, status text not null, state_version integer not null default 1, state_event_id uuid, primary key (org_id, id))',
+    'alter table probe.requests enable row level security',
+    'alter table probe.requests force row level security',
+    `create policy tenant_isolation on probe.requests ${TENANT_POLICY}`,
+    'grant select, insert on probe.requests to agentx_app',
+    'grant update (status, state_version, state_event_id) on probe.requests to agentx_app',
+  ]);
 
 interface ProbeRow {
   org_id: string;
@@ -69,7 +92,15 @@ interface ProbeRow {
   state_event_id?: string | null;
 }
 
-type Tables = AuditTables & { 'probe.agents': ProbeRow; 'probe.keys': ProbeRow };
+interface ProbeRequestRow {
+  org_id: string;
+  id: string;
+  status: string;
+  state_version?: number;
+  state_event_id?: string | null;
+}
+
+type Tables = AuditTables & { 'probe.agents': ProbeRow; 'probe.keys': ProbeRow; 'probe.requests': ProbeRequestRow };
 
 const ROLES = { appRole: 'agentx_app', ownerRole: 'agentx_owner' } as const;
 
@@ -127,7 +158,17 @@ const relabel = (table: typeof AGENTS | typeof KEYS, id: string) =>
     );
   });
 
-const verifyAll = (tables: readonly SignedStateTable[] = [AGENTS, KEYS], limit = 100) =>
+/** Adds a request in the status given and records its first signed state. */
+async function newRequest(status: 'LIVE' | 'ENDED'): Promise<string> {
+  const id = newId();
+  await withTenant(app, org, async (tx) => {
+    await tx.insertInto('probe.requests').values({ org_id: org, id, status }).execute();
+    await states.record(tx, REQUESTS, { orgId: org, id }, 'new', { status }, change('spend_request.created'));
+  });
+  return id;
+}
+
+const verifyAll = (tables: readonly CheckedTable[] = [AGENTS, KEYS], limit = 100) =>
   withTenant(app, org, (tx) => states.verifyAll(tx, org, tables, limit));
 
 const guard = (): Promise<string[]> => liveSchemaProblems(app, { ...ROLES, authorityTables: [AGENTS, KEYS] });
@@ -342,6 +383,45 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     }
   });
 
+  it('checks a growing table in its live rows alone, so its ended ones never count to the limit', async () => {
+    await newRequest('LIVE');
+    await newRequest('ENDED');
+    await newRequest('ENDED');
+
+    expect(await verifyAll([REQUESTS], 1)).toEqual({ outcome: 'verified', objects: 1 });
+  });
+
+  it('names an ended row moved back to a live status, since it is then listed', async () => {
+    const ended = await newRequest('ENDED');
+    const requests = await tamperAsOwner(database, REQUESTS, org);
+    try {
+      await requests.setColumn(ended, 'status', 'LIVE');
+
+      expect(await verifyAll([REQUESTS])).toEqual({
+        outcome: 'tampered',
+        findings: [finding('spend_request', ended, 'seal')],
+      });
+    } finally {
+      await requests.end();
+    }
+  });
+
+  it('leaves an ended row to be verified where it is read again: changed while ended, it is not judged here', async () => {
+    const ended = await newRequest('ENDED');
+    const requests = await tamperAsOwner(database, REQUESTS, org);
+    try {
+      await requests.setColumn(ended, 'status', 'GONE');
+
+      expect(await verifyAll([REQUESTS])).toEqual({ outcome: 'verified', objects: 0 });
+      const read = await withTenant(app, org, (tx) =>
+        states.verifiedState(tx, REQUESTS, { orgId: org, id: ended }, 'share'),
+      );
+      expect(read).toEqual({ outcome: 'tampered', sign: 'seal' });
+    } finally {
+      await requests.end();
+    }
+  });
+
   it("refuses the integrity hold's own subject type, whose state has no row", async () => {
     const hold = {
       table: 'probe.agents',
@@ -354,6 +434,16 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
 });
 
 describe('the lists verifyAll is built on', () => {
+  it('lists only the rows in the statuses asked, and refuses to be asked for none', async () => {
+    const live = await newRequest('LIVE');
+    await newRequest('ENDED');
+
+    expect(await withTenant(app, org, (tx) => signedRowIds(tx, REQUESTS, org, 5, null, ['LIVE']))).toEqual([live]);
+    await expect(withTenant(app, org, (tx) => signedRowIds(tx, REQUESTS, org, 5, null, []))).rejects.toThrow(
+      'Rows are listed in at least one status',
+    );
+  });
+
   it.each([0, 1.5, -1])('refuses a limit of %s', async (limit) => {
     await expect(withTenant(app, org, (tx) => signedRowIds(tx, AGENTS, org, limit))).rejects.toThrow(
       'The limit is a whole number from 1',

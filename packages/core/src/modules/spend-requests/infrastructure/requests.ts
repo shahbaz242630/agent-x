@@ -57,7 +57,10 @@ export const SPEND_REQUESTS = {
     'decision',
     'reason_codes',
   ],
+  // Requests only grow: clearing the integrity hold checks those that can still act, every status with a move out.
+  liveStatuses: ['VALIDATING', 'APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'],
 } as const satisfies SignedStateTable & {
   readonly rules: typeof SPEND_REQUEST;
   readonly fixedAtCreation: readonly string[];
+  readonly liveStatuses: readonly string[];
 };

@@ -27,6 +27,7 @@ export {
   TooManyEventsToRead,
 } from './infrastructure/audit-trail.ts';
 export {
+  type CheckedTable,
   type ClearingStepUp,
   type HistoryCheck,
   type HoldClearing,

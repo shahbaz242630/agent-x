@@ -265,6 +265,8 @@ describe('the authority-table registry takes the modules’ own descriptions', (
           'decision',
           'reason_codes',
         ],
+        // Clearing the hold checks the requests that can still act.
+        liveStatuses: ['VALIDATING', 'APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'],
       },
     ]);
     expect(AUTHORITY_TABLES[0]?.fields).toBe(ORGANIZATIONS.fields);
