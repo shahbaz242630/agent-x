@@ -17,6 +17,7 @@
     "./modules/policies": "./src/modules/policies/index.ts",
     "./modules/providers": "./src/modules/providers/index.ts",
     "./modules/security-events": "./src/modules/security-events/index.ts",
+    "./modules/spend-requests": "./src/modules/spend-requests/index.ts",
     "./modules/suppliers": "./src/modules/suppliers/index.ts",
     "./schema-check": "./src/schema-check.ts",
     "./shared-kernel": "./src/shared-kernel/index.ts"
