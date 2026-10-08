@@ -81,6 +81,8 @@ const FOUND: AgentMandateShown = {
     draftedBy: DRAFTER,
     draftedAt: new Date('2026-10-07T08:30:00.000Z'),
   },
+  // C3c: the organisation's policies hold it below the mandate's monthly limit.
+  monthlyCap: money(1_500_000n, 'AED'),
 };
 
 const SOURCE: SourceRecord = {
@@ -163,6 +165,7 @@ describe('GET /v1/agent/mandate: the mandate an agent acts under (B5, SEC-AG-05)
       currency: 'AED',
       perOrderLimitMinor: 500_000,
       monthlyLimitMinor: 2_000_000,
+      monthlyCapMinor: 1_500_000,
       supplierIds: SUPPLIERS,
       fundingSourceId: SOURCE_ID,
       timeZone: 'Asia/Dubai',

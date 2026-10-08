@@ -44,7 +44,7 @@ export interface VersionShown {
 }
 
 /** The monthly cap the policies hold the mandate's agent to (decision 5), and where it comes from. */
-export interface AgentMonthlyCap {
+interface AgentMonthlyCap {
   readonly cap: Money;
   readonly from: MonthlyCapFrom;
 }
@@ -108,9 +108,13 @@ export async function versionIn(
   return read.version;
 }
 
-/** The words of the warning a version above its agent's monthly cap carries. */
+/** The words of the warning a version in force above its agent's monthly cap carries. */
 export const ABOVE_THE_CAP =
   'the monthly limit is above the monthly cap the organisation’s policies hold the agent to (agentMonthlyCap): payments past the cap are refused; raise it in the mandate’s policy if the mandate’s limit is meant';
+
+/** The same, for a draft waiting: a mandate's policy is weighed against the version in force, so the cap is raised once it is accepted. */
+export const DRAFT_ABOVE_THE_CAP =
+  'the monthly limit is above the monthly cap the organisation’s policies hold the agent to (agentMonthlyCap): once this draft is accepted, payments past the cap are refused until it is raised in the mandate’s policy';
 
 /** A version of the mandate with how it now stands against its source's consent, whatever its setting. */
 async function versionShown(
@@ -127,14 +131,18 @@ async function versionShown(
 }
 
 /** Whether the agent's cap holds the version below its own monthly limit: never compared across currencies (C2 denies those). */
-const heldBelow = (shown: Omit<VersionShown, 'capWarnings'> | null, { cap }: AgentMonthlyCap): VersionShown | null =>
+const heldBelow = (
+  shown: Omit<VersionShown, 'capWarnings'> | null,
+  { cap }: AgentMonthlyCap,
+  warning: string,
+): VersionShown | null =>
   shown === null
     ? null
     : {
         ...shown,
         capWarnings:
           cap.currency === shown.version.monthlyLimit.currency && compare(shown.version.monthlyLimit, cap) > 0
-            ? [ABOVE_THE_CAP]
+            ? [warning]
             : [],
       };
 
@@ -156,11 +164,15 @@ export async function policyRulesIn(
   return { ...read, current: current.version satisfies PolicyVersionRecord };
 }
 
-/** The monthly cap the policies hold the mandate's agent to: the mandate's policy's, else the organisation's, else the default. */
-async function agentCapOf(tx: MandateTx, states: SignedStates, orgId: string, mandateId: string) {
-  const organization = await policyRulesIn(tx, states, orgId, orgId);
-  const own = await policyRulesIn(tx, states, orgId, mandateId);
-  return monthlyCapOf(organization?.current ?? null, own?.current ?? null);
+/**
+ * The monthly cap the policies hold the mandate's agent to: the mandate's
+ * policy's, else the organisation's, else the default. The organisation's is
+ * read only when the mandate's own sets none, as it can't change the cap then.
+ */
+export async function agentCapOf(tx: MandateTx, states: SignedStates, orgId: string, mandateId: string) {
+  const own = (await policyRulesIn(tx, states, orgId, mandateId))?.current ?? null;
+  const organization = own?.monthlyCap ? null : ((await policyRulesIn(tx, states, orgId, orgId))?.current ?? null);
+  return monthlyCapOf(organization, own);
 }
 
 /** The mandate as it now stands, with its version in force, its waiting draft, and its agent's monthly cap. */
@@ -177,8 +189,8 @@ export async function viewIn(
   const agentMonthlyCap = await agentCapOf(tx, states, orgId, mandate.id);
   return {
     mandate,
-    current: heldBelow(current, agentMonthlyCap),
-    pending: heldBelow(pending, agentMonthlyCap),
+    current: heldBelow(current, agentMonthlyCap, ABOVE_THE_CAP),
+    pending: heldBelow(pending, agentMonthlyCap, DRAFT_ABOVE_THE_CAP),
     agentMonthlyCap,
   };
 }

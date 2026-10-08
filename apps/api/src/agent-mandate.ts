@@ -4,7 +4,8 @@
 //
 // - `inForce`: the agent's mandate with a version in force that hasn't
 //   reached its end, ACTIVE or SUSPENDED (so a stopped agent learns why), with
-//   that version's terms. A draft waiting for acceptance grants nothing, and
+//   that version's terms and the monthly cap the policies hold it to (C3c,
+//   partner S92: the agent, who is held to it, is told too). A draft waiting for acceptance grants nothing, and
 //   an ended one nothing more: NOT_FOUND for either, or for none. The end is
 //   checked here on the clock, not left to the expiry job (B4).
 // - `sources`: the funding sources the agent may pay from now: the one its
@@ -18,13 +19,20 @@
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { mayFund, type SourceRecord } from '@agentx/core/modules/funding-sources';
 import { type MandateRecord, type MandateVersionRecord, openMandateOfAgent } from '@agentx/core/modules/mandates';
-import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
+import type { Clock, IdGenerator, Money } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import type { SourcesListed } from './funding-source-reads.ts';
-import { MandateRefused, type MandateTables, type MandateTx, sourceIn, versionIn } from './mandate-reads.ts';
+import {
+  agentCapOf,
+  MandateRefused,
+  type MandateTables,
+  type MandateTx,
+  sourceIn,
+  versionIn,
+} from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork } from './use-case-work.ts';
 
@@ -33,6 +41,7 @@ export type AgentMandateShown =
       readonly outcome: 'found';
       readonly mandate: MandateRecord & { readonly status: 'ACTIVE' | 'SUSPENDED' };
       readonly version: MandateVersionRecord;
+      readonly monthlyCap: Money;
     }
   | Refused;
 
@@ -78,7 +87,8 @@ export function createAgentMandates({
       work.answered(orgId, correlationId, async (tx, states) => {
         const found = await inForceIn(tx, states, orgId, agentId, clock.now());
         if (found === undefined) throw new MandateRefused(404, 'NOT_FOUND');
-        return { outcome: 'found' as const, ...found };
+        const { cap } = await agentCapOf(tx, states, orgId, found.mandate.id);
+        return { outcome: 'found' as const, ...found, monthlyCap: cap };
       }),
 
     sources: (orgId, agentId, after, correlationId) =>

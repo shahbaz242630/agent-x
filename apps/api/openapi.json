@@ -1387,6 +1387,9 @@
           "monthlyLimitMinor": {
             "type": "number"
           },
+          "monthlyCapMinor": {
+            "type": "number"
+          },
           "supplierIds": {
             "type": "array",
             "items": {
@@ -1425,6 +1428,7 @@
           "currency",
           "perOrderLimitMinor",
           "monthlyLimitMinor",
+          "monthlyCapMinor",
           "supplierIds",
           "fundingSourceId",
           "timeZone",
