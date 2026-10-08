@@ -116,7 +116,7 @@ const asAgent = (body: Record<string, unknown>, { key = KEY, idempotencyKey = 'a
 describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
   it('hands the use case the agent and its key, its idempotency request and the body checked, and answers 201', async () => {
     const { app, asked } = await withDecisions();
-    const response = await app.inject(asAgent({ ...BODY, purpose: 'Café beans' }));
+    const response = await app.inject(asAgent({ ...BODY, purpose: 'Cafe\u0301 beans', orderReference: 'PO-e\u0301' }));
 
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual({
@@ -145,8 +145,8 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
       amount: money(125_050n, 'AED'),
       supplierId: SUPPLIER_ID,
       fundingSourceId: SOURCE_ID,
-      orderReference: 'PO-1',
-      // Composed, as the request keeps it.
+      // Each composed, as the request keeps it.
+      orderReference: 'PO-é',
       purpose: 'Café beans',
     });
   });
@@ -197,6 +197,35 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
 
     expect(response.statusCode).toBe(400);
     expect(asked).toEqual([]);
+  });
+
+  it('takes the longest body the schema allows within the body limit: every character escaped, each sent decomposed (B8-3)', async () => {
+    const { app, asked } = await withDecisions();
+    const escaped = (text: string) =>
+      Array.from(
+        text,
+        (c) => `${String.fromCharCode(92)}u${(c.codePointAt(0) ?? 0).toString(16).padStart(4, '0')}`,
+      ).join('');
+    // U+1F82 sent as its four code points: one character kept, four sent.
+    const decomposed = (count: number) => escaped('\u1F82'.normalize('NFD').repeat(count));
+    const body = `{${[
+      ['amountMinor', String(Number.MAX_SAFE_INTEGER)],
+      ['currency', `"${escaped('AED')}"`],
+      ['supplierId', `"${escaped(SUPPLIER_ID)}"`],
+      ['fundingSourceId', `"${escaped(SOURCE_ID)}"`],
+      ['orderReference', `"${decomposed(100)}"`],
+      ['purpose', `"${decomposed(200)}"`],
+    ]
+      .map(([name, value]) => `"${escaped(name ?? '')}":${value ?? ''}`)
+      .join(',')}}`;
+    const response = await app.inject({
+      ...asAgent(BODY),
+      payload: body,
+      headers: { ...asAgent(BODY).headers, 'content-type': 'application/json' },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(asked[0]?.asked.orderReference).toBe('\u1F82'.repeat(100));
   });
 
   it('refuses a request with no idempotency key, a key without requests:write and a member’s session, before the use case runs', async () => {

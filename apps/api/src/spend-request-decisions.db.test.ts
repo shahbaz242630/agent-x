@@ -34,10 +34,10 @@ import {
   waitUntilQueued,
   within,
 } from '@agentx/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { buildServer } from './server.ts';
+import { closeServers, routeServer } from './route-server.helper.test.ts';
 import {
   AED,
   keys,
@@ -64,20 +64,6 @@ let app: Database<Tables>;
 
 const ids = new SequentialIds(0xd4a0_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000d4';
-
-/** The server's own settings for the route's test, its limits out of the way. */
-const ROUTE_CONFIG = {
-  http: {
-    host: '127.0.0.1',
-    port: 0,
-    publicOrigin: 'https://app.agentx.example',
-    trustedProxies: [],
-    rateLimitPerMinute: 1000,
-    rateLimitPerUserPerMinute: 1000,
-    rateLimitPerAgentPerMinute: 1000,
-  },
-  log: { level: 'info' as const, eventCapPerMinute: 10_000 },
-};
 
 let clock: FixedClock;
 let registry: MandateRegistry;
@@ -232,6 +218,8 @@ beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
   app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
+
+afterEach(closeServers);
 
 afterAll(async () => {
   await app.destroy();
@@ -671,48 +659,37 @@ describe("through the agent's route (D4r)", () => {
     const { w, mandateId, acting } = await ready();
     const logger = testLogger(new LogCapture());
     const keyCheck = createAgentKeyCheck({ database: app, keys, ids, clock, logger });
-    const api = await buildServer({
-      config: ROUTE_CONFIG,
-      logger,
-      ids: new SequentialIds(),
-      healthChecks: [],
-      checkAgentKey: keyCheck.check.bind(keyCheck),
-      spendRequestDecisions: decisions,
-    });
-    try {
-      const post = (orderReference: string) =>
-        api.inject({
-          method: 'POST',
-          url: '/v1/spend-requests',
-          headers: { authorization: `Bearer ${acting.text}`, 'idempotency-key': 'route-1' },
-          payload: {
-            amountMinor: 1_000_000,
-            currency: 'AED',
-            supplierId: w.suppliers[0],
-            fundingSourceId: w.source,
-            orderReference,
-            purpose: 'Printer paper',
-          },
-        });
-
-      const first = await post('INV_22');
-      expect(first.statusCode).toBe(201);
-      expect(first.json()).toMatchObject({
-        status: 'APPROVED',
-        decision: 'ALLOW',
-        mandateId,
-        amountMinor: 1_000_000,
-        orderReference: 'INV_22',
-        bankReference: 'INV-22',
+    const api = await routeServer({ checkAgentKey: keyCheck.check.bind(keyCheck), spendRequestDecisions: decisions });
+    const post = (orderReference: string) =>
+      api.inject({
+        method: 'POST',
+        url: '/v1/spend-requests',
+        headers: { authorization: `Bearer ${acting.text}`, 'idempotency-key': 'route-1' },
+        payload: {
+          amountMinor: 1_000_000,
+          currency: 'AED',
+          supplierId: w.suppliers[0],
+          fundingSourceId: w.source,
+          orderReference,
+          purpose: 'Printer paper',
+        },
       });
-      const again = await post('INV_22');
-      expect(again.statusCode).toBe(201);
-      expect(again.json()).toEqual(first.json());
-      expect((await post('INV_23')).json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_REUSED' } });
-      expect((await made(w.org)).requests).toBe(1);
-    } finally {
-      await api.close();
-    }
+
+    const first = await post('INV_22');
+    expect(first.statusCode).toBe(201);
+    expect(first.json()).toMatchObject({
+      status: 'APPROVED',
+      decision: 'ALLOW',
+      mandateId,
+      amountMinor: 1_000_000,
+      orderReference: 'INV_22',
+      bankReference: 'INV-22',
+    });
+    const again = await post('INV_22');
+    expect(again.statusCode).toBe(201);
+    expect(again.json()).toEqual(first.json());
+    expect((await post('INV_23')).json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_REUSED' } });
+    expect((await made(w.org)).requests).toBe(1);
   });
 });
 

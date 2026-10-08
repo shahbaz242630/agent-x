@@ -8,8 +8,8 @@
 // written otherwise becomes its closest form there, by one fixed mapping:
 // shown to the agent with its request (D4r) and made at hand-off (Phase 4),
 // so the two never differ. In order:
-// - compatibility forms and accents taken apart (NFKD) and the accents
-//   dropped: full-width and styled letters become plain ones, é becomes e;
+// - compatibility forms and accents taken apart (NFKD): full-width and styled
+//   letters become plain ones, é becomes e and an accent the rail drops;
 // - every other decimal digit (Arabic-Indic ١٢, Devanagari, …) becomes 0–9;
 // - `_` becomes `-`; anything else the rail can't carry (`#`, Arabic or other
 //   non-Latin letters, symbols) is dropped;
@@ -53,7 +53,6 @@ export function askedText(asked: { readonly purpose: string; readonly orderRefer
 
 /** What the rail carries, and what it keeps of a reference. */
 const RAIL_CHARACTER = /[A-Za-z0-9 /?:().,'+-]/;
-const ACCENT = /\p{M}/gu;
 const LETTER_OR_DIGIT = /[A-Za-z0-9]/;
 
 /** One character of the reference, its digits ASCII already, as the rail carries it: itself, `-` for `_`, or nothing. */
@@ -64,7 +63,7 @@ function railFormOf(character: string): string {
 
 /** The bank's reference for a request's order reference: see the top of this file. */
 export function bankReferenceOf(orderReference: string, requestId: string): string {
-  const carried = Array.from(asciiDigits(orderReference.normalize('NFKD').replace(ACCENT, '')), railFormOf)
+  const carried = Array.from(asciiDigits(orderReference.normalize('NFKD')), railFormOf)
     .join('')
     .replace(/ +/g, ' ')
     .trim()

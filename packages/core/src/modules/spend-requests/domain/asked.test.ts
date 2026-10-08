@@ -23,9 +23,9 @@ const problemsOf = (asked: { purpose: string; orderReference: string }): readonl
 
 describe("a request's purpose and order reference (decision 6)", () => {
   it('keeps any script, composed', () => {
-    expect(askedText({ purpose: 'Café supplies', orderReference: 'فاتورة ١٢' })).toEqual({
+    expect(askedText({ purpose: 'Cafe\u0301 supplies', orderReference: 'No\u0301 ١٢' })).toEqual({
       purpose: 'Café supplies',
-      orderReference: 'فاتورة ١٢',
+      orderReference: 'Nó ١٢',
     });
   });
 

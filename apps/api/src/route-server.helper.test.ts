@@ -37,7 +37,7 @@ export const closeServers = async (): Promise<void> => {
 };
 
 /** The console's sign-in with COOKIE as the session given; nothing else is in these tests. */
-const signedIn = (live: LiveSession): SignIn => ({
+const signedIn = (live: LiveSession | undefined): SignIn => ({
   begin: () => Promise.reject(new Error('not in these tests')),
   beginStepUp: () => Promise.reject(new Error('not in these tests')),
   complete: () => Promise.reject(new Error('not in these tests')),
@@ -46,7 +46,8 @@ const signedIn = (live: LiveSession): SignIn => ({
 });
 
 /**
- * A ready server with the routes given: COOKIE signs in as `live`, a `member`
+ * A ready server with the routes given: COOKIE signs in as `live` (no one when
+ * not given: an agent's own test), a `member`
  * of ORG and of no other organisation (none at all when not given), never
  * restricted. A route's own membership check replaces that one.
  */
@@ -55,7 +56,7 @@ export async function routeServer({
   member,
   ...routes
 }: {
-  readonly live: LiveSession;
+  readonly live?: LiveSession;
   readonly member?: MembershipCheck;
 } & Partial<ServerOptions>): Promise<FastifyInstance> {
   const app = await buildServer({
