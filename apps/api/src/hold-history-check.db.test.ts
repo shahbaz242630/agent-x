@@ -66,6 +66,9 @@ const services = () => ({ keys, ids, logger: testLogger() });
 let capture: LogCapture;
 let org: string;
 let owner: OwnerTamper;
+/** The newest investigation recorded in the test, if any. */
+let latest: string | undefined;
+const ADMIN = { type: 'user' as const, id: '0199a0f0-0000-7000-8000-0000000000ad' };
 
 /** Adds a request in the status given and seals it, as a module does. */
 async function request(status: 'LIVE' | 'ENDED'): Promise<string> {
@@ -88,8 +91,21 @@ async function request(status: 'LIVE' | 'ENDED'): Promise<string> {
   return id;
 }
 
-/** A request changed past the app and read, then put back: the organisation HELD, its cause removed. */
-async function held(): Promise<string> {
+/** The admin's investigation of the hold as it stands, recorded: its ID. */
+async function investigated(): Promise<string> {
+  const id = ids.next();
+  const recorded = await withSignedStates(app, org, services(), (tx, states) =>
+    states.recordInvestigation(tx, org, { id, actor: ADMIN, conclusion: 'CAUSE_REMOVED', reference: 'INC-7' }),
+  );
+  if (recorded.outcome !== 'recorded') throw new Error('the hold should be HELD');
+  return id;
+}
+
+/**
+ * A request changed past the app and read, then put back: the organisation
+ * HELD, its cause removed, and investigated unless `investigate` is false.
+ */
+async function held(investigate = true): Promise<void> {
   const id = await request('ENDED');
   const saved = await owner.saveRow(id);
   await owner.setColumn(id, 'status', 'LIVE');
@@ -97,16 +113,14 @@ async function held(): Promise<string> {
     states.verifiedState(tx, REQUESTS, { orgId: org, id }, 'share'),
   );
   await owner.restoreRow(saved);
-  return id;
+  if (investigate) latest = await investigated();
 }
 
 const holdNow = () => withSignedStates(app, org, services(), (tx, states) => states.holdRecord(tx, org));
 
-const checked = async () => {
-  const now = await holdNow();
-  if (now.outcome !== 'held') return 'not held';
-  return withSignedStates(app, org, services(), (tx, states) => states.historyChecked(tx, org, now.eventId));
-};
+/** Whether the whole history was checked after the newest investigation. */
+const checked = () =>
+  withSignedStates(app, org, services(), (tx, states) => states.historyChecked(tx, org, latest ?? ids.next()));
 
 const job = (batch = 2, batchesARun = 1, tables: readonly CheckedTable[] = [REQUESTS]) =>
   createHoldHistoryCheck({
@@ -143,6 +157,7 @@ beforeEach(async () => {
     createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR }),
   );
   owner = await tamperAsOwner(database, REQUESTS, org);
+  latest = undefined;
 });
 
 afterEach(async () => {
@@ -196,6 +211,32 @@ describe(`the whole history checked while a hold stands (Phase 2 D1c, Postgres $
 
     expect(await checked()).toBe('unchecked');
     expect(lines('hold_history.tampered')).toHaveLength(1);
+  });
+
+  it('waits for an investigation of the hold, so the check runs once its cause is declared removed (D1c review)', async () => {
+    await request('ENDED');
+    await held(false);
+    const checking = job(10);
+
+    await checking.run();
+    expect(lines('hold_history.checked')).toEqual([]);
+
+    latest = await investigated();
+    await checking.run();
+    expect(await checked()).toBe('checked');
+  });
+
+  it('checks again after a newer investigation of the same hold', async () => {
+    await held();
+    const checking = job(10);
+    await checking.run();
+    expect(await checked()).toBe('checked');
+
+    latest = await investigated();
+    expect(await checked()).toBe('unchecked');
+    await checking.run();
+    expect(await checked()).toBe('checked');
+    expect(lines('hold_history.checked')).toHaveLength(2);
   });
 
   it('leaves a CLEAR organisation alone', async () => {

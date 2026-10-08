@@ -323,30 +323,39 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
   });
 
-  it('records a HELD state’s whole history checked, read back for that state alone (Phase 2 D1c)', async () => {
+  it('records the whole history checked after an investigation, read back for that investigation alone (Phase 2 D1c)', async () => {
     await holdThenRepair();
     const { holdEventId, investigationId } = await investigated();
-    const checked = () => inOrg((tx, states) => states.historyChecked(tx, org, holdEventId));
+    const checked = (id: string) => inOrg((tx, states) => states.historyChecked(tx, org, id));
 
-    expect(await checked()).toBe('unchecked');
-    await inOrg((tx, states) => states.recordHistoryChecked(tx, org, holdEventId, 3));
-    expect(await checked()).toBe('checked');
-    // Cleared and set again: the new HELD state's history is still to check.
-    expect(await clear({ holdEventId, investigationId })).toMatchObject({ outcome: 'cleared' });
-    await holdThenRepair();
-    const now = await hold();
-    const nowEventId = now.outcome === 'held' ? now.eventId : '';
-    expect(nowEventId).not.toBe(holdEventId);
-    expect(await inOrg((tx, states) => states.historyChecked(tx, org, nowEventId))).toBe('unchecked');
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, holdEventId))).toBe(investigationId);
+    expect(await checked(investigationId)).toBe('unchecked');
+    await inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 3));
+    expect(await checked(investigationId)).toBe('checked');
+    // A newer investigation of the same HELD state is the one checked after next, and isn't yet.
+    const newer = await investigated();
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, holdEventId))).toBe(newer.investigationId);
+    expect(await checked(newer.investigationId)).toBe('unchecked');
+    // Another HELD state has no investigation of its own yet.
+    expect(await inOrg((tx, states) => states.latestInvestigation(tx, org, newId()))).toBeNull();
   });
 
-  it('records a history checked only while the hold stands in the HELD state it names', async () => {
-    const message = "A HELD state's history is recorded only while the hold stands in it";
-    // CLEAR.
-    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, newId(), 0))).rejects.toThrow(message);
+  it('records a history checked only while the hold stands in the HELD state its investigation is of', async () => {
+    const message =
+      'A history is recorded checked only while the hold stands in the HELD state its investigation is of';
     await holdThenRepair();
-    // HELD, but in another state than the one named.
+    const { holdEventId, investigationId } = await investigated();
+    // No such investigation.
     await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, newId(), 0))).rejects.toThrow(message);
+    // Cleared since, then held again: the investigation is of a HELD state the hold has left.
+    expect(await clear({ holdEventId, investigationId })).toMatchObject({ outcome: 'cleared' });
+    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 0))).rejects.toThrow(
+      message,
+    );
+    await holdThenRepair();
+    await expect(inOrg((tx, states) => states.recordHistoryChecked(tx, org, investigationId, 0))).rejects.toThrow(
+      message,
+    );
   });
 
   it('checks a table’s whole history in batches: every row, and every object the log holds whose row is gone', async () => {

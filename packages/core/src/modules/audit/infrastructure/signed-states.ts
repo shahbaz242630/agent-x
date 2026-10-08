@@ -357,19 +357,26 @@ export interface SignedStates {
     size: number,
   ): Promise<HistoryBatch>;
   /**
-   * Records that the HELD state `holdEventId` names had its whole history
-   * checked (`objects` of them), by the API's job: refused (`basis`) unless
-   * the hold is HELD in that state still, read with the chain head's lock.
+   * The newest investigation of the HELD state `holdEventId` names, by its ID,
+   * or null for none yet: the one the API's job checks the whole history
+   * after (D1c review), so the check runs once the cause is declared removed.
    */
-  recordHistoryChecked(tx: AuditTransaction, orgId: string, holdEventId: string, objects: number): Promise<void>;
+  latestInvestigation(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<string | null>;
+  /**
+   * Records that the whole history was checked (`objects` of them) after the
+   * investigation `investigationId`, by the API's job: refused (`basis`)
+   * unless the hold is still HELD in the state that investigation is of, read
+   * with the chain head's lock.
+   */
+  recordHistoryChecked(tx: AuditTransaction, orgId: string, investigationId: string, objects: number): Promise<void>;
   /**
    * Whether the hold's newest event, as the table holds it and believed in
    * nothing, set it: a cheap look for a job before it makes the verified read
    * (holdRecord), which alone decides anything. Raises no alarm.
    */
   mayBeHeld(tx: AuditTransaction, orgId: string): Promise<boolean>;
-  /** Whether the HELD state `holdEventId` names had its whole history checked. */
-  historyChecked(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<HistoryCheckRecord>;
+  /** Whether the whole history was checked after the investigation `investigationId`. */
+  historyChecked(tx: AuditTransaction, orgId: string, investigationId: string): Promise<HistoryCheckRecord>;
   /**
    * The organisation's integrity hold, from the log, in the caller's
    * transaction (withTenant's for it). Anything the hold stops goes ahead
@@ -511,6 +518,8 @@ function investigationIn(found: Extract<RecordedEventCheck, { kind: 'recorded' }
 const STATUS = 'status';
 /** Who sets a hold: the app itself, on a tamper sign. */
 const HOLDER: AuditActor = Object.freeze({ type: 'system', id: 'integrity-hold' });
+/** The most investigations of an organisation's holds read to find a HELD state's newest. */
+const INVESTIGATIONS_READ = 1000;
 /** Who records a HELD state's history checked: the API's job (Phase 2 D1c). */
 const HISTORY_CHECKER: AuditActor = Object.freeze({ type: 'system', id: 'api' });
 
@@ -921,23 +930,43 @@ export function createSignedStates({
       });
     },
 
+    async latestInvestigation(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<string | null> {
+      const read = await historyOf(tx, orgId, {
+        subjectTypes: [INVESTIGATION_SUBJECT],
+        actions: ['integrity_hold.investigated'],
+        limit: INVESTIGATIONS_READ,
+      });
+      if (read.outcome === 'tampered') return null;
+      const held = holdEventId.toLowerCase();
+      const ofIt = read.events.filter(({ event }) => event.details.holdEventId === held);
+      return ofIt.at(-1)?.event.subject.id.toLowerCase() ?? null;
+    },
+
     async recordHistoryChecked(
       tx: AuditTransaction,
       orgId: string,
-      holdEventId: string,
+      investigationId: string,
       objects: number,
     ): Promise<void> {
-      if (!UUID.test(holdEventId)) throw new RangeError('A HELD state is named by its event ID');
+      if (!UUID.test(investigationId)) throw new RangeError('An investigation is named by its ID');
       if (!Number.isSafeInteger(objects) || objects < 0) throw new RangeError('A count of objects is a whole number');
+      const investigation = await holdInvestigation(tx, orgId, investigationId);
       const hold = await integrityHold(tx, orgId, 'head');
-      if (hold.outcome !== 'held' || hold.eventId !== holdEventId.toLowerCase()) {
-        throw new SignedStateFailed('basis', "A HELD state's history is recorded only while the hold stands in it");
+      if (
+        hold.outcome !== 'held' ||
+        investigation.outcome !== 'found' ||
+        investigation.investigation.holdEventId !== hold.eventId
+      ) {
+        throw new SignedStateFailed(
+          'basis',
+          'A history is recorded checked only while the hold stands in the HELD state its investigation is of',
+        );
       }
       await recordHoldEvent(trail, tx, orgId, {
         actor: HISTORY_CHECKER,
         action: 'integrity_hold.history_checked',
-        subject: { type: HISTORY_CHECK_SUBJECT, id: holdEventId, version: 1 },
-        details: { holdVersion: hold.version, objects },
+        subject: { type: HISTORY_CHECK_SUBJECT, id: investigationId, version: 1 },
+        details: { holdVersion: hold.version, holdEventId: hold.eventId, objects },
       });
     },
 
@@ -946,8 +975,8 @@ export function createSignedStates({
       return newest === 'integrity_hold.set';
     },
 
-    async historyChecked(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<HistoryCheckRecord> {
-      const id = holdEventId.toLowerCase();
+    async historyChecked(tx: AuditTransaction, orgId: string, investigationId: string): Promise<HistoryCheckRecord> {
+      const id = investigationId.toLowerCase();
       const found = await trail.recordedEvent(tx, orgId, { onlyAbout: { type: HISTORY_CHECK_SUBJECT, id } });
       if (found.kind === 'broken') {
         alarm(HISTORY_CHECK_SUBJECT, { orgId, id }, 'log', found.seq);

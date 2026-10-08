@@ -42,9 +42,11 @@ export const INVESTIGATION_SUBJECT = 'hold_investigation';
 /**
  * A HELD state's whole history checked (Phase 2 D1c, partner decision 7):
  * every object of each growing table (a spend request's), ended ones too,
- * verified in batches while the hold stood, recorded as one event about the
- * HELD state's event ID. Clearing that state is refused until it is there.
- * Only the audit module records one, as it does the hold's own events.
+ * verified in batches after an investigation of the HELD state was recorded,
+ * so after its cause was declared removed (D1c review), and recorded as one
+ * event about that investigation's ID. A clearing with that investigation is
+ * refused until it is there. Only the audit module records one, as it does
+ * the hold's own events.
  */
 export const HISTORY_CHECK_SUBJECT = 'hold_history_check';
 

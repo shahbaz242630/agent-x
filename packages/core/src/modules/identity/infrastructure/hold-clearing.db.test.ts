@@ -175,20 +175,16 @@ const stepUp = (who: ClearingAdmin, challengeId: string, amr: readonly string[] 
   });
 
 /** Asks, signs in again, and gives back the challenge. */
-/** The API's job's record that the HELD state's whole history was checked (Phase 2 D1c), as it makes it. */
-const historyChecked = () =>
-  withSignedStates(app, org, services(), async (tx, states) => {
-    const now = await states.integrityHold(tx, org, 'none');
-    if (now.outcome !== 'held') throw new Error('the hold should be HELD');
-    await states.recordHistoryChecked(tx, org, now.eventId, 0);
-  });
+/** The API's job's record that the whole history was checked after the investigation (Phase 2 D1c), as it makes it. */
+const historyChecked = (investigationId: string) =>
+  withSignedStates(app, org, services(), (tx, states) => states.recordHistoryChecked(tx, org, investigationId, 0));
 
 /** Asked and signed in again, the HELD state's history checked meanwhile unless `history` is false. */
 async function steppedUp(investigationId: string, who: ClearingAdmin = admin, history = true): Promise<string> {
   const answer = await ask(investigationId, who);
   if (answer.outcome !== 'asked') throw new Error(`not asked: ${JSON.stringify(answer)}`);
   await stepUp(who, answer.stepUpChallengeId);
-  if (history) await historyChecked();
+  if (history) await historyChecked(investigationId);
   return answer.stepUpChallengeId;
 }
 
@@ -287,7 +283,6 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const answer = await ask(investigationId);
     if (answer.outcome !== 'asked') throw new Error(`not asked: ${answer.outcome}`);
     await stepUp(admin, answer.stepUpChallengeId, ['pwd', 'otp', 'mfa']);
-    await historyChecked();
 
     expect(await confirm(investigationId, answer.stepUpChallengeId)).toEqual({
       outcome: 'refused',
@@ -302,7 +297,6 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     const investigationId = await investigate();
     const answer = await ask(investigationId);
     const challengeId = answer.outcome === 'asked' ? answer.stepUpChallengeId : ids.next();
-    await historyChecked();
 
     expect(await confirm(investigationId, challengeId)).toEqual({
       outcome: 'refused',
@@ -466,7 +460,7 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     });
     expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
     // Once the API's job has recorded it, the same step-up clears it.
-    await historyChecked();
+    await historyChecked(investigationId);
     expect(await confirm(investigationId, challengeId)).toMatchObject({ outcome: 'cleared' });
   });
 
@@ -611,7 +605,6 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     await read(row.id);
     await row.restore();
     expect(await hold()).toMatchObject({ outcome: 'held', version: 4 });
-    await historyChecked();
 
     expect(await confirm(investigationId, challengeId, admin, 'confirm-2')).toEqual({
       outcome: 'refused',

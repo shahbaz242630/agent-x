@@ -5,11 +5,13 @@
 // admin's confirm is let through, this job checks every object of each such
 // table, ended ones and ones the log holds but whose row is gone included, a
 // batch at a time, each batch in a transaction of its own, and records that
-// it did, against the HELD state it checked for (hold-clearing.ts waits for
-// that record).
+// it did. It starts once an investigation of the HELD state is recorded, so
+// after the cause was declared removed, and records against that
+// investigation, which the confirm names (hold-clearing.ts waits for it; D1c
+// review). A newer investigation is checked after again.
 //
 // Where it has got to is kept here, in the process, never in the database an
-// owner could rewrite: a restart, a HELD state replaced, or a batch finding a
+// owner could rewrite: a restart, a newer investigation, or a batch finding a
 // record tampered with starts it again from the beginning. A run checks at
 // most BATCHES_A_RUN batches an organisation, so an organisation with a long
 // history can't keep the others waiting.
@@ -38,9 +40,9 @@ export interface HoldHistoryCheck {
   run(signal?: AbortSignal): Promise<void>;
 }
 
-/** Where an organisation's check has got to: the HELD state it is for, the table, the last ID checked, the count so far. */
+/** Where an organisation's check has got to: the investigation it runs after, the table, the last ID checked, the count so far. */
 interface Progress {
-  readonly holdEventId: string;
+  readonly investigationId: string;
   readonly table: number;
   readonly after: string | null;
   readonly objects: number;
@@ -72,25 +74,32 @@ export function createHoldHistoryCheck({
   const progress = new Map<string, Progress>();
   const services = (log: Logger): SignedStatesServices => ({ keys, ids, logger: log });
 
-  /** The HELD state whose history is still to check, or null: the hold CLEAR, checked already, or not believed. */
-  const uncheckedHold = (log: Logger, orgId: string): Promise<string | null> =>
+  /**
+   * The newest investigation of the HELD state, whose history is still to
+   * check after it, or null: the hold CLEAR, not investigated yet, checked
+   * already, or not believed.
+   */
+  const uncheckedInvestigation = (log: Logger, orgId: string): Promise<string | null> =>
     withSignedStates(database, orgId, services(log), async (tx, states) => {
       // A cheap look first, so a CLEAR organisation costs one read and no verifying; a hold hidden from it stays unchecked.
       if (!(await states.mayBeHeld(tx, orgId))) return null;
       const hold = await states.holdRecord(tx, orgId);
       if (hold.outcome !== 'held') return null;
-      return (await states.historyChecked(tx, orgId, hold.eventId)) === 'unchecked' ? hold.eventId : null;
+      const investigationId = await states.latestInvestigation(tx, orgId, hold.eventId);
+      if (investigationId === null) return null;
+      return (await states.historyChecked(tx, orgId, investigationId)) === 'unchecked' ? investigationId : null;
     });
 
   /** Checks on the organisation's history; false if the signal stopped it. */
   const checkIn = async (log: Logger, orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
-    const holdEventId = await uncheckedHold(log, orgId);
-    if (holdEventId === null) {
+    const investigationId = await uncheckedInvestigation(log, orgId);
+    if (investigationId === null) {
       progress.delete(orgId);
       return true;
     }
     const kept = progress.get(orgId);
-    let at: Progress = kept?.holdEventId === holdEventId ? kept : { holdEventId, table: 0, after: null, objects: 0 };
+    let at: Progress =
+      kept?.investigationId === investigationId ? kept : { investigationId, table: 0, after: null, objects: 0 };
     for (let done = 0; done < batchesARun && at.table < growing.length; done += 1) {
       if (signal?.aborted === true) {
         progress.set(orgId, at);
@@ -109,15 +118,15 @@ export function createHoldHistoryCheck({
         return true;
       }
       at = checked.done
-        ? { holdEventId, table: at.table + 1, after: null, objects: at.objects + checked.objects }
-        : { holdEventId, table: at.table, after: checked.last, objects: at.objects + checked.objects };
+        ? { investigationId, table: at.table + 1, after: null, objects: at.objects + checked.objects }
+        : { investigationId, table: at.table, after: checked.last, objects: at.objects + checked.objects };
     }
     if (at.table < growing.length) {
       progress.set(orgId, at);
       return true;
     }
     await withSignedStates(database, orgId, services(log), (tx, states) =>
-      states.recordHistoryChecked(tx, orgId, holdEventId, at.objects),
+      states.recordHistoryChecked(tx, orgId, investigationId, at.objects),
     );
     progress.delete(orgId);
     log.info('hold_history.checked', { objects: at.objects });
