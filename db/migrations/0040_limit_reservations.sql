@@ -126,20 +126,20 @@ CREATE TABLE limit_reservations.reservations (
   org_id uuid NOT NULL,
   id uuid NOT NULL,
   request_id uuid NOT NULL,
+  -- Its agent, mandate, supplier, payee key, amount and currency: as its request
+  -- holds them, which `held_for_its_request` checks (so none needs its own key here).
   agent_id uuid NOT NULL,
   mandate_id uuid NOT NULL,
   month text NOT NULL,
   supplier_id uuid NOT NULL,
-  payee_key text CHECK (payee_key ~ '^[!-~]{1,128}$'),
-  amount_minor bigint NOT NULL CHECK (amount_minor > 0),
-  currency text NOT NULL REFERENCES mandates.allowed_currencies (code),
+  payee_key text,
+  amount_minor bigint NOT NULL,
+  currency text NOT NULL,
   state text NOT NULL CHECK (state IN ('HELD', 'FINALISED', 'RELEASED', 'BLOCKED_UNKNOWN')),
   reserved_at timestamptz NOT NULL CHECK (pg_catalog.isfinite(reserved_at)),
   settled_at timestamptz CHECK (pg_catalog.isfinite(settled_at)),
   PRIMARY KEY (org_id, id),
   CONSTRAINT one_reservation_a_request UNIQUE (org_id, request_id),
-  CONSTRAINT under_its_agents_mandate FOREIGN KEY (org_id, mandate_id, agent_id)
-    REFERENCES mandates.mandates (org_id, id, agent_id),
   CONSTRAINT in_its_agents_period FOREIGN KEY (org_id, agent_id, month)
     REFERENCES limit_reservations.agent_periods (org_id, agent_id, month),
   -- Settled exactly when it reaches an end, never before it was reserved.
