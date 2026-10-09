@@ -18,9 +18,9 @@
 // - 6: the supplier FOR NO KEY UPDATE, serialising the duplicate check;
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
-// - with the mandate's split check on, the payee's reservations in its
-//   rolling window, across agents (D5), serialised by the supplier's lock;
-// - then the checks, each a statement of its own after the locks; the
+// - then the checks, each a statement of its own after the locks (with the
+//   mandate's split check on, the payee's reservations in its rolling
+//   window, across agents: D5, serialised by the supplier's lock); the
 //   request (8); its reservation and claim (11); its two signed events (12).
 //
 // Whatever the organisation can't give (no mandate, another organisation's

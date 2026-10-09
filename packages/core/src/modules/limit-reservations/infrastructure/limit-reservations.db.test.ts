@@ -483,6 +483,11 @@ describe('the split total (`splitHeld`, D5)', () => {
     expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
     // Given a new key, the supplier still counts its own, whatever key each was made under.
     expect(await splitOf(org, org.supplier, 'payee-2')).toBe(50_000n);
+    // Another organisation's supplier may hold the same key (keys are per organisation): its orders never count.
+    const other = await organisation('payee-1');
+    await period(other);
+    await reserve(other, { payee_key: 'payee-1' });
+    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
   });
 });
 

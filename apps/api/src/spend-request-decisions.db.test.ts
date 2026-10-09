@@ -708,13 +708,7 @@ describe("through the agent's route (D4r)", () => {
   });
 });
 
-/**
- * Every table's rows, as the database admin sees them, in one fixed
- * statement: each table's count and a checksum of every row, so an update
- * shows as well as an insert or a delete (C4's review). What a simulation
- * must leave as it was.
- */
-/** The supplier's payee key set (or cleared) past the use cases, signed as a payee change would: a key moves between records. */
+/** The supplier's payee key set or cleared past the use cases, signed: a key moving between records. */
 const payeeKeyOf = (w: World, id: string, payeeKey: string | null) =>
   withSignedStates(app, w.org, quiet(), async (tx, states) => {
     const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
@@ -841,6 +835,12 @@ describe('the split check (D5, SEC-LIM-04)', () => {
   });
 });
 
+/**
+ * Every table's rows, as the database admin sees them, in one fixed
+ * statement: each table's count and a checksum of every row, so an update
+ * shows as well as an insert or a delete (C4's review). What a simulation
+ * must leave as it was.
+ */
 const EVERY_TABLE = `select schemaname || '.' || tablename as name,
   (pg_catalog.xpath('/row/n/text()', pg_catalog.query_to_xml(pg_catalog.format(
     'select count(*) || '':'' || pg_catalog.md5(coalesce(pg_catalog.string_agg(t::text, '','' order by t::text), '''')) as n from %I.%I t',
