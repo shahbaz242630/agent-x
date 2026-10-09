@@ -16,13 +16,13 @@
 // simulator (C4): the same decision as a request, the month's total, proposed
 // rules, and nothing written anywhere (SEC-AG-09); and no request ever left
 // VALIDATING.
-import { addAgent, AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
+import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { SUPPLIERS, supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
@@ -75,18 +75,7 @@ let decisions: SpendRequestDecisions;
 let simulations: PolicySimulations;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-decisions' });
-const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout } = shared;
-
-/** The supplier verified by the world's admin, as E3 does. */
-const verified = (w: World, id: string) =>
-  withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
-    if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
-    await verifySupplier(tx, states, { orgId: w.org, id }, found, {
-      verifiedBy: w.admin.membershipId,
-      actor: OPERATOR,
-    });
-  });
+const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout, verified } = shared;
 
 /**
  * A world whose agent has a key and a mandate in force (unless `mandate` is
@@ -184,25 +173,6 @@ const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string |
     }),
   );
 };
-
-/** A second agent of the world's organisation with a mandate in force on `terms` and a key: acting as it. */
-async function secondAgent(w: World, terms: Parameters<typeof shared.termsOf>[1] = {}) {
-  const other = ids.next();
-  await withSignedStates(app, w.org, quiet(), (tx, states) =>
-    addAgent(tx, states, {
-      orgId: w.org,
-      id: other,
-      name: 'Second purchasing agent',
-      owner: w.admin.membershipId,
-      scopes: ['requests:write'],
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    }),
-  );
-  const theirs = { ...w, agent: other };
-  await shared.inForce(registry, theirs, terms);
-  return agentKey(theirs);
-}
 
 /**
  * The requests `asked` sends, made while `holding`'s transaction holds its
@@ -517,7 +487,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
       'ALLOW',
     );
 
-    const theirKey = await secondAgent(w);
+    const theirKey = await shared.secondAgent(registry, w);
     // AED 15,000 held by the first agent this month; the second's own month is empty. To the other supplier, so
     // the split check (D5) adds nothing.
     const other = asking(w, { amount: AED(1_500_000n), supplierId: w.suppliers[1] ?? '', orderReference: 'INV-3' });
@@ -764,7 +734,7 @@ describe('the split check (D5, SEC-LIM-04)', () => {
 
   it('adds up every agent’s orders to the supplier', async () => {
     const { w, acting } = await ready({ terms: SPLIT_TERMS });
-    const theirKey = await secondAgent(w, SPLIT_TERMS);
+    const theirKey = await shared.secondAgent(registry, w, SPLIT_TERMS);
     expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
 
     // The second agent's month is empty; the supplier's window isn't.
@@ -815,7 +785,7 @@ describe('the split check (D5, SEC-LIM-04)', () => {
 
   it('runs two agents’ orders to one supplier one after the other: the second sees the first’s (forced)', async () => {
     const { w, acting } = await ready({ terms: SPLIT_TERMS });
-    const theirKey = await secondAgent(w, SPLIT_TERMS);
+    const theirKey = await shared.secondAgent(registry, w, SPLIT_TERMS);
     const supplier = w.suppliers[0] ?? '';
 
     // Each alone within the threshold, the two past it; two agents' months, so only the supplier serialises them.
