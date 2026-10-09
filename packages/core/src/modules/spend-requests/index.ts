@@ -11,6 +11,7 @@ export {
   BANK_REFERENCE_MOST,
   bankReferenceOf,
   ORDER_REFERENCE_MOST,
+  orderReferenceOf,
   REQUEST_PURPOSE_MOST,
   SpendAskRefused,
 } from './domain/asked.ts';

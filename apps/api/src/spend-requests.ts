@@ -24,7 +24,7 @@ import {
   SpendAskRefused,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
-import { moneyFromJson, REASON_CODES } from '@agentx/core/shared-kernel';
+import { moneyFromJson } from '@agentx/core/shared-kernel';
 import { isUnwritten } from '@agentx/platform/db';
 import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
@@ -33,7 +33,7 @@ import { z } from 'zod';
 import { agentOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import { AMOUNT, issuesOf } from './route-schemas.ts';
+import { AMOUNT, issuesOf, REASONS, reasonsOf } from './route-schemas.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 
 /**
@@ -75,9 +75,7 @@ const SPEND_REQUEST_SHOWN = z
       .describe(
         'ALLOW; REQUIRE_APPROVAL: a person must approve it; REQUIRE_NEW_MANDATE: it is past what your mandate allows; DENY.',
       ),
-    reasons: z
-      .array(z.object({ code: z.string(), message: z.string() }))
-      .describe('Why it was decided so, each a reason code with what it means. Empty when allowed outright.'),
+    reasons: REASONS,
     amountMinor: z.number().describe('Whole minor units.'),
     currency: z.string(),
     supplierId: z.uuid(),
@@ -109,7 +107,7 @@ const shown = (request: SpendRequestRecord) => {
     id: request.id,
     status: request.status,
     decision: request.decision,
-    reasons: request.reasons.map((code) => ({ code, message: REASON_CODES[code] })),
+    reasons: reasonsOf(request.reasons),
     amountMinor: Number(request.amount.minor),
     currency: request.amount.currency,
     supplierId: request.supplierId,

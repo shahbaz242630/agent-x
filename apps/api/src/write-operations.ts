@@ -9,7 +9,11 @@
 // A write is any method but GET, HEAD, OPTIONS and TRACE. A public write
 // names none: it has no signed-in caller to namespace a key by, so it must be
 // safe to repeat by itself (sign-out ends a session that may already be gone).
-// A read names none either: it takes no key.
+// A read names none either: it takes no key. Nor does a POST that only
+// computes (`config.writesNothing`, C4's simulator: a POST because its input
+// is a body): it writes nothing, so a retry is safe by itself, and a key's
+// record would be the one thing it wrote (SEC-AG-09). Its own tests prove it
+// writes nothing.
 //
 // B2b-2: a request to a route with an operation must carry an
 // `Idempotency-Key` header, 1 to 255 visible ASCII characters (the
@@ -28,6 +32,8 @@ declare module 'fastify' {
   interface FastifyContextConfig {
     /** The write, as its idempotency keys name it. Required on every write route but a public one (contract.ts). */
     readonly operation?: string;
+    /** A POST that only computes and writes nothing: it names no operation and takes no key (SEC-AG-09). */
+    readonly writesNothing?: true;
   }
 }
 
@@ -41,9 +47,20 @@ export const isWriteRoute = (methods: readonly string[]): boolean =>
 /**
  * Why a route's operation can't stand, if it can't. `access` is the route's own
  * list, whose problems access.ts names: only whether it names the public alone
- * matters here.
+ * matters here. A route that writes nothing is a POST alone, with no operation.
  */
-export function operationProblems(operation: unknown, methods: readonly string[], access: unknown): string[] {
+export function operationProblems(
+  operation: unknown,
+  methods: readonly string[],
+  access: unknown,
+  writesNothing?: unknown,
+): string[] {
+  if (writesNothing !== undefined) {
+    if (writesNothing !== true || methods.length !== 1 || methods[0] !== 'POST') {
+      return ['only a POST may say it writes nothing (config.writesNothing: true)'];
+    }
+    return operation === undefined ? [] : ['it names an operation, but it writes nothing, so it takes no key'];
+  }
   const publicOnly = Array.isArray(access) && access.length === 1 && access[0] === 'public';
   if (!isWriteRoute(methods) || publicOnly) {
     if (operation === undefined) return [];

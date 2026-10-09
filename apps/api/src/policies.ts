@@ -4,7 +4,13 @@
 // asking then confirming with a passkey, the rules sent with both; it is in
 // force at once. Every member reads them. Amounts are whole minor units
 // (fils), as integers (ADR-006 §1), checked at the edge as safe integers.
-import { DEFAULT_MONTHLY_CAP } from '@agentx/core/modules/policies';
+//
+// The simulator (C4, partner decision 9): `POST /v1/mandates/{id}/policy/simulate`,
+// for admins, approvers and developers, answers what a request by the
+// mandate's agent would get now, with the rules in force or proposed ones in
+// their place, writing nothing (policy-simulations.ts).
+import { DECISIONS, DEFAULT_MONTHLY_CAP } from '@agentx/core/modules/policies';
+import { orderReferenceOf, SpendAskRefused } from '@agentx/core/modules/spend-requests';
 import {
   MOST_ALLOWED_SUPPLIERS,
   OVER_CAP,
@@ -29,7 +35,8 @@ import {
   type PolicyTarget,
   type PolicyView,
 } from './policy-changes.ts';
-import { AMOUNT, issuesOf, MANDATE_ID, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
+import { type PolicySimulations, SIMULATING_ROLES, type Simulated } from './policy-simulations.ts';
+import { AMOUNT, issuesOf, MANDATE_ID, REASONS, reasonsOf, STEP_UP_SIGNED_IN, stepUpAsked } from './route-schemas.ts';
 
 /** Every member may see the organisation's policies, as its mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -73,6 +80,14 @@ const RULE_FIELDS = {
 
 type RuleFields = z.infer<z.ZodObject<typeof RULE_FIELDS>>;
 
+/**
+ * The most a simulation's body may be: two proposed policies of 100 supplier
+ * IDs each written as the longest JSON can (as RULES_BODY_LIMIT, twice), the
+ * request's fields and an order reference of 100 characters sent decomposed
+ * and escaped, with room to spare (the B8-3 lesson).
+ */
+const SIMULATE_BODY_LIMIT = 49_152;
+
 /** The rules a body gives, as a version keeps them; or `MoneyRefused` / `PolicyRulesRefused`. */
 const rulesOf = (body: RuleFields): PolicyRules => {
   // Left out or null alike: the policy sets none.
@@ -92,6 +107,89 @@ const rulesOf = (body: RuleFields): PolicyRules => {
 const rulesChecked = (body: RuleFields, context: z.RefinementCtx): void => {
   issuesOf(() => rulesOf(body), PolicyRulesRefused, context);
 };
+
+/** Proposed rules for a policy: weighed in place of those in force, never kept. */
+const PROPOSED_RULES = z.strictObject(RULE_FIELDS).superRefine(rulesChecked);
+
+const SIMULATE_SCHEMA = {
+  summary: 'What a request by the mandate’s agent would get now, with the rules in force or proposed ones',
+  params: MANDATE_ID,
+  body: z
+    .strictObject({
+      amountMinor: AMOUNT.describe('The amount, in whole minor units (fils for AED).'),
+      currency: z.string().describe('The amount’s currency: the mandate’s, AED in the Pilot. Never converted.'),
+      supplierId: z.uuid().describe('The supplier to pay, by ID.'),
+      fundingSourceId: z.uuid().describe('The bank account to pay from, by ID.'),
+      orderReference: z
+        .string()
+        .optional()
+        .describe('The supplier’s order number, to check for a duplicate as a request would; none: not checked.'),
+      whatIf: z
+        .strictObject({
+          organizationPolicy: PROPOSED_RULES.optional().describe(
+            'Rules weighed in place of the organisation’s policy.',
+          ),
+          mandatePolicy: PROPOSED_RULES.optional().describe(
+            'Rules weighed in place of this mandate’s policy: within its terms, as a change must be.',
+          ),
+        })
+        .optional()
+        .describe('Proposed rules, weighed in place of those in force and never kept; none: the rules in force.'),
+    })
+    .superRefine((body, context) => {
+      issuesOf(() => moneyFromJson(body.amountMinor, body.currency), SpendAskRefused, context);
+      const { orderReference } = body;
+      if (orderReference !== undefined) issuesOf(() => orderReferenceOf(orderReference), SpendAskRefused, context);
+    })
+    .describe('The request to weigh, and any proposed rules.'),
+  response: {
+    200: z
+      .object({
+        decision: z.enum(DECISIONS).describe('What the request would get now: nothing was made or reserved.'),
+        reasons: REASONS,
+        mandateId: z.uuid().nullable().describe('The agent’s mandate in force weighed, or null: it has none.'),
+        versions: z
+          .object({
+            mandate: z.uuid().nullable(),
+            organizationPolicy: z.uuid().nullable().describe('Null: none set, or the proposed rules weighed.'),
+            mandatePolicy: z.uuid().nullable().describe('Null: none set, or the proposed rules weighed.'),
+          })
+          .describe('The versions in force weighed.'),
+        proposed: z
+          .object({ organizationPolicy: z.boolean(), mandatePolicy: z.boolean() })
+          .describe('Which policies were weighed as proposed, in place of those in force.'),
+        monthlyCapFrom: z
+          .enum(['mandate-policy', 'organization-policy', 'default'])
+          .describe('Where the agent’s monthly cap came from.'),
+        month: z.string().nullable().describe('The agent’s month (YYYY-MM) in its zone, or null without a mandate.'),
+        monthSpentMinor: z
+          .number()
+          .describe('What the agent holds or spent in that month, under every mandate of its, in whole minor units.'),
+      })
+      .register(API_SCHEMAS, {
+        id: 'PolicySimulation',
+        description: 'What a request would get now, weighed by the same engine and totals; nothing made.',
+      }),
+  },
+};
+
+/** A version weighed as the answer shows it: a proposed policy's is none. */
+const versionShown = (versionId: string | null, proposed: boolean) => (proposed ? null : versionId);
+
+const simulationBody = ({ made, mandateId, month, monthSpent, proposed }: Simulated) => ({
+  decision: made.decision,
+  reasons: reasonsOf(made.reasons),
+  mandateId,
+  versions: {
+    mandate: made.versions.mandate,
+    organizationPolicy: versionShown(made.versions.organizationPolicy, proposed.organizationPolicy),
+    mandatePolicy: versionShown(made.versions.mandatePolicy, proposed.mandatePolicy),
+  },
+  proposed,
+  monthlyCapFrom: made.monthlyCapFrom,
+  month,
+  monthSpentMinor: Number(monthSpent.minor),
+});
 
 const POLICY_VERSION = z
   .object({
@@ -198,8 +296,43 @@ const targetOf = (kind: Kind, request: FastifyRequest): PolicyTarget => {
   return { scope: 'mandate', mandateId: id };
 };
 
-export function registerPolicies(app: FastifyInstance, { changes }: { changes: PolicyChanges | undefined }) {
+export function registerPolicies(
+  app: FastifyInstance,
+  { changes, simulations }: { changes: PolicyChanges | undefined; simulations: PolicySimulations | undefined },
+) {
   const routes = app.withTypeProvider<ZodTypeProvider>();
+
+  routes.post(
+    '/v1/mandates/:id/policy/simulate',
+    {
+      schema: SIMULATE_SCHEMA,
+      bodyLimit: SIMULATE_BODY_LIMIT,
+      config: { access: [...SIMULATING_ROLES], writesNothing: true },
+    },
+    async (request, reply) => {
+      const { orgId } = memberInSessionOf(request);
+      const { body } = request;
+      const { organizationPolicy, mandatePolicy } = body.whatIf ?? {};
+      const simulated = await need(simulations).simulate(
+        orgId,
+        request.params.id,
+        {
+          // The schema has checked both.
+          amount: moneyFromJson(body.amountMinor, body.currency),
+          supplierId: body.supplierId,
+          fundingSourceId: body.fundingSourceId,
+          orderReference: body.orderReference === undefined ? null : orderReferenceOf(body.orderReference),
+        },
+        {
+          organizationPolicy: organizationPolicy && rulesOf(organizationPolicy),
+          mandatePolicy: mandatePolicy && rulesOf(mandatePolicy),
+        },
+        request.id,
+      );
+      if (simulated.outcome === 'refused') return answerRefusal(simulated, request, reply);
+      return simulationBody(simulated);
+    },
+  );
 
   for (const kind of ['organization', 'mandate'] as const) {
     const schemas = schemasOf(kind);

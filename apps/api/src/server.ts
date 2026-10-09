@@ -71,6 +71,7 @@ import type { AgentKeyChanges } from './agent-key-changes.ts';
 import type { AgentRegistrations } from './agent-registering.ts';
 import type { AgentMandates } from './agent-mandate.ts';
 import { registerAgentSelf } from './agent-self.ts';
+import type { PolicySimulations } from './policy-simulations.ts';
 import type { SpendRequestDecisions } from './spend-request-decisions.ts';
 import { registerSpendRequests } from './spend-requests.ts';
 import { registerAgents } from './agents.ts';
@@ -155,6 +156,8 @@ export interface ServerOptions {
   /** Suspending, resuming and revoking mandates (mandate-moves.ts); without it, no one reaches those routes. */
   readonly mandateMoves?: MandateMoves | undefined;
   readonly policyChanges?: PolicyChanges | undefined;
+  /** The policy simulator (policy-simulations.ts); without it, no one reaches that route. */
+  readonly policySimulations?: PolicySimulations | undefined;
   /** An agent's own mandate and the sources it names (agent-mandate.ts); without it, no agent reaches those routes. */
   readonly agentMandates?: AgentMandates | undefined;
   /** Deciding an agent's spend requests (spend-request-decisions.ts); without it, no agent reaches that route. */
@@ -351,7 +354,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     acceptance: options.mandateAcceptance,
     moves: options.mandateMoves,
   });
-  registerPolicies(app, { changes: options.policyChanges });
+  registerPolicies(app, { changes: options.policyChanges, simulations: options.policySimulations });
   registerFakeBank(app, { bank: options.fakeBank });
   registerInvitations(app, {
     writes: options.invitationWrites,

@@ -35,12 +35,7 @@ export async function lockAgentMonth(
     .values({ org_id: orgId, agent_id: agentId, time_zone: zoneIfNew, created_at: at })
     .onConflict((conflict) => conflict.doNothing())
     .execute();
-  const { time_zone: timeZone } = await tx
-    .selectFrom('limit_reservations.agent_zones')
-    .select('time_zone')
-    .where('agent_id', '=', agentId)
-    .executeTakeFirstOrThrow();
-  const { month } = periodOf(at, timeZone);
+  const month = await agentMonth(tx, { agentId, zoneIfNew, at });
   await tx
     .insertInto('limit_reservations.agent_periods')
     .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
@@ -54,6 +49,23 @@ export async function lockAgentMonth(
     .forNoKeyUpdate()
     .executeTakeFirstOrThrow();
   return month;
+}
+
+/**
+ * The agent's month at `at` (`YYYY-MM`), writing and locking nothing: named
+ * in its kept zone, or `zoneIfNew` for an agent with none yet, as its first
+ * decision would keep it. The simulator's (C4); a decision locks it instead.
+ */
+export async function agentMonth(
+  tx: ReservationsTransaction,
+  { agentId, zoneIfNew, at }: { agentId: string; zoneIfNew: string; at: Date },
+): Promise<string> {
+  const kept = await tx
+    .selectFrom('limit_reservations.agent_zones')
+    .select('time_zone')
+    .where('agent_id', '=', agentId)
+    .executeTakeFirst();
+  return periodOf(at, kept?.time_zone ?? zoneIfNew).month;
 }
 
 /** The agent's month's total in minor units: every reservation but a released one, under any of its mandates. */

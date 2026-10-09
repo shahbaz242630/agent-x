@@ -12,8 +12,10 @@
 // a released reservation and another agent's never); a retry answered as it
 // was; what is refused with nothing made (a currency not taken, a revoked or
 // expired key or another agent's, a frozen organisation, a tampered
-// mandate); the agent's route over HTTP with its real key check (D4r); and
-// no request ever left VALIDATING.
+// mandate); the agent's route over HTTP with its real key check (D4r); the
+// simulator (C4): the same decision as a request, the month's total, proposed
+// rules, and nothing written anywhere (SEC-AG-09); and no request ever left
+// VALIDATING.
 import { addAgent, AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
@@ -37,6 +39,7 @@ import {
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
 import { closeServers, routeServer } from './route-server.helper.test.ts';
 import {
   AED,
@@ -54,6 +57,7 @@ import {
   type SpendAskedByAgent,
   type SpendRequestDecided,
   type SpendRequestDecisions,
+  type SpendWeighed,
 } from './spend-request-decisions.ts';
 
 type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
@@ -68,6 +72,7 @@ const CORRELATION = '0199a0f0-0000-7000-8000-0000000000d4';
 let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
+let simulations: PolicySimulations;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-decisions' });
 const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout } = shared;
@@ -231,6 +236,7 @@ beforeEach(() => {
   const logger = testLogger(new LogCapture());
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  simulations = createPolicySimulations({ database: app, keys, ids, clock, logger });
 });
 
 describe('deciding a spend request and reserving it (D4)', () => {
@@ -690,6 +696,178 @@ describe("through the agent's route (D4r)", () => {
     expect(again.json()).toEqual(first.json());
     expect((await post('INV_23')).json()).toMatchObject({ error: { code: 'IDEMPOTENCY_KEY_REUSED' } });
     expect((await made(w.org)).requests).toBe(1);
+  });
+});
+
+/**
+ * Every table's rows, as the database admin sees them, in one fixed
+ * statement: each table's count and a checksum of every row, so an update
+ * shows as well as an insert or a delete (C4's review). What a simulation
+ * must leave as it was.
+ */
+const EVERY_TABLE = `select schemaname || '.' || tablename as name,
+  (pg_catalog.xpath('/row/n/text()', pg_catalog.query_to_xml(pg_catalog.format(
+    'select count(*) || '':'' || pg_catalog.md5(coalesce(pg_catalog.string_agg(t::text, '','' order by t::text), '''')) as n from %I.%I t',
+    schemaname, tablename), false, true, '')))[1]::text as n
+  from pg_catalog.pg_tables where schemaname not in ('pg_catalog', 'information_schema') order by 1`;
+
+const everyTable = async (): Promise<Record<string, string>> =>
+  Object.fromEntries(
+    (await database.as('admin').query<{ name: string; n: string }>(EVERY_TABLE)).map(({ name, n }) => [name, n]),
+  );
+
+/** The simulator's answer for the world's mandate, the request as `asking` makes it unless changed. */
+const simulated = async (w: World, mandateId: string, overrides: Partial<SpendWeighed> = {}, whatIf: WhatIf = {}) =>
+  simulations.simulate(w.org, mandateId, { ...asking(w), ...overrides }, whatIf, CORRELATION);
+
+const simulatedOf = (answer: Awaited<ReturnType<typeof simulated>>) => {
+  if (answer.outcome !== 'simulated') throw new Error(`not simulated: ${JSON.stringify(answer)}`);
+  return answer;
+};
+
+/** A mandate policy's or the organisation's proposed rules: only a monthly cap, or an approval threshold. */
+const proposed = (rules: { monthlyCap?: bigint; approvalThreshold?: bigint; supplierIds?: string[] }) => ({
+  currency: 'AED',
+  perOrderCap: null,
+  monthlyCap: rules.monthlyCap === undefined ? null : AED(rules.monthlyCap),
+  approvalThreshold: rules.approvalThreshold === undefined ? null : AED(rules.approvalThreshold),
+  supplierIds: rules.supplierIds ?? null,
+});
+
+describe('the simulator (C4, decision 9)', () => {
+  it('decides as a request would, from the same totals, writing nothing anywhere (SEC-AG-09)', async () => {
+    const { w, mandateId, acting } = await ready({ terms: { approvalThreshold: AED(1_500_000n) } });
+    const id = mandateId ?? '';
+    const before = await everyTable();
+    // Each a count and a checksum, so equal tables are a real check.
+    expect(Object.values(before).every((rows) => /^[0-9]+:[0-9a-f]{32}$/.test(rows))).toBe(true);
+
+    // A new agent's month, before its first request: named in the mandate's zone, its zone left unkept.
+    const first = simulatedOf(await simulated(w, id));
+    expect(first).toMatchObject({
+      mandateId,
+      month: '2026-10',
+      monthSpent: AED(0n),
+      proposed: { organizationPolicy: false, mandatePolicy: false },
+    });
+    expect(first.made).toMatchObject({ decision: 'ALLOW', reasons: [], monthlyCapFrom: 'default' });
+    const approval = simulatedOf(await simulated(w, id, { amount: AED(1_600_000n) }));
+    expect(approval.made).toMatchObject({ decision: 'REQUIRE_APPROVAL', reasons: ['APPROVAL_THRESHOLD'] });
+    await simulated(w, id, {}, { organizationPolicy: proposed({ monthlyCap: 1n }) });
+    expect(await everyTable()).toEqual(before);
+
+    // The same engine and totals: a request made now gets what was simulated.
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe(first.made.decision);
+    expect(decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' })))).toMatchObject({
+      decision: 'ALLOW',
+    });
+    // AED 16,000 held: AED 16,000 more is past the default cap (AED 20,000), as a request would find it.
+    const held = simulatedOf(await simulated(w, id, { amount: AED(1_600_000n), orderReference: 'INV-3' }));
+    expect(held).toMatchObject({ monthSpent: AED(1_600_000n), month: '2026-10' });
+    expect(held.made).toMatchObject({ decision: 'DENY' });
+    expect([...held.made.reasons].sort()).toEqual(['APPROVAL_THRESHOLD', 'POLICY_MONTHLY_CAP']);
+    const request = decidedOf(await ask(acting, asking(w, { amount: AED(1_600_000n), orderReference: 'INV-3' })));
+    expect({ decision: request.decision, reasons: request.reasons }).toEqual({
+      decision: held.made.decision,
+      reasons: held.made.reasons,
+    });
+  });
+
+  it('weighs proposed rules in place of those in force, changing nothing', async () => {
+    const { w, mandateId, acting } = await ready();
+    const id = mandateId ?? '';
+    await capped(w, 'organization', null, 3_000_000n);
+
+    const tighter = simulatedOf(await simulated(w, id, {}, { organizationPolicy: proposed({ monthlyCap: 500_000n }) }));
+    expect(tighter.made).toMatchObject({
+      decision: 'DENY',
+      reasons: ['POLICY_MONTHLY_CAP'],
+      monthlyCapFrom: 'organization-policy',
+    });
+    expect(tighter.made.versions.organizationPolicy).toBe('proposed');
+    expect(tighter.proposed).toEqual({ organizationPolicy: true, mandatePolicy: false });
+
+    // The mandate's own, proposed: an approval threshold below the amount, its cap the organisation's.
+    const mandates = simulatedOf(
+      await simulated(w, id, {}, { mandatePolicy: proposed({ approvalThreshold: 100_000n }) }),
+    );
+    expect(mandates.made).toMatchObject({ decision: 'REQUIRE_APPROVAL', reasons: ['APPROVAL_THRESHOLD'] });
+    expect(mandates.made.versions.mandatePolicy).toBe('proposed');
+    expect(mandates.made.versions.organizationPolicy).toEqual(expect.any(String));
+
+    // Nothing proposed was kept: a request is weighed by the rules in force.
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+  });
+
+  it('refuses a proposed mandate policy wider than the mandate, or for a mandate not in force', async () => {
+    const { w, mandateId } = await ready();
+    expect(await simulated(w, mandateId ?? '', {}, { mandatePolicy: proposed({ monthlyCap: 100_000_000n }) })).toEqual(
+      refused(409, 'POLICY_WIDER_THAN_MANDATE'),
+    );
+    expect(await simulated(w, mandateId ?? '', {}, { mandatePolicy: proposed({ supplierIds: [ids.next()] }) })).toEqual(
+      refused(409, 'POLICY_WIDER_THAN_MANDATE'),
+    );
+
+    const drafting = await ready({ mandate: false });
+    const { id: draftId } = await shared.drafted(registry, drafting.w);
+    expect(await simulated(drafting.w, draftId, {}, { mandatePolicy: proposed({ approvalThreshold: 1n }) })).toEqual(
+      refused(409, 'MANDATE_NOT_IN_FORCE'),
+    );
+    // An ended mandate, its agent's new one in force: proposed rules for the old one are refused.
+    const renewed = await ready();
+    await movedPastTheUseCase(renewed.w, renewed.mandateId ?? '', 'revoke');
+    await shared.inForce(registry, renewed.w);
+    expect(
+      await simulated(renewed.w, renewed.mandateId ?? '', {}, { mandatePolicy: proposed({ approvalThreshold: 1n }) }),
+    ).toEqual(refused(409, 'MANDATE_NOT_IN_FORCE'));
+
+    // Without proposed rules, a draft's agent is weighed as it stands: no mandate in force.
+    const asItStands = simulatedOf(await simulated(drafting.w, draftId));
+    expect(asItStands).toMatchObject({ mandateId: null, month: null });
+    expect(asItStands.made).toMatchObject({ decision: 'DENY', reasons: ['MANDATE_NOT_IN_FORCE'] });
+  });
+
+  it('names the month in the agent’s kept zone, not its mandate’s, as a decision would', async () => {
+    const { w, mandateId } = await ready();
+    // A zone kept from an earlier mandate (UTC+14): already November when Dubai is still in October.
+    await withTenant(app, w.org, (tx) =>
+      tx
+        .insertInto('limit_reservations.agent_zones')
+        .values({ org_id: w.org, agent_id: w.agent, time_zone: 'Pacific/Kiritimati', created_at: clock.now() })
+        .execute(),
+    );
+    clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
+
+    expect(simulatedOf(await simulated(w, mandateId ?? '')).month).toBe('2026-11');
+  });
+
+  it('finds an order already claimed when one is named, however written, and none when none is', async () => {
+    const { w, mandateId, acting } = await ready();
+    const id = mandateId ?? '';
+    decidedOf(await ask(acting, asking(w)));
+
+    const again = simulatedOf(await simulated(w, id, { orderReference: ' inv-1001 ' }));
+    expect(again.made.reasons).toContain('DUPLICATE_ORDER_REFERENCE');
+    const unnamed = simulatedOf(await simulated(w, id, { orderReference: null }));
+    expect(unnamed.made.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
+  });
+
+  it('refuses another organisation’s mandate, a currency not taken and a frozen organisation, as a request is', async () => {
+    const { w, mandateId } = await ready();
+    const other = await ready();
+    expect(await simulated(other.w, mandateId ?? '')).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await simulated(w, ids.next())).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await simulated(w, mandateId ?? '', { amount: money(1_000_000n, 'USD') })).toEqual(
+      refused(422, 'CURRENCY_NOT_ALLOWED'),
+    );
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, ORGANIZATIONS, { orgId: w.org, id: w.org }, 'freeze', {
+        actor: OPERATOR,
+        action: 'organization.freeze',
+        details: {},
+      }),
+    );
+    expect(await simulated(w, mandateId ?? '')).toEqual(refused(409, 'ORG_FROZEN'));
   });
 });
 

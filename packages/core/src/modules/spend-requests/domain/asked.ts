@@ -39,6 +39,13 @@ export class SpendAskRefused extends Error {
   }
 }
 
+/** An order reference as a request keeps it (composed, NFC); or `SpendAskRefused`. */
+export function orderReferenceOf(orderReference: string): string {
+  const { name, problems } = visibleName(orderReference, ORDER_REFERENCE_MOST, 'the order reference');
+  if (problems.length > 0) throw new SpendAskRefused(problems);
+  return name;
+}
+
 /** The purpose and order reference as a request keeps them (composed, NFC); or `SpendAskRefused`. */
 export function askedText(asked: { readonly purpose: string; readonly orderReference: string }): {
   readonly purpose: string;
