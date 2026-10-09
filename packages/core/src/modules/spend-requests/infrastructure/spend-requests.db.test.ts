@@ -15,6 +15,7 @@ import type { Insertable, Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { type SeededSupplier as Supplier, seedRows } from '../../../seed-rows.helper.test.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { claimOrder, hasOpenClaim, orderKeyOf, releaseClaim } from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -28,11 +29,6 @@ const AT = new Date('2026-10-08T08:00:00Z');
 type Tx = DatabaseTransaction<SpendRequestsTables>;
 type RequestRow = Insertable<SpendRequestsTables['spend_requests.requests']>;
 type ClaimRow = Insertable<SpendRequestsTables['spend_requests.order_claims']>;
-
-interface Supplier {
-  readonly id: string;
-  readonly version: string;
-}
 
 interface Agent {
   readonly id: string;
@@ -48,40 +44,16 @@ interface Org {
   readonly supplier: Supplier;
 }
 
+const seed = () => seedRows(database.as('admin'), AT);
+
 /** An agent of the organisation with its key, made past the app, as the steps that add them are tested elsewhere. */
 const agentOf = async (org: string): Promise<Agent> => {
-  const agent = { id: randomUUID(), key: randomUUID() };
-  const admin = database.as('admin');
-  await admin.query(
-    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-     values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
-    [org, agent.id, randomUUID(), AT],
-  );
-  await admin.query('insert into directory.agent_keys (key_id, org_id) values ($1, $2)', [agent.key, org]);
-  await admin.query(
-    `insert into agents.agent_keys (org_id, id, agent_id, status, scopes, secret_mac, secret_key_version, expires_at,
-       created_at)
-     values ($1, $2, $3, 'ACTIVE', 'requests:write', $4, 1, '2027-10-08T08:00:00Z', $5)`,
-    [org, agent.key, agent.id, 'c'.repeat(64), AT],
-  );
-  return agent;
+  const id = await seed().agent(org);
+  return { id, key: await seed().agentKey(org, id) };
 };
 
 /** A supplier of the organisation with its first version, made past the app. */
-const supplierOf = async (org: string, payeeKey: string | null = null): Promise<Supplier> => {
-  const supplier = { id: randomUUID(), version: randomUUID() };
-  await database.as('admin').query(
-    `with supplier as (
-       insert into suppliers.suppliers (org_id, id, status, current_version_id, payee_key, created_at)
-       values ($1, $2, 'UNVERIFIED', $3, $4, $5) returning org_id)
-     insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts,
-       phone_ciphertext, contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
-     select org_id, $3, $2, 1, 'Gulf Office Supplies LLC', 'phone', pg_catalog.decode(pg_catalog.repeat('00', 40), 'hex'),
-       1, $5, 'registry', 'trade-licence-1', $2, $5 from supplier`,
-    [org, supplier.id, supplier.version, payeeKey, AT],
-  );
-  return supplier;
-};
+const supplierOf = (org: string, payeeKey: string | null = null) => seed().supplier(org, payeeKey);
 
 /** A policy and its first version, made past the app: the organisation's own (by its ID) or a mandate's (by the mandate's). */
 const policyOf = async (org: string, scope: 'organization' | 'mandate', id: string): Promise<string> => {
@@ -98,53 +70,15 @@ const policyOf = async (org: string, scope: 'organization' | 'mandate', id: stri
   return version;
 };
 
-/** A mandate of the agent waiting with its draft on the source, made past the app: its ID and its version's. */
-const mandateOf = async (org: string, agent: string, source: string, supplier: string) => {
-  const mandate = { id: randomUUID(), version: randomUUID() };
-  await database.as('admin').query(
-    `with mandate as (
-       insert into mandates.mandates (org_id, id, agent_id, time_zone, split_window_hours, status, pending_version_id,
-         created_at)
-       values ($1, $2, $3, 'Asia/Dubai', 24, 'PENDING_ACCEPTANCE', $4, $5) returning org_id)
-     insert into mandates.versions (org_id, id, mandate_id, version, purpose, currency, per_order_limit_minor,
-       monthly_limit_minor, approval_threshold_minor, supplier_ids, funding_source_id, split_check, consent_limits,
-       terms_hash, drafted_by, drafted_at)
-     select org_id, $4, $2, 1, 'Office supplies', 'AED', 500000, 2000000, 100000, $6, $7, 'on', 'strict', $8, $3, $5
-     from mandate`,
-    [org, mandate.id, agent, mandate.version, AT, supplier, source, 'a'.repeat(64)],
-  );
-  return mandate;
-};
-
 /** An organisation with an agent and its key, a funding source, a supplier and the agent's mandate, made past the app. */
 const organisation = async (): Promise<Org> => {
-  const ids = { org: randomUUID(), source: randomUUID(), link: randomUUID() };
-  const admin = database.as('admin');
-  await admin.query('insert into directory.orgs (org_id) values ($1)', [ids.org]);
-  const agent = await agentOf(ids.org);
-  await admin.query(
-    `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
-     values ($1, $2, $3, 'fake', 'session-1', $5, $4)`,
-    [ids.org, ids.link, randomUUID(), AT, new Date(AT.getTime() + 86_400_000)],
-  );
-  await admin.query(
-    `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
-       consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
-       max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
-     values ($1, $2, $3, 'fake', $4, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1', '2027-10-06T08:00:00Z', 'AED',
-       'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $5, $5)`,
-    [ids.org, ids.source, ids.link, `acct-${ids.source}`, AT],
-  );
-  const supplier = await supplierOf(ids.org);
-  const mandate = await mandateOf(ids.org, agent.id, ids.source, supplier.id);
-  return {
-    id: ids.org,
-    agent,
-    source: ids.source,
-    mandate: mandate.id,
-    mandateVersion: mandate.version,
-    supplier,
-  };
+  const id = randomUUID();
+  await seed().org(id);
+  const agent = await agentOf(id);
+  const source = await seed().source(id);
+  const supplier = await supplierOf(id);
+  const mandate = await seed().mandate(id, { agent: agent.id, source, supplier: supplier.id });
+  return { id, agent, source, mandate: mandate.id, mandateVersion: mandate.version, supplier };
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
