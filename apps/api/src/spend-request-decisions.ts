@@ -18,7 +18,9 @@
 // - 6: the supplier FOR NO KEY UPDATE, serialising the duplicate check;
 // - 7: the agent's month FOR NO KEY UPDATE, serialising the monthly check
 //   (decision 4: the agent's, under all its mandates);
-// - then the checks, each a statement of its own after the locks; the
+// - then the checks, each a statement of its own after the locks (with the
+//   mandate's split check on, the payee's reservations in its rolling
+//   window, across agents: D5, serialised by the supplier's lock); the
 //   request (8); its reservation and claim (11); its two signed events (12).
 //
 // Whatever the organisation can't give (no mandate, another organisation's
@@ -42,6 +44,7 @@ import {
   lockAgentMonth,
   monthSpent,
   reserve,
+  splitHeld,
 } from '@agentx/core/modules/limit-reservations';
 import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
@@ -64,7 +67,7 @@ import {
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf } from '@agentx/core/modules/suppliers';
-import { type Clock, type IdGenerator, type Money, money } from '@agentx/core/shared-kernel';
+import { type Clock, type IdGenerator, type Money, money, windowStart } from '@agentx/core/shared-kernel';
 import {
   type Database,
   type DatabaseTransaction,
@@ -127,8 +130,8 @@ export interface SpendRequestDecisions {
 const rulesOf = (read: { readonly current: PolicyVersionRecord } | null): PolicyRules | null =>
   read === null ? null : { ...read.current, versionId: read.current.id };
 
-/** The agent's mandate in force as the engine weighs it, with the zone its months start in. */
-export type MandateWeighed = MandateInForce & { readonly timeZone: string };
+/** The agent's mandate in force as the engine weighs it, with the zone its months start in and its split window. */
+export type MandateWeighed = MandateInForce & { readonly timeZone: string; readonly splitWindowHours: number };
 
 /** A currency the deployment doesn't take is refused: nothing is weighed in it (422). */
 export async function currencyTaken(tx: DecisionTx, currency: string): Promise<void> {
@@ -259,6 +262,15 @@ export async function weigh(
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month });
+  // The split total, only where it is weighed: the mandate's split check on, for a supplier of the organisation's.
+  const split =
+    mandate?.splitCheck === true && supplier !== null
+      ? await splitHeld(tx, {
+          supplierId: supplier.id,
+          payeeKey: supplier.payeeKey,
+          since: windowStart(now, mandate.splitWindowHours),
+        })
+      : 0n;
   const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
   const input: DecisionInput = {
     request: { amount: asked.amount, supplierId: asked.supplierId, fundingSourceId: asked.fundingSourceId },
@@ -270,8 +282,7 @@ export async function weigh(
     organizationPolicy,
     mandatePolicy,
     monthSpent: money(spent, currency),
-    // The split aggregate comes with D5: until then no split order is counted.
-    splitOpen: money(0n, currency),
+    splitOpen: money(split, currency),
     duplicateOrder,
   };
   return { input, mandate, supplier, order, month };

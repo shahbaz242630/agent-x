@@ -22,8 +22,8 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
-import { DAY_MS, money } from '@agentx/core/shared-kernel';
+import { SUPPLIERS, supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
+import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -184,6 +184,25 @@ const capped = (w: World, scope: 'organization' | 'mandate', mandateId: string |
     }),
   );
 };
+
+/** A second agent of the world's organisation with a mandate in force on `terms` and a key: acting as it. */
+async function secondAgent(w: World, terms: Parameters<typeof shared.termsOf>[1] = {}) {
+  const other = ids.next();
+  await withSignedStates(app, w.org, quiet(), (tx, states) =>
+    addAgent(tx, states, {
+      orgId: w.org,
+      id: other,
+      name: 'Second purchasing agent',
+      owner: w.admin.membershipId,
+      scopes: ['requests:write'],
+      createdAt: clock.now(),
+      actor: OPERATOR,
+    }),
+  );
+  const theirs = { ...w, agent: other };
+  await shared.inForce(registry, theirs, terms);
+  return agentKey(theirs);
+}
 
 /**
  * The requests `asked` sends, made while `holding`'s transaction holds its
@@ -389,12 +408,16 @@ describe('deciding a spend request and reserving it (D4)', () => {
     await movedPastTheUseCase(w, mandateId ?? '', 'revoke');
     const next = await shared.inForce(registry, w);
 
-    const over = decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-2' })));
+    // To the other supplier, so the split check (D5) adds nothing.
+    const other = w.suppliers[1] ?? '';
+    const over = decidedOf(
+      await ask(acting, asking(w, { amount: AED(1_500_000n), supplierId: other, orderReference: 'INV-2' })),
+    );
 
     // AED 15,000 held under the revoked mandate and 15,000 asked: past the default AED 20,000 cap.
     expect(over).toMatchObject({ mandateId: next, decision: 'DENY', reasons: ['POLICY_MONTHLY_CAP'] });
     // Exactly at the cap passes.
-    const rest = asking(w, { amount: AED(500_000n), orderReference: 'INV-3' });
+    const rest = asking(w, { amount: AED(500_000n), supplierId: other, orderReference: 'INV-3' });
     expect(decidedOf(await ask(acting, rest)).decision).toBe('ALLOW');
   });
 
@@ -494,25 +517,11 @@ describe('deciding a spend request and reserving it (D4)', () => {
       'ALLOW',
     );
 
-    const other = ids.next();
-    await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      addAgent(tx, states, {
-        orgId: w.org,
-        id: other,
-        name: 'Second purchasing agent',
-        owner: w.admin.membershipId,
-        scopes: ['requests:write'],
-        createdAt: clock.now(),
-        actor: OPERATOR,
-      }),
-    );
-    const theirs = { ...w, agent: other };
-    await shared.inForce(registry, theirs);
-    const theirKey = await agentKey(theirs);
-    // AED 15,000 held by the first agent this month; the second's own month is empty.
-    expect(
-      decidedOf(await ask(theirKey, asking(w, { amount: AED(1_500_000n), orderReference: 'INV-3' }))).decision,
-    ).toBe('ALLOW');
+    const theirKey = await secondAgent(w);
+    // AED 15,000 held by the first agent this month; the second's own month is empty. To the other supplier, so
+    // the split check (D5) adds nothing.
+    const other = asking(w, { amount: AED(1_500_000n), supplierId: w.suppliers[1] ?? '', orderReference: 'INV-3' });
+    expect(decidedOf(await ask(theirKey, other)).decision).toBe('ALLOW');
     // A key is its own agent's alone.
     expect(await ask({ ...acting, keyId: theirKey.keyId }, asking(w, { orderReference: 'INV-4' }))).toEqual(
       refused(401, 'UNAUTHENTICATED'),
@@ -699,6 +708,133 @@ describe("through the agent's route (D4r)", () => {
   });
 });
 
+/** The supplier's payee key set or cleared past the use cases, signed: a key moving between records. */
+const payeeKeyOf = (w: World, id: string, payeeKey: string | null) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
+    if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+    await states.record(
+      tx,
+      SUPPLIERS,
+      { orgId: w.org, id },
+      found.state,
+      { payee_key: payeeKey, payee_key_version: payeeKey === null ? null : 1 },
+      { actor: OPERATOR, action: 'supplier.payee_key_moved', details: {} },
+    );
+  });
+
+/** Approval above AED 15,000, so two orders within the default cap (AED 20,000 a month) can cross it together. */
+const SPLIT_TERMS = { approvalThreshold: AED(1_500_000n) };
+const SPLIT = { decision: 'REQUIRE_APPROVAL', reasons: ['AGGREGATE_THRESHOLD'], status: 'APPROVAL_REQUIRED' };
+
+describe('the split check (D5, SEC-LIM-04)', () => {
+  it('sends a split order for approval: the supplier’s orders in the window crossing the threshold, across midnight', async () => {
+    const { w, mandateId, acting } = await ready({ terms: SPLIT_TERMS });
+    // 23:30 in Dubai.
+    clock.advanceBy(11.5 * HOUR_MS);
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+
+    // 00:30 the next day: a calendar day would start afresh, the rolling window doesn't.
+    clock.advanceBy(HOUR_MS);
+    const second = asking(w, { amount: AED(600_000n), orderReference: 'INV-2' });
+    // The simulator weighs the same split total, writing nothing.
+    expect(simulatedOf(await simulated(w, mandateId ?? '', second)).made).toMatchObject({
+      decision: SPLIT.decision,
+      reasons: SPLIT.reasons,
+    });
+    const split = decidedOf(await ask(acting, second));
+
+    expect(split).toMatchObject(SPLIT);
+    expect((await heldBy(w.org, split.id)).reservation).toMatchObject({ state: 'HELD', amount_minor: 600_000n });
+    // Another supplier's orders are its own: AED 20,000 in the month, exactly the cap.
+    const other = asking(w, { amount: AED(400_000n), supplierId: w.suppliers[1] ?? '', orderReference: 'INV-3' });
+    expect(decidedOf(await ask(acting, other)).decision).toBe('ALLOW');
+  });
+
+  it('counts an order only while it is in the window', async () => {
+    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+
+    clock.advanceBy(DAY_MS + 60_000);
+
+    expect(decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' }))).decision).toBe(
+      'ALLOW',
+    );
+  });
+
+  it('adds up every agent’s orders to the supplier', async () => {
+    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+    const theirKey = await secondAgent(w, SPLIT_TERMS);
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+
+    // The second agent's month is empty; the supplier's window isn't.
+    const split = decidedOf(await ask(theirKey, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' })));
+
+    expect(split).toMatchObject(SPLIT);
+  });
+
+  it('adds up the payee’s orders under another supplier record holding its key', async () => {
+    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+    const [first, second] = [w.suppliers[0] ?? '', w.suppliers[1] ?? ''];
+    await payeeKeyOf(w, first, 'payee-1');
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+    // The payee's key moved to the second supplier record, as a supplier re-created for the same account.
+    await payeeKeyOf(w, first, null);
+    await payeeKeyOf(w, second, 'payee-1');
+
+    const split = decidedOf(
+      await ask(acting, asking(w, { amount: AED(600_000n), supplierId: second, orderReference: 'INV-2' })),
+    );
+
+    expect(split).toMatchObject(SPLIT);
+  });
+
+  it('keeps counting the supplier’s orders under a revoked mandate: a new one never resets the window', async () => {
+    const { w, mandateId, acting } = await ready({ terms: SPLIT_TERMS });
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+    await movedPastTheUseCase(w, mandateId ?? '', 'revoke');
+    const next = await shared.inForce(registry, w, SPLIT_TERMS);
+
+    const split = decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' })));
+
+    expect(split).toMatchObject({ ...SPLIT, mandateId: next });
+  });
+
+  it('with the check off, weighs each order alone, and still denies the same order twice', async () => {
+    const { w, acting } = await ready({ terms: { ...SPLIT_TERMS, splitCheck: false } });
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+    const second = asking(w, { amount: AED(600_000n), orderReference: 'INV-2' });
+
+    expect(decidedOf(await ask(acting, second)).decision).toBe('ALLOW');
+    // The same order again, for AED 100: within every limit, and still the duplicate.
+    expect(decidedOf(await ask(acting, { ...second, amount: AED(10_000n) }))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE'],
+    });
+  });
+
+  it('runs two agents’ orders to one supplier one after the other: the second sees the first’s (forced)', async () => {
+    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+    const theirKey = await secondAgent(w, SPLIT_TERMS);
+    const supplier = w.suppliers[0] ?? '';
+
+    // Each alone within the threshold, the two past it; two agents' months, so only the supplier serialises them.
+    const answers = await whileHeld(
+      (wait) =>
+        withSignedStates(app, w.org, quiet(), async (tx, states) => {
+          await supplierOf(tx, states, { orgId: w.org, id: supplier }, 'change');
+          await wait();
+        }),
+      () => [
+        ask(acting, asking(w, { orderReference: 'INV-1' })),
+        ask(theirKey, asking(w, { orderReference: 'INV-2' })),
+      ],
+    );
+
+    expect(answers.map((answer) => decidedOf(answer).decision).sort()).toEqual(['ALLOW', 'REQUIRE_APPROVAL']);
+  });
+});
+
 /**
  * Every table's rows, as the database admin sees them, in one fixed
  * statement: each table's count and a checksum of every row, so an update
@@ -758,9 +894,11 @@ describe('the simulator (C4, decision 9)', () => {
 
     // The same engine and totals: a request made now gets what was simulated.
     expect(decidedOf(await ask(acting, asking(w))).decision).toBe(first.made.decision);
-    expect(decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' })))).toMatchObject({
-      decision: 'ALLOW',
-    });
+    // To the other supplier, so only the month adds it (D5 would add the first supplier's as a split).
+    const other = w.suppliers[1] ?? '';
+    expect(
+      decidedOf(await ask(acting, asking(w, { amount: AED(600_000n), supplierId: other, orderReference: 'INV-2' }))),
+    ).toMatchObject({ decision: 'ALLOW' });
     // AED 16,000 held: AED 16,000 more is past the default cap (AED 20,000), as a request would find it.
     const held = simulatedOf(await simulated(w, id, { amount: AED(1_600_000n), orderReference: 'INV-3' }));
     expect(held).toMatchObject({ monthSpent: AED(1_600_000n), month: '2026-10' });

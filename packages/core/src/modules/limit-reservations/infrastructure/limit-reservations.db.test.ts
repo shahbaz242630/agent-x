@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { RESERVATION } from '../domain/reservation.ts';
+import { splitHeld } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -443,6 +444,50 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
     for (const state of ['BLOCKED_UNKNOWN', 'FINALISED']) {
       await expect(change(org, id, moveTo(state))).rejects.toEqual(refusedBy('held_for_its_request'));
     }
+  });
+});
+
+/** The split total for the supplier (and payee key) given, since `since`, as a decision reads it (D5). */
+const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT) =>
+  inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since }));
+
+describe('the split total (`splitHeld`, D5)', () => {
+  it('adds up the supplier’s reservations still holding capacity, reserved since the window began', async () => {
+    const org = await organisation();
+    await period(org);
+    await reserve(org);
+    await moved(org, 'FINALISED');
+    await moved(org, 'RELEASED');
+    const other = await organisation();
+    await period(other);
+    await reserve(other);
+
+    // HELD and FINALISED count, RELEASED never; another organisation's never.
+    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
+    // The window's first instant counts; one reserved before it doesn't.
+    expect(await splitOf(org, org.supplier, null, new Date(AT.getTime() + 1))).toBe(0n);
+  });
+
+  it('counts the payee key’s under another supplier record, and the supplier’s own under any key or none', async () => {
+    const org = await organisation('payee-1');
+    await period(org);
+    await reserve(org, { payee_key: 'payee-1' });
+    // The key moved to a new supplier record past the app, as a re-created supplier would take it.
+    await database
+      .as('admin')
+      .query('update suppliers.suppliers set payee_key = null where org_id = $1 and id = $2', [org.id, org.supplier]);
+    await reserve(org);
+    const recreated = await seedRows(database.as('admin'), AT).supplier(org.id, 'payee-1');
+
+    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
+    expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
+    // Given a new key, the supplier still counts its own, whatever key each was made under.
+    expect(await splitOf(org, org.supplier, 'payee-2')).toBe(50_000n);
+    // Another organisation's supplier may hold the same key (keys are per organisation): its orders never count.
+    const other = await organisation('payee-1');
+    await period(other);
+    await reserve(other, { payee_key: 'payee-1' });
+    expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
   });
 });
 
