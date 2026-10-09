@@ -9,6 +9,8 @@
 // - `monthSpent`: the agent's month, every reservation but a released one, in
 //   a statement of its own after the lock, so READ COMMITTED's fresh snapshot
 //   sees every reservation the transaction it waited for committed (§7.2);
+// - `splitHeld`: with the mandate's split check on, the payee's reservations
+//   in its rolling window, across agents, as a statement of its own too (D5);
 // - `reserve`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
@@ -81,6 +83,34 @@ export async function monthSpent(
     .where('state', '<>', 'RELEASED')
     .executeTakeFirstOrThrow();
   return BigInt(spent);
+}
+
+/**
+ * The split total in minor units (ADR-006 §9, ADR-014 §3 and §5; D5): what the
+ * payee's reservations still hold (every state but RELEASED) that were
+ * reserved since `since`, under any agent of the organisation. The payee is
+ * its supplier, and its payee key where it has one: both are read, so a
+ * reservation made under another supplier record with the same payee key
+ * counts, and so does one the supplier made before it had a key (0041's
+ * indexes). A statement of its own after the supplier's lock, which
+ * serialises the payee's decisions (§7.2).
+ */
+export async function splitHeld(
+  tx: ReservationsTransaction,
+  { supplierId, payeeKey, since }: { supplierId: string; payeeKey: string | null; since: Date },
+): Promise<bigint> {
+  const { held } = await tx
+    .selectFrom('limit_reservations.reservations')
+    .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
+    .where('state', '<>', 'RELEASED')
+    .where('reserved_at', '>=', since)
+    .where((where) =>
+      payeeKey === null
+        ? where('supplier_id', '=', supplierId)
+        : where.or([where('supplier_id', '=', supplierId), where('payee_key', '=', payeeKey)]),
+    )
+    .executeTakeFirstOrThrow();
+  return BigInt(held);
 }
 
 /** A request's reservation, as a decision holds it. */
