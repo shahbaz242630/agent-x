@@ -1,6 +1,6 @@
 // The pieces many routes' schemas share, written once so every route says
 // them alike in the OpenAPI document.
-import { MoneyRefused } from '@agentx/core/shared-kernel';
+import { MoneyRefused, REASON_CODES, type ReasonCode } from '@agentx/core/shared-kernel';
 import { z } from 'zod';
 
 import { API_SCHEMAS } from './api-schemas.ts';
@@ -77,3 +77,10 @@ export const pageQuery = (most: number) =>
   });
 
 export const NEXT = z.uuid().nullable().describe('The ID to ask the next page after; null at the end.');
+
+/** A decision's reasons, each a code with what it means: the request's answer and the simulator's. */
+export const REASONS = z
+  .array(z.object({ code: z.string(), message: z.string() }))
+  .describe('Why it was decided so, each a reason code with what it means. Empty when allowed outright.');
+
+export const reasonsOf = (codes: readonly ReasonCode[]) => codes.map((code) => ({ code, message: REASON_CODES[code] }));

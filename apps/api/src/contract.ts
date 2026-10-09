@@ -498,7 +498,7 @@ function limitAndAccessProblems(route: RouteOptions, keys: ReadonlyMap<string, u
 function operationHeaderProblems(route: RouteOptions, keys: ReadonlyMap<string, unknown>, written: boolean): string[] {
   const problems: string[] = [];
   const operation = route.config?.operation;
-  problems.push(...operationProblems(operation, methodsOf(route), route.config?.access));
+  problems.push(...operationProblems(operation, methodsOf(route), route.config?.access, route.config?.writesNothing));
   // One method, so the document shows the name on one operation, as OpenAPI requires.
   if (operation !== undefined && methodsOf(route).length !== 1) {
     problems.push('it names an operation but serves more than one method: make a route for each');

@@ -1159,6 +1159,143 @@
         "additionalProperties": false,
         "description": "Accepting a mandate’s draft, waiting for the admin to sign in again."
       },
+      "PolicySimulation": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "DENY",
+              "REQUIRE_NEW_MANDATE",
+              "REQUIRE_APPROVAL",
+              "ALLOW"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "mandateId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "versions": {
+            "type": "object",
+            "properties": {
+              "mandate": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "organizationPolicy": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mandatePolicy": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "mandate",
+              "organizationPolicy",
+              "mandatePolicy"
+            ],
+            "additionalProperties": false
+          },
+          "proposed": {
+            "type": "object",
+            "properties": {
+              "organizationPolicy": {
+                "type": "boolean"
+              },
+              "mandatePolicy": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "organizationPolicy",
+              "mandatePolicy"
+            ],
+            "additionalProperties": false
+          },
+          "monthlyCapFrom": {
+            "type": "string",
+            "enum": [
+              "mandate-policy",
+              "organization-policy",
+              "default"
+            ]
+          },
+          "month": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "monthSpentMinor": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "decision",
+          "reasons",
+          "mandateId",
+          "versions",
+          "proposed",
+          "monthlyCapFrom",
+          "month",
+          "monthSpentMinor"
+        ],
+        "additionalProperties": false,
+        "description": "What a request would get now, weighed by the same engine and totals; nothing made."
+      },
       "PolicyVersion": {
         "type": "object",
         "properties": {
@@ -11638,6 +11775,254 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MandateDetails"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/policy/simulate": {
+      "post": {
+        "summary": "What a request by the mandate’s agent would get now, with the rules in force or proposed ones",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "amountMinor": {
+                    "type": "number"
+                  },
+                  "currency": {
+                    "type": "string"
+                  },
+                  "supplierId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "fundingSourceId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "orderReference": {
+                    "type": "string"
+                  },
+                  "whatIf": {
+                    "type": "object",
+                    "properties": {
+                      "organizationPolicy": {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "pattern": "^[A-Z]{3}$"
+                          },
+                          "perOrderCap": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "capMinor": {
+                                    "type": "number"
+                                  },
+                                  "over": {
+                                    "type": "string",
+                                    "enum": [
+                                      "DENY",
+                                      "REQUIRE_APPROVAL"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "capMinor",
+                                  "over"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "monthlyCapMinor": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "approvalThresholdMinor": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "supplierIds": {
+                            "anyOf": [
+                              {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "currency"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "mandatePolicy": {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "pattern": "^[A-Z]{3}$"
+                          },
+                          "perOrderCap": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "capMinor": {
+                                    "type": "number"
+                                  },
+                                  "over": {
+                                    "type": "string",
+                                    "enum": [
+                                      "DENY",
+                                      "REQUIRE_APPROVAL"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "capMinor",
+                                  "over"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "monthlyCapMinor": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "approvalThresholdMinor": {
+                            "type": [
+                              "number",
+                              "null"
+                            ]
+                          },
+                          "supplierIds": {
+                            "anyOf": [
+                              {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                }
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "currency"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "amountMinor",
+                  "currency",
+                  "supplierId",
+                  "fundingSourceId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "header",
+            "name": "agentx-organization",
+            "required": true,
+            "description": "The organisation the request acts in, by its ID. The signed-in person must be an active member of it, in one of the roles the address answers."
+          }
+        ],
+        "x-access": [
+          "admin",
+          "approver",
+          "developer"
+        ],
+        "x-body-limit": 49152,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicySimulation"
                 }
               }
             }

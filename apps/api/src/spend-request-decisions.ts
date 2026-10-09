@@ -93,12 +93,17 @@ export interface AgentActing {
   readonly keyId: string;
 }
 
-/** What the agent asks to pay, its edge checks passed (D4r). */
-export interface SpendAskedByAgent {
+/** A request as the engine weighs it: the simulator's may name no order. */
+export interface SpendWeighed {
   readonly amount: Money;
   readonly supplierId: string;
   readonly fundingSourceId: string;
-  /** The supplier's own invoice or order number, as written (decision 6). */
+  /** The supplier's own invoice or order number, as written (decision 6); null: none named, none checked. */
+  readonly orderReference: string | null;
+}
+
+/** What the agent asks to pay, its edge checks passed (D4r). */
+export interface SpendAskedByAgent extends SpendWeighed {
   readonly orderReference: string;
   readonly purpose: string;
 }
@@ -122,27 +127,45 @@ export interface SpendRequestDecisions {
 const rulesOf = (read: { readonly current: PolicyVersionRecord } | null): PolicyRules | null =>
   read === null ? null : { ...read.current, versionId: read.current.id };
 
+/** The agent's mandate in force as the engine weighs it, with the zone its months start in. */
+export type MandateWeighed = MandateInForce & { readonly timeZone: string };
+
+/** A currency the deployment doesn't take is refused: nothing is weighed in it (422). */
+export async function currencyTaken(tx: DecisionTx, currency: string): Promise<void> {
+  if (!(await currencyAllowed(tx, currency))) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
+}
+
 /** A read tampered with refuses the request: nothing is decided on what can't be believed. */
 const believed = (read: { readonly outcome: string }): void => {
   if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
 };
 
-/** Levels 2–3a: the organisation not frozen, the agent, and the key it came with, still live and its own. */
-async function actingIn(tx: DecisionTx, states: SignedStates, { orgId, agentId, keyId }: AgentActing, now: Date) {
+/** Levels 2–3: the organisation not frozen, and the agent. */
+export async function agentIn(
+  tx: DecisionTx,
+  states: SignedStates,
+  { orgId, agentId }: { readonly orgId: string; readonly agentId: string },
+) {
   // The organisation always exists while its requests can be made.
   const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
   if (organization.outcome !== 'verified') throw new MandateRefused(503, 'INTEGRITY_FAILED');
   if (organization.fields.get('status') === 'FROZEN') throw new MandateRefused(409, 'ORG_FROZEN');
   const agent = await agentOf(tx, states, { orgId, id: agentId }, 'share');
   believed(agent);
-  // The key's check found it, and agents are never deleted (0019's grants).
-  if (agent.outcome !== 'found') throw new Error(`A key's agent is missing: ${agentId}`);
-  const key = await agentKeyOf(tx, states, { orgId, id: keyId }, 'share');
+  // A key's check, or a mandate's own row, found it, and agents are never deleted (0019's grants).
+  if (agent.outcome !== 'found') throw new Error(`An agent is missing: ${agentId}`);
+  return agent.agent;
+}
+
+/** Levels 2–3a: the organisation not frozen, the agent, and the key it came with, still live and its own. */
+async function actingIn(tx: DecisionTx, states: SignedStates, acting: AgentActing, now: Date) {
+  const agent = await agentIn(tx, states, acting);
+  const key = await agentKeyOf(tx, states, { orgId: acting.orgId, id: acting.keyId }, 'share');
   believed(key);
-  if (key.outcome !== 'found' || key.key.agentId !== agent.agent.id || !isLiveKey(key.key, now)) {
+  if (key.outcome !== 'found' || key.key.agentId !== agent.id || !isLiveKey(key.key, now)) {
     throw new MandateRefused(401, 'UNAUTHENTICATED');
   }
-  return { agent: agent.agent, keyId: key.key.id };
+  return { agent, keyId: key.key.id };
 }
 
 /**
@@ -153,7 +176,7 @@ async function actingIn(tx: DecisionTx, states: SignedStates, { orgId, agentId, 
 async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, agentId: string) {
   const open = await openMandateOfAgent(tx, states, orgId, agentId);
   believed(open);
-  let mandate: (MandateInForce & { readonly timeZone: string }) | null = null;
+  let mandate: MandateWeighed | null = null;
   if (open.outcome === 'found' && open.mandate.currentVersionId !== null) {
     const version = await versionIn(tx, states, orgId, open.mandate.id, open.mandate.currentVersionId);
     mandate = { ...version, ...open.mandate, versionId: version.id };
@@ -164,18 +187,73 @@ async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, 
 }
 
 /** Levels 5 and 6: the source asked for, and the supplier, held, with whether its order is claimed already. */
-async function payingIn(tx: DecisionTx, states: SignedStates, orgId: string, asked: SpendAskedByAgent) {
+async function payingIn(tx: DecisionTx, states: SignedStates, orgId: string, asked: SpendWeighed) {
   const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
   believed(source);
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, 'change');
   believed(supplier);
   if (supplier.outcome !== 'found') return { source, supplier: null, order: null, duplicateOrder: false };
+  // The simulator may weigh a request with no order named: no duplicate is then looked for.
+  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null, duplicateOrder: false };
   const order = {
     supplierId: supplier.supplier.id,
     payeeKey: supplier.supplier.payeeKey,
     reference: asked.orderReference,
   };
   return { source, supplier: supplier.supplier, order, duplicateOrder: await hasOpenClaim(tx, order) };
+}
+
+/** The policies in force for the agent's mandate, as the engine weighs them. */
+export interface PoliciesWeighed {
+  readonly organizationPolicy: PolicyRules | null;
+  readonly mandatePolicy: PolicyRules | null;
+}
+
+/**
+ * Levels 4–7 and what the engine weighs, shared with the simulator (C4): the
+ * agent's authority, the source and supplier, the agent's month and its
+ * total. `monthOf` locks the month for a decision, or only reads it for the
+ * simulator; `rules` lets the simulator put proposed policies in place of
+ * those in force.
+ */
+export async function weigh(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  agent: { readonly id: string; readonly status: string },
+  asked: SpendWeighed,
+  {
+    now,
+    monthOf,
+    rules = (inForce) => inForce,
+  }: {
+    readonly now: Date;
+    readonly monthOf: (zoneIfNew: string) => Promise<string>;
+    readonly rules?: (inForce: PoliciesWeighed, mandate: MandateWeighed | null) => PoliciesWeighed;
+  },
+) {
+  const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
+  const { mandatePolicy, organizationPolicy } = rules(inForce, mandate);
+  const { source, supplier, order, duplicateOrder } = await payingIn(tx, states, orgId, asked);
+  // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
+  const month = mandate === null ? null : await monthOf(mandate.timeZone);
+  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month });
+  const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
+  const input: DecisionInput = {
+    request: { amount: asked.amount, supplierId: asked.supplierId, fundingSourceId: asked.fundingSourceId },
+    now,
+    agent: { id: agent.id, status: agent.status },
+    mandate,
+    supplierStatus: supplier?.status ?? null,
+    sourceMayFund: source.outcome === 'found' && mayFund(source.source, now),
+    organizationPolicy,
+    mandatePolicy,
+    monthSpent: money(spent, currency),
+    // The split aggregate comes with D5: until then no split order is counted.
+    splitOpen: money(0n, currency),
+    duplicateOrder,
+  };
+  return { input, mandate, supplier, order, month };
 }
 
 export function createSpendRequestDecisions({
@@ -204,30 +282,12 @@ export function createSpendRequestDecisions({
   ): Promise<string> {
     const { orgId, agentId } = acting;
     const now = clock.now();
-    if (!(await currencyAllowed(tx, asked.amount.currency))) throw new MandateRefused(422, 'CURRENCY_NOT_ALLOWED');
+    await currencyTaken(tx, asked.amount.currency);
     const { agent, keyId } = await actingIn(tx, states, acting, now);
-    const { mandate, mandatePolicy, organizationPolicy } = await authorityIn(tx, states, orgId, agentId);
-    const { source, supplier, order, duplicateOrder } = await payingIn(tx, states, orgId, asked);
-    // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
-    const month =
-      mandate === null ? null : await lockAgentMonth(tx, { orgId, agentId, zoneIfNew: mandate.timeZone, at: now });
-    const spent = month === null ? 0n : await monthSpent(tx, { agentId, month });
-    const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
-
-    const input: DecisionInput = {
-      request: { amount: asked.amount, supplierId: asked.supplierId, fundingSourceId: asked.fundingSourceId },
+    const { input, mandate, supplier, order, month } = await weigh(tx, states, orgId, agent, asked, {
       now,
-      agent: { id: agent.id, status: agent.status },
-      mandate,
-      supplierStatus: supplier?.status ?? null,
-      sourceMayFund: source.outcome === 'found' && mayFund(source.source, now),
-      organizationPolicy,
-      mandatePolicy,
-      monthSpent: money(spent, currency),
-      // The split aggregate comes with D5: until then no split order is counted.
-      splitOpen: money(0n, currency),
-      duplicateOrder,
-    };
+      monthOf: (zoneIfNew) => lockAgentMonth(tx, { orgId, agentId, zoneIfNew, at: now }),
+    });
     const made = decide(input);
     const requestId = ids.next();
     const hash = keys.mac('decision-hash', [

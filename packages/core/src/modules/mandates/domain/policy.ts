@@ -83,7 +83,10 @@ function suppliersKept(given: readonly string[], problems: string[]): string[] {
  * each rule above the mandate's own, a supplier it doesn't name, or another
  * currency. None: within it.
  */
-export function widerThanMandate(rules: PolicyRules, terms: MandateTerms): string[] {
+export function widerThanMandate(
+  rules: PolicyRules,
+  terms: Pick<MandateTerms, 'perOrderLimit' | 'monthlyLimit' | 'approvalThreshold' | 'supplierIds'>,
+): string[] {
   if (rules.currency !== terms.perOrderLimit.currency) return ['the policy is not in the mandate’s currency'];
   const above = (rule: Money | null, limit: Money) => rule !== null && compare(rule, limit) > 0;
   const wider: string[] = [];

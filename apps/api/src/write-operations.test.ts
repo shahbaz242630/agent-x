@@ -126,6 +126,23 @@ describe('SEC-DP-07 each write names what it does, so its idempotency keys are i
     ]);
   });
 
+  it('takes a POST that writes nothing with no operation, and nothing else saying so (SEC-AG-09)', () => {
+    expect(operationProblems(undefined, ['POST'], ['admin'], true)).toEqual([]);
+    expect(operationProblems('policies.simulate', ['POST'], ['admin'], true)).toEqual([
+      'it names an operation, but it writes nothing, so it takes no key',
+    ]);
+    for (const [methods, writesNothing] of [
+      [['PUT'], true],
+      [['POST', 'PUT'], true],
+      [['POST'], false],
+      [['POST'], 'yes'],
+    ] as const) {
+      expect(operationProblems(undefined, methods, ['admin'], writesNothing)).toEqual([
+        'only a POST may say it writes nothing (config.writesNothing: true)',
+      ]);
+    }
+  });
+
   it('names each operation more than one route names, once', () => {
     expect(sharedOperations(['a', undefined, 'b', 'a', undefined, 'a', 'c'])).toEqual(['a']);
     expect(sharedOperations(['a', 'b', undefined, undefined])).toEqual([]);
