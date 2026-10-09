@@ -361,6 +361,19 @@ export interface SignedStates {
     size: number,
   ): Promise<HistoryBatch>;
   /**
+   * The table's next objects in the organisation after `after` (null from the
+   * start), at most `size`, by ID: its rows and every object the log holds an
+   * event about, so one whose row was deleted is listed too (a read of it is
+   * then `deleted`); and the ID to list the next after, or null for the last.
+   */
+  objectIds(
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    after: string | null,
+    size: number,
+  ): Promise<{ readonly ids: readonly string[]; readonly next: string | null }>;
+  /**
    * The newest investigation of the HELD state `holdEventId` names, by its ID,
    * or null for none yet: the one the API's job checks the whole history
    * after (D1c review), so the check runs once the cause is declared removed.
@@ -892,6 +905,23 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'read', events: read.events });
   };
 
+  /** The table's next objects, its rows' and the log's together (SignedStates.objectIds). */
+  const objectIdsOf = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    after: string | null,
+    size: number,
+  ) => {
+    notTheHold(table);
+    const rowIds = await signedRowIds(tx, table, orgId, size, after);
+    const loggedIds = await trail.subjectIds(tx, orgId, table.subject, size, after);
+    // Each list holds one more than `size` at most, so its first `size` of the two together are the next ones.
+    const next = [...new Set([...rowIds, ...loggedIds])].sort();
+    const ids = Object.freeze(next.slice(0, size));
+    return Object.freeze({ ids, next: next.length > size ? (ids.at(-1) ?? null) : null });
+  };
+
   return Object.freeze({
     verifiedState,
 
@@ -930,21 +960,18 @@ export function createSignedStates({
       after: string | null,
       size: number,
     ): Promise<HistoryBatch> {
-      notTheHold(table);
-      const rowIds = await signedRowIds(tx, table, orgId, size, after);
-      const loggedIds = await trail.subjectIds(tx, orgId, table.subject, size, after);
-      // Each list holds one more than `size` at most, so its first `size` of the two together are the next ones.
-      const next = [...new Set([...rowIds, ...loggedIds])].sort();
-      const batch = next.slice(0, size);
+      const { ids: batch, next } = await objectIdsOf(tx, orgId, table, after, size);
       const findings = await judged(tx, orgId, table, batch);
       if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
       return Object.freeze({
         outcome: 'checked',
         objects: batch.length,
         last: batch.at(-1) ?? after,
-        done: next.length <= size,
+        done: next === null,
       });
     },
+
+    objectIds: objectIdsOf,
 
     async latestInvestigation(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<string | null> {
       const read = await historyOf(tx, orgId, {

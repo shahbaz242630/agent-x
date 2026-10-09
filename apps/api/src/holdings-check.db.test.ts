@@ -197,6 +197,28 @@ describe('the holdings check (E1)', () => {
       'waiting',
     ],
     [
+      'a reservation moved to another month',
+      async (owner, { allowed }) => {
+        await owner.query(
+          "insert into limit_reservations.agent_periods (org_id, agent_id, month, created_at) select org_id, agent_id, '2026-09', now() from limit_reservations.reservations where request_id = $1",
+          [allowed],
+        );
+        return owner.query("update limit_reservations.reservations set month = '2026-09' where request_id = $1", [
+          allowed,
+        ]);
+      },
+      'allowed',
+    ],
+    [
+      'a reservation moved back out of the split window',
+      (owner, { waiting }) =>
+        owner.query(
+          "update limit_reservations.reservations set reserved_at = reserved_at - interval '30 days' where request_id = $1",
+          [waiting],
+        ),
+      'waiting',
+    ],
+    [
       'a claim released',
       (owner, { allowed }) =>
         owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [allowed]),
@@ -227,7 +249,7 @@ describe('the holdings check (E1)', () => {
     expect(await holdOf(w)).toMatchObject({ outcome: 'clear' });
   });
 
-  it('stops at a request tampered with, its read raising the alarm and the hold, and starts again next run', async () => {
+  it('passes over a request tampered with, its read raising the alarm and the hold, and checks the rest', async () => {
     const { w, acting } = await ready();
     const { allowed } = await requests(acting, w);
     const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
@@ -239,12 +261,35 @@ describe('the holdings check (E1)', () => {
 
     await job(w).run();
 
-    expect(lines('holdings_check.refused')).toEqual([expect.objectContaining({ reason: 'unsigned' })]);
     expect(lines('audit.integrity_failed')).toEqual([
       expect.objectContaining({ reason: 'unsigned', objectId: allowed }),
     ]);
+    expect(lines('holdings_check.passed')).toEqual([
+      expect.objectContaining({ requests: 2, mismatched: 0, tampered: 1 }),
+    ]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
-    expect(lines('holdings_check.passed')).toEqual([]);
+  });
+
+  it('finds a request deleted with its claim, as the log still holds it, so its order can’t be paid twice unseen', async () => {
+    const { w, acting } = await ready();
+    const { allowed } = await requests(acting, w);
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.query('delete from spend_requests.order_claims where request_id = $1', [allowed]);
+      await owner.deleteRow(allowed);
+    } finally {
+      await owner.end();
+    }
+
+    await job(w).run();
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'deleted', objectId: allowed }),
+    ]);
+    expect(lines('holdings_check.passed')).toEqual([
+      expect.objectContaining({ requests: 2, mismatched: 0, tampered: 1 }),
+    ]);
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
   });
 
   it('logs a page that fails and an organisation list that can’t be read, and goes on; stops when told to', async () => {

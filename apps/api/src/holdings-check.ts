@@ -3,16 +3,17 @@
 // SEC-DB-09; Phase 2 E1): the API's job, on a timer of its own. For each
 // organisation the directory lists, it goes through every spend request a
 // page at a time, each page in a transaction of its own (`checkHoldings`):
-// each request verified, and its reservation and claim compared with what its
-// signed status says they must be. A mismatch raises the integrity alarm
+// each request the table or the log holds verified (one deleted is alarmed),
+// and its reservation and claim compared with what its signed status and
+// decision say they must be. A request tampered with is passed over, its
+// alarm raised, so the ones after it are still checked. A mismatch raises the integrity alarm
 // (`holding`, SEV-1) and puts the organisation on hold, as any tamper sign
 // does, so its hand-offs stop until an admin clears it.
 //
 // Where an organisation's pass has got to is kept here, in the process, as
 // the hold history check keeps it: a run checks at most PAGES_A_RUN pages an
 // organisation and the next run goes on from there, so a long history can't
-// keep the others waiting; a restart, or a page refused as tampered with,
-// starts it again from the beginning.
+// keep the others waiting; a restart starts it again from the beginning.
 //
 // A run never throws: each failure is logged, naming the organisation, and
 // the run goes on to the next.
@@ -63,6 +64,7 @@ export function createHoldingsCheck({
     const log = logger.child({ orgId });
     let requests = 0;
     let mismatched = 0;
+    let tampered = 0;
     for (let pages = 0; pages < pagesARun; pages += 1) {
       if (signal?.aborted === true) return false;
       const after = progress.get(orgId) ?? null;
@@ -70,17 +72,12 @@ export function createHoldingsCheck({
         const checked = await withSignedStates(database, orgId, services(log), (tx, states) =>
           checkHoldings(tx, states, orgId, { after, limit: page }),
         );
-        if (checked.outcome === 'tampered') {
-          // Its read raised the alarm and the hold; the next run starts the pass again.
-          progress.delete(orgId);
-          log.error('holdings_check.refused', { reason: checked.sign });
-          return true;
-        }
         requests += checked.requests;
         mismatched += checked.mismatched;
+        tampered += checked.tampered;
         if (checked.next === null) {
           progress.delete(orgId);
-          log.info('holdings_check.passed', { requests, mismatched });
+          log.info('holdings_check.passed', { requests, mismatched, tampered });
           return true;
         }
         progress.set(orgId, checked.next);
@@ -89,7 +86,7 @@ export function createHoldingsCheck({
         return true;
       }
     }
-    log.info('holdings_check.paused', { requests, mismatched });
+    log.info('holdings_check.paused', { requests, mismatched, tampered });
     return true;
   };
 

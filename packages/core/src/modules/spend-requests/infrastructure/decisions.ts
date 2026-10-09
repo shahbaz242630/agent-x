@@ -68,13 +68,15 @@ export async function insertRequest(tx: RequestsTransaction, request: NewRequest
 
 /**
  * Signs the request just inserted (`spend_request.received`) and moves it
- * where its decision leads (`spend_request.decided`, with the reasons).
+ * where its decision leads (`spend_request.decided`, with the reasons, and,
+ * when it holds capacity, its reservation's month and instant: `held`).
  */
 export async function signRequest(
   tx: RequestsTransaction,
   states: SignedStates,
   request: NewRequest,
   actor: AuditActor,
+  held: HeldAs | null,
 ): Promise<void> {
   const key = { orgId: request.orgId, id: request.id };
   await states.record(tx, SPEND_REQUESTS, key, 'new', fieldsOf(request), {
@@ -85,10 +87,21 @@ export async function signRequest(
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, MOVED_BY[request.decision], {
     actor,
     action: 'spend_request.decided',
-    details: { decision: request.decision, reasons: request.reasons.join(' ') },
+    details: {
+      decision: request.decision,
+      reasons: request.reasons.join(' '),
+      // What its reservation was made as, sealed with the decision, for the holdings check (E1).
+      ...(held === null ? {} : { heldMonth: held.month, heldAt: held.reservedAt.toISOString() }),
+    },
   });
   // Just recorded VALIDATING by this transaction, its move its decision's: anything else is something past the app.
   if (moved.outcome !== 'changed') throw new Error(`A new spend request didn't move as decided: ${moved.outcome}`);
+}
+
+/** A reservation as its decision made it: the agent's month and the instant (E1 checks the reservation against them). */
+export interface HeldAs {
+  readonly month: string;
+  readonly reservedAt: Date;
 }
 
 /** The authority fields of a new request, as the row and its first signed state hold them. */
