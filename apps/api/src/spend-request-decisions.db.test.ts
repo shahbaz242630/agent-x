@@ -827,6 +827,20 @@ describe('the simulator (C4, decision 9)', () => {
     expect(asItStands.made).toMatchObject({ decision: 'DENY', reasons: ['MANDATE_NOT_IN_FORCE'] });
   });
 
+  it('names the month in the agent’s kept zone, not its mandate’s, as a decision would', async () => {
+    const { w, mandateId } = await ready();
+    // A zone kept from an earlier mandate (UTC+14): already November when Dubai is still in October.
+    await withTenant(app, w.org, (tx) =>
+      tx
+        .insertInto('limit_reservations.agent_zones')
+        .values({ org_id: w.org, agent_id: w.agent, time_zone: 'Pacific/Kiritimati', created_at: clock.now() })
+        .execute(),
+    );
+    clock.advanceBy(Date.parse('2026-10-31T12:00:00Z') - clock.now().getTime());
+
+    expect(simulatedOf(await simulated(w, mandateId ?? '')).month).toBe('2026-11');
+  });
+
   it('finds an order already claimed when one is named, however written, and none when none is', async () => {
     const { w, mandateId, acting } = await ready();
     const id = mandateId ?? '';
