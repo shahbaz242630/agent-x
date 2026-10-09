@@ -15,11 +15,11 @@
 //   commit in, no agent's month passes its cap, no order is held twice, and
 //   no supplier's orders allowed without approval pass the approval
 //   threshold together (the split check).
-import { addAgent, AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { supplierOf, suspendSupplier, verifySupplier } from '@agentx/core/modules/suppliers';
+import { supplierOf, suspendSupplier } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, TRANSACTION_RETRIED, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -67,37 +67,9 @@ const TERMS = { approvalThreshold: AED(1_500_000n) };
 /** A world whose agent has a key and a mandate in force on TERMS, both suppliers verified. */
 async function ready() {
   const w = await world();
-  for (const id of w.suppliers) {
-    await withSignedStates(app, w.org, quiet(), async (tx, states) => {
-      const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
-      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
-      await verifySupplier(tx, states, { orgId: w.org, id }, found, {
-        verifiedBy: w.admin.membershipId,
-        actor: OPERATOR,
-      });
-    });
-  }
+  for (const id of w.suppliers) await shared.verified(w, id);
   const mandateId = await shared.inForce(registry, w, TERMS);
   return { w, mandateId, acting: await agentKey(w) };
-}
-
-/** A second agent of the world's organisation with a mandate in force on TERMS and a key: acting as it. */
-async function secondAgent(w: World): Promise<AgentActing> {
-  const other = ids.next();
-  await withSignedStates(app, w.org, quiet(), (tx, states) =>
-    addAgent(tx, states, {
-      orgId: w.org,
-      id: other,
-      name: 'Second purchasing agent',
-      owner: w.admin.membershipId,
-      scopes: ['requests:write'],
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    }),
-  );
-  const theirs = { ...w, agent: other };
-  await shared.inForce(registry, theirs, TERMS);
-  return agentKey(theirs);
 }
 
 /** AED 1,000 to the first supplier, order `INV-<n>`, unless changed. */
@@ -130,9 +102,9 @@ const ask = (acting: AgentActing, asked: SpendAskedByAgent) => {
 /**
  * The requests around `change`: the first two answered before it starts, the
  * last started once it is done, and those between started with it at one
- * barrier, racing it for real. So each test sees both sides of the change,
- * and a true collision (started all together, the change's short transaction
- * always won outright). The requests' answers, in order (a rejection fails
+ * barrier, racing it for real. So each test sees both sides of the change
+ * (started all together, the change's short transaction has always won
+ * outright). The requests' answers, in order (a rejection fails
  * the test: every request is answered, never thrown).
  */
 async function racing(requests: (() => Promise<SpendRequestDecided>)[], change: () => Promise<unknown>) {
@@ -285,7 +257,9 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
     );
 
     const suspended = (await chainOf(w.org))('agent.suspended', w.agent);
-    for (const { request, seq } of await committed(w.org, answers)) {
+    const decided = await committed(w.org, answers);
+    expect(decided).toHaveLength(6);
+    for (const { request, seq } of decided) {
       expect(request.decision).toBe(seq < suspended ? 'ALLOW' : 'DENY');
     }
     expect(retries()).toEqual([]);
@@ -297,7 +271,9 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
     const answers = await racing(six(w, acting), () => shared.movedPastTheUseCase(w, mandateId, 'revoke'));
 
     const revoked = (await chainOf(w.org))('mandate.revoke', mandateId);
-    for (const { request, seq } of await committed(w.org, answers)) {
+    const decided = await committed(w.org, answers);
+    expect(decided).toHaveLength(6);
+    for (const { request, seq } of decided) {
       expect(request.decision).toBe(seq < revoked ? 'ALLOW' : 'DENY');
       if (seq > revoked) expect(request.reasons).toContain('MANDATE_NOT_IN_FORCE');
     }
@@ -318,14 +294,16 @@ describe('the deadlock suite (SEC-AV-04): each change racing the agent’s reque
     );
 
     const suspended = (await chainOf(w.org))('supplier.suspend', supplier);
-    for (const { request, seq } of await committed(w.org, answers)) {
+    const decided = await committed(w.org, answers);
+    expect(decided).toHaveLength(6);
+    for (const { request, seq } of decided) {
       expect(request.decision).toBe(seq < suspended ? 'ALLOW' : 'DENY');
       if (seq > suspended) expect(request.reasons).toEqual(['SUPPLIER_NOT_VERIFIED']);
     }
     expect(retries()).toEqual([]);
   });
 
-  it('its key revoked: no deadlock; every request decided committed before it, the rest refused', async () => {
+  it('its key revoked: no deadlock; each request decided committed before it, the rest refused', async () => {
     const { w, acting } = await ready();
 
     const answers = await racing(six(w, acting), () =>
@@ -362,8 +340,11 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
   it('never passes a month’s cap, holds an order twice, or allows a split past the threshold', async () => {
     await fc.assert(
       fc.asyncProperty(fc.array(REQUEST, { minLength: 4, maxLength: 8 }), async (batch) => {
+        // A log of this run's own, so a retry in one run never fails another.
+        capture = new LogCapture();
+        decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger: testLogger(capture) });
         const { w, acting } = await ready();
-        const agents = [acting, await secondAgent(w)];
+        const agents = [acting, await shared.secondAgent(registry, w, TERMS)];
 
         // Every request started at once, each on its own connection.
         const answers = await Promise.all(
@@ -402,12 +383,13 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
             .where('released_at', 'is', null)
             .execute(),
         }));
-        const ids = holding.map((request) => request.id).sort();
-        expect(held.reservations.map((row) => row.request_id).sort()).toEqual(ids);
-        expect(held.claims.map((row) => row.request_id).sort()).toEqual(ids);
+        const holdingIds = holding.map((request) => request.id).sort();
+        expect(held.reservations.map((row) => row.request_id).sort()).toEqual(holdingIds);
+        expect(held.claims.map((row) => row.request_id).sort()).toEqual(holdingIds);
         expect(retries()).toEqual([]);
       }),
-      { numRuns: 8 },
+      // Shrinking replays whole worlds, and a race may not replay at all: the failing batch is printed as it was.
+      { numRuns: 8, endOnFailure: true },
     );
-  });
+  }, 120_000);
 });

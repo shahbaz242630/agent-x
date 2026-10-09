@@ -30,7 +30,7 @@ import { acceptDraft, mandateOf, MANDATES, type MandatesTables } from '@agentx/c
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
-import { addSupplier, type SuppliersTables } from '@agentx/core/modules/suppliers';
+import { addSupplier, supplierOf, type SuppliersTables, verifySupplier } from '@agentx/core/modules/suppliers';
 import { DAY_MS, money } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
@@ -312,6 +312,36 @@ export function mandateWorld({
     return id;
   }
 
+  /** The supplier verified by the world's admin, as E3 does. */
+  const verified = (w: World, id: string) =>
+    withSignedStates(app(), w.org, quiet(), async (tx, states) => {
+      const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
+      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+      await verifySupplier(tx, states, { orgId: w.org, id }, found, {
+        verifiedBy: w.admin.membershipId,
+        actor: OPERATOR,
+      });
+    });
+
+  /** A second agent of the world's organisation with a mandate in force on `terms` and a key: acting as it. */
+  async function secondAgent(registry: MandateRegistry, w: World, terms: Partial<MandateDraft['terms']> = {}) {
+    const other = ids.next();
+    await withSignedStates(app(), w.org, quiet(), (tx, states) =>
+      addAgent(tx, states, {
+        orgId: w.org,
+        id: other,
+        name: 'Second purchasing agent',
+        owner: w.admin.membershipId,
+        scopes: ['requests:write'],
+        createdAt: clock().now(),
+        actor: OPERATOR,
+      }),
+    );
+    const theirs = { ...w, agent: other };
+    await inForce(registry, theirs, terms);
+    return agentKey(theirs);
+  }
+
   /** The mandate moved by `event`, past the use cases. */
   const movedPastTheUseCase = (w: World, id: string, event: 'suspend' | 'resume' | 'revoke' | 'expire') =>
     withSignedStates(app(), w.org, quiet(), (tx, states) =>
@@ -372,6 +402,8 @@ export function mandateWorld({
     inForce,
     movedPastTheUseCase,
     agentKey,
+    verified,
+    secondAgent,
     stepUp,
   };
 }
