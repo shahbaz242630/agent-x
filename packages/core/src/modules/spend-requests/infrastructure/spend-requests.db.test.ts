@@ -53,7 +53,7 @@ const agentOf = async (org: string): Promise<Agent> => {
 };
 
 /** A supplier of the organisation with its first version, made past the app. */
-const supplierOf = (org: string, payeeKey: string | null = null) => seed().supplier(org, payeeKey);
+const supplierOf = (org: string, payeeKey?: string | null) => seed().supplier(org, payeeKey);
 
 /** A policy and its first version, made past the app: the organisation's own (by its ID) or a mandate's (by the mandate's). */
 const policyOf = async (org: string, scope: 'organization' | 'mandate', id: string): Promise<string> => {

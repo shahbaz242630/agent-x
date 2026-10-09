@@ -47,7 +47,8 @@ export const seedRows = (admin: TestSession, at: Date) => ({
   },
 
   /** An active key of the agent, in the directory too: its ID. */
-  agentKey: async (org: string, agent: string, id: string = randomUUID()): Promise<string> => {
+  agentKey: async (org: string, agent: string): Promise<string> => {
+    const id = randomUUID();
     await admin.query('insert into directory.agent_keys (key_id, org_id) values ($1, $2)', [id, org]);
     await admin.query(
       `insert into agents.agent_keys (org_id, id, agent_id, status, scopes, secret_mac, secret_key_version, expires_at,

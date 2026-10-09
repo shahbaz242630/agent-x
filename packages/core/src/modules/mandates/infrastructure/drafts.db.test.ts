@@ -80,7 +80,7 @@ const terms = (overrides: Partial<MandateTerms> = {}): MandateTerms => ({
   ...overrides,
 });
 
-/** An agent and a funding source of the organisation, made past the app: the steps that add them are tested elsewhere. */
+/** Two agents and a funding source of the organisation, made past the app: the steps that add them are tested elsewhere. */
 async function seed(): Promise<void> {
   const rows = seedRows(database.as('admin'), clock.now());
   agent = await rows.agent(org, { id: ids.next() });
