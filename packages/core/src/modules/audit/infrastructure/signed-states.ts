@@ -94,8 +94,12 @@ import {
  *   past the app could make it fail
  * - `chain`: the organisation's audit chain failed the anchor check (B1d-3;
  *   its alarm line names how), found by no read of a row
+ * - `holding`: what a verified object holds elsewhere (a request's
+ *   reservation or order claim, Phase 2 E1) isn't what its signed state
+ *   says it must be (`mismatch`)
  */
-export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain';
+export type TamperSign =
+  'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain' | 'holding';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {
@@ -357,6 +361,19 @@ export interface SignedStates {
     size: number,
   ): Promise<HistoryBatch>;
   /**
+   * The table's next objects in the organisation after `after` (null from the
+   * start), at most `size`, by ID: its rows and every object the log holds an
+   * event about, so one whose row was deleted is listed too (a read of it is
+   * then `deleted`); and the ID to list the next after, or null for the last.
+   */
+  objectIds(
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    after: string | null,
+    size: number,
+  ): Promise<{ readonly ids: readonly string[]; readonly next: string | null }>;
+  /**
    * The newest investigation of the HELD state `holdEventId` names, by its ID,
    * or null for none yet: the one the API's job checks the whole history
    * after (D1c review), so the check runs once the cause is declared removed.
@@ -454,6 +471,14 @@ export interface SignedStates {
       readonly stepUp: ClearingStepUp;
     },
   ): Promise<HoldClearing>;
+  /**
+   * Raises the integrity alarm for the object `key` names, verified here, for
+   * rows it holds in a table with no signed state of its own that don't match
+   * it (`holding`, E1: a request's reservation or order claim, ADR-012 §2).
+   * The organisation is put on hold as for any tamper sign, once the
+   * transaction ends (withSignedStates).
+   */
+  mismatch(subjectType: string, key: SignedRowKey): void;
 }
 
 /**
@@ -880,8 +905,29 @@ export function createSignedStates({
     return Object.freeze({ outcome: 'read', events: read.events });
   };
 
+  /** The table's next objects, its rows' and the log's together (SignedStates.objectIds). */
+  const objectIdsOf = async (
+    tx: AuditTransaction,
+    orgId: string,
+    table: SignedStateTable,
+    after: string | null,
+    size: number,
+  ) => {
+    notTheHold(table);
+    const rowIds = await signedRowIds(tx, table, orgId, size, after);
+    const loggedIds = await trail.subjectIds(tx, orgId, table.subject, size, after);
+    // Each list holds one more than `size` at most, so its first `size` of the two together are the next ones.
+    const next = [...new Set([...rowIds, ...loggedIds])].sort();
+    const ids = Object.freeze(next.slice(0, size));
+    return Object.freeze({ ids, next: next.length > size ? (ids.at(-1) ?? null) : null });
+  };
+
   return Object.freeze({
     verifiedState,
+
+    mismatch(subjectType: string, key: SignedRowKey): void {
+      alarm(subjectType, key, 'holding');
+    },
 
     async verifyAll(
       tx: AuditTransaction,
@@ -914,21 +960,18 @@ export function createSignedStates({
       after: string | null,
       size: number,
     ): Promise<HistoryBatch> {
-      notTheHold(table);
-      const rowIds = await signedRowIds(tx, table, orgId, size, after);
-      const loggedIds = await trail.subjectIds(tx, orgId, table.subject, size, after);
-      // Each list holds one more than `size` at most, so its first `size` of the two together are the next ones.
-      const next = [...new Set([...rowIds, ...loggedIds])].sort();
-      const batch = next.slice(0, size);
+      const { ids: batch, next } = await objectIdsOf(tx, orgId, table, after, size);
       const findings = await judged(tx, orgId, table, batch);
       if (findings.length > 0) return Object.freeze({ outcome: 'tampered', findings: Object.freeze(findings) });
       return Object.freeze({
         outcome: 'checked',
         objects: batch.length,
         last: batch.at(-1) ?? after,
-        done: next.length <= size,
+        done: next === null,
       });
     },
+
+    objectIds: objectIdsOf,
 
     async latestInvestigation(tx: AuditTransaction, orgId: string, holdEventId: string): Promise<string | null> {
       const read = await historyOf(tx, orgId, {

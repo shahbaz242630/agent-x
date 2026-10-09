@@ -113,6 +113,53 @@ export async function splitHeld(
   return BigInt(held);
 }
 
+/** A reservation as the holdings check (E1) compares it with its request. */
+export interface ReservationSeen {
+  readonly requestId: string;
+  readonly agentId: string;
+  readonly mandateId: string;
+  readonly supplierId: string;
+  readonly amountMinor: bigint;
+  readonly currency: string;
+  readonly state: string;
+  readonly month: string;
+  readonly reservedAt: Date;
+}
+
+/** The reservations of the requests named, in one statement: none, one, or (past the app) more for each. */
+export async function reservationsFor(
+  tx: ReservationsTransaction,
+  requestIds: readonly string[],
+): Promise<ReservationSeen[]> {
+  if (requestIds.length === 0) return [];
+  const rows = await tx
+    .selectFrom('limit_reservations.reservations')
+    .select([
+      'request_id',
+      'agent_id',
+      'mandate_id',
+      'supplier_id',
+      'amount_minor',
+      'currency',
+      'state',
+      'month',
+      'reserved_at',
+    ])
+    .where('request_id', 'in', requestIds)
+    .execute();
+  return rows.map((row) => ({
+    requestId: row.request_id,
+    agentId: row.agent_id,
+    mandateId: row.mandate_id,
+    supplierId: row.supplier_id,
+    amountMinor: BigInt(row.amount_minor),
+    currency: row.currency,
+    state: row.state,
+    month: row.month,
+    reservedAt: row.reserved_at,
+  }));
+}
+
 /** A request's reservation, as a decision holds it. */
 export interface NewReservation {
   readonly orgId: string;

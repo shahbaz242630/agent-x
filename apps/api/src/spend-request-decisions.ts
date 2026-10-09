@@ -372,7 +372,8 @@ export function createSpendRequestDecisions({
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
     }
-    await signRequest(tx, states, request, { type: 'agent', id: agent.id });
+    const held = holdsCapacity(made.decision) && month !== null ? { month, reservedAt: now } : null;
+    await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     return requestId;
   }
 
