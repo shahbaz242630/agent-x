@@ -186,11 +186,22 @@ async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, 
   return { mandate, mandatePolicy, organizationPolicy };
 }
 
-/** Levels 5 and 6: the source asked for, and the supplier, held, with whether its order is claimed already. */
-async function payingIn(tx: DecisionTx, states: SignedStates, orgId: string, asked: SpendWeighed) {
+/**
+ * Levels 5 and 6: the source asked for, and the supplier, with whether its
+ * order is claimed already. A decision holds the supplier FOR NO KEY UPDATE
+ * (`change`), serialising its orders; the simulator only FOR SHARE, so it
+ * never queues a decision behind it (C4's review).
+ */
+async function payingIn(
+  tx: DecisionTx,
+  states: SignedStates,
+  orgId: string,
+  asked: SpendWeighed,
+  supplierLock: 'share' | 'change',
+) {
   const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
   believed(source);
-  const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, 'change');
+  const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
   if (supplier.outcome !== 'found') return { source, supplier: null, order: null, duplicateOrder: false };
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
@@ -212,9 +223,9 @@ export interface PoliciesWeighed {
 /**
  * Levels 4–7 and what the engine weighs, shared with the simulator (C4): the
  * agent's authority, the source and supplier, the agent's month and its
- * total. `monthOf` locks the month for a decision, or only reads it for the
- * simulator; `rules` lets the simulator put proposed policies in place of
- * those in force.
+ * total. A decision locks the supplier and the month (`decides`, `monthOf`
+ * locking it); the simulator only reads them, and `rules` lets it put
+ * proposed policies in place of those in force.
  */
 export async function weigh(
   tx: DecisionTx,
@@ -224,17 +235,26 @@ export async function weigh(
   asked: SpendWeighed,
   {
     now,
+    decides,
     monthOf,
     rules = (inForce) => inForce,
   }: {
     readonly now: Date;
+    /** A decision's locks (true), or the simulator's reads (false). */
+    readonly decides: boolean;
     readonly monthOf: (zoneIfNew: string) => Promise<string>;
     readonly rules?: (inForce: PoliciesWeighed, mandate: MandateWeighed | null) => PoliciesWeighed;
   },
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
   const { mandatePolicy, organizationPolicy } = rules(inForce, mandate);
-  const { source, supplier, order, duplicateOrder } = await payingIn(tx, states, orgId, asked);
+  const { source, supplier, order, duplicateOrder } = await payingIn(
+    tx,
+    states,
+    orgId,
+    asked,
+    decides ? 'change' : 'share',
+  );
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month });
@@ -286,6 +306,7 @@ export function createSpendRequestDecisions({
     const { agent, keyId } = await actingIn(tx, states, acting, now);
     const { input, mandate, supplier, order, month } = await weigh(tx, states, orgId, agent, asked, {
       now,
+      decides: true,
       monthOf: (zoneIfNew) => lockAgentMonth(tx, { orgId, agentId, zoneIfNew, at: now }),
     });
     const made = decide(input);

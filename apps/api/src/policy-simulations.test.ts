@@ -4,7 +4,7 @@
 // that it takes no idempotency key as it writes nothing (SEC-AG-09), who may
 // use it (decision 9: never a viewer), the edge's refusals and the use
 // case's. What the use case weighs, and that it writes nothing, is
-// policy-simulations.db.test.ts.
+// spend-request-decisions.db.test.ts ("the simulator").
 import type { LiveSession, MembershipCheck, Role } from '@agentx/core/modules/identity';
 import { money, REASON_CODES } from '@agentx/core/shared-kernel';
 import type { InjectOptions } from 'fastify';

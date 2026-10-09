@@ -699,15 +699,21 @@ describe("through the agent's route (D4r)", () => {
   });
 });
 
-/** Every table's row count, as the database admin sees them, in one fixed statement: what a simulation must leave as it was. */
+/**
+ * Every table's rows, as the database admin sees them, in one fixed
+ * statement: each table's count and a checksum of every row, so an update
+ * shows as well as an insert or a delete (C4's review). What a simulation
+ * must leave as it was.
+ */
 const EVERY_TABLE = `select schemaname || '.' || tablename as name,
-  (pg_catalog.xpath('/row/n/text()', pg_catalog.query_to_xml(
-    pg_catalog.format('select count(*) as n from %I.%I', schemaname, tablename), false, true, '')))[1]::text::int as n
+  (pg_catalog.xpath('/row/n/text()', pg_catalog.query_to_xml(pg_catalog.format(
+    'select count(*) || '':'' || pg_catalog.md5(coalesce(pg_catalog.string_agg(t::text, '','' order by t::text), '''')) as n from %I.%I t',
+    schemaname, tablename), false, true, '')))[1]::text as n
   from pg_catalog.pg_tables where schemaname not in ('pg_catalog', 'information_schema') order by 1`;
 
-const everyTable = async (): Promise<Record<string, number>> =>
+const everyTable = async (): Promise<Record<string, string>> =>
   Object.fromEntries(
-    (await database.as('admin').query<{ name: string; n: number }>(EVERY_TABLE)).map(({ name, n }) => [name, n]),
+    (await database.as('admin').query<{ name: string; n: string }>(EVERY_TABLE)).map(({ name, n }) => [name, n]),
   );
 
 /** The simulator's answer for the world's mandate, the request as `asking` makes it unless changed. */
@@ -733,6 +739,8 @@ describe('the simulator (C4, decision 9)', () => {
     const { w, mandateId, acting } = await ready({ terms: { approvalThreshold: AED(1_500_000n) } });
     const id = mandateId ?? '';
     const before = await everyTable();
+    // Each a count and a checksum, so equal tables are a real check.
+    expect(Object.values(before).every((rows) => /^[0-9]+:[0-9a-f]{32}$/.test(rows))).toBe(true);
 
     // A new agent's month, before its first request: named in the mandate's zone, its zone left unkept.
     const first = simulatedOf(await simulated(w, id));
@@ -805,6 +813,14 @@ describe('the simulator (C4, decision 9)', () => {
     expect(await simulated(drafting.w, draftId, {}, { mandatePolicy: proposed({ approvalThreshold: 1n }) })).toEqual(
       refused(409, 'MANDATE_NOT_IN_FORCE'),
     );
+    // An ended mandate, its agent's new one in force: proposed rules for the old one are refused.
+    const renewed = await ready();
+    await movedPastTheUseCase(renewed.w, renewed.mandateId ?? '', 'revoke');
+    await shared.inForce(registry, renewed.w);
+    expect(
+      await simulated(renewed.w, renewed.mandateId ?? '', {}, { mandatePolicy: proposed({ approvalThreshold: 1n }) }),
+    ).toEqual(refused(409, 'MANDATE_NOT_IN_FORCE'));
+
     // Without proposed rules, a draft's agent is weighed as it stands: no mandate in force.
     const asItStands = simulatedOf(await simulated(drafting.w, draftId));
     expect(asItStands).toMatchObject({ mandateId: null, month: null });

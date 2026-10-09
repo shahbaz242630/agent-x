@@ -138,9 +138,8 @@ const SIMULATE_SCHEMA = {
     })
     .superRefine((body, context) => {
       issuesOf(() => moneyFromJson(body.amountMinor, body.currency), SpendAskRefused, context);
-      if (body.orderReference !== undefined) {
-        issuesOf(() => orderReferenceOf(body.orderReference ?? ''), SpendAskRefused, context);
-      }
+      const { orderReference } = body;
+      if (orderReference !== undefined) issuesOf(() => orderReferenceOf(orderReference), SpendAskRefused, context);
     })
     .describe('The request to weigh, and any proposed rules.'),
   response: {

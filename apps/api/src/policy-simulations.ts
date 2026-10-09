@@ -122,6 +122,7 @@ export function createPolicySimulations({
         const agent = await agentIn(tx, states, { orgId, agentId });
         const { input, mandate, month } = await weigh(tx, states, orgId, agent, asked, {
           now,
+          decides: false,
           monthOf: (zoneIfNew) => agentMonth(tx, { agentId, zoneIfNew, at: now }),
           rules: policiesFor(mandateId, whatIf),
         });
