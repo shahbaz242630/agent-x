@@ -468,7 +468,7 @@ describe('the split total (`splitHeld`, D5)', () => {
     expect(await splitOf(org, org.supplier, null, new Date(AT.getTime() + 1))).toBe(0n);
   });
 
-  it('counts the payee key’s under another supplier record, and the supplier’s own made without one', async () => {
+  it('counts the payee key’s under another supplier record, and the supplier’s own under any key or none', async () => {
     const org = await organisation('payee-1');
     await period(org);
     await reserve(org, { payee_key: 'payee-1' });
@@ -481,6 +481,8 @@ describe('the split total (`splitHeld`, D5)', () => {
 
     expect(await splitOf(org, recreated.id, 'payee-1')).toBe(25_000n);
     expect(await splitOf(org, org.supplier, null)).toBe(50_000n);
+    // Given a new key, the supplier still counts its own, whatever key each was made under.
+    expect(await splitOf(org, org.supplier, 'payee-2')).toBe(50_000n);
   });
 });
 

@@ -22,7 +22,7 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf, verifySupplier } from '@agentx/core/modules/suppliers';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
@@ -714,6 +714,21 @@ describe("through the agent's route (D4r)", () => {
  * shows as well as an insert or a delete (C4's review). What a simulation
  * must leave as it was.
  */
+/** The supplier's payee key set (or cleared) past the use cases, signed as a payee change would: a key moves between records. */
+const payeeKeyOf = (w: World, id: string, payeeKey: string | null) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const found = await supplierOf(tx, states, { orgId: w.org, id }, 'change');
+    if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+    await states.record(
+      tx,
+      SUPPLIERS,
+      { orgId: w.org, id },
+      found.state,
+      { payee_key: payeeKey, payee_key_version: payeeKey === null ? null : 1 },
+      { actor: OPERATOR, action: 'supplier.payee_key_moved', details: {} },
+    );
+  });
+
 /** Approval above AED 15,000, so two orders within the default cap (AED 20,000 a month) can cross it together. */
 const SPLIT_TERMS = { approvalThreshold: AED(1_500_000n) };
 const SPLIT = { decision: 'REQUIRE_APPROVAL', reasons: ['AGGREGATE_THRESHOLD'], status: 'APPROVAL_REQUIRED' };
@@ -760,6 +775,22 @@ describe('the split check (D5, SEC-LIM-04)', () => {
 
     // The second agent's month is empty; the supplier's window isn't.
     const split = decidedOf(await ask(theirKey, asking(w, { amount: AED(600_000n), orderReference: 'INV-2' })));
+
+    expect(split).toMatchObject(SPLIT);
+  });
+
+  it('adds up the payee’s orders under another supplier record holding its key', async () => {
+    const { w, acting } = await ready({ terms: SPLIT_TERMS });
+    const [first, second] = [w.suppliers[0] ?? '', w.suppliers[1] ?? ''];
+    await payeeKeyOf(w, first, 'payee-1');
+    expect(decidedOf(await ask(acting, asking(w))).decision).toBe('ALLOW');
+    // The payee's key moved to the second supplier record, as a supplier re-created for the same account.
+    await payeeKeyOf(w, first, null);
+    await payeeKeyOf(w, second, 'payee-1');
+
+    const split = decidedOf(
+      await ask(acting, asking(w, { amount: AED(600_000n), supplierId: second, orderReference: 'INV-2' })),
+    );
 
     expect(split).toMatchObject(SPLIT);
   });
