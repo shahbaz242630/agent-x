@@ -6,6 +6,7 @@ import type { Insertable, Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { RESERVATION } from '../domain/reservation.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
@@ -37,66 +38,24 @@ interface Org {
  * are tested elsewhere: only the rows a reservation and its request point at.
  */
 const organisation = async (payeeKey: string | null = null): Promise<Org> => {
-  const org: Org = {
-    id: randomUUID(),
-    agent: randomUUID(),
-    key: randomUUID(),
-    mandate: randomUUID(),
-    version: randomUUID(),
-    source: randomUUID(),
-    supplier: randomUUID(),
-    supplierVersion: randomUUID(),
+  const seed = seedRows(database.as('admin'), AT);
+  const id = randomUUID();
+  await seed.org(id);
+  const agent = await seed.agent(id);
+  const key = await seed.agentKey(id, agent);
+  const source = await seed.source(id);
+  const supplier = await seed.supplier(id, payeeKey);
+  const mandate = await seed.mandate(id, { agent, source, supplier: supplier.id });
+  return {
+    id,
+    agent,
+    key,
+    mandate: mandate.id,
+    version: mandate.version,
+    source,
+    supplier: supplier.id,
+    supplierVersion: supplier.version,
   };
-  const admin = database.as('admin');
-  await admin.query(
-    `with o as (insert into directory.orgs (org_id) values ($1) returning org_id),
-     a as (insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-       select org_id, $2, 'Purchasing agent', $2, 'ACTIVE', 'requests:write', $8 from o returning org_id),
-     l as (insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
-       select org_id, $5, $2, 'fake', 'session-1', '2027-10-08T08:00:00Z', $8 from a returning org_id),
-     s as (insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
-         consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
-         max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
-       select org_id, $4, $5, 'fake', $11, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1',
-         '2027-10-06T08:00:00Z', 'AED', 'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $8, $8
-       from l returning org_id),
-     su as (insert into suppliers.suppliers (org_id, id, status, current_version_id, payee_key, created_at)
-       select org_id, $7, 'UNVERIFIED', $9, $12, $8 from s returning org_id),
-     sv as (insert into suppliers.supplier_versions (org_id, id, supplier_id, version, display_name, contacts,
-         phone_ciphertext, contacts_key_version, phone_since, source_kind, source_ref, entered_by, entered_at)
-       select org_id, $9, $7, 1, 'Gulf Office Supplies LLC', 'phone', pg_catalog.decode(pg_catalog.repeat('00', 40), 'hex'),
-         1, $8, 'registry', 'trade-licence-1', $7, $8 from su returning org_id),
-     m as (insert into mandates.mandates (org_id, id, agent_id, time_zone, split_window_hours, status,
-         pending_version_id, created_at)
-       select org_id, $3, $2, 'Asia/Dubai', 24, 'PENDING_ACCEPTANCE', $6, $8 from sv returning org_id)
-     insert into mandates.versions (org_id, id, mandate_id, version, purpose, currency, per_order_limit_minor,
-       monthly_limit_minor, approval_threshold_minor, supplier_ids, funding_source_id, split_check, consent_limits,
-       terms_hash, drafted_by, drafted_at)
-     select org_id, $6, $3, 1, 'Office supplies', 'AED', 500000, 2000000, 100000, $7, $4, 'on', 'strict', $10, $2, $8
-     from m`,
-    [
-      org.id,
-      org.agent,
-      org.mandate,
-      org.source,
-      randomUUID(),
-      org.version,
-      org.supplier,
-      AT,
-      org.supplierVersion,
-      'a'.repeat(64),
-      `acct-${org.source}`,
-      payeeKey,
-    ],
-  );
-  await admin.query(
-    `with d as (insert into directory.agent_keys (key_id, org_id) values ($2, $1) returning org_id)
-     insert into agents.agent_keys (org_id, id, agent_id, status, scopes, secret_mac, secret_key_version, expires_at,
-       created_at)
-     select org_id, $2, $3, 'ACTIVE', 'requests:write', $4, 1, '2027-10-08T08:00:00Z', $5 from d`,
-    [org.id, org.key, org.agent, 'c'.repeat(64), AT],
-  );
-  return org;
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
