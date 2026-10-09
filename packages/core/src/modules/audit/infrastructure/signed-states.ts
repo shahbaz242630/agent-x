@@ -94,8 +94,12 @@ import {
  *   past the app could make it fail
  * - `chain`: the organisation's audit chain failed the anchor check (B1d-3;
  *   its alarm line names how), found by no read of a row
+ * - `holding`: what a verified object holds elsewhere (a request's
+ *   reservation or order claim, Phase 2 E1) isn't what its signed state
+ *   says it must be (`mismatch`)
  */
-export type TamperSign = 'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain';
+export type TamperSign =
+  'row' | 'deleted' | 'unsigned' | 'log' | 'pointer' | 'version' | 'seal' | 'status' | 'chain' | 'holding';
 
 /** A tamper sign, as the alarm names it: the organisation and the object's type and ID (IDs in lower case), and the sign. */
 export interface TamperFinding {
@@ -454,6 +458,14 @@ export interface SignedStates {
       readonly stepUp: ClearingStepUp;
     },
   ): Promise<HoldClearing>;
+  /**
+   * Raises the integrity alarm for the object `key` names, verified here, for
+   * rows it holds in a table with no signed state of its own that don't match
+   * it (`holding`, E1: a request's reservation or order claim, ADR-012 §2).
+   * The organisation is put on hold as for any tamper sign, once the
+   * transaction ends (withSignedStates).
+   */
+  mismatch(subjectType: string, key: SignedRowKey): void;
 }
 
 /**
@@ -882,6 +894,10 @@ export function createSignedStates({
 
   return Object.freeze({
     verifiedState,
+
+    mismatch(subjectType: string, key: SignedRowKey): void {
+      alarm(subjectType, key, 'holding');
+    },
 
     async verifyAll(
       tx: AuditTransaction,

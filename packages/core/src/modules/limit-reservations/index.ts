@@ -8,6 +8,8 @@ export {
   lockAgentMonth,
   monthSpent,
   type NewReservation,
+  reservationsFor,
+  type ReservationSeen,
   reserve,
   splitHeld,
 } from './infrastructure/reservations.ts';

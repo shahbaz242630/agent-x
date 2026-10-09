@@ -5,7 +5,8 @@
 // made VALIDATING with its decision and moved by it (D4). Deciding and
 // reserving are composed in the API (decideAndReserve), the agent asking
 // through its route (D4r), its text checked here, with the bank reference its
-// order reference becomes (decision 8).
+// order reference becomes (decision 8); and the holdings check, comparing each
+// request's reservation and claim with its signed state (E1).
 export {
   askedText,
   BANK_REFERENCE_MOST,
@@ -16,6 +17,7 @@ export {
   SpendAskRefused,
 } from './domain/asked.ts';
 export { SPEND_REQUEST, type SpendRequestStatus } from './domain/spend-request.ts';
+export { checkHoldings, type HoldingsChecked, MOST_CHECKED_A_PAGE } from './infrastructure/holdings-check.ts';
 export {
   holdsCapacity,
   insertRequest,

@@ -102,6 +102,7 @@ import { createPolicySimulations } from './policy-simulations.ts';
 import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
+import { createHoldingsCheck, HOLDINGS_CHECK_EVERY_MS } from './holdings-check.ts';
 import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.ts';
 import { createMandateMoves } from './mandate-moves.ts';
 import { createPolicyChanges } from './policy-changes.ts';
@@ -755,6 +756,11 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     HOLD_HISTORY_EVERY_MS,
   );
+  // Every request's reservation and order claim checked against its signed state (Phase 2 E1), on a timer of its own.
+  const holdingsChecking = scheduleRuns(
+    createHoldingsCheck({ list: () => listedOrganizations(database), database, keys, ids: uuidV7Ids, logger }),
+    HOLDINGS_CHECK_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -775,6 +781,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           factorRemoving.stop(),
           expiring.stop(),
           historyChecking.stop(),
+          holdingsChecking.stop(),
           recording.stop(),
         ]);
       },
