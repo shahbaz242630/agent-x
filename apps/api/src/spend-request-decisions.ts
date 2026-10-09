@@ -189,8 +189,9 @@ async function authorityIn(tx: DecisionTx, states: SignedStates, orgId: string, 
 /**
  * Levels 5 and 6: the source asked for, and the supplier, with whether its
  * order is claimed already. A decision holds the supplier FOR NO KEY UPDATE
- * (`change`), serialising its orders; the simulator only FOR SHARE, so it
- * never queues a decision behind it (C4's review).
+ * (`change`), serialising its orders; the simulator FOR SHARE, as all its
+ * reads (C4's review): simulations never wait on each other, and a decision
+ * waits at most the moment one takes, each person's simulations rate-limited.
  */
 async function payingIn(
   tx: DecisionTx,
