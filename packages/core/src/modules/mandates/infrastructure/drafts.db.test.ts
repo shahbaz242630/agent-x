@@ -19,6 +19,7 @@ import {
 import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { type TamperSign, withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
 import { DAY_MS, money } from '../../../shared-kernel/index.ts';
@@ -79,34 +80,12 @@ const terms = (overrides: Partial<MandateTerms> = {}): MandateTerms => ({
   ...overrides,
 });
 
-/** An agent and a funding source of the organisation, made past the app: the steps that add them are tested elsewhere. */
+/** Two agents and a funding source of the organisation, made past the app: the steps that add them are tested elsewhere. */
 async function seed(): Promise<void> {
-  [agent, otherAgent, source] = [ids.next(), ids.next(), ids.next()];
-  const link = ids.next();
-  const admin = database.as('admin');
-  await admin.query(
-    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-     values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
-    [org, agent, ids.next(), clock.now()],
-  );
-  await admin.query(
-    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-     values ($1, $2, 'Another agent', $3, 'ACTIVE', 'requests:write', $4)`,
-    [org, otherAgent, ids.next(), clock.now()],
-  );
-  await admin.query(
-    `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
-     values ($1, $2, $3, 'fake', 'session-1', $5, $4)`,
-    [org, link, ids.next(), clock.now(), new Date(clock.now().getTime() + DAY_MS)],
-  );
-  await admin.query(
-    `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
-       consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
-       max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
-     values ($1, $2, $3, 'fake', $5, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1', '2027-10-06T08:00:00Z', 'AED',
-       'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $4, $4)`,
-    [org, source, link, clock.now(), `acct-${source}`],
-  );
+  const rows = seedRows(database.as('admin'), clock.now());
+  agent = await rows.agent(org, { id: ids.next() });
+  otherAgent = await rows.agent(org, { id: ids.next(), name: 'Another agent' });
+  source = await rows.source(org, ids.next());
 }
 
 /** A mandate drafted with its first version, for the agent unless another is given: their IDs. */

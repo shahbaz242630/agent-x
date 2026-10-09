@@ -17,6 +17,7 @@ import { type Insertable, sql, type Updateable } from 'kysely';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { DEFAULT_TIME_ZONE } from '../../../shared-kernel/index.ts';
 import {
   CONSENT_LIMITS,
@@ -44,30 +45,12 @@ interface Org {
   readonly source: string;
 }
 
+const seed = () => seedRows(database.as('admin'), AT);
+
 /** An organisation with an agent and a funding source, made past the app, as the steps that add them are tested elsewhere. */
 const organisation = async (): Promise<Org> => {
-  const org = { id: randomUUID(), agent: randomUUID(), source: randomUUID() };
-  const link = randomUUID();
-  const admin = database.as('admin');
-  await admin.query(
-    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-     values ($1, $2, 'Purchasing agent', $3, 'ACTIVE', 'requests:write', $4)`,
-    [org.id, org.agent, randomUUID(), AT],
-  );
-  await admin.query(
-    `insert into funding_sources.links (org_id, id, started_by, partner, session_ref, expires_at, created_at)
-     values ($1, $2, $3, 'fake', 'session-1', $5, $4)`,
-    [org.id, link, randomUUID(), AT, new Date(AT.getTime() + 86_400_000)],
-  );
-  await admin.query(
-    `insert into funding_sources.sources (org_id, id, link_id, partner, external_ref, status, availability,
-       consent_status, account_consent_id, consent_expires_at, currency, limit_period, max_payment_minor,
-       max_period_minor, max_period_payments, holder_name, account_type, hint, partner_changed_at, created_at)
-     values ($1, $2, $3, 'fake', $4, 'ACTIVE', 'ACTIVE', 'Authorized', 'consent-1', '2027-10-06T08:00:00Z', 'AED',
-       'month', 5000000, 20000000, 100, 'Acme Trading LLC', 'sme', 'AE…1234', $5, $5)`,
-    [org.id, org.source, link, `acct-${org.source}`, AT],
-  );
-  return org;
+  const id = randomUUID();
+  return { id, agent: await seed().agent(id), source: await seed().source(id) };
 };
 
 const inOrg = <Result>(org: Org, work: (tx: Tx) => Promise<Result>) => withTenant(app, org.id, work);
@@ -115,15 +98,7 @@ const add = (org: Org, mandate: MandateRow, version: VersionRow) =>
   });
 
 /** Another agent of the organisation, made past the app: an agent has one open mandate at a time. */
-const anotherAgent = async (org: Org): Promise<string> => {
-  const agent = randomUUID();
-  await database.as('admin').query(
-    `insert into agents.agents (org_id, id, name, owner, status, scopes, created_at)
-       values ($1, $2, 'Another agent', $3, 'ACTIVE', 'requests:write', $4)`,
-    [org.id, agent, randomUUID(), AT],
-  );
-  return agent;
-};
+const anotherAgent = (org: Org): Promise<string> => seed().agent(org.id, { name: 'Another agent' });
 
 /** A mandate waiting for acceptance with its first draft, for a new agent unless one is given: its ID and the draft's. */
 const drafted = async (org: Org, overrides: Partial<VersionRow> = {}, agent?: string) => {
