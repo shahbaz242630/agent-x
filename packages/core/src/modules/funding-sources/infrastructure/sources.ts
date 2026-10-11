@@ -313,7 +313,7 @@ export async function sourcesPage(
     orgId,
     page,
     { most: MOST_SOURCES_A_PAGE, rows: 'sources' },
-    (verified) => Promise.resolve({ outcome: 'shown', items: verified.map(({ id, state }) => sourceFrom(id, state)) }),
+    (verified) => ({ outcome: 'shown', items: verified.map(({ id, state }) => sourceFrom(id, state)) }),
   );
   return listed.outcome === 'tampered' ? listed : { outcome: 'listed', sources: listed.items, next: listed.next };
 }

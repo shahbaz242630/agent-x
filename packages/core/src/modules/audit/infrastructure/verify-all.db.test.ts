@@ -320,6 +320,19 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     });
   });
 
+  it('raises each alarm in ID order, one gone with its seals among them, so the hold names the first by ID', async () => {
+    const [gone, changed] = [await newRow(AGENTS), await newRow(AGENTS)];
+    await agents.setColumn(changed, 'label', 'REVOKED');
+    // Neither a row nor a signed state left: verifyAll's own `deleted`, before the seal found after it.
+    await agents.stripSeals(gone);
+    await agents.deleteRow(gone);
+
+    const findings = [finding('agent', gone, 'deleted'), finding('agent', changed, 'seal')];
+    expect(await verifyAll([AGENTS])).toEqual({ outcome: 'tampered', findings });
+    // The hold is recorded from the first finding handed on (withSignedStates).
+    expect(found).toEqual(findings);
+  });
+
   it.each([
     ['rows', async () => [await newRow(KEYS), await newRow(KEYS), await newRow(KEYS)]],
     [

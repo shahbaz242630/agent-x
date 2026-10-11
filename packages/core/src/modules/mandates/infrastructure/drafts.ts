@@ -476,12 +476,8 @@ export async function mandatesPage(
         if (shown === null) throw new Error(`A verified mandate has no version to show: ${id}`);
         return { mandate, shown };
       });
-      const versions = await states.verifiedStates(
-        tx,
-        MANDATE_VERSIONS,
-        orgId,
-        mandates.map(({ shown }) => shown),
-      );
+      const versionIds = mandates.map(({ shown }) => shown);
+      const versions = await states.verifiedStates(tx, MANDATE_VERSIONS, orgId, versionIds);
       const items: MandateShown[] = [];
       for (const { mandate, shown } of mandates) {
         const version = mandateVersionIn(shown, checkOf(versions, shown), mandate.id);

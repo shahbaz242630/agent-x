@@ -999,8 +999,8 @@ export async function suppliersPage(
     { most: MOST_SUPPLIERS_A_PAGE, rows: 'suppliers' },
     async (verified): Promise<PageShown<SupplierShown>> => {
       const suppliers = verified.map(({ id, state }) => supplierFrom(id, state));
-      const ids = suppliers.map(({ currentVersionId }) => currentVersionId);
-      const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, ids);
+      const versionIds = suppliers.map(({ currentVersionId }) => currentVersionId);
+      const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, versionIds);
       const items: SupplierShown[] = [];
       for (const supplier of suppliers) {
         const id = supplier.currentVersionId;

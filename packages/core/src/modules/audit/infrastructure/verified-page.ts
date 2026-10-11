@@ -7,7 +7,7 @@
 import { type SignedStateTable, signedRowIds } from '@agentx/platform/db';
 
 import type { AuditTransaction } from './audit-trail.ts';
-import type { SignedStates, StateCheck, TamperSign, VerifiedState } from './signed-states.ts';
+import { checkOf, type SignedStates, type TamperSign, type VerifiedState } from './signed-states.ts';
 
 /** A page, with the ID to ask the next page after, or null at the end; or tampered with, and then no page at all. */
 export type VerifiedPage<Item> =
@@ -31,13 +31,6 @@ export type PageShown<Item> =
   | { readonly outcome: 'shown'; readonly items: readonly Item[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
-/** The check verifiedStates gave the row `id`: it answers every ID asked, so one missing is a bug, never a row to show. */
-export function checkOf(checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck {
-  const check = checks.get(id.toLowerCase());
-  if (check === undefined) throw new Error(`A row was asked for and not read: ${id}`);
-  return check;
-}
-
 /**
  * A page of the organisation's rows of `table`, in order of ID, in the
  * caller's transaction, which must be withSignedStates' for it: the page's
@@ -46,8 +39,9 @@ export function checkOf(checks: ReadonlyMap<string, StateCheck>, id: string): St
  * holds nothing that can't be believed. A row gone since its ID was listed
  * is left out. Tampered with, at the first row that is in ID order, the page
  * is refused (every tampered row's alarm raised). Besides `show`'s, six
- * statements a page: its IDs, then the rows, then their signed states, each
- * with its tenant check. A limit outside 1 to `most` is refused before any
+ * statements a page that holds rows: its IDs, then the rows, then their
+ * signed states, each with its tenant check (a row not found whole is read
+ * again on its own). A limit outside 1 to `most` is refused before any
  * SQL runs, naming the page's `rows`.
  */
 export async function verifiedPage<Item>(
@@ -57,7 +51,7 @@ export async function verifiedPage<Item>(
   orgId: string,
   { after, limit }: PageAsked,
   { most, rows }: { readonly most: number; readonly rows: string },
-  show: (verified: readonly PageRow[]) => Promise<PageShown<Item>>,
+  show: (verified: readonly PageRow[]) => PageShown<Item> | Promise<PageShown<Item>>,
 ): Promise<VerifiedPage<Item>> {
   if (!Number.isInteger(limit) || limit < 1 || limit > most) {
     throw new RangeError(`A page is 1 to ${String(most)} ${rows}`);

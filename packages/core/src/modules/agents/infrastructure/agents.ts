@@ -252,7 +252,7 @@ export async function agentsPage(
     orgId,
     page,
     { most: MOST_AGENTS_A_PAGE, rows: 'agents' },
-    (verified) => Promise.resolve({ outcome: 'shown', items: verified.map(({ id, state }) => agentFrom(id, state)) }),
+    (verified) => ({ outcome: 'shown', items: verified.map(({ id, state }) => agentFrom(id, state)) }),
   );
   if (listed.outcome === 'tampered') return listed;
   return { outcome: 'listed', agents: await agentsShown(tx, orgId, listed.items), next: listed.next };
