@@ -306,14 +306,14 @@ export function createSpendRequestDecisions({
   // The mandates' refusal: the decision reads mandates, versions and policies through their reads.
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
 
-  /** Everything in the lock order, the decision, and what it makes: the request's ID. */
+  /** Everything in the lock order, the decision, and what it makes: the request's ID, with its decision. */
   async function decided(
     tx: DecisionTx,
     states: SignedStates,
     acting: AgentActing,
     idempotencyKey: string,
     asked: SpendAskedByAgent,
-  ): Promise<string> {
+  ): Promise<{ readonly id: string } & Pick<NewRequest, 'decision' | 'reasons'>> {
     const { orgId, agentId } = acting;
     const now = clock.now();
     await currencyTaken(tx, asked.amount.currency);
@@ -377,18 +377,31 @@ export function createSpendRequestDecisions({
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
     }
     await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
-    return requestId;
+    return { id: requestId, decision: made.decision, reasons: made.reasons };
   }
 
   return {
     async decideAndReserve(agent, idempotent, asked, correlationId) {
-      const done = await retryingTransaction(logger.child({ correlationId }), DECIDE_OPERATION, () =>
-        work.write(agent, idempotent, correlationId, async (tx, states) => ({
-          status: 201,
-          resourceId: await decided(tx, states, agent, idempotent.key, asked),
-        })),
+      const log = logger.child({ correlationId, orgId: agent.orgId });
+      // Each attempt sets it; only the one that committed is returned, so it is that attempt's decision.
+      let made: Awaited<ReturnType<typeof decided>> | undefined;
+      const done = await retryingTransaction(log, DECIDE_OPERATION, () =>
+        work.write(agent, idempotent, correlationId, async (tx, states) => {
+          made = await decided(tx, states, agent, idempotent.key, asked);
+          return { status: 201, resourceId: made.id };
+        }),
       );
       if (isUnwritten(done)) return done;
+      // Once a decision is committed, and once only (never for its key's replay), from the write itself, so a
+      // failed read after it can't lose it (E2a review): the denial-surge alert counts these lines per agent
+      // (E2). The audit chain is the record; this is the signal.
+      if (done.outcome === 'done' && made !== undefined) {
+        log.info('spend_request.decided', {
+          agentId: agent.agentId,
+          decision: made.decision,
+          reasons: made.reasons.join(' '),
+        });
+      }
       return work.answered(agent.orgId, correlationId, async (tx, states) => {
         const found = await requestOf(tx, states, { orgId: agent.orgId, id: done.result.resourceId });
         believed(found);
