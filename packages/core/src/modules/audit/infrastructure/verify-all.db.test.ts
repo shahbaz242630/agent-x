@@ -382,7 +382,7 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     expect(many.sent).toBe(few.sent);
   });
 
-  it('judges a table past one read’s rows in batches, the last batch as the first', async () => {
+  it('judges a table past one read’s rows in batches, each to its last row, the last batch as the first', async () => {
     const ids: string[] = [];
     await withTenant(app, org, async (tx) => {
       for (let made = 0; made <= MOST_SIGNED_ROWS_READ; made += 1) {
@@ -392,12 +392,14 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
         ids.push(id);
       }
     });
-    const last = ids.at(-1) ?? '';
+    // The newIds rise, so these are the first batch's last object and the second batch's only one.
+    const [endOfFirst, last] = [ids.at(-2) ?? '', ids.at(-1) ?? ''];
+    await agents.setColumn(endOfFirst, 'label', 'PLANTED');
     await agents.setColumn(last, 'label', 'PLANTED');
 
     expect(await verifyAll([AGENTS], MOST_SIGNED_ROWS_READ + 1)).toEqual({
       outcome: 'tampered',
-      findings: [finding('agent', last, 'seal')],
+      findings: [finding('agent', endOfFirst, 'seal'), finding('agent', last, 'seal')],
     });
   }, 60_000);
 

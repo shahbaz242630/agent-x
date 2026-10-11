@@ -294,9 +294,13 @@ export type HistoryCheck =
   | { readonly outcome: 'read'; readonly events: readonly ReadEvent[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
-/** The check verifiedStates gave the row `id`: it answers every ID asked, so one missing is a bug, never a row to believe. */
+/**
+ * The check verifiedStates gave the row `id`, in lower case as the database
+ * lists IDs: it answers every ID asked, so one missing is a bug, never a row
+ * to believe.
+ */
 export function checkOf(checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck {
-  const check = checks.get(id.toLowerCase());
+  const check = checks.get(id);
   if (check === undefined) throw new Error(`A row was asked for and not read: ${id}`);
   return check;
 }
