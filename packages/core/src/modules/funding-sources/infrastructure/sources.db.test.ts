@@ -19,6 +19,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import type { DirectoryTables } from '../../directory/index.ts';
@@ -585,6 +586,23 @@ describe(`a page of an organisation's funding sources (D2-4, Postgres ${server.v
       sources: [first, second, third],
       next: null,
     });
+  });
+
+  it('reads a page in the same few statements however many sources it holds: no per-row loop', async () => {
+    const org = await organization();
+    const counted = () =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        statementsSent(tx, (each) => sourcesPage(each, states, org, { after: null, limit: MOST_SOURCES_A_PAGE })),
+      );
+    await linkedSource(org);
+    const few = await counted();
+    await linkedSource(org, 'sme-trading-business-acct-01');
+    await linkedSource(org, 'corporate-treasury-listed-acct-01');
+    const many = await counted();
+
+    expect(few.result).toMatchObject({ outcome: 'listed', sources: [{}] });
+    expect(many.result).toMatchObject({ outcome: 'listed', sources: [{}, {}, {}] });
+    expect(many.sent).toBe(few.sent);
   });
 
   it('is empty for an organisation with none', async () => {
