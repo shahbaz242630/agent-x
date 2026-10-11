@@ -20,6 +20,7 @@ import {
   createDatabase,
   type Database,
   liveSchemaProblems,
+  MOST_SIGNED_ROWS_READ,
   readSignedRow,
   type SignedStateTable,
   signedRowIds,
@@ -30,6 +31,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { AuditEventRefused } from '../domain/event.ts';
 import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
@@ -318,6 +320,19 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
     });
   });
 
+  it('raises each alarm in ID order, one gone with its seals among them, so the hold names the first by ID', async () => {
+    const [gone, changed] = [await newRow(AGENTS), await newRow(AGENTS)];
+    await agents.setColumn(changed, 'label', 'REVOKED');
+    // Neither a row nor a signed state left: verifyAll's own `deleted`, before the seal found after it.
+    await agents.stripSeals(gone);
+    await agents.deleteRow(gone);
+
+    const findings = [finding('agent', gone, 'deleted'), finding('agent', changed, 'seal')];
+    expect(await verifyAll([AGENTS])).toEqual({ outcome: 'tampered', findings });
+    // The hold is recorded from the first finding handed on (withSignedStates).
+    expect(found).toEqual(findings);
+  });
+
   it.each([
     ['rows', async () => [await newRow(KEYS), await newRow(KEYS), await newRow(KEYS)]],
     [
@@ -352,6 +367,41 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
 
     expect(await verifyAll([KEYS], 2)).toEqual({ outcome: 'verified', objects: 2 });
   });
+
+  it('reads a table in the same few statements however many objects it holds: no per-row loop', async () => {
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [AGENTS, KEYS], 100)));
+    await newRow(AGENTS);
+    await newRow(KEYS);
+    const few = await counted();
+    for (let more = 0; more < 6; more += 1) await newRow(AGENTS);
+    const many = await counted();
+
+    expect(few.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(many.result).toEqual({ outcome: 'verified', objects: 8 });
+    expect(many.sent).toBe(few.sent);
+  });
+
+  it('judges a table past one read’s rows in batches, each to its last row, the last batch as the first', async () => {
+    const ids: string[] = [];
+    await withTenant(app, org, async (tx) => {
+      for (let made = 0; made <= MOST_SIGNED_ROWS_READ; made += 1) {
+        const id = newId();
+        await tx.insertInto(AGENTS.table).values({ org_id: org, id, label: 'ACTIVE' }).execute();
+        await states.record(tx, AGENTS, { orgId: org, id }, 'new', { label: 'ACTIVE' }, change('agent.created'));
+        ids.push(id);
+      }
+    });
+    // The newIds rise, so these are the first batch's last object and the second batch's only one.
+    const [endOfFirst, last] = [ids.at(-2) ?? '', ids.at(-1) ?? ''];
+    await agents.setColumn(endOfFirst, 'label', 'PLANTED');
+    await agents.setColumn(last, 'label', 'PLANTED');
+
+    expect(await verifyAll([AGENTS], MOST_SIGNED_ROWS_READ + 1)).toEqual({
+      outcome: 'tampered',
+      findings: [finding('agent', endOfFirst, 'seal'), finding('agent', last, 'seal')],
+    });
+  }, 60_000);
 
   it('holds each row locked for a decision to the end of its transaction: read again for a decision, not for a change', async () => {
     const id = await newRow(AGENTS);

@@ -250,11 +250,15 @@ export async function sourceOf(
 ): Promise<SourceCheck> {
   const state = await states.verifiedState(tx, SOURCES, key, lock);
   if (state.outcome !== 'verified') return state;
-  const source = recordOf(key.id.toLowerCase(), state.fields);
+  return { outcome: 'found', source: sourceFrom(key.id, state), state };
+}
+
+/** The source its verified state holds. */
+function sourceFrom(id: string, state: VerifiedState): SourceRecord {
+  const source = recordOf(id.toLowerCase(), state.fields);
   // The table's checks hold each field to its kind, and the seal to what was written.
-  if (source === undefined)
-    throw new Error(`A verified funding source holds a field that isn't one of its own: ${key.id}`);
-  return { outcome: 'found', source, state };
+  if (source === undefined) throw new Error(`A verified funding source holds a field that isn't one of its own: ${id}`);
+  return source;
 }
 
 /**
@@ -287,8 +291,9 @@ export const MOST_SOURCES_A_PAGE = 50;
 /**
  * A page of the organisation's sources, in order of ID, after `after` (null
  * from the start), in the caller's transaction, which must be
- * withSignedStates' for the organisation: each read through its signed state
- * (`share`), so a page holds nothing that can't be believed. Tampered with,
+ * withSignedStates' for the organisation: read together through their signed
+ * states (`share`, verifiedPage), so a page holds nothing that can't be
+ * believed, in the same few statements however many it holds. Tampered with,
  * the page is refused, the alarm raised and the organisation held, as for
  * one source. `next` is the ID to ask the page after, or null at the end.
  */
@@ -303,14 +308,12 @@ export async function sourcesPage(
 > {
   const listed = await verifiedPage(
     tx,
+    states,
     SOURCES,
     orgId,
     page,
     { most: MOST_SOURCES_A_PAGE, rows: 'sources' },
-    async (id) => {
-      const read = await sourceOf(tx, states, { orgId, id }, 'share');
-      return read.outcome === 'found' ? { outcome: 'found', item: read.source } : read;
-    },
+    (verified) => ({ outcome: 'shown', items: verified.map(({ id, state }) => sourceFrom(id, state)) }),
   );
   return listed.outcome === 'tampered' ? listed : { outcome: 'listed', sources: listed.items, next: listed.next };
 }

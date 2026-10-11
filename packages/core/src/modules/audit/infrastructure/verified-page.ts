@@ -1,17 +1,13 @@
 // A page of an organisation's authority rows, each believed only once its
 // signed state is (ADR-012 §2): the one paging every list of them shares
-// (agents, funding sources, suppliers), so where a page starts, where it
-// stops and what a tampered row does to it are written once.
+// (agents, funding sources, suppliers, mandates), so where a page starts,
+// where it stops and what a tampered row does to it are written once. The
+// page's rows are verified together (SignedStates.verifiedStates), so a page
+// is a few statements however many rows it holds, never one read a row.
 import { type SignedStateTable, signedRowIds } from '@agentx/platform/db';
-import type { Transaction } from 'kysely';
 
-import type { TamperSign } from './signed-states.ts';
-
-/** One row as its module reads it through its signed state (agentOf, sourceOf, supplierOf). */
-export type PageRead<Item> =
-  | { readonly outcome: 'found'; readonly item: Item }
-  | { readonly outcome: 'missing' }
-  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+import type { AuditTransaction } from './audit-trail.ts';
+import { checkOf, type SignedStates, type TamperSign, type VerifiedState } from './signed-states.ts';
 
 /** A page, with the ID to ask the next page after, or null at the end; or tampered with, and then no page at all. */
 export type VerifiedPage<Item> =
@@ -24,35 +20,53 @@ export interface PageAsked {
   readonly limit: number;
 }
 
+/** A row of the page, verified: its ID, in lower case, and its signed state. */
+export interface PageRow {
+  readonly id: string;
+  readonly state: VerifiedState;
+}
+
+/** The items a page's rows show, in the rows' order; or tampered with, at the first that is (its alarm raised). */
+export type PageShown<Item> =
+  | { readonly outcome: 'shown'; readonly items: readonly Item[] }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
 /**
  * A page of the organisation's rows of `table`, in order of ID, in the
- * caller's transaction, which must be withSignedStates' for it: each row read
- * by `read`, so a page holds nothing that can't be believed. A row gone since
- * its ID was listed is left out. Tampered with, at the first row that is, the
- * page is refused (`read` raised the alarm). Besides each row's own read, two
- * statements a page: the tenant check and its IDs. A limit outside 1 to `most` is refused before
- * any SQL runs, naming the page's `rows`.
+ * caller's transaction, which must be withSignedStates' for it: the page's
+ * rows verified together, locked `share`, then shown by `show`, which may
+ * read what they point to (a supplier's version) the same way, so a page
+ * holds nothing that can't be believed. A row gone since its ID was listed
+ * is left out. Tampered with, at the first row that is in ID order, the page
+ * is refused (every tampered row's alarm raised). Besides `show`'s, six
+ * statements a page that holds rows: its IDs, then the rows, then their
+ * signed states, each with its tenant check (a row not found whole is read
+ * again on its own). A limit outside 1 to `most` is refused before any
+ * SQL runs, naming the page's `rows`.
  */
-export async function verifiedPage<Schema, Item>(
-  tx: Transaction<Schema>,
+export async function verifiedPage<Item>(
+  tx: AuditTransaction,
+  states: SignedStates,
   table: SignedStateTable,
   orgId: string,
   { after, limit }: PageAsked,
   { most, rows }: { readonly most: number; readonly rows: string },
-  read: (id: string) => Promise<PageRead<Item>>,
+  show: (verified: readonly PageRow[]) => PageShown<Item> | Promise<PageShown<Item>>,
 ): Promise<VerifiedPage<Item>> {
   if (!Number.isInteger(limit) || limit < 1 || limit > most) {
     throw new RangeError(`A page is 1 to ${String(most)} ${rows}`);
   }
   const ids = await signedRowIds(tx, table, orgId, limit, after);
-  const items: Item[] = [];
-  let last: string | null = null;
-  for (const id of ids.slice(0, limit)) {
-    const found = await read(id);
-    if (found.outcome === 'tampered') return found;
-    if (found.outcome === 'found') items.push(found.item);
-    last = id;
+  const page = ids.slice(0, limit);
+  const checks = await states.verifiedStates(tx, table, orgId, page);
+  const verified: PageRow[] = [];
+  for (const id of page) {
+    const check = checkOf(checks, id);
+    if (check.outcome === 'tampered') return check;
+    if (check.outcome === 'verified') verified.push({ id: id.toLowerCase(), state: check });
   }
+  const shown = await show(verified);
+  if (shown.outcome === 'tampered') return shown;
   // One more than the page was there: the next page starts after this one's last.
-  return { outcome: 'listed', items, next: ids.length > limit ? last : null };
+  return { outcome: 'listed', items: shown.items, next: ids.length > limit ? (page.at(-1) ?? null) : null };
 }

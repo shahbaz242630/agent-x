@@ -40,6 +40,7 @@ import { sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/
 import {
   createStatusChanger,
   type FieldText,
+  MOST_SIGNED_ROWS_READ,
   pointSignedRow,
   readSignedRow,
   readSignedRows,
@@ -292,6 +293,17 @@ export class SignedStateFailed extends Error {
 export type HistoryCheck =
   | { readonly outcome: 'read'; readonly events: readonly ReadEvent[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
+
+/**
+ * The check verifiedStates gave the row `id`, in lower case as the database
+ * lists IDs: it answers every ID asked, so one missing is a bug, never a row
+ * to believe.
+ */
+export function checkOf(checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck {
+  const check = checks.get(id);
+  if (check === undefined) throw new Error(`A row was asked for and not read: ${id}`);
+  return check;
+}
 
 export interface SignedStates {
   /**
@@ -706,11 +718,18 @@ export function createSignedStates({
     return checked;
   };
 
-  const verifiedStates = async (
+  /**
+   * verifiedStates, each check made in ID order with its alarm. `listed`: the
+   * IDs were listed as the table's objects (judged), so one with neither a
+   * row nor a signed state is `deleted`, its alarm raised in that same order,
+   * as the hold records the first alarm it hears (withSignedStates).
+   */
+  const checksOf = async (
     tx: AuditTransaction,
     table: SignedStateTable,
     orgId: string,
     ids: readonly string[],
+    listed: boolean,
   ): Promise<ReadonlyMap<string, StateCheck>> => {
     notTheHold(table);
     const rows = heldIn(tx);
@@ -732,13 +751,15 @@ export function createSignedStates({
       if (row === undefined || last === undefined) throw new Error('A signed state was asked for and not read');
       // A row not found whole (missing, or unreadable: rare, and a tamper sign) is read again on its own, which
       // judges it as verifiedState always does, a row created since it was read among them.
-      checks.set(
-        id,
-        row.outcome === 'found' ? compare(table, key, row, last) : await verifiedState(tx, table, key, 'share'),
-      );
+      const check =
+        row.outcome === 'found' ? compare(table, key, row, last) : await verifiedState(tx, table, key, 'share');
+      checks.set(id, listed && check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check);
     }
     return checks;
   };
+
+  const verifiedStates = (tx: AuditTransaction, table: SignedStateTable, orgId: string, ids: readonly string[]) =>
+    checksOf(tx, table, orgId, ids, false);
 
   /**
    * Locks a row being created for change, once it is as the app inserts one:
@@ -925,7 +946,13 @@ export function createSignedStates({
     return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
   };
 
-  /** Each object verified as verifyAll does, locked `share`: the findings, each with its alarm raised. */
+  /**
+   * Each object verified as verifyAll does, locked `share`, by ID: the
+   * findings, each with its alarm raised, in ID order. Read as verifiedStates
+   * reads, so a few statements for each MOST_SIGNED_ROWS_READ objects, never
+   * per row. Listed, as a row or in the log, yet neither a row nor a signed
+   * state now: deleted, its seals with it (checksOf).
+   */
   const judged = async (
     tx: AuditTransaction,
     orgId: string,
@@ -933,15 +960,16 @@ export function createSignedStates({
     ids: readonly string[],
   ): Promise<TamperFinding[]> => {
     const findings: TamperFinding[] = [];
-    for (const id of ids) {
-      const key = { orgId, id };
-      const check = await verifiedState(tx, table, key, 'share');
-      // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
-      const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
-      if (found.outcome === 'tampered') {
-        findings.push(
-          Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: found.sign }),
-        );
+    for (let start = 0; start < ids.length; start += MOST_SIGNED_ROWS_READ) {
+      const batch = ids.slice(start, start + MOST_SIGNED_ROWS_READ);
+      const checks = await checksOf(tx, table, orgId, batch, true);
+      for (const id of batch) {
+        const check = checkOf(checks, id);
+        if (check.outcome === 'tampered') {
+          findings.push(
+            Object.freeze({ orgId: orgId.toLowerCase(), subjectType: table.subject, objectId: id, sign: check.sign }),
+          );
+        }
       }
     }
     return findings;

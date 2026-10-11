@@ -14,6 +14,7 @@ import { createDatabase, type Database, TenantContextError, withTenant } from '@
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { DAY_MS } from '../../../shared-kernel/index.ts';
 import { type AuditTables, withSignedStates } from '../../audit/index.ts';
 import { type DirectoryTables, listedAgentKey } from '../../directory/index.ts';
@@ -769,6 +770,22 @@ describe("a page of the organisation's agents (C1-2)", () => {
     expect(page).toMatchObject({ outcome: 'listed', agents: [{ id, name: 'Purchasing bot' }], next: null });
   });
 
+  it('reads a page in the same few statements however many agents it holds: no per-row loop', async () => {
+    const org = await organization();
+    const counted = () =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        statementsSent(tx, (each) => agentsPage(each, states, org, { after: null, limit: MOST_AGENTS_A_PAGE })),
+      );
+    await addAnAgent(org);
+    const few = await counted();
+    for (let more = 0; more < 3; more += 1) await addAnAgent(org);
+    const many = await counted();
+
+    expect(few.result).toMatchObject({ outcome: 'listed', agents: [{}] });
+    expect(many.result).toMatchObject({ outcome: 'listed', agents: [{}, {}, {}, {}] });
+    expect(many.sent).toBe(few.sent);
+  });
+
   it('steps past an agent gone since its ID was listed: the next page still starts after it', async () => {
     const org = await organization();
     const { id: first } = await addAnAgent(org);
@@ -776,9 +793,14 @@ describe("a page of the organisation's agents (C1-2)", () => {
 
     const page = await withSignedStates(app, org, services(), (tx, states) => {
       // A row gone since listed, with nothing in the log, reads as missing: this stands in for one.
-      const verifiedState: typeof states.verifiedState = (...args) =>
-        args[2].id === first ? Promise.resolve({ outcome: 'missing' as const }) : states.verifiedState(...args);
-      return agentsPage(tx, { ...states, verifiedState }, org, { after: null, limit: 1 });
+      const verifiedStates: typeof states.verifiedStates = async (...args) =>
+        new Map(
+          [...(await states.verifiedStates(...args))].map(([id, check]) => [
+            id,
+            id === first ? { outcome: 'missing' as const } : check,
+          ]),
+        );
+      return agentsPage(tx, { ...states, verifiedStates }, org, { after: null, limit: 1 });
     });
 
     expect(page).toEqual({ outcome: 'listed', agents: [], next: first });

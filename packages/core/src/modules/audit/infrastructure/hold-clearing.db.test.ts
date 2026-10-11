@@ -20,6 +20,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
 import { type HoldClearing, type SignedStates, SignedStateFailed } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
@@ -378,6 +379,20 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
       outcome: 'tampered',
       findings: [{ orgId: org, subjectType: 'agent', objectId: gone, sign: 'deleted' }],
     });
+  });
+
+  it('reads a batch in the same few statements however many objects it holds: no per-row loop', async () => {
+    const counted = () =>
+      inOrg((tx, states) => statementsSent(tx, (each) => states.checkHistoryBatch(each, org, AGENTS, null, 50)));
+    await inOrg((tx, states) => insertAgent(tx, states, newId()));
+    const few = await counted();
+    for (let more = 0; more < 5; more += 1) await inOrg((tx, states) => insertAgent(tx, states, newId()));
+    const many = await counted();
+
+    // The organisation's own row is an agent here too (insertAgent's first).
+    expect(few.result).toMatchObject({ outcome: 'checked', objects: 2, done: true });
+    expect(many.result).toMatchObject({ outcome: 'checked', objects: 7, done: true });
+    expect(many.sent).toBe(few.sent);
   });
 
   it('reads the hold with the chain head locked, which comes last: no row is read after it', async () => {
