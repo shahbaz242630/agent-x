@@ -213,6 +213,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     errorAlertThreshold: appErrorAlertThreshold
     integrityAlertName: names.auditIntegrity
     tokenRefusedAlertName: names.tokenRefused
+    denialSurgeAlertName: names.denialSurge
+    holdingsCheckAlertName: names.holdingsCheck
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

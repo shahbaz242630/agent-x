@@ -221,6 +221,8 @@ const APP_LOGS = named(/^app-logs-to-workspace$/);
 const ERRORS_ALERT = named(/-app-errors$/);
 const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
+const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
+const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const COMMUNICATION = type('Microsoft.Communication/communicationServices');
@@ -451,6 +453,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-app-errors',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-audit-integrity',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-token-refused',
+      'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-denials-by-agent',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-denial-surge',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1113,15 +1118,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to M.
+    // The playbook's sections run from A to N.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('M')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('N')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('N')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('O')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -1764,6 +1769,93 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section M.
     expect(String(at(staging.predictedResources.find(TOKEN_REFUSED_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section M\.$/,
+    );
+  });
+
+  it("denial-surge-alert: no alert on one agent's denials, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const DENIALS =
+      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.decided" | where tostring(parse_json(Log).decision) in ("DENY", "REQUIRE_NEW_MANDATE")';
+    expect(brokenRules(without(DENIAL_SURGE_ALERT))).toEqual(['denial-surge-alert']);
+    for (const change of [
+      // Every decision, or denials alone without a new mandate's, or another event.
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.decided" | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.decided" | where tostring(parse_json(Log).decision) in ("DENY") | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)',
+      ),
+      query(
+        `${DENIALS.replace('spend_request.decided', 'http.request_completed')} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)`,
+      ),
+      // The organisation's total, not one agent's; or the agents' total again.
+      query(`${DENIALS} | summarize Highest = count()`),
+      query(
+        `${DENIALS} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = sum(Denials)`,
+      ),
+      query(
+        `${DENIALS} | summarize Denials = count() by Agent = tostring(parse_json(Log).orgId) | summarize Highest = max(Denials)`,
+      ),
+      query(
+        `${DENIALS.replace('ContainerAppConsoleLogs', 'ContainerAppSystemLogs')} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)`,
+      ),
+      // Its threshold, neither higher nor lower.
+      (alert: Mutable) => (criterion(alert).threshold = 11),
+      (alert: Mutable) => (criterion(alert).threshold = 0),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(DENIAL_SURGE_ALERT, change))).toEqual(['denial-surge-alert']);
+    }
+    expect(brokenRules(changed(DENIAL_SURGE_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'denial-surge-alert',
+    ]);
+    // One number: the per-agent stage left last returns a row an agent.
+    expect(
+      brokenRules(
+        changed(
+          DENIAL_SURGE_ALERT,
+          query(`${DENIALS} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId)`),
+        ),
+      ),
+    ).toEqual(['alert-counts-only', 'denial-surge-alert']);
+    // Its runbook is the playbook's section F (an agent behaving strangely).
+    expect(String(at(staging.predictedResources.find(DENIAL_SURGE_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section F\.$/,
+    );
+  });
+
+  it("holdings-check-alert: no alert on a failed page of the holdings check, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    expect(brokenRules(without(HOLDINGS_CHECK_ALERT))).toEqual(['holdings-check-alert']);
+    for (const change of [
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "holdings_check.paused" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "holdings_check.failed" | summarize Events = count()',
+      ),
+      query(
+        'ContainerAppSystemLogs | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()',
+      ),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(HOLDINGS_CHECK_ALERT, change))).toEqual(['holdings-check-alert']);
+    }
+    expect(brokenRules(changed(HOLDINGS_CHECK_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'holdings-check-alert',
+    ]);
+    // Its runbook is the playbook's section N.
+    expect(String(at(staging.predictedResources.find(HOLDINGS_CHECK_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section N\.$/,
     );
   });
 
