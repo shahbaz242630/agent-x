@@ -124,6 +124,7 @@ export interface ReservationSeen {
   readonly state: string;
   readonly month: string;
   readonly reservedAt: Date;
+  readonly payeeKey: string | null;
 }
 
 /** The reservations of the requests named, in one statement: none, one, or (past the app) more for each. */
@@ -144,6 +145,7 @@ export async function reservationsFor(
       'state',
       'month',
       'reserved_at',
+      'payee_key',
     ])
     .where('request_id', 'in', requestIds)
     .execute();
@@ -157,6 +159,7 @@ export async function reservationsFor(
     state: row.state,
     month: row.month,
     reservedAt: row.reserved_at,
+    payeeKey: row.payee_key,
   }));
 }
 

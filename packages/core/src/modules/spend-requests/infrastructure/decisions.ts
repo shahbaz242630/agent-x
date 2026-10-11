@@ -21,6 +21,7 @@ import type {
 } from '../../audit/index.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
+import type { PayeeSeal } from '../domain/holdings.ts';
 import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -76,7 +77,8 @@ export async function insertRequest(tx: RequestsTransaction, request: NewRequest
 /**
  * Signs the request just inserted (`spend_request.received`) and moves it
  * where its decision leads (`spend_request.decided`, with the reasons, and,
- * when it holds capacity, its reservation's month and instant: `held`).
+ * when it holds capacity, its reservation's month and instant and its payee
+ * seal: `held`).
  */
 export async function signRequest(
   tx: RequestsTransaction,
@@ -97,18 +99,30 @@ export async function signRequest(
     details: {
       decision: request.decision,
       reasons: request.reasons.join(' '),
-      // What its reservation was made as, sealed with the decision, for the holdings check (E1).
-      ...(held === null ? {} : { heldMonth: held.month, heldAt: held.reservedAt.toISOString() }),
+      // What its reservation and claim were made as, sealed with the decision, for the holdings check (E1, E1b).
+      ...(held === null
+        ? {}
+        : {
+            heldMonth: held.month,
+            heldAt: held.reservedAt.toISOString(),
+            payeeSeal: held.payee.mac,
+            payeeSealKeyVersion: held.payee.keyVersion,
+          }),
     },
   });
   // Just recorded VALIDATING by this transaction, its move its decision's: anything else is something past the app.
   if (moved.outcome !== 'changed') throw new Error(`A new spend request didn't move as decided: ${moved.outcome}`);
 }
 
-/** A reservation as its decision made it: the agent's month and the instant (E1 checks the reservation against them). */
+/**
+ * A reservation and claim as their decision made them: the agent's month and
+ * the instant (E1), and the seal of their payee key (E1b, sealPayee); the
+ * holdings check compares them against these.
+ */
 export interface HeldAs {
   readonly month: string;
   readonly reservedAt: Date;
+  readonly payee: PayeeSeal;
 }
 
 /** The authority fields of a new request, as the row and its first signed state hold them. */

@@ -3,7 +3,8 @@
 // locked FOR SHARE (so a move that changes what it holds waits for the page,
 // or the page for it), with their reservations and order claims read in one
 // statement each and compared by `holdingsMatch`, with the month and instant
-// each decision sealed (`heldMonth`, `heldAt`) read from its signed event.
+// each decision sealed (`heldMonth`, `heldAt`) read from its signed event,
+// and their payee keys against its payee seal (E1b, payee-seal.ts).
 // A page is a fixed number of statements, however many requests it holds
 // (E1c, the partner's no-per-row-loops rule): the rows and their signed
 // states two (verifiedStates), the decided events one. A
@@ -22,13 +23,15 @@
 // One planted past the app only takes capacity away or blocks an order, never
 // pays one (0040's `held_for_its_request` and 0039's `for_its_request` guard
 // what the app makes).
+import type { KeyProvider } from '@agentx/platform/keys';
 import { sql, type Transaction } from 'kysely';
 
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
-import { type ClaimHolding, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
-import { type HeldAs, requestsOf, type SpendRequestRecord } from './decisions.ts';
+import { type ClaimHolding, type HeldSealed, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
+import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
+import { payeeAsSealed } from './payee-seal.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -55,6 +58,7 @@ interface ClaimRow {
   readonly supplierId: string;
   readonly orderKey: string;
   readonly released: boolean;
+  readonly payeeKey: string | null;
 }
 
 /** The claims of the requests named, in one statement. */
@@ -62,7 +66,7 @@ async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[])
   if (requestIds.length === 0) return [];
   const rows = await tx
     .selectFrom('spend_requests.order_claims')
-    .select(['request_id', 'supplier_id', 'order_reference', 'released_at'])
+    .select(['request_id', 'supplier_id', 'order_reference', 'released_at', 'payee_key'])
     .where('request_id', 'in', requestIds)
     .execute();
   return rows.map((row) => ({
@@ -70,6 +74,7 @@ async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[])
     supplierId: row.supplier_id,
     orderKey: row.order_reference,
     released: row.released_at !== null,
+    payeeKey: row.payee_key,
   }));
 }
 
@@ -83,7 +88,7 @@ async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[
 }
 
 /**
- * The reservation's month and instant each request's decision sealed, by the
+ * What each request's decision sealed of what it holds (heldOf), by the
  * request's ID, in one statement; null for a request whose decision sealed
  * none. A history that can't be believed has raised the alarm and holds the
  * organisation already: nothing sealed is then compared.
@@ -93,7 +98,7 @@ async function heldAsDecided(
   states: SignedStates,
   orgId: string,
   ids: readonly string[],
-): Promise<Map<string, HeldAs | null>> {
+): Promise<Map<string, HeldSealed | null>> {
   if (ids.length === 0) return new Map();
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject],
@@ -127,6 +132,7 @@ function byRequest<Row extends { readonly requestId: string }>(rows: readonly Ro
 export async function checkHoldings(
   tx: HoldingsTransaction,
   states: SignedStates,
+  keys: KeyProvider,
   orgId: string,
   { after, limit }: PageAsked,
 ): Promise<HoldingsChecked> {
@@ -144,7 +150,7 @@ export async function checkHoldings(
   const found = requests.map(({ id }) => id);
   const reservations = byRequest(await reservationsFor(tx, found));
   const claimed = byRequest(await claimsFor(tx, found));
-  const keys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
+  const orderKeys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
   // Only what still holds anything was sealed with what it holds.
   const sealed = await heldAsDecided(
     tx,
@@ -155,12 +161,19 @@ export async function checkHoldings(
   let mismatched = 0;
   for (const request of requests) {
     const held = sealed.get(request.id) ?? null;
+    const asSealed = (payeeKey: string | null) =>
+      held === null || payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey });
     // A claim is its request's own when it is on the request's supplier and order, in canonical form.
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({
       released: claim.released,
-      itsOwn: claim.supplierId === request.supplierId && claim.orderKey === keys.get(request.orderReference),
+      itsOwn: claim.supplierId === request.supplierId && claim.orderKey === orderKeys.get(request.orderReference),
+      payeeAsSealed: asSealed(claim.payeeKey),
     }));
-    if (!holdingsMatch({ ...request, held }, reservations.get(request.id) ?? [], claims)) {
+    const reserved = (reservations.get(request.id) ?? []).map((reservation) => ({
+      ...reservation,
+      payeeAsSealed: asSealed(reservation.payeeKey),
+    }));
+    if (!holdingsMatch({ ...request, held }, reserved, claims)) {
       states.mismatch(SPEND_REQUESTS.subject, { orgId, id: request.id });
       mismatched += 1;
     }

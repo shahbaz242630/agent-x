@@ -13,7 +13,12 @@ import { SPEND_REQUEST, type SpendRequestStatus } from './spend-request.ts';
 
 const AT = new Date('2026-10-08T08:00:00Z');
 
-const request = (status: SpendRequestStatus, held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT }) => ({
+const SEAL = { mac: 'ab'.repeat(32), keyVersion: 1 };
+
+const request = (
+  status: SpendRequestStatus,
+  held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT, payee: SEAL },
+) => ({
   agentId: 'agent',
   mandateId: 'mandate',
   supplierId: 'supplier',
@@ -31,11 +36,12 @@ const reservation = (overrides: Partial<ReservationHolding> = {}): ReservationHo
   state: 'HELD',
   month: '2026-10',
   reservedAt: AT,
+  payeeAsSealed: true,
   ...overrides,
 });
 
-const OPEN: ClaimHolding = { released: false, itsOwn: true };
-const RELEASED: ClaimHolding = { released: true, itsOwn: true };
+const OPEN: ClaimHolding = { released: false, itsOwn: true, payeeAsSealed: true };
+const RELEASED: ClaimHolding = { released: true, itsOwn: true, payeeAsSealed: true };
 
 describe('what a request holds (E1)', () => {
   it.each(['APPROVAL_REQUIRED', 'APPROVED', 'INSTRUCTION_READY'] as const)(
@@ -48,7 +54,10 @@ describe('what a request holds (E1)', () => {
       expect(holdingsMatch(request(status), [reservation(), reservation()], [OPEN])).toBe(false);
       expect(holdingsMatch(request(status), [reservation()], [OPEN, OPEN])).toBe(false);
       expect(holdingsMatch(request(status), [reservation()], [RELEASED])).toBe(false);
-      expect(holdingsMatch(request(status), [reservation()], [{ released: false, itsOwn: false }])).toBe(false);
+      expect(holdingsMatch(request(status), [reservation()], [{ ...OPEN, itsOwn: false }])).toBe(false);
+      // E1b: a claim or reservation on another payee key than the decision sealed.
+      expect(holdingsMatch(request(status), [reservation()], [{ ...OPEN, payeeAsSealed: false }])).toBe(false);
+      expect(holdingsMatch(request(status), [reservation({ payeeAsSealed: false })], [OPEN])).toBe(false);
       for (const state of ['RELEASED', 'FINALISED', 'BLOCKED_UNKNOWN']) {
         expect(holdingsMatch(request(status), [reservation({ state })], [OPEN])).toBe(false);
       }
@@ -79,6 +88,7 @@ describe('what a request holds (E1)', () => {
     expect(holdingsMatch(request('HANDED_OFF'), [reservation({ state: 'RELEASED' })], [OPEN])).toBe(false);
     expect(holdingsMatch(request('HANDED_OFF'), [reservation()], [RELEASED])).toBe(false);
     expect(holdingsMatch(request('HANDED_OFF'), [reservation({ amountMinor: 1n })], [OPEN])).toBe(false);
+    expect(holdingsMatch(request('HANDED_OFF'), [reservation({ payeeAsSealed: false })], [OPEN])).toBe(false);
   });
 
   it.each(['DENIED', 'EXPIRED', 'CANCELLED'] as const)('%s: nothing held, or all of it given back', (status) => {
@@ -102,12 +112,26 @@ describe('what a request holds (E1)', () => {
     expect(heldOf({ heldMonth: '2026-10', heldAt: AT.toISOString(), decision: 'ALLOW' })).toEqual({
       month: '2026-10',
       reservedAt: AT,
+      payee: 'none',
     });
     expect(heldOf(undefined)).toBeNull();
     expect(heldOf({ decision: 'ALLOW' })).toBeNull();
     expect(heldOf({ heldMonth: '2026-10' })).toBeNull();
     expect(heldOf({ heldAt: AT.toISOString() })).toBeNull();
     expect(heldOf({ heldMonth: 202610, heldAt: AT.toISOString() })).toBeNull();
+  });
+
+  it('reads the payee seal a decision sealed (E1b): none before E1b, unreadable if not whole', () => {
+    const sealed = (payee: Record<string, unknown>) =>
+      heldOf({ heldMonth: '2026-10', heldAt: AT.toISOString(), ...payee })?.payee;
+    expect(sealed({ payeeSeal: SEAL.mac, payeeSealKeyVersion: 1 })).toEqual(SEAL);
+    expect(sealed({ payeeSeal: SEAL.mac })).toBe('unreadable');
+    expect(sealed({ payeeSealKeyVersion: 1 })).toBe('unreadable');
+    expect(sealed({ payeeSeal: SEAL.mac.toUpperCase(), payeeSealKeyVersion: 1 })).toBe('unreadable');
+    expect(sealed({ payeeSeal: SEAL.mac.slice(2), payeeSealKeyVersion: 1 })).toBe('unreadable');
+    expect(sealed({ payeeSeal: SEAL.mac, payeeSealKeyVersion: 0 })).toBe('unreadable');
+    expect(sealed({ payeeSeal: SEAL.mac, payeeSealKeyVersion: 1.5 })).toBe('unreadable');
+    expect(sealed({ payeeSeal: SEAL.mac, payeeSealKeyVersion: '1' })).toBe('unreadable');
   });
 
   it('says which statuses still hold anything', () => {

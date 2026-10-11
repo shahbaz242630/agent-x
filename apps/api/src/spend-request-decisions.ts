@@ -62,6 +62,7 @@ import {
   insertRequest,
   type NewRequest,
   requestOf,
+  sealPayee,
   signRequest,
   type SpendRequestRecord,
   type SpendRequestsTables,
@@ -372,7 +373,10 @@ export function createSpendRequestDecisions({
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
     }
-    const held = holdsCapacity(made.decision) && month !== null ? { month, reservedAt: now } : null;
+    const held =
+      holdsCapacity(made.decision) && month !== null && order !== null
+        ? { month, reservedAt: now, payee: sealPayee(keys, orgId, requestId, order.payeeKey) }
+        : null;
     await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     return requestId;
   }

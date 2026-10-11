@@ -29,5 +29,6 @@ export {
   type SpendRequestRecord,
 } from './infrastructure/decisions.ts';
 export { claimOrder, hasOpenClaim, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
+export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';
