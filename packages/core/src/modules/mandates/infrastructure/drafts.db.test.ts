@@ -276,6 +276,31 @@ describe('reading mandates (B2)', () => {
     expect(await page(first.id)).toMatchObject({ mandates: [{ id: second.id, purpose: 'Cleaning' }], next: null });
   });
 
+  it('shows the purpose of the version in force while a later draft waits', async () => {
+    const { id, versionId } = await drafted(terms({ purpose: 'Office supplies' }));
+    await acceptedNow(id, versionId);
+    await redrafted(id, terms({ purpose: 'Cleaning' }));
+
+    expect(
+      await withSignedStates(app, org, quiet(), (tx, states) =>
+        mandatesPage(tx, states, org, { after: null, limit: 1 }),
+      ),
+    ).toMatchObject({ mandates: [{ id, purpose: 'Office supplies' }] });
+  });
+
+  it('reads the page’s rows alone: one tampered with past the page is left to the page it is on', async () => {
+    const first = await drafted();
+    const second = await drafted(terms(), otherAgent);
+    await owner.stripSeals(second.id);
+
+    expect(
+      await withSignedStates(app, org, quiet(), (tx, states) =>
+        mandatesPage(tx, states, org, { after: null, limit: 1 }),
+      ),
+    ).toMatchObject({ outcome: 'listed', mandates: [{ id: first.id }], next: first.id });
+    expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([]);
+  });
+
   it('reads a page in the same few statements however many mandates it holds: no per-row loop', async () => {
     const counted = () =>
       withSignedStates(app, org, quiet(), (tx, states) =>
