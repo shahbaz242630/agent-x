@@ -10,6 +10,7 @@
 import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { checkHoldings, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -59,6 +60,29 @@ async function ready() {
   await shared.inForce(registry, w, { approvalThreshold: AED(1_500_000n) });
   return { w, acting: await agentKey(w) };
 }
+
+/** The partner's identity for the first supplier's payee, as E2's registration would record it (E1b's tests). */
+const PAYEE = 'partner-payee-e1b';
+
+/** The world's first supplier given a payee key, through its signed state: what a registration records. */
+const withPayee = (w: World) =>
+  withSignedStates(app, w.org, quiet(), async (tx, states) => {
+    const key = { orgId: w.org, id: w.suppliers[0] ?? '' };
+    const state = await states.verifiedState(tx, SUPPLIERS, key, 'change');
+    if (state.outcome !== 'verified') throw new Error(`supplier not verified: ${state.outcome}`);
+    await states.record(
+      tx,
+      SUPPLIERS,
+      key,
+      state,
+      { payee_key: PAYEE, payee_key_version: null },
+      {
+        actor: { type: 'system', id: 'holdings-check-test' },
+        action: 'supplier.payee_registered',
+        details: {},
+      },
+    );
+  });
 
 let keysUsed = 0;
 const ask = async (acting: AgentActing, w: World, overrides: Partial<SpendAskedByAgent>) => {
@@ -181,7 +205,7 @@ describe('the holdings check (E1)', () => {
           },
           transformResult: ({ result }) => Promise.resolve(result),
         };
-        return checkHoldings(tx.withPlugin(counting), states, w.org, { after: null, limit: 200 });
+        return checkHoldings(tx.withPlugin(counting), states, keys, w.org, { after: null, limit: 200 });
       });
       return { sent, checked };
     };
@@ -207,7 +231,7 @@ describe('the holdings check (E1)', () => {
     const trail = createAuditTrail({ keys, ids });
     const page = () =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        checkHoldings(tx, states, w.org, { after: null, limit: 200 }),
+        checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
       );
     // Sealed by the app's own keys, signing no state: only the decided events' count is wrong.
     const decidedAgain = (times: number, details: Record<string, string> = {}) =>
@@ -302,6 +326,128 @@ describe('the holdings check (E1)', () => {
     ]);
     expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 1 })]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  const payeeChanged: [string, (owner: TestClient, held: Held) => Promise<unknown>, keyof Held][] = [
+    [
+      'a claim’s payee key nulled',
+      (owner, { allowed }) =>
+        owner.query('update spend_requests.order_claims set payee_key = null where request_id = $1', [allowed]),
+      'allowed',
+    ],
+    [
+      'a reservation’s payee key nulled',
+      (owner, { waiting }) =>
+        owner.query('update limit_reservations.reservations set payee_key = null where request_id = $1', [waiting]),
+      'waiting',
+    ],
+    [
+      'a claim’s payee key swapped',
+      (owner, { waiting }) =>
+        owner.query("update spend_requests.order_claims set payee_key = 'another-payee' where request_id = $1", [
+          waiting,
+        ]),
+      'waiting',
+    ],
+    [
+      'a reservation’s payee key swapped',
+      (owner, { allowed }) =>
+        owner.query("update limit_reservations.reservations set payee_key = 'another-payee' where request_id = $1", [
+          allowed,
+        ]),
+      'allowed',
+    ],
+    [
+      'a reservation’s payee key emptied',
+      (owner, { waiting }) =>
+        owner.query("update limit_reservations.reservations set payee_key = '' where request_id = $1", [waiting]),
+      'waiting',
+    ],
+  ];
+
+  it('passes requests on a payee key as their decisions sealed it (E1b)', async () => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    await requests(acting, w);
+
+    await job(w).run();
+
+    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
+    expect(lines('audit.integrity_failed')).toEqual([]);
+  });
+
+  it.each(payeeChanged)('raises the alarm and the hold for %s past the app (E1b)', async (_, change, whose) => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    const held = await requests(acting, w);
+    await pastTheApp(w, (owner) => change(owner, held));
+
+    await job(w).run();
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held[whose] }),
+    ]);
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('seals the payee key in the decision without the key itself in the log (E1b, ADR-014 §3)', async () => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    const { allowed } = await requests(acting, w);
+
+    const history = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.historyOf(tx, w.org, {
+        subjectTypes: [SPEND_REQUESTS.subject],
+        subjectIds: [allowed],
+        actions: ['spend_request.decided'],
+        limit: 4,
+      }),
+    );
+    if (history.outcome !== 'read') throw new Error('the history should read');
+    const [decided] = history.events;
+    expect(decided?.event.details).toMatchObject({
+      payeeSeal: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+      payeeSealKeyVersion: 1,
+    });
+    expect(JSON.stringify(history.events.map(({ event }) => event.details))).not.toContain(PAYEE);
+  });
+
+  it('leaves the payee key of a request decided before E1b, which sealed none, uncompared', async () => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    const { allowed } = await requests(acting, w);
+    // A later decided event as E1 sealed one, with the month and instant alone (the app's own keys, as the log's).
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: 'spend_request.decided',
+        subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
+        details: { heldMonth: '2026-10', heldAt: clock.now().toISOString() },
+      }),
+    );
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set payee_key = null where request_id = $1', [allowed]),
+    );
+
+    await job(w).run();
+
+    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
+  });
+
+  it('raises the alarm for a payee key added past the app where the decision sealed none (E1b)', async () => {
+    const { w, acting } = await ready();
+    const held = await requests(acting, w);
+    await pastTheApp(w, (owner) =>
+      owner.query("update spend_requests.order_claims set payee_key = 'planted-payee' where request_id = $1", [
+        held.allowed,
+      ]),
+    );
+
+    await job(w).run();
+
+    expect(lines('audit.integrity_failed')).toEqual([
+      expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held.allowed }),
+    ]);
   });
 
   it('passes an organisation with no requests yet', async () => {

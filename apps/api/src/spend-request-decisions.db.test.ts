@@ -73,6 +73,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let simulations: PolicySimulations;
+let capture: LogCapture;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-decisions' });
 const { world, quiet, movedPastTheUseCase, agentKey, eventsAbout, verified } = shared;
@@ -222,7 +223,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-08T08:00:00Z'));
-  const logger = testLogger(new LogCapture());
+  capture = new LogCapture();
+  const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
   simulations = createPolicySimulations({ database: app, keys, ids, clock, logger });
@@ -419,6 +421,33 @@ describe('deciding a spend request and reserving it (D4)', () => {
       outcome: 'conflict',
     });
     expect((await made(w.org)).requests).toBe(1);
+  });
+
+  it('logs each decision once it is made, for the denial-surge alert, and never for its key’s replay (E2)', async () => {
+    const { w, acting } = await ready();
+    const decided = () => capture.lines().filter((line) => line.event === 'spend_request.decided');
+    const allowed = decidedOf(await ask(acting, asking(w), 'logged-once'));
+    const denied = decidedOf(await ask(acting, asking(w, { orderReference: 'inv-1001' })));
+
+    expect(denied.decision).toBe('DENY');
+    expect(decided()).toEqual([
+      expect.objectContaining({ orgId: w.org, agentId: acting.agentId, decision: 'ALLOW', reasons: '' }),
+      expect.objectContaining({
+        orgId: w.org,
+        agentId: acting.agentId,
+        decision: 'DENY',
+        reasons: denied.reasons.join(' '),
+      }),
+    ]);
+    // The signal alone: no order, amount or supplier in the line.
+    const lines = JSON.stringify(decided());
+    for (const value of ['inv-1001', 'INV-1001', w.suppliers[0] ?? '', '1000000', 'Printer paper']) {
+      expect(lines).not.toContain(value);
+    }
+
+    expect(decidedOf(await ask(acting, asking(w), 'logged-once'))).toEqual(allowed);
+    expect(await ask(acting, asking(w, { orderReference: 'INV-9' }), 'logged-once')).toEqual({ outcome: 'conflict' });
+    expect(decided()).toHaveLength(2);
   });
 
   it('refuses with nothing made a currency the deployment doesn’t take, a revoked key and a frozen organisation', async () => {

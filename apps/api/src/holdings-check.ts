@@ -70,7 +70,7 @@ export function createHoldingsCheck({
       const after = progress.get(orgId) ?? null;
       try {
         const checked = await withSignedStates(database, orgId, services(log), (tx, states) =>
-          checkHoldings(tx, states, orgId, { after, limit: page }),
+          checkHoldings(tx, states, keys, orgId, { after, limit: page }),
         );
         requests += checked.requests;
         mismatched += checked.mismatched;
