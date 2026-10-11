@@ -281,10 +281,11 @@ export interface HistoryToRead {
 }
 
 /**
- * The objects a history reads (HistoryToRead), in lower case, or undefined
- * for every object of its types; refuses a find that breaks its rules.
+ * The objects a history reads (HistoryToRead), or undefined for every object
+ * of its types (compared as uuids, so in any case); refuses a find that breaks
+ * its rules.
  */
-function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): string[] | undefined {
+function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): readonly string[] | undefined {
   const named = subjectId === undefined ? subjectIds : [subjectId];
   const problems = [
     ...subjectTypes.flatMap(subjectTypeProblems),
@@ -295,7 +296,7 @@ function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): 
   if (subjectId !== undefined && subjectIds !== undefined) throw new RangeError('One object or several, not both');
   // None named would read every object's history, which a caller asking for some never means.
   if (named?.length === 0) throw new RangeError('At least one object is read');
-  return named?.map((id) => id.toLowerCase());
+  return named;
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -827,7 +828,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       const which = sql.join(
         [
           sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
-          ...(objects === undefined ? [] : [sql`e.subject_id = any(${objects}::uuid[])`]),
+          ...(objects === undefined ? [] : [sql`e.subject_id = any(${[...objects]}::uuid[])`]),
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
         ],
         sql` and `,

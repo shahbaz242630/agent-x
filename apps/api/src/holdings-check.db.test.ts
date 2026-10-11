@@ -210,20 +210,24 @@ describe('the holdings check (E1)', () => {
         checkHoldings(tx, states, w.org, { after: null, limit: 200 }),
       );
     // Sealed by the app's own keys, signing no state: only the decided events' count is wrong.
-    const decidedAgain = (times: number) =>
+    const decidedAgain = (times: number, details: Record<string, string> = {}) =>
       withTenant(app, w.org, async (tx) => {
         for (let time = 0; time < times; time += 1) {
           await trail.record(tx, w.org, {
             actor: { type: 'system', id: 'api' },
             action: 'spend_request.decided',
             subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
-            details: {},
+            details,
           });
         }
       });
 
-    await decidedAgain(3);
+    await decidedAgain(2);
     expect(await page()).toMatchObject({ requests: 3, mismatched: 0 });
+    // The request's last decided event is the one compared: one sealing another month is a mismatch.
+    await decidedAgain(1, { heldMonth: '2026-01', heldAt: '2026-01-15T08:00:00.000Z' });
+    expect(await page()).toMatchObject({ requests: 3, mismatched: 1 });
+    // A fifth: more than one decision makes, beside requests with one each.
     await decidedAgain(1);
     await expect(page()).rejects.toBeInstanceOf(TooManyEventsToRead);
   });

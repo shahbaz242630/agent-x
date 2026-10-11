@@ -906,6 +906,33 @@ describe('many rows verified at once (verifiedStates; E1c)', () => {
     expect(alarms()).toEqual([]);
   });
 
+  it('reads a row locked for a change again for a decision, which keeps it locked for the change', async () => {
+    const id = await newAgent();
+
+    const recorded = await withTenant(app, org, async (tx) => {
+      const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+      expect((await states.verifiedStates(tx, AGENTS, org, [id])).get(id)).toMatchObject({ version: 1 });
+      // Still locked for the change: verified for it again, and recorded from it.
+      const again = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      if (again.outcome !== 'verified') throw new Error('The test expected a verified state');
+      return states.record(tx, AGENTS, { orgId: org, id }, again, { role: 'writer' }, change('agent.touched'));
+    });
+
+    expect(recorded).toMatchObject({ version: 2 });
+  });
+
+  it('refuses to lock rows after the chain head, before reading any (ADR-006 §6)', async () => {
+    const id = await newAgent();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.integrityHold(tx, org, 'head');
+        return states.verifiedStates(tx, AGENTS, org, [id]);
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+  });
+
   it('reads nothing for no IDs, and refuses an ID not a UUID or more than 500 before any SQL runs', async () => {
     expect(await many([])).toEqual(new Map());
     await expect(many(['x'])).rejects.toThrow(RangeError);
