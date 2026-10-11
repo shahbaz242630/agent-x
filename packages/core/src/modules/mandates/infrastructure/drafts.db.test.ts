@@ -294,7 +294,7 @@ describe('reading mandates (B2)', () => {
     await owner.stripSeals(second.id);
 
     expect(
-      await withSignedStates(app, org, quiet(), (tx, states) =>
+      await withSignedStates(app, org, services(), (tx, states) =>
         mandatesPage(tx, states, org, { after: null, limit: 1 }),
       ),
     ).toMatchObject({ outcome: 'listed', mandates: [{ id: first.id }], next: first.id });
