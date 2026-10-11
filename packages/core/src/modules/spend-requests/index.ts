@@ -18,8 +18,8 @@ export {
 } from './domain/asked.ts';
 export { SPEND_REQUEST, type SpendRequestStatus } from './domain/spend-request.ts';
 export { checkHoldings, type HoldingsChecked, MOST_CHECKED_A_PAGE } from './infrastructure/holdings-check.ts';
+export type { HeldAs } from './domain/holdings.ts';
 export {
-  type HeldAs,
   holdsCapacity,
   insertRequest,
   type NewRequest,

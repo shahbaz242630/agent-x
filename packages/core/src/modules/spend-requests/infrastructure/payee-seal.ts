@@ -10,17 +10,28 @@ import type { KeyProvider, Message } from '@agentx/platform/keys';
 
 import type { HeldSealed, PayeeSeal } from '../domain/holdings.ts';
 
-/** What is sealed: the request's payee key, or none (a part of its own, as 0039's keys are never empty). */
-const sealed = (orgId: string, requestId: string, payeeKey: string | null): Message => [
+/** The request whose payee key is sealed, and the key: null where its supplier has none. */
+export interface SealedFor {
+  readonly orgId: string;
+  readonly requestId: string;
+  readonly payeeKey: string | null;
+}
+
+/**
+ * What is sealed. No key and a key are told apart by shape, not by a value a
+ * key could take: a reservation's `payee_key` has no check against '' (0040,
+ * review), so '' must never pass as none.
+ */
+const payeeSealMessage = ({ orgId, requestId, payeeKey }: SealedFor): Message => [
   'spend-request-payee',
   orgId.toLowerCase(),
   requestId.toLowerCase(),
-  payeeKey ?? '',
+  ...(payeeKey === null ? ['none'] : ['key', payeeKey]),
 ];
 
 /** The seal of the request's payee key, with the current `decision-hash` key. */
-export function sealPayee(keys: KeyProvider, orgId: string, requestId: string, payeeKey: string | null): PayeeSeal {
-  const { mac, keyVersion } = keys.mac('decision-hash', sealed(orgId, requestId, payeeKey));
+export function sealPayee(keys: KeyProvider, sealedFor: SealedFor): PayeeSeal {
+  const { mac, keyVersion } = keys.mac('decision-hash', payeeSealMessage(sealedFor));
   return { mac: Buffer.from(mac).toString('hex'), keyVersion };
 }
 
@@ -29,21 +40,8 @@ export function sealPayee(keys: KeyProvider, orgId: string, requestId: string, p
  * decision sealed: true where none was sealed (decided before E1b), false
  * where the seal can't be read.
  */
-export function payeeAsSealed(
-  keys: KeyProvider,
-  seal: HeldSealed['payee'],
-  {
-    orgId,
-    requestId,
-    payeeKey,
-  }: { readonly orgId: string; readonly requestId: string; readonly payeeKey: string | null },
-): boolean {
+export function payeeAsSealed(keys: KeyProvider, seal: HeldSealed['payee'], sealedFor: SealedFor): boolean {
   if (seal === 'none') return true;
   if (seal === 'unreadable') return false;
-  return keys.verifyMac(
-    'decision-hash',
-    seal.keyVersion,
-    sealed(orgId, requestId, payeeKey),
-    Buffer.from(seal.mac, 'hex'),
-  );
+  return keys.verifyMac('decision-hash', seal.keyVersion, payeeSealMessage(sealedFor), Buffer.from(seal.mac, 'hex'));
 }

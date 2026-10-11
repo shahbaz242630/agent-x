@@ -39,6 +39,11 @@ export interface HeldSealed {
   readonly payee: PayeeSeal | 'none' | 'unreadable';
 }
 
+/** What a decision that holds capacity seals (signRequest's `held`): always a payee seal of its own. */
+export interface HeldAs extends Omit<HeldSealed, 'payee'> {
+  readonly payee: PayeeSeal;
+}
+
 /** The request as its signed state holds it, what the check compares by. */
 export interface RequestHolding {
   readonly agentId: string;
@@ -107,9 +112,13 @@ function payeeSealOf(details: Readonly<Record<string, unknown>> | undefined): He
   const mac = details?.payeeSeal;
   const keyVersion = details?.payeeSealKeyVersion;
   if (mac === undefined && keyVersion === undefined) return 'none';
-  return typeof mac === 'string' && SEAL_MAC.test(mac) && Number.isSafeInteger(keyVersion) && Number(keyVersion) >= 1
-    ? { mac, keyVersion: Number(keyVersion) }
-    : 'unreadable';
+  const whole =
+    typeof mac === 'string' &&
+    SEAL_MAC.test(mac) &&
+    typeof keyVersion === 'number' &&
+    Number.isSafeInteger(keyVersion) &&
+    keyVersion >= 1;
+  return whole ? { mac, keyVersion } : 'unreadable';
 }
 
 /** Whether the status still holds capacity and its order: waiting, approved, ready or handed off. */

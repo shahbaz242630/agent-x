@@ -58,6 +58,7 @@ import {
 import {
   claimOrder,
   hasOpenClaim,
+  type HeldAs,
   holdsCapacity,
   insertRequest,
   type NewRequest,
@@ -353,6 +354,7 @@ export function createSpendRequestDecisions({
     };
 
     await insertRequest(tx, request);
+    let held: HeldAs | null = null;
     if (holdsCapacity(made.decision)) {
       // Capacity is held only on a mandate in force, by a supplier of the organisation's (decide's checks).
       if (mandate === null || month === null || order === null) throw new Error('capacity held with nothing weighed');
@@ -372,11 +374,8 @@ export function createSpendRequestDecisions({
       const claimed = await claimOrder(tx, { ...order, orgId, id: ids.next(), requestId, claimedAt: now });
       // The supplier held and its payee key its own alone: see the top of this file.
       if (claimed === 'taken') throw new Error(`An order held by its supplier was claimed meanwhile: ${requestId}`);
+      held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
     }
-    const held =
-      holdsCapacity(made.decision) && month !== null && order !== null
-        ? { month, reservedAt: now, payee: sealPayee(keys, orgId, requestId, order.payeeKey) }
-        : null;
     await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
     return requestId;
   }

@@ -349,6 +349,20 @@ describe('the holdings check (E1)', () => {
         ]),
       'waiting',
     ],
+    [
+      'a reservation’s payee key swapped',
+      (owner, { allowed }) =>
+        owner.query("update limit_reservations.reservations set payee_key = 'another-payee' where request_id = $1", [
+          allowed,
+        ]),
+      'allowed',
+    ],
+    [
+      'a reservation’s payee key emptied',
+      (owner, { waiting }) =>
+        owner.query("update limit_reservations.reservations set payee_key = '' where request_id = $1", [waiting]),
+      'waiting',
+    ],
   ];
 
   it('passes requests on a payee key as their decisions sealed it (E1b)', async () => {
@@ -374,6 +388,50 @@ describe('the holdings check (E1)', () => {
       expect.objectContaining({ reason: 'holding', subjectType: 'spend_request', objectId: held[whose] }),
     ]);
     expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+  });
+
+  it('seals the payee key in the decision without the key itself in the log (E1b, ADR-014 §3)', async () => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    const { allowed } = await requests(acting, w);
+
+    const history = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.historyOf(tx, w.org, {
+        subjectTypes: [SPEND_REQUESTS.subject],
+        subjectIds: [allowed],
+        actions: ['spend_request.decided'],
+        limit: 4,
+      }),
+    );
+    if (history.outcome !== 'read') throw new Error('the history should read');
+    const [decided] = history.events;
+    expect(decided?.event.details).toMatchObject({
+      payeeSeal: expect.stringMatching(/^[0-9a-f]{64}$/) as unknown,
+      payeeSealKeyVersion: 1,
+    });
+    expect(JSON.stringify(history.events.map(({ event }) => event.details))).not.toContain(PAYEE);
+  });
+
+  it('leaves the payee key of a request decided before E1b, which sealed none, uncompared', async () => {
+    const { w, acting } = await ready();
+    await withPayee(w);
+    const { allowed } = await requests(acting, w);
+    // A later decided event as E1 sealed one, with the month and instant alone (the app's own keys, as the log's).
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: 'spend_request.decided',
+        subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
+        details: { heldMonth: '2026-10', heldAt: clock.now().toISOString() },
+      }),
+    );
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set payee_key = null where request_id = $1', [allowed]),
+    );
+
+    await job(w).run();
+
+    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
   });
 
   it('raises the alarm for a payee key added past the app where the decision sealed none (E1b)', async () => {

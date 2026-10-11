@@ -21,7 +21,7 @@ import type {
 } from '../../audit/index.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
-import type { PayeeSeal } from '../domain/holdings.ts';
+import type { HeldAs } from '../domain/holdings.ts';
 import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -112,17 +112,6 @@ export async function signRequest(
   });
   // Just recorded VALIDATING by this transaction, its move its decision's: anything else is something past the app.
   if (moved.outcome !== 'changed') throw new Error(`A new spend request didn't move as decided: ${moved.outcome}`);
-}
-
-/**
- * A reservation and claim as their decision made them: the agent's month and
- * the instant (E1), and the seal of their payee key (E1b, sealPayee); the
- * holdings check compares them against these.
- */
-export interface HeldAs {
-  readonly month: string;
-  readonly reservedAt: Date;
-  readonly payee: PayeeSeal;
 }
 
 /** The authority fields of a new request, as the row and its first signed state hold them. */

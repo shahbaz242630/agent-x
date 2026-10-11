@@ -30,7 +30,7 @@ const asSealed = (seal: Parameters<typeof payeeAsSealed>[1], payeeKey: string | 
 
 describe('the payee seal (E1b)', () => {
   it('holds for the payee key sealed alone: another key, or none, is told apart', () => {
-    const seal = sealPayee(keys, ORG, REQUEST, PAYEE);
+    const seal = sealPayee(keys, { orgId: ORG, requestId: REQUEST, payeeKey: PAYEE });
 
     expect(seal.mac).toMatch(/^[0-9a-f]{64}$/);
     expect(seal.keyVersion).toBe(1);
@@ -44,16 +44,19 @@ describe('the payee seal (E1b)', () => {
   });
 
   it('seals a request with no payee key as none, which a key added past the app breaks', () => {
-    const seal = sealPayee(keys, ORG, REQUEST, null);
+    const seal = sealPayee(keys, { orgId: ORG, requestId: REQUEST, payeeKey: null });
 
     expect(asSealed(seal, null)).toBe(true);
     expect(asSealed(seal, PAYEE)).toBe(false);
+    // No key is a shape of its own, so a key of '' (a reservation's column has no check against it) is told apart.
+    expect(asSealed(seal, '')).toBe(false);
+    expect(asSealed(sealPayee(keys, { orgId: ORG, requestId: REQUEST, payeeKey: '' }), null)).toBe(false);
   });
 
   it('verifies with the version it was sealed with, after the key is rotated', () => {
-    const old = sealPayee(keys, ORG, REQUEST, PAYEE);
+    const old = sealPayee(keys, { orgId: ORG, requestId: REQUEST, payeeKey: PAYEE });
     const rotated = keysAt(2);
-    const seal = sealPayee(rotated, ORG, REQUEST, PAYEE);
+    const seal = sealPayee(rotated, { orgId: ORG, requestId: REQUEST, payeeKey: PAYEE });
 
     expect(seal.keyVersion).toBe(2);
     expect(seal.mac).not.toBe(old.mac);
@@ -64,8 +67,8 @@ describe('the payee seal (E1b)', () => {
   });
 
   it('is a payee seal alone: never the same hash as anything else the decision key makes of these parts', () => {
-    const seal = sealPayee(keys, ORG, REQUEST, PAYEE);
-    const decision = keys.mac('decision-hash', ['spend-request-decision', ORG, REQUEST, PAYEE]);
+    const seal = sealPayee(keys, { orgId: ORG, requestId: REQUEST, payeeKey: PAYEE });
+    const decision = keys.mac('decision-hash', ['spend-request-decision', ORG, REQUEST, 'key', PAYEE]);
 
     expect(Buffer.from(decision.mac).toString('hex')).not.toBe(seal.mac);
   });
