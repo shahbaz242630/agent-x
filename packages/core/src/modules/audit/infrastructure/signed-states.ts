@@ -42,6 +42,7 @@ import {
   type FieldText,
   pointSignedRow,
   readSignedRow,
+  readSignedRows,
   type RowLock,
   type SignedFieldValues,
   type SignedRow,
@@ -299,6 +300,20 @@ export interface SignedStates {
    * row stays locked as asked to the end of the transaction.
    */
   verifiedState(tx: AuditTransaction, table: SignedStateTable, key: SignedRowKey, lock: RowLock): Promise<StateCheck>;
+  /**
+   * verifiedState for many rows of one table in the organisation, each locked
+   * `share`: the rows in one statement and their signed states in another,
+   * each judged alone as verifiedState judges one, its alarm raised the same.
+   * Each ID asked, in lower case, has its check in the map. A row gone while
+   * its object's log holds a signed state is read again on its own, as
+   * verifiedState reads one. At most 500 rows (readSignedRows).
+   */
+  verifiedStates(
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    orgId: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, StateCheck>>;
   /**
    * Every object of these tables in the organisation, verified as
    * verifiedState does and locked `share`, for a decision that rests on
@@ -691,6 +706,40 @@ export function createSignedStates({
     return checked;
   };
 
+  const verifiedStates = async (
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    orgId: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, StateCheck>> => {
+    notTheHold(table);
+    const rows = heldIn(tx);
+    const asked = [...new Set(ids.map((id) => id.toLowerCase()))];
+    for (const id of asked) checkLockOrder(tx, rows.get(rowName(table, { orgId, id })), 'share');
+    const read = await readSignedRows(tx, table, orgId, asked);
+    for (const id of asked) {
+      const name = rowName(table, { orgId, id });
+      const held = rows.get(name);
+      rows.set(name, { lock: held?.lock ?? 'share', ...(held?.from ? { from: held.from } : {}) });
+    }
+    const latest = await trail.latestSignedStates(tx, orgId, table.subject, asked);
+    const checks = new Map<string, StateCheck>();
+    for (const id of asked) {
+      const key = { orgId, id };
+      const row = read.get(id);
+      const last = latest.get(id);
+      // Both reads answer every ID asked; one that didn't would be a bug, never a row to believe.
+      if (row === undefined || last === undefined) throw new Error('A signed state was asked for and not read');
+      if (row.outcome === 'unreadable') checks.set(id, alarm(table.subject, key, 'row'));
+      else if (row.outcome === 'found') checks.set(id, compare(table, key, row, last));
+      else if (last.kind === 'none') checks.set(id, MISSING);
+      else if (last.kind === 'broken') checks.set(id, alarm(table.subject, key, 'log', last.seq));
+      // The row commits with its first event: gone, or created since it was read, which its own read tells.
+      else checks.set(id, await verifiedState(tx, table, key, 'share'));
+    }
+    return checks;
+  };
+
   /**
    * Locks a row being created for change, once it is as the app inserts one:
    * at version 1, pointing at no event, in its first status, with nothing
@@ -924,6 +973,8 @@ export function createSignedStates({
 
   return Object.freeze({
     verifiedState,
+
+    verifiedStates,
 
     mismatch(subjectType: string, key: SignedRowKey): void {
       alarm(subjectType, key, 'holding');

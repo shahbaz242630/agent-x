@@ -43,6 +43,7 @@ export {
   type FieldText,
   pointSignedRow,
   readSignedRow,
+  readSignedRows,
   type RowLock,
   type SignedField,
   type SignedFieldType,
@@ -52,6 +53,7 @@ export {
   type SignedRowKey,
   type SignedStateTable,
   signedRowIds,
+  MOST_SIGNED_ROWS_READ,
   type WrittenRow,
   writeSignedRow,
 } from './signed-rows.ts';

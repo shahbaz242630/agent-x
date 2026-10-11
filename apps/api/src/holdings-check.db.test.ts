@@ -9,7 +9,7 @@
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
 import { withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { checkHoldings, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -166,6 +166,39 @@ describe('the holdings check (E1)', () => {
     // A pass ended starts again from the beginning.
     await check.run();
     expect(lines('holdings_check.paused')).toHaveLength(2);
+  });
+
+  it('reads a page in the same few statements however many requests it holds (E1c: no per-row loop)', async () => {
+    const { w, acting } = await ready();
+    /** The statements one page of the check sends, each counted as Kysely sends it. */
+    const statementsAPage = async () => {
+      let sent = 0;
+      const checked = await withSignedStates(app, w.org, quiet(), (tx, states) => {
+        const counting: Parameters<typeof tx.withPlugin>[0] = {
+          transformQuery: ({ node }) => {
+            sent += 1;
+            return node;
+          },
+          transformResult: ({ result }) => Promise.resolve(result),
+        };
+        return checkHoldings(tx.withPlugin(counting), states, w.org, { after: null, limit: 200 });
+      });
+      return { sent, checked };
+    };
+
+    await requests(acting, w);
+    const few = await statementsAPage();
+    for (const order of ['INV-3', 'INV-4', 'INV-5', 'INV-6', 'INV-7']) {
+      await ask(acting, w, { amount: AED(10_000n), orderReference: order });
+    }
+    const many = await statementsAPage();
+
+    expect(few.checked).toMatchObject({ requests: 3, mismatched: 0, tampered: 0 });
+    expect(many.checked).toMatchObject({ requests: 8, mismatched: 0, tampered: 0 });
+    expect(many.sent).toBe(few.sent);
+    // The IDs (rows and log), the rows, their signed states, the decided events, reservations, claims, order keys,
+    // each read with its tenant check: 13 in all, the same for 3 requests or 200.
+    expect(few.sent).toBeLessThanOrEqual(13);
   });
 
   type Held = Awaited<ReturnType<typeof requests>>;

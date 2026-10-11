@@ -254,6 +254,47 @@ export async function readSignedRow<Schema>(
   return rowOf(table, rows);
 }
 
+/** The most rows readSignedRows reads in one statement. */
+export const MOST_SIGNED_ROWS_READ = 500;
+
+/**
+ * Reads many rows as readSignedRow reads one, in one statement, each locked
+ * `share` in order of ID, in the caller's transaction, which must be
+ * withTenant's for the organisation. Every ID asked has its read in the map,
+ * by its ID in lower case: `missing` where no row holds it, and each judged
+ * alone by readSignedRow's rules.
+ */
+export async function readSignedRows<Schema>(
+  tx: Transaction<Schema>,
+  table: SignedStateTable,
+  orgId: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, SignedRow>> {
+  checkTable(table);
+  if (!UUID.test(orgId) || !ids.every((id) => UUID.test(id))) throw new RangeError('A signed row is named by UUIDs');
+  const asked = [...new Set(ids.map((id) => id.toLowerCase()))];
+  if (asked.length > MOST_SIGNED_ROWS_READ) {
+    throw new RangeError(`At most ${MOST_SIGNED_ROWS_READ.toString()} signed rows are read at once`);
+  }
+  if (asked.length === 0) return new Map();
+  await assertTenant(tx, orgId);
+  const { rows } = await sql<Record<string, unknown>>`
+    select target.id::text as row_id, ${columnsOf(table)} from ${sql.table(table.table)} as target
+    where target.org_id = ${orgId} and target.id = any(${asked}::uuid[])
+    order by target.id
+    for share
+  `.execute(tx);
+  return new Map(
+    asked.map((id) => [
+      id,
+      rowOf(
+        table,
+        rows.filter(({ row_id: rowId }) => rowId === id),
+      ),
+    ]),
+  );
+}
+
 /**
  * The IDs of the table's rows in the organisation, in order (Postgres gives a
  * uuid as text in lower case), after the row `after` (null from the start),

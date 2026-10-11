@@ -11,7 +11,14 @@
 // refuses one the log already holds a state for.
 import type { Transaction } from 'kysely';
 
-import type { AuditActor, AuditTables, SignedStates, TamperSign, VerifiedState } from '../../audit/index.ts';
+import type {
+  AuditActor,
+  AuditTables,
+  SignedStates,
+  StateCheck,
+  TamperSign,
+  VerifiedState,
+} from '../../audit/index.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST, type SpendRequestStatus } from '../domain/spend-request.ts';
@@ -157,7 +164,26 @@ export async function requestOf(
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
 ): Promise<SpendRequestCheck> {
-  const state = await states.verifiedState(tx, SPEND_REQUESTS, key, 'share');
+  return requestFrom(key, await states.verifiedState(tx, SPEND_REQUESTS, key, 'share'));
+}
+
+/**
+ * Many requests of the organisation, as requestOf reads one, in two
+ * statements (SignedStates.verifiedStates): each ID asked, in lower case,
+ * with its check.
+ */
+export async function requestsOf(
+  tx: RequestsTransaction,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, SpendRequestCheck>> {
+  const checks = await states.verifiedStates(tx, SPEND_REQUESTS, orgId, ids);
+  return new Map([...checks].map(([id, state]) => [id, requestFrom({ orgId, id }, state)]));
+}
+
+/** The request a verified state holds; any other check as it is. */
+function requestFrom(key: { readonly orgId: string; readonly id: string }, state: StateCheck): SpendRequestCheck {
   if (state.outcome !== 'verified') return state;
   const field = (column: string): string | undefined => state.fields.get(column) ?? undefined;
   const agentId = field('agent_id');

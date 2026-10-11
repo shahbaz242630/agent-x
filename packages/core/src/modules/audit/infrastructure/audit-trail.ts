@@ -160,6 +160,9 @@ export class TooManyEventsToRead extends Error {
 /** The most events about an object, its newest signed one first, that one read takes. */
 const LATER_EVENTS_READ = 1000;
 
+/** The most objects latestSignedStates reads in one statement. */
+const MOST_LATEST_READ = 500;
+
 /**
  * Thrown by latestSignedState for an object with more than
  * LATER_EVENTS_READ events since its newest signed one: activity recorded
@@ -209,6 +212,17 @@ export interface AuditTrail {
    */
   latestSignedState(tx: AuditTransaction, orgId: string, subject: AuditSubjectKey): Promise<LatestSignedState>;
   /**
+   * latestSignedState for many objects of one type, in one statement: each
+   * ID asked, in lower case, with its object's latest signed state, judged
+   * alone as latestSignedState judges one. At most MOST_LATEST_READ objects.
+   */
+  latestSignedStates(
+    tx: AuditTransaction,
+    orgId: string,
+    type: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, LatestSignedState>>;
+  /**
    * The IDs of every object of this type the organisation's log holds any
    * event about, sealed or not, in order (a uuid, so lower case), after the ID
    * `after` (null from the start): at most `limit` and one more, so the caller
@@ -253,12 +267,35 @@ export interface AuditTrail {
   recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck>;
 }
 
-/** A history to read (recordedEvents): its objects' types, one object and some actions alone if named, and the most events it may hold. */
+/**
+ * A history to read (recordedEvents): its objects' types, one object (or
+ * several: `subjectIds`, never with `subjectId`) and some actions alone if
+ * named, and the most events it may hold.
+ */
 export interface HistoryToRead {
   readonly subjectTypes: readonly string[];
   readonly subjectId?: string;
+  readonly subjectIds?: readonly string[];
   readonly actions?: readonly string[];
   readonly limit: number;
+}
+
+/**
+ * The objects a history reads (HistoryToRead), in lower case, or undefined
+ * for every object of its types; refuses a find that breaks its rules.
+ */
+function objectsToRead({ subjectTypes, subjectId, subjectIds }: HistoryToRead): string[] | undefined {
+  const named = subjectId === undefined ? subjectIds : [subjectId];
+  const problems = [
+    ...subjectTypes.flatMap(subjectTypeProblems),
+    ...((named ?? []).every((id) => UUID.test(id)) ? [] : ['subject.id must be a UUID']),
+  ];
+  if (problems.length > 0) throw new AuditEventRefused(problems);
+  if (subjectTypes.length === 0) throw new RangeError('At least one subject type is read');
+  if (subjectId !== undefined && subjectIds !== undefined) throw new RangeError('One object or several, not both');
+  // None named would read every object's history, which a caller asking for some never means.
+  if (named?.length === 0) throw new RangeError('At least one object is read');
+  return named?.map((id) => id.toLowerCase());
 }
 
 /** The organisation's chain, named by its ID in lower case, as Postgres returns a uuid. */
@@ -573,6 +610,65 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     return Object.freeze({ id: sealed.id, seq: sealed.seq, recordedAt: sealed.recordedAt });
   };
 
+  /**
+   * The latest signed state in `rows`, an object's newest signed event and
+   * every one after it as eventsWithHead read them (none at all: no event of
+   * the object's), judged with the chain's head and the first event past it,
+   * which every row of the statement carries alike (`first`).
+   */
+  const latestIn = (
+    chain: Chain & { readonly kind: 'organisation' },
+    rows: readonly Readonly<Record<string, unknown>>[],
+    first: Readonly<Record<string, unknown>> | undefined,
+  ): LatestSignedState => {
+    if (first === undefined) return { kind: 'none' };
+    // The first event of the chain past its head (or of a chain with no head), if there is one: such a chain
+    // refuses every new event, the integrity hold's among them, so nothing about it is believed.
+    const past = first.past_head;
+    const pastHead = past !== null;
+    const brokenPast = brokenAt(past);
+    if (rows.length > LATER_EVENTS_READ) {
+      if (pastHead) return brokenPast;
+      throw new TooManyEventsAboutObject();
+    }
+    const events = rows.filter((row) => row.seq !== null);
+    const [newestSigned] = events;
+    if (newestSigned === undefined) return pastHead ? brokenPast : { kind: 'none' };
+
+    const head = first.has_head === true ? headIsWhole(keys, chain, first) : undefined;
+    const read = events.map((row) => ({ row, sealed: sealedFields(row), content: contentOf(row) }));
+    const bad = read.find(
+      ({ sealed, content }) =>
+        sealed === undefined ||
+        content === undefined ||
+        head === undefined ||
+        sealed.seq > head.seq ||
+        !entryIsSealed(keys, chain, { ...sealed, content }),
+    );
+    const details = detailsObject(newestSigned.details);
+    const seal = details === undefined ? undefined : stateSealIn(details);
+    const signed = read[0]?.sealed;
+    const version = newestSigned.subject_version;
+    if (
+      bad !== undefined ||
+      signed === undefined ||
+      typeof version !== 'number' ||
+      seal === undefined ||
+      seal === 'malformed'
+    ) {
+      return brokenAt((bad ?? read[0])?.row.seq);
+    }
+    if (pastHead) return brokenPast;
+    return Object.freeze({
+      kind: 'signed',
+      id: signed.id,
+      seq: signed.seq,
+      recordedAt: signed.recordedAt,
+      version,
+      seal,
+    });
+  };
+
   const trail: AuditTrail = Object.freeze({
     record(tx: AuditTransaction, orgId: string, event: AuditEvent): Promise<RecordedAuditEvent> {
       return recordAs(false, tx, orgId, event);
@@ -609,52 +705,50 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
           )`,
         LATER_EVENTS_READ + 1,
       );
-      const [first] = rows;
-      // The first event of the chain past its head (or of a chain with no head), if there is one: such a chain
-      // refuses every new event, the integrity hold's among them, so nothing about it is believed.
-      const past = first?.past_head;
-      const pastHead = past !== null;
-      const brokenPast = brokenAt(past);
-      if (rows.length > LATER_EVENTS_READ) {
-        if (pastHead) return brokenPast;
-        throw new TooManyEventsAboutObject();
-      }
-      const events = rows.filter((row) => row.seq !== null);
-      const [newestSigned] = events;
-      if (first === undefined || newestSigned === undefined) return pastHead ? brokenPast : { kind: 'none' };
+      return latestIn(chain, rows, rows[0]);
+    },
 
-      const head = first.has_head === true ? headIsWhole(keys, chain, first) : undefined;
-      const read = events.map((row) => ({ row, sealed: sealedFields(row), content: contentOf(row) }));
-      const bad = read.find(
-        ({ sealed, content }) =>
-          sealed === undefined ||
-          content === undefined ||
-          head === undefined ||
-          sealed.seq > head.seq ||
-          !entryIsSealed(keys, chain, { ...sealed, content }),
-      );
-      const details = detailsObject(newestSigned.details);
-      const seal = details === undefined ? undefined : stateSealIn(details);
-      const signed = read[0]?.sealed;
-      const version = newestSigned.subject_version;
-      if (
-        bad !== undefined ||
-        signed === undefined ||
-        typeof version !== 'number' ||
-        seal === undefined ||
-        seal === 'malformed'
-      ) {
-        return brokenAt((bad ?? read[0])?.row.seq);
+    async latestSignedStates(
+      tx: AuditTransaction,
+      orgId: string,
+      type: string,
+      ids: readonly string[],
+    ): Promise<ReadonlyMap<string, LatestSignedState>> {
+      const problems = [
+        ...subjectTypeProblems(type),
+        ...(ids.every((id) => UUID.test(id)) ? [] : ['subject.id must be a UUID']),
+      ];
+      if (problems.length > 0) throw new AuditEventRefused(problems);
+      const asked = [...new Set(ids.map((id) => id.toLowerCase()))];
+      if (asked.length > MOST_LATEST_READ) {
+        throw new RangeError(`At most ${MOST_LATEST_READ.toString()} objects' signed states are read at once`);
       }
-      if (pastHead) return brokenPast;
-      return Object.freeze({
-        kind: 'signed',
-        id: signed.id,
-        seq: signed.seq,
-        recordedAt: signed.recordedAt,
-        version,
-        seal,
-      });
+      if (asked.length === 0) return new Map();
+      await assertTenant(tx, orgId);
+      const chain = chainOf(orgId);
+      // Each object's newest signed event and every one after it, as latestSignedState reads one object's. Past
+      // the limit, some object has more than LATER_EVENTS_READ of them, and its own judgement below says so.
+      const rows = await eventsWithHead(
+        tx,
+        chain,
+        sql`e.subject_type = ${type} and e.subject_id = any(${asked}::uuid[])
+          and e.seq >= (
+            select pg_catalog.max(s.seq) from audit.events s
+            where s.org_id = ${chain.orgId} and s.subject_type = ${type} and s.subject_id = e.subject_id
+              and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
+          )`,
+        asked.length * (LATER_EVENTS_READ + 1),
+      );
+      return new Map(
+        asked.map((id) => [
+          id,
+          latestIn(
+            chain,
+            rows.filter((row) => row.subject_id === id),
+            rows[0],
+          ),
+        ]),
+      );
     },
 
     async subjectIds(
@@ -724,24 +818,16 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       return Object.freeze({ kind: 'recorded', ...read });
     },
 
-    async recordedEvents(
-      tx: AuditTransaction,
-      orgId: string,
-      { subjectTypes, subjectId, actions, limit }: HistoryToRead,
-    ): Promise<RecordedEventsCheck> {
-      const problems = [
-        ...subjectTypes.flatMap(subjectTypeProblems),
-        ...(subjectId === undefined || UUID.test(subjectId) ? [] : ['subject.id must be a UUID']),
-      ];
-      if (problems.length > 0) throw new AuditEventRefused(problems);
-      if (subjectTypes.length === 0) throw new RangeError('At least one subject type is read');
+    async recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck> {
+      const { subjectTypes, actions, limit } = find;
+      const objects = objectsToRead(find);
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
       const which = sql.join(
         [
           sql`e.subject_type = any(${[...subjectTypes]}::text[])`,
-          ...(subjectId === undefined ? [] : [sql`e.subject_id = ${subjectId.toLowerCase()}`]),
+          ...(objects === undefined ? [] : [sql`e.subject_id = any(${objects}::uuid[])`]),
           ...(actions === undefined ? [] : [sql`e.action = any(${[...actions]}::text[])`]),
         ],
         sql` and `,
