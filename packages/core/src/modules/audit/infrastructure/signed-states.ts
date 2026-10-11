@@ -304,9 +304,9 @@ export interface SignedStates {
    * verifiedState for many rows of one table in the organisation, each locked
    * `share`: the rows in one statement and their signed states in another,
    * each judged alone as verifiedState judges one, its alarm raised the same.
-   * Each ID asked, in lower case, has its check in the map. A row gone while
-   * its object's log holds a signed state is read again on its own, as
-   * verifiedState reads one. At most 500 rows (readSignedRows).
+   * Each ID asked, in lower case, has its check in the map. A row not found
+   * whole is read again on its own, through verifiedState. At most 500 rows
+   * (readSignedRows).
    */
   verifiedStates(
     tx: AuditTransaction,
@@ -730,12 +730,12 @@ export function createSignedStates({
       const last = latest.get(id);
       // Both reads answer every ID asked; one that didn't would be a bug, never a row to believe.
       if (row === undefined || last === undefined) throw new Error('A signed state was asked for and not read');
-      if (row.outcome === 'unreadable') checks.set(id, alarm(table.subject, key, 'row'));
-      else if (row.outcome === 'found') checks.set(id, compare(table, key, row, last));
-      else if (last.kind === 'none') checks.set(id, MISSING);
-      else if (last.kind === 'broken') checks.set(id, alarm(table.subject, key, 'log', last.seq));
-      // The row commits with its first event: gone, or created since it was read, which its own read tells.
-      else checks.set(id, await verifiedState(tx, table, key, 'share'));
+      // A row not found whole (missing, or unreadable: rare, and a tamper sign) is read again on its own, which
+      // judges it as verifiedState always does, a row created since it was read among them.
+      checks.set(
+        id,
+        row.outcome === 'found' ? compare(table, key, row, last) : await verifiedState(tx, table, key, 'share'),
+      );
     }
     return checks;
   };

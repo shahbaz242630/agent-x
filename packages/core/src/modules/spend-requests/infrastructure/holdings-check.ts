@@ -24,7 +24,7 @@
 // what the app makes).
 import { sql, type Transaction } from 'kysely';
 
-import { type AuditTables, type PageAsked, type SignedStates } from '../../audit/index.ts';
+import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
 import { type ClaimHolding, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
 import { type HeldAs, requestsOf, type SpendRequestRecord } from './decisions.ts';
@@ -102,8 +102,14 @@ async function heldAsDecided(
     limit: MOST_DECIDED_EVENTS * ids.length,
   });
   if (history.outcome !== 'read') return new Map();
+  const decided = history.events.map(({ event }) => [event.subject.id.toLowerCase(), event.details] as const);
+  // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
+  const counts = new Map<string, number>();
+  for (const [id] of decided) counts.set(id, (counts.get(id) ?? 0) + 1);
+  if ([...counts.values()].some((count) => count > MOST_DECIDED_EVENTS))
+    throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
   // In chain order, so each request's last decided event is the one left.
-  return new Map(history.events.map(({ event }) => [event.subject.id.toLowerCase(), heldOf(event.details)]));
+  return new Map(decided.map(([id, details]) => [id, heldOf(details)]));
 }
 
 /** Groups rows by their request's ID. */
