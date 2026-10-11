@@ -721,6 +721,13 @@ const watchesEveryWindow = (alert: PredictedResource, criterion: unknown): boole
   at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1;
 
 /**
+ * Whether a criterion totals its one row's number: `Count` would count the row
+ * itself, always 1, so a threshold above it never fires, and one of 0 always
+ * does (E2b review).
+ */
+const totals = (criterion: unknown): boolean => at(criterion, 'timeAggregation') === 'Total';
+
+/**
  * Whether a query is exactly `table | stage | … | summarize Name = aggregation`:
  * the same stages, in order, whatever the spacing around its pipes.
  */
@@ -1827,6 +1834,7 @@ const tokenRefusedAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [TOKEN_REFUSED_LINES], 'count()') &&
+        totals(criterion) &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         watchesEveryWindow(alert, criterion),
@@ -1853,6 +1861,7 @@ const denialSurgeAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DENIAL_LINES, 'max(Denials)') &&
+        totals(criterion) &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === DENIAL_SURGE_THRESHOLD &&
         watchesEveryWindow(alert, criterion),
@@ -1878,6 +1887,7 @@ const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [HOLDINGS_CHECK_FAILED_LINES], 'count()') &&
+        totals(criterion) &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         watchesEveryWindow(alert, criterion),

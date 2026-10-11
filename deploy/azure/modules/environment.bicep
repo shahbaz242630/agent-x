@@ -267,8 +267,11 @@ resource tokenRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
 // `spend_request.decided` with its decision and agent; REQUIRE_NEW_MANDATE is
 // a denial too (PRD §4.2). The query counts each agent's denials in the window
 // and returns the highest, one number with no ID dimensions (ADR-013): which
-// agent it was is the saved query's to show, inside the workspace. More than
-// 10 in 15 minutes is well above an agent that is only refused now and then.
+// agent it was is the saved query's to show, inside the workspace, each agent
+// ranked by its busiest 15 minutes as the alert counts them (E2b review). More
+// than 10 in 15 minutes is well above an agent that is only refused now and
+// then. The windows meet end to end, so 10 either side of a boundary, or a slow
+// 40 an hour, doesn't fire it: a first number, to tune on real traffic.
 // Stateful: it fires once and resolves after a quiet window.
 var denialLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.decided" | where tostring(parse_json(Log).decision) in ("DENY", "REQUIRE_NEW_MANDATE")'
 
@@ -278,7 +281,7 @@ resource denialsByAgent 'Microsoft.OperationalInsights/workspaces/savedSearches@
   properties: {
     category: 'Agent X'
     displayName: 'Denials by agent'
-    query: '${denialLines} | extend Line = parse_json(Log) | summarize Denials = count(), Latest = max(TimeGenerated) by Organisation = tostring(Line.orgId), Agent = tostring(Line.agentId), Reasons = tostring(Line.reasons) | order by Denials desc'
+    query: '${denialLines} | extend Line = parse_json(Log) | summarize Denials = count(), Reasons = make_set(tostring(Line.reasons), 10), Latest = max(TimeGenerated) by Organisation = tostring(Line.orgId), Agent = tostring(Line.agentId), Window = bin(TimeGenerated, 15m) | summarize Busiest15m = max(Denials), Total = sum(Denials), Reasons = make_set(Reasons, 10), Latest = max(Latest) by Organisation, Agent | order by Busiest15m desc'
     version: 2
   }
 }

@@ -1757,6 +1757,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) => (criterion(alert).threshold = 1),
       ...LATE_OR_BLIND,
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {
       expect(brokenRules(changed(TOKEN_REFUSED_ALERT, change))).toEqual(['token-refused-alert']);
@@ -1805,6 +1806,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) => (criterion(alert).threshold = 0),
       ...LATE_OR_BLIND,
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {
       expect(brokenRules(changed(DENIAL_SURGE_ALERT, change))).toEqual(['denial-surge-alert']);
@@ -1845,6 +1847,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) => (criterion(alert).threshold = 1),
       ...LATE_OR_BLIND,
       (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
       (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
     ]) {
       expect(brokenRules(changed(HOLDINGS_CHECK_ALERT, change))).toEqual(['holdings-check-alert']);
