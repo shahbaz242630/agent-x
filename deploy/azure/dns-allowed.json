@@ -1,5 +1,5 @@
 {
-  "about": "The names the network's lookups may be answered for once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026), each one Microsoft's or GitHub's, and from the names those lookups pass through (S84, 3 to 5 Oct): the policy judges every name in a CNAME chain, so a name we allow whose chain runs through one we don't still reached the catch-all; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone, and so are zones where no customer can point a name at a server they run (Entra's, Key Vault's and Microsoft's edge networks); in zones any customer can create names in (Traffic Manager, Front Door's and Azure CDN's, Akamai's three), only the exact names the chains pass through, which Microsoft may change: the logs are read again before the catch-all blocks. An exact name covers names under it too, and Traffic Manager takes a dotted profile name (`x.mcr` was available, S84), but a profile only points at a fixed target, which the catch-all judges in turn: what is left is which of several such profiles is looked up, and a profile's query counts its owner sees, a narrow channel resting on the same CNAME question as below (Carry-Forward). Not listed on purpose: reverse lookups (Azure sends them to public servers, which answer that no such name exists), and the login service's internal address (answered inside the environment: it never appears in the logs). This narrows which names are answered; whether a blocked name's labels still reach its own server (Azure follows CNAME chains, so it may resolve a name before judging it) is proven before relying on it (Carry-Forward). The policy's dns-allow rule refuses any Allow not listed here.",
+  "about": "The names the network's lookups may be answered for once the DNS policy blocks the rest (S68 audit finding 14; dns-policy.bicep). Each entry is a name or a zone ending in a dot, and covers every name under it. Read from three days of staging's lookups (S78, 30 Sep to 3 Oct 2026), each one Microsoft's or GitHub's, and from the names those lookups pass through (S84, 3 to 5 Oct): the policy judges every name in a CNAME chain, so a name we allow whose chain runs through one we don't still reached the catch-all; names Microsoft picks and changes (storage accounts, the cluster's API host) are allowed by their zone, and so are zones where no customer can point a name at a server they run (Entra's, Key Vault's and Microsoft's edge networks); in zones any customer can create names in (Traffic Manager, Front Door's and Azure CDN's, Akamai's three, cloudapp.net), only the exact names the chains pass through, which Microsoft may change: the logs are read again before the catch-all blocks. An exact name covers names under it too, and Traffic Manager takes a dotted profile name (`x.mcr` was available, S84), but a profile only points at a fixed target, which the catch-all judges in turn: what is left is which of several such profiles is looked up, and a profile's query counts its owner sees, a narrow channel resting on the same CNAME question as below (Carry-Forward). Not listed on purpose: reverse lookups (Azure sends them to public servers, which answer that no such name exists), and the login service's internal address (answered inside the environment: it never appears in the logs). This narrows which names are answered; whether a blocked name's labels still reach its own server (Azure follows CNAME chains, so it may resolve a name before judging it) is proven before relying on it (Carry-Forward). The policy's dns-allow rule refuses any Allow not listed here.",
   "domains": [
     {
       "domain": "microsoft.com.",
@@ -82,6 +82,10 @@
       "why": "Microsoft's edge, behind packages.microsoft.com and the certificate CDN"
     },
     {
+      "domain": "microsoftmetrics.com.",
+      "why": "The platform's own metrics service (Azure Monitor's shoebox and its global endpoint), a zone only Microsoft creates names in"
+    },
+    {
       "domain": "acs-mirror.trafficmanager.net.",
       "why": "behind acs-mirror.azureedge.net (AKS downloads)"
     },
@@ -96,6 +100,10 @@
     {
       "domain": "arm-frontdoor-edge-geo.trafficmanager.net.",
       "why": "behind management.azure.com"
+    },
+    {
+      "domain": "azglobal.prod.msftmetrics.trafficmanager.net.",
+      "why": "behind global.prod.microsoftmetrics.com (the platform's own metrics)"
     },
     {
       "domain": "azurefd-critical-t-prod-stage2.trafficmanager.net.",
@@ -114,12 +122,20 @@
       "why": "behind the platform's storage accounts in the UAE"
     },
     {
+      "domain": "blob.dxb24prdstrz01a.trafficmanager.net.",
+      "why": "behind the platform's storage accounts in the UAE (a third storage stamp, seen 9 Oct)"
+    },
+    {
       "domain": "gig-warm-prod-shared-uaenorth.trafficmanager.net.",
       "why": "behind Azure Monitor's UAE North ingestion"
     },
     {
       "domain": "mcr.trafficmanager.net.",
       "why": "behind mcr.microsoft.com"
+    },
+    {
+      "domain": "shoebox2.prod.msftmetrics.trafficmanager.net.",
+      "why": "behind shoebox2.prod.microsoftmetrics.com (the platform's own metrics)"
     },
     {
       "domain": "warmpath-prod-nested.trafficmanager.net.",
@@ -132,6 +148,22 @@
     {
       "domain": "www.tm.primary-cdn.pkir.trafficmanager.net.",
       "why": "behind primary-cdn.pki.core.windows.net (certificates)"
+    },
+    {
+      "domain": "azglobal-black.cloudapp.net.",
+      "why": "behind global.prod.microsoftmetrics.com (the platform's own metrics)"
+    },
+    {
+      "domain": "azglobal-red.cloudapp.net.",
+      "why": "the other half of azglobal-black's pair, as shoebox2 answered from both (the platform's own metrics)"
+    },
+    {
+      "domain": "shoebox2-black.cloudapp.net.",
+      "why": "behind shoebox2.prod.microsoftmetrics.com (the platform's own metrics)"
+    },
+    {
+      "domain": "shoebox2-red.cloudapp.net.",
+      "why": "behind shoebox2.prod.microsoftmetrics.com (the platform's own metrics)"
     },
     {
       "domain": "azurecommunicationservice.azurefd.net.",

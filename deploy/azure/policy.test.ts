@@ -134,6 +134,8 @@ const SHARED_ZONES = [
   'akadns.net.',
   'akamaiedge.net.',
   'edgekey.net.',
+  // Classic cloud services' names, any customer's (the metrics hops, S98).
+  'cloudapp.net.',
 ];
 const SHARED_CLUSTER = /^(?:[a-z]\d+\.azurefd|[a-z]+\.akamaiedge)\.net\.$/;
 
@@ -1307,7 +1309,13 @@ describe('SEC-OPS-09 each rule can fail', () => {
       'B01.azurefd.net.',
     ])
       expect(tooBroad(broad), broad).toBe(true);
-    for (const narrow of ['microsoft.com.', '40.10.in-addr.arpa.', 'mcr.trafficmanager.net.', 'x.b01.azurefd.net.'])
+    for (const narrow of [
+      'microsoft.com.',
+      '40.10.in-addr.arpa.',
+      'mcr.trafficmanager.net.',
+      'x.b01.azurefd.net.',
+      'shoebox2-red.cloudapp.net.',
+    ])
       expect(tooBroad(narrow), narrow).toBe(false);
     const allowedList = staging.predictedResources.find(ALLOWED_NAMES);
     expect(at(allowedList?.properties, 'domains')).toEqual([...DNS_ALLOWED]);
