@@ -440,7 +440,10 @@ describe('deciding a spend request and reserving it (D4)', () => {
       }),
     ]);
     // The signal alone: no order, amount or supplier in the line.
-    expect(JSON.stringify(decided())).not.toMatch(/inv-1001|supplier|amount|purpose/i);
+    const lines = JSON.stringify(decided());
+    for (const value of ['inv-1001', 'INV-1001', w.suppliers[0] ?? '', '1000000', 'Printer paper']) {
+      expect(lines).not.toContain(value);
+    }
 
     expect(decidedOf(await ask(acting, asking(w), 'logged-once'))).toEqual(allowed);
     expect(await ask(acting, asking(w, { orderReference: 'INV-9' }), 'logged-once')).toEqual({ outcome: 'conflict' });
