@@ -389,13 +389,23 @@ export function createSpendRequestDecisions({
         })),
       );
       if (isUnwritten(done)) return done;
-      return work.answered(agent.orgId, correlationId, async (tx, states) => {
+      const answer = await work.answered(agent.orgId, correlationId, async (tx, states) => {
         const found = await requestOf(tx, states, { orgId: agent.orgId, id: done.result.resourceId });
         believed(found);
         // Requests are never deleted (0039's grants): one just made, or answered for its key, is there.
         if (found.outcome !== 'found') throw new Error(`A decided spend request is missing: ${done.result.resourceId}`);
         return { outcome: 'decided' as const, request: found.request };
       });
+      // Once a decision is committed, and once only (never for its key's replay): the denial-surge alert counts
+      // these lines per agent (E2). The audit chain is the record; this is the signal.
+      if (done.outcome === 'done' && answer.outcome === 'decided') {
+        logger.child({ correlationId, orgId: agent.orgId }).info('spend_request.decided', {
+          agentId: answer.request.agentId,
+          decision: answer.request.decision,
+          reasons: answer.request.reasons.join(' '),
+        });
+      }
+      return answer;
     },
   };
 }
