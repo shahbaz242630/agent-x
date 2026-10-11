@@ -380,6 +380,33 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
     });
   });
 
+  it('reads a batch in the same few statements however many objects it holds: no per-row loop', async () => {
+    /** The statements one batch sends, each counted as Kysely sends it. */
+    const statementsSent = async () => {
+      let sent = 0;
+      const checked = await inOrg((tx, states) => {
+        const counting: Parameters<typeof tx.withPlugin>[0] = {
+          transformQuery: ({ node }) => {
+            sent += 1;
+            return node;
+          },
+          transformResult: ({ result }) => Promise.resolve(result),
+        };
+        return states.checkHistoryBatch(tx.withPlugin(counting), org, AGENTS, null, 50);
+      });
+      return { sent, checked };
+    };
+    await inOrg((tx, states) => insertAgent(tx, states, newId()));
+    const few = await statementsSent();
+    for (let more = 0; more < 5; more += 1) await inOrg((tx, states) => insertAgent(tx, states, newId()));
+    const many = await statementsSent();
+
+    // The organisation's own row is an agent here too (insertAgent's first).
+    expect(few.checked).toMatchObject({ outcome: 'checked', objects: 2, done: true });
+    expect(many.checked).toMatchObject({ outcome: 'checked', objects: 7, done: true });
+    expect(many.sent).toBe(few.sent);
+  });
+
   it('reads the hold with the chain head locked, which comes last: no row is read after it', async () => {
     await holdThenRepair();
     const asked = await investigated();

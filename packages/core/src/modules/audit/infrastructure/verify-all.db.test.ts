@@ -20,6 +20,7 @@ import {
   createDatabase,
   type Database,
   liveSchemaProblems,
+  MOST_SIGNED_ROWS_READ,
   readSignedRow,
   type SignedStateTable,
   signedRowIds,
@@ -352,6 +353,52 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
 
     expect(await verifyAll([KEYS], 2)).toEqual({ outcome: 'verified', objects: 2 });
   });
+
+  it('reads a table in the same few statements however many objects it holds: no per-row loop', async () => {
+    /** The statements one verifyAll sends, each counted as Kysely sends it. */
+    const statementsSent = async () => {
+      let sent = 0;
+      const checked = await withTenant(app, org, (tx) => {
+        const counting: Parameters<typeof tx.withPlugin>[0] = {
+          transformQuery: ({ node }) => {
+            sent += 1;
+            return node;
+          },
+          transformResult: ({ result }) => Promise.resolve(result),
+        };
+        return states.verifyAll(tx.withPlugin(counting), org, [AGENTS, KEYS], 100);
+      });
+      return { sent, checked };
+    };
+    await newRow(AGENTS);
+    await newRow(KEYS);
+    const few = await statementsSent();
+    for (let more = 0; more < 6; more += 1) await newRow(AGENTS);
+    const many = await statementsSent();
+
+    expect(few.checked).toEqual({ outcome: 'verified', objects: 2 });
+    expect(many.checked).toEqual({ outcome: 'verified', objects: 8 });
+    expect(many.sent).toBe(few.sent);
+  });
+
+  it('judges a table past one read’s rows in batches, the last batch as the first', async () => {
+    const ids: string[] = [];
+    await withTenant(app, org, async (tx) => {
+      for (let made = 0; made <= MOST_SIGNED_ROWS_READ; made += 1) {
+        const id = newId();
+        await tx.insertInto(AGENTS.table).values({ org_id: org, id, label: 'ACTIVE' }).execute();
+        await states.record(tx, AGENTS, { orgId: org, id }, 'new', { label: 'ACTIVE' }, change('agent.created'));
+        ids.push(id);
+      }
+    });
+    const last = ids.at(-1) ?? '';
+    await agents.setColumn(last, 'label', 'PLANTED');
+
+    expect(await verifyAll([AGENTS], MOST_SIGNED_ROWS_READ + 1)).toEqual({
+      outcome: 'tampered',
+      findings: [finding('agent', last, 'seal')],
+    });
+  }, 60_000);
 
   it('holds each row locked for a decision to the end of its transaction: read again for a decision, not for a change', async () => {
     const id = await newRow(AGENTS);

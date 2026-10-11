@@ -40,6 +40,7 @@ import { sealState, stateSealDetails, stateSealMatches } from '@agentx/platform/
 import {
   createStatusChanger,
   type FieldText,
+  MOST_SIGNED_ROWS_READ,
   pointSignedRow,
   readSignedRow,
   readSignedRows,
@@ -925,7 +926,11 @@ export function createSignedStates({
     return investigation === undefined ? MISSING : Object.freeze({ outcome: 'found', investigation });
   };
 
-  /** Each object verified as verifyAll does, locked `share`: the findings, each with its alarm raised. */
+  /**
+   * Each object verified as verifyAll does, locked `share`, by ID: the
+   * findings, each with its alarm raised. Read through verifiedStates, so
+   * a few statements for each MOST_SIGNED_ROWS_READ objects, never per row.
+   */
   const judged = async (
     tx: AuditTransaction,
     orgId: string,
@@ -933,9 +938,22 @@ export function createSignedStates({
     ids: readonly string[],
   ): Promise<TamperFinding[]> => {
     const findings: TamperFinding[] = [];
+    const checks = new Map<string, StateCheck>();
+    for (let start = 0; start < ids.length; start += MOST_SIGNED_ROWS_READ) {
+      for (const [id, check] of await verifiedStates(
+        tx,
+        table,
+        orgId,
+        ids.slice(start, start + MOST_SIGNED_ROWS_READ),
+      )) {
+        checks.set(id, check);
+      }
+    }
     for (const id of ids) {
       const key = { orgId, id };
-      const check = await verifiedState(tx, table, key, 'share');
+      const check = checks.get(id.toLowerCase());
+      // verifiedStates answers every ID asked; one it didn't would be a bug, never an object to pass.
+      if (check === undefined) throw new Error('An object was asked for and not judged');
       // Listed, as a row or in the log, yet neither a row nor a signed state now: deleted, its seals with it.
       const found = check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check;
       if (found.outcome === 'tampered') {
