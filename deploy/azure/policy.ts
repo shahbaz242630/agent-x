@@ -50,6 +50,8 @@ export type RuleId =
   | 'app-errors-alert'
   | 'audit-integrity-alert'
   | 'token-refused-alert'
+  | 'denial-surge-alert'
+  | 'holdings-check-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -214,6 +216,23 @@ const INTEGRITY_LINES =
  * as the error type LoginTokenRefused (zitadel-call.ts), whichever token.
  */
 const TOKEN_REFUSED_LINES = 'where tostring(parse_json(Log).err.type) == "LoginTokenRefused"';
+
+/**
+ * A denial surge's lines (Phase 2 E2): every spend request decided as a
+ * denial, REQUIRE_NEW_MANDATE among them (PRD §4.2), counted per agent and the
+ * highest kept, so the alert returns one number with no ID dimensions.
+ */
+const DENIAL_LINES = [
+  'where tostring(parse_json(Log).event) == "spend_request.decided"',
+  'where tostring(parse_json(Log).decision) in ("DENY", "REQUIRE_NEW_MANDATE")',
+  'summarize Denials = count() by Agent = tostring(parse_json(Log).agentId)',
+] as const;
+
+/** One agent denied more than this many times in a window is a surge (Logging-and-Monitoring.md: well above normal). */
+const DENIAL_SURGE_THRESHOLD = 10;
+
+/** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
+const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -700,6 +719,13 @@ const watchesEveryWindow = (alert: PredictedResource, criterion: unknown): boole
   at(alert.properties, 'windowSize') === at(alert.properties, 'evaluationFrequency') &&
   at(criterion, 'failingPeriods', 'numberOfEvaluationPeriods') === 1 &&
   at(criterion, 'failingPeriods', 'minFailingPeriodsToAlert') === 1;
+
+/**
+ * Whether a criterion totals its one row's number: `Count` would count the row
+ * itself, always 1, so a threshold above it never fires, and one of 0 always
+ * does (E2b review).
+ */
+const totals = (criterion: unknown): boolean => at(criterion, 'timeAggregation') === 'Total';
 
 /**
  * Whether a query is exactly `table | stage | … | summarize Name = aggregation`:
@@ -1510,7 +1536,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-M]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-N]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -1808,6 +1834,7 @@ const tokenRefusedAlert: Check = (snapshot, _expected, add) => {
       'any',
       (criterion, alert) =>
         queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [TOKEN_REFUSED_LINES], 'count()') &&
+        totals(criterion) &&
         at(criterion, 'operator') === 'GreaterThan' &&
         at(criterion, 'threshold') === 0 &&
         watchesEveryWindow(alert, criterion),
@@ -1818,6 +1845,59 @@ const tokenRefusedAlert: Check = (snapshot, _expected, add) => {
         resource: environment.name,
         message:
           "needs an enabled alert on this deployment's workspace that fires on any LoginTokenRefused error line, watching every minute and firing on the first window",
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace fires when one agent's denials in a window
+ * pass DENIAL_SURGE_THRESHOLD (Phase 2 E2), watching every minute.
+ */
+const denialSurgeAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', DENIAL_LINES, 'max(Denials)') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === DENIAL_SURGE_THRESHOLD &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'denial-surge-alert',
+        resource: environment.name,
+        message: `needs an enabled alert on this deployment's workspace that fires when one agent has more than ${String(DENIAL_SURGE_THRESHOLD)} spend requests denied in a window, watching every minute`,
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace fires on any page of the holdings check
+ * that failed (Phase 2 E1b's review): one line is enough, in any window.
+ */
+const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [HOLDINGS_CHECK_FAILED_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'holdings-check-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any holdings_check.failed line, watching every minute and firing on the first window",
       });
     }
   }
@@ -2750,6 +2830,8 @@ const CHECKS: readonly Check[] = [
   appErrorsAlert,
   auditIntegrityAlert,
   tokenRefusedAlert,
+  denialSurgeAlert,
+  holdingsCheckAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,

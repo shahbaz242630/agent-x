@@ -32,6 +32,8 @@ param errorAlertName string
 param errorAlertThreshold int
 param integrityAlertName string
 param tokenRefusedAlertName string
+param denialSurgeAlertName string
+param holdingsCheckAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -240,6 +242,112 @@ resource tokenRefusedAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).err.type) == "LoginTokenRefused" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// A denial surge (Phase 2 E2; Logging-and-Monitoring.md; ADR-014): one
+// agent denied over and over is a runaway loop, a prompt injection probing
+// its limits, or a mandate gone wrong. The API logs every decision as
+// `spend_request.decided` with its decision and agent; REQUIRE_NEW_MANDATE is
+// a denial too (PRD §4.2). The query counts each agent's denials in the window
+// and returns the highest, one number with no ID dimensions (ADR-013): which
+// agent it was is the saved query's to show, inside the workspace, each agent
+// ranked by its busiest 15 minutes as the alert counts them (E2b review). More
+// than 10 in 15 minutes is well above an agent that is only refused now and
+// then. The windows meet end to end, so 10 either side of a boundary, or a slow
+// 40 an hour, doesn't fire it: a first number, to tune on real traffic.
+// Stateful: it fires once and resolves after a quiet window.
+var denialLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.decided" | where tostring(parse_json(Log).decision) in ("DENY", "REQUIRE_NEW_MANDATE")'
+
+resource denialsByAgent 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
+  parent: workspace
+  name: 'agentx-denials-by-agent'
+  properties: {
+    category: 'Agent X'
+    displayName: 'Denials by agent'
+    query: '${denialLines} | extend Line = parse_json(Log) | summarize Denials = count(), Reasons = make_set(tostring(Line.reasons), 10), Latest = max(TimeGenerated) by Organisation = tostring(Line.orgId), Agent = tostring(Line.agentId), Window = bin(TimeGenerated, 15m) | summarize Busiest15m = max(Denials), Total = sum(Denials), Reasons = make_set(Reasons, 10), Latest = max(Latest) by Organisation, Agent | order by Busiest15m desc'
+    version: 2
+  }
+}
+
+resource denialSurgeAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: denialSurgeAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Spend requests: one agent denied again and again'
+    description: 'SEV-2. One agent had more than 10 spend requests denied in 15 minutes (DENY or REQUIRE_NEW_MANDATE): a runaway loop, an agent probing its limits, or a mandate gone wrong. The saved query "Denials by agent" shows which. Runbook: Incident-Response-Playbook.md section F.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: '${denialLines} | summarize Denials = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Denials)'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Highest'
+          operator: 'GreaterThan'
+          threshold: 10
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// The holdings check failing (Phase 2 E1b's review): a page that throws
+// (a key version the process doesn't hold, a history too long to read, the
+// database away) logs `holdings_check.failed` and starts again from the same
+// place next run, so the organisation's later requests go unchecked, with no
+// integrity alarm. Any one line tells someone. Stateful, as above.
+resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: holdingsCheckAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Holdings check: a page failed'
+    description: 'SEV-2. The holdings check (reservations and order claims against the signed decisions) failed a page and will retry from the same place: until it passes, that organisation is not being checked. Runbook: Incident-Response-Playbook.md section N.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

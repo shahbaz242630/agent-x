@@ -132,6 +132,8 @@ func resourceNames(environment string, nameSuffix string) object => {
   appErrors: 'alert-agentx-${shortName(environment)}-app-errors'
   auditIntegrity: 'alert-agentx-${shortName(environment)}-audit-integrity'
   tokenRefused: 'alert-agentx-${shortName(environment)}-token-refused'
+  denialSurge: 'alert-agentx-${shortName(environment)}-denial-surge'
+  holdingsCheck: 'alert-agentx-${shortName(environment)}-holdings-check'
   identities: map(workloads, workload => identityName(environment, workload))
   jobs: map(jobWorkloads, workload => jobName(environment, workload))
   // CI's identity and the one role it may be given (G4); nothing runs as it. A
