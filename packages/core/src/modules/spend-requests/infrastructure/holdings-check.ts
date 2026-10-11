@@ -3,7 +3,10 @@
 // locked FOR SHARE (so a move that changes what it holds waits for the page,
 // or the page for it), with their reservations and order claims read in one
 // statement each and compared by `holdingsMatch`, with the month and instant
-// each decision sealed (`heldMonth`, `heldAt`) read from its signed event. A
+// each decision sealed (`heldMonth`, `heldAt`) read from its signed event.
+// A page is a fixed number of statements, however many requests it holds
+// (E1c, the partner's no-per-row-loops rule): the rows and their signed
+// states two (verifiedStates), the decided events one. A
 // request whose holdings don't match raises the integrity alarm (`holding`),
 // and the organisation is put on hold once the page's transaction ends
 // (withSignedStates).
@@ -15,16 +18,16 @@
 // alarm raised by its read, so it can't hide the ones after it.
 //
 // A reservation or claim whose request was never made isn't looked for: the
-// requests table is read only through signed states, request by request.
+// requests table is read only through signed states, a page at a time.
 // One planted past the app only takes capacity away or blocks an order, never
 // pays one (0040's `held_for_its_request` and 0039's `for_its_request` guard
 // what the app makes).
 import { sql, type Transaction } from 'kysely';
 
-import { type AuditTables, type PageAsked, type SignedStates } from '../../audit/index.ts';
+import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
 import { type ClaimHolding, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
-import { type HeldAs, requestOf, type SpendRequestRecord } from './decisions.ts';
+import { type HeldAs, requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -80,23 +83,33 @@ async function orderKeysOf(tx: HoldingsTransaction, references: readonly string[
 }
 
 /**
- * The reservation's month and instant the request's decision sealed; null
- * where it sealed none. A history that can't be believed has raised the alarm
- * and holds the organisation already: nothing sealed is then compared.
+ * The reservation's month and instant each request's decision sealed, by the
+ * request's ID, in one statement; null for a request whose decision sealed
+ * none. A history that can't be believed has raised the alarm and holds the
+ * organisation already: nothing sealed is then compared.
  */
 async function heldAsDecided(
   tx: HoldingsTransaction,
   states: SignedStates,
   orgId: string,
-  id: string,
-): Promise<HeldAs | null> {
+  ids: readonly string[],
+): Promise<Map<string, HeldAs | null>> {
+  if (ids.length === 0) return new Map();
   const history = await states.historyOf(tx, orgId, {
     subjectTypes: [SPEND_REQUESTS.subject],
-    subjectId: id,
+    subjectIds: ids,
     actions: ['spend_request.decided'],
-    limit: MOST_DECIDED_EVENTS,
+    limit: MOST_DECIDED_EVENTS * ids.length,
   });
-  return history.outcome === 'read' ? heldOf(history.events.at(-1)?.event.details) : null;
+  if (history.outcome !== 'read') return new Map();
+  const decided = history.events.map(({ event }) => [event.subject.id.toLowerCase(), event.details] as const);
+  // The limit holds for each request, as when each was read alone: one request's many can't hide in a page's few.
+  const counts = new Map<string, number>();
+  for (const [id] of decided) counts.set(id, (counts.get(id) ?? 0) + 1);
+  if ([...counts.values()].some((count) => count > MOST_DECIDED_EVENTS))
+    throw new TooManyEventsToRead(MOST_DECIDED_EVENTS);
+  // In chain order, so each request's last decided event is the one left.
+  return new Map(decided.map(([id, details]) => [id, heldOf(details)]));
 }
 
 /** Groups rows by their request's ID. */
@@ -123,8 +136,7 @@ export async function checkHoldings(
   const { ids, next } = await states.objectIds(tx, orgId, SPEND_REQUESTS, after, limit);
   const requests: SpendRequestRecord[] = [];
   let tampered = 0;
-  for (const id of ids) {
-    const read = await requestOf(tx, states, { orgId, id });
+  for (const read of (await requestsOf(tx, states, orgId, ids)).values()) {
     // Listed by its row or its signed events, a request not found is one tampered with (its read raised the alarm).
     if (read.outcome === 'found') requests.push(read.request);
     else tampered += 1;
@@ -133,10 +145,16 @@ export async function checkHoldings(
   const reservations = byRequest(await reservationsFor(tx, found));
   const claimed = byRequest(await claimsFor(tx, found));
   const keys = await orderKeysOf(tx, [...new Set(requests.map(({ orderReference }) => orderReference))]);
+  // Only what still holds anything was sealed with what it holds.
+  const sealed = await heldAsDecided(
+    tx,
+    states,
+    orgId,
+    requests.filter(({ status }) => holdsNow(status)).map(({ id }) => id),
+  );
   let mismatched = 0;
   for (const request of requests) {
-    // Only what still holds anything was sealed with what it holds.
-    const held = holdsNow(request.status) ? await heldAsDecided(tx, states, orgId, request.id) : null;
+    const held = sealed.get(request.id) ?? null;
     // A claim is its request's own when it is on the request's supplier and order, in canonical form.
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({
       released: claim.released,

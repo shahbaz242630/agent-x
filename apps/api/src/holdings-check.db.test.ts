@@ -7,10 +7,10 @@
 // request, and puts the organisation on hold: a reservation released,
 // lowered or deleted, a claim deleted or released. (A claim moved to another
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
-import { withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { checkHoldings, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
@@ -166,6 +166,70 @@ describe('the holdings check (E1)', () => {
     // A pass ended starts again from the beginning.
     await check.run();
     expect(lines('holdings_check.paused')).toHaveLength(2);
+  });
+
+  it('reads a page in the same few statements however many requests it holds (E1c: no per-row loop)', async () => {
+    const { w, acting } = await ready();
+    /** The statements one page of the check sends, each counted as Kysely sends it. */
+    const statementsAPage = async () => {
+      let sent = 0;
+      const checked = await withSignedStates(app, w.org, quiet(), (tx, states) => {
+        const counting: Parameters<typeof tx.withPlugin>[0] = {
+          transformQuery: ({ node }) => {
+            sent += 1;
+            return node;
+          },
+          transformResult: ({ result }) => Promise.resolve(result),
+        };
+        return checkHoldings(tx.withPlugin(counting), states, w.org, { after: null, limit: 200 });
+      });
+      return { sent, checked };
+    };
+
+    await requests(acting, w);
+    const few = await statementsAPage();
+    for (const order of ['INV-3', 'INV-4', 'INV-5', 'INV-6', 'INV-7']) {
+      await ask(acting, w, { amount: AED(10_000n), orderReference: order });
+    }
+    const many = await statementsAPage();
+
+    expect(few.checked).toMatchObject({ requests: 3, mismatched: 0, tampered: 0 });
+    expect(many.checked).toMatchObject({ requests: 8, mismatched: 0, tampered: 0 });
+    expect(many.sent).toBe(few.sent);
+    // The IDs (rows and log), the rows, their signed states, the decided events, reservations, claims, order keys,
+    // each read with its tenant check: 13 in all, the same for 3 requests or 200.
+    expect(few.sent).toBeLessThanOrEqual(13);
+  });
+
+  it('refuses a page where one request has more decided events than one decision makes, however few the rest have', async () => {
+    const { w, acting } = await ready();
+    const { allowed } = await requests(acting, w);
+    const trail = createAuditTrail({ keys, ids });
+    const page = () =>
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        checkHoldings(tx, states, w.org, { after: null, limit: 200 }),
+      );
+    // Sealed by the app's own keys, signing no state: only the decided events' count is wrong.
+    const decidedAgain = (times: number, details: Record<string, string> = {}) =>
+      withTenant(app, w.org, async (tx) => {
+        for (let time = 0; time < times; time += 1) {
+          await trail.record(tx, w.org, {
+            actor: { type: 'system', id: 'api' },
+            action: 'spend_request.decided',
+            subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
+            details,
+          });
+        }
+      });
+
+    await decidedAgain(2);
+    expect(await page()).toMatchObject({ requests: 3, mismatched: 0 });
+    // The request's last decided event is the one compared: one sealing another month is a mismatch.
+    await decidedAgain(1, { heldMonth: '2026-01', heldAt: '2026-01-15T08:00:00.000Z' });
+    expect(await page()).toMatchObject({ requests: 3, mismatched: 1 });
+    // A fifth: more than one decision makes, beside requests with one each.
+    await decidedAgain(1);
+    await expect(page()).rejects.toBeInstanceOf(TooManyEventsToRead);
   });
 
   type Held = Awaited<ReturnType<typeof requests>>;

@@ -26,7 +26,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { canonicalDetails } from '../../../shared-kernel/index.ts';
 import { type AuditEvent, AuditEventRefused, eventContent } from '../domain/event.ts';
-import { type AuditTrail, createAuditTrail, TooManyEventsAboutObject, TooManyEventsToRead } from './audit-trail.ts';
+import {
+  type AuditTrail,
+  createAuditTrail,
+  type HistoryToRead,
+  TooManyEventsAboutObject,
+  TooManyEventsToRead,
+} from './audit-trail.ts';
 import type { AuditTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -895,6 +901,68 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
     expect(await latest(org)).toEqual({ kind: 'broken', seq: 1001n });
   });
 
+  describe('for many objects at once (latestSignedStates; E1c)', () => {
+    const NEVER = '0199a0f0-0000-7000-8000-0000000000ee';
+    const latestOfMany = (ids: readonly string[], type = 'agent') =>
+      withTenant(app, org, (tx) => trail.latestSignedStates(tx, org, type, ids));
+
+    it('judges each object as latestSignedState judges one, keeping each apart', async () => {
+      await record(
+        org,
+        signed(org, 1, 'ACTIVE'),
+        signed(org, 2, 'SUSPENDED'),
+        unsigned(2),
+        signed(org, 5, 'REVOKED', OTHER_AGENT),
+        signed(org, 7, 'REVOKED', NEVER, 'agent_key'),
+      );
+
+      const many = await latestOfMany([AGENT.toUpperCase(), OTHER_AGENT, NEVER]);
+      expect([...many.keys()]).toEqual([AGENT, OTHER_AGENT, NEVER]);
+      expect(many.get(AGENT)).toEqual(await latest(org));
+      expect(many.get(AGENT)).toMatchObject({ kind: 'signed', seq: 2n, version: 2 });
+      expect(many.get(OTHER_AGENT)).toEqual(await latest(org, { type: 'agent', id: OTHER_AGENT }));
+      expect(many.get(NEVER)).toEqual({ kind: 'none' });
+    });
+
+    it('throws past 1,000 events about any one object, however few the others have', async () => {
+      await record(org, signed(org, 1, 'ACTIVE', OTHER_AGENT), signed(org, 1, 'ACTIVE'));
+      await record(org, ...Array.from({ length: 999 }, () => unsigned(1)));
+      expect((await latestOfMany([OTHER_AGENT, AGENT])).get(AGENT)).toMatchObject({ kind: 'signed', seq: 2n });
+
+      await record(org, unsigned(1));
+      await expect(latestOfMany([OTHER_AGENT, AGENT])).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+    });
+
+    it('calls every object broken, signed or not, when the chain holds an event past its head', async () => {
+      await record(org, signed(org, 1, 'ACTIVE'));
+      await tamper(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, seq + 1, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 1`,
+      );
+
+      expect(await latestOfMany([AGENT, NEVER])).toEqual(
+        new Map([
+          [AGENT, { kind: 'broken', seq: 2n }],
+          [NEVER, { kind: 'broken', seq: 2n }],
+        ]),
+      );
+    });
+
+    it('reads nothing for no IDs, and refuses a bad type, an ID not a UUID or more than 500 before any SQL runs', async () => {
+      expect(await latestOfMany([])).toEqual(new Map());
+      await expect(latestOfMany([AGENT], 'Agent')).rejects.toBeInstanceOf(AuditEventRefused);
+      await expect(latestOfMany([AGENT, 'agent-1'])).rejects.toThrow('subject.id must be a UUID');
+      const tooMany = Array.from(
+        { length: 501 },
+        (_, index) => `0199a0f0-0000-7000-8000-${index.toString(16).padStart(12, '0')}`,
+      );
+      await expect(latestOfMany(tooMany)).rejects.toThrow("At most 500 objects' signed states are read at once");
+    });
+  });
+
   it('finds an object by its ID in any case', async () => {
     await record(org, signed(org, 1, 'ACTIVE'));
 
@@ -1155,6 +1223,26 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
         trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectId: 'x', limit: 2 }),
       ),
     ).rejects.toThrow('subject.id must be a UUID');
+  });
+
+  it('gives several objects’ events alone when it names them, and refuses one and several together, or none (E1c)', async () => {
+    const other = '0199a0f0-0000-7000-8000-0000000000bb';
+    const third = '0199a0f0-0000-7000-8000-0000000000cc';
+    await record(org, about('supplier', 1), {
+      ...about('supplier', 2),
+      subject: { type: 'supplier', id: other, version: 2 },
+    });
+    await record(org, { ...about('supplier', 3), subject: { type: 'supplier', id: third, version: 3 } });
+
+    const read = await withTenant(app, org, (tx) =>
+      trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], subjectIds: [USER, third.toUpperCase()], limit: 2 }),
+    );
+    expect(read).toMatchObject({ kind: 'recorded', events: [{ seq: 1n }, { seq: 3n }] });
+    const refused = (find: Partial<HistoryToRead>) =>
+      withTenant(app, org, (tx) => trail.recordedEvents(tx, org, { subjectTypes: ['supplier'], limit: 2, ...find }));
+    await expect(refused({ subjectId: USER, subjectIds: [other] })).rejects.toThrow('One object or several, not both');
+    await expect(refused({ subjectIds: [] })).rejects.toThrow('At least one object is read');
+    await expect(refused({ subjectIds: [USER, 'x'] })).rejects.toThrow('subject.id must be a UUID');
   });
 
   it('gives none for a chain that holds none, or was never started', async () => {

@@ -813,6 +813,174 @@ describe('FX-TAMPER: an authority row changed past the app is denied, with the a
   });
 });
 
+describe('many rows verified at once (verifiedStates; E1c)', () => {
+  const many = (ids: readonly string[], within = org) =>
+    withTenant(app, within, (tx) => states.verifiedStates(tx, AGENTS, within, ids));
+
+  it('judges each row as verifiedState does, in one read, the alarm raised for each tampered with', async () => {
+    const whole = await newAgent();
+    const changed = await newAgent();
+    await changeStatus(changed, 'suspend');
+    const sealBroken = await newAgent();
+    await tamper("update probe.agents set role = 'admin' where org_id = $1 and id = $2", sealBroken);
+    const pointer = await newAgent();
+    await tamper('update probe.agents set state_event_id = null where org_id = $1 and id = $2', pointer);
+    const version = await newAgent();
+    await tamper('update probe.agents set state_version = 3 where org_id = $1 and id = $2', version);
+    const unreadable = await newAgent();
+    await tamper('update probe.agents set state_version = 0 where org_id = $1 and id = $2', unreadable);
+    const unsigned = await newAgent();
+    await tamper('delete from audit.events where org_id = $1 and subject_id = $2', unsigned);
+    const deleted = await newAgent();
+    await tamper('delete from probe.agents where org_id = $1 and id = $2', deleted);
+    const brokenLog = await newAgent();
+    await tamper(
+      `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`,
+      brokenLog,
+    );
+    const goneAndBroken = await newAgent();
+    await tamper('delete from probe.agents where org_id = $1 and id = $2', goneAndBroken);
+    await tamper(
+      `update audit.events set details = pg_catalog.replace(details, '"reason":"test"', '"reason":"tost"') where org_id = $1 and subject_id = $2`,
+      goneAndBroken,
+    );
+    const never = newId();
+    const asked = [
+      whole,
+      changed,
+      sealBroken,
+      pointer,
+      version,
+      unreadable,
+      unsigned,
+      deleted,
+      brokenLog,
+      goneAndBroken,
+      never,
+    ];
+
+    const checks = await many(asked.map((id) => id.toUpperCase()));
+    const batched = alarms();
+    const oneByOne = new Map<string, unknown>();
+    for (const id of asked) oneByOne.set(id, await check(id));
+
+    expect(checks).toEqual(oneByOne);
+    expect(checks.get(whole)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(checks.get(changed)).toMatchObject({
+      outcome: 'verified',
+      version: 2,
+      fields: new Map([
+        ['status', 'SUSPENDED'],
+        ['role', 'reader'],
+      ]),
+    });
+    expect(
+      [...checks.values()].map((checked) => (checked.outcome === 'tampered' ? checked.sign : checked.outcome)),
+    ).toEqual([
+      'verified',
+      'verified',
+      'seal',
+      'pointer',
+      'version',
+      'row',
+      'unsigned',
+      'deleted',
+      'log',
+      'log',
+      'missing',
+    ]);
+    // The same alarms, in the same order, as the rows read one at a time.
+    const named = (lines: readonly Record<string, unknown>[]) =>
+      lines.map(({ reason, objectId, seq }) => ({ reason, objectId, seq }));
+    expect(named(batched)).toEqual(named(alarms().slice(batched.length)));
+    expect(batched).toHaveLength(8);
+  });
+
+  it("gives another organisation's rows as missing, with no alarm (SEC-TEN-01)", async () => {
+    const id = await newAgent();
+    const elsewhere = org;
+    org = newId();
+
+    expect(await many([id])).toEqual(new Map([[id, { outcome: 'missing' }]]));
+    expect(await many([id], elsewhere)).toEqual(new Map([[id, expect.objectContaining({ outcome: 'verified' })]]));
+    expect(alarms()).toEqual([]);
+  });
+
+  it('reads a row locked for a change again for a decision, which keeps it locked for the change', async () => {
+    const id = await newAgent();
+
+    const recorded = await withTenant(app, org, async (tx) => {
+      const current = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      if (current.outcome !== 'verified') throw new Error('The test expected a verified state');
+      expect((await states.verifiedStates(tx, AGENTS, org, [id])).get(id)).toMatchObject({ version: 1 });
+      // Still locked for the change: verified for it again, and recorded from it.
+      const again = await states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      if (again.outcome !== 'verified') throw new Error('The test expected a verified state');
+      return states.record(tx, AGENTS, { orgId: org, id }, again, { role: 'writer' }, change('agent.touched'));
+    });
+
+    expect(recorded).toMatchObject({ version: 2 });
+  });
+
+  it('refuses to lock rows after the chain head, before reading any (ADR-006 §6)', async () => {
+    const id = await newAgent();
+
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.integrityHold(tx, org, 'head');
+        return states.verifiedStates(tx, AGENTS, org, [id]);
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+  });
+
+  it('reads nothing for no IDs, and refuses an ID not a UUID or more than 500 before any SQL runs', async () => {
+    expect(await many([])).toEqual(new Map());
+    await expect(many(['x'])).rejects.toThrow(RangeError);
+    const tooMany = Array.from({ length: 501 }, () => newId());
+    await expect(many(tooMany)).rejects.toThrow('At most 500 signed rows are read at once');
+    // One ID asked twice is one row.
+    const id = await newAgent();
+    expect([...(await many([id, id.toUpperCase()])).keys()]).toEqual([id]);
+  });
+
+  it('locks each row for a decision: a change waits for the read to end, and the same transaction may not raise it to change', async () => {
+    const id = await newAgent();
+    await expect(
+      withTenant(app, org, async (tx) => {
+        await states.verifiedStates(tx, AGENTS, org, [id]);
+        return states.verifiedState(tx, AGENTS, { orgId: org, id }, 'change');
+      }),
+    ).rejects.toMatchObject({ reason: 'lock_order' });
+
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let read = (): void => undefined;
+    const readDone = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+    const deciding = withTenant(app, org, async (tx) => {
+      const checked = await states.verifiedStates(tx, AGENTS, org, [id]);
+      read();
+      await held;
+      return checked;
+    });
+    try {
+      await readDone;
+      const changing = changeStatus(id, 'revoke');
+      await waitUntilQueued(attacker, 1);
+      release();
+
+      expect((await deciding).get(id)).toMatchObject({ outcome: 'verified', version: 1 });
+      expect(await changing).toMatchObject({ outcome: 'changed', to: 'REVOKED', version: 2 });
+    } finally {
+      release();
+    }
+    expect(alarms()).toEqual([]);
+  });
+});
+
 describe('FX-RACE: a check while the row changes never raises a false alarm', () => {
   it('waits for a status change to commit, then verifies the new state', async () => {
     const id = await newAgent();
