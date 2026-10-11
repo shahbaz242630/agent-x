@@ -31,6 +31,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import { sql } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { AuditEventRefused } from '../domain/event.ts';
 import { HOLD_SUBJECT } from '../domain/integrity-hold.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
@@ -355,29 +356,16 @@ describe(`verifyAll: every object of an organisation's authority tables (Postgre
   });
 
   it('reads a table in the same few statements however many objects it holds: no per-row loop', async () => {
-    /** The statements one verifyAll sends, each counted as Kysely sends it. */
-    const statementsSent = async () => {
-      let sent = 0;
-      const checked = await withTenant(app, org, (tx) => {
-        const counting: Parameters<typeof tx.withPlugin>[0] = {
-          transformQuery: ({ node }) => {
-            sent += 1;
-            return node;
-          },
-          transformResult: ({ result }) => Promise.resolve(result),
-        };
-        return states.verifyAll(tx.withPlugin(counting), org, [AGENTS, KEYS], 100);
-      });
-      return { sent, checked };
-    };
+    const counted = () =>
+      withTenant(app, org, (tx) => statementsSent(tx, (each) => states.verifyAll(each, org, [AGENTS, KEYS], 100)));
     await newRow(AGENTS);
     await newRow(KEYS);
-    const few = await statementsSent();
+    const few = await counted();
     for (let more = 0; more < 6; more += 1) await newRow(AGENTS);
-    const many = await statementsSent();
+    const many = await counted();
 
-    expect(few.checked).toEqual({ outcome: 'verified', objects: 2 });
-    expect(many.checked).toEqual({ outcome: 'verified', objects: 8 });
+    expect(few.result).toEqual({ outcome: 'verified', objects: 2 });
+    expect(many.result).toEqual({ outcome: 'verified', objects: 8 });
     expect(many.sent).toBe(few.sent);
   });
 

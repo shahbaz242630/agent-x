@@ -20,6 +20,7 @@ import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { type AuditTrail, createAuditTrail } from './audit-trail.ts';
 import { type HoldClearing, type SignedStates, SignedStateFailed } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
@@ -381,29 +382,16 @@ describe(`clearing the integrity hold (clearIntegrityHold, Postgres ${server.ver
   });
 
   it('reads a batch in the same few statements however many objects it holds: no per-row loop', async () => {
-    /** The statements one batch sends, each counted as Kysely sends it. */
-    const statementsSent = async () => {
-      let sent = 0;
-      const checked = await inOrg((tx, states) => {
-        const counting: Parameters<typeof tx.withPlugin>[0] = {
-          transformQuery: ({ node }) => {
-            sent += 1;
-            return node;
-          },
-          transformResult: ({ result }) => Promise.resolve(result),
-        };
-        return states.checkHistoryBatch(tx.withPlugin(counting), org, AGENTS, null, 50);
-      });
-      return { sent, checked };
-    };
+    const counted = () =>
+      inOrg((tx, states) => statementsSent(tx, (each) => states.checkHistoryBatch(each, org, AGENTS, null, 50)));
     await inOrg((tx, states) => insertAgent(tx, states, newId()));
-    const few = await statementsSent();
+    const few = await counted();
     for (let more = 0; more < 5; more += 1) await inOrg((tx, states) => insertAgent(tx, states, newId()));
-    const many = await statementsSent();
+    const many = await counted();
 
     // The organisation's own row is an agent here too (insertAgent's first).
-    expect(few.checked).toMatchObject({ outcome: 'checked', objects: 2, done: true });
-    expect(many.checked).toMatchObject({ outcome: 'checked', objects: 7, done: true });
+    expect(few.result).toMatchObject({ outcome: 'checked', objects: 2, done: true });
+    expect(many.result).toMatchObject({ outcome: 'checked', objects: 7, done: true });
     expect(many.sent).toBe(few.sent);
   });
 

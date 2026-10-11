@@ -24,10 +24,12 @@ import {
   type AuditActor,
   type AuditDetails,
   type AuditTables,
+  checkOf,
   type PageAsked,
-  type PageRead,
+  type PageShown,
   type RecordedState,
   type SignedStates,
+  type StateCheck,
   type TamperSign,
   verifiedPage,
   type VerifiedState,
@@ -206,8 +208,13 @@ export async function mandateOf(
 ): Promise<MandateCheck> {
   const state = await states.verifiedState(tx, MANDATES, key, lock);
   if (state.outcome !== 'verified') return state;
-  const id = key.id.toLowerCase();
-  return { outcome: 'found', mandate: recordOf(MANDATES, id, mandateRecordOf(id, state.fields)), state };
+  return { outcome: 'found', mandate: mandateFrom(key.id, state), state };
+}
+
+/** The mandate its verified state holds. */
+function mandateFrom(id: string, state: VerifiedState): MandateRecord {
+  const lower = id.toLowerCase();
+  return recordOf(MANDATES, lower, mandateRecordOf(lower, state.fields));
 }
 
 /**
@@ -221,10 +228,14 @@ export async function mandateVersionOf(
   key: MandateKey,
   mandateId: string,
 ): Promise<MandateVersionCheck> {
-  const state = await states.verifiedState(tx, MANDATE_VERSIONS, key, 'share');
+  return mandateVersionIn(key.id, await states.verifiedState(tx, MANDATE_VERSIONS, key, 'share'), mandateId);
+}
+
+/** The version its check holds, found only as a version of `mandateId` (mandateVersionOf). */
+function mandateVersionIn(id: string, state: StateCheck, mandateId: string): MandateVersionCheck {
   if (state.outcome !== 'verified') return state;
-  const id = key.id.toLowerCase();
-  const version = recordOf(MANDATE_VERSIONS, id, versionRecordOf(id, state.fields));
+  const lower = id.toLowerCase();
+  const version = recordOf(MANDATE_VERSIONS, lower, versionRecordOf(lower, state.fields));
   if (version.mandateId !== mandateId.toLowerCase()) return { outcome: 'missing' };
   return { outcome: 'found', version };
 }
@@ -435,9 +446,11 @@ export interface MandateShown extends MandateRecord {
 export const MOST_MANDATES_A_PAGE = 50;
 
 /**
- * A page of the organisation's mandates, in order of ID, each read (`share`)
- * and verified with the version it shows, in the caller's transaction, which
- * must be withSignedStates' for it; or tampered with, at the first that is.
+ * A page of the organisation's mandates, in order of ID, read (`share`) and
+ * verified together, then the versions they show together, in the caller's
+ * transaction, which must be withSignedStates' for it; or tampered with, at
+ * the first mandate that is, else the first version. The same few statements
+ * however many mandates it holds.
  */
 export async function mandatesPage(
   tx: MandatesTransaction,
@@ -450,20 +463,34 @@ export async function mandatesPage(
 > {
   const listed = await verifiedPage(
     tx,
+    states,
     MANDATES,
     orgId,
     page,
     { most: MOST_MANDATES_A_PAGE, rows: 'mandates' },
-    async (id): Promise<PageRead<MandateShown>> => {
-      const read = await mandateOf(tx, states, { orgId, id }, 'share');
-      if (read.outcome !== 'found') return read;
-      const shown = read.mandate.currentVersionId ?? read.mandate.pendingVersionId;
-      // A revoked draft keeps the version it waited with, so every mandate has one to show (0035's checks).
-      if (shown === null) throw new Error(`A verified mandate has no version to show: ${id}`);
-      const version = await mandateVersionOf(tx, states, { orgId, id: shown }, id);
-      if (version.outcome === 'tampered') return version;
-      if (version.outcome === 'missing') throw new Error(`A verified mandate's version is not its own: ${id}`);
-      return { outcome: 'found', item: { ...read.mandate, purpose: version.version.purpose } };
+    async (verified): Promise<PageShown<MandateShown>> => {
+      const mandates = verified.map(({ id, state }) => {
+        const mandate = mandateFrom(id, state);
+        const shown = mandate.currentVersionId ?? mandate.pendingVersionId;
+        // A revoked draft keeps the version it waited with, so every mandate has one to show (0035's checks).
+        if (shown === null) throw new Error(`A verified mandate has no version to show: ${id}`);
+        return { mandate, shown };
+      });
+      const versions = await states.verifiedStates(
+        tx,
+        MANDATE_VERSIONS,
+        orgId,
+        mandates.map(({ shown }) => shown),
+      );
+      const items: MandateShown[] = [];
+      for (const { mandate, shown } of mandates) {
+        const version = mandateVersionIn(shown, checkOf(versions, shown), mandate.id);
+        if (version.outcome === 'tampered') return version;
+        if (version.outcome === 'missing')
+          throw new Error(`A verified mandate's version is not its own: ${mandate.id}`);
+        items.push({ ...mandate, purpose: version.version.purpose });
+      }
+      return { outcome: 'shown', items };
     },
   );
   return listed.outcome === 'tampered' ? listed : { outcome: 'listed', mandates: listed.items, next: listed.next };

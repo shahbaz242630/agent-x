@@ -135,18 +135,19 @@ export async function agentOf(
 ): Promise<AgentCheck> {
   const state = await states.verifiedState(tx, AGENTS, key, lock);
   if (state.outcome !== 'verified') return state;
+  return { outcome: 'found', agent: agentFrom(key.id, state), state };
+}
+
+/** The agent its verified state holds. */
+function agentFrom(id: string, state: VerifiedState): AgentRecord {
   const owner = state.fields.get('owner');
   const status = state.fields.get('status');
   const scopes = state.fields.get('scopes');
   // The table's checks hold each field to its kind, and the seal to what was written.
   if (typeof owner !== 'string' || (status !== 'ACTIVE' && status !== 'SUSPENDED') || typeof scopes !== 'string') {
-    throw new Error(`A verified agent holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified agent holds a field that isn't one of its own: ${id}`);
   }
-  return {
-    outcome: 'found',
-    agent: { id: key.id.toLowerCase(), owner, status, scopes: scopesOf(scopes) },
-    state,
-  };
+  return { id: id.toLowerCase(), owner, status, scopes: scopesOf(scopes) };
 }
 
 /**
@@ -232,8 +233,8 @@ export const MOST_AGENTS_A_PAGE = 50;
  * verified, in the caller's transaction, which must be withSignedStates' for
  * it: at most `limit` (1 to MOST_AGENTS_A_PAGE) after the agent `after`, with
  * the ID to ask the next page after, or null at the end; or tampered with, at
- * the first agent that is, and then no page at all. Besides each agent's own
- * read, three statements a page: the tenant check, its IDs and its names.
+ * the first agent that is, and then no page at all. Seven statements a page,
+ * however many agents it holds: verifiedPage's six and their names.
  */
 export async function agentsPage(
   tx: AgentsTransaction,
@@ -246,14 +247,12 @@ export async function agentsPage(
 > {
   const listed = await verifiedPage(
     tx,
+    states,
     AGENTS,
     orgId,
     page,
     { most: MOST_AGENTS_A_PAGE, rows: 'agents' },
-    async (id) => {
-      const read = await agentOf(tx, states, { orgId, id }, 'share');
-      return read.outcome === 'found' ? { outcome: 'found', item: read.agent } : read;
-    },
+    (verified) => Promise.resolve({ outcome: 'shown', items: verified.map(({ id, state }) => agentFrom(id, state)) }),
   );
   if (listed.outcome === 'tampered') return listed;
   return { outcome: 'listed', agents: await agentsShown(tx, orgId, listed.items), next: listed.next };

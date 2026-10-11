@@ -44,10 +44,12 @@ import {
   type AuditActor,
   type AuditDetails,
   type AuditTables,
+  checkOf,
   type PageAsked,
-  type PageRead,
+  type PageShown,
   type RecordedState,
   type SignedStates,
+  type StateCheck,
   type TamperSign,
   verifiedPage,
   type VerifiedState,
@@ -445,10 +447,15 @@ export async function supplierOf(
 ): Promise<SupplierCheck> {
   const state = await states.verifiedState(tx, SUPPLIERS, key, lock);
   if (state.outcome !== 'verified') return state;
-  const supplier = supplierRecordOf(key.id.toLowerCase(), state.fields);
+  return { outcome: 'found', supplier: supplierFrom(key.id, state), state };
+}
+
+/** The supplier its verified state holds. */
+function supplierFrom(id: string, state: VerifiedState): SupplierRecord {
+  const supplier = supplierRecordOf(id.toLowerCase(), state.fields);
   // The table's checks hold each field to its kind, and the seal to what was written.
-  if (supplier === undefined) throw new Error(`A verified supplier holds a field that isn't one of its own: ${key.id}`);
-  return { outcome: 'found', supplier, state };
+  if (supplier === undefined) throw new Error(`A verified supplier holds a field that isn't one of its own: ${id}`);
+  return supplier;
 }
 
 /** Who moves a supplier, and the facts their events name. */
@@ -884,12 +891,16 @@ export async function versionOf(
   key: SupplierKey,
   supplierId: string,
 ): Promise<VersionCheck> {
-  const state = await states.verifiedState(tx, SUPPLIER_VERSIONS, key, 'share');
+  return versionIn(key.id, await states.verifiedState(tx, SUPPLIER_VERSIONS, key, 'share'), supplierId);
+}
+
+/** The version its check holds, found only as a version of `supplierId` (versionOf). */
+function versionIn(id: string, state: StateCheck, supplierId: string): VersionCheck {
   if (state.outcome !== 'verified') return state;
-  const version = versionRecordOf(key.id.toLowerCase(), state.fields);
+  const version = versionRecordOf(id.toLowerCase(), state.fields);
   // The table's checks hold each field to its kind, and the seal to what was written.
   if (version === undefined) {
-    throw new Error(`A verified supplier version holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified supplier version holds a field that isn't one of its own: ${id}`);
   }
   if (version.supplierId !== supplierId.toLowerCase()) return { outcome: 'missing' };
   return { outcome: 'found', version };
@@ -962,13 +973,13 @@ export interface SupplierShown extends SupplierRecord {
 export const MOST_SUPPLIERS_A_PAGE = 50;
 
 /**
- * A page of the organisation's suppliers, in order of ID, each read (`share`)
- * and verified with its current version, in the caller's transaction, which
- * must be withSignedStates' for it: at most `limit` (1 to
+ * A page of the organisation's suppliers, in order of ID, read (`share`) and
+ * verified together, then their current versions together, in the caller's
+ * transaction, which must be withSignedStates' for it: at most `limit` (1 to
  * MOST_SUPPLIERS_A_PAGE) after the supplier `after`, with the ID to ask the
  * next page after, or null at the end; or tampered with, at the first
- * supplier or version that is, and then no page at all. Besides each row's
- * own read, two statements a page: the tenant check and its IDs.
+ * supplier that is, else the first version, and then no page at all. The same
+ * few statements however many suppliers it holds.
  */
 export async function suppliersPage(
   tx: SuppliersTransaction,
@@ -981,19 +992,26 @@ export async function suppliersPage(
 > {
   const listed = await verifiedPage(
     tx,
+    states,
     SUPPLIERS,
     orgId,
     page,
     { most: MOST_SUPPLIERS_A_PAGE, rows: 'suppliers' },
-    async (id): Promise<PageRead<SupplierShown>> => {
-      const read = await supplierOf(tx, states, { orgId, id }, 'share');
-      if (read.outcome !== 'found') return read;
-      const current = await versionOf(tx, states, { orgId, id: read.supplier.currentVersionId }, id);
-      if (current.outcome === 'tampered') return current;
-      // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
-      if (current.outcome === 'missing')
-        throw new Error(`A verified supplier has no current version of its own: ${id}`);
-      return { outcome: 'found', item: { ...read.supplier, displayName: current.version.displayName } };
+    async (verified): Promise<PageShown<SupplierShown>> => {
+      const suppliers = verified.map(({ id, state }) => supplierFrom(id, state));
+      const ids = suppliers.map(({ currentVersionId }) => currentVersionId);
+      const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, ids);
+      const items: SupplierShown[] = [];
+      for (const supplier of suppliers) {
+        const id = supplier.currentVersionId;
+        const current = versionIn(id, checkOf(versions, id), supplier.id);
+        if (current.outcome === 'tampered') return current;
+        // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
+        if (current.outcome === 'missing')
+          throw new Error(`A verified supplier has no current version of its own: ${supplier.id}`);
+        items.push({ ...supplier, displayName: current.version.displayName });
+      }
+      return { outcome: 'shown', items };
     },
   );
   return listed.outcome === 'tampered' ? listed : { outcome: 'listed', suppliers: listed.items, next: listed.next };

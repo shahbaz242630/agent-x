@@ -19,6 +19,7 @@ import {
 import type { Transaction } from 'kysely';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import { statementsSent } from '../../../statements-sent.helper.test.ts';
 import { HOUR_MS } from '../../../shared-kernel/index.ts';
 import { withSignedStates } from '../../audit/index.ts';
 import { createOrganization } from '../../organizations/index.ts';
@@ -596,6 +597,22 @@ describe(`a page of an organisation's suppliers (E1-1, Postgres ${server.version
       suppliers: [{ id: made[2]?.id, displayName: 'Third Supplier' }],
       next: null,
     });
+  });
+
+  it('reads a page in the same few statements however many suppliers it holds: no per-row loop', async () => {
+    const org = await organization();
+    const counted = () =>
+      withSignedStates(app, org, services(), (tx, states) =>
+        statementsSent(tx, (each) => suppliersPage(each, states, org, { after: null, limit: MOST_SUPPLIERS_A_PAGE })),
+      );
+    await added(org);
+    const few = await counted();
+    for (let more = 0; more < 3; more += 1) await added(org);
+    const many = await counted();
+
+    expect(few.result).toMatchObject({ outcome: 'listed', suppliers: [{}] });
+    expect(many.result).toMatchObject({ outcome: 'listed', suppliers: [{}, {}, {}, {}] });
+    expect(many.sent).toBe(few.sent);
   });
 
   it('is empty for an organisation with none', async () => {
