@@ -264,7 +264,9 @@ export async function weigh(
   );
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
-  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month });
+  // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
+  const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
+  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month, currency });
   // The split total, only where it is weighed: the mandate's split check on, for a supplier of the organisation's.
   const split =
     mandate?.splitCheck === true && supplier !== null
@@ -272,9 +274,9 @@ export async function weigh(
           supplierId: supplier.id,
           payeeKey: supplier.payeeKey,
           since: windowStart(now, mandate.splitWindowHours),
+          currency,
         })
       : 0n;
-  const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
   const input: DecisionInput = {
     request: { amount: asked.amount, supplierId: asked.supplierId, fundingSourceId: asked.fundingSourceId },
     now,
