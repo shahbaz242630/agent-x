@@ -148,6 +148,7 @@ describe('cancelling a spend request before hand-off (D8)', () => {
       actorType: 'user',
       details: { statusFrom: 'APPROVAL_REQUIRED', statusTo: 'CANCELLED' },
     });
+    expect((await eventsOf(w, waiting.id)).at(-1)?.details).not.toHaveProperty('agentKeyId');
     const again = await ask(acting, w, { orderReference: 'inv-c1' });
     expect(again.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
     expect(await cleanHoldings(w)).toMatchObject({ mismatched: 0, tampered: 0 });
@@ -183,6 +184,7 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     expect((await eventsOf(w, mine.id)).at(-1)).toMatchObject({
       action: 'spend_request.cancelled',
       actorType: 'agent',
+      details: { agentKeyId: acting.keyId },
     });
     expect(await holdingsOf(w, mine.id)).toEqual({ reservation: 'RELEASED', released: true });
   });
@@ -299,7 +301,7 @@ describe('cancelling a spend request before hand-off (D8)', () => {
         states,
         keys,
         { orgId: w.org, id: waiting.id },
-        { kind: 'agent', agentId: w.agent },
+        { kind: 'agent', agentId: w.agent, agentKeyId: acting.keyId },
         clock.now(),
       ),
     );

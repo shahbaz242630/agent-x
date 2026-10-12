@@ -105,9 +105,14 @@ export async function expireRequest(
   return { outcome: 'ended', request: { ...read.request, status: 'EXPIRED' } };
 }
 
-/** Who cancels (PRD §7.2): a person (the API checks their role), or the agent that made the request. */
+/**
+ * Who cancels (PRD §7.2): a person (the API checks their role), or the agent
+ * that made the request, with the key it came with (kept as evidence, as the
+ * request's own is).
+ */
 export type Canceller =
-  { readonly kind: 'user'; readonly userId: string } | { readonly kind: 'agent'; readonly agentId: string };
+  | { readonly kind: 'user'; readonly userId: string }
+  | { readonly kind: 'agent'; readonly agentId: string; readonly agentKeyId: string };
 
 /**
  * Cancels the request if it hasn't ended or been handed off (SPEND_REQUEST's
@@ -132,7 +137,7 @@ export async function cancelRequest(
   await endHolding(tx, states, keys, key, 'cancel', now, {
     actor: by.kind === 'user' ? { type: 'user', id: by.userId } : { type: 'agent', id: by.agentId },
     action: 'spend_request.cancelled',
-    details: {},
+    details: by.kind === 'agent' ? { agentKeyId: by.agentKeyId } : {},
   });
   return { outcome: 'ended', request: { ...read.request, status: 'CANCELLED' } };
 }

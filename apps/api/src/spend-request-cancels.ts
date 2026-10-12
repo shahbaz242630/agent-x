@@ -110,7 +110,7 @@ export function createSpendRequestCancels({
 
     async byAgent(agent, idempotent, requestId, correlationId) {
       const done = await work.write(agent, idempotent, correlationId, async (tx, states) => {
-        const by = { kind: 'agent', agentId: agent.agentId } as const;
+        const by = { kind: 'agent', agentId: agent.agentId, agentKeyId: agent.keyId } as const;
         return settled(await cancelRequest(tx, states, keys, { orgId: agent.orgId, id: requestId }, by, clock.now()));
       });
       return shown(agent.orgId, correlationId, done);
