@@ -624,37 +624,42 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     },
   );
 
-  it('refuses an admin who invited themselves, once deactivated, their own link back in (the S68 audit)', async () => {
-    // The admin signs in with the address they invite, before they are removed.
-    const self = await person();
-    const org = ids.next();
-    const admin = ids.next();
-    await withSignedStates(app, org, services(), async (tx, states) => {
-      await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
-      await addMembership(tx, states, {
-        orgId: org,
-        id: admin,
-        userId: self.userId,
-        role: 'admin',
-        joinedAt: clock.now(),
-        actor: OPERATOR,
+  it.each(['deactivated', 'demoted'] as const)(
+    'refuses an admin who invited themselves, once %s, their own link back in (the S68 audit)',
+    async (how) => {
+      // The admin signs in with the address they invite, before they are removed.
+      const self = await person();
+      const org = ids.next();
+      const admin = ids.next();
+      await withSignedStates(app, org, services(), async (tx, states) => {
+        await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
+        await addMembership(tx, states, {
+          orgId: org,
+          id: admin,
+          userId: self.userId,
+          role: 'admin',
+          joinedAt: clock.now(),
+          actor: OPERATOR,
+        });
       });
-    });
-    const { token } = await invitation({ org, admin, adminUser: self.userId }, 'developer');
-    expect(await accept(self, token, 'accept-while-admin')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'ALREADY_A_MEMBER',
-    });
-    await adminMoved({ org, admin }, 'deactivated');
+      const { token } = await invitation({ org, admin, adminUser: self.userId }, 'developer');
+      expect(await accept(self, token, 'accept-while-admin')).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'ALREADY_A_MEMBER',
+      });
+      await adminMoved({ org, admin }, how);
 
-    expect(await accept(self, token, 'accept-once-removed')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'INVITATION_CLOSED',
-    });
-    expect(await membershipOfPerson(org, self.userId)).toEqual({ outcome: 'deactivated', id: admin });
-  });
+      expect(await accept(self, token, 'accept-once-removed')).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'INVITATION_CLOSED',
+      });
+      expect(await membershipOfPerson(org, self.userId)).toMatchObject(
+        how === 'deactivated' ? { outcome: 'deactivated', id: admin } : { outcome: 'active', id: admin },
+      );
+    },
+  );
 
   it('keeps a person deactivated there waiting, invited as an admin, until an admin confirms them (B4-5c)', async () => {
     const who = await organization();
