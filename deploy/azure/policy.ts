@@ -53,6 +53,7 @@ export type RuleId =
   | 'denial-surge-alert'
   | 'holdings-check-alert'
   | 'integrity-runs-alert'
+  | 'agent-cancels-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -231,6 +232,20 @@ const DENIAL_LINES = [
 
 /** One agent denied more than this many times in a window is a surge (Logging-and-Monitoring.md: well above normal). */
 const DENIAL_SURGE_THRESHOLD = 10;
+
+/**
+ * An agent's own cancels' lines (Phase 2 G6, partner decision 11b): each
+ * `spend_request.cancelled` the agent made itself, counted per agent and the
+ * highest kept, so the alert returns one number with no ID dimensions.
+ */
+const AGENT_CANCEL_LINES = [
+  'where tostring(parse_json(Log).event) == "spend_request.cancelled"',
+  'where tostring(parse_json(Log).by) == "agent"',
+  'summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId)',
+] as const;
+
+/** One agent cancelling more of its own than this in a window: half its day's cap (10) at once. */
+const AGENT_CANCELS_THRESHOLD = 5;
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
@@ -1882,6 +1897,32 @@ const denialSurgeAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires when one agent's own cancels in a
+ * window pass AGENT_CANCELS_THRESHOLD (Phase 2 G6), watching every window.
+ */
+const agentCancelsAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', AGENT_CANCEL_LINES, 'max(Cancels)') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === AGENT_CANCELS_THRESHOLD &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'agent-cancels-alert',
+        resource: environment.name,
+        message: `needs an enabled alert on this deployment's workspace that fires when one agent cancels more than ${String(AGENT_CANCELS_THRESHOLD)} of its own spend requests in a window, watching every window`,
+      });
+    }
+  }
+};
+
+/**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
  */
@@ -2865,6 +2906,7 @@ const CHECKS: readonly Check[] = [
   denialSurgeAlert,
   holdingsCheckAlert,
   integrityRunsAlert,
+  agentCancelsAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
