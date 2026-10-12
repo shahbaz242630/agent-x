@@ -7,6 +7,7 @@
 // agent's is NOT_FOUND. A developer or viewer is FORBIDDEN. Cancelled already
 // is answered as it stands; denied or expired is REQUEST_NOT_CANCELLABLE; none
 // of the organisation's is NOT_FOUND; one tampered with is INTEGRITY_FAILED.
+// An agent cancels at most 10 of its own a day, each logged once (G6).
 // The key answers its own replay. A cancel waiting on an expiry that holds
 // the request (forced) finds it expired.
 import { withSignedStates } from '@agentx/core/modules/audit';
@@ -17,10 +18,12 @@ import {
   requestOf,
   SPEND_REQUESTS,
 } from '@agentx/core/modules/spend-requests';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
+  LogCapture,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
@@ -56,6 +59,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let cancels: SpendRequestCancels;
+let capture: LogCapture;
 
 const shared = spendWorld({
   app: () => app,
@@ -124,7 +128,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date());
-  const logger = testLogger();
+  capture = new LogCapture();
+  const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
   cancels = createSpendRequestCancels({ database: app, keys, ids, clock, logger });
@@ -187,6 +192,44 @@ describe('cancelling a spend request before hand-off (D8)', () => {
       details: { agentKeyId: acting.keyId },
     });
     expect(await holdingsOf(w, mine.id)).toEqual({ reservation: 'RELEASED', released: true });
+  });
+
+  it('lets the agent cancel 10 of its own a day, then refuses it while a person still may (decision 11b)', async () => {
+    const { w, acting } = await ready();
+    for (let n = 0; n < 10; n += 1) {
+      expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    }
+    const one = await ask(acting, w);
+    const cancelledEarlier = (await ask(acting, w)).id;
+    await byMember(w.admin, cancelledEarlier);
+
+    expect(await byAgent(acting, one.id)).toEqual(refused(409, 'AGENT_CANCELS_SPENT'));
+    expect(await statusOf(w, one.id)).toBe('APPROVAL_REQUIRED');
+    // One cancelled already is answered as it stands, counting nothing.
+    expect(await byAgent(acting, cancelledEarlier)).toMatchObject({ outcome: 'cancelled' });
+    // Another agent's own are its own; a person's cancel never counts and is never capped.
+    const other = await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n) });
+    expect(await byAgent(other, (await ask(other, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    expect(await byMember(w.admin, one.id)).toMatchObject({ outcome: 'cancelled' });
+
+    // A day after them, it may again: the log seals the database's time, which the clock started at, a minute
+    // covering the seconds this test took.
+    clock.advanceBy(DAY_MS + 60_000);
+    expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+  });
+
+  it('logs each of the agent’s own cancels once, with the agent, and never a person’s, a replay or one as it stands', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const key = idempotent(acting.orgId, { kind: 'agent', id: acting.agentId }, AGENT_CANCEL_OPERATION, waiting.id);
+    await cancels.byAgent(acting, key, waiting.id, CORRELATION);
+    await cancels.byAgent(acting, key, waiting.id, CORRELATION);
+    await byAgent(acting, waiting.id);
+    await byMember(w.admin, (await ask(acting, w)).id);
+
+    expect(capture.lines().filter(({ event }) => event === 'spend_request.cancelled')).toEqual([
+      expect.objectContaining({ by: 'agent', agentId: acting.agentId, requestId: waiting.id, orgId: w.org }),
+    ]);
   });
 
   it('answers one cancelled already as it stands, recording nothing more: a brake pressed twice', async () => {

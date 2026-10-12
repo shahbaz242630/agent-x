@@ -14,6 +14,8 @@
 export const REASON_CODES = {
   AGENT_ADDS_SPENT:
     "The organisation has registered as many agents as it may in 24 hours, so this one wasn't registered. Try again tomorrow; if no one at the organisation registered them, tell its admins at once.",
+  AGENT_CANCELS_SPENT:
+    "The agent has cancelled as many of its own spend requests as it may in 24 hours, so this one wasn't cancelled. An admin or finance approver can still cancel it; if the agent keeps cancelling, look at what it is doing.",
   AGENT_KEYS_FULL:
     'The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, or revoke one, then rotate again. Nothing was changed.',
   AGENT_KEYS_SPENT:

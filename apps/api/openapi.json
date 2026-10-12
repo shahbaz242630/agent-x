@@ -21,6 +21,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "AGENT_CANCELS_SPENT",
+                    "description": "The agent has cancelled as many of its own spend requests as it may in 24 hours, so this one wasn't cancelled. An admin or finance approver can still cancel it; if the agent keeps cancelling, look at what it is doing."
+                  },
+                  {
+                    "type": "string",
                     "const": "AGENT_KEYS_FULL",
                     "description": "The agent already has as many working keys as it may: a rotation is still in its overlap. Wait for the older key to expire, or revoke one, then rotate again. Nothing was changed."
                   },

@@ -22,13 +22,19 @@
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 
-import type { AuditTables, SignedChange, SignedStates, TamperSign } from '../../audit/index.ts';
+import {
+  actorEventsSince,
+  type AuditTables,
+  type SignedChange,
+  type SignedStates,
+  type TamperSign,
+} from '../../audit/index.ts';
 import {
   type LimitReservationsTables,
   lockReservationsOf,
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
-import { movedAsRead } from '../../../shared-kernel/index.ts';
+import { DAY_MS, movedAsRead } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { requestOf, type SpendRequestRecord } from './decisions.ts';
 import { requestHoldingsWhole } from './holdings-check.ts';
@@ -41,12 +47,24 @@ type EndingsTransaction = Transaction<SpendRequestsTables & AuditTables & LimitR
 /** How long a request waits for approval before it expires (partner decision 10; a constant for the Pilot). */
 export const WAITS_FOR_APPROVAL_MS = 72 * 3_600_000;
 
+/**
+ * How many of its own requests an agent may cancel in 24 hours (partner
+ * decision 11b): enough for real changes of plan, too few to map its approval
+ * line by asking and cancelling. A person's cancels never count.
+ */
+export const MOST_AGENT_CANCELS_A_DAY = 10;
+
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-/** What came of ending a request: ended, its holdings released; already moved on, as it stands; not yet due; or not to be believed. */
+/**
+ * What came of ending a request: ended, its holdings released; already moved
+ * on, as it stands; not yet due; its agent's cancels for the day spent; or not
+ * to be believed.
+ */
 export type Ended =
   | { readonly outcome: 'ended'; readonly request: SpendRequestRecord }
   | { readonly outcome: 'not_open'; readonly request: SpendRequestRecord }
+  | { readonly outcome: 'spent' }
   | { readonly outcome: 'not_due' }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -118,8 +136,9 @@ export type Canceller =
  * Cancels the request if it hasn't ended or been handed off (SPEND_REQUEST's
  * `cancel`: waiting, approved or ready), releasing its reservation and order
  * claim, recorded as the canceller's. An agent's own requests alone: another
- * agent's is answered as none. Already cancelled, or ended otherwise, it is
- * answered as it stands (`not_open`).
+ * agent's is answered as none; and MOST_AGENT_CANCELS_A_DAY of them (`spent`).
+ * Already cancelled, or ended otherwise, it is answered as it stands
+ * (`not_open`), counting nothing.
  */
 export async function cancelRequest(
   tx: EndingsTransaction,
@@ -134,8 +153,19 @@ export async function cancelRequest(
   if (by.kind === 'agent' && read.request.agentId !== by.agentId) return { outcome: 'missing' };
   if (!SPEND_REQUEST.transition(read.request.status, 'cancel').ok)
     return { outcome: 'not_open', request: read.request };
+  const actor =
+    by.kind === 'user' ? ({ type: 'user', id: by.userId } as const) : ({ type: 'agent', id: by.agentId } as const);
+  // Counted from the agent's own signed cancels (0044). Two at once may each read one short of the cap: a
+  // budget, not a lock, so at most one over.
+  if (
+    by.kind === 'agent' &&
+    (await actorEventsSince(tx, key.orgId, actor, 'spend_request.cancelled', new Date(now.getTime() - DAY_MS))) >=
+      MOST_AGENT_CANCELS_A_DAY
+  ) {
+    return { outcome: 'spent' };
+  }
   await endHolding(tx, states, keys, key, 'cancel', now, {
-    actor: by.kind === 'user' ? { type: 'user', id: by.userId } : { type: 'agent', id: by.agentId },
+    actor,
     action: 'spend_request.cancelled',
     details: by.kind === 'agent' ? { agentKeyId: by.agentKeyId } : {},
   });
