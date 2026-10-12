@@ -8,7 +8,9 @@
 // (spend-request-decisions.ts).
 //
 // Every request recorded answers 201 with its decision and the reasons, a
-// denied one too: the agent learns why, and the evidence keeps it. Only what
+// denied one too: the agent learns why, and the evidence keeps it. A refusal
+// shows the agent only the reasons that made it (partner decision 11c), so a
+// request refused for nothing it holds never maps its hidden approval line. Only what
 // can't be recorded is refused: CURRENCY_NOT_ALLOWED (422), ORG_FROZEN (409),
 // a key no longer live (401), INTEGRITY_FAILED (503), and the idempotency
 // key's own answers. The answer shows the bank reference the order reference
@@ -21,7 +23,7 @@
 // `POST /v1/agent/spend-requests/{id}/cancel` (agents have routes of their
 // own, SEC-AG-05). Both answer 200 with the request as it now stands, its
 // reservation and order claim released.
-import { DECISIONS } from '@agentx/core/modules/policies';
+import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
   askedText,
   bankReferenceOf,
@@ -136,13 +138,14 @@ const AGENT_CANCEL_SCHEMA = {
   response: { 200: CANCELLED },
 };
 
-const shown = (request: SpendRequestRecord) => {
+/** The request as answered: to its agent, a refusal's own reasons alone (reasonsShownToAgent); to a person, all. */
+const shown = (request: SpendRequestRecord, to: 'agent' | 'member') => {
   const bankReference = bankReferenceOf(request.orderReference, request.id);
   return {
     id: request.id,
     status: request.status,
     decision: request.decision,
-    reasons: reasonsOf(request.reasons),
+    reasons: reasonsOf(to === 'agent' ? reasonsShownToAgent(request.decision, request.reasons) : request.reasons),
     amountMinor: Number(request.amount.minor),
     currency: request.amount.currency,
     supplierId: request.supplierId,
@@ -183,7 +186,7 @@ export function registerSpendRequests(
         request.id,
       );
       if (isUnwritten(decided)) return answerRefusal(decided, request, reply);
-      return reply.code(201).send(shown(decided.request));
+      return reply.code(201).send(shown(decided.request, 'agent'));
     },
   );
 
@@ -203,7 +206,7 @@ export function registerSpendRequests(
         request.id,
       );
       if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
-      return reply.code(200).send(shown(cancelled.request));
+      return reply.code(200).send(shown(cancelled.request, 'member'));
     },
   );
 
@@ -223,7 +226,7 @@ export function registerSpendRequests(
         request.id,
       );
       if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
-      return reply.code(200).send(shown(cancelled.request));
+      return reply.code(200).send(shown(cancelled.request, 'agent'));
     },
   );
 }

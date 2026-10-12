@@ -19,6 +19,7 @@ import {
   type MandateInForce,
   type PolicyRules,
   type SpendAsked,
+  reasonsShownToAgent,
 } from './decide.ts';
 
 const aed = (dirhams: number): Money => money(BigInt(Math.round(dirhams * 100)), 'AED');
@@ -469,6 +470,32 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
 
 const rank = (decision: Decision): number => DECISIONS.indexOf(decision);
 
+describe('reasonsShownToAgent (decision 11c)', () => {
+  it('shows an approval every reason, and a refusal only the reasons that made it', () => {
+    expect(reasonsShownToAgent('REQUIRE_APPROVAL', ['APPROVAL_THRESHOLD', 'AGGREGATE_THRESHOLD'])).toEqual([
+      'APPROVAL_THRESHOLD',
+      'AGGREGATE_THRESHOLD',
+    ]);
+    expect(reasonsShownToAgent('ALLOW', [])).toEqual([]);
+    // A policy's order cap that asks approval is shown with the rest.
+    expect(reasonsShownToAgent('REQUIRE_APPROVAL', ['POLICY_ORDER_CAP', 'APPROVAL_THRESHOLD'])).toEqual([
+      'POLICY_ORDER_CAP',
+      'APPROVAL_THRESHOLD',
+    ]);
+    expect(reasonsShownToAgent('DENY', ['SUPPLIER_NOT_ALLOWED', 'MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'])).toEqual([
+      'SUPPLIER_NOT_ALLOWED',
+    ]);
+    expect(reasonsShownToAgent('REQUIRE_NEW_MANDATE', ['MANDATE_MONTHLY_LIMIT', 'APPROVAL_THRESHOLD'])).toEqual([
+      'MANDATE_MONTHLY_LIMIT',
+    ]);
+  });
+
+  it('shows a policy’s order cap only when nothing else could have denied', () => {
+    expect(reasonsShownToAgent('DENY', ['POLICY_ORDER_CAP', 'APPROVAL_THRESHOLD'])).toEqual(['POLICY_ORDER_CAP']);
+    expect(reasonsShownToAgent('DENY', ['POLICY_MONTHLY_CAP', 'POLICY_ORDER_CAP'])).toEqual(['POLICY_MONTHLY_CAP']);
+  });
+});
+
 describe('decide: properties', () => {
   it('never allows, or sends for approval, what the mandate does not allow (SEC-LIM-05, -06)', () => {
     fc.assert(
@@ -498,6 +525,22 @@ describe('decide: properties', () => {
         const narrowed = decide({ ...given, mandatePolicy: policy });
         const capOnly = decide({ ...given, mandatePolicy: { ...NO_RULES, monthlyCap: policy.monthlyCap } });
         expect(rank(narrowed.decision)).toBeLessThanOrEqual(rank(capOnly.decision));
+      }),
+    );
+  });
+
+  it('shows the agent at least one reason for any refusal, and none that asks approval (decision 11c)', () => {
+    fc.assert(
+      fc.property(anyInput, (given) => {
+        const { decision, reasons } = decide(given);
+        const shown = reasonsShownToAgent(decision, reasons);
+        expect(shown.every((code) => reasons.includes(code))).toBe(true);
+        if (decision === 'DENY' || decision === 'REQUIRE_NEW_MANDATE') {
+          expect(shown.length).toBeGreaterThan(0);
+          expect(shown).not.toContain('APPROVAL_THRESHOLD');
+          expect(shown).not.toContain('AGGREGATE_THRESHOLD');
+          expect(shown).not.toContain('POSSIBLE_DUPLICATE_ORDER');
+        } else expect(shown).toEqual(reasons);
       }),
     );
   });
