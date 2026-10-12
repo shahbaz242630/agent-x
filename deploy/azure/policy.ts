@@ -54,6 +54,7 @@ export type RuleId =
   | 'holdings-check-alert'
   | 'integrity-runs-alert'
   | 'agent-cancels-alert'
+  | 'agent-cancel-cap-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -246,6 +247,9 @@ const AGENT_CANCEL_LINES = [
 
 /** One agent cancelling more of its own than this in a window: half its day's cap (10) at once. */
 const AGENT_CANCELS_THRESHOLD = 5;
+
+/** An agent refused a cancel by its day's cap (Phase 2 G6): steady cancelling the burst alert never sees. */
+const AGENT_CANCEL_CAP_LINES = 'where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent"';
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
@@ -1923,6 +1927,33 @@ const agentCancelsAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
+ * An enabled alert on the workspace fires on any cancel an agent's day's cap
+ * refused (Phase 2 G6): one line is enough, in any window.
+ */
+const agentCancelCapAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [AGENT_CANCEL_CAP_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'agent-cancel-cap-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any agent cancel refused by its day's cap, in any window",
+      });
+    }
+  }
+};
+
+/**
  * An enabled alert on the workspace fires on any page of the holdings check
  * that failed (Phase 2 E1b's review): one line is enough, in any window.
  */
@@ -2907,6 +2938,7 @@ const CHECKS: readonly Check[] = [
   holdingsCheckAlert,
   integrityRunsAlert,
   agentCancelsAlert,
+  agentCancelCapAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,

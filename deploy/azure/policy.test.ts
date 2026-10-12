@@ -223,6 +223,7 @@ const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
+const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -461,6 +462,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1775,6 +1777,27 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section M.
     expect(String(at(staging.predictedResources.find(TOKEN_REFUSED_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section M\.$/,
+    );
+  });
+
+  it("agent-cancel-cap-alert: no alert on a cancel the agent's cap refused, or one that counts something else, can't fire", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const SPENT =
+      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent"';
+    expect(brokenRules(without(AGENT_CANCEL_CAP_ALERT))).toEqual(['agent-cancel-cap-alert']);
+    for (const change of [
+      query(`${SPENT.replace('agent_cancels_spent', 'cancelled')} | summarize Events = count()`),
+      query(`${SPENT.replace('ContainerAppConsoleLogs', 'ContainerAppSystemLogs')} | summarize Events = count()`),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(AGENT_CANCEL_CAP_ALERT, change))).toEqual(['agent-cancel-cap-alert']);
+    }
+    expect(String(at(staging.predictedResources.find(AGENT_CANCEL_CAP_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section F\.$/,
     );
   });
 

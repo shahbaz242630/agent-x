@@ -218,6 +218,7 @@ module appsEnvironment 'modules/environment.bicep' = {
     // Named here, not in names.bicep, so only foundation reads it (Phase 2 E2c).
     integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
     agentCancelsAlertName: 'alert-agentx-${short}-agent-cancels'
+    agentCancelCapAlertName: 'alert-agentx-${short}-agent-cancel-cap'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [

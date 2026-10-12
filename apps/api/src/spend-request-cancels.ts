@@ -121,14 +121,14 @@ export function createSpendRequestCancels({
         ended = outcome.outcome;
         return settled(outcome);
       });
+      const log = logger.child({ correlationId, orgId: agent.orgId });
       // Once the cancel is committed, never for its key's replay: the alert counts these lines per agent (G6).
       if (!isUnwritten(done) && done.outcome === 'done' && ended === 'ended') {
-        logger.child({ correlationId, orgId: agent.orgId }).info('spend_request.cancelled', {
-          by: 'agent',
-          agentId: agent.agentId,
-          requestId: done.result.resourceId,
-        });
+        log.info('spend_request.cancelled', { by: 'agent', agentId: agent.agentId, requestId: done.result.resourceId });
       }
+      // The cap reached: an agent cancelling slowly and steadily never trips the burst alert, but reaches this
+      // (the partner's catch, S102); its own alert fires on any one.
+      if (ended === 'spent') log.warn('spend_request.agent_cancels_spent', { agentId: agent.agentId, requestId });
       return shown(agent.orgId, correlationId, done);
     },
   };

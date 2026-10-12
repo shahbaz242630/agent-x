@@ -204,6 +204,9 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     await byMember(w.admin, cancelledEarlier);
 
     expect(await byAgent(acting, one.id)).toEqual(refused(409, 'AGENT_CANCELS_SPENT'));
+    expect(capture.lines().filter(({ event }) => event === 'spend_request.agent_cancels_spent')).toEqual([
+      expect.objectContaining({ agentId: acting.agentId, requestId: one.id, orgId: w.org }),
+    ]);
     expect(await statusOf(w, one.id)).toBe('APPROVAL_REQUIRED');
     // One cancelled already is answered as it stands, counting nothing.
     expect(await byAgent(acting, cancelledEarlier)).toMatchObject({ outcome: 'cancelled' });

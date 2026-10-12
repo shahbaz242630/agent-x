@@ -36,6 +36,7 @@ param denialSurgeAlertName string
 param holdingsCheckAlertName string
 param integrityRunsAlertName string
 param agentCancelsAlertName string
+param agentCancelCapAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -456,6 +457,49 @@ resource agentCancelsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' =
           metricMeasureColumn: 'Highest'
           operator: 'GreaterThan'
           threshold: 5
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An agent reaching its day's cap of own cancels (Phase 2 G6, the partner's
+// catch): one cancelling slowly and steadily never trips the burst alert
+// above, but at 10 a day it reaches the cap, and the API logs
+// `spend_request.agent_cancels_spent` for each cancel the cap refuses. Any
+// one line tells someone. Stateful, as above.
+resource agentCancelCapAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: agentCancelCapAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Spend requests: an agent reached its cap of own cancels'
+    description: 'SEV-2. An agent cancelled 10 of its own spend requests in 24 hours and was refused another: steady asking and cancelling, which may be mapping its approval line. The saved query "Own cancels by agent" shows which. Runbook: Incident-Response-Playbook.md section F.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1
