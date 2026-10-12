@@ -6,7 +6,8 @@
 //
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
-// its reservation and order claim locked (11); then the move, signed, which
+// an agent's own cancels counted under its cancel lock (8a); its reservation
+// and order claim locked (11); then the move, signed, which
 // takes the audit head (12); then the reservation and claim released, which
 // 0040's `held_for_its_request` and 0039's `claim_guard` allow only once the
 // request has ended. So no lock is taken after the head's.
@@ -19,6 +20,7 @@
 // moved later past the app is only left holding (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
 // against 72 hours.
+import { holdTransactionLock } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 
@@ -155,14 +157,13 @@ export async function cancelRequest(
     return { outcome: 'not_open', request: read.request };
   const actor =
     by.kind === 'user' ? ({ type: 'user', id: by.userId } as const) : ({ type: 'agent', id: by.agentId } as const);
-  // Counted from the agent's own signed cancels (0044). Two at once may each read one short of the cap: a
-  // budget, not a lock, so at most one over.
-  if (
-    by.kind === 'agent' &&
-    (await actorEventsSince(tx, key.orgId, actor, 'spend_request.cancelled', new Date(now.getTime() - DAY_MS))) >=
-      MOST_AGENT_CANCELS_A_DAY
-  ) {
-    return { outcome: 'spent' };
+  if (by.kind === 'agent') {
+    // Counted from the agent's own signed cancels (0044), under the agent's cancel lock (ADR-006 §6, 8a: after
+    // its request, before its holdings), so its other cancel in flight commits or rolls back before this counts.
+    await holdTransactionLock(tx, 'agent-cancels', key.orgId, by.agentId);
+    const since = new Date(now.getTime() - DAY_MS);
+    if ((await actorEventsSince(tx, key.orgId, actor, 'spend_request.cancelled', since)) >= MOST_AGENT_CANCELS_A_DAY)
+      return { outcome: 'spent' };
   }
   await endHolding(tx, states, keys, key, 'cancel', now, {
     actor,
