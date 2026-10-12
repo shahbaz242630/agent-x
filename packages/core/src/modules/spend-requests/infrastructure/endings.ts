@@ -12,8 +12,11 @@
 // The 72 hours run from the decision's own event (`spend_request.decided`),
 // whose time the audit chain seals: a request still waiting has signed no
 // other since, so it is the verified read's own event. The row's `created_at`
-// is unsealed, so it only picks the candidates (`requestsWaitingSince`), and a
-// request that claims to be older than it is is never expired early.
+// is unsealed, so it only picks the candidates (`requestsWaitingSince`): a
+// request that claims to be older than it is is never expired early, and one
+// moved later past the app is only left holding (money kept, never paid). The
+// sealed time is the database's clock, `now` the app's: seconds apart at most,
+// against 72 hours.
 import type { Transaction } from 'kysely';
 
 import type { AuditTables, SignedChange, SignedStates, TamperSign } from '../../audit/index.ts';

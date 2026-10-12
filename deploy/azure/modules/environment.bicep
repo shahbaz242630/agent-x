@@ -370,9 +370,8 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
 
 // An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
 // the holdings check, the hold-history check, mandate expiry and request
-// expiry (D7) each read the
-// organisation list first, and when that read fails, log `<job>.run_failed`
-// and check nothing until the next run. Any one line tells someone. Stateful,
+// expiry (D7) each read the organisation list first, and when that read
+// fails, log `<job>.run_failed` and check nothing until the next run. Any one line tells someone. Stateful,
 // as above. A job that stops running altogether is PL-33.
 resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: integrityRunsAlertName
