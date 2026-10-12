@@ -96,7 +96,8 @@ export function createHoldingsCheck({
       try {
         orgs = await list();
       } catch (error) {
-        logger.warn('holdings_check.run_failed', { err: error });
+        // The whole run skipped: an error, which the integrity-runs alert counts (Phase 2 E2c).
+        logger.error('holdings_check.run_failed', { err: error });
         return;
       }
       for (const orgId of orgs) {

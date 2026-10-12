@@ -517,7 +517,8 @@ describe('the holdings check (E1)', () => {
       logger: testLogger(capture),
     });
     await unlisted.run();
-    expect(lines('holdings_check.run_failed')).toHaveLength(1);
+    // An error, which the integrity-runs alert counts (Phase 2 E2c).
+    expect(lines('holdings_check.run_failed')).toEqual([expect.objectContaining({ level: 'error' })]);
 
     await job(w).run(AbortSignal.abort());
     expect(lines('holdings_check.passed')).toEqual([]);

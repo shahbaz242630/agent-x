@@ -34,6 +34,7 @@ param integrityAlertName string
 param tokenRefusedAlertName string
 param denialSurgeAlertName string
 param holdingsCheckAlertName string
+param integrityRunsAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -348,6 +349,49 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "holdings_check.failed" | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
+// the holdings check, the hold-history check and mandate expiry each read the
+// organisation list first, and when that read fails, log `<job>.run_failed`
+// and check nothing until the next run. Any one line tells someone. Stateful,
+// as above. A job that stops running altogether is PL-33.
+resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: integrityRunsAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Integrity jobs: a run failed'
+    description: 'SEV-2. The holdings check, the hold-history check or mandate expiry could not read the organisation list and skipped a whole run: nothing was checked or expired until a run passes. Runbook: Incident-Response-Playbook.md section O.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

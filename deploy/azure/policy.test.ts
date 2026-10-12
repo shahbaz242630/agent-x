@@ -223,6 +223,7 @@ const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
+const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
 const BUDGET = type('Microsoft.Consumption/budgets');
 const COMMUNICATION = type('Microsoft.Communication/communicationServices');
@@ -456,6 +457,7 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-denials-by-agent',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-denial-surge',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1118,15 +1120,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       ['alert-runbook'],
     );
     expect(brokenRules(changed(CAP_ALERT, (alert) => (properties(alert).severity = 3)))).toEqual(['alert-runbook']);
-    // The playbook's sections run from A to N.
+    // The playbook's sections run from A to O.
     const inSection = (section: string) => (alert: Mutable) => {
       const before = String(properties(alert).description);
       properties(alert).description = before.replace(/section [A-Z]\.$/, `section ${section}.`);
       expect(properties(alert).description).not.toBe(before);
     };
     expect(brokenRules(changed(CAP_ALERT, inSection('A')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('N')))).toEqual([]);
-    expect(brokenRules(changed(CAP_ALERT, inSection('O')))).toEqual(['alert-runbook']);
+    expect(brokenRules(changed(CAP_ALERT, inSection('O')))).toEqual([]);
+    expect(brokenRules(changed(CAP_ALERT, inSection('P')))).toEqual(['alert-runbook']);
     // The log cap's own section (T1c): section D is about dependencies.
     for (const pick of [CAP_ALERT, QUOTA_ALERT]) {
       const description = String(at(staging.predictedResources.find(pick)?.properties, 'description'));
@@ -1859,6 +1861,41 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section N.
     expect(String(at(staging.predictedResources.find(HOLDINGS_CHECK_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section N\.$/,
+    );
+  });
+
+  it("integrity-runs-alert: no alert on an integrity job's skipped run, or one that counts something else or misses a job, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query =
+      (events: string, table = 'ContainerAppConsoleLogs') =>
+      (alert: Mutable) =>
+        (criterion(alert).query =
+          `${table} | where tostring(parse_json(Log).event) in (${events}) | summarize Events = count()`);
+    const EVERY_JOB = '"hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed"';
+    expect(brokenRules(without(INTEGRITY_RUNS_ALERT))).toEqual(['integrity-runs-alert']);
+    for (const change of [
+      // Each job left out in turn.
+      query('"holdings_check.run_failed", "mandate_expiry.run_failed"'),
+      query('"hold_history.run_failed", "mandate_expiry.run_failed"'),
+      query('"hold_history.run_failed", "holdings_check.run_failed"'),
+      query('"hold_history.failed", "holdings_check.run_failed", "mandate_expiry.run_failed"'),
+      query(EVERY_JOB, 'ContainerAppSystemLogs'),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(INTEGRITY_RUNS_ALERT, change))).toEqual(['integrity-runs-alert']);
+    }
+    expect(brokenRules(changed(INTEGRITY_RUNS_ALERT, query(EVERY_JOB)))).toEqual([]);
+    expect(brokenRules(changed(INTEGRITY_RUNS_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'integrity-runs-alert',
+    ]);
+    // Its runbook is the playbook's section O.
+    expect(String(at(staging.predictedResources.find(INTEGRITY_RUNS_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section O\.$/,
     );
   });
 

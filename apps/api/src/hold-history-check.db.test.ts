@@ -4,7 +4,8 @@
 // seals them, and the database's owner as the attacker. The job checks a held
 // organisation's every row, ended ones too, a batch at a time across runs,
 // and records it once whole; a record tampered with starts it again; a CLEAR
-// organisation, or one already checked, is left alone.
+// organisation, or one already checked, is left alone; an organisation list
+// that can't be read is logged as an error (Phase 2 E2c).
 import { type CheckedTable, withSignedStates } from '@agentx/core/modules/audit';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createDatabase, type Database } from '@agentx/platform/db';
@@ -269,6 +270,23 @@ describe(`the whole history checked while a hold stands (Phase 2 D1c, Postgres $
 
     await job(10, 1, []).run();
 
+    expect(await checked()).toBe('unchecked');
+  });
+
+  it('logs an organisation list that can’t be read as an error, which the integrity-runs alert counts, and checks nothing (E2c)', async () => {
+    await request('ENDED');
+    await held();
+
+    await createHoldHistoryCheck({
+      list: () => Promise.reject(new Error('the directory is down')),
+      database: app,
+      keys,
+      ids,
+      logger: testLogger(capture),
+      tables: [REQUESTS],
+    }).run();
+
+    expect(lines('hold_history.run_failed')).toEqual([expect.objectContaining({ level: 'error' })]);
     expect(await checked()).toBe('unchecked');
   });
 });

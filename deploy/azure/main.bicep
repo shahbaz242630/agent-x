@@ -215,6 +215,8 @@ module appsEnvironment 'modules/environment.bicep' = {
     tokenRefusedAlertName: names.tokenRefused
     denialSurgeAlertName: names.denialSurge
     holdingsCheckAlertName: names.holdingsCheck
+    // Named here, not in names.bicep, so only foundation reads it (Phase 2 E2c).
+    integrityRunsAlertName: 'alert-agentx-${short}-integrity-runs'
   }
   // The apps subnet with its rules, the workspace and the action group must exist first.
   dependsOn: [
