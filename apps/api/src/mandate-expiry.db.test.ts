@@ -8,7 +8,6 @@
 // full page (S90 review); a run's share, the rest left to the next; a
 // stopped run; and an organisation list that can't be read, logged as an
 // error (Phase 2 E2c).
-import { addAgent } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
 import { acceptDraft, mandateOf, MANDATES } from '@agentx/core/modules/mandates';
@@ -109,23 +108,6 @@ const suspendedPastTheApp = async (w: World, id: string): Promise<void> => {
   } finally {
     await owner.end();
   }
-};
-
-/** The world with another active agent of its organisation, who may hold a mandate of its own. */
-const withAnotherAgent = async (w: World): Promise<World> => {
-  const agent = ids.next();
-  await withSignedStates(app, w.org, quiet(), (tx, states) =>
-    addAgent(tx, states, {
-      orgId: w.org,
-      id: agent,
-      name: 'Second agent',
-      owner: w.admin.membershipId,
-      scopes: ['requests:write'],
-      createdAt: clock.now(),
-      actor: OPERATOR,
-    }),
-  );
-  return { ...w, agent };
 };
 
 describe('mandates ended by the clock (B4)', () => {
@@ -233,7 +215,7 @@ describe('mandates ended by the clock (B4)', () => {
   it('pages past a tampered mandate that fills a page, expiring the one after it (S90 review)', async () => {
     const w = await world();
     const bad = await inForce(w, inHours(1));
-    const good = await inForce(await withAnotherAgent(w), inHours(1));
+    const good = await inForce(await shared.anotherAgent(w), inHours(1));
     expect(bad < good).toBe(true);
     await suspendedPastTheApp(w, bad);
     clock.advanceBy(HOUR);
@@ -247,7 +229,7 @@ describe('mandates ended by the clock (B4)', () => {
     const w = await world();
     const bad = await inForce(w, inHours(1));
     const good = [];
-    for (let i = 0; i < 3; i += 1) good.push(await inForce(await withAnotherAgent(w), inHours(1)));
+    for (let i = 0; i < 3; i += 1) good.push(await inForce(await shared.anotherAgent(w), inHours(1)));
     await suspendedPastTheApp(w, bad);
     clock.advanceBy(HOUR);
 
@@ -259,7 +241,7 @@ describe('mandates ended by the clock (B4)', () => {
   it('expires its share of an organisation’s mandates a run, the rest the next', async () => {
     const w = await world();
     const first = await inForce(w, inHours(1));
-    const second = await inForce(await withAnotherAgent(w), inHours(1));
+    const second = await inForce(await shared.anotherAgent(w), inHours(1));
     clock.advanceBy(HOUR);
 
     const job = expiryOf(1);
