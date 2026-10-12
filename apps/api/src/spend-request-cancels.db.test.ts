@@ -221,6 +221,13 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
   });
 
+  it('never caps a person: an admin cancels 11 in a day', async () => {
+    const { w, acting } = await ready();
+    for (let n = 0; n < 11; n += 1) {
+      expect(await byMember(w.admin, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    }
+  });
+
   it('logs each of the agent’s own cancels once, with the agent, and never a person’s, a replay or one as it stands', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);

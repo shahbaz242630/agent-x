@@ -122,8 +122,8 @@ export function createSpendRequestCancels({
         return settled(outcome);
       });
       const log = logger.child({ correlationId, orgId: agent.orgId });
-      // Once the cancel is committed, never for its key's replay: the alert counts these lines per agent (G6).
-      if (!isUnwritten(done) && done.outcome === 'done' && ended === 'ended') {
+      // Once the cancel is committed; a replay of its key runs nothing, so sets nothing. The alert counts these (G6).
+      if (!isUnwritten(done) && ended === 'ended') {
         log.info('spend_request.cancelled', { by: 'agent', agentId: agent.agentId, requestId: done.result.resourceId });
       }
       // The cap reached: an agent cancelling slowly and steadily never trips the burst alert, but reaches this
