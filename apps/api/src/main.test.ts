@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { AUTHORITY_TABLES } from '@agentx/core/authority-tables';
 import type { DatabaseConnectionOptions } from '@agentx/platform/db';
 import { PURPOSES } from '@agentx/platform/keys';
 import type { Output } from '@agentx/platform/observability';
@@ -176,6 +177,62 @@ vi.mock('./row-sweep.ts', () => ({
   },
 }));
 
+/**
+ * Phase 2's jobs, each tagged as main.ts makes it, and the interval each is
+ * scheduled at (the jobs' own tests run them); the hold history check's tables.
+ */
+const phase2Jobs = vi.hoisted(() => {
+  const made = new Map<object, string>();
+  return {
+    made,
+    scheduled: [] as [string, number][],
+    historyTables: [] as unknown[],
+    /** The module's `create` export, its job tagged with `name`. */
+    tagged:
+      <Options, Job extends object>(name: string, create: (options: Options) => Job) =>
+      (options: Options): Job => {
+        const job = create(options);
+        made.set(job, name);
+        return job;
+      },
+  };
+});
+
+vi.mock('./background.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./background.ts')>();
+  return {
+    ...actual,
+    scheduleRuns: (work: { run(signal?: AbortSignal): Promise<void> }, intervalMs: number) => {
+      const name = phase2Jobs.made.get(work);
+      if (name !== undefined) phase2Jobs.scheduled.push([name, intervalMs]);
+      return actual.scheduleRuns(work, intervalMs);
+    },
+  };
+});
+vi.mock('./mandate-expiry.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./mandate-expiry.ts')>();
+  return { ...actual, createMandateExpiry: phase2Jobs.tagged('mandate expiry', actual.createMandateExpiry) };
+});
+vi.mock('./hold-history-check.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hold-history-check.ts')>();
+  const create = phase2Jobs.tagged('hold history check', actual.createHoldHistoryCheck);
+  return {
+    ...actual,
+    createHoldHistoryCheck: (options: Parameters<typeof actual.createHoldHistoryCheck>[0]) => {
+      phase2Jobs.historyTables.push(options.tables);
+      return create(options);
+    },
+  };
+});
+vi.mock('./holdings-check.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./holdings-check.ts')>();
+  return { ...actual, createHoldingsCheck: phase2Jobs.tagged('holdings check', actual.createHoldingsCheck) };
+});
+vi.mock('./request-expiry.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./request-expiry.ts')>();
+  return { ...actual, createRequestExpiry: phase2Jobs.tagged('request expiry', actual.createRequestExpiry) };
+});
+
 vi.mock('./anchor-check.ts', () => ({
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
@@ -286,6 +343,8 @@ beforeEach(() => {
   sweeps.stopped = 0;
   rowSweeps.scheduled.length = 0;
   rowSweeps.stopped.length = 0;
+  phase2Jobs.scheduled.length = 0;
+  phase2Jobs.historyTables.length = 0;
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
   fake.destroy = closePool;
@@ -468,6 +527,20 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     // Three intervals without a completed check are the alarm.
     expect(anchorChecks.staleAfter).toEqual([900_000, 1_800_000]);
     expect(anchorChecks.deadlines).toEqual([120_000, 120_000]);
+  });
+
+  it("runs Phase 2's jobs each on a timer of its own, the hold history check over every authority table", async () => {
+    await start();
+
+    // Written out, not the modules' constants, so a changed interval fails here (B4, D1c, E1, D7: partner decision 10).
+    expect(phase2Jobs.scheduled).toEqual([
+      ['mandate expiry', 300_000],
+      ['hold history check', 30_000],
+      ['holdings check', 900_000],
+      ['request expiry', 300_000],
+    ]);
+    expect(phase2Jobs.historyTables).toEqual([AUTHORITY_TABLES]);
+    expect(AUTHORITY_TABLES.length).toBeGreaterThan(0);
   });
 
   it('sweeps the idempotency keys on a timer of its own, hourly, a batch of 1,000 at a time (B1e-3)', async () => {

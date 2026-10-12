@@ -10,7 +10,13 @@
 // The key answers its own replay. A cancel waiting on an expiry that holds
 // the request (forced) finds it expired.
 import { withSignedStates } from '@agentx/core/modules/audit';
-import { checkHoldings, expireRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import {
+  cancelRequest,
+  checkHoldings,
+  expireRequest,
+  requestOf,
+  SPEND_REQUESTS,
+} from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -253,8 +259,19 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     await waitUntilQueued(database.as('admin'), 1);
     open(undefined);
 
-    expect(await expiring).toMatchObject({ outcome: 'ended' });
+    expect(await expiring).toMatchObject({ outcome: 'ended', request: { id: waiting.id, status: 'EXPIRED' } });
     expect(await cancelling).toEqual(refused(409, 'REQUEST_NOT_CANCELLABLE'));
     expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+  });
+
+  it('answers the request ended as it now stands, CANCELLED, to whoever cancels it in core', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+
+    const ended = await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      cancelRequest(tx, states, { orgId: w.org, id: waiting.id }, { kind: 'agent', agentId: w.agent }, clock.now()),
+    );
+
+    expect(ended).toMatchObject({ outcome: 'ended', request: { id: waiting.id, status: 'CANCELLED' } });
   });
 });
