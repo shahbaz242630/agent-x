@@ -20,7 +20,6 @@ import {
   requestOf,
   SPEND_REQUESTS,
   type SpendRequestsTables,
-  WAITS_FOR_APPROVAL_MS,
 } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -56,6 +55,9 @@ let app: Database<Tables>;
 const ids = new SequentialIds(0xd700_0000_0000);
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000d7';
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+/** Partner decision 10's wait, written out here so the code's constant is held to it. */
+const SEVENTY_TWO_HOURS = 72 * HOUR;
 
 let clock: FixedClock;
 let capture: LogCapture;
@@ -143,7 +145,7 @@ const lines = (event: string) => capture.lines().filter((line) => line.event ===
  * a moment after the clock's start), less `early`.
  */
 const pastTheWait = (early = 0) => {
-  clock.advanceBy(WAITS_FOR_APPROVAL_MS + MINUTE - early);
+  clock.advanceBy(SEVENTY_TWO_HOURS + MINUTE - early);
 };
 
 beforeAll(async () => {
@@ -216,7 +218,7 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
 
     await expiryOf(only(w)).run();
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
-    clock.advanceBy(WAITS_FOR_APPROVAL_MS);
+    clock.advanceBy(SEVENTY_TWO_HOURS);
     await expiryOf(only(w)).run();
 
     expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
@@ -237,6 +239,8 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     } finally {
       await owner.end();
     }
+    // An hour on: a candidate by its row, five days old, but its decision only an hour old.
+    clock.advanceBy(HOUR);
 
     await expiryOf(only(w)).run();
 
@@ -383,15 +387,17 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
   });
 
-  it('expireRequest answers what it found: one already moved on, or none of the organisation’s, is left as it is', async () => {
+  it('expireRequest answers what it found: one not yet due, one already moved on, or none of the organisation’s, is left as it is', async () => {
     const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
     const allowed = await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
-    pastTheWait();
+    clock.advanceBy(SEVENTY_TWO_HOURS - MINUTE);
     const expire = (id: string) =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
         expireRequest(tx, states, { orgId: w.org, id }, clock.now()),
       );
 
+    expect(await expire(waiting.id)).toEqual({ outcome: 'not_due' });
     expect(await expire(allowed.id)).toEqual({ outcome: 'not_open', status: 'APPROVED' });
     expect(await expire(ids.next())).toEqual({ outcome: 'missing' });
     expect(await holdingsOf(w, allowed.id)).toEqual({ reservation: 'HELD', released: false });
