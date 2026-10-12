@@ -1,6 +1,8 @@
 // A spend request ended before hand-off, its capacity and order given back
-// (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decision 10; Phase 2 D7):
-// a request waiting for approval 72 hours from its decision is EXPIRED.
+// (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decision 10; Phase 2 D7,
+// D8): a request waiting for approval 72 hours from its decision is EXPIRED;
+// one cancelled by a person, or by the agent that made it, before hand-off
+// (waiting, approved or ready) is CANCELLED.
 //
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
@@ -26,6 +28,7 @@ import {
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
 import { movedAsRead } from '../../../shared-kernel/index.ts';
+import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { requestOf, type SpendRequestRecord } from './decisions.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
@@ -38,10 +41,10 @@ export const WAITS_FOR_APPROVAL_MS = 72 * 3_600_000;
 
 const ACTOR = { type: 'system', id: 'api' } as const;
 
-/** What came of ending a request: ended, its holdings released; already moved on; not yet due; or not to be believed. */
+/** What came of ending a request: ended, its holdings released; already moved on, as it stands; not yet due; or not to be believed. */
 export type Ended =
   | { readonly outcome: 'ended'; readonly request: SpendRequestRecord }
-  | { readonly outcome: 'not_open'; readonly status: SpendRequestRecord['status'] }
+  | { readonly outcome: 'not_open'; readonly request: SpendRequestRecord }
   | { readonly outcome: 'not_due' }
   | { readonly outcome: 'missing' }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
@@ -87,7 +90,7 @@ export async function expireRequest(
 ): Promise<Ended> {
   const read = await requestOf(tx, states, key, 'change');
   if (read.outcome !== 'found') return read;
-  if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', status: read.request.status };
+  if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', request: read.request };
   // Still waiting, its latest signed event is its decision: the chain seals when that was recorded.
   const decided = read.state.recordedAt;
   if (decided.getTime() + WAITS_FOR_APPROVAL_MS > now.getTime()) return { outcome: 'not_due' };
@@ -99,6 +102,37 @@ export async function expireRequest(
   return { outcome: 'ended', request: { ...read.request, status: 'EXPIRED' } };
 }
 
+/** Who cancels (PRD §7.2): a person (the API checks their role), or the agent that made the request. */
+export type Canceller =
+  { readonly kind: 'user'; readonly userId: string } | { readonly kind: 'agent'; readonly agentId: string };
+
+/**
+ * Cancels the request if it hasn't ended or been handed off (SPEND_REQUEST's
+ * `cancel`: waiting, approved or ready), releasing its reservation and order
+ * claim, recorded as the canceller's. An agent's own requests alone: another
+ * agent's is answered as none. Already cancelled, or ended otherwise, it is
+ * answered as it stands (`not_open`).
+ */
+export async function cancelRequest(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+  by: Canceller,
+  now: Date,
+): Promise<Ended> {
+  const read = await requestOf(tx, states, key, 'change');
+  if (read.outcome !== 'found') return read;
+  if (by.kind === 'agent' && read.request.agentId !== by.agentId) return { outcome: 'missing' };
+  if (!SPEND_REQUEST.transition(read.request.status, 'cancel').ok)
+    return { outcome: 'not_open', request: read.request };
+  await endHolding(tx, states, key, 'cancel', now, {
+    actor: by.kind === 'user' ? { type: 'user', id: by.userId } : { type: 'agent', id: by.agentId },
+    action: 'spend_request.cancelled',
+    details: {},
+  });
+  return { outcome: 'ended', request: { ...read.request, status: 'CANCELLED' } };
+}
+
 /**
  * The move and its release, in lock order: the reservation and claim locked
  * (11), the request moved and signed (the head, 12), then both released. The
@@ -108,7 +142,7 @@ async function endHolding(
   tx: EndingsTransaction,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
-  event: 'expire',
+  event: 'expire' | 'cancel',
   at: Date,
   change: SignedChange,
 ): Promise<void> {

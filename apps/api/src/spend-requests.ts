@@ -14,6 +14,13 @@
 // key's own answers. The answer shows the bank reference the order reference
 // becomes on the rail when that differs from it (decision 8): the same
 // mapping as hand-off's.
+//
+// Cancelling before hand-off (partner decision 10; Phase 2 D8;
+// spend-request-cancels.ts), one click and no step-up: an admin or finance
+// approver at `POST /v1/spend-requests/{id}/cancel`, the agent its own at
+// `POST /v1/agent/spend-requests/{id}/cancel` (agents have routes of their
+// own, SEC-AG-05). Both answer 200 with the request as it now stands, its
+// reservation and order claim released.
 import { DECISIONS } from '@agentx/core/modules/policies';
 import {
   askedText,
@@ -30,10 +37,16 @@ import type { FastifyInstance } from 'fastify';
 import type { ZodTypeProvider } from 'fastify-type-provider-zod';
 import { z } from 'zod';
 
-import { agentOf, need } from './access.ts';
+import { agentOf, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
 import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
-import { AMOUNT, issuesOf, REASONS, reasonsOf } from './route-schemas.ts';
+import { AMOUNT, issuesOf, NOTHING, NOTHING_BODY_LIMIT, REASONS, reasonsOf } from './route-schemas.ts';
+import {
+  AGENT_CANCEL_OPERATION,
+  CANCEL_OPERATION,
+  CANCELLING_ROLES,
+  type SpendRequestCancels,
+} from './spend-request-cancels.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 
 /**
@@ -101,6 +114,26 @@ const ASK_SCHEMA = {
   },
 };
 
+const SPEND_REQUEST_ID = z.object({ id: z.uuid().describe('The spend request, by its ID.') });
+
+const CANCELLED = SPEND_REQUEST_SHOWN.describe(
+  'The request as it now stands: CANCELLED, its reservation and order claim released (or cancelled already).',
+);
+
+const CANCEL_SCHEMA = {
+  summary: 'Cancel a spend request before hand-off: at once, no step-up',
+  params: SPEND_REQUEST_ID,
+  body: NOTHING,
+  response: { 200: CANCELLED },
+};
+
+const AGENT_CANCEL_SCHEMA = {
+  summary: 'Cancel one of your own spend requests before hand-off',
+  params: SPEND_REQUEST_ID,
+  body: NOTHING,
+  response: { 200: CANCELLED },
+};
+
 const shown = (request: SpendRequestRecord) => {
   const bankReference = bankReferenceOf(request.orderReference, request.id);
   return {
@@ -120,7 +153,7 @@ const shown = (request: SpendRequestRecord) => {
 
 export function registerSpendRequests(
   app: FastifyInstance,
-  { decisions }: { decisions: SpendRequestDecisions | undefined },
+  { decisions, cancels }: { decisions: SpendRequestDecisions | undefined; cancels: SpendRequestCancels | undefined },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
 
@@ -149,6 +182,46 @@ export function registerSpendRequests(
       );
       if (isUnwritten(decided)) return answerRefusal(decided, request, reply);
       return reply.code(201).send(shown(decided.request));
+    },
+  );
+
+  routes.post(
+    '/v1/spend-requests/:id/cancel',
+    {
+      schema: CANCEL_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...CANCELLING_ROLES], operation: CANCEL_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const cancelled = await need(cancels).byMember(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
+      return reply.code(200).send(shown(cancelled.request));
+    },
+  );
+
+  routes.post(
+    '/v1/agent/spend-requests/:id/cancel',
+    {
+      schema: AGENT_CANCEL_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: ['agent'], agentScopes: ['requests:write'], operation: AGENT_CANCEL_OPERATION },
+    },
+    async (request, reply) => {
+      const { orgId, agentId, keyId } = agentOf(request);
+      const cancelled = await need(cancels).byAgent(
+        { orgId, agentId, keyId },
+        idempotentRequest(request, orgId),
+        request.params.id,
+        request.id,
+      );
+      if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
+      return reply.code(200).send(shown(cancelled.request));
     },
   );
 }
