@@ -58,7 +58,7 @@ import {
 } from '@agentx/core/modules/policies';
 import {
   claimOrder,
-  hasOpenClaim,
+  claimsOn,
   type HeldAs,
   holdsCapacity,
   insertRequest,
@@ -210,15 +210,16 @@ async function payingIn(
   believed(source);
   const supplier = await supplierOf(tx, states, { orgId, id: asked.supplierId }, supplierLock);
   believed(supplier);
-  if (supplier.outcome !== 'found') return { source, supplier: null, order: null, duplicateOrder: false };
+  const unclaimed = { duplicate: false, possible: false };
+  if (supplier.outcome !== 'found') return { source, supplier: null, order: null, claims: unclaimed };
   // The simulator may weigh a request with no order named: no duplicate is then looked for.
-  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null, duplicateOrder: false };
+  if (asked.orderReference === null) return { source, supplier: supplier.supplier, order: null, claims: unclaimed };
   const order = {
     supplierId: supplier.supplier.id,
     payeeKey: supplier.supplier.payeeKey,
     reference: asked.orderReference,
   };
-  return { source, supplier: supplier.supplier, order, duplicateOrder: await hasOpenClaim(tx, order) };
+  return { source, supplier: supplier.supplier, order, claims: await claimsOn(tx, order) };
 }
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */
@@ -255,13 +256,7 @@ export async function weigh(
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
   const { mandatePolicy, organizationPolicy } = rules(inForce, mandate);
-  const { source, supplier, order, duplicateOrder } = await payingIn(
-    tx,
-    states,
-    orgId,
-    asked,
-    decides ? 'change' : 'share',
-  );
+  const { source, supplier, order, claims } = await payingIn(tx, states, orgId, asked, decides ? 'change' : 'share');
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
@@ -288,7 +283,8 @@ export async function weigh(
     mandatePolicy,
     monthSpent: money(spent, currency),
     splitOpen: money(split, currency),
-    duplicateOrder,
+    duplicateOrder: claims.duplicate,
+    possibleDuplicate: claims.possible,
   };
   return { input, mandate, supplier, order, month };
 }

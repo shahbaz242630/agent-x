@@ -58,6 +58,8 @@ interface OrderClaimsTable {
   payee_key: string | null;
   /** Its request's `order_key`. */
   order_reference: string;
+  /** Its bank reference in lower case (0043, `bankKeyOf`); none when that would be its request's ID, or claimed before. */
+  bank_key: string | null;
   claimed_at: Date;
   /** When its request or payment ended so the order may be asked for again; open until then. */
   released_at: Date | null;

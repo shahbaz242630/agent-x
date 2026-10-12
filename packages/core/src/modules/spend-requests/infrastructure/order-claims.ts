@@ -10,14 +10,21 @@
 // reference as its request was made with, by the same expression, and 0039's
 // `for_its_request` key holds it to its request's own supplier and `order_key`.
 //
+// A claim also keeps its `bank_key` (0043; partner decision 11a): its bank
+// reference in lower case, the app's (`bankKeyOf`). An open claim with the
+// same bank key and another canonical form, on the supplier or its payee key,
+// makes the request a possible duplicate, for a person to approve
+// (`claimsOn`); the holdings check compares each claim's with its request's.
+//
 // The caller (D4) holds the supplier FOR NO KEY UPDATE first (ADR-006 §6: 6),
 // which serialises the check and the claim for one supplier, and its payee
 // key with it: no two suppliers hold one key at once (0033's
 // `one_supplier_a_payee`), and a key moves only by a change of the supplier
 // holding it, which that lock waits for. So D4 never meets `taken` (it fails
 // the request if it does); the answer stays for any caller without the lock.
-import { type Expression, sql, type Transaction } from 'kysely';
+import { type Expression, type ExpressionBuilder, sql, type Transaction } from 'kysely';
 
+import { bankKeyOf } from '../domain/asked.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 type ClaimsTransaction = Transaction<SpendRequestsTables>;
@@ -35,9 +42,17 @@ export interface OrderOf {
   readonly reference: string;
 }
 
+type Claims = ExpressionBuilder<SpendRequestsTables, 'spend_requests.order_claims'>;
+
+/** By the same supplier, or by the same payee key where there is one. */
+const onTheOrdersPayee = (order: OrderOf) => (where: Claims) =>
+  order.payeeKey === null
+    ? where('supplier_id', '=', order.supplierId)
+    : where.or([where('supplier_id', '=', order.supplierId), where('payee_key', '=', order.payeeKey)]);
+
 /**
- * The open claims on the order: by the same supplier, or by the same payee key
- * where there is one; the organisation's alone, by its tenant wall (withTenant).
+ * The open claims on the order, in canonical form, on its supplier or payee;
+ * the organisation's alone, by its tenant wall (withTenant).
  */
 const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
   tx
@@ -45,16 +60,42 @@ const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
     .select('id')
     .where('released_at', 'is', null)
     .where('order_reference', '=', orderKeyOf(order.reference))
-    .where((where) =>
-      order.payeeKey === null
-        ? where('supplier_id', '=', order.supplierId)
-        : where.or([where('supplier_id', '=', order.supplierId), where('payee_key', '=', order.payeeKey)]),
-    )
+    .where(onTheOrdersPayee(order))
     .limit(1);
 
 /** Whether the order is already claimed and not released, in canonical form. */
 export async function hasOpenClaim(tx: ClaimsTransaction, order: OrderOf): Promise<boolean> {
   return (await openClaimsOn(tx, order).executeTakeFirst()) !== undefined;
+}
+
+/**
+ * What the open claims on the order's supplier or payee say of it, in one
+ * statement: `duplicate`, one claims it in canonical form (D3: refused);
+ * `possible`, one in another form the rail would carry alike (decision 11a:
+ * a person approves it). An order whose bank reference would be its
+ * request's own ID is never a possible duplicate.
+ */
+export async function claimsOn(
+  tx: ClaimsTransaction,
+  order: OrderOf,
+): Promise<{ readonly duplicate: boolean; readonly possible: boolean }> {
+  const bankKey = bankKeyOf(order.reference);
+  const lookalikes = (bank: string) =>
+    tx
+      .selectFrom('spend_requests.order_claims')
+      .select('id')
+      .where('released_at', 'is', null)
+      .where('bank_key', '=', bank)
+      .where('order_reference', '<>', orderKeyOf(order.reference))
+      .where(onTheOrdersPayee(order));
+  const found = await tx
+    .selectNoFrom((select) => [
+      select.exists(openClaimsOn(tx, order)).as('duplicate'),
+      bankKey === null ? sql<boolean>`false`.as('possible') : select.exists(lookalikes(bankKey)).as('possible'),
+    ])
+    .executeTakeFirstOrThrow();
+  // Postgres answers booleans; Kysely types EXISTS as any dialect's.
+  return { duplicate: found.duplicate === true, possible: found.possible === true };
 }
 
 /**
@@ -82,6 +123,7 @@ export async function claimOrder(
       supplier_id: claim.supplierId,
       payee_key: claim.payeeKey,
       order_reference: orderKeyOf(claim.reference),
+      bank_key: bankKeyOf(claim.reference),
       claimed_at: claim.claimedAt,
     })
     // Postgres takes one conflict target and the order has two partial keys, so any key's conflict lands here:

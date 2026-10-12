@@ -85,6 +85,8 @@ export interface DecisionInput {
   readonly splitOpen: Money;
   /** Whether an open, unknown or paid request already claims this supplier and order reference (D3). */
   readonly duplicateOrder: boolean;
+  /** Whether an open claim's order, in another form, the rail would carry alike (decision 11a). */
+  readonly possibleDuplicate: boolean;
 }
 
 /** Where the monthly cap per agent came from. */
@@ -109,6 +111,7 @@ const DECIDES: Readonly<Partial<Record<ReasonCode, Decision>>> = {
   MANDATE_MONTHLY_LIMIT: 'REQUIRE_NEW_MANDATE',
   APPROVAL_THRESHOLD: 'REQUIRE_APPROVAL',
   AGGREGATE_THRESHOLD: 'REQUIRE_APPROVAL',
+  POSSIBLE_DUPLICATE_ORDER: 'REQUIRE_APPROVAL',
 };
 
 /** The request against the mandate and its policies: the decision, every failing reason and the versions weighed. */
@@ -187,6 +190,7 @@ function statusChecks(input: DecisionInput, fail: Fail): void {
   if (input.supplierStatus !== 'VERIFIED') fail('SUPPLIER_NOT_VERIFIED');
   if (!input.sourceMayFund) fail('SOURCE_NOT_USABLE');
   if (input.duplicateOrder) fail('DUPLICATE_ORDER_REFERENCE');
+  if (input.possibleDuplicate) fail('POSSIBLE_DUPLICATE_ORDER');
 }
 
 /** ACTIVE, this agent's, and before its end. */
@@ -270,6 +274,8 @@ export function decisionInputText(input: DecisionInput): string {
     input.duplicateOrder,
     // So a change of the default changes the text too.
     amount(DEFAULT_MONTHLY_CAP),
+    // Last, from G5 (decision 11a): a decision sealed before it has no `possibleDuplicate` fact, and its text ends above.
+    input.possibleDuplicate,
   ]);
 }
 
@@ -290,6 +296,7 @@ export function decisionFacts(input: DecisionInput): Readonly<Record<string, str
     monthSpent: `${String(input.monthSpent.minor)} ${input.monthSpent.currency}`,
     splitOpen: `${String(input.splitOpen.minor)} ${input.splitOpen.currency}`,
     duplicateOrder: input.duplicateOrder,
+    possibleDuplicate: input.possibleDuplicate,
     // The default as it was then, so a later change of it leaves this decision whole.
     defaultMonthlyCap: `${String(DEFAULT_MONTHLY_CAP.minor)} ${DEFAULT_MONTHLY_CAP.currency}`,
   };

@@ -317,6 +317,18 @@ describe('the holdings check (E1)', () => {
         owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [allowed]),
       'allowed',
     ],
+    [
+      'a claim’s bank key nulled, hiding its possible duplicates (G5)',
+      (owner, { waiting }) =>
+        owner.query('update spend_requests.order_claims set bank_key = null where request_id = $1', [waiting]),
+      'waiting',
+    ],
+    [
+      'a claim’s bank key swapped (G5)',
+      (owner, { allowed }) =>
+        owner.query("update spend_requests.order_claims set bank_key = 'inv-9' where request_id = $1", [allowed]),
+      'allowed',
+    ],
   ];
 
   it.each(tampered)('raises the alarm and the hold for %s past the app (SEC-DB-09)', async (_, change, whose) => {

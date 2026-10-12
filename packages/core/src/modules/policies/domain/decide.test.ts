@@ -67,6 +67,7 @@ function input(dirhams: number, changes: Partial<DecisionInput> = {}): DecisionI
     monthSpent: aed(0),
     splitOpen: aed(0),
     duplicateOrder: false,
+    possibleDuplicate: false,
     ...changes,
   };
 }
@@ -200,6 +201,23 @@ describe('decide: the mandate alone (SEC-LIM-06)', () => {
       decision: 'DENY',
       reasons: ['DUPLICATE_ORDER_REFERENCE', 'MANDATE_ORDER_LIMIT', 'POLICY_MONTHLY_CAP', 'APPROVAL_THRESHOLD'],
     });
+  });
+});
+
+describe('decide: a possible duplicate (decision 11a)', () => {
+  it('asks approval for an order an open claim’s looks like, however small', () => {
+    expect(decide(input(1, { possibleDuplicate: true }))).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      reasons: ['POSSIBLE_DUPLICATE_ORDER'],
+    });
+  });
+
+  it('still denies the exact duplicate, and what the mandate refuses', () => {
+    expect(decide(input(5_000, { duplicateOrder: true, possibleDuplicate: true }))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE', 'POSSIBLE_DUPLICATE_ORDER'],
+    });
+    expect(decide(input(30_000, { possibleDuplicate: true })).decision).toBe(decide(input(30_000)).decision);
   });
 });
 
@@ -338,6 +356,7 @@ describe('decisionInputText', () => {
       { ...base, monthSpent: aed(1) },
       { ...base, splitOpen: aed(1) },
       { ...base, duplicateOrder: true },
+      { ...base, possibleDuplicate: true },
       { ...base, organizationPolicy: orgPolicy({ perOrderCap: { cap: aed(4_000), over: 'REQUIRE_APPROVAL' } }) },
       { ...base, mandatePolicy: NO_RULES },
       { ...base, mandate: { ...MANDATE, endsAt: NOW } },
@@ -358,10 +377,11 @@ describe('decisionInputText', () => {
       monthSpent: '0 AED',
       splitOpen: '0 AED',
       duplicateOrder: false,
+      possibleDuplicate: false,
       defaultMonthlyCap: '2000000 AED',
     });
     // A fact added to the text must be added here too, or kept in a versioned record: this counts them.
-    expect(JSON.parse(decisionInputText(base))).toHaveLength(12);
+    expect(JSON.parse(decisionInputText(base))).toHaveLength(13);
     for (const changed of [
       { ...base, now: new Date(NOW.getTime() + 1) },
       { ...base, agent: { ...base.agent, status: 'SUSPENDED' } },
@@ -371,6 +391,7 @@ describe('decisionInputText', () => {
       { ...base, monthSpent: aed(1) },
       { ...base, splitOpen: aed(1) },
       { ...base, duplicateOrder: true },
+      { ...base, possibleDuplicate: true },
     ]) {
       expect(decisionFacts(changed)).not.toEqual(decisionFacts(base));
     }
@@ -417,6 +438,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
     monthSpent: minor,
     splitOpen: minor,
     duplicateOrder: fc.boolean(),
+    possibleDuplicate: fc.boolean(),
   })
   .map((g) => {
     const [threshold = 1n, perOrder = 1n, monthly = 1n] = g.limits;
@@ -441,6 +463,7 @@ const anyInput: fc.Arbitrary<DecisionInput> = fc
       monthSpent: money(g.monthSpent, 'AED'),
       splitOpen: money(g.splitOpen, 'AED'),
       duplicateOrder: g.duplicateOrder,
+      possibleDuplicate: g.possibleDuplicate,
     });
   });
 
@@ -462,6 +485,8 @@ describe('decide: properties', () => {
         expect(monthSpent.minor + request.amount.minor).toBeLessThanOrEqual(mandate.monthlyLimit.minor);
         expect(mandate.supplierIds).toContain(request.supplierId);
         if (decision === 'ALLOW') expect(request.amount.minor).toBeLessThanOrEqual(mandate.approvalThreshold.minor);
+        // A possible duplicate is never allowed without a person (decision 11a).
+        if (decision === 'ALLOW') expect(given.possibleDuplicate).toBe(false);
       }),
     );
   });

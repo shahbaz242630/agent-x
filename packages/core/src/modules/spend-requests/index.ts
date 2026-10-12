@@ -12,6 +12,7 @@
 export {
   askedText,
   BANK_REFERENCE_MOST,
+  bankKeyOf,
   bankReferenceOf,
   ORDER_REFERENCE_MOST,
   orderReferenceOf,
@@ -43,7 +44,7 @@ export {
   requestsWaitingSince,
   WAITS_FOR_APPROVAL_MS,
 } from './infrastructure/endings.ts';
-export { claimOrder, hasOpenClaim, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
+export { claimOrder, claimsOn, hasOpenClaim, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

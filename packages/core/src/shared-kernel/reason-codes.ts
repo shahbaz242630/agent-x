@@ -152,6 +152,8 @@ export const REASON_CODES = {
     "A supplier the policy names is not one of the organisation's. Check the suppliers' IDs. Nothing was changed.",
   POLICY_WIDER_THAN_MANDATE:
     "A mandate's policy may only narrow it, and a rule here goes past the mandate's terms: a cap or threshold above the mandate's own, or a supplier the mandate doesn't name. Nothing was changed.",
+  POSSIBLE_DUPLICATE_ORDER:
+    'An earlier request to the same supplier that is still open, has an unknown outcome or was paid has an order reference the bank would carry the same way (as INV_22 and INV-22, or the same number in other digits), so this may be the same order: a person must approve it.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_NOT_CANCELLABLE:
