@@ -7,20 +7,13 @@
 // they are; one whose unsealed `created_at` was moved back past the app is
 // judged by its decision's sealed time and left; one tampered with is refused
 // and paged past, the others still expired; one that can't be expired, and an
-// organisation whose requests can't be read, logged and passed over; a run's share, the rest left to the next; a
-// stopped run; a holdings check holding the request, or a holder of its
+// organisation whose requests can't be read, logged and passed over; a run's
+// share, the rest left to the next; a stopped run; a holdings check holding the request, or a holder of its
 // reservation or claim reaching for the audit head (forced), is waited for;
 // expireRequest's own answers for a request moved on or not there; and an
 // organisation list that can't be read, logged as an error.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
-import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
-import {
-  checkHoldings,
-  expireRequest,
-  requestOf,
-  SPEND_REQUESTS,
-  type SpendRequestsTables,
-} from '@agentx/core/modules/spend-requests';
+import { checkHoldings, expireRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -36,24 +29,16 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { AED, keys, mandateWorld, type MandateWorldTables, type World } from './mandate-world.helper.test.ts';
+import { AED, keys, type World } from './mandate-world.helper.test.ts';
 import { createRequestExpiry, type RequestExpiry } from './request-expiry.ts';
-import {
-  type AgentActing,
-  createSpendRequestDecisions,
-  DECIDE_OPERATION,
-  type SpendAskedByAgent,
-  type SpendRequestDecisions,
-} from './spend-request-decisions.ts';
-
-type Tables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
+import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
+import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
-let app: Database<Tables>;
+let app: Database<SpendWorldTables>;
 
 const ids = new SequentialIds(0xd700_0000_0000);
-const CORRELATION = '0199a0f0-0000-7000-8000-0000000000d7';
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 /** Partner decision 10's wait, written out here so the code's constant is held to it. */
@@ -67,76 +52,15 @@ let decisions: SpendRequestDecisions;
 let expiryOf: (orgs: () => Promise<readonly string[]>, most?: number) => RequestExpiry;
 const only = (w: World) => () => Promise.resolve([w.org]);
 
-const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'request-expiry' });
-const { world, quiet, agentKey } = shared;
-
-/** A world whose agent has a key and a mandate in force (approval above AED 1,000), both suppliers verified. */
-async function ready() {
-  const w = await world();
-  for (const id of w.suppliers) await shared.verified(w, id);
-  await shared.inForce(registry, w, { approvalThreshold: AED(100_000n) });
-  return { w, acting: await agentKey(w) };
-}
-
-let keysUsed = 0;
-/** The agent's request, decided: AED 2,000 to the first supplier by default, so it waits for approval. */
-const ask = async (acting: AgentActing, w: World, overrides: Partial<SpendAskedByAgent> = {}) => {
-  keysUsed += 1;
-  const asked: SpendAskedByAgent = {
-    amount: AED(200_000n),
-    supplierId: w.suppliers[0] ?? '',
-    fundingSourceId: w.source,
-    orderReference: `INV-${String(keysUsed)}`,
-    purpose: 'Printer paper',
-    ...overrides,
-  };
-  const answer = await decisions.decideAndReserve(
-    acting,
-    {
-      orgId: acting.orgId,
-      client: { kind: 'agent', id: acting.agentId },
-      operation: DECIDE_OPERATION,
-      key: `expiry-${String(keysUsed)}`,
-      payload: JSON.stringify({ ...asked, amount: String(asked.amount.minor) }),
-    },
-    asked,
-    CORRELATION,
-  );
-  if (answer.outcome !== 'decided') throw new Error(`not decided: ${JSON.stringify(answer)}`);
-  return answer.request;
-};
-
-const statusOf = (w: World, id: string) =>
-  withSignedStates(app, w.org, quiet(), async (tx, states) => {
-    const read = await requestOf(tx, states, { orgId: w.org, id });
-    return read.outcome === 'found' ? read.request.status : read.outcome;
-  });
-
-/** What the request holds: its reservation's state and whether its claim is released. */
-const holdingsOf = (w: World, id: string) =>
-  withTenant(app, w.org, async (tx) => {
-    const reservation = await tx
-      .selectFrom('limit_reservations.reservations')
-      .select(['state', 'settled_at'])
-      .where('request_id', '=', id)
-      .executeTakeFirstOrThrow();
-    const claim = await tx
-      .selectFrom('spend_requests.order_claims')
-      .select('released_at')
-      .where('request_id', '=', id)
-      .executeTakeFirstOrThrow();
-    return { reservation: reservation.state, released: claim.released_at !== null };
-  });
-
-const spentOf = (w: World, acting: AgentActing) =>
-  withTenant(app, w.org, async (tx) => {
-    const { month } = await tx
-      .selectFrom('limit_reservations.reservations')
-      .select('month')
-      .where('agent_id', '=', acting.agentId)
-      .executeTakeFirstOrThrow();
-    return monthSpent(tx, { agentId: acting.agentId, month });
-  });
+const shared = spendWorld({
+  app: () => app,
+  clock: () => clock,
+  ids,
+  name: 'request-expiry',
+  registry: () => registry,
+  decisions: () => decisions,
+});
+const { quiet, ready, ask, statusOf, holdingsOf, spentOf } = shared;
 
 const lines = (event: string) => capture.lines().filter((line) => line.event === event);
 
@@ -150,7 +74,7 @@ const pastTheWait = (early = 0) => {
 
 beforeAll(async () => {
   database = await createTestDatabase(server, { schema: 'migrated' });
-  app = createDatabase<Tables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
+  app = createDatabase<SpendWorldTables>({ ...database.connection('app'), maxConnections: 6 }, testLogger());
 });
 
 afterAll(async () => {
@@ -398,7 +322,7 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
       );
 
     expect(await expire(waiting.id)).toEqual({ outcome: 'not_due' });
-    expect(await expire(allowed.id)).toEqual({ outcome: 'not_open', status: 'APPROVED' });
+    expect(await expire(allowed.id)).toMatchObject({ outcome: 'not_open', request: { status: 'APPROVED' } });
     expect(await expire(ids.next())).toEqual({ outcome: 'missing' });
     expect(await holdingsOf(w, allowed.id)).toEqual({ reservation: 'HELD', released: false });
   });

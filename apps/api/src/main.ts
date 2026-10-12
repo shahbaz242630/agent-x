@@ -100,6 +100,7 @@ import { createAnchorCheck, scheduleAnchorCheck } from './anchor-check.ts';
 import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicySimulations } from './policy-simulations.ts';
+import { createSpendRequestCancels } from './spend-request-cancels.ts';
 import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
@@ -537,6 +538,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     agentMandates: createAgentMandates({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     spendRequestDecisions: createSpendRequestDecisions({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    spendRequestCancels: createSpendRequestCancels({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,

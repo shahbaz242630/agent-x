@@ -73,6 +73,7 @@ import type { AgentMandates } from './agent-mandate.ts';
 import { registerAgentSelf } from './agent-self.ts';
 import type { PolicySimulations } from './policy-simulations.ts';
 import type { SpendRequestDecisions } from './spend-request-decisions.ts';
+import type { SpendRequestCancels } from './spend-request-cancels.ts';
 import { registerSpendRequests } from './spend-requests.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceChanges } from './funding-source-changes.ts';
@@ -162,6 +163,8 @@ export interface ServerOptions {
   readonly agentMandates?: AgentMandates | undefined;
   /** Deciding an agent's spend requests (spend-request-decisions.ts); without it, no agent reaches that route. */
   readonly spendRequestDecisions?: SpendRequestDecisions | undefined;
+  /** Cancelling spend requests before hand-off (spend-request-cancels.ts); without it, no one reaches those routes. */
+  readonly spendRequestCancels?: SpendRequestCancels | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -330,7 +333,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
   registerAgentSelf(app, { mandates: options.agentMandates });
-  registerSpendRequests(app, { decisions: options.spendRequestDecisions });
+  registerSpendRequests(app, { decisions: options.spendRequestDecisions, cancels: options.spendRequestCancels });
   registerAgents(app, {
     registrations: options.agentRegistrations,
     changes: options.agentChanges,
