@@ -57,14 +57,8 @@ export interface SessionMember extends Member {
 /** A write's answer: its key's outcome, or the area's refusal. */
 export type Written = IdempotentWrite | Refused;
 
-/**
- * A status move the work's own read, in this transaction, said it may make:
- * one refused means something past the app is at work, never a refusal to
- * answer, so it throws, rolling the write back.
- */
-export function movedAsRead(moved: { readonly outcome: string }, what: string): void {
-  if (moved.outcome !== 'changed') throw new Error(`${what}: ${moved.outcome}`);
-}
+// A status move the work's own read said it may make (the shared kernel's, also core's: D7).
+export { movedAsRead } from '@agentx/core/shared-kernel';
 
 export function createUseCaseWork<Tables extends UseCaseTables>({
   database,

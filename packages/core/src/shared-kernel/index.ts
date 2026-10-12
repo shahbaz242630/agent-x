@@ -15,6 +15,7 @@ export {
   defineStateMachine,
   type EventRule,
   type Move,
+  movedAsRead,
   type StateMachine,
   type StateMachineDefinition,
   StateMachineInvalid,

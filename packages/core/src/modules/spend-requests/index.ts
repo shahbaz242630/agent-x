@@ -6,7 +6,8 @@
 // reserving are composed in the API (decideAndReserve), the agent asking
 // through its route (D4r), its text checked here, with the bank reference its
 // order reference becomes (decision 8); and the holdings check, comparing each
-// request's reservation and claim with its signed state (E1).
+// request's reservation and claim with its signed state (E1); a request
+// waiting for approval expired after 72 hours, its holdings released (D7).
 export {
   askedText,
   BANK_REFERENCE_MOST,
@@ -28,6 +29,7 @@ export {
   type SpendRequestCheck,
   type SpendRequestRecord,
 } from './infrastructure/decisions.ts';
+export { type Ended, expireRequest, requestsWaitingSince, WAITS_FOR_APPROVAL_MS } from './infrastructure/endings.ts';
 export { claimOrder, hasOpenClaim, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';

@@ -29,6 +29,7 @@ import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
+import { eachOrganisation, expireInPages } from './expiry-pages.ts';
 import { type MandateTables, mandateIn, toldAdminsAndApprovers, versionIn } from './mandate-reads.ts';
 import { movedAsRead } from './use-case-work.ts';
 
@@ -101,46 +102,31 @@ export function createMandateExpiry({
   };
 
   /** Expires the organisation's mandates past their end, up to its share; false if the signal stopped it. */
-  const expireIn = async (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
+  const expireIn = (orgId: string, signal: AbortSignal | undefined): Promise<boolean> => {
     const log = logger.child({ orgId });
-    let expired = 0;
-    let after: string | undefined;
-    // Until the candidates run out, or the run's share of them is expired.
-    while (expired < most) {
-      // A page as long as what is left of the share, so a run never expires more.
-      const left = most - expired;
-      let due: readonly string[];
-      try {
-        due = await withSignedStates(database, orgId, services(log), (tx) =>
+    return expireInPages({
+      most,
+      signal,
+      page: (left, after) =>
+        withSignedStates(database, orgId, services(log), (tx) =>
           mandatesPastTheirEnd(tx, orgId, clock.now(), left, after),
-        );
-      } catch (error) {
+        ),
+      expire: (mandateId) => expiredLogged(log, orgId, mandateId),
+      unreadable: (error) => {
         log.error('mandate_expiry.unreadable', { err: error });
-        return true;
-      }
-      for (const mandateId of due) {
-        if (signal?.aborted === true) return false;
-        if (await expiredLogged(log, orgId, mandateId)) expired += 1;
-      }
-      if (due.length < left) return true;
-      after = due.at(-1);
-    }
-    return true;
+      },
+    });
   };
 
   return {
-    async run(signal) {
-      let orgs: readonly string[];
-      try {
-        orgs = await list();
-      } catch (error) {
+    run: (signal) =>
+      eachOrganisation(
+        list,
         // The whole run skipped: an error, which the integrity-runs alert counts (Phase 2 E2c).
-        logger.error('mandate_expiry.run_failed', { err: error });
-        return;
-      }
-      for (const orgId of orgs) {
-        if (!(await expireIn(orgId, signal))) return;
-      }
-    },
+        (error) => {
+          logger.error('mandate_expiry.run_failed', { err: error });
+        },
+        (orgId) => expireIn(orgId, signal),
+      ),
   };
 }

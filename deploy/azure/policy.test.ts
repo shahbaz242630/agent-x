@@ -1871,14 +1871,15 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) =>
         (criterion(alert).query =
           `${table} | where tostring(parse_json(Log).event) in (${events}) | summarize Events = count()`);
-    const EVERY_JOB = '"hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed"';
+    const JOBS = ['hold_history', 'holdings_check', 'mandate_expiry', 'request_expiry'].map(
+      (job) => `"${job}.run_failed"`,
+    );
+    const EVERY_JOB = JOBS.join(', ');
     expect(brokenRules(without(INTEGRITY_RUNS_ALERT))).toEqual(['integrity-runs-alert']);
     for (const change of [
       // Each job left out in turn.
-      query('"holdings_check.run_failed", "mandate_expiry.run_failed"'),
-      query('"hold_history.run_failed", "mandate_expiry.run_failed"'),
-      query('"hold_history.run_failed", "holdings_check.run_failed"'),
-      query('"hold_history.failed", "holdings_check.run_failed", "mandate_expiry.run_failed"'),
+      ...JOBS.map((left) => query(JOBS.filter((job) => job !== left).join(', '))),
+      query(EVERY_JOB.replace('"hold_history.run_failed"', '"hold_history.failed"')),
       query(EVERY_JOB, 'ContainerAppSystemLogs'),
       (alert: Mutable) => (criterion(alert).threshold = 1),
       ...LATE_OR_BLIND,

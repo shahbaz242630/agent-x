@@ -195,3 +195,12 @@ export function defineStateMachine<const State extends string, const Event exten
     },
   });
 }
+
+/**
+ * A status move the caller's own read, in this transaction, said it may
+ * make: one refused means something past the app is at work, never a refusal
+ * to answer, so it throws, rolling the write back.
+ */
+export function movedAsRead(moved: { readonly outcome: string }, what: string): void {
+  if (moved.outcome !== 'changed') throw new Error(`${what}: ${moved.outcome}`);
+}

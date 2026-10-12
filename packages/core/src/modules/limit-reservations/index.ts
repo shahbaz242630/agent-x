@@ -6,8 +6,10 @@ export { RESERVATION, type ReservationState } from './domain/reservation.ts';
 export {
   agentMonth,
   lockAgentMonth,
+  lockReservationsOf,
   monthSpent,
   type NewReservation,
+  releaseReservationsOf,
   reservationsFor,
   type ReservationSeen,
   reserve,

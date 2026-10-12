@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { defineStateMachine, type StateMachineDefinition, StateMachineInvalid } from './state-machine.ts';
+import { defineStateMachine, movedAsRead, type StateMachineDefinition, StateMachineInvalid } from './state-machine.ts';
 
 // The machines of PRD §4, written as definitions: the format must be able to
 // say each of them. Their modules define them for real in later phases.
@@ -433,5 +433,16 @@ describe('a machine written wrong is refused when it is defined', () => {
     expect(() => defineStateMachine({ ...agent, initial: 'NEW' })).toThrow(
       'The state machine was refused: the first state NEW is not one of the states',
     );
+  });
+});
+
+describe('movedAsRead', () => {
+  it('passes a move made, and throws, naming it, for any other outcome', () => {
+    expect(() => {
+      movedAsRead({ outcome: 'changed' }, 'a move');
+    }).not.toThrow();
+    expect(() => {
+      movedAsRead({ outcome: 'refused' }, 'a mandate read as open didn’t expire');
+    }).toThrow('a mandate read as open didn’t expire: refused');
   });
 });
