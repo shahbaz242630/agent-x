@@ -52,6 +52,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import { createStepUps } from './use-case-work.ts';
 
 /** Asking to verify a supplier: its operation, which the step-up challenge names as its action too. */
 export const VERIFY_OPERATION = 'suppliers.verify';
@@ -128,6 +129,7 @@ export function createSupplierVerifications({
   readonly logger: Logger;
 }): SupplierVerifications {
   const work = createSupplierWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
   /**
    * Whether this member may verify the supplier now, with this call-back,
@@ -190,14 +192,10 @@ export function createSupplierVerifications({
     async verify(member, idempotent, supplierId, callBack, correlationId) {
       const done = await write(member, idempotent, correlationId, async (tx, states) => {
         const { current } = await verifiable(tx, states, member, supplierId, callBack, 'share', correlationId);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: VERIFY_OPERATION,
           changeHash: verificationHash(current.id, callBack.note),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       return work.askedAfter(done);
     },
@@ -215,19 +213,15 @@ export function createSupplierVerifications({
           'change',
           correlationId,
         );
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           confirm.stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: VERIFY_OPERATION,
-            changeHash: verificationHash(current.id, confirm.note),
-          },
+          { action: VERIFY_OPERATION, changeHash: verificationHash(current.id, confirm.note) },
           // A change that makes a supplier payable: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new SupplierRefused(403, 'STEP_UP_FAILED');
         await verifySupplier(tx, states, { orgId, id: found.supplier.id }, found, {
           verifiedBy: verifier.id,
           actor: { type: 'user', id: member.userId },
