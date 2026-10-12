@@ -12,14 +12,17 @@
 // a released reservation and another agent's never); a retry answered as it
 // was; what is refused with nothing made (a currency not taken, a revoked or
 // expired key or another agent's, a frozen organisation, a tampered
-// mandate); the agent's route over HTTP with its real key check (D4r); the
+// mandate, a version's limit or a supplier's payee key changed past the app:
+// SEC-DB-02/03); a mandate past its end before the job (SEC-AG-12), a
+// suspended source of the organisation's own (SEC-AG-03), and a supersede
+// mid-month keeping the month (SEC-LIM-03) (G8); the agent's route over HTTP with its real key check (D4r); the
 // simulator (C4): the same decision as a request, the month's total, proposed
 // rules, and nothing written anywhere (SEC-AG-09); and no request ever left
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
+import { MANDATE_VERSIONS, MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
@@ -38,7 +41,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
+import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
 import { createPolicySimulations, type PolicySimulations, type WhatIf } from './policy-simulations.ts';
 import { closeServers, routeServer } from './route-server.helper.test.ts';
 import {
@@ -631,6 +634,96 @@ describe('deciding a spend request and reserving it (D4)', () => {
 
     expect(await ask(acting, asking(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('refuses a mandate version’s limit raised past the app, making nothing (FX-TAMPER, SEC-DB-03)', async () => {
+    const w = await world();
+    for (const supplier of w.suppliers) await verified(w, supplier);
+    const { id, versionId } = await shared.drafted(registry, w);
+    await shared.acceptedPastTheUseCase(w, id);
+    const acting = await agentKey(w);
+    const owner = await tamperAsOwner(database, MANDATE_VERSIONS, w.org);
+    try {
+      await owner.query('alter table mandates.versions disable trigger made_once');
+      await owner.setColumn(versionId, 'monthly_limit_minor', '99000000');
+    } finally {
+      await owner.query('alter table mandates.versions enable trigger made_once');
+      await owner.end();
+    }
+
+    expect(await ask(acting, asking(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('refuses a supplier’s payee key changed past the app, making nothing (FX-TAMPER, SEC-DB-02)', async () => {
+    const { w, acting } = await ready();
+    const owner = await tamperAsOwner(database, SUPPLIERS, w.org);
+    try {
+      await owner.setColumn(w.suppliers[0] ?? '', 'payee_key', 'planted-payee');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await ask(acting, asking(w))).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await made(w.org)).toEqual({ requests: 0, months: 0 });
+  });
+
+  it('denies a mandate past its end before the expiry job reaches it (SEC-AG-12)', async () => {
+    const { w, mandateId, acting } = await ready({ terms: { endsAt: new Date(clock.now().getTime() + HOUR_MS) } });
+    clock.advanceBy(2 * HOUR_MS);
+
+    expect(decidedOf(await ask(acting, asking(w)))).toMatchObject({
+      mandateId,
+      decision: 'DENY',
+      reasons: ['MANDATE_NOT_IN_FORCE'],
+      status: 'DENIED',
+    });
+    const row = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('mandates.mandates')
+        .select('status')
+        .where('id', '=', mandateId ?? '')
+        .executeTakeFirstOrThrow(),
+    );
+    expect(row.status).toBe('ACTIVE');
+  });
+
+  it('denies a source of the organisation’s own the partner suspended (SEC-AG-03)', async () => {
+    const { w, acting } = await ready();
+    await shared.partnerSays(w, { availability: 'SUSPENDED' });
+
+    expect(decidedOf(await ask(acting, asking(w)))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['SOURCE_NOT_USABLE'],
+      status: 'DENIED',
+    });
+  });
+
+  it('keeps the agent’s month when its mandate is superseded mid-month (SEC-LIM-03)', async () => {
+    const { w, mandateId, acting } = await ready();
+    const first = decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n) })));
+    expect(first.decision).toBe('ALLOW');
+    const redrafted = await registry.redraft(
+      w.admin,
+      shared.keyed(w.admin, REDRAFT_OPERATION),
+      mandateId ?? '',
+      shared.termsOf(w, { purpose: 'Office supplies, renewed' }),
+      CORRELATION,
+    );
+    expect(redrafted.outcome).toBe('drafted');
+    await shared.acceptedPastTheUseCase(w, mandateId ?? '');
+
+    // To the other supplier, so the split check (D5) adds nothing.
+    const other = w.suppliers[1] ?? '';
+    const over = decidedOf(
+      await ask(acting, asking(w, { amount: AED(1_500_000n), supplierId: other, orderReference: 'INV-2' })),
+    );
+
+    // AED 15,000 held under the version superseded and 15,000 asked: past the default AED 20,000 cap.
+    expect(over).toMatchObject({ mandateId, decision: 'DENY', reasons: ['POLICY_MONTHLY_CAP'] });
+    const versions = [first.id, over.id].map(async (id) => (await heldBy(w.org, id)).row?.mandate_version_id);
+    const [before, after] = await Promise.all(versions);
+    expect(after).not.toBe(before);
   });
 });
 
