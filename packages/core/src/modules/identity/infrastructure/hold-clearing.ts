@@ -32,7 +32,7 @@
 import { createIdempotentWrites, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
-import { type Kysely } from 'kysely';
+import { type Kysely, type Transaction } from 'kysely';
 
 import type { IdGenerator, ReasonCode } from '../../../shared-kernel/index.ts';
 import {
@@ -103,31 +103,48 @@ class ClearingRefused extends Refusal {
 
 type Tables = IdentityTables & DirectoryTables & AuditTables;
 
+/**
+ * What the hold names, checked beyond its signed state, in the clearing's
+ * transaction: whole or not. A spend request's reservation and order claim
+ * (G1: a `holding` alarm is on rows no signed state holds).
+ */
+export type NamedRecordCheck<Theirs> = (
+  tx: Transaction<Tables & Theirs>,
+  states: SignedStates,
+  orgId: string,
+  objectId: string,
+) => Promise<boolean>;
+
 /** The pending change's SHA-256: the organisation, the HELD state's event, the investigation, IDs in lower case. */
 const clearingHash = (orgId: string, holdEventId: string, investigationId: string): Buffer =>
   changeHashOf([orgId.toLowerCase(), holdEventId.toLowerCase(), investigationId.toLowerCase()]);
 
-export function createHoldClearings({
+export function createHoldClearings<Theirs extends object = object>({
   database,
   keys,
   ids,
   challenges,
   logger,
   authorityTables,
+  namedRecordChecks = {},
   objectsChecked = OBJECTS_CHECKED,
 }: {
-  readonly database: Kysely<Tables>;
+  /** Both: every table the clearing reads, and those `namedRecordChecks` read too. */
+  readonly database: Kysely<Tables> & Kysely<Tables & Theirs>;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly challenges: StepUpChallenges;
   readonly logger: Logger;
   /** Every authority table, in the lock order (the product's AUTHORITY_TABLES); a growing one checked in its live rows. */
   readonly authorityTables: readonly CheckedTable[];
+  /** By the subject a hold names: what else must be whole before it clears. */
+  readonly namedRecordChecks?: Readonly<Record<string, NamedRecordCheck<Theirs>>>;
   /** The most objects of one table checked before clearing; past it, the clearing fails rather than judge part. */
   readonly objectsChecked?: number;
 }): HoldClearings {
   if (authorityTables.length === 0) throw new RangeError('Clearing checks every authority table first');
   const trail = createAuditTrail({ keys, ids });
+  const ours: Kysely<Tables> = database;
 
   /** The hold's HELD state, the event it was recorded by: or a refusal. */
   const heldEventOf = async (tx: MembershipsTransaction, states: SignedStates, orgId: string): Promise<string> => {
@@ -156,6 +173,12 @@ export function createHoldClearings({
     if (table === undefined || typeof objectId !== 'string') return;
     const check = await states.verifiedState(tx, table, { orgId, id: objectId }, 'share');
     if (check.outcome !== 'verified') throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+    const theirs = namedRecordChecks[table.subject];
+    // Opened on `database`, which holds their tables too.
+    const wider = tx as unknown as Transaction<Tables & Theirs>;
+    if (theirs !== undefined && !(await theirs(wider, states, orgId, objectId))) {
+      throw new ClearingRefused(503, 'INTEGRITY_FAILED');
+    }
   };
 
   /**
@@ -189,7 +212,7 @@ export function createHoldClearings({
     const services = { keys, ids, logger: logger.child({ correlationId }) };
     const idempotency = createIdempotentWrites({ keys, logger: services.logger });
     try {
-      return await withSignedStates(database, admin.orgId, services, (tx, states) =>
+      return await withSignedStates(ours, admin.orgId, services, (tx, states) =>
         idempotency.run(tx, idempotent, () => work(tx, states)),
       );
     } catch (error) {
@@ -270,7 +293,7 @@ export function createHoldClearings({
       if (isUnwritten(done)) return done;
       // Answered from the hold as it now stands, on a replay too.
       const read = await withSignedStates(
-        database,
+        ours,
         admin.orgId,
         { keys, ids, logger: logger.child({ correlationId }) },
         (tx, states) => states.holdRecord(tx, admin.orgId),

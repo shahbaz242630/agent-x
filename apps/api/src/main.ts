@@ -65,7 +65,7 @@ import type { FundingSourcesTables } from '@agentx/core/modules/funding-sources'
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import type { FakePartnerTables } from '@agentx/core/modules/providers';
 import { createSecurityEvents, type SecurityEventsTables } from '@agentx/core/modules/security-events';
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { holdingsRecordChecks, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { checkSchemaOnSchedule, schemaSoundAtStart } from '@agentx/core/schema-check';
 import { HOUR_MS, systemClock, uuidV7Ids } from '@agentx/core/shared-kernel';
@@ -495,6 +495,8 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       challenges,
       logger,
       authorityTables: AUTHORITY_TABLES,
+      // A held request's reservation and claim match its decision again before the hold clears (G1).
+      namedRecordChecks: holdingsRecordChecks(keys),
     }),
     agentRegistrations: createAgentRegistrations({
       database,

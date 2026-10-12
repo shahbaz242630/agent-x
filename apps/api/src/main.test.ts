@@ -233,6 +233,20 @@ vi.mock('./request-expiry.ts', async (importOriginal) => {
   return { ...actual, createRequestExpiry: phase2Jobs.tagged('request expiry', actual.createRequestExpiry) };
 });
 
+/** The subjects the hold clearing checks beyond their signed states (G1), as main.ts builds it. */
+const clearingChecks = vi.hoisted(() => ({ subjects: [] as string[][] }));
+
+vi.mock('@agentx/core/modules/identity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentx/core/modules/identity')>();
+  return {
+    ...actual,
+    createHoldClearings: (options: Parameters<typeof actual.createHoldClearings>[0]) => {
+      clearingChecks.subjects.push(Object.keys(options.namedRecordChecks ?? {}));
+      return actual.createHoldClearings(options);
+    },
+  };
+});
+
 vi.mock('./anchor-check.ts', () => ({
   createAnchorCheck: (options: {
     chains: readonly { chain: unknown; verify: (anchor: unknown) => Promise<unknown> }[];
@@ -344,6 +358,7 @@ beforeEach(() => {
   rowSweeps.scheduled.length = 0;
   rowSweeps.stopped.length = 0;
   phase2Jobs.scheduled.length = 0;
+  clearingChecks.subjects.length = 0;
   phase2Jobs.historyTables.length = 0;
   anchorChecks.runs = 0;
   fake.roleCheck = () => Promise.resolve();
@@ -541,6 +556,12 @@ describe('APP-02 the API opens its database as its own role, and checks that rol
     ]);
     expect(phase2Jobs.historyTables).toEqual([AUTHORITY_TABLES]);
     expect(AUTHORITY_TABLES.length).toBeGreaterThan(0);
+  });
+
+  it('clears an integrity hold only once a spend request it names holds what it was decided with (G1)', async () => {
+    await start();
+
+    expect(clearingChecks.subjects).toEqual([['spend_request']]);
   });
 
   it('sweeps the idempotency keys on a timer of its own, hourly, a batch of 1,000 at a time (B1e-3)', async () => {
