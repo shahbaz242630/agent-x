@@ -7,6 +7,8 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+// Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import './route-server.helper.test.ts';
 import { errorBody } from './errors.ts';
 import {
   answerAsked,

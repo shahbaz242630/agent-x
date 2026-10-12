@@ -4,6 +4,8 @@ import type { FastifyInstance, RouteOptions, RouteShorthandOptions } from 'fasti
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+// Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import './route-server.helper.test.ts';
 import { ContractBroken } from './contract.ts';
 import { buildServer } from './server.ts';
 import { isWriteRoute, operationProblems, sharedOperations } from './write-operations.ts';

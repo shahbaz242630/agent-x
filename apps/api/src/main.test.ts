@@ -10,6 +10,8 @@ import { findLeaks, LogCapture, writeTestKeys } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import './route-server.helper.test.ts';
 import { type ApiProcess, runApi } from './main.ts';
 import type { buildServer } from './server.ts';
 

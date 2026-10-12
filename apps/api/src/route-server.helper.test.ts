@@ -7,6 +7,7 @@ import type { LiveSession, MembershipCheck, SignIn } from '@agentx/core/modules/
 import { createLogger } from '@agentx/platform/observability';
 import { LogCapture, SequentialIds } from '@agentx/testing';
 import type { FastifyInstance } from 'fastify';
+import { beforeAll } from 'vitest';
 
 import { buildServer, type ServerOptions } from './server.ts';
 
@@ -78,3 +79,13 @@ export async function routeServer({
   await app.ready();
   return app;
 }
+
+// A file's first server costs 4 to 12 times the rest (Fastify and every route
+// set up cold: 0.3 s alone, 1 s under the whole unit run), and on a cold,
+// busy machine that twice took a first test past its 5 s (S96, S100). So every
+// file importing this pays it here, before its tests, under a limit of its own.
+const COLD_START_LIMIT_MS = 60_000;
+beforeAll(async () => {
+  await routeServer({});
+  await closeServers();
+}, COLD_START_LIMIT_MS);
