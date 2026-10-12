@@ -137,6 +137,10 @@ export async function cancelRequest(
  * The move and its release, in lock order: the reservation and claim locked
  * (11), the request moved and signed (the head, 12), then both released. The
  * request was read for change in this transaction and may make the move.
+ * Every request that may still end holds exactly one reservation and one
+ * claim, as it was decided with: releasing anything else means they were
+ * changed past the app, so the alarm is raised and the request still ends
+ * (a brake), rather than its ending hiding the change from the holdings check.
  */
 async function endHolding(
   tx: EndingsTransaction,
@@ -150,6 +154,7 @@ async function endHolding(
   await lockClaimsOf(tx, key.id);
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
-  await releaseReservationsOf(tx, { requestId: key.id, at });
-  await releaseClaim(tx, { requestId: key.id, releasedAt: at });
+  const reservations = await releaseReservationsOf(tx, { requestId: key.id, at });
+  const claimed = await releaseClaim(tx, { requestId: key.id, releasedAt: at });
+  if (reservations !== 1 || !claimed) states.mismatch(SPEND_REQUESTS.subject, key);
 }

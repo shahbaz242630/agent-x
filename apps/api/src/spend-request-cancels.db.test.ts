@@ -43,7 +43,7 @@ import {
   createSpendRequestDecisions,
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
-import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
+import { releasedPastTheApp, spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -239,6 +239,31 @@ describe('cancelling a spend request before hand-off (D8)', () => {
     expect(await byMember(w.admin, first.id, 'cancel-once')).toEqual(once);
     expect(await byMember(w.admin, second.id, 'cancel-once')).toEqual({ outcome: 'conflict' });
     expect(await statusOf(w, second.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it.each(['claim', 'reservation'] as const)(
+    'still cancels one whose %s was released past the app, raising the alarm and the hold rather than hiding it (G2)',
+    async (what) => {
+      const { w, acting } = await ready();
+      const waiting = await ask(acting, w);
+      await releasedPastTheApp(database, w.org, waiting.id, what);
+
+      expect(await byAgent(acting, waiting.id)).toMatchObject({
+        outcome: 'cancelled',
+        request: { status: 'CANCELLED' },
+      });
+      const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
+      expect(hold).toMatchObject({ outcome: 'held' });
+    },
+  );
+
+  it('ends one holding just what it was decided with, raising no alarm (G2)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+
+    expect(await byAgent(acting, waiting.id)).toMatchObject({ outcome: 'cancelled' });
+    const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
+    expect(hold).toMatchObject({ outcome: 'clear' });
   });
 
   it('waits for an expiry holding the request, then finds it expired (forced)', async () => {
