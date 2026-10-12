@@ -450,6 +450,27 @@ describe(`confirming a payee change waiting, with the admin's passkey (E2-2b, Po
     // Everything rolled back, the challenge's use included; the change is left for a withdrawal.
     expect(changedOf(await withdraw(admin, second)).supplier.pendingVersionId).toBeNull();
   });
+
+  it('lets any other failure through as it is, never as SUPPLIER_PAYEE_TAKEN, keeping nothing', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    const { versionId } = await waiting(admin, id);
+    const challengeId = askedFor(await approve(admin, id));
+    await stepUp(admin, challengeId);
+    changes = createSupplierPayeeChanges({
+      database: app,
+      keys,
+      ids,
+      clock,
+      logger: testLogger(),
+      challenges: challenges(),
+      outbox: { ...createOutbox({ ids, clock }), add: () => Promise.reject(new Error('the outbox is down')) },
+    });
+
+    await expect(confirm(admin, id, challengeId)).rejects.toThrow('the outbox is down');
+    expect(await supplierNow(org, id)).toMatchObject({ pendingVersionId: versionId, payeeKey: null });
+  });
 });
 
 describe(`the confirmation's lock order against the confirmer's demotion (ADR-006 §6, Postgres ${server.version})`, () => {
