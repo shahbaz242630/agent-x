@@ -15,6 +15,7 @@ export {
   type AuditSubject,
   type AuditSubjectKey,
 } from './domain/event.ts';
+export { actorEventsSince } from './infrastructure/actor-counts.ts';
 export {
   type AuditTrail,
   type AuditTransaction,

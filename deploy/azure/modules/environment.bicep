@@ -35,6 +35,8 @@ param tokenRefusedAlertName string
 param denialSurgeAlertName string
 param holdingsCheckAlertName string
 param integrityRunsAlertName string
+param agentCancelsAlertName string
+param agentCancelCapAlertName string
 
 resource environment 'Microsoft.App/managedEnvironments@2026-01-01' = {
   name: name
@@ -392,6 +394,108 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
       allOf: [
         {
           query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed") | summarize Events = count()'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Events'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An agent cancelling its own requests again and again (Phase 2 G6; partner
+// decision 11b): asking, reading the decision and cancelling maps where its
+// hidden approval line lies. The API caps an agent at 10 of its own cancels a
+// day and logs each as `spend_request.cancelled` with `by` and the agent; a
+// person's are never logged here. The query counts each agent's in the window
+// and returns the highest, one number with no ID dimensions (ADR-013); the
+// saved query shows which agent. More than 5 in 15 minutes is half its day's
+// cap at once: a first number, to tune on real traffic. Stateful, as above.
+var agentCancelLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log).by) == "agent"'
+
+resource agentCancelsByAgent 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
+  parent: workspace
+  name: 'agentx-agent-cancels-by-agent'
+  properties: {
+    category: 'Agent X'
+    displayName: 'Own cancels by agent'
+    query: '${agentCancelLines} | extend Line = parse_json(Log) | summarize Cancels = count(), Latest = max(TimeGenerated) by Organisation = tostring(Line.orgId), Agent = tostring(Line.agentId), Window = bin(TimeGenerated, 15m) | summarize Busiest15m = max(Cancels), Total = sum(Cancels), Latest = max(Latest) by Organisation, Agent | order by Busiest15m desc'
+    version: 2
+  }
+}
+
+resource agentCancelsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: agentCancelsAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Spend requests: one agent cancelling its own again and again'
+    description: 'SEV-2. One agent cancelled more than 5 of its own spend requests in 15 minutes: it may be asking and cancelling to find its approval line, or looping. The saved query "Own cancels by agent" shows which. Runbook: Incident-Response-Playbook.md section F.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: '${agentCancelLines} | summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId) | summarize Highest = max(Cancels)'
+          timeAggregation: 'Total'
+          metricMeasureColumn: 'Highest'
+          operator: 'GreaterThan'
+          threshold: 5
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    autoMitigate: true
+    actions: {
+      actionGroups: [actionGroupId]
+    }
+  }
+  dependsOn: [appLogs]
+}
+
+// An agent reaching its day's cap of own cancels (Phase 2 G6, the partner's
+// catch): one cancelling slowly and steadily never trips the burst alert
+// above, but at 10 a day it reaches the cap, and the API logs
+// `spend_request.agent_cancels_spent` for each cancel the cap refuses. Any
+// one line tells someone. Stateful, as above.
+resource agentCancelCapAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
+  name: agentCancelCapAlertName
+  location: location
+  tags: tags
+  kind: 'LogAlert'
+  properties: {
+    displayName: 'Spend requests: an agent reached its cap of own cancels'
+    description: 'SEV-2. An agent cancelled 10 of its own spend requests in 24 hours and was refused another: steady asking and cancelling, which may be mapping its approval line. The saved query "Own cancels by agent" shows which. Runbook: Incident-Response-Playbook.md section F.'
+    severity: 2
+    enabled: true
+    scopes: [workspaceId]
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT15M'
+    // The table appears with the first app's first log line, after this rule exists.
+    skipQueryValidation: true
+    criteria: {
+      allOf: [
+        {
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent" | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

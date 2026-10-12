@@ -222,6 +222,8 @@ const ERRORS_ALERT = named(/-app-errors$/);
 const INTEGRITY_ALERT = named(/-audit-integrity$/);
 const TOKEN_REFUSED_ALERT = named(/^alert-agentx-.+-token-refused$/);
 const DENIAL_SURGE_ALERT = named(/^alert-agentx-.+-denial-surge$/);
+const AGENT_CANCELS_ALERT = named(/^alert-agentx-.+-agent-cancels$/);
+const AGENT_CANCEL_CAP_ALERT = named(/^alert-agentx-.+-agent-cancel-cap$/);
 const HOLDINGS_CHECK_ALERT = named(/^alert-agentx-.+-holdings-check$/);
 const INTEGRITY_RUNS_ALERT = named(/^alert-agentx-.+-integrity-runs$/);
 const ACTION_GROUP = type('Microsoft.Insights/actionGroups');
@@ -458,6 +460,9 @@ describe('SEC-OPS-09, SEC-OPS-11 deploy/azure', () => {
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-denial-surge',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-holdings-check',
       'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-integrity-runs',
+      'Microsoft.OperationalInsights/workspaces/savedSearches log-agentx-stg/agentx-agent-cancels-by-agent',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancels',
+      'Microsoft.Insights/scheduledQueryRules alert-agentx-stg-agent-cancel-cap',
       expect.stringMatching(/^Microsoft\.Communication\/emailServices ecs-agentx-stg-[a-z0-9]{6}$/),
       expect.stringMatching(
         /^Microsoft\.Communication\/emailServices\/domains ecs-agentx-stg-[a-z0-9]{6}\/AzureManagedDomain$/,
@@ -1772,6 +1777,76 @@ describe('SEC-OPS-09 each rule can fail', () => {
     // Its runbook is the playbook's section M.
     expect(String(at(staging.predictedResources.find(TOKEN_REFUSED_ALERT)?.properties, 'description'))).toMatch(
       / Runbook: Incident-Response-Playbook\.md section M\.$/,
+    );
+  });
+
+  it("agent-cancel-cap-alert: no alert on a cancel the agent's cap refused, or one that counts something else, can't fire", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const SPENT =
+      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.agent_cancels_spent"';
+    expect(brokenRules(without(AGENT_CANCEL_CAP_ALERT))).toEqual(['agent-cancel-cap-alert']);
+    for (const change of [
+      query(`${SPENT.replace('agent_cancels_spent', 'cancelled')} | summarize Events = count()`),
+      query(`${SPENT.replace('ContainerAppConsoleLogs', 'ContainerAppSystemLogs')} | summarize Events = count()`),
+      (alert: Mutable) => (criterion(alert).threshold = 1),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(AGENT_CANCEL_CAP_ALERT, change))).toEqual(['agent-cancel-cap-alert']);
+    }
+    expect(String(at(staging.predictedResources.find(AGENT_CANCEL_CAP_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section F\.$/,
+    );
+  });
+
+  it("agent-cancels-alert: no alert on one agent's own cancels, or one that counts something else, can't fire or fires too late", () => {
+    const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
+    const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
+    const CANCELS =
+      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log).by) == "agent"';
+    const PER_AGENT = 'summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId)';
+    expect(brokenRules(without(AGENT_CANCELS_ALERT))).toEqual(['agent-cancels-alert']);
+    for (const change of [
+      // Every cancel, a person's too; or another event.
+      query(
+        `ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | ${PER_AGENT} | summarize Highest = max(Cancels)`,
+      ),
+      query(
+        `${CANCELS.replace('spend_request.cancelled', 'spend_request.decided')} | ${PER_AGENT} | summarize Highest = max(Cancels)`,
+      ),
+      // The organisation's total, not one agent's; or the agents' total again; or per organisation.
+      query(`${CANCELS} | summarize Highest = count()`),
+      query(`${CANCELS} | ${PER_AGENT} | summarize Highest = sum(Cancels)`),
+      query(
+        `${CANCELS} | summarize Cancels = count() by Agent = tostring(parse_json(Log).orgId) | summarize Highest = max(Cancels)`,
+      ),
+      query(
+        `${CANCELS.replace('ContainerAppConsoleLogs', 'ContainerAppSystemLogs')} | ${PER_AGENT} | summarize Highest = max(Cancels)`,
+      ),
+      // Its threshold, neither higher nor lower.
+      (alert: Mutable) => (criterion(alert).threshold = 6),
+      (alert: Mutable) => (criterion(alert).threshold = 0),
+      ...LATE_OR_BLIND,
+      (alert: Mutable) => (criterion(alert).operator = 'LessThan'),
+      (alert: Mutable) => (criterion(alert).timeAggregation = 'Count'),
+      (alert: Mutable) => (properties(alert).scopes = ['/subscriptions/x/workspaces/y']),
+    ]) {
+      expect(brokenRules(changed(AGENT_CANCELS_ALERT, change))).toEqual(['agent-cancels-alert']);
+    }
+    expect(brokenRules(changed(AGENT_CANCELS_ALERT, (alert) => (properties(alert).enabled = false)))).toEqual([
+      'alert-delivery',
+      'agent-cancels-alert',
+    ]);
+    // One number: the per-agent stage left last returns a row an agent.
+    expect(brokenRules(changed(AGENT_CANCELS_ALERT, query(`${CANCELS} | ${PER_AGENT}`)))).toEqual([
+      'alert-counts-only',
+      'agent-cancels-alert',
+    ]);
+    // Its runbook is the playbook's section F (an agent behaving strangely).
+    expect(String(at(staging.predictedResources.find(AGENT_CANCELS_ALERT)?.properties, 'description'))).toMatch(
+      / Runbook: Incident-Response-Playbook\.md section F\.$/,
     );
   });
 

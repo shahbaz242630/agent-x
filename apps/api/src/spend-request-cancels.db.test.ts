@@ -7,6 +7,8 @@
 // agent's is NOT_FOUND. A developer or viewer is FORBIDDEN. Cancelled already
 // is answered as it stands; denied or expired is REQUEST_NOT_CANCELLABLE; none
 // of the organisation's is NOT_FOUND; one tampered with is INTEGRITY_FAILED.
+// An agent cancels at most 10 of its own a day, each logged once (G6); one
+// waits for its other cancel in flight, so two at once can't pass it (G6b).
 // The key answers its own replay. A cancel waiting on an expiry that holds
 // the request (forced) finds it expired.
 import { withSignedStates } from '@agentx/core/modules/audit';
@@ -17,10 +19,12 @@ import {
   requestOf,
   SPEND_REQUESTS,
 } from '@agentx/core/modules/spend-requests';
+import { DAY_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database } from '@agentx/platform/db';
 import {
   createTestDatabase,
   FixedClock,
+  LogCapture,
   SequentialIds,
   tamperAsOwner,
   type TestDatabase,
@@ -56,6 +60,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let cancels: SpendRequestCancels;
+let capture: LogCapture;
 
 const shared = spendWorld({
   app: () => app,
@@ -124,7 +129,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date());
-  const logger = testLogger();
+  capture = new LogCapture();
+  const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
   decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
   cancels = createSpendRequestCancels({ database: app, keys, ids, clock, logger });
@@ -187,6 +193,81 @@ describe('cancelling a spend request before hand-off (D8)', () => {
       details: { agentKeyId: acting.keyId },
     });
     expect(await holdingsOf(w, mine.id)).toEqual({ reservation: 'RELEASED', released: true });
+  });
+
+  it('lets the agent cancel 10 of its own a day, then refuses it while a person still may (decision 11b)', async () => {
+    const { w, acting } = await ready();
+    for (let n = 0; n < 9; n += 1) {
+      expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    }
+    // A person's cancel of the agent's request never counts toward the agent's ten.
+    const cancelledEarlier = (await ask(acting, w)).id;
+    await byMember(w.admin, cancelledEarlier);
+    expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    const one = await ask(acting, w);
+
+    expect(await byAgent(acting, one.id)).toEqual(refused(409, 'AGENT_CANCELS_SPENT'));
+    expect(capture.lines().filter(({ event }) => event === 'spend_request.agent_cancels_spent')).toEqual([
+      expect.objectContaining({ agentId: acting.agentId, requestId: one.id, orgId: w.org }),
+    ]);
+    expect(await statusOf(w, one.id)).toBe('APPROVAL_REQUIRED');
+    // One cancelled already is answered as it stands, counting nothing.
+    expect(await byAgent(acting, cancelledEarlier)).toMatchObject({ outcome: 'cancelled' });
+    // Another agent's own are its own; a person is never capped.
+    const other = await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n) });
+    expect(await byAgent(other, (await ask(other, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    expect(await byMember(w.admin, one.id)).toMatchObject({ outcome: 'cancelled' });
+
+    // A day after them, it may again: the log seals the database's time, which the clock started at, a minute
+    // covering the seconds this test took.
+    clock.advanceBy(DAY_MS + 60_000);
+    expect(await byAgent(acting, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+  });
+
+  it('makes an agent’s cancel wait for its other cancel in flight, so two at once never pass the cap (forced)', async () => {
+    const { w, acting } = await ready();
+    for (let n = 0; n < 9; n += 1) await byAgent(acting, (await ask(acting, w)).id);
+    const tenth = await ask(acting, w);
+    const eleventh = await ask(acting, w);
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const by = { kind: 'agent', agentId: acting.agentId, agentKeyId: acting.keyId } as const;
+    // The tenth cancelled, its transaction held open before it commits.
+    const cancelling = withSignedStates(app, w.org, quiet(), async (tx, states) => {
+      const ended = await cancelRequest(tx, states, keys, { orgId: w.org, id: tenth.id }, by, clock.now());
+      holding(undefined);
+      await gate;
+      return ended;
+    });
+    await held;
+    const racing = within(20_000, byAgent(acting, eleventh.id), 'the eleventh cancel');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+
+    expect(await cancelling).toMatchObject({ outcome: 'ended' });
+    expect(await racing).toEqual(refused(409, 'AGENT_CANCELS_SPENT'));
+    expect(await statusOf(w, eleventh.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('never caps a person: an admin cancels 11 in a day', async () => {
+    const { w, acting } = await ready();
+    for (let n = 0; n < 11; n += 1) {
+      expect(await byMember(w.admin, (await ask(acting, w)).id)).toMatchObject({ outcome: 'cancelled' });
+    }
+  });
+
+  it('logs each of the agent’s own cancels once, with the agent, and never a person’s, a replay or one as it stands', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const key = idempotent(acting.orgId, { kind: 'agent', id: acting.agentId }, AGENT_CANCEL_OPERATION, waiting.id);
+    await cancels.byAgent(acting, key, waiting.id, CORRELATION);
+    await cancels.byAgent(acting, key, waiting.id, CORRELATION);
+    await byAgent(acting, waiting.id);
+    await byMember(w.admin, (await ask(acting, w)).id);
+
+    expect(capture.lines().filter(({ event }) => event === 'spend_request.cancelled')).toEqual([
+      expect.objectContaining({ by: 'agent', agentId: acting.agentId, requestId: waiting.id, orgId: w.org }),
+    ]);
   });
 
   it('answers one cancelled already as it stands, recording nothing more: a brake pressed twice', async () => {

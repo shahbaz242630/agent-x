@@ -11,11 +11,15 @@
 //   isn't refused for a key revoked meanwhile, nor while the organisation is
 //   frozen (a freeze stops new requests, never a brake).
 //
-// The key claimed first; then the request read for change (8), its holdings
-// locked (11), the move signed (12), both released. A request cancelled
+// The key claimed first; then the request read for change (8), an agent's
+// cancels counted under its cancel lock (8a), its holdings locked (11), the
+// move signed (12), both released. A request cancelled
 // already is answered as it stands (a brake pressed twice is not an error);
-// one denied, expired or handed off is REQUEST_NOT_CANCELLABLE (409). No one
-// is emailed yet (decision 10).
+// one denied, expired or handed off is REQUEST_NOT_CANCELLABLE (409). An
+// agent cancels at most 10 of its own a day
+// (AGENT_CANCELS_SPENT, 409; partner decision 11b), each logged as
+// `spend_request.cancelled` for the alert on an agent that keeps cancelling.
+// No one is emailed yet (decision 10).
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
   cancelRequest,
@@ -64,6 +68,7 @@ function settled(ended: Ended): { status: number; resourceId: string } {
   if (ended.outcome === 'ended') return { status: 200, resourceId: ended.request.id };
   if (ended.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
   if (ended.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (ended.outcome === 'spent') throw new MandateRefused(409, 'AGENT_CANCELS_SPENT');
   // Never `not_due`: only expiry waits. Cancelled already: answered as it stands.
   if (ended.outcome === 'not_open' && ended.request.status === 'CANCELLED') {
     return { status: 200, resourceId: ended.request.id };
@@ -109,10 +114,22 @@ export function createSpendRequestCancels({
     },
 
     async byAgent(agent, idempotent, requestId, correlationId) {
+      // Set by the write's one run (it never retries): whether it cancelled, found it cancelled, or was refused.
+      let ended: Ended['outcome'] | undefined;
       const done = await work.write(agent, idempotent, correlationId, async (tx, states) => {
         const by = { kind: 'agent', agentId: agent.agentId, agentKeyId: agent.keyId } as const;
-        return settled(await cancelRequest(tx, states, keys, { orgId: agent.orgId, id: requestId }, by, clock.now()));
+        const outcome = await cancelRequest(tx, states, keys, { orgId: agent.orgId, id: requestId }, by, clock.now());
+        ended = outcome.outcome;
+        return settled(outcome);
       });
+      const log = logger.child({ correlationId, orgId: agent.orgId });
+      // Once the cancel is committed; a replay of its key runs nothing, so sets nothing. The alert counts these (G6).
+      if (!isUnwritten(done) && ended === 'ended') {
+        log.info('spend_request.cancelled', { by: 'agent', agentId: agent.agentId, requestId: done.result.resourceId });
+      }
+      // The cap reached: an agent cancelling slowly and steadily never trips the burst alert, but reaches this
+      // (the partner's catch, S102); its own alert fires on any one.
+      if (ended === 'spent') log.warn('spend_request.agent_cancels_spent', { agentId: agent.agentId, requestId });
       return shown(agent.orgId, correlationId, done);
     },
   };
