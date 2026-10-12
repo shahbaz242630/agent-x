@@ -106,14 +106,9 @@ async function membershipsRead(
     }
   };
   const theirId = await listedMembership(tx, orgId, userId);
-  if (theirId === inviterId) {
-    // The admin who asked is accepting it: their own membership, read once for the change, decides both.
-    // Still active, they are refused as ALREADY_A_MEMBER; listed but not theirs, the directory's key refuses it.
-    const read = await theirs();
-    if (read.outcome === 'deactivated') throw new AcceptanceRefused(409, 'INVITATION_CLOSED');
-    return read;
-  }
-  if (theirId !== undefined && theirId < inviterId) {
+  // The admin who asked accepting it too: read for the change, then checked as any admin, so a
+  // directory entry naming someone else's membership never skips the check (#207).
+  if (theirId !== undefined && theirId <= inviterId) {
     const read = await theirs();
     await stillAdmin();
     return read;
