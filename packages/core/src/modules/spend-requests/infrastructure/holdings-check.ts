@@ -28,6 +28,7 @@ import { sql, type Transaction } from 'kysely';
 
 import { type AuditTables, type PageAsked, type SignedStates, TooManyEventsToRead } from '../../audit/index.ts';
 import { type LimitReservationsTables, reservationsFor } from '../../limit-reservations/index.ts';
+import { bankKeyOf } from '../domain/asked.ts';
 import { type ClaimHolding, type HeldSealed, heldOf, holdingsMatch, holdsNow } from '../domain/holdings.ts';
 import { requestsOf, type SpendRequestRecord } from './decisions.ts';
 import { orderKeyOf } from './order-claims.ts';
@@ -57,6 +58,7 @@ interface ClaimRow {
   readonly requestId: string;
   readonly supplierId: string;
   readonly orderKey: string;
+  readonly bankKey: string | null;
   readonly released: boolean;
   readonly payeeKey: string | null;
 }
@@ -66,13 +68,14 @@ async function claimsFor(tx: HoldingsTransaction, requestIds: readonly string[])
   if (requestIds.length === 0) return [];
   const rows = await tx
     .selectFrom('spend_requests.order_claims')
-    .select(['request_id', 'supplier_id', 'order_reference', 'released_at', 'payee_key'])
+    .select(['request_id', 'supplier_id', 'order_reference', 'bank_key', 'released_at', 'payee_key'])
     .where('request_id', 'in', requestIds)
     .execute();
   return rows.map((row) => ({
     requestId: row.request_id,
     supplierId: row.supplier_id,
     orderKey: row.order_reference,
+    bankKey: row.bank_key,
     released: row.released_at !== null,
     payeeKey: row.payee_key,
   }));
@@ -197,10 +200,17 @@ async function judged(
     const held = sealed.get(request.id) ?? null;
     const asSealed = (payeeKey: string | null) =>
       held === null || payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey });
-    // A claim is its request's own when it is on the request's supplier and order, in canonical form.
+    // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
+    // where its decision wrote one (G5), with its bank key (0043): one changed past the app could hide a
+    // possible duplicate. A claim made before G5 has none to compare, as E1b's payee seal.
+    const bankKeyAsMade = (bankKey: string | null) =>
+      held?.bankKeyed !== true || bankKey === bankKeyOf(request.orderReference);
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({
       released: claim.released,
-      itsOwn: claim.supplierId === request.supplierId && claim.orderKey === orderKeys.get(request.orderReference),
+      itsOwn:
+        claim.supplierId === request.supplierId &&
+        claim.orderKey === orderKeys.get(request.orderReference) &&
+        bankKeyAsMade(claim.bankKey),
       payeeAsSealed: asSealed(claim.payeeKey),
     }));
     const reserved = (reservations.get(request.id) ?? []).map((reservation) => ({

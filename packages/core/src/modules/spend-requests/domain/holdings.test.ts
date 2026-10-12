@@ -17,7 +17,7 @@ const SEAL = { mac: 'ab'.repeat(32), keyVersion: 1 };
 
 const request = (
   status: SpendRequestStatus,
-  held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT, payee: SEAL },
+  held: RequestHolding['held'] = { month: '2026-10', reservedAt: AT, payee: SEAL, bankKeyed: true },
 ) => ({
   agentId: 'agent',
   mandateId: 'mandate',
@@ -113,7 +113,15 @@ describe('what a request holds (E1)', () => {
       month: '2026-10',
       reservedAt: AT,
       payee: 'none',
+      bankKeyed: false,
     });
+    // G5's decisions seal `possibleDuplicate`, whichever it was: their claims' bank keys are compared.
+    for (const possibleDuplicate of [false, true]) {
+      expect(heldOf({ heldMonth: '2026-10', heldAt: AT.toISOString(), possibleDuplicate })?.bankKeyed).toBe(true);
+    }
+    expect(heldOf({ heldMonth: '2026-10', heldAt: AT.toISOString(), possibleDuplicate: 'false' })?.bankKeyed).toBe(
+      false,
+    );
     expect(heldOf(undefined)).toBeNull();
     expect(heldOf({ decision: 'ALLOW' })).toBeNull();
     expect(heldOf({ heldMonth: '2026-10' })).toBeNull();

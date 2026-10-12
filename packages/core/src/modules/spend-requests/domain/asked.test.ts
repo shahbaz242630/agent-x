@@ -3,7 +3,7 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
-import { askedText, BANK_REFERENCE_MOST, bankReferenceOf, SpendAskRefused } from './asked.ts';
+import { askedText, BANK_REFERENCE_MOST, bankKeyOf, bankReferenceOf, SpendAskRefused } from './asked.ts';
 
 const REQUEST_ID = '0199a0f0-0000-7000-8000-0000000000aa';
 const OWN_REFERENCE = '0199a0f00000700080000000000000aa';
@@ -88,6 +88,40 @@ describe('the bank reference an order reference becomes (decision 8)', () => {
     fc.assert(
       fc.property(fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9/?:().,'+-]{0,34}$/), (reference) => {
         expect(bankReferenceOf(reference, REQUEST_ID)).toBe(reference);
+      }),
+    );
+  });
+});
+
+describe('the bank key two orders the rail carries alike share (decision 11a)', () => {
+  it.each([
+    ['`_` and `-`', 'INV_22', 'INV-22'],
+    ['Arabic-Indic and ASCII digits', 'INV-١٢', 'INV-12'],
+    ['upper and lower case', 'inv_22', 'INV-22'],
+    ['`#` and none', 'PO#1', 'PO1'],
+    ['full-width and plain', 'ＩＮＶ１２', 'inv12'],
+  ])('is the same for %s', (_what, one, other) => {
+    expect(bankKeyOf(one)).toBe(bankKeyOf(other));
+    expect(bankKeyOf(one)).not.toBeNull();
+  });
+
+  it('is the bank reference in lower case', () => {
+    expect(bankKeyOf('PO 1/2 (B)')).toBe('po 1/2 (b)');
+  });
+
+  it('differs for orders the rail carries differently', () => {
+    expect(bankKeyOf('INV-22')).not.toBe(bankKeyOf('INV-23'));
+  });
+
+  it.each([['فاتورة'], ['#_#']])('is none when the bank reference would be the request’s own ID: %s', (reference) => {
+    expect(bankKeyOf(reference)).toBeNull();
+  });
+
+  it('is always one 0043 keeps, whatever the order reference', () => {
+    fc.assert(
+      fc.property(fc.string({ unit: 'binary', minLength: 1, maxLength: 100 }), (reference) => {
+        const key = bankKeyOf(reference);
+        if (key !== null) expect(key).toMatch(/^[a-z0-9 /?:().,'+-]{1,35}$/);
       }),
     );
   });

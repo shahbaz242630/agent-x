@@ -391,6 +391,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "POSSIBLE_DUPLICATE_ORDER",
+                    "description": "An earlier request to the same supplier that is still open, has an unknown outcome or was paid has an order reference the bank would carry the same way (as INV_22 and INV-22, or the same number in other digits), so this may be the same order: a person must approve it."
+                  },
+                  {
+                    "type": "string",
                     "const": "RATE_LIMITED",
                     "description": "Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again."
                   },

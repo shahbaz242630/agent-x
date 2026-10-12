@@ -389,6 +389,67 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(decidedOf(await ask(acting, another)).decision).toBe('ALLOW');
   });
 
+  it('sends for approval an order an open claim’s looks like on the rail, holding it; the exact one still denied (decision 11a)', async () => {
+    const { w, acting } = await ready();
+    const small = (orderReference: string, supplierId = w.suppliers[0] ?? '') =>
+      asking(w, { amount: AED(10_000n), orderReference, supplierId });
+    const first = decidedOf(await ask(acting, small('INV_22')));
+    expect(first.decision).toBe('ALLOW');
+    expect((await heldBy(w.org, first.id)).claim).toMatchObject({ bank_key: 'inv-22', released_at: null });
+
+    for (const written of ['INV-22', 'INV-٢٢']) {
+      const possible = decidedOf(await ask(acting, small(written)));
+      expect(possible).toMatchObject({
+        decision: 'REQUIRE_APPROVAL',
+        reasons: ['POSSIBLE_DUPLICATE_ORDER'],
+        status: 'APPROVAL_REQUIRED',
+      });
+      // Held while it waits, its claim beside the one it looks like.
+      expect((await heldBy(w.org, possible.id)).claim).toMatchObject({ bank_key: 'inv-22', released_at: null });
+    }
+    // The first's own order, however written, is refused; INV-22's open claims also look like it.
+    expect(decidedOf(await ask(acting, small('inv_22')))).toMatchObject({
+      decision: 'DENY',
+      reasons: ['DUPLICATE_ORDER_REFERENCE', 'POSSIBLE_DUPLICATE_ORDER'],
+    });
+    expect(decidedOf(await ask(acting, small('INV-22', w.suppliers[1] ?? ''))).decision).toBe('ALLOW');
+    expect(decidedOf(await ask(acting, small('INV-23'))).decision).toBe('ALLOW');
+  });
+
+  it('looks for a possible duplicate under the payee’s key at another supplier record, and not past a released claim', async () => {
+    const { w, acting } = await ready();
+    const [first, second] = [w.suppliers[0] ?? '', w.suppliers[1] ?? ''];
+    const small = (orderReference: string, supplierId: string) =>
+      asking(w, { amount: AED(10_000n), orderReference, supplierId });
+    await payeeKeyOf(w, first, 'payee-1');
+    const claimed = decidedOf(await ask(acting, small('PO_7', first)));
+    await payeeKeyOf(w, first, null);
+    await payeeKeyOf(w, second, 'payee-1');
+
+    expect(decidedOf(await ask(acting, small('PO-7', second)))).toMatchObject({
+      decision: 'REQUIRE_APPROVAL',
+      reasons: ['POSSIBLE_DUPLICATE_ORDER'],
+    });
+
+    await withSignedStates(app, w.org, quiet(), (tx, states) =>
+      states.changeStatus(tx, SPEND_REQUESTS, { orgId: w.org, id: claimed.id }, 'deny', {
+        actor: OPERATOR,
+        action: 'spend_request.denied',
+        details: {},
+      }),
+    );
+    await withTenant(app, w.org, (tx) => releaseClaim(tx, { requestId: claimed.id, releasedAt: clock.now() }));
+    // Its claim released, and the first supplier without the payee's key now, nothing open there looks like PO-7.
+    expect(decidedOf(await ask(acting, small('PO-7', first))).decision).toBe('ALLOW');
+  });
+
+  it('never makes an order with nothing the rail carries a possible duplicate of another', async () => {
+    const { w, acting } = await ready();
+    const small = (orderReference: string) => asking(w, { amount: AED(10_000n), orderReference });
+    expect(decidedOf(await ask(acting, small('فاتورة'))).decision).toBe('ALLOW');
+    expect(decidedOf(await ask(acting, small('#_#'))).decision).toBe('ALLOW');
+  });
+
   it('counts the agent’s month under every mandate: a new mandate never resets it (decision 4)', async () => {
     const { w, mandateId, acting } = await ready();
     expect(decidedOf(await ask(acting, asking(w, { amount: AED(1_500_000n) }))).decision).toBe('ALLOW');
@@ -1000,6 +1061,8 @@ describe('the simulator (C4, decision 9)', () => {
 
     const again = simulatedOf(await simulated(w, id, { orderReference: ' inv-1001 ' }));
     expect(again.made.reasons).toContain('DUPLICATE_ORDER_REFERENCE');
+    const alike = simulatedOf(await simulated(w, id, { orderReference: 'INV_1001' }));
+    expect(alike.made).toMatchObject({ decision: 'REQUIRE_APPROVAL', reasons: ['POSSIBLE_DUPLICATE_ORDER'] });
     const unnamed = simulatedOf(await simulated(w, id, { orderReference: null }));
     expect(unnamed.made.reasons).not.toContain('DUPLICATE_ORDER_REFERENCE');
   });

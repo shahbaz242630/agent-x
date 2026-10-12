@@ -17,6 +17,8 @@
 // - nothing left with a letter or digit: the request's own ID, its dashes
 //   taken out (32 characters).
 // The duplicate check never uses it: it compares `order_key` (decision 6).
+// Its lower-case form, without the ID, is the claim's `bank_key` (0043): two
+// orders the rail would carry alike are possible duplicates (decision 11a).
 import { asciiDigits, visibleName } from '../../../shared-kernel/index.ts';
 
 /** The most characters a request's purpose may have: 0039's limit. */
@@ -68,13 +70,27 @@ function railFormOf(character: string): string {
   return RAIL_CHARACTER.test(character) ? character : '';
 }
 
-/** The bank's reference for a request's order reference: see the top of this file. */
-export function bankReferenceOf(orderReference: string, requestId: string): string {
+/** The order reference as the rail carries it, or null when no letter or digit is left of it. */
+function carriedOf(orderReference: string): string | null {
   const carried = Array.from(asciiDigits(orderReference.normalize('NFKD')), railFormOf)
     .join('')
     .replace(/ +/g, ' ')
     .trim()
     .slice(0, BANK_REFERENCE_MOST)
     .trimEnd();
-  return LETTER_OR_DIGIT.test(carried) ? carried : requestId.replaceAll('-', '');
+  return LETTER_OR_DIGIT.test(carried) ? carried : null;
+}
+
+/** The bank's reference for a request's order reference: see the top of this file. */
+export function bankReferenceOf(orderReference: string, requestId: string): string {
+  return carriedOf(orderReference) ?? requestId.replaceAll('-', '');
+}
+
+/**
+ * The claim's `bank_key` (0043; decision 11a): the bank reference in lower
+ * case, or null when it would be the request's own ID, which no other order
+ * can look like.
+ */
+export function bankKeyOf(orderReference: string): string | null {
+  return carriedOf(orderReference)?.toLowerCase() ?? null;
 }

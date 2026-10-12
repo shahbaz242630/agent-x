@@ -317,6 +317,18 @@ describe('the holdings check (E1)', () => {
         owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [allowed]),
       'allowed',
     ],
+    [
+      'a claim’s bank key nulled, hiding its possible duplicates (G5)',
+      (owner, { waiting }) =>
+        owner.query('update spend_requests.order_claims set bank_key = null where request_id = $1', [waiting]),
+      'waiting',
+    ],
+    [
+      'a claim’s bank key swapped (G5)',
+      (owner, { allowed }) =>
+        owner.query("update spend_requests.order_claims set bank_key = 'inv-9' where request_id = $1", [allowed]),
+      'allowed',
+    ],
   ];
 
   it.each(tampered)('raises the alarm and the hold for %s past the app (SEC-DB-09)', async (_, change, whose) => {
@@ -456,6 +468,27 @@ describe('the holdings check (E1)', () => {
     );
     await pastTheApp(w, (owner) =>
       owner.query('update spend_requests.order_claims set payee_key = null where request_id = $1', [allowed]),
+    );
+
+    await job(w).run();
+
+    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
+  });
+
+  it('leaves the bank key of a claim decided before G5, which wrote none, uncompared', async () => {
+    const { w, acting } = await ready();
+    const { allowed } = await requests(acting, w);
+    // A later decided event as G3 sealed one, without G5's `possibleDuplicate` (the app's own keys, as the log's).
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: 'spend_request.decided',
+        subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
+        details: { heldMonth: '2026-10', heldAt: clock.now().toISOString(), duplicateOrder: false },
+      }),
+    );
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set bank_key = null where request_id = $1', [allowed]),
     );
 
     await job(w).run();
