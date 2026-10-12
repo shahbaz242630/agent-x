@@ -97,6 +97,17 @@ export async function claimOrder(
   return 'taken';
 }
 
+/** Locks the request's claims FOR NO KEY UPDATE (level 11), before its move takes the audit head (D7, D8). */
+export async function lockClaimsOf(tx: ClaimsTransaction, requestId: string): Promise<void> {
+  await tx
+    .selectFrom('spend_requests.order_claims')
+    .select('id')
+    .where('request_id', '=', requestId)
+    .orderBy('id')
+    .forNoKeyUpdate()
+    .execute();
+}
+
 /**
  * Releases a request's claim once its request (or its payment) has ended, so
  * the order may be asked for again: whether there was an open one to release.

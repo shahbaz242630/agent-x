@@ -15,7 +15,8 @@
 //    sweep (B2-4a), the security events' retention sweep (B2-5a) and the
 //    notices' sweep (B5-1b); and the security events' recorder, writing its
 //    counts each minute (B2-5b); and mandates past their end expired, each
-//    five minutes (Phase 2 B4). Role grants write their notices to the
+//    five minutes (Phase 2 B4), and spend requests waiting for approval past
+//    72 hours expired, each five minutes (D7). Role grants write their notices to the
 //    outbox (B5-1b); the sender sends them by email, each minute, once the
 //    config names email (B5-3)
 // 7. stops cleanly on SIGTERM or SIGINT: HTTP first, so every
@@ -107,6 +108,7 @@ import { createMandateExpiry, MANDATE_EXPIRY_EVERY_MS } from './mandate-expiry.t
 import { createMandateMoves } from './mandate-moves.ts';
 import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
+import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
@@ -761,6 +763,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     createHoldingsCheck({ list: () => listedOrganizations(database), database, keys, ids: uuidV7Ids, logger }),
     HOLDINGS_CHECK_EVERY_MS,
   );
+  // Spend requests waiting for approval past 72 hours expired, their holdings released (Phase 2 D7), on a timer of its own.
+  const requestExpiring = scheduleRuns(
+    createRequestExpiry({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
+    REQUEST_EXPIRY_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -782,6 +796,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           expiring.stop(),
           historyChecking.stop(),
           holdingsChecking.stop(),
+          requestExpiring.stop(),
           recording.stop(),
         ]);
       },

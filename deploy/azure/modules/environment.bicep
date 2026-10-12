@@ -369,9 +369,9 @@ resource holdingsCheckAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
 }
 
 // An integrity job skipping a whole run (Phase 2 E2c, the partner's catch):
-// the holdings check, the hold-history check and mandate expiry each read the
-// organisation list first, and when that read fails, log `<job>.run_failed`
-// and check nothing until the next run. Any one line tells someone. Stateful,
+// the holdings check, the hold-history check, mandate expiry and request
+// expiry (D7) each read the organisation list first, and when that read
+// fails, log `<job>.run_failed` and check nothing until the next run. Any one line tells someone. Stateful,
 // as above. A job that stops running altogether is PL-33.
 resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: integrityRunsAlertName
@@ -380,7 +380,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   kind: 'LogAlert'
   properties: {
     displayName: 'Integrity jobs: a run failed'
-    description: 'SEV-2. The holdings check, the hold-history check or mandate expiry could not read the organisation list and skipped a whole run: nothing was checked or expired until a run passes. Runbook: Incident-Response-Playbook.md section O.'
+    description: 'SEV-2. The holdings check, the hold-history check, mandate expiry or request expiry could not read the organisation list and skipped a whole run: nothing was checked or expired until a run passes. Runbook: Incident-Response-Playbook.md section O.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -391,7 +391,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'

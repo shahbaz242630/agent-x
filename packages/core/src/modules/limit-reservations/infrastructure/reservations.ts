@@ -14,6 +14,12 @@
 // - `reserve`: the request's reservation, HELD, while the request is still
 //   VALIDATING (level 11; 0039's `held_for_its_request`), at the very instant
 //   the month was worked out from.
+//
+// A request that ends before hand-off (expired or cancelled: D7, D8) gives
+// its capacity back: `lockReservationsOf` takes its reservation FOR NO KEY
+// UPDATE at level 11, after the request (8) and before the audit head (12),
+// and `releaseReservationsOf` releases it once the request has ended (0040's
+// `held_for_its_request` refuses it before).
 import { sql, type Transaction } from 'kysely';
 
 import { periodOf } from '../../../shared-kernel/index.ts';
@@ -199,4 +205,33 @@ export async function reserve(tx: ReservationsTransaction, reservation: NewReser
       settled_at: null,
     })
     .execute();
+}
+
+/** Locks the request's reservations FOR NO KEY UPDATE (level 11), before its move takes the audit head. */
+export async function lockReservationsOf(tx: ReservationsTransaction, requestId: string): Promise<void> {
+  await tx
+    .selectFrom('limit_reservations.reservations')
+    .select('id')
+    .where('request_id', '=', requestId)
+    .orderBy('id')
+    .forNoKeyUpdate()
+    .execute();
+}
+
+/**
+ * Releases the request's HELD reservations, once the request has ended
+ * before hand-off: how many were released. (BLOCKED_UNKNOWN comes only after
+ * hand-off, settled by the payment's outcome, Phase 4.)
+ */
+export async function releaseReservationsOf(
+  tx: ReservationsTransaction,
+  { requestId, at }: { readonly requestId: string; readonly at: Date },
+): Promise<number> {
+  const released = await tx
+    .updateTable('limit_reservations.reservations')
+    .set({ state: 'RELEASED', settled_at: at })
+    .where('request_id', '=', requestId)
+    .where('state', '=', RESERVATION.initial)
+    .executeTakeFirst();
+  return Number(released.numUpdatedRows);
 }

@@ -89,6 +89,7 @@ describe(`creating an organisation (B1a, Postgres ${server.version})`, () => {
       outcome: 'verified',
       version: 1,
       eventId: recorded.eventId.toLowerCase(),
+      recordedAt: expect.any(Date) as Date,
       fields: new Map([['status', 'ACTIVE']]),
     });
     expect(await listed(id)).toBe(true);

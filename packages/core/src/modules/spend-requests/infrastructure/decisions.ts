@@ -158,16 +158,18 @@ export type SpendRequestCheck =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
- * The request, by its ID, read (`share`) and verified, in the caller's
- * transaction, which must be withSignedStates' for its organisation: missing
- * for none of the organisation's; tampered with, the alarm raised.
+ * The request, by its ID, read and verified, locked `share` (or `change`, for
+ * a move: D7, D8), in the caller's transaction, which must be
+ * withSignedStates' for its organisation: missing for none of the
+ * organisation's; tampered with, the alarm raised.
  */
 export async function requestOf(
   tx: RequestsTransaction,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
+  lock: 'share' | 'change' = 'share',
 ): Promise<SpendRequestCheck> {
-  return requestFrom(key, await states.verifiedState(tx, SPEND_REQUESTS, key, 'share'));
+  return requestFrom(key, await states.verifiedState(tx, SPEND_REQUESTS, key, lock));
 }
 
 /**

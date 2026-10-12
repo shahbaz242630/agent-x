@@ -222,6 +222,7 @@ describe('ADR-012 §2 an authority row recorded and verified against the log', (
       outcome: 'verified',
       version: 1,
       eventId: created?.id,
+      recordedAt: expect.any(Date) as Date,
       fields: new Map([
         ['status', 'ACTIVE'],
         ['role', 'reader'],

@@ -237,7 +237,7 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 
 /** An integrity job that skipped a whole run, its organisation list unread (Phase 2 E2c): nothing checked or expired that run. */
 const INTEGRITY_RUN_FAILED_LINES =
-  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed")';
+  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -1909,8 +1909,8 @@ const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
 };
 
 /**
- * An enabled alert on the workspace fires on any run of the three integrity
- * jobs skipped whole (Phase 2 E2c): one line is enough, in any window.
+ * An enabled alert on the workspace fires on any run of the four integrity
+ * jobs skipped whole (Phase 2 E2c; request expiry, D7): one line is enough, in any window.
  */
 const integrityRunsAlert: Check = (snapshot, _expected, add) => {
   for (const environment of ofType(snapshot, TYPES.environment)) {
@@ -1929,7 +1929,7 @@ const integrityRunsAlert: Check = (snapshot, _expected, add) => {
         rule: 'integrity-runs-alert',
         resource: environment.name,
         message:
-          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check or mandate expiry, watching every minute and firing on the first window",
+          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check, mandate expiry or request expiry, watching every minute and firing on the first window",
       });
     }
   }

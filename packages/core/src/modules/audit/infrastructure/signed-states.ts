@@ -128,6 +128,8 @@ export interface VerifiedState {
   readonly outcome: 'verified';
   readonly version: number;
   readonly eventId: string;
+  /** When that event was recorded, as the chain seals it (a waiting request's decision: D7). */
+  readonly recordedAt: Date;
   /** The authority fields, by column, exactly as sealed: canonical text, or null. */
   readonly fields: ReadonlyMap<string, string | null>;
 }
@@ -674,7 +676,13 @@ export function createSignedStates({
       fields: row.fields,
     };
     if (!stateSealMatches(keys, facts, latest.seal)) return alarm(table.subject, key, 'seal');
-    return Object.freeze({ outcome: 'verified', version: row.version, eventId, fields: new Map(row.fields) });
+    return Object.freeze({
+      outcome: 'verified',
+      version: row.version,
+      eventId,
+      recordedAt: latest.recordedAt,
+      fields: new Map(row.fields),
+    });
   };
 
   /** Throws if locking the row now would break the lock order: a shared lock raised to change, or a row after the head. */
