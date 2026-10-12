@@ -47,7 +47,7 @@ import {
   viewIn,
 } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, movedAsRead, type SessionMember } from './use-case-work.ts';
+import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember } from './use-case-work.ts';
 
 /** The moves, by the state machine's events (MANDATE). */
 export const MANDATE_MOVES = ['suspend', 'resume', 'revoke'] as const;
@@ -128,6 +128,7 @@ export function createMandateMoves({
   readonly logger: Logger;
 }): MandateMoves {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
+  const stepUps = createStepUps({ challenges, Refusal: MandateRefused });
 
   /** The mandate read (`share` or `change`) and verified: refused unless it may make the move now. */
   const movable = async (
@@ -159,14 +160,10 @@ export function createMandateMoves({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await movable(tx, states, member.orgId, mandateId, move, 'share');
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: MOVE_OPERATIONS[move].ask,
           changeHash: moveHash(member.orgId, read.state.eventId),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new MandateRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -177,19 +174,13 @@ export function createMandateMoves({
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);
         const read = await movable(tx, states, member.orgId, mandateId, move, 'change');
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: MOVE_OPERATIONS[move].ask,
-            changeHash: moveHash(member.orgId, read.state.eventId),
-          },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: MOVE_OPERATIONS[move].ask, changeHash: moveHash(member.orgId, read.state.eventId) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new MandateRefused(403, 'STEP_UP_FAILED');
         const { id } = read.mandate;
         movedAsRead(
           await states.changeStatus(tx, MANDATES, { orgId: member.orgId, id }, move, {

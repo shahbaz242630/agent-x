@@ -57,7 +57,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
-import { movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
+import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
 export const REFRESH_OPERATION = 'funding-sources.refresh';
@@ -138,6 +138,7 @@ export function createFundingSourceChanges({
   readonly logger: Logger;
 }): FundingSourceChanges {
   const work = createFundingSourceWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: FundingSourceRefused });
 
   /** A suspended source, and the event that suspended it: SOURCE_NOT_SUSPENDED for one active or ended. */
   const suspendedSource = async (tx: FundingSourceTx, states: SignedStates, orgId: string, sourceId: string) => {
@@ -245,14 +246,10 @@ export function createFundingSourceChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const source = await suspendedSource(tx, states, member.orgId, sourceId);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: REACTIVATE_OPERATION,
           changeHash: reactivationHash(source.suspendedBy),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new FundingSourceRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -263,19 +260,13 @@ export function createFundingSourceChanges({
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const source = await suspendedSource(tx, states, member.orgId, sourceId);
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: REACTIVATE_OPERATION,
-            changeHash: reactivationHash(source.suspendedBy),
-          },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(source.suspendedBy) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new FundingSourceRefused(403, 'STEP_UP_FAILED');
         movedAsRead(
           await states.changeStatus(tx, SOURCES, { orgId: member.orgId, id: source.id }, 'reactivate', {
             actor: { type: 'user', id: member.userId },

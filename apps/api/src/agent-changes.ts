@@ -83,7 +83,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
-import { movedAsRead, type Written } from './use-case-work.ts';
+import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
 export const SUSPEND_OPERATION = 'agents.suspend';
@@ -201,6 +201,7 @@ export function createAgentChanges({
   readonly logger: Logger;
 }): AgentChanges {
   const work = createAgentWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
   /** The agent, read for change and verified: NOT_FOUND, or INTEGRITY_FAILED, otherwise. */
   const agentToChange = async (tx: AgentTx, states: SignedStates, orgId: string, agentId: string) => {
@@ -283,14 +284,10 @@ export function createAgentChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: REACTIVATE_OPERATION,
           changeHash: reactivationHash(member.orgId, agent.suspendedBy),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -301,19 +298,13 @@ export function createAgentChanges({
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: REACTIVATE_OPERATION,
-            changeHash: reactivationHash(member.orgId, agent.suspendedBy),
-          },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(member.orgId, agent.suspendedBy) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new AgentRefused(403, 'STEP_UP_FAILED');
         movedAsRead(
           await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: agent.id }, 'reactivate', {
             actor: { type: 'user', id: member.userId },
@@ -332,14 +323,10 @@ export function createAgentChanges({
         const read = await handOverRead(tx, states, member, agentId, owner);
         // Counted early, so an ask that can't be confirmed today is refused now.
         await work.keyBudgetLeft(tx, member.orgId, clock.now());
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: HAND_OVER_OPERATION,
           changeHash: handOverHash(read.state.eventId, read.owner),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -355,19 +342,13 @@ export function createAgentChanges({
         await work.keyBudgetLeft(tx, member.orgId, now);
         const listed = await agentKeysOf(tx, states, member.orgId, read.agent.id, 'change');
         if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: HAND_OVER_OPERATION,
-            changeHash: handOverHash(read.state.eventId, read.owner),
-          },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: HAND_OVER_OPERATION, changeHash: handOverHash(read.state.eventId, read.owner) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new AgentRefused(403, 'STEP_UP_FAILED');
         const actor = { type: 'user' as const, id: member.userId };
         await handAgentOver(tx, states, {
           orgId: member.orgId,

@@ -56,7 +56,7 @@ import {
   viewIn,
 } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, type SessionMember } from './use-case-work.ts';
+import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 /** Accepting a mandate's draft: the ask, then its confirm. */
 export const ACCEPT_OPERATION = 'mandates.accept';
@@ -160,6 +160,7 @@ export function createMandateAcceptance({
   readonly logger: Logger;
 }): MandateAcceptance {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
+  const stepUps = createStepUps({ challenges, Refusal: MandateRefused });
 
   /**
    * Every check acceptance makes, in the lock order: the mandate with its
@@ -196,14 +197,10 @@ export function createMandateAcceptance({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, ACCEPTING_ROLES);
         const { state, draft } = await acceptable(tx, states, member.orgId, mandateId, versionId, 'share');
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: ACCEPT_OPERATION,
           changeHash: acceptanceHash(member.orgId, state.eventId, draft),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new MandateRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -214,19 +211,13 @@ export function createMandateAcceptance({
         const held = await challenges.hold(tx, member.sessionId);
         const admin = await work.memberIn(tx, states, member, ACCEPTING_ROLES);
         const read = await acceptable(tx, states, member.orgId, mandateId, null, 'change');
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: ACCEPT_OPERATION,
-            changeHash: acceptanceHash(member.orgId, read.state.eventId, read.draft),
-          },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: ACCEPT_OPERATION, changeHash: acceptanceHash(member.orgId, read.state.eventId, read.draft) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new MandateRefused(403, 'STEP_UP_FAILED');
         await acceptDraft(tx, states, read, {
           orgId: member.orgId,
           versionId: read.draft.id,

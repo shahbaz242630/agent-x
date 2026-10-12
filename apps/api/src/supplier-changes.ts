@@ -43,6 +43,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import { createStepUps } from './use-case-work.ts';
 
 /** The brake on a supplier. */
 export const SUSPEND_OPERATION = 'suppliers.suspend';
@@ -103,6 +104,7 @@ export function createSupplierChanges({
   readonly logger: Logger;
 }): SupplierChanges {
   const work = createSupplierWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
   /** A suspended supplier, read for change, and the event that suspended it: SUPPLIER_NOT_SUSPENDED otherwise. */
   const suspended = async (tx: SupplierTx, states: SignedStates, orgId: string, supplierId: string) => {
@@ -131,14 +133,7 @@ export function createSupplierChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const { suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
-          action: REACTIVATE_OPERATION,
-          changeHash: reactivationHash(suspendedBy),
-        });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
+        return stepUps.ask(tx, member, { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) });
       });
       return work.askedAfter(done);
     },
@@ -148,15 +143,13 @@ export function createSupplierChanges({
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
         const { found, suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          { sessionId: member.sessionId, action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new SupplierRefused(403, 'STEP_UP_FAILED');
         await reactivateSupplier(tx, states, { orgId: member.orgId, id: found.supplier.id }, found, {
           actor: { type: 'user', id: member.userId },
           details: stepUpDetails(consumed),

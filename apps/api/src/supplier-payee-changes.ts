@@ -58,6 +58,7 @@ import {
   toldEveryone,
 } from './supplier-work.ts';
 import type { Written } from './use-case-work.ts';
+import { createStepUps } from './use-case-work.ts';
 
 /** Asking to confirm the change waiting: its operation, which the step-up challenge names as its action too. */
 export const PAYEE_APPROVE_OPERATION = 'suppliers.payee.approve';
@@ -118,6 +119,7 @@ export function createSupplierPayeeChanges({
   readonly logger: Logger;
 }): SupplierPayeeChanges {
   const work = createSupplierWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
   /**
    * The change waiting for this admin's confirmation, read in the write's
@@ -148,14 +150,7 @@ export function createSupplierPayeeChanges({
     async approve(member, idempotent, supplierId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const { version } = await waitingFor(tx, states, member, supplierId, 'share');
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
-          action: PAYEE_APPROVE_OPERATION,
-          changeHash: approvalHash(version.id),
-        });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
+        return stepUps.ask(tx, member, { action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) });
       });
       return work.askedAfter(done);
     },
@@ -168,15 +163,13 @@ export function createSupplierPayeeChanges({
           const { orgId } = member;
           const { found, version, registration } = await waitingFor(tx, states, member, supplierId, 'change');
           const current = await work.versionIn(tx, states, orgId, found.supplier.id, found.supplier.currentVersionId);
-          const consumed = await challenges.consume(
+          const consumed = await stepUps.consumed(
             tx,
             held,
             stepUpChallengeId,
-            { sessionId: member.sessionId, action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) },
-            // An admin's change: proved with a passkey (SEC-HA-12).
+            { action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) },
             { passkeyRequired: true },
           );
-          if (consumed === undefined) throw new SupplierRefused(403, 'STEP_UP_FAILED');
           await confirmPayeeChange(
             tx,
             states,

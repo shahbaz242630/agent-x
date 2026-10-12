@@ -45,6 +45,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
+import { createStepUps } from './use-case-work.ts';
 
 /** Asking to register an agent: its operation, which the step-up challenge names as its action too. */
 export const REGISTER_OPERATION = 'agents.register';
@@ -128,19 +129,16 @@ export function createAgentRegistrations({
   readonly logger: Logger;
 }): AgentRegistrations {
   const work = createAgentWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
   return {
     async ask(member, idempotent, asked, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REGISTERING_ROLES);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: REGISTER_OPERATION,
           changeHash: registrationHash(member.orgId, asked),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -156,19 +154,13 @@ export function createAgentRegistrations({
         if ((await agentsAddedSince(tx, member.orgId, new Date(now.getTime() - DAY_MS))) >= MOST_AGENTS_ADDED_A_DAY) {
           throw new AgentRefused(409, 'AGENT_ADDS_SPENT');
         }
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
           held,
           stepUpChallengeId,
-          {
-            sessionId: member.sessionId,
-            action: REGISTER_OPERATION,
-            changeHash: registrationHash(member.orgId, asked),
-          },
-          // An admin's change is proved with a passkey (SEC-HA-12); a developer's with their second factor.
+          { action: REGISTER_OPERATION, changeHash: registrationHash(member.orgId, asked) },
           { passkeyRequired: role === 'admin' },
         );
-        if (consumed === undefined) throw new AgentRefused(403, 'STEP_UP_FAILED');
         const actor = { type: 'user' as const, id: member.userId };
         const agentId = ids.next();
         await addAgent(tx, states, {
