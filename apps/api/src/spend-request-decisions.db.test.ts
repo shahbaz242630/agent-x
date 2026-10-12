@@ -273,7 +273,22 @@ describe('deciding a spend request and reserving it (D4)', () => {
     // Signed twice: received VALIDATING, then moved by its decision.
     expect(await eventsAbout(w.org, request.id, 'spend_request')).toEqual([
       expect.objectContaining({ action: 'spend_request.received', actorType: 'agent' }),
-      expect.objectContaining({ action: 'spend_request.decided', actorType: 'agent' }),
+      expect.objectContaining({
+        action: 'spend_request.decided',
+        actorType: 'agent',
+        // What was weighed that no record keeps, sealed with it, so its input hash can be checked again (G3).
+        details: expect.objectContaining({
+          weighedAt: clock.now().toISOString(),
+          agentStatus: 'ACTIVE',
+          mandateStatus: 'ACTIVE',
+          supplierStatus: 'VERIFIED',
+          sourceMayFund: true,
+          monthSpent: '0 AED',
+          splitOpen: '0 AED',
+          duplicateOrder: false,
+          defaultMonthlyCap: '2000000 AED',
+        }) as unknown,
+      }),
     ]);
     // The agent's months are named in its first mandate's zone, kept for good.
     expect(

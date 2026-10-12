@@ -272,3 +272,25 @@ export function decisionInputText(input: DecisionInput): string {
     amount(DEFAULT_MONTHLY_CAP),
   ]);
 }
+
+/**
+ * The facts weighed that no record keeps as they were (G3, PRD §8: every
+ * decision reconstructable): when, the statuses then, and the sums. Sealed
+ * with the decision, they and the versions the request names (mandate,
+ * policies, supplier) give decisionInputText back, so its keyed hash can be
+ * checked again.
+ */
+export function decisionFacts(input: DecisionInput): Readonly<Record<string, string | boolean | null>> {
+  return {
+    weighedAt: input.now.toISOString(),
+    agentStatus: input.agent.status,
+    mandateStatus: input.mandate?.status ?? null,
+    supplierStatus: input.supplierStatus,
+    sourceMayFund: input.sourceMayFund,
+    monthSpent: `${String(input.monthSpent.minor)} ${input.monthSpent.currency}`,
+    splitOpen: `${String(input.splitOpen.minor)} ${input.splitOpen.currency}`,
+    duplicateOrder: input.duplicateOrder,
+    // The default as it was then, so a later change of it leaves this decision whole.
+    defaultMonthlyCap: `${String(DEFAULT_MONTHLY_CAP.minor)} ${DEFAULT_MONTHLY_CAP.currency}`,
+  };
+}

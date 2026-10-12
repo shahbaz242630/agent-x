@@ -4,6 +4,7 @@
 export {
   type Decision,
   type DecisionInput,
+  decisionFacts,
   decisionInputText,
   type DecisionMade,
   DECISIONS,
