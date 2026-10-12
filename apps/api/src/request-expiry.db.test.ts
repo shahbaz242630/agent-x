@@ -8,10 +8,11 @@
 // judged by its decision's sealed time and left; one tampered with is refused
 // and paged past, the others still expired; one that can't be expired, and an
 // organisation whose requests can't be read, logged and passed over; a run's share, the rest left to the next; a
-// stopped run; a holdings check holding the request (forced) is waited for;
+// stopped run; a holdings check holding the request, or a holder of its
+// reservation or claim reaching for the audit head (forced), is waited for;
 // expireRequest's own answers for a request moved on or not there; and an
 // organisation list that can't be read, logged as an error.
-import { withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
 import {
   checkHoldings,
@@ -288,6 +289,39 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     await expiryOf(only(w)).run(AbortSignal.abort());
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
+
+  // ADR-006's order: the reservation and claim (11) before the audit head (12). A holder that takes them in that
+  // order, as Phase 4's outcomes will, is waited for; were the expiry to sign first, the two would deadlock.
+  for (const table of ['limit_reservations.reservations', 'spend_requests.order_claims'] as const) {
+    it(`locks the request's ${table} before the audit head (forced: one holding it, then the head, is waited for)`, async () => {
+      const { w, acting } = await ready();
+      const waiting = await ask(acting, w);
+      pastTheWait();
+      const trail = createAuditTrail({ keys, ids });
+      const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+      const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+      const locking = withTenant(app, w.org, async (tx) => {
+        await tx.selectFrom(table).select('id').where('request_id', '=', waiting.id).forNoKeyUpdate().execute();
+        holding(undefined);
+        await gate;
+        await trail.record(tx, w.org, {
+          actor: { type: 'system', id: 'request-expiry-test' },
+          action: 'probe.locked',
+          subject: { type: 'probe', id: ids.next(), version: 1 },
+          details: {},
+        });
+      });
+      await held;
+      const running = within(20_000, expiryOf(only(w)).run(), 'the run');
+      await waitUntilQueued(database.as('admin'), 1);
+      open(undefined);
+
+      await locking;
+      await running;
+      expect(lines('request_expiry.failed')).toEqual([]);
+      expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+    });
+  }
 
   it('waits for a holdings check holding the request, then expires it (forced: no deadlock in the lock order)', async () => {
     const { w, acting } = await ready();
