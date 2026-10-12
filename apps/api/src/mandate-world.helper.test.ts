@@ -323,13 +323,13 @@ export function mandateWorld({
       });
     });
 
-  /** A second agent of the world's organisation with a mandate in force on `terms` and a key: acting as it. */
-  async function secondAgent(registry: MandateRegistry, w: World, terms: Partial<MandateDraft['terms']> = {}) {
-    const other = ids.next();
+  /** The world as another agent of its organisation, owned by its admin, with no mandate yet. */
+  async function anotherAgent(w: World): Promise<World> {
+    const agent = ids.next();
     await withSignedStates(app(), w.org, quiet(), (tx, states) =>
       addAgent(tx, states, {
         orgId: w.org,
-        id: other,
+        id: agent,
         name: 'Second purchasing agent',
         owner: w.admin.membershipId,
         scopes: ['requests:write'],
@@ -337,7 +337,12 @@ export function mandateWorld({
         actor: OPERATOR,
       }),
     );
-    const theirs = { ...w, agent: other };
+    return { ...w, agent };
+  }
+
+  /** A second agent of the world's organisation with a mandate in force on `terms` and a key: acting as it. */
+  async function secondAgent(registry: MandateRegistry, w: World, terms: Partial<MandateDraft['terms']> = {}) {
+    const theirs = await anotherAgent(w);
     await inForce(registry, theirs, terms);
     return agentKey(theirs);
   }
@@ -403,6 +408,7 @@ export function mandateWorld({
     movedPastTheUseCase,
     agentKey,
     verified,
+    anotherAgent,
     secondAgent,
     stepUp,
   };
