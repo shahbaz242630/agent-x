@@ -218,6 +218,7 @@ export function createAgentKeyChanges({
   ) =>
     stepUps.consumed(
       tx,
+      member,
       held,
       stepUpChallengeId,
       { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId) },

@@ -258,6 +258,7 @@ export function createPolicyChanges({
         const { admin, id, mandateId, existing } = await changeable(tx, states, member, target, rules, 'change');
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           {

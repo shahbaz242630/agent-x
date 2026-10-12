@@ -300,6 +300,7 @@ export function createAgentChanges({
         const agent = await suspendedAgent(tx, states, member.orgId, agentId);
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: REACTIVATE_OPERATION, changeHash: reactivationHash(member.orgId, agent.suspendedBy) },
@@ -344,6 +345,7 @@ export function createAgentChanges({
         if (listed.outcome === 'tampered') throw new AgentRefused(503, 'INTEGRITY_FAILED');
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: HAND_OVER_OPERATION, changeHash: handOverHash(read.state.eventId, read.owner) },

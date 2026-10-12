@@ -145,6 +145,7 @@ export function createSupplierChanges({
         const { found, suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) },

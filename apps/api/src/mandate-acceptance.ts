@@ -213,6 +213,7 @@ export function createMandateAcceptance({
         const read = await acceptable(tx, states, member.orgId, mandateId, null, 'change');
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: ACCEPT_OPERATION, changeHash: acceptanceHash(member.orgId, read.state.eventId, read.draft) },

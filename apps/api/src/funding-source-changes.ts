@@ -262,6 +262,7 @@ export function createFundingSourceChanges({
         const source = await suspendedSource(tx, states, member.orgId, sourceId);
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: REACTIVATE_OPERATION, changeHash: reactivationHash(source.suspendedBy) },

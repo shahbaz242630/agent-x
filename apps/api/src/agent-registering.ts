@@ -156,9 +156,11 @@ export function createAgentRegistrations({
         }
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: REGISTER_OPERATION, changeHash: registrationHash(member.orgId, asked) },
+          // An admin's change is proved with a passkey (SEC-HA-12); a developer's with their second factor.
           { passkeyRequired: role === 'admin' },
         );
         const actor = { type: 'user' as const, id: member.userId };

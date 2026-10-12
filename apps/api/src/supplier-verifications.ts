@@ -215,6 +215,7 @@ export function createSupplierVerifications({
         );
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           confirm.stepUpChallengeId,
           { action: VERIFY_OPERATION, changeHash: verificationHash(current.id, confirm.note) },

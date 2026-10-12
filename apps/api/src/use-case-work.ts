@@ -142,7 +142,8 @@ type ChallengeHandle = Parameters<StepUpChallenges['open']>[0];
 /**
  * A change's step-up (ADR-003 §7), one copy for every use case asking one
  * (S101, eleven had their own): the ask opens the challenge, the confirm
- * uses it in the change's own transaction, bound to the session `held` locked.
+ * uses it in the change's own transaction. Both bind the member's session:
+ * `consume` refuses a hold of any other, so a confirm holding the wrong one throws.
  */
 export function createStepUps({
   challenges,
@@ -167,6 +168,7 @@ export function createStepUps({
     /** Uses the challenge for exactly this change, or STEP_UP_FAILED. An admin's change needs a passkey (SEC-HA-12). */
     consumed: async (
       tx: ChallengeHandle,
+      member: SessionMember,
       held: HeldChallenges,
       stepUpChallengeId: string,
       change: Omit<StepUpBinding, 'sessionId'>,
@@ -176,7 +178,7 @@ export function createStepUps({
         tx,
         held,
         stepUpChallengeId,
-        { sessionId: held.sessionId, ...change },
+        { sessionId: member.sessionId, ...change },
         need,
       );
       if (consumed === undefined) throw new Refusal(403, 'STEP_UP_FAILED');

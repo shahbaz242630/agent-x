@@ -174,6 +174,7 @@ export function createSupplierDetailsChanges({
         );
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },

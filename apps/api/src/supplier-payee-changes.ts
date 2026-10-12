@@ -57,8 +57,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
-import type { Written } from './use-case-work.ts';
-import { createStepUps } from './use-case-work.ts';
+import { createStepUps, type Written } from './use-case-work.ts';
 
 /** Asking to confirm the change waiting: its operation, which the step-up challenge names as its action too. */
 export const PAYEE_APPROVE_OPERATION = 'suppliers.payee.approve';
@@ -165,6 +164,7 @@ export function createSupplierPayeeChanges({
           const current = await work.versionIn(tx, states, orgId, found.supplier.id, found.supplier.currentVersionId);
           const consumed = await stepUps.consumed(
             tx,
+            member,
             held,
             stepUpChallengeId,
             { action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) },

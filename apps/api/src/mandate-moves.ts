@@ -176,6 +176,7 @@ export function createMandateMoves({
         const read = await movable(tx, states, member.orgId, mandateId, move, 'change');
         const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           { action: MOVE_OPERATIONS[move].ask, changeHash: moveHash(member.orgId, read.state.eventId) },
