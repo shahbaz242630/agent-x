@@ -162,7 +162,7 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
     const denied: SpendRequestRecord = {
       ...ALLOWED,
       mandateId: null,
-      decision: 'REQUIRE_NEW_MANDATE',
+      decision: 'DENY',
       reasons: ['MANDATE_NOT_IN_FORCE'],
       status: 'DENIED',
     };
@@ -172,9 +172,25 @@ describe('POST /v1/spend-requests: an agent asks to pay (D4r)', () => {
     expect(response.statusCode).toBe(201);
     expect(response.json()).toMatchObject({
       status: 'DENIED',
-      decision: 'REQUIRE_NEW_MANDATE',
+      decision: 'DENY',
       mandateId: null,
       reasons: [{ code: 'MANDATE_NOT_IN_FORCE', message: REASON_CODES.MANDATE_NOT_IN_FORCE }],
+    });
+  });
+
+  it('shows the agent a refusal’s own reasons alone, never where its approval line lies (decision 11c)', async () => {
+    const denied: SpendRequestRecord = {
+      ...ALLOWED,
+      decision: 'DENY',
+      reasons: ['SUPPLIER_NOT_ALLOWED', 'MANDATE_ORDER_LIMIT', 'APPROVAL_THRESHOLD'],
+      status: 'DENIED',
+    };
+    const { app } = await withDecisions({ outcome: 'decided', request: denied });
+    const response = await app.inject(asAgent(BODY));
+
+    expect(response.json()).toMatchObject({
+      decision: 'DENY',
+      reasons: [{ code: 'SUPPLIER_NOT_ALLOWED', message: REASON_CODES.SUPPLIER_NOT_ALLOWED }],
     });
   });
 

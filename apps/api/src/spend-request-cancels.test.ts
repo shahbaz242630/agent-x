@@ -193,6 +193,24 @@ describe('POST /v1/spend-requests/{id}/cancel: an admin or approver cancels (D8)
   });
 });
 
+describe('the reasons each route shows (decision 11c)', () => {
+  const refused: SpendRequestRecord = {
+    ...CANCELLED,
+    decision: 'DENY',
+    reasons: ['DUPLICATE_ORDER_REFERENCE', 'APPROVAL_THRESHOLD'],
+    status: 'DENIED',
+  };
+  const codes = (response: { json: () => { reasons: { code: string }[] } }) =>
+    response.json().reasons.map(({ code }) => code);
+
+  it('shows a person every reason, and the agent only the refusal’s own', async () => {
+    const { app } = await withCancels({ outcome: 'cancelled', request: refused });
+
+    expect(codes(await app.inject(asMember()))).toEqual(['DUPLICATE_ORDER_REFERENCE', 'APPROVAL_THRESHOLD']);
+    expect(codes(await app.inject(asAgent()))).toEqual(['DUPLICATE_ORDER_REFERENCE']);
+  });
+});
+
 describe('POST /v1/agent/spend-requests/{id}/cancel: the agent cancels its own (D8)', () => {
   it('hands the use case the agent, its key and the request, and answers 200', async () => {
     const { app, asked } = await withCancels();
