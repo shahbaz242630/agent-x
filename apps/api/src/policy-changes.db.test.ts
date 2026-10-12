@@ -501,6 +501,10 @@ describe('a mandate shows the cap its agent is held to (C3c, partner S92: never 
     expect(await shown()).toEqual({ from: 'default', cap: AED(2_000_000n), warnings: [ABOVE_THE_CAP] });
     changedOf(await changed(w, ORGANIZATION, rules(3_000_000n)));
     expect(await shown()).toEqual({ from: 'organization-policy', cap: AED(3_000_000n), warnings: [] });
+    // A mandate policy setting no monthly cap of its own: the organisation's still holds.
+    const thresholdOnly = rules(0n, { monthlyCap: null, approvalThreshold: AED(400_000n) });
+    changedOf(await changed(w, { scope: 'mandate', mandateId: id }, thresholdOnly));
+    expect(await shown()).toEqual({ from: 'organization-policy', cap: AED(3_000_000n), warnings: [] });
     changedOf(await changed(w, { scope: 'mandate', mandateId: id }, rules(2_999_999n)));
     expect(await shown()).toEqual({ from: 'mandate-policy', cap: AED(2_999_999n), warnings: [ABOVE_THE_CAP] });
     changedOf(await changed(w, { scope: 'mandate', mandateId: id }, rules(3_000_000n)));

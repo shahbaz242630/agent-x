@@ -10,7 +10,7 @@
 import { AGENTS } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
-import { MANDATE_VERSIONS, MANDATES, MOST_DRAFTS_A_DAY } from '@agentx/core/modules/mandates';
+import { MANDATE_VERSIONS, MANDATES } from '@agentx/core/modules/mandates';
 import { createDatabase, type Database, lockName, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -267,10 +267,11 @@ describe('drafting a later version (B2)', () => {
     expect(await redraft(w.admin, first.mandate.id, draftOf(w).terms)).toEqual(refused(409, 'MANDATE_ENDED'));
   });
 
-  it(`spends the day's budget of ${String(MOST_DRAFTS_A_DAY)} drafts, and refuses the next until a day has passed`, async () => {
+  // B2's daily budget, written out so a change to the constant fails here.
+  it("spends the day's budget of 100 drafts, and refuses the next until a day has passed", async () => {
     const w = await world();
     const first = draftedOf(await draft(w.admin, draftOf(w)));
-    for (let made = 1; made < MOST_DRAFTS_A_DAY; made += 1) {
+    for (let made = 1; made < 100; made += 1) {
       draftedOf(await redraft(w.admin, first.mandate.id, draftOf(w).terms));
     }
 
