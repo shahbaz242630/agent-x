@@ -15,8 +15,8 @@
 // mandate, a version's limit or a supplier's payee key changed past the app:
 // SEC-DB-02/03); a mandate past its end before the job (SEC-AG-12), a
 // suspended source of the organisation's own (SEC-AG-03), and a supersede
-// mid-month keeping the month (SEC-LIM-03) (G8); the agent's route over HTTP with its real key check (D4r); the
-// simulator (C4): the same decision as a request, the month's total, proposed
+// mid-month keeping the month (SEC-LIM-03) (G8); the agent's route over HTTP
+// with its real key check (D4r); the simulator (C4): the same decision as a request, the month's total, proposed
 // rules, and nothing written anywhere (SEC-AG-09); and no request ever left
 // VALIDATING.
 import { AGENT_KEYS, AGENTS, createAgentKeyCheck } from '@agentx/core/modules/agents';
