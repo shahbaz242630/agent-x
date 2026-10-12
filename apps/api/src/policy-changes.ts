@@ -60,7 +60,7 @@ import {
   versionIn,
 } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
-import { createUseCaseWork, type SessionMember } from './use-case-work.ts';
+import { createStepUps, createUseCaseWork, type SessionMember } from './use-case-work.ts';
 
 /** Each kind's operations: the ask, which the step-up challenge names as its action too, and its confirm. */
 export const POLICY_OPERATIONS = {
@@ -161,6 +161,7 @@ export function createPolicyChanges({
   readonly logger: Logger;
 }): PolicyChanges {
   const work = createUseCaseWork({ database, keys, ids, logger, Refusal: MandateRefused });
+  const stepUps = createStepUps({ challenges, Refusal: MandateRefused });
 
   /** The policy, by its ID, read and verified: null for one never set; INTEGRITY_FAILED for one that can't be believed. */
   const policyIn = async (tx: MandateTx, states: SignedStates, orgId: string, id: string, lock: 'share' | 'change') => {
@@ -240,14 +241,10 @@ export function createPolicyChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const rules = policyRules(asked);
         const { id, existing } = await changeable(tx, states, member, target, rules, 'share');
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
+        return stepUps.ask(tx, member, {
           action: POLICY_OPERATIONS[target.scope].ask,
           changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
         });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new MandateRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
@@ -259,19 +256,17 @@ export function createPolicyChanges({
         await onePolicyChangeAtATime(tx, member.orgId);
         const held = await challenges.hold(tx, member.sessionId);
         const { admin, id, mandateId, existing } = await changeable(tx, states, member, target, rules, 'change');
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
           {
-            sessionId: member.sessionId,
             action: POLICY_OPERATIONS[target.scope].ask,
             changeHash: changeHash(target.scope, member.orgId, id, existing, rules),
           },
-          // An admin's change: proved with a passkey (SEC-HA-12).
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new MandateRefused(403, 'STEP_UP_FAILED');
         await setPolicy(tx, states, {
           orgId: member.orgId,
           existing,
