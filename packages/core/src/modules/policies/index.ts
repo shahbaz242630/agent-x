@@ -15,5 +15,6 @@ export {
   type MonthlyCapFrom,
   type OverCap,
   type PolicyRules,
+  reasonsShownToAgent,
   type SpendAsked,
 } from './domain/decide.ts';

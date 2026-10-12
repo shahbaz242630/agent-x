@@ -161,6 +161,22 @@ export function decide(input: DecisionInput): DecisionMade {
   };
 }
 
+/**
+ * The reasons an agent is shown (partner decision 11c, widened S102): on a
+ * refusal (DENY, REQUIRE_NEW_MANDATE), only those that made it, so a request
+ * refused for nothing it holds never tells the agent where its hidden approval
+ * line or caps lie; on an approval, all of them. The evidence and the team
+ * keep the full list.
+ */
+export function reasonsShownToAgent(decision: Decision, reasons: readonly ReasonCode[]): readonly ReasonCode[] {
+  if (decision !== 'DENY' && decision !== 'REQUIRE_NEW_MANDATE') return reasons;
+  // A policy's order cap denies or asks approval as the policy says, which the record doesn't keep: shown only
+  // when nothing else could have denied, so it denied.
+  const made = reasons.filter((code) => code !== 'POLICY_ORDER_CAP' && (DECIDES[code] ?? 'DENY') === decision);
+  if (made.length > 0 || decision !== 'DENY') return made;
+  return reasons.filter((code) => code === 'POLICY_ORDER_CAP');
+}
+
 type Fail = (code: ReasonCode, decision?: Decision) => void;
 
 /** More than the limit: exactly at it passes. */
