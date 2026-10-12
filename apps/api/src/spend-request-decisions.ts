@@ -51,6 +51,7 @@ import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/or
 import {
   decide,
   type DecisionInput,
+  decisionFacts,
   decisionInputText,
   type MandateInForce,
   type PolicyRules,
@@ -348,6 +349,7 @@ export function createSpendRequestDecisions({
       idempotencyKey,
       inputHash: Buffer.from(hash.mac).toString('hex'),
       inputHashKeyVersion: hash.keyVersion,
+      weighed: decisionFacts(input),
       decision: made.decision,
       reasons: made.reasons,
       createdAt: now,

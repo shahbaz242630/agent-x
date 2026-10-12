@@ -60,6 +60,8 @@ export interface NewRequest {
   /** The keyed hash of decisionInputText, lower-case hex, and its key's version. */
   readonly inputHash: string;
   readonly inputHashKeyVersion: number;
+  /** decisionFacts: what was weighed that no record keeps, sealed with the decision (G3). */
+  readonly weighed: Readonly<Record<string, string | boolean | null>>;
   readonly decision: Decision;
   readonly reasons: readonly ReasonCode[];
   readonly createdAt: Date;
@@ -99,6 +101,7 @@ export async function signRequest(
     details: {
       decision: request.decision,
       reasons: request.reasons.join(' '),
+      ...request.weighed,
       // What its reservation and claim were made as, sealed with the decision, for the holdings check (E1, E1b).
       ...(held === null
         ? {}

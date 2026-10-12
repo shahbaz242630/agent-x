@@ -13,6 +13,7 @@ import {
   DECISIONS,
   decide,
   type DecisionInput,
+  decisionFacts,
   decisionInputText,
   DEFAULT_MONTHLY_CAP,
   type MandateInForce,
@@ -343,6 +344,32 @@ describe('decisionInputText', () => {
       { ...base, now: new Date(NOW.getTime() + 1) },
     ]) {
       expect(decisionInputText(changed)).not.toBe(decisionInputText(base));
+    }
+  });
+
+  it('keeps in decisionFacts every fact weighed that no versioned record holds (G3)', () => {
+    const base = input(5_000);
+    expect(decisionFacts(base)).toEqual({
+      weighedAt: NOW.toISOString(),
+      agentStatus: base.agent.status,
+      mandateStatus: MANDATE.status,
+      supplierStatus: base.supplierStatus,
+      sourceMayFund: base.sourceMayFund,
+      monthSpent: '0 AED',
+      splitOpen: '0 AED',
+      duplicateOrder: false,
+    });
+    for (const changed of [
+      { ...base, now: new Date(NOW.getTime() + 1) },
+      { ...base, agent: { ...base.agent, status: 'SUSPENDED' } },
+      { ...base, mandate: { ...MANDATE, status: 'SUSPENDED' } },
+      { ...base, supplierStatus: null },
+      { ...base, sourceMayFund: !base.sourceMayFund },
+      { ...base, monthSpent: aed(1) },
+      { ...base, splitOpen: aed(1) },
+      { ...base, duplicateOrder: true },
+    ]) {
+      expect(decisionFacts(changed)).not.toEqual(decisionFacts(base));
     }
   });
 
