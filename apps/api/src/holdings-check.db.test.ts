@@ -11,7 +11,7 @@ import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
   checkHoldings,
-  requestHoldingsWhole,
+  holdingsRecordChecks,
   SPEND_REQUESTS,
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
@@ -374,7 +374,9 @@ describe('the holdings check (E1)', () => {
     const { w, acting } = await ready();
     const held = await requests(acting, w);
     const whole = (id: string) =>
-      withSignedStates(app, w.org, quiet(), (tx, states) => requestHoldingsWhole(tx, states, keys, w.org, id));
+      withSignedStates(app, w.org, quiet(), (tx, states) =>
+        holdingsRecordChecks(keys)[SPEND_REQUESTS.subject](tx, states, w.org, id),
+      );
 
     expect([await whole(held.allowed), await whole(held.waiting), await whole(held.denied)]).toEqual([
       true,

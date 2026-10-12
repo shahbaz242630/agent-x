@@ -148,16 +148,23 @@ export async function checkHoldings(
  * the caller's transaction: whole, or a mismatch alarmed (G1: clearing a hold
  * waits for its named request's reservation and claim to match again).
  */
-export async function requestHoldingsWhole(
+async function requestHoldingsWhole(
   tx: HoldingsTransaction,
   states: SignedStates,
   keys: KeyProvider,
   orgId: string,
   requestId: string,
 ): Promise<boolean> {
-  const { requests, mismatched, tampered } = await judged(tx, states, keys, orgId, [requestId]);
-  return requests === 1 && mismatched === 0 && tampered === 0;
+  // A request not found counts as tampered with.
+  const { mismatched, tampered } = await judged(tx, states, keys, orgId, [requestId]);
+  return mismatched === 0 && tampered === 0;
 }
+
+/** For the hold's clearing (identity's `namedRecordChecks`): a spend request named whole only when it holds as decided. */
+export const holdingsRecordChecks = (keys: KeyProvider) => ({
+  [SPEND_REQUESTS.subject]: (tx: HoldingsTransaction, states: SignedStates, orgId: string, id: string) =>
+    requestHoldingsWhole(tx, states, keys, orgId, id),
+});
 
 /** The requests `ids` judged against what each holds, each mismatch alarmed. */
 async function judged(

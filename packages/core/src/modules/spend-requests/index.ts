@@ -21,9 +21,9 @@ export {
 export { SPEND_REQUEST, type SpendRequestStatus } from './domain/spend-request.ts';
 export {
   checkHoldings,
+  holdingsRecordChecks,
   type HoldingsChecked,
   MOST_CHECKED_A_PAGE,
-  requestHoldingsWhole,
 } from './infrastructure/holdings-check.ts';
 export type { HeldAs } from './domain/holdings.ts';
 export {
