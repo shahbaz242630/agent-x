@@ -148,7 +148,7 @@ export async function checkHoldings(
  * the caller's transaction: whole, or a mismatch alarmed (G1: clearing a hold
  * waits for its named request's reservation and claim to match again).
  */
-async function requestHoldingsWhole(
+export async function requestHoldingsWhole(
   tx: HoldingsTransaction,
   states: SignedStates,
   keys: KeyProvider,

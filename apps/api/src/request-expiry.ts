@@ -66,7 +66,7 @@ export function createRequestExpiry({
   const expiredLogged = async (log: Logger, orgId: string, requestId: string): Promise<boolean> => {
     try {
       const ended = await withSignedStates(database, orgId, services(log), (tx, states) =>
-        expireRequest(tx, states, { orgId, id: requestId }, clock.now()),
+        expireRequest(tx, states, keys, { orgId, id: requestId }, clock.now()),
       );
       if (ended.outcome === 'ended') log.info('request_expiry.expired', { requestId });
       // A tampered request has raised its alarm through its read; the rest were moved meanwhile, or aren't due.
