@@ -76,16 +76,21 @@ export async function agentMonth(
   return periodOf(at, kept?.time_zone ?? zoneIfNew).month;
 }
 
-/** The agent's month's total in minor units: every reservation but a released one, under any of its mandates. */
+/**
+ * The agent's month's total in minor units of `currency`: every reservation
+ * but a released one, under any of its mandates. One currency's alone, as a
+ * cap is in one (G4: another's minor units would be counted as its own).
+ */
 export async function monthSpent(
   tx: ReservationsTransaction,
-  { agentId, month }: { agentId: string; month: string },
+  { agentId, month, currency }: { agentId: string; month: string; currency: string },
 ): Promise<bigint> {
   const { spent } = await tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('spent'))
     .where('agent_id', '=', agentId)
     .where('month', '=', month)
+    .where('currency', '=', currency)
     .where('state', '<>', 'RELEASED')
     .executeTakeFirstOrThrow();
   return BigInt(spent);
@@ -99,17 +104,24 @@ export async function monthSpent(
  * reservation made under another supplier record with the same payee key
  * counts, and so does one the supplier made before it had a key (0041's
  * indexes). A statement of its own after the supplier's lock, which
- * serialises the payee's decisions (§7.2).
+ * serialises the payee's decisions (§7.2). In `currency` alone, as the
+ * threshold is (G4).
  */
 export async function splitHeld(
   tx: ReservationsTransaction,
-  { supplierId, payeeKey, since }: { supplierId: string; payeeKey: string | null; since: Date },
+  {
+    supplierId,
+    payeeKey,
+    since,
+    currency,
+  }: { supplierId: string; payeeKey: string | null; since: Date; currency: string },
 ): Promise<bigint> {
   const { held } = await tx
     .selectFrom('limit_reservations.reservations')
     .select(sql<string>`coalesce(pg_catalog.sum(amount_minor), 0)::text`.as('held'))
     .where('state', '<>', 'RELEASED')
     .where('reserved_at', '>=', since)
+    .where('currency', '=', currency)
     .where((where) =>
       payeeKey === null
         ? where('supplier_id', '=', supplierId)

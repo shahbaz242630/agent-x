@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { seedRows } from '../../../seed-rows.helper.test.ts';
 import { RESERVATION } from '../domain/reservation.ts';
-import { splitHeld } from './reservations.ts';
+import { monthSpent, splitHeld } from './reservations.ts';
 import type { LimitReservationsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -77,13 +77,13 @@ const period = (org: Org, month = MONTH, zone = 'Asia/Dubai') =>
   });
 
 /** The agent's spend request for AED 250, VALIDATING with its decision as D4 adds it, made past the app: its ID. */
-const requestOf = async (org: Org, decision = 'ALLOW'): Promise<string> => {
+const requestOf = async (org: Org, decision = 'ALLOW', currency = 'AED'): Promise<string> => {
   const id = randomUUID();
   await database.as('admin').query(
     `insert into spend_requests.requests (org_id, id, agent_id, agent_key_id, mandate_id, mandate_version_id,
        supplier_id, supplier_version_id, funding_source_id, amount_minor, currency, purpose, order_reference,
        idempotency_key, input_hash, input_hash_key_version, decision, reason_codes, status, created_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 25000, 'AED', 'Printer paper', 'PO-1', $10, $11, 1, $12, $13,
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 25000, $15, 'Printer paper', 'PO-1', $10, $11, 1, $12, $13,
        'VALIDATING', $14)`,
     [
       org.id,
@@ -100,6 +100,7 @@ const requestOf = async (org: Org, decision = 'ALLOW'): Promise<string> => {
       decision,
       decision === 'ALLOW' ? null : 'APPROVAL_THRESHOLD',
       AT,
+      currency,
     ],
   );
   return id;
@@ -448,8 +449,29 @@ describe("a reservation's request (`held_for_its_request`, D2's review)", () => 
 });
 
 /** The split total for the supplier (and payee key) given, since `since`, as a decision reads it (D5). */
-const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT) =>
-  inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since }));
+const splitOf = (org: Org, supplierId: string, payeeKey: string | null, since = AT, currency = 'AED') =>
+  inOrg(org, (tx) => splitHeld(tx, { supplierId, payeeKey, since, currency }));
+
+describe('the totals in one currency (G4)', () => {
+  it('count only the currency weighed: another’s minor units are never counted as its own', async () => {
+    const org = await organisation();
+    await period(org);
+    // Another deployment's currency, added as its own migration would add it.
+    await database
+      .as('admin')
+      .query("insert into mandates.allowed_currencies (code) values ('USD') on conflict do nothing");
+    await add(org, reservationRow(org, await requestOf(org)));
+    await add(org, reservationRow(org, await requestOf(org, 'ALLOW', 'USD'), { currency: 'USD' }));
+    const spent = (currency: string) =>
+      inOrg(org, (tx) => monthSpent(tx, { agentId: org.agent, month: MONTH, currency }));
+
+    expect([await spent('AED'), await spent('USD'), await spent('EUR')]).toEqual([25_000n, 25_000n, 0n]);
+    expect([
+      await splitOf(org, org.supplier, null, AT, 'AED'),
+      await splitOf(org, org.supplier, null, AT, 'USD'),
+    ]).toEqual([25_000n, 25_000n]);
+  });
+});
 
 describe('the split total (`splitHeld`, D5)', () => {
   it('adds up the supplier’s reservations still holding capacity, reserved since the window began', async () => {

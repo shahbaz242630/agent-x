@@ -146,7 +146,7 @@ export function spendWorld({
         .select('month')
         .where('agent_id', '=', acting.agentId)
         .executeTakeFirstOrThrow();
-      return monthSpent(tx, { agentId: acting.agentId, month });
+      return monthSpent(tx, { agentId: acting.agentId, month, currency: 'AED' });
     });
 
   return { ...shared, ready, ask, statusOf, holdingsOf, spentOf };
