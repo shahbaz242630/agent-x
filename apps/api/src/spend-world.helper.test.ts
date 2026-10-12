@@ -3,7 +3,7 @@
 // above AED 1,000) and both suppliers verified; the agent's requests decided
 // through decideAndReserve; and reads of where a request stands, what it
 // holds and the agent's month.
-import type { FixedClock, SequentialIds } from '@agentx/testing';
+import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
 import { requestOf, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -19,6 +19,46 @@ import {
 } from './spend-request-decisions.ts';
 
 export type SpendWorldTables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
+
+/**
+ * The request's claim or reservation released, or its reservation's amount
+ * halved, by the tables' owner with their guards off: as only something past
+ * the app could (G2).
+ */
+export async function changedPastTheApp(
+  database: TestDatabase,
+  org: string,
+  requestId: string,
+  what: 'claim released' | 'reservation released' | 'amount halved',
+): Promise<void> {
+  const owner = await database.connect('owner');
+  try {
+    await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [org]);
+    await owner.query('begin');
+    await owner.query('alter table limit_reservations.reservations disable trigger user');
+    await owner.query('alter table spend_requests.order_claims disable trigger user');
+    if (what === 'claim released') {
+      await owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [
+        requestId,
+      ]);
+    } else if (what === 'reservation released') {
+      await owner.query(
+        "update limit_reservations.reservations set state = 'RELEASED', settled_at = now() where request_id = $1",
+        [requestId],
+      );
+    } else {
+      await owner.query(
+        'update limit_reservations.reservations set amount_minor = amount_minor / 2 where request_id = $1',
+        [requestId],
+      );
+    }
+    await owner.query('alter table limit_reservations.reservations enable trigger user');
+    await owner.query('alter table spend_requests.order_claims enable trigger user');
+    await owner.query('commit');
+  } finally {
+    await owner.end();
+  }
+}
 
 const CORRELATION = '0199a0f0-0000-7000-8000-0000000000d7';
 

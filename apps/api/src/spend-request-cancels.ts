@@ -103,7 +103,7 @@ export function createSpendRequestCancels({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, CANCELLING_ROLES);
         const by = { kind: 'user', userId: member.userId } as const;
-        return settled(await cancelRequest(tx, states, { orgId: member.orgId, id: requestId }, by, clock.now()));
+        return settled(await cancelRequest(tx, states, keys, { orgId: member.orgId, id: requestId }, by, clock.now()));
       });
       return shown(member.orgId, correlationId, done);
     },
@@ -111,7 +111,7 @@ export function createSpendRequestCancels({
     async byAgent(agent, idempotent, requestId, correlationId) {
       const done = await work.write(agent, idempotent, correlationId, async (tx, states) => {
         const by = { kind: 'agent', agentId: agent.agentId } as const;
-        return settled(await cancelRequest(tx, states, { orgId: agent.orgId, id: requestId }, by, clock.now()));
+        return settled(await cancelRequest(tx, states, keys, { orgId: agent.orgId, id: requestId }, by, clock.now()));
       });
       return shown(agent.orgId, correlationId, done);
     },

@@ -32,7 +32,7 @@ import { createMandateRegistry, type MandateRegistry } from './mandate-registry.
 import { AED, keys, type World } from './mandate-world.helper.test.ts';
 import { createRequestExpiry, type RequestExpiry } from './request-expiry.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
-import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
+import { changedPastTheApp, spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -128,6 +128,19 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
       checkHoldings(tx, states, keys, w.org, { after: null, limit: 200 }),
     );
     expect(checked).toMatchObject({ mismatched: 0, tampered: 0 });
+  });
+
+  it('still expires one whose claim was released past the app, raising the alarm and the hold rather than hiding it (G2)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w, { orderReference: 'INV-G2' });
+    await changedPastTheApp(database, w.org, waiting.id, 'claim released');
+    pastTheWait();
+
+    await expiryOf(only(w)).run();
+
+    expect(await statusOf(w, waiting.id)).toBe('EXPIRED');
+    const hold = await withSignedStates(app, w.org, quiet(), (tx, states) => states.holdRecord(tx, w.org));
+    expect(hold).toMatchObject({ outcome: 'held' });
   });
 
   it('leaves one not yet due, an allowed one and a denied one as they are', async () => {
@@ -318,7 +331,7 @@ describe('spend requests waiting for approval expired after 72 hours (D7)', () =
     clock.advanceBy(SEVENTY_TWO_HOURS - MINUTE);
     const expire = (id: string) =>
       withSignedStates(app, w.org, quiet(), (tx, states) =>
-        expireRequest(tx, states, { orgId: w.org, id }, clock.now()),
+        expireRequest(tx, states, keys, { orgId: w.org, id }, clock.now()),
       );
 
     expect(await expire(waiting.id)).toEqual({ outcome: 'not_due' });
