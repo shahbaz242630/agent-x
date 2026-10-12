@@ -19,6 +19,7 @@
 // moved later past the app is only left holding (money kept, never paid). The
 // sealed time is the database's clock, `now` the app's: seconds apart at most,
 // against 72 hours.
+import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 
 import type { AuditTables, SignedChange, SignedStates, TamperSign } from '../../audit/index.ts';
@@ -30,6 +31,7 @@ import {
 import { movedAsRead } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { requestOf, type SpendRequestRecord } from './decisions.ts';
+import { requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
@@ -85,6 +87,7 @@ export async function requestsWaitingSince(
 export async function expireRequest(
   tx: EndingsTransaction,
   states: SignedStates,
+  keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
   now: Date,
 ): Promise<Ended> {
@@ -94,7 +97,7 @@ export async function expireRequest(
   // Still waiting, its latest signed event is its decision: the chain seals when that was recorded.
   const decided = read.state.recordedAt;
   if (decided.getTime() + WAITS_FOR_APPROVAL_MS > now.getTime()) return { outcome: 'not_due' };
-  await endHolding(tx, states, key, 'expire', now, {
+  await endHolding(tx, states, keys, key, 'expire', now, {
     actor: ACTOR,
     action: 'spend_request.expired',
     details: { decidedAt: decided.toISOString() },
@@ -116,6 +119,7 @@ export type Canceller =
 export async function cancelRequest(
   tx: EndingsTransaction,
   states: SignedStates,
+  keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
   by: Canceller,
   now: Date,
@@ -125,7 +129,7 @@ export async function cancelRequest(
   if (by.kind === 'agent' && read.request.agentId !== by.agentId) return { outcome: 'missing' };
   if (!SPEND_REQUEST.transition(read.request.status, 'cancel').ok)
     return { outcome: 'not_open', request: read.request };
-  await endHolding(tx, states, key, 'cancel', now, {
+  await endHolding(tx, states, keys, key, 'cancel', now, {
     actor: by.kind === 'user' ? { type: 'user', id: by.userId } : { type: 'agent', id: by.agentId },
     action: 'spend_request.cancelled',
     details: {},
@@ -137,14 +141,15 @@ export async function cancelRequest(
  * The move and its release, in lock order: the reservation and claim locked
  * (11), the request moved and signed (the head, 12), then both released. The
  * request was read for change in this transaction and may make the move.
- * Every request that may still end holds exactly one reservation and one
- * claim, as it was decided with: releasing anything else means they were
- * changed past the app, so the alarm is raised and the request still ends
+ * Its reservation and claim are first judged as the holdings check judges
+ * them, once locked: one changed past the app (released, deleted, or its
+ * amount, month or payee moved) raises the alarm, and the request still ends
  * (a brake), rather than its ending hiding the change from the holdings check.
  */
 async function endHolding(
   tx: EndingsTransaction,
   states: SignedStates,
+  keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
   event: 'expire' | 'cancel',
   at: Date,
@@ -152,9 +157,10 @@ async function endHolding(
 ): Promise<void> {
   await lockReservationsOf(tx, key.id);
   await lockClaimsOf(tx, key.id);
+  // A mismatch is alarmed by the judging itself.
+  await requestHoldingsWhole(tx, states, keys, key.orgId, key.id);
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);
   movedAsRead(moved, `A spend request read as open didn't ${event}`);
-  const reservations = await releaseReservationsOf(tx, { requestId: key.id, at });
-  const claimed = await releaseClaim(tx, { requestId: key.id, releasedAt: at });
-  if (reservations !== 1 || !claimed) states.mismatch(SPEND_REQUESTS.subject, key);
+  await releaseReservationsOf(tx, { requestId: key.id, at });
+  await releaseClaim(tx, { requestId: key.id, releasedAt: at });
 }

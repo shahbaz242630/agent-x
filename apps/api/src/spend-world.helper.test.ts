@@ -21,14 +21,15 @@ import {
 export type SpendWorldTables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
 
 /**
- * The request's claim, or its reservation, released by the tables' owner with
- * their guards off: as only something past the app could (G2).
+ * The request's claim or reservation released, or its reservation's amount
+ * halved, by the tables' owner with their guards off: as only something past
+ * the app could (G2).
  */
-export async function releasedPastTheApp(
+export async function changedPastTheApp(
   database: TestDatabase,
   org: string,
   requestId: string,
-  what: 'claim' | 'reservation',
+  what: 'claim released' | 'reservation released' | 'amount halved',
 ): Promise<void> {
   const owner = await database.connect('owner');
   try {
@@ -36,13 +37,18 @@ export async function releasedPastTheApp(
     await owner.query('begin');
     await owner.query('alter table limit_reservations.reservations disable trigger user');
     await owner.query('alter table spend_requests.order_claims disable trigger user');
-    if (what === 'claim') {
+    if (what === 'claim released') {
       await owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [
         requestId,
       ]);
-    } else {
+    } else if (what === 'reservation released') {
       await owner.query(
         "update limit_reservations.reservations set state = 'RELEASED', settled_at = now() where request_id = $1",
+        [requestId],
+      );
+    } else {
+      await owner.query(
+        'update limit_reservations.reservations set amount_minor = amount_minor / 2 where request_id = $1',
         [requestId],
       );
     }
