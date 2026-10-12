@@ -11,8 +11,9 @@
 //   isn't refused for a key revoked meanwhile, nor while the organisation is
 //   frozen (a freeze stops new requests, never a brake).
 //
-// The key claimed first; then the request read for change (8), its holdings
-// locked (11), the move signed (12), both released. A request cancelled
+// The key claimed first; then the request read for change (8), an agent's
+// cancels counted under its cancel lock (8a), its holdings locked (11), the
+// move signed (12), both released. A request cancelled
 // already is answered as it stands (a brake pressed twice is not an error);
 // one denied, expired or handed off is REQUEST_NOT_CANCELLABLE (409). An
 // agent cancels at most 10 of its own a day
