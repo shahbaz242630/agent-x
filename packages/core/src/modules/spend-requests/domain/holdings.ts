@@ -37,10 +37,12 @@ export interface HeldSealed {
   readonly month: string;
   readonly reservedAt: Date;
   readonly payee: PayeeSeal | 'none' | 'unreadable';
+  /** Whether it was decided by G5's engine, which writes the claim's bank key (0043): its sealed `possibleDuplicate`. */
+  readonly bankKeyed: boolean;
 }
 
 /** What a decision that holds capacity seals (signRequest's `held`): always a payee seal of its own. */
-export interface HeldAs extends Omit<HeldSealed, 'payee'> {
+export interface HeldAs extends Omit<HeldSealed, 'payee' | 'bankKeyed'> {
   readonly payee: PayeeSeal;
 }
 
@@ -104,7 +106,12 @@ export function heldOf(details: Readonly<Record<string, unknown>> | undefined): 
   const month = details?.heldMonth;
   const at = details?.heldAt;
   if (typeof month !== 'string' || typeof at !== 'string') return null;
-  return { month, reservedAt: new Date(at), payee: payeeSealOf(details) };
+  return {
+    month,
+    reservedAt: new Date(at),
+    payee: payeeSealOf(details),
+    bankKeyed: typeof details?.possibleDuplicate === 'boolean',
+  };
 }
 
 /** The payee seal the details hold: none before E1b; unreadable if either half is there but not whole. */

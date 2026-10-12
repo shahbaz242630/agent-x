@@ -200,14 +200,17 @@ async function judged(
     const held = sealed.get(request.id) ?? null;
     const asSealed = (payeeKey: string | null) =>
       held === null || payeeAsSealed(keys, held.payee, { orgId, requestId: request.id, payeeKey });
-    // A claim is its request's own when it is on the request's supplier and order, in canonical form and as
-    // the bank would carry it (0043: a bank key changed past the app could hide a possible duplicate).
+    // A claim is its request's own when it is on the request's supplier and order, in canonical form, and,
+    // where its decision wrote one (G5), with its bank key (0043): one changed past the app could hide a
+    // possible duplicate. A claim made before G5 has none to compare, as E1b's payee seal.
+    const bankKeyAsMade = (bankKey: string | null) =>
+      held?.bankKeyed !== true || bankKey === bankKeyOf(request.orderReference);
     const claims: ClaimHolding[] = (claimed.get(request.id) ?? []).map((claim) => ({
       released: claim.released,
       itsOwn:
         claim.supplierId === request.supplierId &&
         claim.orderKey === orderKeys.get(request.orderReference) &&
-        claim.bankKey === bankKeyOf(request.orderReference),
+        bankKeyAsMade(claim.bankKey),
       payeeAsSealed: asSealed(claim.payeeKey),
     }));
     const reserved = (reservations.get(request.id) ?? []).map((reservation) => ({

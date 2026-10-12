@@ -475,6 +475,27 @@ describe('the holdings check (E1)', () => {
     expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
   });
 
+  it('leaves the bank key of a claim decided before G5, which wrote none, uncompared', async () => {
+    const { w, acting } = await ready();
+    const { allowed } = await requests(acting, w);
+    // A later decided event as G3 sealed one, without G5's `possibleDuplicate` (the app's own keys, as the log's).
+    await withTenant(app, w.org, (tx) =>
+      createAuditTrail({ keys, ids }).record(tx, w.org, {
+        actor: { type: 'system', id: 'api' },
+        action: 'spend_request.decided',
+        subject: { type: SPEND_REQUESTS.subject, id: allowed, version: 2 },
+        details: { heldMonth: '2026-10', heldAt: clock.now().toISOString(), duplicateOrder: false },
+      }),
+    );
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set bank_key = null where request_id = $1', [allowed]),
+    );
+
+    await job(w).run();
+
+    expect(lines('holdings_check.passed')).toEqual([expect.objectContaining({ requests: 3, mismatched: 0 })]);
+  });
+
   it('raises the alarm for a payee key added past the app where the decision sealed none (E1b)', async () => {
     const { w, acting } = await ready();
     const held = await requests(acting, w);
