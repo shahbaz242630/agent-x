@@ -596,37 +596,70 @@ describe(`accepting, the harder cases (B4-4c, Postgres ${server.version})`, () =
     },
   );
 
-  it('refuses an admin who invited themselves, once deactivated, their own link back in (the S68 audit)', async () => {
-    // The admin signs in with the address they invite, before they are removed.
-    const self = await person();
-    const org = ids.next();
-    const admin = ids.next();
-    await withSignedStates(app, org, services(), async (tx, states) => {
-      await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
-      await addMembership(tx, states, {
-        orgId: org,
-        id: admin,
-        userId: self.userId,
-        role: 'admin',
-        joinedAt: clock.now(),
-        actor: OPERATOR,
-      });
-    });
-    const { token } = await invitation({ org, admin, adminUser: self.userId }, 'developer');
-    expect(await accept(self, token, 'accept-while-admin')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'ALREADY_A_MEMBER',
-    });
-    await adminMoved({ org, admin }, 'deactivated');
+  it.each(['developer', 'admin'] as const)(
+    'closes a removed admin’s invitation as a %s even when the directory lists the invitee as that admin (#207)',
+    async (role) => {
+      const who = await organization();
+      const { id, token } = await invitation(who, role);
+      await adminMoved(who, 'deactivated');
+      const invitee = await person();
+      // The directory isn't signed: a row planted past the app names the invitee as the admin who asked.
+      const owner = await database.connect('admin');
+      try {
+        await owner.query('insert into directory.members (user_id, org_id, membership_id) values ($1, $2, $3)', [
+          invitee.userId,
+          who.org,
+          who.admin,
+        ]);
+      } finally {
+        await owner.end();
+      }
 
-    expect(await accept(self, token, 'accept-once-removed')).toEqual({
-      outcome: 'refused',
-      status: 409,
-      code: 'INVITATION_CLOSED',
-    });
-    expect(await membershipOfPerson(org, self.userId)).toEqual({ outcome: 'deactivated', id: admin });
-  });
+      expect(await accept(invitee, token)).toEqual({ outcome: 'refused', status: 409, code: 'INVITATION_CLOSED' });
+      expect(await membershipOfPerson(who.org, invitee.userId)).toEqual({ outcome: 'none' });
+      const read = await withSignedStates(app, who.org, services(), (tx, states) =>
+        invitationRecord(tx, states, who.org, id),
+      );
+      expect(read).toMatchObject({ outcome: 'found', invitation: { status: 'OPEN', acceptedBy: null } });
+    },
+  );
+
+  it.each(['deactivated', 'demoted'] as const)(
+    'refuses an admin who invited themselves, once %s, their own link back in (the S68 audit)',
+    async (how) => {
+      // The admin signs in with the address they invite, before they are removed.
+      const self = await person();
+      const org = ids.next();
+      const admin = ids.next();
+      await withSignedStates(app, org, services(), async (tx, states) => {
+        await createOrganization(tx, states, { id: org, name: 'Acme Trading LLC', actor: OPERATOR });
+        await addMembership(tx, states, {
+          orgId: org,
+          id: admin,
+          userId: self.userId,
+          role: 'admin',
+          joinedAt: clock.now(),
+          actor: OPERATOR,
+        });
+      });
+      const { token } = await invitation({ org, admin, adminUser: self.userId }, 'developer');
+      expect(await accept(self, token, 'accept-while-admin')).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'ALREADY_A_MEMBER',
+      });
+      await adminMoved({ org, admin }, how);
+
+      expect(await accept(self, token, 'accept-once-removed')).toEqual({
+        outcome: 'refused',
+        status: 409,
+        code: 'INVITATION_CLOSED',
+      });
+      expect(await membershipOfPerson(org, self.userId)).toMatchObject(
+        how === 'deactivated' ? { outcome: 'deactivated', id: admin } : { outcome: 'active', id: admin },
+      );
+    },
+  );
 
   it('keeps a person deactivated there waiting, invited as an admin, until an admin confirms them (B4-5c)', async () => {
     const who = await organization();
