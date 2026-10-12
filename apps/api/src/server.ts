@@ -163,6 +163,7 @@ export interface ServerOptions {
   readonly agentMandates?: AgentMandates | undefined;
   /** Deciding an agent's spend requests (spend-request-decisions.ts); without it, no agent reaches that route. */
   readonly spendRequestDecisions?: SpendRequestDecisions | undefined;
+  /** Cancelling spend requests before hand-off (spend-request-cancels.ts); without it, no one reaches those routes. */
   readonly spendRequestCancels?: SpendRequestCancels | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;

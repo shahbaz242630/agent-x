@@ -82,7 +82,9 @@ const SPEND_REQUEST_SHOWN = z
     id: z.uuid().describe('The request, by its ID.'),
     status: z
       .enum(SPEND_REQUEST.states)
-      .describe('Where it stands: APPROVED (allowed), APPROVAL_REQUIRED (waiting for a person), or DENIED.'),
+      .describe(
+        'Where it stands: APPROVED (allowed), APPROVAL_REQUIRED (waiting for a person) or DENIED; later EXPIRED (waited 72 hours) or CANCELLED.',
+      ),
     decision: z
       .enum(DECISIONS)
       .describe(
