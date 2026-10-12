@@ -15,7 +15,7 @@
 // locked (11), the move signed (12), both released. A request cancelled
 // already is answered as it stands (a brake pressed twice is not an error);
 // one denied, expired or handed off is REQUEST_NOT_CANCELLABLE (409). An
-// agent cancels at most MOST_AGENT_CANCELS_A_DAY of its own a day
+// agent cancels at most 10 of its own a day
 // (AGENT_CANCELS_SPENT, 409; partner decision 11b), each logged as
 // `spend_request.cancelled` for the alert on an agent that keeps cancelling.
 // No one is emailed yet (decision 10).
@@ -113,7 +113,7 @@ export function createSpendRequestCancels({
     },
 
     async byAgent(agent, idempotent, requestId, correlationId) {
-      // Set by each attempt; only the one that committed is the answer: whether it cancelled, or found it cancelled.
+      // Set by the write's one run (it never retries): whether it cancelled, found it cancelled, or was refused.
       let ended: Ended['outcome'] | undefined;
       const done = await work.write(agent, idempotent, correlationId, async (tx, states) => {
         const by = { kind: 'agent', agentId: agent.agentId, agentKeyId: agent.keyId } as const;

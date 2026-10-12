@@ -52,7 +52,7 @@ export const WAITS_FOR_APPROVAL_MS = 72 * 3_600_000;
  * decision 11b): enough for real changes of plan, too few to map its approval
  * line by asking and cancelling. A person's cancels never count.
  */
-export const MOST_AGENT_CANCELS_A_DAY = 10;
+const MOST_AGENT_CANCELS_A_DAY = 10;
 
 const ACTOR = { type: 'system', id: 'api' } as const;
 
