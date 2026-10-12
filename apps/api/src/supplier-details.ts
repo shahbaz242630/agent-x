@@ -51,6 +51,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
+import { createStepUps } from './use-case-work.ts';
 
 /** Asking to change a supplier's details: its operation, which the step-up challenge names as its action too. */
 export const DETAILS_OPERATION = 'suppliers.details';
@@ -114,6 +115,7 @@ export function createSupplierDetailsChanges({
   readonly logger: Logger;
 }): SupplierDetailsChanges {
   const work = createSupplierWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
   /**
    * Whether this admin may change the supplier's details to `details` now,
@@ -151,14 +153,7 @@ export function createSupplierDetailsChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await oneSupplierAddAtATime(tx, member.orgId);
         const { current } = await changeable(tx, states, member, supplierId, details, 'share', correlationId);
-        const challenge = await challenges.open(tx, {
-          sessionId: member.sessionId,
-          action: DETAILS_OPERATION,
-          changeHash: changeHash(current.id, details),
-        });
-        // The session ended since the access hook found it.
-        if (challenge === undefined) throw new SupplierRefused(401, 'UNAUTHENTICATED');
-        return { status: 202, resourceId: challenge.challengeId };
+        return stepUps.ask(tx, member, { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) });
       });
       return work.askedAfter(done);
     },
@@ -177,15 +172,14 @@ export function createSupplierDetailsChanges({
           'change',
           correlationId,
         );
-        const consumed = await challenges.consume(
+        const consumed = await stepUps.consumed(
           tx,
+          member,
           held,
           stepUpChallengeId,
-          { sessionId: member.sessionId, action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
-          // An admin's change: proved with a passkey (SEC-HA-12).
+          { action: DETAILS_OPERATION, changeHash: changeHash(current.id, details) },
           { passkeyRequired: true },
         );
-        if (consumed === undefined) throw new SupplierRefused(403, 'STEP_UP_FAILED');
         await changeDetails(tx, states, keys, { orgId, id: found.supplier.id }, found, {
           orgId,
           id: ids.next(),

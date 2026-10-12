@@ -61,7 +61,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
-import { movedAsRead, type Written } from './use-case-work.ts';
+import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Asking to rotate a key: its operation, which the step-up challenge names as its action too. */
 export const ROTATE_OPERATION = 'agents.keys.rotate';
@@ -149,6 +149,7 @@ export function createAgentKeyChanges({
   readonly logger: Logger;
 }): AgentKeyChanges {
   const work = createAgentWork({ database, keys, ids, logger });
+  const stepUps = createStepUps({ challenges, Refusal: AgentRefused });
 
   /**
    * The agent and its key, each read for change and verified: NOT_FOUND for
@@ -202,14 +203,7 @@ export function createAgentKeyChanges({
     operation: string,
     keyEventId: string,
   ): Promise<{ status: number; resourceId: string }> => {
-    const challenge = await challenges.open(tx, {
-      sessionId: member.sessionId,
-      action: operation,
-      changeHash: keyChangeHash(member.orgId, keyEventId),
-    });
-    // The session ended since the access hook found it.
-    if (challenge === undefined) throw new AgentRefused(401, 'UNAUTHENTICATED');
-    return { status: 202, resourceId: challenge.challengeId };
+    return stepUps.ask(tx, member, { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId) });
   };
 
   /** Consumes the step-up for the change, with a passkey for an admin (SEC-HA-12): STEP_UP_FAILED otherwise. */
@@ -221,21 +215,15 @@ export function createAgentKeyChanges({
     keyEventId: string,
     held: HeldChallenges,
     stepUpChallengeId: string,
-  ) => {
-    const consumed = await challenges.consume(
+  ) =>
+    stepUps.consumed(
       tx,
+      member,
       held,
       stepUpChallengeId,
-      {
-        sessionId: member.sessionId,
-        action: operation,
-        changeHash: keyChangeHash(member.orgId, keyEventId),
-      },
+      { action: operation, changeHash: keyChangeHash(member.orgId, keyEventId) },
       { passkeyRequired: role === 'admin' },
     );
-    if (consumed === undefined) throw new AgentRefused(403, 'STEP_UP_FAILED');
-    return consumed;
-  };
 
   /** The agent and its keys as they now stand, answering the write, on a retry too. */
   const reread = (member: AgentMember, correlationId: string, agentId: string) =>
