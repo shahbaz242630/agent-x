@@ -17,6 +17,8 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+// Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import './route-server.helper.test.ts';
 import { SESSION_CHALLENGE } from './access.ts';
 import { errorBody } from './errors.ts';
 import type { SecurityEventNote } from './security-recorder.ts';

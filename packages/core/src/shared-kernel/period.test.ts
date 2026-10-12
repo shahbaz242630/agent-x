@@ -43,6 +43,8 @@ describe('periodOf', () => {
     );
   });
 
+  // Its own limit: 2,000 runs through Intl take 2 s alone and 4.5 s under the whole
+  // unit run (S101), past the default 5 s on a busier machine.
   it('holds every instant in exactly one month, in zones with and without daylight saving', () => {
     const zones = [
       DEFAULT_TIME_ZONE,
@@ -76,7 +78,7 @@ describe('periodOf', () => {
       ),
       { numRuns: 2_000 },
     );
-  });
+  }, 30_000);
 
   it('refuses a zone the runtime doesn’t know', () => {
     expect(() => periodOf(new Date('2026-10-06T00:00:00Z'), 'Mars/Olympus_Mons')).toThrow(RangeError);

@@ -12,6 +12,8 @@ import type { FastifyInstance, InjectOptions, RouteShorthandOptions } from 'fast
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+// Its first server built before the tests, so none is timed cold (route-server.helper.test.ts).
+import './route-server.helper.test.ts';
 import { type FindMembership, type Member, ORGANIZATION_HEADER } from './access.ts';
 import { errorBody } from './errors.ts';
 import { buildServer } from './server.ts';
