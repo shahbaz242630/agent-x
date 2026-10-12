@@ -5,8 +5,9 @@
 // as it is; a run again moving nothing; a new version with a later end
 // accepted while the job waits for the mandate (forced); a tampered mandate
 // refused and logged while the others are expired, even those after it in a
-// full page (S90 review); a run's share, the rest left to the next; and a
-// stopped run.
+// full page (S90 review); a run's share, the rest left to the next; a
+// stopped run; and an organisation list that can't be read, logged as an
+// error (Phase 2 E2c).
 import { addAgent } from '@agentx/core/modules/agents';
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { listedOrganizations } from '@agentx/core/modules/directory';
@@ -277,6 +278,27 @@ describe('mandates ended by the clock (B4)', () => {
     stopping.abort();
 
     await expiry.run(stopping.signal);
+    expect(await statusOf(w, id)).toMatchObject({ status: 'ACTIVE' });
+  });
+
+  it('logs an organisation list that can’t be read as an error, which the integrity-runs alert counts, and expires nothing (E2c)', async () => {
+    const w = await world();
+    const id = await inForce(w, inHours(1));
+    clock.advanceBy(HOUR);
+    const unlisted = createMandateExpiry({
+      list: () => Promise.reject(new Error('the directory is down')),
+      database: app,
+      keys,
+      ids,
+      clock,
+      outbox: createOutbox({ ids, clock }),
+      logger: testLogger(capture),
+    });
+
+    await unlisted.run();
+    expect(capture.lines().filter((line) => line.event === 'mandate_expiry.run_failed')).toEqual([
+      expect.objectContaining({ level: 'error' }),
+    ]);
     expect(await statusOf(w, id)).toMatchObject({ status: 'ACTIVE' });
   });
 });

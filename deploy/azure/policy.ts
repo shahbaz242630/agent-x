@@ -52,6 +52,7 @@ export type RuleId =
   | 'token-refused-alert'
   | 'denial-surge-alert'
   | 'holdings-check-alert'
+  | 'integrity-runs-alert'
   | 'identities'
   | 'release-identity'
   | 'release-access'
@@ -233,6 +234,10 @@ const DENIAL_SURGE_THRESHOLD = 10;
 
 /** A page of the holdings check that failed (Phase 2 E1b's review): that organisation is unchecked until it passes. */
 const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "holdings_check.failed"';
+
+/** An integrity job that skipped a whole run, its organisation list unread (Phase 2 E2c): nothing checked or expired that run. */
+const INTEGRITY_RUN_FAILED_LINES =
+  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage
@@ -1536,7 +1541,7 @@ const alertRules: Check = (snapshot, _expected, add) => {
       });
     }
     const severity = at(alert.properties, 'severity');
-    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-N]\.$/.exec(
+    const runbook = /^SEV-([12])\. .+ Runbook: Incident-Response-Playbook\.md section [A-O]\.$/.exec(
       String(at(alert.properties, 'description')),
     );
     if (runbook === null || Number(runbook[1]) !== severity) {
@@ -1898,6 +1903,33 @@ const holdingsCheckAlert: Check = (snapshot, _expected, add) => {
         resource: environment.name,
         message:
           "needs an enabled alert on this deployment's workspace that fires on any holdings_check.failed line, watching every minute and firing on the first window",
+      });
+    }
+  }
+};
+
+/**
+ * An enabled alert on the workspace fires on any run of the three integrity
+ * jobs skipped whole (Phase 2 E2c): one line is enough, in any window.
+ */
+const integrityRunsAlert: Check = (snapshot, _expected, add) => {
+  for (const environment of ofType(snapshot, TYPES.environment)) {
+    const alerted = workspaceAlerted(
+      snapshot,
+      'any',
+      (criterion, alert) =>
+        queryIs(at(criterion, 'query'), 'ContainerAppConsoleLogs', [INTEGRITY_RUN_FAILED_LINES], 'count()') &&
+        totals(criterion) &&
+        at(criterion, 'operator') === 'GreaterThan' &&
+        at(criterion, 'threshold') === 0 &&
+        watchesEveryWindow(alert, criterion),
+    );
+    if (!alerted) {
+      add({
+        rule: 'integrity-runs-alert',
+        resource: environment.name,
+        message:
+          "needs an enabled alert on this deployment's workspace that fires on any run_failed line of the holdings check, the hold-history check or mandate expiry, watching every minute and firing on the first window",
       });
     }
   }
@@ -2832,6 +2864,7 @@ const CHECKS: readonly Check[] = [
   tokenRefusedAlert,
   denialSurgeAlert,
   holdingsCheckAlert,
+  integrityRunsAlert,
   ownerLoginAlert,
   identities,
   releaseIdentity,
