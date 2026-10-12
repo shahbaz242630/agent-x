@@ -140,6 +140,33 @@ export async function checkHoldings(
     throw new RangeError(`A page is 1 to ${String(MOST_CHECKED_A_PAGE)} spend requests`);
   }
   const { ids, next } = await states.objectIds(tx, orgId, SPEND_REQUESTS, after, limit);
+  return { ...(await judged(tx, states, keys, orgId, ids)), next };
+}
+
+/**
+ * One request checked against what it holds, as the holdings check does, in
+ * the caller's transaction: whole, or a mismatch alarmed (G1: clearing a hold
+ * waits for its named request's reservation and claim to match again).
+ */
+export async function requestHoldingsWhole(
+  tx: HoldingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  requestId: string,
+): Promise<boolean> {
+  const { requests, mismatched, tampered } = await judged(tx, states, keys, orgId, [requestId]);
+  return requests === 1 && mismatched === 0 && tampered === 0;
+}
+
+/** The requests `ids` judged against what each holds, each mismatch alarmed. */
+async function judged(
+  tx: HoldingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  ids: readonly string[],
+): Promise<Omit<HoldingsChecked, 'next'>> {
   const requests: SpendRequestRecord[] = [];
   let tampered = 0;
   for (const read of (await requestsOf(tx, states, orgId, ids)).values()) {
@@ -178,5 +205,5 @@ export async function checkHoldings(
       mismatched += 1;
     }
   }
-  return { requests: requests.length, mismatched, tampered, next };
+  return { requests: requests.length, mismatched, tampered };
 }

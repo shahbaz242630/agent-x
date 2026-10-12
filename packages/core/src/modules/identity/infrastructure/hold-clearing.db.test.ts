@@ -520,6 +520,42 @@ describe(`clearing the integrity hold as its admin (Postgres ${server.version})`
     expect(await confirmLiveOnly()).toMatchObject({ outcome: 'cleared' });
   });
 
+  it('refuses while what the hold names is not whole beyond its signed state, its own check given the record (G1)', async () => {
+    const row = await holdThenRepair();
+    const investigationId = await investigate();
+    const challengeId = await steppedUp(investigationId);
+    const asked: string[] = [];
+    let whole = false;
+    const withTheirs = createHoldClearings({
+      database: app,
+      keys,
+      ids,
+      challenges: challenges(),
+      logger: testLogger(),
+      authorityTables: AUTHORITY_TABLES,
+      namedRecordChecks: {
+        [MEMBERSHIPS.subject]: (_tx, _states, orgId, objectId) => {
+          asked.push(`${orgId} ${objectId}`);
+          return Promise.resolve(whole);
+        },
+      },
+    });
+    const confirmTheirs = () =>
+      withTheirs.confirm(
+        admin,
+        keyed(admin, CLEAR_CONFIRM_OPERATION, 'confirm-1', `${investigationId} ${challengeId}`),
+        investigationId,
+        challengeId,
+        CORRELATION,
+      );
+
+    expect(await confirmTheirs()).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
+    expect(await hold()).toMatchObject({ outcome: 'held', version: 2 });
+    whole = true;
+    expect(await confirmTheirs()).toMatchObject({ outcome: 'cleared' });
+    expect(asked).toEqual([`${org} ${row.id}`, `${org} ${row.id}`]);
+  });
+
   it('fails rather than judge part of a table past the objects it checks, leaving it HELD', async () => {
     await holdThenRepair();
     const investigationId = await investigate();

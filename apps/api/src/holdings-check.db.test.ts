@@ -9,7 +9,12 @@
 // order or supplier is refused even then, by 0039's `for_its_request` key.)
 import { createAuditTrail, TooManyEventsToRead, withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
-import { checkHoldings, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import {
+  checkHoldings,
+  requestHoldingsWhole,
+  SPEND_REQUESTS,
+  type SpendRequestsTables,
+} from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
@@ -364,6 +369,28 @@ describe('the holdings check (E1)', () => {
       'waiting',
     ],
   ];
+
+  it('judges one request as the check does, for the clearing of a hold it names: whole until its claim is released past the app (G1)', async () => {
+    const { w, acting } = await ready();
+    const held = await requests(acting, w);
+    const whole = (id: string) =>
+      withSignedStates(app, w.org, quiet(), (tx, states) => requestHoldingsWhole(tx, states, keys, w.org, id));
+
+    expect([await whole(held.allowed), await whole(held.waiting), await whole(held.denied)]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(await holdOf(w)).toMatchObject({ outcome: 'clear' });
+    await pastTheApp(w, (owner) =>
+      owner.query('update spend_requests.order_claims set released_at = now() where request_id = $1', [held.allowed]),
+    );
+
+    expect(await whole(held.allowed)).toBe(false);
+    // The mismatch is alarmed: the organisation held, naming the request.
+    expect(await holdOf(w)).toMatchObject({ outcome: 'held' });
+    expect(await whole(ids.next())).toBe(false);
+  });
 
   it('passes requests on a payee key as their decisions sealed it (E1b)', async () => {
     const { w, acting } = await ready();

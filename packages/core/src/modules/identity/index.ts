@@ -165,6 +165,7 @@ export {
   type ClearingWrite,
   createHoldClearings,
   type HoldClearings,
+  type NamedRecordCheck,
 } from './infrastructure/hold-clearing.ts';
 export {
   activeContactsFor,
