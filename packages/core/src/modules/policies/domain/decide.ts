@@ -290,5 +290,7 @@ export function decisionFacts(input: DecisionInput): Readonly<Record<string, str
     monthSpent: `${String(input.monthSpent.minor)} ${input.monthSpent.currency}`,
     splitOpen: `${String(input.splitOpen.minor)} ${input.splitOpen.currency}`,
     duplicateOrder: input.duplicateOrder,
+    // The default as it was then, so a later change of it leaves this decision whole.
+    defaultMonthlyCap: `${String(DEFAULT_MONTHLY_CAP.minor)} ${DEFAULT_MONTHLY_CAP.currency}`,
   };
 }

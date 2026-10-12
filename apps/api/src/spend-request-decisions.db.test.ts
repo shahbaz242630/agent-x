@@ -286,6 +286,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
           monthSpent: '0 AED',
           splitOpen: '0 AED',
           duplicateOrder: false,
+          defaultMonthlyCap: '2000000 AED',
         }) as unknown,
       }),
     ]);

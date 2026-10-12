@@ -358,7 +358,10 @@ describe('decisionInputText', () => {
       monthSpent: '0 AED',
       splitOpen: '0 AED',
       duplicateOrder: false,
+      defaultMonthlyCap: '2000000 AED',
     });
+    // A fact added to the text must be added here too, or kept in a versioned record: this counts them.
+    expect(JSON.parse(decisionInputText(base))).toHaveLength(12);
     for (const changed of [
       { ...base, now: new Date(NOW.getTime() + 1) },
       { ...base, agent: { ...base.agent, status: 'SUSPENDED' } },
