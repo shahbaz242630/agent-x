@@ -9,7 +9,6 @@ import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
   MANDATE_NOTICE_KINDS,
-  ORGANIZATION_NOTICE_KINDS,
   type NoticeKind,
   SIGN_IN_NOTICE_KINDS,
   type SignInNoticeKind,
@@ -264,7 +263,7 @@ describe('a notice’s email (B5-1b)', () => {
   describe('C3a a change of the organisation’s own policy (0038)', () => {
     const org = '0199a0f0-0000-7000-8000-00000000c3a1';
 
-    it.each(ORGANIZATION_NOTICE_KINDS)(
+    it.each(['organization_policy_changed'] as const)(
       'tells of %s, naming the organisation by ID alone, admins and approvers',
       (kind) => {
         const message = messageFor({ ...NOTICE, kind, membershipId: null, role: null, aboutId: org }, 'a@example.test');
@@ -275,6 +274,43 @@ describe('a notice’s email (B5-1b)', () => {
         expect(message.text).toContain("check the organisation's policies");
       },
     );
+  });
+
+  describe('B1 the organisation frozen or unfrozen (0045, Phase 3)', () => {
+    const org = '0199a0f0-0000-7000-8000-0000000003b1';
+
+    it.each([
+      ['organization_frozen', 'frozen'],
+      ['organization_unfrozen', 'unfrozen'],
+    ] as const)('tells of %s, naming the organisation by ID alone, admins and approvers', (kind, word) => {
+      const message = messageFor({ ...NOTICE, kind, membershipId: null, role: null, aboutId: org }, 'a@example.test');
+
+      expect(message.subject).toBe(`Agent X: the organisation was ${word}`);
+      expect(message.text).toContain(`Organisation: ${org}`);
+      expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+      expect(message.text).toContain('emergency brake');
+    });
+  });
+
+  describe('B1 a spend request waiting for approval (0045, Phase 3; SEC-HA-11)', () => {
+    const request = '0199a0f0-0000-7000-8000-0000000003b2';
+    const message = messageFor(
+      { ...NOTICE, kind: 'spend_request_waiting', membershipId: null, role: null, aboutId: request },
+      'a@example.test',
+    );
+
+    it('names the request by ID alone, told to admins and approvers', () => {
+      expect(message.subject).toBe("Agent X: an AI agent's spend request is waiting for approval");
+      expect(message.text).toContain(`Spend request: ${request}`);
+      expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+    });
+
+    it('carries no approval power: no link, and says the decision is made signed in, with a passkey', () => {
+      expect(`${message.subject} ${message.text}`).not.toMatch(/https?:|www\.|token|#/i);
+      expect(message.text).toContain('not through a link in an email');
+      expect(message.text).toContain('passkey');
+      expect(message.text).toContain("This email can't approve or change anything.");
+    });
   });
 
   describe('E2-1 a change to a supplier (0033)', () => {

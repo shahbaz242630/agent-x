@@ -15,6 +15,7 @@ import {
   isAboutAnAgent,
   isAboutAPerson,
   isAboutASupplier,
+  isAboutASpendRequest,
   isAboutTheOrganization,
   isToAdminsAndApprovers,
   type NoticeKind,
@@ -47,7 +48,7 @@ export interface ResetLink {
 interface Wording {
   readonly subject: (role: string) => string;
   readonly firstLine: (role: string) => string;
-  /** What to check if it wasn't expected. */
+  /** What to check if it wasn't expected, or what to do. */
   readonly check: string;
 }
 
@@ -68,6 +69,8 @@ const MANDATES_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's mandates, and tell its admins at once: a mandate is what lets an AI agent spend.";
 const POLICIES_CHECK =
   "If you didn't expect this, sign in to Agent X and check the organisation's policies, and tell its admins at once: a policy sets how much, and whom, its AI agents may pay.";
+const FREEZE_CHECK =
+  "If you didn't expect this, sign in to Agent X and check the organisation's state, and tell its admins at once: a freeze is the organisation's emergency brake on its AI agents' spending.";
 /** What a person's second factor is, as the emails name it. */
 const SECOND_FACTOR = 'second factor (an authenticator app, a security key or a passkey)';
 
@@ -265,6 +268,27 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       "An admin of one of your Agent X organisations changed its policy, signing in again with a passkey: its rules are in force now for the organisation's AI agents.",
     check: POLICIES_CHECK,
   },
+  // About the organisation's freeze (0045): its brake, to every admin and approver.
+  organization_frozen: {
+    subject: () => 'Agent X: the organisation was frozen',
+    firstLine: () =>
+      "An admin of one of your Agent X organisations froze it: its AI agents can't make new spend requests, and none waiting can be approved, until it is unfrozen.",
+    check: FREEZE_CHECK,
+  },
+  organization_unfrozen: {
+    subject: () => 'Agent X: the organisation was unfrozen',
+    firstLine: () =>
+      'An admin of one of your Agent X organisations unfroze it, signing in again with a passkey and giving a reason: its AI agents can make spend requests again under their mandates.',
+    check: FREEZE_CHECK,
+  },
+  // About a spend request (0045): one waiting for a person's decision. No link that decides, no amount: the console shows it.
+  spend_request_waiting: {
+    subject: () => "Agent X: an AI agent's spend request is waiting for approval",
+    firstLine: () =>
+      "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey; after 72 hours it expires.",
+    check:
+      "Sign in to Agent X yourself, not through a link in an email, to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
+  },
 };
 
 const NEWLINE = '\n';
@@ -277,6 +301,7 @@ function aboutLine(notice: ClaimedNotice): string {
   if (isAboutAnAgent(notice.kind)) return `Agent: ${id}`;
   if (isAboutAMandate(notice.kind)) return `Mandate: ${id}`;
   if (isAboutTheOrganization(notice.kind)) return `Organisation: ${id}`;
+  if (isAboutASpendRequest(notice.kind)) return `Spend request: ${id}`;
   return isAboutASupplier(notice.kind) ? `Supplier: ${id}` : `Registered contact: ${id}`;
 }
 
