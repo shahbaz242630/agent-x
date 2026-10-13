@@ -13,10 +13,14 @@
 // its requests): a list reads its page of requests in one transaction and the
 // agents and suppliers they name in a second (their names, read a moment
 // later); one request is read in one transaction, its agent and supplier
-// first, found by their IDs alone (requestInOrder).
+// first, found by their IDs alone (requestInOrder). A rejected one in full
+// carries its reject, from the signed event: who, when and why (B4a,
+// decision 6).
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
 import {
+  rejectionOf,
+  type RejectionShown,
   requestOf,
   requestsPage,
   type SpendRequestRecord,
@@ -52,7 +56,8 @@ export type RequestsListed =
     }
   | Refused;
 
-export type RequestFound = { readonly outcome: 'found'; readonly shown: RequestShown } | Refused;
+export type RequestFound =
+  { readonly outcome: 'found'; readonly shown: RequestShown; readonly rejection: RejectionShown | null } | Refused;
 
 export interface SpendRequestReads {
   /** Every request, newest first; or those waiting for approval, oldest first. */
@@ -173,7 +178,11 @@ export function createSpendRequestReads({
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
         if (read.outcome === 'unbelieved') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-        return read;
+        // Only a DENIED request may have been rejected; any other has no reject to read.
+        if (read.shown.request.status !== 'DENIED') return { ...read, rejection: null };
+        const rejected = await rejectionOf(tx, states, { orgId, id: requestId });
+        if (rejected.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        return { ...read, rejection: rejected.outcome === 'rejected' ? rejected.rejection : null };
       }),
   };
 }

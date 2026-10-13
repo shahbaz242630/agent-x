@@ -4,7 +4,9 @@
 // form (NFC), so a name typed composed or decomposed is kept as the same
 // text, and it must be something a person can see and read. (NFC doesn't
 // merge letters that merely look alike, such as a Latin and a Cyrillic "a": a
-// name is shown only to its own organisation's members.)
+// name is shown only to its own organisation's members.) A note kept for good
+// in an audit event (keptNote: a call-back's, a reject's) is a name too, with
+// no long number in it.
 
 /**
  * What a name may not hold, anywhere: Unicode's "other" category (controls;
@@ -60,4 +62,26 @@ export function visibleName(
   if (STACKED.test(composed.replace(JOINERS, '')))
     problems.push(`${what} starts with a combining mark, or stacks more than 4 on one`);
   return { name: composed, problems };
+}
+
+/**
+ * Seven digits or more in a run, of any script (Arabic-Indic and fullwidth
+ * too), spaces, dots, dashes, slashes or brackets between them allowed: a
+ * phone, card or account number.
+ */
+const LONG_NUMBER = /\p{Nd}(?:[\s./()-]*\p{Nd}){6}/u;
+
+/**
+ * A note a person writes that is kept for good, in an audit event: a visible
+ * name of 1 to `most` characters, composed (NFC) as it is kept, with no long
+ * number in it, so no phone, card or account number is ever kept.
+ */
+export function keptNote(
+  note: string,
+  most: number,
+  what: string,
+): { readonly note: string; readonly problems: readonly string[] } {
+  const { name, problems } = visibleName(note, most, what);
+  if (LONG_NUMBER.test(name)) problems.push(`${what} holds a long number: leave phone and account numbers out`);
+  return { note: name, problems };
 }

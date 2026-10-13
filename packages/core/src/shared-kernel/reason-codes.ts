@@ -160,6 +160,8 @@ export const REASON_CODES = {
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
   REQUEST_NOT_CANCELLABLE:
     'The spend request has ended (denied or expired) or was handed off for payment already, so it can no longer be cancelled. Nothing was changed.',
+  REQUEST_NOT_WAITING:
+    'The spend request is no longer waiting for approval: it was approved, rejected, cancelled or expired already, so it can no longer be approved or rejected. Nothing was changed.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
   RESET_ASKS_SPENT:
     "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once.",

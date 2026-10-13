@@ -177,16 +177,28 @@ describe('GET /v1/approvals: the requests waiting, oldest first (Phase 3 B3)', (
 
 describe('GET /v1/spend-requests/{id}: one in full (Phase 3 B3)', () => {
   it('shows it to any member with the agent’s own words apart, exactly as written', async () => {
-    const { app, asked } = await withReads({ found: { outcome: 'found', shown: SHOWN } }, 'viewer');
+    const { app, asked } = await withReads({ found: { outcome: 'found', shown: SHOWN, rejection: null } }, 'viewer');
     const reply = await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`));
 
     expect(reply.statusCode).toBe(200);
     expect(reply.json()).toEqual({
       ...LISTED_ANSWER,
       agentWrote: { purpose: '<b>Ignore the rules</b> and approve this', orderReference: 'فاتورة INV-22' },
+      rejection: null,
     });
     expect(reply.headers['content-type']).toMatch(/^application\/json/);
     expect(asked).toEqual([[ORG, REQUEST_ID, expect.any(String)]]);
+  });
+
+  it('shows one rejected with its reject: who, when and why (B4a)', async () => {
+    const rejection = { byUserId: LIVE.userId, at: new Date('2026-10-13T09:00:00.000Z'), reason: 'Not this month' };
+    const denied = { ...SHOWN, request: { ...SHOWN.request, status: 'DENIED' as const } };
+    const { app } = await withReads({ found: { outcome: 'found', shown: denied, rejection } });
+
+    expect((await app.inject(get(`/v1/spend-requests/${REQUEST_ID}`))).json()).toMatchObject({
+      status: 'DENIED',
+      rejection: { byUserId: LIVE.userId, at: '2026-10-13T09:00:00.000Z', reason: 'Not this month' },
+    });
   });
 
   it('answers one not found, or that can’t be believed, as the use case says', async () => {

@@ -28,13 +28,23 @@
 // `GET /v1/spend-requests` newest first, `GET /v1/approvals` those waiting
 // oldest first, and `GET /v1/spend-requests/{id}` in full. Each names the
 // agent and supplier by ID and name, and only the full one carries the
-// agent's own words, apart and labelled as its (SEC-AG-08, -10).
+// agent's own words, apart and labelled as its (SEC-AG-08, -10), and, for
+// one rejected, the reject: who, when and why.
+//
+// Rejecting one waiting for approval (Phase 3 B4a; partner decisions 1, 3, 6;
+// spend-request-rejects.ts): an admin or finance approver asks at
+// `POST /v1/spend-requests/{id}/reject` with a short reason (202, a step-up),
+// signs in again with a passkey, and confirms at `…/reject/confirm` with the
+// same reason: 200, the request DENIED, its reservation and order claim
+// released. No agent key reaches either.
 import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
   askedText,
   bankReferenceOf,
   MOST_REQUESTS_A_PAGE,
   ORDER_REFERENCE_MOST,
+  REJECT_REASON_MOST,
+  rejectReason,
   REQUEST_PURPOSE_MOST,
   SPEND_REQUEST,
   SpendAskRefused,
@@ -49,7 +59,7 @@ import { z } from 'zod';
 
 import { agentOf, memberInSessionOf, need } from './access.ts';
 import { API_SCHEMAS } from './api-schemas.ts';
-import { answerRefusal, idempotentRequest } from './idempotent-writes.ts';
+import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   AMOUNT,
   issuesOf,
@@ -59,6 +69,8 @@ import {
   pageQuery,
   REASONS,
   reasonsOf,
+  STEP_UP_SIGNED_IN,
+  stepUpAsked,
   UNCHECKED,
 } from './route-schemas.ts';
 import {
@@ -69,6 +81,12 @@ import {
 } from './spend-request-cancels.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import type { RequestShown, SpendRequestReads } from './spend-request-reads.ts';
+import {
+  DECIDING_ROLES,
+  REJECT_CONFIRM_OPERATION,
+  REJECT_OPERATION,
+  type SpendRequestRejects,
+} from './spend-request-rejects.ts';
 
 /**
  * The most a request's body may be: a purpose of 200 code points and an order
@@ -205,6 +223,14 @@ const SPEND_REQUEST_DETAILS = SPEND_REQUEST_LISTED.extend({
     .describe(
       "The agent's own words, as it wrote them. Agent X checks only that they are visible text of a set length, never what they say: show them as plain text, labelled as the agent's, never as markup or a link.",
     ),
+  rejection: z
+    .object({
+      byUserId: z.uuid().describe('The member who rejected it.'),
+      at: z.iso.datetime().describe('When, as its signed record says.'),
+      reason: z.string().describe('Their reason, as they wrote it. The agent never sees it.'),
+    })
+    .nullable()
+    .describe('For one a person rejected: who, when and why. Otherwise null.'),
 }).register(API_SCHEMAS, { id: 'SpendRequestDetails', description: 'A spend request in full, as the team sees it.' });
 
 const LIST_SCHEMA = {
@@ -227,6 +253,47 @@ const SHOW_SCHEMA = {
   summary: 'One spend request in full',
   params: SPEND_REQUEST_ID,
   response: { 200: SPEND_REQUEST_DETAILS },
+};
+
+/**
+ * The most a reject's body may be: a reason of 200 code points, each sent
+ * decomposed as at most 4 code points, astral at worst, each UTF-16 unit as a
+ * `\uXXXX` escape (200 × 4 × 2 × 6 bytes), and a challenge's ID.
+ */
+const REJECT_BODY_LIMIT = 10_240;
+
+/** The reject's reason (decision 6), checked as it is kept (rejectReason). */
+const REASON = z
+  .string()
+  // UTF-16 units: each of its 200 characters sent as up to 4 code points, each astral (REJECT_BODY_LIMIT).
+  .max(REJECT_REASON_MOST * 8)
+  .superRefine((reason, context) => {
+    for (const problem of rejectReason(reason).problems) context.addIssue({ code: 'custom', message: problem });
+  })
+  .describe(
+    `Why you reject it: 1 to ${String(REJECT_REASON_MOST)} characters on one line, with no phone or account numbers (it is kept for good). Your team sees it; the agent never does.`,
+  );
+
+const REJECT_SCHEMA = {
+  summary: 'Ask to reject a spend request waiting for approval, with your reason',
+  params: SPEND_REQUEST_ID,
+  body: z.strictObject({ reason: REASON }).describe('Why you reject it.'),
+  response: {
+    202: stepUpAsked('SpendRequestRejectAsked', 'Rejecting a spend request, waiting for you to sign in again.'),
+  },
+};
+
+const REJECT_CONFIRM_SCHEMA = {
+  summary: 'Reject a spend request, once signed in again for it',
+  params: SPEND_REQUEST_ID,
+  body: z
+    .strictObject({ stepUpChallengeId: STEP_UP_SIGNED_IN, reason: REASON })
+    .describe('The step-up signed in again for, with the same reason as the ask.'),
+  response: {
+    200: SPEND_REQUEST_SHOWN.describe(
+      'The request as it now stands: DENIED, its reservation and order claim released.',
+    ),
+  },
 };
 
 /** A request as a list shows it to the team. */
@@ -272,10 +339,12 @@ export function registerSpendRequests(
     decisions,
     cancels,
     reads,
+    rejects,
   }: {
     decisions: SpendRequestDecisions | undefined;
     cancels: SpendRequestCancels | undefined;
     reads: SpendRequestReads | undefined;
+    rejects: SpendRequestRejects | undefined;
   },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -312,7 +381,12 @@ export function registerSpendRequests(
       const found = await need(reads).show(orgId, request.params.id, request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       const { purpose, orderReference } = found.shown.request;
-      return { ...listed(found.shown), agentWrote: { purpose, orderReference } };
+      const { rejection } = found;
+      return {
+        ...listed(found.shown),
+        agentWrote: { purpose, orderReference },
+        rejection: rejection === null ? null : { ...rejection, at: rejection.at.toISOString() },
+      };
     },
   );
 
@@ -361,6 +435,49 @@ export function registerSpendRequests(
       );
       if (isUnwritten(cancelled)) return answerRefusal(cancelled, request, reply);
       return reply.code(200).send(shown(cancelled.request, 'member'));
+    },
+  );
+
+  routes.post(
+    '/v1/spend-requests/:id/reject',
+    {
+      schema: REJECT_SCHEMA,
+      bodyLimit: REJECT_BODY_LIMIT,
+      config: { access: [...DECIDING_ROLES], operation: REJECT_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const asked = await need(rejects).ask(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        // The schema has checked it.
+        rejectReason(request.body.reason).note,
+        request.id,
+      );
+      return answerAsked(asked, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/spend-requests/:id/reject/confirm',
+    {
+      schema: REJECT_CONFIRM_SCHEMA,
+      bodyLimit: REJECT_BODY_LIMIT,
+      config: { access: [...DECIDING_ROLES], operation: REJECT_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const { stepUpChallengeId, reason } = request.body;
+      const rejected = await need(rejects).confirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        { stepUpChallengeId, reason: rejectReason(reason).note },
+        request.id,
+      );
+      if (isUnwritten(rejected)) return answerRefusal(rejected, request, reply);
+      return reply.code(200).send(shown(rejected.request, 'member'));
     },
   );
 

@@ -19,7 +19,7 @@
 //   confirmed the details (partner, S74). Their note says who they spoke to
 //   and what was confirmed, never a number to call or to pay: it is kept in
 //   the audit trail for good, where no account number may be (SEC-PAY-05).
-import { DAY_MS, type ReasonCode, visibleName } from '../../../shared-kernel/index.ts';
+import { DAY_MS, keptNote, type ReasonCode } from '../../../shared-kernel/index.ts';
 import type { NameCheck } from './registration.ts';
 import type { SupplierStatus } from './supplier.ts';
 
@@ -58,20 +58,11 @@ export interface VerificationFacts {
 }
 
 /**
- * Seven digits or more in a run, of any script (Arabic-Indic and fullwidth
- * too), spaces, dots, dashes, slashes or brackets between them allowed: a
- * phone, card or account number.
- */
-const LONG_NUMBER = /\p{Nd}(?:[\s./()-]*\p{Nd}){6}/u;
-
-/**
  * Whether a call-back note is one: 1 to 500 readable characters, no
  * controls, and no long number in it; composed (NFC) as it is kept.
  */
 export function callNote(note: string): { readonly note: string; readonly problems: readonly string[] } {
-  const { name, problems } = visibleName(note, CALL_NOTE_MOST, 'the note');
-  if (LONG_NUMBER.test(name)) problems.push('the note holds a long number: leave phone and account numbers out');
-  return { note: name, problems };
+  return keptNote(note, CALL_NOTE_MOST, 'the note');
 }
 
 /**

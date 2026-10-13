@@ -22,4 +22,4 @@ export {
   type Transition,
 } from './state-machine.ts';
 export { minorOf, oneOf, oneOfOrNull, timeOf, wholeOf } from './verified-fields.ts';
-export { visibleName } from './visible-name.ts';
+export { keptNote, visibleName } from './visible-name.ts';

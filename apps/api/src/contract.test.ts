@@ -224,6 +224,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'POST /v1/registered-contacts/{id}/remove/confirm',
       'POST /v1/spend-requests',
       'POST /v1/spend-requests/{id}/cancel',
+      'POST /v1/spend-requests/{id}/reject',
+      'POST /v1/spend-requests/{id}/reject/confirm',
       'POST /v1/suppliers',
       'POST /v1/suppliers/{id}/details',
       'POST /v1/suppliers/{id}/details/confirm',
@@ -1214,8 +1216,9 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // mandates' draft, supersede, list and one (Phase 2 B2), a mandate's accept and its confirm (B3), its suspend,
     // resume and revoke with each confirm (B4), the agent's own mandate (B5), the organisation's policy and a
     // mandate's, each read, changed and confirmed (C3), an agent's spend request (D4r), the simulator (C4), a spend request's cancel by a member and by its agent
-    // (D8), the team's spend requests, approvals and one request (Phase 3 B3), with each GET's HEAD.
-    expect(answers).toHaveLength(129);
+    // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
+    // confirm (B4a), with each GET's HEAD.
+    expect(answers).toHaveLength(131);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1278,6 +1281,7 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'SpendRequest',
       'SpendRequestDetails',
       'SpendRequestListed',
+      'SpendRequestRejectAsked',
       'Supplier',
       'SupplierDetails',
       'SupplierDetailsChangeAsked',
