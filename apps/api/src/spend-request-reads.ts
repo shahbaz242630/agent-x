@@ -3,7 +3,10 @@
 // oldest first (the soonest to expire at the top), and one in full. Each is
 // read through its signed state, and so are the agent and supplier it names,
 // so nothing is shown that can't be believed: one tampered with refuses the
-// answer, 503 INTEGRITY_FAILED, and holds the organisation.
+// answer, 503 INTEGRITY_FAILED, and holds the organisation. One that can't
+// be checked right now (a backlog of events), a request or the agent or
+// supplier it names, leaves only that request out of a list, named in
+// `unchecked`: the list shows the rest (A1b, partner decision 5; B3b).
 //
 // ADR-006's lock order (agent 3, supplier 6, request 8) is kept, so a read
 // never waits on a brake that waits on it (C2's cascades lock the agent, then
@@ -144,19 +147,24 @@ export function createSpendRequestReads({
           ...new Set(listed.items.map(({ request }) => request.supplierId)),
         ]);
         if (suppliers.outcome === 'tampered') return suppliers;
-        return { outcome: 'named' as const, agents: agents.agents, suppliers: suppliers.suppliers };
+        return { outcome: 'named' as const, agents, suppliers };
       });
       if (named.outcome === 'tampered') return refused(503, 'INTEGRITY_FAILED');
+      const { agents, suppliers } = named;
+      const stuck = ({ request }: { readonly request: SpendRequestRecord }) =>
+        agents.stuck.has(request.agentId) || suppliers.stuck.has(request.supplierId);
       return {
         outcome: 'listed',
-        requests: listed.items.map(({ request, changedAt }) => ({
-          request,
-          changedAt,
-          agentName: pointedTo(named.agents, request.agentId).name,
-          supplierName: pointedTo(named.suppliers, request.supplierId).displayName,
-        })),
+        requests: listed.items
+          .filter((item) => !stuck(item))
+          .map(({ request, changedAt }) => ({
+            request,
+            changedAt,
+            agentName: pointedTo(agents.agents, request.agentId).name,
+            supplierName: pointedTo(suppliers.suppliers, request.supplierId).displayName,
+          })),
         next: listed.next,
-        unchecked: listed.unchecked,
+        unchecked: [...listed.unchecked, ...listed.items.filter(stuck).map(({ request }) => request.id)],
       };
     },
 
