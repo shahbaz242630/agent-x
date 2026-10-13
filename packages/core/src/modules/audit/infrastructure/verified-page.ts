@@ -41,6 +41,19 @@ export type PageShown<Item> =
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
+ * How a list is cut and ordered: at most `most` a page, its `rows` named in a
+ * refusal; only rows in one of `statuses` when given (their row's status:
+ * each listed row is still verified, so none passes unbelieved); oldest first
+ * by ID unless `order` is newest (Phase 3 B3).
+ */
+export interface PageShape {
+  readonly most: number;
+  readonly rows: string;
+  readonly statuses?: readonly string[];
+  readonly order?: 'oldest' | 'newest';
+}
+
+/**
  * A page of the organisation's rows of `table`, in order of ID, in the
  * caller's transaction, which must be withSignedStates' for it: the page's
  * rows verified together, locked `share`, then shown by `show`, which may
@@ -60,13 +73,13 @@ export async function verifiedPage<Item>(
   table: SignedStateTable,
   orgId: string,
   { after, limit }: PageAsked,
-  { most, rows }: { readonly most: number; readonly rows: string },
+  { most, rows, statuses, order }: PageShape,
   show: (verified: readonly PageRow[]) => PageShown<Item> | Promise<PageShown<Item>>,
 ): Promise<VerifiedPage<Item>> {
   if (!Number.isInteger(limit) || limit < 1 || limit > most) {
     throw new RangeError(`A page is 1 to ${String(most)} ${rows}`);
   }
-  const ids = await signedRowIds(tx, table, orgId, limit, after);
+  const ids = await signedRowIds(tx, table, orgId, limit, after, statuses ?? null, order);
   const page = ids.slice(0, limit);
   const checks = await states.pageStates(tx, table, orgId, page);
   const verified: PageRow[] = [];

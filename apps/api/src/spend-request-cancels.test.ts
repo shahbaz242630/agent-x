@@ -56,6 +56,7 @@ const CANCELLED: SpendRequestRecord = {
   supplierId: '0199a0f0-0000-7000-8000-0000000000e1',
   fundingSourceId: '0199a0f0-0000-7000-8000-0000000000f1',
   amount: money(200_000n, 'AED'),
+  purpose: 'Printer paper',
   orderReference: 'INV_22',
   decision: 'REQUIRE_APPROVAL',
   reasons: ['APPROVAL_THRESHOLD'],

@@ -41,6 +41,7 @@ export {
   agentOf,
   AGENTS,
   agentsAddedSince,
+  agentsNamed,
   type AgentShown,
   agentsPage,
   agentsShown,

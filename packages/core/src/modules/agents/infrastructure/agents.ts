@@ -225,6 +225,33 @@ export async function agentsShown(
   });
 }
 
+/**
+ * The agents named, verified together (each locked `share`) with their names,
+ * by ID in lower case, in the caller's transaction, which must be
+ * withSignedStates' for the organisation: for a list naming the agents its
+ * own verified rows point to (Phase 3 B3), so one missing is a bug and
+ * throws; tampered with, at the first that is (every alarm raised).
+ */
+export async function agentsNamed(
+  tx: AgentsTransaction,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<
+  | { readonly outcome: 'named'; readonly agents: ReadonlyMap<string, AgentShown> }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const checks = await states.verifiedStates(tx, AGENTS, orgId, ids);
+  const agents: AgentRecord[] = [];
+  for (const [id, check] of checks) {
+    if (check.outcome === 'tampered') return check;
+    if (check.outcome === 'missing') throw new Error(`An agent a verified row names is missing: ${id}`);
+    agents.push(agentFrom(id, check));
+  }
+  const shown = await agentsShown(tx, orgId, agents);
+  return { outcome: 'named', agents: new Map(shown.map((agent) => [agent.id, agent])) };
+}
+
 /** The most agents a page gives. */
 export const MOST_AGENTS_A_PAGE = 50;
 

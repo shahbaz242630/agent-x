@@ -16,6 +16,7 @@ const FIELDS: Readonly<Record<string, string | null>> = {
   funding_source_id: '0199a0f0-0000-7000-8000-000000000004',
   amount_minor: '150000',
   currency: 'AED',
+  purpose: 'Printer paper',
   order_reference: 'INV-1001',
   decision: 'DENY',
   reason_codes: 'MANDATE_NOT_IN_FORCE SUPPLIER_NOT_VERIFIED',
@@ -40,6 +41,7 @@ describe('a spend request read through its signed state', () => {
         id: KEY.id.toLowerCase(),
         mandateId: null,
         amount: { minor: 150_000n, currency: 'AED' },
+        purpose: 'Printer paper',
         decision: 'DENY',
         reasons: ['MANDATE_NOT_IN_FORCE', 'SUPPLIER_NOT_VERIFIED'],
         status: 'DENIED',
@@ -63,6 +65,7 @@ describe('a spend request read through its signed state', () => {
       { amount_minor: '-1' },
       { decision: 'MAYBE' },
       { status: 'PAID' },
+      { purpose: null },
       { order_reference: null },
     ]) {
       await expect(read(reading({ ...FIELDS, ...bad }))).rejects.toThrow("a field that isn't one of its own");

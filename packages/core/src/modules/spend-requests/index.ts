@@ -30,10 +30,13 @@ export type { HeldAs } from './domain/holdings.ts';
 export {
   holdsCapacity,
   insertRequest,
+  MOST_REQUESTS_A_PAGE,
   type NewRequest,
   requestOf,
+  requestsPage,
   signRequest,
   type SpendRequestCheck,
+  type SpendRequestListed,
   type SpendRequestRecord,
 } from './infrastructure/decisions.ts';
 export {
