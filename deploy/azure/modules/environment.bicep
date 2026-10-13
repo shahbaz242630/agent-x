@@ -421,7 +421,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
 // and returns the highest, one number with no ID dimensions (ADR-013); the
 // saved query shows which agent. More than 5 in 15 minutes is half its day's
 // cap at once: a first number, to tune on real traffic. Stateful, as above.
-var agentCancelLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log).by) == "agent"'
+var agentCancelLines = 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log)["by"]) == "agent"'
 
 resource agentCancelsByAgent 'Microsoft.OperationalInsights/workspaces/savedSearches@2025-07-01' = {
   parent: workspace
