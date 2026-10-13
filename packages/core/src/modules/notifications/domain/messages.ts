@@ -281,19 +281,20 @@ const WORDING: Readonly<Record<NoticeKind, Wording>> = {
       'An admin of one of your Agent X organisations unfroze it, signing in again with a passkey and giving a reason: its AI agents can make spend requests again under their mandates.',
     check: FREEZE_CHECK,
   },
-  // About a spend request (0045): one waiting for a person's decision. No link that decides, no amount: the console shows it.
+  // About a spend request (0045): one waiting for a person's decision. B2 adds its amount, supplier and agent and the
+  // console's address (partner decision 2): never a token or anything that decides (SEC-HA-11).
   spend_request_waiting: {
     subject: () => "Agent X: an AI agent's spend request is waiting for approval",
     firstLine: () =>
       "An AI agent of one of your Agent X organisations asked to pay a supplier, and its organisation's rules need a person to approve it. Nothing is paid unless an admin or approver approves it in Agent X, signing in again with a passkey; after 72 hours it expires.",
     check:
-      "Sign in to Agent X yourself, not through a link in an email, to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
+      "Sign in to Agent X to see the request in full and approve or reject it. If you didn't expect it, reject it and tell the organisation's admins.",
   },
 };
 
 const NEWLINE = '\n';
 
-/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a supplier, or a registered contact. */
+/** What a notice is about, by its ID alone: a membership, a person, an agent, a mandate, the organisation, a spend request, a supplier, or a registered contact. */
 function aboutLine(notice: ClaimedNotice): string {
   if (notice.membershipId !== null) return `Membership: ${notice.membershipId}`;
   const id = notice.aboutId ?? '';
@@ -333,7 +334,7 @@ function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): Notice
   };
 }
 
-/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, as an admin or approver (a mandate or a policy), or as an admin. */
+/** Why the recipient is told: as a contact, as the person the login is, as an agent's new owner, as an admin or approver (a mandate, a policy, the organisation's freeze or a request waiting), or as an admin. */
 function whyTold(notice: ClaimedNotice): string {
   if (notice.recipientContactId !== null) {
     return "You're told because this address is one of the organisation's registered contacts.";

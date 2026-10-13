@@ -263,17 +263,17 @@ describe('a notice’s email (B5-1b)', () => {
   describe('C3a a change of the organisation’s own policy (0038)', () => {
     const org = '0199a0f0-0000-7000-8000-00000000c3a1';
 
-    it.each(['organization_policy_changed'] as const)(
-      'tells of %s, naming the organisation by ID alone, admins and approvers',
-      (kind) => {
-        const message = messageFor({ ...NOTICE, kind, membershipId: null, role: null, aboutId: org }, 'a@example.test');
+    it('tells of organization_policy_changed, naming the organisation by ID alone, admins and approvers', () => {
+      const message = messageFor(
+        { ...NOTICE, kind: 'organization_policy_changed', membershipId: null, role: null, aboutId: org },
+        'a@example.test',
+      );
 
-        expect(message.subject).toContain('policy');
-        expect(message.text).toContain(`Organisation: ${org}`);
-        expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
-        expect(message.text).toContain("check the organisation's policies");
-      },
-    );
+      expect(message.subject).toContain('policy');
+      expect(message.text).toContain(`Organisation: ${org}`);
+      expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+      expect(message.text).toContain("check the organisation's policies");
+    });
   });
 
   describe('B1 the organisation frozen or unfrozen (0045, Phase 3)', () => {
@@ -305,9 +305,8 @@ describe('a notice’s email (B5-1b)', () => {
       expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
     });
 
-    it('carries no approval power: no link, and says the decision is made signed in, with a passkey', () => {
-      expect(`${message.subject} ${message.text}`).not.toMatch(/https?:|www\.|token|#/i);
-      expect(message.text).toContain('not through a link in an email');
+    it('carries no approval power: no token, and says the decision is made signed in, with a passkey', () => {
+      expect(`${message.subject} ${message.text}`).not.toMatch(/token|[?#]/i);
       expect(message.text).toContain('passkey');
       expect(message.text).toContain("This email can't approve or change anything.");
     });

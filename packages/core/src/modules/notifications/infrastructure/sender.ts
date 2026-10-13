@@ -155,8 +155,9 @@ export function createNoticeSender({
    * about a person (their sign-in, or a reset of their second factor), by
    * their user ID (B6-2a review): that person is told apart, as themselves,
    * once. A notice about a supplier: the contacts that count now, or every
-   * active member (E2-2b). A notice about a mandate, or the organisation's
-   * policy: every admin and approver (0036, 0038).
+   * active member (E2-2b). A notice about a mandate, the organisation's
+   * policy or freeze, or a spend request waiting: every admin and approver
+   * (0036, 0038, 0045).
    */
   const groupOf = async (notice: ClaimedNotice): Promise<readonly string[]> => {
     if (isAboutASupplier(notice.kind)) {

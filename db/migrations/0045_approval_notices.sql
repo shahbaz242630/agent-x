@@ -5,9 +5,12 @@
 -- decision that sends a request to approval (B2); organization_frozen and
 -- organization_unfrozen, `aboutId` the organisation's ID (D1). Each is written
 -- to the group and fanned out as it is sent, to the admins and approvers
--- active then, as a mandate's moves are (0036). The email names the request
--- by its ID alone and carries no approval power (SEC-HA-11): the decision is
--- made in the console, with a passkey.
+-- active then, as a mandate's moves are (0036). The waiting email carries no
+-- token or approval power (SEC-HA-11): the decision is made in the console,
+-- with a passkey; B2 adds the request's amount, supplier and agent and the
+-- console's address (partner decision 2). Approvals and rejections need no
+-- kind of their own, and requests voided by a brake are told by the brake's
+-- own notice (a mandate's moves, 0036; the freeze, here).
 
 ALTER TABLE notifications.outbox DROP CONSTRAINT outbox_kind_check;
 ALTER TABLE notifications.outbox
