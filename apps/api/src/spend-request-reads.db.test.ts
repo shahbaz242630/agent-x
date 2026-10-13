@@ -3,7 +3,10 @@
 // agent's own words; each through its signed state, and the agent and
 // supplier it names too, so a record that can't be believed refuses the
 // answer (503 INTEGRITY_FAILED) and another organisation's is never found.
+import { agentsNamed } from '@agentx/core/modules/agents';
+import { withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
+import { suppliersNamed } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
@@ -273,5 +276,16 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
     await changedPastTheApp(renamed.w.org, 'supplier renamed', supplier.current_version_id);
     expect(await reads.list(renamed.w.org, { after: null, limit: 50 }, 'all', CORRELATION)).toEqual(INTEGRITY_FAILED);
     expect(await reads.show(renamed.w.org, second.id, CORRELATION)).toEqual(INTEGRITY_FAILED);
+  });
+
+  it('throws for an agent or supplier named that is missing: the list names only its own rows’, so a bug', async () => {
+    const { w } = await ready();
+    const named = (read: typeof agentsNamed | typeof suppliersNamed) =>
+      withSignedStates(app, w.org, { keys, ids, logger: testLogger() }, (tx, states): Promise<unknown> =>
+        read(tx, states, w.org, [ids.next()]),
+      );
+
+    await expect(named(agentsNamed)).rejects.toThrow('An agent a verified row names is missing');
+    await expect(named(suppliersNamed)).rejects.toThrow('A supplier a verified row names is missing');
   });
 });
