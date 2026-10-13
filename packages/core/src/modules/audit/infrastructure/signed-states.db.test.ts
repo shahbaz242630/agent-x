@@ -1028,6 +1028,17 @@ describe('a row whose object has a backlog of events (Phase 3 A1b; partner decis
     expect(found).toEqual([]);
   });
 
+  it('raises a row’s own tamper alarm, never a backlog, when its row is unreadable too (A1b review)', async () => {
+    const stuck = await newAgent();
+    await backlog(stuck);
+    await tamper('update probe.agents set state_version = 0 where org_id = $1 and id = $2', stuck);
+
+    const checks = await withTenant(app, org, (tx) => states.pageStates(tx, AGENTS, org, [stuck]));
+    expect(checks.get(stuck)).toMatchObject({ outcome: 'tampered', sign: 'row' });
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: stuck })]);
+    expect(backlogLines()).toEqual([]);
+  });
+
   it('leaves it out of a list’s page and names it, the rest listed (verifiedPage)', async () => {
     const fine = await newAgent();
     const stuck = await newAgent();

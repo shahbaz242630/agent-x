@@ -824,10 +824,10 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
   });
 
   /** An event about the agent that signs nothing, such as a rename. */
-  const unsigned = (version: number): AuditEvent => ({
+  const unsigned = (version: number, id = AGENT): AuditEvent => ({
     actor: { type: 'user', id: USER },
     action: 'agent.renamed',
-    subject: { type: 'agent', id: AGENT, version },
+    subject: { type: 'agent', id, version },
     details: {},
   });
 
@@ -946,6 +946,30 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       const many = await latestOfMany([AGENT, OTHER_AGENT]);
       expect(many.get(AGENT)).toEqual({ kind: 'backlog' });
       expect(many.get(OTHER_AGENT)).toMatchObject({ kind: 'signed', version: 4 });
+    });
+
+    it('answers backlog for each object that has one, for all when all have, and judges the rest (A1b review)', async () => {
+      const THIRD = '0199a0f0-0000-7000-8000-0000000000a3';
+      await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 1001 }, () => unsigned(1)));
+      await record(
+        org,
+        signed(org, 2, 'ACTIVE', OTHER_AGENT),
+        ...Array.from({ length: 1001 }, () => unsigned(2, OTHER_AGENT)),
+      );
+      await record(org, signed(org, 3, 'SUSPENDED', THIRD), unsigned(3, NEVER));
+
+      const many = await latestOfMany([AGENT, OTHER_AGENT, THIRD, NEVER]);
+      expect(many.get(AGENT)).toEqual({ kind: 'backlog' });
+      expect(many.get(OTHER_AGENT)).toEqual({ kind: 'backlog' });
+      expect(many.get(THIRD)).toMatchObject({ kind: 'signed', version: 3 });
+      // Never signed, though its one event came after both backlogs: none, read whole.
+      expect(many.get(NEVER)).toEqual({ kind: 'none' });
+      expect(await latestOfMany([OTHER_AGENT, AGENT])).toEqual(
+        new Map([
+          [OTHER_AGENT, { kind: 'backlog' }],
+          [AGENT, { kind: 'backlog' }],
+        ]),
+      );
     });
 
     it('calls every object broken, never backlogged, when a backlogged chain holds an event past its head', async () => {

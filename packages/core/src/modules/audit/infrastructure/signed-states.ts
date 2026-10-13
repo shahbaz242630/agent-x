@@ -789,14 +789,13 @@ export function createSignedStates({
       const last = latest.get(id);
       // Both reads answer every ID asked; one that didn't would be a bug, never a row to believe.
       if (row === undefined || last === undefined) throw new Error('A signed state was asked for and not read');
-      if (last.kind === 'backlog') {
-        checks.set(id, { outcome: 'backlog' });
-        continue;
-      }
       // A row not found whole (missing, or unreadable: rare, and a tamper sign) is read again on its own, which
-      // judges it as verifiedState always does, a row created since it was read among them.
-      const check =
-        row.outcome === 'found' ? compare(table, key, row, last) : await verifiedState(tx, table, key, 'share');
+      // judges it as verifiedState always does, a row created since it was read among them: an unreadable row's
+      // alarm comes before its log is read, so a backlog never hides it (A1b review).
+      let check: PageCheck;
+      if (row.outcome !== 'found') check = await verifiedState(tx, table, key, 'share');
+      else if (last.kind === 'backlog') check = { outcome: 'backlog' };
+      else check = compare(table, key, row, last);
       checks.set(id, listed && check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check);
     }
     return checks;

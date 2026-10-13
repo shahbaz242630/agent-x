@@ -372,13 +372,23 @@ function contentOf(row: Readonly<Record<string, unknown>>): StoredEntry['content
  * The events `which` picks, in chain order and at most `limit`, each beside
  * the chain's head and the first event past it, all in one statement so they
  * come from the same moment. With no event picked, one row with the head alone.
+ * With `each`, the limit is each of those objects' own (Phase 3 A1b), so no
+ * object's events can crowd out another's.
  */
 async function eventsWithHead(
   tx: AuditTransaction,
   chain: Chain & { readonly kind: 'organisation' },
   which: RawBuilder<unknown>,
   limit: number,
+  each?: readonly string[],
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const picked =
+    each === undefined
+      ? sql`select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit ${limit}`
+      : sql`select e.* from pg_catalog.unnest(${each}::uuid[]) as a (id) cross join lateral (
+          select e.* from audit.events e
+          where e.org_id = ${chain.orgId} and e.subject_id = a.id and ${which} order by e.seq limit ${limit}
+        ) as e`;
   const { rows } = await sql<Record<string, unknown>>`
     select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
            h.mac_key_version as head_mac_key_version, past.past_head,
@@ -391,9 +401,7 @@ async function eventsWithHead(
       select pg_catalog.min(p.seq) as past_head from audit.events p
       where p.org_id = ${chain.orgId} and p.seq > coalesce(h.seq, 0)
     ) as past
-    left join lateral (
-      select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit ${limit}
-    ) as e on true
+    left join lateral (${picked}) as e on true
     order by e.seq
   `.execute(tx);
   return rows;
@@ -742,36 +750,31 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       if (asked.length === 0) return new Map();
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      // Every object backlogged until judged: those still backlogged when the reads end stay so.
-      const judged = new Map<string, LatestSignedState | BackloggedRead>(asked.map((id) => [id, BACKLOGGED]));
-      let left = asked;
-      while (left.length > 0) {
-        // Each object's newest signed event and every one after it, as latestSignedState reads one object's. Past
-        // the limit, some object has more than LATER_EVENTS_READ of them, and its own judgement below says so.
-        const rows = await eventsWithHead(
-          tx,
-          chain,
-          sql`e.subject_type = ${type} and e.subject_id = any(${left}::uuid[])
-            and e.seq >= (
-              select pg_catalog.max(s.seq) from audit.events s
-              where s.org_id = ${chain.orgId} and s.subject_type = ${type} and s.subject_id = e.subject_id
-                and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
-            )`,
-          left.length * (LATER_EVENTS_READ + 1),
-        );
-        const [first] = rows;
-        const rowsOf = (id: string) => rows.filter((row) => row.subject_id === id);
-        const backlogged = left.filter((id) => rowsOf(id).length > LATER_EVENTS_READ);
-        // A backlogged object's rows may have crowded out the others' (the limit is the statement's, in the
-        // chain's order), so each other is judged only from a read without it: never `none` for rows cut off.
-        // A chain past its head is judged as it is: every object broken.
-        if (backlogged.length === 0 || (first !== undefined && first.past_head !== null)) {
-          for (const id of left) judged.set(id, latestIn(chain, rowsOf(id), first));
-          break;
-        }
-        left = left.filter((id) => !backlogged.includes(id));
-      }
-      return judged;
+      // Each object's newest signed event and every one after it, as latestSignedState reads one object's, each
+      // object's at most LATER_EVENTS_READ + 1 of its own: past that, its judgement below says so.
+      const rows = await eventsWithHead(
+        tx,
+        chain,
+        sql`e.subject_type = ${type}
+          and e.seq >= (
+            select pg_catalog.max(s.seq) from audit.events s
+            where s.org_id = ${chain.orgId} and s.subject_type = ${type} and s.subject_id = e.subject_id
+              and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
+          )`,
+        LATER_EVENTS_READ + 1,
+        asked,
+      );
+      const [first] = rows;
+      const byObject = new Map<string, Readonly<Record<string, unknown>>[]>(asked.map((id) => [id, []]));
+      for (const row of rows) if (typeof row.subject_id === 'string') byObject.get(row.subject_id)?.push(row);
+      // A chain past its head is judged as it is: every object broken, a backlogged one too.
+      const pastHead = (first?.past_head ?? null) !== null;
+      return new Map(
+        asked.map((id) => {
+          const own = byObject.get(id) ?? [];
+          return [id, !pastHead && own.length > LATER_EVENTS_READ ? BACKLOGGED : latestIn(chain, own, first)];
+        }),
+      );
     },
 
     async subjectIds(
