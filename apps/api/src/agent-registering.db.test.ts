@@ -5,7 +5,7 @@
 // themselves are the agents module's agents.db.test.ts.
 import { createHash } from 'node:crypto';
 
-import { type AgentsTables, MOST_AGENTS_ADDED_A_DAY, type Scope } from '@agentx/core/modules/agents';
+import { type AgentsTables, type Scope } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
@@ -364,10 +364,11 @@ describe('what registering refuses, writing nothing', () => {
     expect(await ask(viewer)).toEqual({ outcome: 'refused', status: 503, code: 'INTEGRITY_FAILED' });
   });
 
-  it(`past ${String(MOST_AGENTS_ADDED_A_DAY)} agents in 24 hours: AGENT_ADDS_SPENT, until a day has passed`, async () => {
+  // The daily budget of agents, written out so a change to the constant fails here.
+  it('past 10 agents in 24 hours: AGENT_ADDS_SPENT, until a day has passed', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
-    for (let count = 0; count < MOST_AGENTS_ADDED_A_DAY; count += 1) {
+    for (let count = 0; count < 10; count += 1) {
       await register(developer, { ...ASKED, name: `Bot ${String(count)}` }, APP_CODE);
     }
     const last = { ...ASKED, name: 'One too many' };
@@ -379,7 +380,7 @@ describe('what registering refuses, writing nothing', () => {
       status: 409,
       code: 'AGENT_ADDS_SPENT',
     });
-    expect(await agentsIn(org)).toBe(MOST_AGENTS_ADDED_A_DAY);
+    expect(await agentsIn(org)).toBe(10);
 
     clock.advanceBy(DAY_MS);
     // A day on, the session has ended: the member signs in again.

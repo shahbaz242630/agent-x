@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { type SeededSupplier as Supplier, seedRows } from '../../../seed-rows.helper.test.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
-import { claimOrder, hasOpenClaim, orderKeyOf, releaseClaim } from './order-claims.ts';
+import { claimOrder, claimsOn, orderKeyOf, releaseClaim } from './order-claims.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
 const server = inject('postgres');
@@ -624,12 +624,16 @@ describe('the duplicate check and claiming an order (D3)', () => {
     .filter((written) => written.trim() !== '');
 
   const check = (org: Org, written: string, order: { supplierId?: string; payeeKey?: string | null } = {}) =>
-    inOrg(org, (tx) =>
-      hasOpenClaim(tx, {
-        supplierId: order.supplierId ?? org.supplier.id,
-        payeeKey: order.payeeKey ?? null,
-        reference: written,
-      }),
+    inOrg(
+      org,
+      async (tx) =>
+        (
+          await claimsOn(tx, {
+            supplierId: order.supplierId ?? org.supplier.id,
+            payeeKey: order.payeeKey ?? null,
+            reference: written,
+          })
+        ).duplicate,
     );
 
   interface ClaimOptions {
@@ -718,7 +722,7 @@ describe('the duplicate check and claiming an order (D3)', () => {
     const again = await approved(org, { order_reference: 'po-2026/0042 ' });
     const after = await inOrg(org, async (tx) => {
       const outcome = await claimOrder(tx, claimOf(org, again, { reference: 'po-2026/0042 ' }));
-      return { outcome, seen: await hasOpenClaim(tx, claimOf(org, again)) };
+      return { outcome, seen: (await claimsOn(tx, claimOf(org, again))).duplicate };
     });
     expect(after).toEqual({ outcome: 'taken', seen: true });
   });

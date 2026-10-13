@@ -314,6 +314,8 @@ export function createSpendRequestDecisions({
     asked: SpendAskedByAgent,
   ): Promise<{ readonly id: string } & Pick<NewRequest, 'decision' | 'reasons'>> {
     const { orgId, agentId } = acting;
+    // Read before the lock waits below (each at most 5 s), so a request can be weighed seconds past a mandate's
+    // `endsAt`; the sealed instant is this one, so the evidence shows it as it was weighed.
     const now = clock.now();
     await currencyTaken(tx, asked.amount.currency);
     const { agent, keyId } = await actingIn(tx, states, acting, now);

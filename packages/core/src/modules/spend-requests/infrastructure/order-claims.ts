@@ -63,11 +63,6 @@ const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
     .where(onTheOrdersPayee(order))
     .limit(1);
 
-/** Whether the order is already claimed and not released, in canonical form. */
-export async function hasOpenClaim(tx: ClaimsTransaction, order: OrderOf): Promise<boolean> {
-  return (await openClaimsOn(tx, order).executeTakeFirst()) !== undefined;
-}
-
 /**
  * What the open claims on the order's supplier or payee say of it, in one
  * statement: `duplicate`, one claims it in canonical form (D3: refused);

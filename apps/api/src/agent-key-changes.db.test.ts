@@ -15,7 +15,6 @@ import {
   createAgentKeyCheck,
   handAgentOver,
   keySecretMessage,
-  MOST_KEYS_ISSUED_A_DAY,
   parseAgentKey,
   type Scope,
 } from '@agentx/core/modules/agents';
@@ -536,11 +535,12 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     expect(await keysIn(org)).toBe(2);
   });
 
-  it(`past ${String(MOST_KEYS_ISSUED_A_DAY)} keys in 24 hours, first keys included: AGENT_KEYS_SPENT, until a day has passed`, async () => {
+  // The daily key budget, written out so a change to the constant fails here.
+  it('past 20 keys in 24 hours, first keys included: AGENT_KEYS_SPENT, until a day has passed', async () => {
     const org = await organization();
     const developer = await member(org, 'developer');
     const key = await agentWithKey(org, developer);
-    for (let count = 1; count < MOST_KEYS_ISSUED_A_DAY; count += 1) {
+    for (let count = 1; count < 20; count += 1) {
       await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() - 1 + 90 * DAY_MS));
     }
     // Every key but the first is revoked, so the agent has room for a new one.
@@ -552,7 +552,7 @@ describe(`rotating a key (C1-4b, Postgres ${server.version})`, () => {
     await stepUp(developer, challengeId);
 
     expect(await rotateConfirm(developer, key, challengeId)).toEqual(refusal(409, 'AGENT_KEYS_SPENT'));
-    expect(await keysIn(org)).toBe(MOST_KEYS_ISSUED_A_DAY);
+    expect(await keysIn(org)).toBe(20);
 
     clock.advanceBy(DAY_MS);
     const again = await signedInAgain(developer);
@@ -876,14 +876,14 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     expect(await keysIn(org)).toBe(2);
   });
 
-  it(`past ${String(MOST_KEYS_ISSUED_A_DAY)} keys in 24 hours: AGENT_KEYS_SPENT, asking or confirming, nothing changed`, async () => {
+  it('past 20 keys in 24 hours: AGENT_KEYS_SPENT, asking or confirming, nothing changed', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');
     const next = await member(org, 'developer');
     const key = await agentWithKey(org, admin);
     const challengeId = askedForHandOver(await handOverAsk(admin, key.agentId, next.membershipId));
     await stepUp(admin, challengeId);
-    for (let count = 1; count < MOST_KEYS_ISSUED_A_DAY; count += 1) {
+    for (let count = 1; count < 20; count += 1) {
       await keyFor(org, key.agentId, ['requests:read'], new Date(START.getTime() + 90 * DAY_MS));
     }
 
@@ -891,7 +891,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
       refusal(409, 'AGENT_KEYS_SPENT'),
     );
     expect(await handOverAsk(admin, key.agentId, next.membershipId)).toEqual(refusal(409, 'AGENT_KEYS_SPENT'));
-    expect(await keysIn(org)).toBe(MOST_KEYS_ISSUED_A_DAY);
+    expect(await keysIn(org)).toBe(20);
     expect(await check(key.text)).toMatchObject({ outcome: 'accepted' });
   });
 });
