@@ -4,7 +4,7 @@
 // supplier it names too, so a record that can't be believed refuses the
 // answer (503 INTEGRITY_FAILED) and another organisation's is never found.
 import { agentsNamed } from '@agentx/core/modules/agents';
-import { withSignedStates } from '@agentx/core/modules/audit';
+import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { suppliersNamed } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
@@ -12,7 +12,7 @@ import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testL
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
-import { AED, keys } from './mandate-world.helper.test.ts';
+import { AED, keys, OPERATOR } from './mandate-world.helper.test.ts';
 import { CANCEL_OPERATION, createSpendRequestCancels, type SpendRequestCancels } from './spend-request-cancels.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads, type SpendRequestReads } from './spend-request-reads.ts';
@@ -287,5 +287,58 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
 
     await expect(named(agentsNamed)).rejects.toThrow('An agent a verified row names is missing');
     await expect(named(suppliersNamed)).rejects.toThrow('A supplier a verified row names is missing');
+  });
+});
+
+describe('a record that can’t be checked right now leaves out only the requests that name it (A1b; Phase 3 B3b)', () => {
+  /** 1,001 events about the record since its newest signed one: more than one read takes, so it can't be judged now. */
+  const backlogged = (org: string, type: 'agent' | 'supplier' | 'supplier_version', id: string) =>
+    withTenant(app, org, async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (let added = 0; added < 1001; added += 1) {
+        await trail.record(tx, org, {
+          actor: OPERATOR,
+          action: `${type}.noted`,
+          subject: { type, id, version: 1 },
+          details: {},
+        });
+      }
+    });
+
+  /** A request waiting, to the first supplier, and one approved at once, to the second. */
+  const twoRequests = async () => {
+    const { w, acting } = await ready();
+    const first = await ask(acting, w);
+    const second = await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
+    return { w, acting, first, second };
+  };
+
+  it('lists the rest when a supplier can’t be checked, naming the requests to it', async () => {
+    const { w, first, second } = await twoRequests();
+    await backlogged(w.org, 'supplier', w.suppliers[0] ?? '');
+
+    expect(await listOf(w.org, 'all')).toEqual({ rows: [[second.id, 'APPROVED']], next: null, unchecked: [first.id] });
+    expect(await listOf(w.org, 'waiting')).toEqual({ rows: [], next: null, unchecked: [first.id] });
+  });
+
+  it('lists the rest when a supplier’s current version can’t be checked', async () => {
+    const { w, first, second } = await twoRequests();
+    const supplier = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('suppliers.suppliers')
+        .select('current_version_id')
+        .where('id', '=', w.suppliers[0] ?? '')
+        .executeTakeFirstOrThrow(),
+    );
+    await backlogged(w.org, 'supplier_version', supplier.current_version_id);
+
+    expect(await listOf(w.org, 'all')).toEqual({ rows: [[second.id, 'APPROVED']], next: null, unchecked: [first.id] });
+  });
+
+  it('still answers when the agent can’t be checked, naming every request it made', async () => {
+    const { w, acting, first, second } = await twoRequests();
+    await backlogged(w.org, 'agent', acting.agentId);
+
+    expect(await listOf(w.org, 'all')).toEqual({ rows: [], next: null, unchecked: [second.id, first.id] });
   });
 });

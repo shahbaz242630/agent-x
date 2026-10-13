@@ -230,7 +230,9 @@ export async function agentsShown(
  * by ID in lower case, in the caller's transaction, which must be
  * withSignedStates' for the organisation: for a list naming the agents its
  * own verified rows point to (Phase 3 B3), so one missing is a bug and
- * throws; tampered with, at the first that is (every alarm raised).
+ * throws. One that can't be checked now (a backlog of events, logged as an
+ * error) is in `stuck`, so the list shows the rest (A1b, Phase 3 B3b);
+ * tampered with, at the first that is (every alarm raised).
  */
 export async function agentsNamed(
   tx: AgentsTransaction,
@@ -238,18 +240,24 @@ export async function agentsNamed(
   orgId: string,
   ids: readonly string[],
 ): Promise<
-  | { readonly outcome: 'named'; readonly agents: ReadonlyMap<string, AgentShown> }
+  | {
+      readonly outcome: 'named';
+      readonly agents: ReadonlyMap<string, AgentShown>;
+      readonly stuck: ReadonlySet<string>;
+    }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  const checks = await states.verifiedStates(tx, AGENTS, orgId, ids);
+  const checks = await states.pageStates(tx, AGENTS, orgId, ids);
   const agents: AgentRecord[] = [];
+  const stuck = new Set<string>();
   for (const [id, check] of checks) {
     if (check.outcome === 'tampered') return check;
     if (check.outcome === 'missing') throw new Error(`An agent a verified row names is missing: ${id}`);
-    agents.push(agentFrom(id, check));
+    if (check.outcome === 'backlog') stuck.add(id);
+    else agents.push(agentFrom(id, check));
   }
   const shown = await agentsShown(tx, orgId, agents);
-  return { outcome: 'named', agents: new Map(shown.map((agent) => [agent.id, agent])) };
+  return { outcome: 'named', agents: new Map(shown.map((agent) => [agent.id, agent])), stuck };
 }
 
 /** The most agents a page gives. */

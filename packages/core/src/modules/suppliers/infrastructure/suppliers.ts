@@ -1017,8 +1017,10 @@ export async function suppliersPage(
 
 /**
  * Verified suppliers with the names their current versions give them, the
- * versions verified together (each locked `share`); tampered with, at the
- * first version that is.
+ * versions verified together (each locked `share`), a supplier whose version
+ * can't be checked now (a backlog of events, logged as an error) left out and
+ * named in `unchecked`, never the whole answer refused (A1b, Phase 3 B3b);
+ * tampered with, at the first version that is.
  */
 async function suppliersShown(
   tx: SuppliersTransaction,
@@ -1027,18 +1029,24 @@ async function suppliersShown(
   suppliers: readonly SupplierRecord[],
 ): Promise<PageShown<SupplierShown>> {
   const versionIds = suppliers.map(({ currentVersionId }) => currentVersionId);
-  const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, versionIds);
+  const versions = await states.pageStates(tx, SUPPLIER_VERSIONS, orgId, versionIds);
   const items: SupplierShown[] = [];
+  const unchecked: string[] = [];
   for (const supplier of suppliers) {
     const id = supplier.currentVersionId;
-    const current = versionIn(id, checkOf(versions, id), supplier.id);
+    const check = checkOf(versions, id);
+    if (check.outcome === 'backlog') {
+      unchecked.push(supplier.id);
+      continue;
+    }
+    const current = versionIn(id, check, supplier.id);
     if (current.outcome === 'tampered') return current;
     // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
     if (current.outcome === 'missing')
       throw new Error(`A verified supplier has no current version of its own: ${supplier.id}`);
     items.push({ ...supplier, displayName: current.version.displayName });
   }
-  return { outcome: 'shown', items };
+  return { outcome: 'shown', items, unchecked };
 }
 
 /**
@@ -1046,7 +1054,9 @@ async function suppliersShown(
  * locked `share`) and named by them, by ID in lower case, in the caller's
  * transaction, which must be withSignedStates' for the organisation: for a
  * list naming the suppliers its own verified rows point to (Phase 3 B3), so
- * one missing is a bug and throws; tampered with, at the first that is.
+ * one missing is a bug and throws. One that can't be checked now, or whose
+ * version can't, is in `stuck` (A1b: the list shows the rest); tampered
+ * with, at the first that is.
  */
 export async function suppliersNamed(
   tx: SuppliersTransaction,
@@ -1054,19 +1064,26 @@ export async function suppliersNamed(
   orgId: string,
   ids: readonly string[],
 ): Promise<
-  | { readonly outcome: 'named'; readonly suppliers: ReadonlyMap<string, SupplierShown> }
+  | {
+      readonly outcome: 'named';
+      readonly suppliers: ReadonlyMap<string, SupplierShown>;
+      readonly stuck: ReadonlySet<string>;
+    }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
-  const checks = await states.verifiedStates(tx, SUPPLIERS, orgId, ids);
+  const checks = await states.pageStates(tx, SUPPLIERS, orgId, ids);
   const suppliers: SupplierRecord[] = [];
+  const stuck = new Set<string>();
   for (const [id, check] of checks) {
     if (check.outcome === 'tampered') return check;
     if (check.outcome === 'missing') throw new Error(`A supplier a verified row names is missing: ${id}`);
-    suppliers.push(supplierFrom(id, check));
+    if (check.outcome === 'backlog') stuck.add(id);
+    else suppliers.push(supplierFrom(id, check));
   }
   const shown = await suppliersShown(tx, states, orgId, suppliers);
   if (shown.outcome === 'tampered') return shown;
-  return { outcome: 'named', suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])) };
+  for (const id of shown.unchecked ?? []) stuck.add(id);
+  return { outcome: 'named', suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])), stuck };
 }
 
 /**

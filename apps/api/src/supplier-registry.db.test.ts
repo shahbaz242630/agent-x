@@ -3,7 +3,7 @@
 // through the use case the routes call, on the real migrated schema, as the
 // app role. The routes' answers are suppliers.test.ts; the brake is
 // supplier-changes.db.test.ts.
-import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
+import { type AuditTables, createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import {
   addMembership,
@@ -302,6 +302,31 @@ describe(`reading suppliers (E1-2, Postgres ${server.version})`, () => {
     expect(await registry.list(org, { after: page.next, limit: 50 }, CORRELATION)).toMatchObject({
       suppliers: [{ id: second.supplier.id, displayName: 'Second' }],
       next: null,
+    });
+  });
+
+  it('leaves out one whose current version can’t be checked right now, named, and lists the rest (A1b; Phase 3 B3b)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const stuck = addedOf(await add(admin, named('Stuck')));
+    const other = addedOf(await add(admin, named('Other')));
+    // 1,001 events about its version since its newest signed one: more than one read takes.
+    await withTenant(app, org, async (tx) => {
+      const trail = createAuditTrail({ keys, ids });
+      for (let added = 0; added < 1001; added += 1) {
+        await trail.record(tx, org, {
+          actor: OPERATOR,
+          action: 'supplier_version.noted',
+          subject: { type: 'supplier_version', id: stuck.supplier.currentVersionId, version: 1 },
+          details: {},
+        });
+      }
+    });
+
+    expect(await registry.list(org, { after: null, limit: 50 }, CORRELATION)).toMatchObject({
+      outcome: 'listed',
+      suppliers: [{ id: other.supplier.id, displayName: 'Other' }],
+      unchecked: [stuck.supplier.id],
     });
   });
 

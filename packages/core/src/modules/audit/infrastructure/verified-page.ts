@@ -35,9 +35,14 @@ export interface PageRow {
   readonly state: VerifiedState;
 }
 
-/** The items a page's rows show, in the rows' order; or tampered with, at the first that is (its alarm raised). */
+/**
+ * The items a page's rows show, in the rows' order, and the rows left out
+ * because a record they show can't be checked now (a supplier's version with
+ * a backlog of events: A1b, Phase 3 B3b); or tampered with, at the first that
+ * is (its alarm raised).
+ */
 export type PageShown<Item> =
-  | { readonly outcome: 'shown'; readonly items: readonly Item[] }
+  | { readonly outcome: 'shown'; readonly items: readonly Item[]; readonly unchecked?: readonly string[] }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
@@ -97,6 +102,6 @@ export async function verifiedPage<Item>(
     outcome: 'listed',
     items: shown.items,
     next: ids.length > limit ? (page.at(-1) ?? null) : null,
-    unchecked,
+    unchecked: [...unchecked, ...(shown.unchecked ?? [])],
   };
 }
