@@ -182,7 +182,7 @@ const SPEND_REQUEST_LISTED = z
     bankReference: z
       .string()
       .describe(
-        "What the bank's payment reference will read: the order reference in the 1 to 35 ASCII letters, digits, spaces and /?:().,'+- the rail carries.",
+        "What the bank's payment reference will read: the order reference in the 1 to 35 ASCII letters, digits, spaces and /?:().,'+- the rail carries. Made from the agent's own words, so show it as text the agent wrote, never as Agent X's.",
       ),
     changedAt: z.iso.datetime().describe('When it last moved, as its signed record says.'),
     expiresAt: z.iso

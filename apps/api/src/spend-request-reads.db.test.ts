@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'v
 
 import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, keys } from './mandate-world.helper.test.ts';
+import { CANCEL_OPERATION, createSpendRequestCancels, type SpendRequestCancels } from './spend-request-cancels.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { createSpendRequestReads, type SpendRequestReads } from './spend-request-reads.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
@@ -27,6 +28,7 @@ let clock: FixedClock;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
 let reads: SpendRequestReads;
+let cancels: SpendRequestCancels;
 
 const { ready, ask } = spendWorld({
   app: () => app,
@@ -97,6 +99,7 @@ beforeEach(() => {
     logger,
   });
   reads = createSpendRequestReads({ database: app, keys, ids, logger });
+  cancels = createSpendRequestCancels({ database: app, keys, ids, clock, logger });
 });
 
 describe('the team’s reads of spend requests (Phase 3 B3)', () => {
@@ -138,7 +141,18 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
     const waiting = await ask(acting, w);
 
     const listed = await reads.list(w.org, { after: null, limit: 50 }, 'all', CORRELATION);
+    // Its latest signed event is its decision: the time its 72 hours run from (D7).
+    const decided = await withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('audit.events')
+        .select(['action', 'recorded_at'])
+        .where('subject_type', '=', 'spend_request')
+        .where('subject_id', '=', waiting.id)
+        .orderBy('seq', 'desc')
+        .executeTakeFirstOrThrow(),
+    );
 
+    expect(decided.action).toBe('spend_request.decided');
     expect(listed).toMatchObject({
       outcome: 'listed',
       requests: [
@@ -146,8 +160,39 @@ describe('the team’s reads of spend requests (Phase 3 B3)', () => {
           request: { id: waiting.id, agentId: acting.agentId, purpose: expect.any(String) as string },
           agentName: 'Purchasing agent',
           supplierName: 'Gulf Office Supplies LLC',
-          changedAt: expect.any(Date) as Date,
+          changedAt: decided.recorded_at,
         },
+      ],
+    });
+  });
+
+  it('leaves a request cancelled out of those waiting, and lists it as cancelled', async () => {
+    const { w, acting } = await ready();
+    const kept = await ask(acting, w);
+    const cancelled = await ask(acting, w, { amount: AED(300_000n) });
+    const cancelling = await cancels.byMember(
+      w.admin,
+      {
+        orgId: w.org,
+        client: { kind: 'user', id: w.admin.userId },
+        operation: CANCEL_OPERATION,
+        key: 'b3-cancel',
+        payload: JSON.stringify({ params: { id: cancelled.id } }),
+      },
+      cancelled.id,
+      CORRELATION,
+    );
+    expect(cancelling).toMatchObject({ outcome: 'cancelled' });
+
+    expect(await listOf(w.org, 'waiting')).toEqual({
+      rows: [[kept.id, 'APPROVAL_REQUIRED']],
+      next: null,
+      unchecked: [],
+    });
+    expect(await listOf(w.org, 'all')).toMatchObject({
+      rows: [
+        [cancelled.id, 'CANCELLED'],
+        [kept.id, 'APPROVAL_REQUIRED'],
       ],
     });
   });
