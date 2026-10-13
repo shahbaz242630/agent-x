@@ -71,6 +71,7 @@ const ALLOWED: SpendRequestRecord = {
   supplierId: SUPPLIER_ID,
   fundingSourceId: SOURCE_ID,
   amount: money(125_050n, 'AED'),
+  purpose: 'Printer paper',
   orderReference: 'PO-1',
   decision: 'ALLOW',
   reasons: [],

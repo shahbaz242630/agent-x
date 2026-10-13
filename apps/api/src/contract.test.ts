@@ -115,6 +115,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/agent/suppliers',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
+      'GET /v1/approvals',
       'GET /v1/auth/callback',
       'GET /v1/auth/session',
       'GET /v1/auth/sign-in',
@@ -130,6 +131,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/members',
       'GET /v1/policies/organization',
       'GET /v1/registered-contacts',
+      'GET /v1/spend-requests',
+      'GET /v1/spend-requests/{id}',
       'GET /v1/suppliers',
       'GET /v1/suppliers/{id}',
       'HEAD /health',
@@ -140,6 +143,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/agent/suppliers',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
+      'HEAD /v1/approvals',
       'HEAD /v1/auth/callback',
       'HEAD /v1/auth/session',
       'HEAD /v1/auth/sign-in',
@@ -155,6 +159,8 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/members',
       'HEAD /v1/policies/organization',
       'HEAD /v1/registered-contacts',
+      'HEAD /v1/spend-requests',
+      'HEAD /v1/spend-requests/{id}',
       'HEAD /v1/suppliers',
       'HEAD /v1/suppliers/{id}',
       'POST /test/both',
@@ -1208,8 +1214,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // mandates' draft, supersede, list and one (Phase 2 B2), a mandate's accept and its confirm (B3), its suspend,
     // resume and revoke with each confirm (B4), the agent's own mandate (B5), the organisation's policy and a
     // mandate's, each read, changed and confirmed (C3), an agent's spend request (D4r), the simulator (C4), a spend request's cancel by a member and by its agent
-    // (D8), with each GET's HEAD.
-    expect(answers).toHaveLength(123);
+    // (D8), the team's spend requests, approvals and one request (Phase 3 B3), with each GET's HEAD.
+    expect(answers).toHaveLength(129);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -1270,6 +1276,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
       'RegisteredContacts',
       'Session',
       'SpendRequest',
+      'SpendRequestDetails',
+      'SpendRequestListed',
       'Supplier',
       'SupplierDetails',
       'SupplierDetailsChangeAsked',

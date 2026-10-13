@@ -64,6 +64,7 @@ export {
   type SupplierShown,
   suppliersAddedSince,
   suppliersFound,
+  suppliersNamed,
   suppliersPage,
   supplierOf,
   type SuppliersTransaction,

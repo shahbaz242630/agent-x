@@ -101,6 +101,7 @@ import { scheduleRuns, scheduleRunsIfAny } from './background.ts';
 import { createAgentMandates } from './agent-mandate.ts';
 import { createPolicySimulations } from './policy-simulations.ts';
 import { createSpendRequestCancels } from './spend-request-cancels.ts';
+import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
@@ -549,6 +550,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     spendRequestCancels: createSpendRequestCancels({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    spendRequestReads: createSpendRequestReads({ database, keys, ids: uuidV7Ids, logger }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
       database,

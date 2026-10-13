@@ -11,13 +11,16 @@
 // refuses one the log already holds a state for.
 import type { Transaction } from 'kysely';
 
-import type {
-  AuditActor,
-  AuditTables,
-  SignedStates,
-  StateCheck,
-  TamperSign,
-  VerifiedState,
+import {
+  type AuditActor,
+  type AuditTables,
+  type PageAsked,
+  type SignedStates,
+  type StateCheck,
+  type TamperSign,
+  type VerifiedPage,
+  verifiedPage,
+  type VerifiedState,
 } from '../../audit/index.ts';
 import { type Decision, DECISIONS } from '../../policies/index.ts';
 import { isReasonCode, type Money, minorOf, money, oneOf, type ReasonCode } from '../../../shared-kernel/index.ts';
@@ -148,6 +151,8 @@ export interface SpendRequestRecord {
   readonly supplierId: string;
   readonly fundingSourceId: string;
   readonly amount: Money;
+  /** The agent's own words, as it wrote them: shown only labelled as its (Phase 3 B3), never in an email. */
+  readonly purpose: string;
   readonly orderReference: string;
   readonly decision: Decision;
   readonly reasons: readonly ReasonCode[];
@@ -190,14 +195,58 @@ export async function requestsOf(
   return new Map([...checks].map(([id, state]) => [id, requestFrom({ orgId, id }, state)]));
 }
 
+/** The most spend requests a page gives. */
+export const MOST_REQUESTS_A_PAGE = 50;
+
+/** A request as a list shows it: its signed state, and when that state was signed (its latest move, sealed). */
+export interface SpendRequestListed {
+  readonly request: SpendRequestRecord;
+  readonly changedAt: Date;
+}
+
+/**
+ * A page of the organisation's spend requests, each read (`share`) and
+ * verified, in the caller's transaction, which must be withSignedStates' for
+ * it (verifiedPage): every request, newest first; or those waiting for
+ * approval, oldest first, the soonest to expire at the top (Phase 3 B3).
+ */
+export async function requestsPage(
+  tx: RequestsTransaction,
+  states: SignedStates,
+  orgId: string,
+  page: PageAsked,
+  which: 'all' | 'waiting',
+): Promise<VerifiedPage<SpendRequestListed>> {
+  return verifiedPage(
+    tx,
+    states,
+    SPEND_REQUESTS,
+    orgId,
+    page,
+    which === 'all'
+      ? { most: MOST_REQUESTS_A_PAGE, rows: 'spend requests', order: 'newest' }
+      : { most: MOST_REQUESTS_A_PAGE, rows: 'spend requests', statuses: ['APPROVAL_REQUIRED'] },
+    (verified) => ({
+      outcome: 'shown',
+      items: verified.map(({ id, state }) => ({ request: recordFrom(id, state), changedAt: state.recordedAt })),
+    }),
+  );
+}
+
 /** The request a verified state holds; any other check as it is. */
 function requestFrom(key: { readonly orgId: string; readonly id: string }, state: StateCheck): SpendRequestCheck {
   if (state.outcome !== 'verified') return state;
+  return { outcome: 'found', request: recordFrom(key.id, state), state };
+}
+
+/** The request a verified state holds. */
+function recordFrom(id: string, state: VerifiedState): SpendRequestRecord {
   const field = (column: string): string | undefined => state.fields.get(column) ?? undefined;
   const agentId = field('agent_id');
   const supplierId = field('supplier_id');
   const fundingSourceId = field('funding_source_id');
   const currency = field('currency');
+  const purpose = field('purpose');
   const orderReference = field('order_reference');
   const minor = minorOf(state.fields.get('amount_minor'));
   const decision = oneOf(DECISIONS, state.fields.get('decision'));
@@ -208,31 +257,29 @@ function requestFrom(key: { readonly orgId: string; readonly id: string }, state
     supplierId === undefined ||
     fundingSourceId === undefined ||
     currency === undefined ||
+    purpose === undefined ||
     orderReference === undefined ||
     minor === undefined ||
     decision === undefined ||
     status === undefined
   ) {
-    throw new Error(`A verified spend request holds a field that isn't one of its own: ${key.id}`);
+    throw new Error(`A verified spend request holds a field that isn't one of its own: ${id}`);
   }
   const reasons = field('reason_codes')?.split(' ') ?? [];
   if (!reasons.every(isReasonCode)) {
-    throw new Error(`A verified spend request holds a reason that isn't one: ${key.id}`);
+    throw new Error(`A verified spend request holds a reason that isn't one: ${id}`);
   }
   return {
-    outcome: 'found',
-    request: {
-      id: key.id.toLowerCase(),
-      agentId,
-      mandateId: field('mandate_id') ?? null,
-      supplierId,
-      fundingSourceId,
-      amount: money(minor, currency),
-      orderReference,
-      decision,
-      reasons,
-      status,
-    },
-    state,
+    id: id.toLowerCase(),
+    agentId,
+    mandateId: field('mandate_id') ?? null,
+    supplierId,
+    fundingSourceId,
+    amount: money(minor, currency),
+    purpose,
+    orderReference,
+    decision,
+    reasons,
+    status,
   };
 }

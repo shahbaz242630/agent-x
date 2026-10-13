@@ -1002,26 +1002,71 @@ export async function suppliersPage(
     orgId,
     page,
     { most: MOST_SUPPLIERS_A_PAGE, rows: 'suppliers' },
-    async (verified): Promise<PageShown<SupplierShown>> => {
-      const suppliers = verified.map(({ id, state }) => supplierFrom(id, state));
-      const versionIds = suppliers.map(({ currentVersionId }) => currentVersionId);
-      const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, versionIds);
-      const items: SupplierShown[] = [];
-      for (const supplier of suppliers) {
-        const id = supplier.currentVersionId;
-        const current = versionIn(id, checkOf(versions, id), supplier.id);
-        if (current.outcome === 'tampered') return current;
-        // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
-        if (current.outcome === 'missing')
-          throw new Error(`A verified supplier has no current version of its own: ${supplier.id}`);
-        items.push({ ...supplier, displayName: current.version.displayName });
-      }
-      return { outcome: 'shown', items };
-    },
+    (verified) =>
+      suppliersShown(
+        tx,
+        states,
+        orgId,
+        verified.map(({ id, state }) => supplierFrom(id, state)),
+      ),
   );
   return listed.outcome === 'tampered'
     ? listed
     : { outcome: 'listed', suppliers: listed.items, next: listed.next, unchecked: listed.unchecked };
+}
+
+/**
+ * Verified suppliers with the names their current versions give them, the
+ * versions verified together (each locked `share`); tampered with, at the
+ * first version that is.
+ */
+async function suppliersShown(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  orgId: string,
+  suppliers: readonly SupplierRecord[],
+): Promise<PageShown<SupplierShown>> {
+  const versionIds = suppliers.map(({ currentVersionId }) => currentVersionId);
+  const versions = await states.verifiedStates(tx, SUPPLIER_VERSIONS, orgId, versionIds);
+  const items: SupplierShown[] = [];
+  for (const supplier of suppliers) {
+    const id = supplier.currentVersionId;
+    const current = versionIn(id, checkOf(versions, id), supplier.id);
+    if (current.outcome === 'tampered') return current;
+    // A verified supplier's current version is its own (0032's key, checked at commit): none is past the app.
+    if (current.outcome === 'missing')
+      throw new Error(`A verified supplier has no current version of its own: ${supplier.id}`);
+    items.push({ ...supplier, displayName: current.version.displayName });
+  }
+  return { outcome: 'shown', items };
+}
+
+/**
+ * The suppliers named, verified together with their current versions (each
+ * locked `share`) and named by them, by ID in lower case, in the caller's
+ * transaction, which must be withSignedStates' for the organisation: for a
+ * list naming the suppliers its own verified rows point to (Phase 3 B3), so
+ * one missing is a bug and throws; tampered with, at the first that is.
+ */
+export async function suppliersNamed(
+  tx: SuppliersTransaction,
+  states: SignedStates,
+  orgId: string,
+  ids: readonly string[],
+): Promise<
+  | { readonly outcome: 'named'; readonly suppliers: ReadonlyMap<string, SupplierShown> }
+  | { readonly outcome: 'tampered'; readonly sign: TamperSign }
+> {
+  const checks = await states.verifiedStates(tx, SUPPLIERS, orgId, ids);
+  const suppliers: SupplierRecord[] = [];
+  for (const [id, check] of checks) {
+    if (check.outcome === 'tampered') return check;
+    if (check.outcome === 'missing') throw new Error(`A supplier a verified row names is missing: ${id}`);
+    suppliers.push(supplierFrom(id, check));
+  }
+  const shown = await suppliersShown(tx, states, orgId, suppliers);
+  if (shown.outcome === 'tampered') return shown;
+  return { outcome: 'named', suppliers: new Map(shown.items.map((supplier) => [supplier.id, supplier])) };
 }
 
 /**
