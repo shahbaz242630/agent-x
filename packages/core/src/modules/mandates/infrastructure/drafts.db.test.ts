@@ -297,7 +297,7 @@ describe('reading mandates (B2)', () => {
       await withSignedStates(app, org, services(), (tx, states) =>
         mandatesPage(tx, states, org, { after: null, limit: 1 }),
       ),
-    ).toMatchObject({ outcome: 'listed', mandates: [{ id: first.id }], next: first.id });
+    ).toMatchObject({ outcome: 'listed', mandates: [{ id: first.id }], next: first.id, unchecked: [] });
     expect(capture.lines().filter((line) => line.event === 'audit.integrity_failed')).toEqual([]);
   });
 

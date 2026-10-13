@@ -577,14 +577,30 @@ describe(`a page of an organisation's funding sources (D2-4, Postgres ${server.v
     await linkedSource(other);
     const [first, second, third] = await Promise.all(mine.map(({ id }) => found(org, id)));
 
-    expect(await page(org, null, 2)).toEqual({ outcome: 'listed', sources: [first, second], next: second?.id });
-    expect(await page(org, second?.id ?? null, 2)).toEqual({ outcome: 'listed', sources: [third], next: null });
+    expect(await page(org, null, 2)).toEqual({
+      outcome: 'listed',
+      sources: [first, second],
+      next: second?.id,
+      unchecked: [],
+    });
+    expect(await page(org, second?.id ?? null, 2)).toEqual({
+      outcome: 'listed',
+      sources: [third],
+      next: null,
+      unchecked: [],
+    });
     // A page exactly full is the last when nothing follows it.
-    expect(await page(org, null, 3)).toEqual({ outcome: 'listed', sources: [first, second, third], next: null });
+    expect(await page(org, null, 3)).toEqual({
+      outcome: 'listed',
+      sources: [first, second, third],
+      next: null,
+      unchecked: [],
+    });
     expect(await page(org, null, MOST_SOURCES_A_PAGE)).toEqual({
       outcome: 'listed',
       sources: [first, second, third],
       next: null,
+      unchecked: [],
     });
   });
 
@@ -607,7 +623,7 @@ describe(`a page of an organisation's funding sources (D2-4, Postgres ${server.v
 
   it('is empty for an organisation with none', async () => {
     const org = await organization();
-    expect(await page(org, null, 1)).toEqual({ outcome: 'listed', sources: [], next: null });
+    expect(await page(org, null, 1)).toEqual({ outcome: 'listed', sources: [], next: null, unchecked: [] });
   });
 
   it.each([0, MOST_SOURCES_A_PAGE + 1, 1.5])('refuses a page of %j, before any SQL runs', async (limit) => {

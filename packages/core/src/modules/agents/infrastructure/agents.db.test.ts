@@ -767,7 +767,12 @@ describe("a page of the organisation's agents (C1-2)", () => {
       agentsPage(tx, states, org, { after: null, limit: 1 }),
     );
 
-    expect(page).toMatchObject({ outcome: 'listed', agents: [{ id, name: 'Purchasing bot' }], next: null });
+    expect(page).toMatchObject({
+      outcome: 'listed',
+      agents: [{ id, name: 'Purchasing bot' }],
+      next: null,
+      unchecked: [],
+    });
   });
 
   it('reads a page in the same few statements however many agents it holds: no per-row loop', async () => {
@@ -793,16 +798,16 @@ describe("a page of the organisation's agents (C1-2)", () => {
 
     const page = await withSignedStates(app, org, services(), (tx, states) => {
       // A row gone since listed, with nothing in the log, reads as missing: this stands in for one.
-      const verifiedStates: typeof states.verifiedStates = async (...args) =>
+      const pageStates: typeof states.pageStates = async (...args) =>
         new Map(
-          [...(await states.verifiedStates(...args))].map(([id, check]) => [
+          [...(await states.pageStates(...args))].map(([id, check]) => [
             id,
             id === first ? { outcome: 'missing' as const } : check,
           ]),
         );
-      return agentsPage(tx, { ...states, verifiedStates }, org, { after: null, limit: 1 });
+      return agentsPage(tx, { ...states, pageStates }, org, { after: null, limit: 1 });
     });
 
-    expect(page).toEqual({ outcome: 'listed', agents: [], next: first });
+    expect(page).toEqual({ outcome: 'listed', agents: [], next: first, unchecked: [] });
   });
 });

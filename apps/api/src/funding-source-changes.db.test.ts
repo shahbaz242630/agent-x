@@ -417,6 +417,7 @@ describe(`reading the organisation’s sources (D2-4a, Postgres ${server.version
       outcome: 'listed',
       sources: [first.source, ended],
       next: null,
+      unchecked: [],
     });
     expect(await reads.show(org, ended.id, CORRELATION)).toEqual({ outcome: 'found', source: ended });
   });
