@@ -396,7 +396,7 @@ describe('approvals racing a revoke and the agent’s requests (Phase 3 B4b, SEC
     const [first, ...rest] = confirms;
     const last = rest.pop();
     const revoke = () => shared.movedPastTheUseCase(w, mandateId, 'revoke');
-    // Two of the agent's requests to the other supplier, each AED 1,000: allowed before the revoke, denied after.
+    // Two of the agent's requests to the other supplier, each AED 1,000: holding capacity before the revoke, denied after.
     const requests = [6, 7].map((n) => () => ask(acting, asking(w, n, { supplierId: w.suppliers[1] ?? '' })));
 
     const before = await first?.();
@@ -425,7 +425,9 @@ describe('approvals racing a revoke and the agent’s requests (Phase 3 B4b, SEC
       w.org,
       outcomes.slice(rest.length, -1).map((o) => (o.status === 'fulfilled' ? o.value : o) as SpendRequestDecided),
     )) {
-      expect(request.decision).toBe(seq < revoked ? 'ALLOW' : 'DENY');
+      // Before the revoke each holds capacity: the second to the same supplier takes the pair past the approval
+      // threshold together, so it waits for approval (the split check), whichever commits first.
+      expect(request.decision === 'DENY').toBe(seq > revoked);
     }
     expect(retries()).toEqual([]);
   });
