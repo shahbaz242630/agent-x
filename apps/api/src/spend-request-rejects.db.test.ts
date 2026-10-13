@@ -11,7 +11,9 @@
 // with an app code, asked for another request, another reason or the request
 // as it stood before is STEP_UP_FAILED. A frozen organisation still rejects.
 // The key answers its own replay. A reject waiting on a cancel or an expiry
-// that holds the request (forced) finds it no longer waiting.
+// that holds the request (forced) finds it no longer waiting. The agent
+// reads its own afterwards (B4c): rejected, and not for one denied by its
+// decision; another agent's is NOT_FOUND; one tampered with INTEGRITY_FAILED.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -343,4 +345,54 @@ describe('rejecting a spend request waiting for approval (B4a)', () => {
       expect(await statusOf(w, waiting.id)).toBe(brake === 'cancel' ? 'CANCELLED' : 'EXPIRED');
     },
   );
+});
+
+describe('the agent reads its own request after a reject (B4c)', () => {
+  const reads = () => createSpendRequestReads({ database: app, keys, ids, logger: testLogger(new LogCapture()) });
+
+  it('learns that a person rejected it, and that one its decision denied was not', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const allowed = await ask(acting, w, { amount: AED(50_000n), supplierId: w.suppliers[1] ?? '' });
+    const denied = await ask(acting, w, {
+      amount: AED(50_000n),
+      supplierId: w.suppliers[1] ?? '',
+      orderReference: allowed.orderReference,
+    });
+    await rejected(w.admin, waiting.id);
+
+    expect(await reads().ofAgent(w.org, acting.agentId, waiting.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      request: { id: waiting.id, status: 'DENIED' },
+      rejected: true,
+    });
+    expect(await reads().ofAgent(w.org, acting.agentId, denied.id, CORRELATION)).toMatchObject({
+      outcome: 'found',
+      request: { status: 'DENIED' },
+      rejected: false,
+    });
+    expect(await reads().ofAgent(w.org, acting.agentId, allowed.id, CORRELATION)).toMatchObject({
+      request: { status: 'APPROVED' },
+      rejected: false,
+    });
+  });
+
+  it('answers another agent’s, and none, as NOT_FOUND; one tampered with as INTEGRITY_FAILED', async () => {
+    const { w, acting } = await ready();
+    const other = await shared.secondAgent(registry, w, { approvalThreshold: AED(100_000n) });
+    const theirs = await ask(other, w);
+    const mine = await ask(acting, w);
+    const owner = await tamperAsOwner(database, SPEND_REQUESTS, w.org);
+    try {
+      await owner.stripSeals(mine.id);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await reads().ofAgent(w.org, acting.agentId, theirs.id, CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await reads().ofAgent(w.org, acting.agentId, ids.next(), CORRELATION)).toEqual(refused(404, 'NOT_FOUND'));
+    expect(await reads().ofAgent(w.org, acting.agentId, mine.id, CORRELATION)).toEqual(
+      refused(503, 'INTEGRITY_FAILED'),
+    );
+  });
 });

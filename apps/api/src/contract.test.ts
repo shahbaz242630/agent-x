@@ -112,6 +112,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'GET /v1/agent',
       'GET /v1/agent/funding-sources',
       'GET /v1/agent/mandate',
+      'GET /v1/agent/spend-requests/{id}',
       'GET /v1/agent/suppliers',
       'GET /v1/agents',
       'GET /v1/agents/{id}',
@@ -140,6 +141,7 @@ describe('SEC-WEB-06 the router serves exactly what the OpenAPI document holds',
       'HEAD /v1/agent',
       'HEAD /v1/agent/funding-sources',
       'HEAD /v1/agent/mandate',
+      'HEAD /v1/agent/spend-requests/{id}',
       'HEAD /v1/agent/suppliers',
       'HEAD /v1/agents',
       'HEAD /v1/agents/{id}',
@@ -1217,8 +1219,8 @@ describe('SEC-DATA-04, ADR-011 §8 the document names the one error body and eve
     // resume and revoke with each confirm (B4), the agent's own mandate (B5), the organisation's policy and a
     // mandate's, each read, changed and confirmed (C3), an agent's spend request (D4r), the simulator (C4), a spend request's cancel by a member and by its agent
     // (D8), the team's spend requests, approvals and one request (Phase 3 B3), a spend request's reject and its
-    // confirm (B4a), with each GET's HEAD.
-    expect(answers).toHaveLength(131);
+    // confirm (B4a), the agent's own request (B4c), with each GET's HEAD.
+    expect(answers).toHaveLength(133);
     for (const answer of answers.flat()) {
       expect(answer).toMatchObject({
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },

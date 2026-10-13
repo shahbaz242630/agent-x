@@ -34,6 +34,8 @@ export const REASON_CODES = {
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
     "You already belong to this organisation, so its invitation can't be accepted. Ask one of its admins if your role should change.",
+  APPROVAL_REJECTED:
+    'A person at your organisation rejected this request, so it will not be paid. Its reservation was released; ask again only if what you need has changed.',
   APPROVAL_THRESHOLD:
     "The amount is above the approval threshold, the lowest of the mandate's and its policies', so a person must approve it.",
   BAD_REQUEST: "The request is malformed, so it can't be read.",

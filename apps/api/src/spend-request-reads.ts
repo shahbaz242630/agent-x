@@ -16,6 +16,12 @@
 // first, found by their IDs alone (requestInOrder). A rejected one in full
 // carries its reject, from the signed event: who, when and why (B4a,
 // decision 6).
+//
+// The agent reads its own requests (B4c, partner S106), one by its ID: its
+// own alone (another agent's is NOT_FOUND, as none), as it stands now, so it
+// learns that one waiting was approved, rejected, cancelled or expired. Who
+// rejected it and why are the team's alone: the agent learns only that a
+// person rejected it.
 import { agentOf, agentsNamed, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import type { PageAsked, SignedStates } from '@agentx/core/modules/audit';
 import {
@@ -59,10 +65,15 @@ export type RequestsListed =
 export type RequestFound =
   { readonly outcome: 'found'; readonly shown: RequestShown; readonly rejection: RejectionShown | null } | Refused;
 
+export type OwnRequestFound =
+  { readonly outcome: 'found'; readonly request: SpendRequestRecord; readonly rejected: boolean } | Refused;
+
 export interface SpendRequestReads {
   /** Every request, newest first; or those waiting for approval, oldest first. */
   list(orgId: string, page: PageAsked, which: 'all' | 'waiting', correlationId: string): Promise<RequestsListed>;
   show(orgId: string, requestId: string, correlationId: string): Promise<RequestFound>;
+  /** One of the agent's own requests, as it stands, and whether a person rejected it. */
+  ofAgent(orgId: string, agentId: string, requestId: string, correlationId: string): Promise<OwnRequestFound>;
 }
 
 /** Refused inside a request's read, so its transaction ends there. */
@@ -115,6 +126,18 @@ export async function requestInOrder(
       supplierName: version.version.displayName,
     },
   };
+}
+
+/**
+ * The reject of a request read as DENIED, from its signed event, in the
+ * caller's transaction; null for any other status (only a waiting request is
+ * rejected), or a DENIED one no person rejected.
+ */
+async function rejectionIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord) {
+  if (request.status !== 'DENIED') return null;
+  const rejected = await rejectionOf(tx, states, { orgId, id: request.id });
+  if (rejected.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+  return rejected.outcome === 'rejected' ? rejected.rejection : null;
 }
 
 /** The entry a verified list's own rows point to; one missing is a bug. */
@@ -178,11 +201,19 @@ export function createSpendRequestReads({
         const read = await requestInOrder(tx, states, orgId, requestId);
         if (read.outcome === 'none') throw new RequestReadRefused(404, 'NOT_FOUND');
         if (read.outcome === 'unbelieved') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-        // Only a DENIED request may have been rejected; any other has no reject to read.
-        if (read.shown.request.status !== 'DENIED') return { ...read, rejection: null };
-        const rejected = await rejectionOf(tx, states, { orgId, id: requestId });
-        if (rejected.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-        return { ...read, rejection: rejected.outcome === 'rejected' ? rejected.rejection : null };
+        return { ...read, rejection: await rejectionIn(tx, states, orgId, read.shown.request) };
+      }),
+
+    ofAgent: (orgId, agentId, requestId, correlationId) =>
+      work.answered(orgId, correlationId, async (tx, states) => {
+        const read = await requestOf(tx, states, { orgId, id: requestId });
+        if (read.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
+        // Another agent's is answered as none: an agent can't learn another's requests exist.
+        if (read.outcome === 'missing' || read.request.agentId !== agentId) {
+          throw new RequestReadRefused(404, 'NOT_FOUND');
+        }
+        const rejection = await rejectionIn(tx, states, orgId, read.request);
+        return { outcome: 'found' as const, request: read.request, rejected: rejection !== null };
       }),
   };
 }

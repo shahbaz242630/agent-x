@@ -81,6 +81,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "APPROVAL_REJECTED",
+                    "description": "A person at your organisation rejected this request, so it will not be paid. Its reservation was released; ask again only if what you need has changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "APPROVAL_THRESHOLD",
                     "description": "The amount is above the approval threshold, the lowest of the mandate's and its policies', so a person must approve it."
                   },
@@ -7087,6 +7092,114 @@
           "approver"
         ],
         "x-body-limit": 10240,
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendRequest"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agent/spend-requests/{id}": {
+      "get": {
+        "summary": "One of your own spend requests, as it stands now",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "x-access": [
+          "agent"
+        ],
+        "x-agent-scopes": [
+          "requests:read"
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendRequest"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "description": "Refused. The reason code says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "description": "Failed on our side. Quote the correlation ID if you contact support.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "summary": "One of your own spend requests, as it stands now",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "x-access": [
+          "agent"
+        ],
+        "x-agent-scopes": [
+          "requests:read"
+        ],
         "responses": {
           "200": {
             "description": "Default Response",
