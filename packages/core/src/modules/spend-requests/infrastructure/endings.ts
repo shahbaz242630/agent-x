@@ -51,6 +51,10 @@ type EndingsTransaction = Transaction<SpendRequestsTables & AuditTables & LimitR
 /** How long a request waits for approval before it expires (partner decision 10; a constant for the Pilot). */
 export const WAITS_FOR_APPROVAL_MS = 72 * 3_600_000;
 
+/** Whether a request decided at `decidedAt` (its decision's sealed time) has waited for approval as long as it may. */
+export const waitedOut = (decidedAt: Date, now: Date): boolean =>
+  decidedAt.getTime() + WAITS_FOR_APPROVAL_MS <= now.getTime();
+
 /**
  * How many of its own requests an agent may cancel in 24 hours (partner
  * decision 11b): enough for real changes of plan, too few to map its approval
@@ -118,7 +122,7 @@ export async function expireRequest(
   if (read.request.status !== 'APPROVAL_REQUIRED') return { outcome: 'not_open', request: read.request };
   // Still waiting, its latest signed event is its decision: the chain seals when that was recorded.
   const decided = read.state.recordedAt;
-  if (decided.getTime() + WAITS_FOR_APPROVAL_MS > now.getTime()) return { outcome: 'not_due' };
+  if (!waitedOut(decided, now)) return { outcome: 'not_due' };
   await endHolding(tx, states, keys, key, 'expire', now, {
     actor: ACTOR,
     action: 'spend_request.expired',

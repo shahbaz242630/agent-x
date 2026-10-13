@@ -103,6 +103,7 @@ import { createPolicySimulations } from './policy-simulations.ts';
 import { createSpendRequestCancels } from './spend-request-cancels.ts';
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createSpendRequestRejects } from './spend-request-rejects.ts';
+import { createSpendRequestApprovals } from './spend-request-approvals.ts';
 import { createSpendRequestDecisions } from './spend-request-decisions.ts';
 import { createMandateAcceptance } from './mandate-acceptance.ts';
 import { createHoldHistoryCheck, HOLD_HISTORY_EVERY_MS } from './hold-history-check.ts';
@@ -553,6 +554,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     spendRequestCancels: createSpendRequestCancels({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     spendRequestReads: createSpendRequestReads({ database, keys, ids: uuidV7Ids, logger }),
     spendRequestRejects: createSpendRequestRejects({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      logger,
+    }),
+    spendRequestApprovals: createSpendRequestApprovals({
       database,
       keys,
       ids: uuidV7Ids,

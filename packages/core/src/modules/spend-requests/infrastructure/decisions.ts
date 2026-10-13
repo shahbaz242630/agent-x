@@ -159,6 +159,35 @@ export interface SpendRequestRecord {
   readonly status: SpendRequestStatus;
 }
 
+/**
+ * What a request was decided against, by the versions its signed state names
+ * (Phase 3 B4b): an approval weighs it again and refuses it if any is no
+ * longer the one in force. Null for none (no mandate, no policy, or a
+ * supplier not the organisation's).
+ */
+export interface DecidedAgainst {
+  readonly agentKeyId: string;
+  readonly mandateVersionId: string | null;
+  readonly organizationPolicyVersionId: string | null;
+  readonly mandatePolicyVersionId: string | null;
+  readonly supplierVersionId: string | null;
+}
+
+/** The versions the request's verified state names (requestOf's `state`). */
+export function decidedAgainst(state: VerifiedState): DecidedAgainst {
+  const field = (column: string): string | null => state.fields.get(column) ?? null;
+  const agentKeyId = field('agent_key_id');
+  // The table holds every request to the key it came with (0039's NOT NULL).
+  if (agentKeyId === null) throw new Error('A verified spend request names no agent key');
+  return {
+    agentKeyId,
+    mandateVersionId: field('mandate_version_id'),
+    organizationPolicyVersionId: field('organization_policy_version_id'),
+    mandatePolicyVersionId: field('mandate_policy_version_id'),
+    supplierVersionId: field('supplier_version_id'),
+  };
+}
+
 /** A spend request read by its ID and verified; missing; or tampered with. */
 export type SpendRequestCheck =
   | { readonly outcome: 'found'; readonly request: SpendRequestRecord; readonly state: VerifiedState }

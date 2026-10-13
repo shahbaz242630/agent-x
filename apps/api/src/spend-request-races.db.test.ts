@@ -7,9 +7,11 @@
 // commit order):
 // - the deadlock suite: an agent suspended, its mandate superseded, both at
 //   once, its mandate revoked, its supplier suspended, its key revoked, each
-//   racing the agent's requests. No deadlock (A2's retry never logged), and
-//   the right winner: a request committed before the change was decided
-//   without it, one after it with it;
+//   racing the agent's requests; and approvals (Phase 3 B4b) racing a revoke
+//   and the agent's new requests. No deadlock (A2's retry never logged, no
+//   approval failing), and the right winner: a request committed before the
+//   change was decided without it, one after it with it; an approval
+//   committed before the revoke approved, one after it refused as changed;
 // - the model: random batches of requests by two agents to two suppliers,
 //   some naming the same order, all at once (fast-check). Whatever order they
 //   commit in, no agent's month passes its cap, no order is held twice, and
@@ -20,6 +22,7 @@ import { withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suspendSupplier } from '@agentx/core/modules/suppliers';
+import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, TRANSACTION_RETRIED, withTenant } from '@agentx/platform/db';
 import {
@@ -35,7 +38,23 @@ import fc from 'fast-check';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
-import { AED, keys, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
+import {
+  AED,
+  askedFor,
+  keys,
+  mandateWorld,
+  type MandateWorldTables,
+  OPERATOR,
+  refused,
+  type World,
+} from './mandate-world.helper.test.ts';
+import {
+  type Approved,
+  APPROVE_CONFIRM_OPERATION,
+  APPROVE_OPERATION,
+  createSpendRequestApprovals,
+  type SpendRequestApprovals,
+} from './spend-request-approvals.ts';
 import {
   type AgentActing,
   createSpendRequestDecisions,
@@ -58,6 +77,7 @@ let clock: FixedClock;
 let capture: LogCapture;
 let registry: MandateRegistry;
 let decisions: SpendRequestDecisions;
+let approvals: SpendRequestApprovals;
 
 const shared = mandateWorld({ app: () => app, clock: () => clock, ids, name: 'spend-request-races' });
 const { world, quiet, keyed, agentKey } = shared;
@@ -178,6 +198,14 @@ beforeEach(() => {
     keys,
     ids,
     clock,
+    logger,
+  });
+  approvals = createSpendRequestApprovals({
+    database: app,
+    keys,
+    ids,
+    clock,
+    challenges: createStepUpChallenges({ ids, clock }),
     logger,
   });
 });
@@ -342,6 +370,65 @@ const REQUEST = fc.record({
   // AED 1,000 to 12,000, in AED 500 steps.
   amount: fc.integer({ min: 2, max: 24 }).map((halves) => BigInt(halves) * 50_000n),
   order: fc.integer({ min: 1, max: 4 }),
+});
+
+describe('approvals racing a revoke and the agent’s requests (Phase 3 B4b, SEC-AV-04)', () => {
+  it('no deadlock; an approval committed before the revoke approved, one after it REQUEST_CHANGED', async () => {
+    const w = await world();
+    for (const id of w.suppliers) await shared.verified(w, id);
+    // Approval above AED 1,000: five requests of AED 2,000 wait, within the default cap together.
+    const mandateId = await shared.inForce(registry, w, { approvalThreshold: AED(100_000n) });
+    const acting = await agentKey(w);
+    const confirms: (() => Promise<Approved>)[] = [];
+    for (const n of [1, 2, 3, 4, 5]) {
+      const waiting = decidedOf(await ask(acting, asking(w, n, { amount: AED(200_000n) })));
+      expect(waiting.status).toBe('APPROVAL_REQUIRED');
+      // Each its own approver, in a session of their own, so no confirm waits on another's challenges (0b).
+      const approver = await shared.member(w.org, 'approver');
+      const challengeId = askedFor(
+        await approvals.ask(approver, keyed(approver, APPROVE_OPERATION), waiting.id, CORRELATION),
+      );
+      await shared.stepUp(approver, challengeId);
+      confirms.push(() =>
+        approvals.confirm(approver, keyed(approver, APPROVE_CONFIRM_OPERATION), waiting.id, challengeId, CORRELATION),
+      );
+    }
+    const [first, ...rest] = confirms;
+    const last = rest.pop();
+    const revoke = () => shared.movedPastTheUseCase(w, mandateId, 'revoke');
+    // Two of the agent's requests to the other supplier, each AED 1,000: allowed before the revoke, denied after.
+    const requests = [6, 7].map((n) => () => ask(acting, asking(w, n, { supplierId: w.suppliers[1] ?? '' })));
+
+    const before = await first?.();
+    const between: (() => Promise<unknown>)[] = [...rest, ...requests, revoke];
+    const outcomes = await race(between.length, async (n, sync) => {
+      await sync();
+      return between[n]?.();
+    });
+    const after = await last?.();
+
+    expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toEqual([]);
+    const at = await chainOf(w.org);
+    const revoked = at('mandate.revoke', mandateId);
+    const answers = [
+      before,
+      ...outcomes.slice(0, rest.length).map((o) => (o.status === 'fulfilled' ? o.value : o)),
+      after,
+    ];
+    expect(answers[0]).toMatchObject({ outcome: 'approved' });
+    expect(answers.at(-1)).toEqual(refused(409, 'REQUEST_CHANGED'));
+    for (const answer of answers as Approved[]) {
+      if (answer.outcome === 'approved') expect(at('spend_request.approved', answer.request.id)).toBeLessThan(revoked);
+      else expect(answer).toEqual(refused(409, 'REQUEST_CHANGED'));
+    }
+    for (const { request, seq } of await committed(
+      w.org,
+      outcomes.slice(rest.length, -1).map((o) => (o.status === 'fulfilled' ? o.value : o) as SpendRequestDecided),
+    )) {
+      expect(request.decision).toBe(seq < revoked ? 'ALLOW' : 'DENY');
+    }
+    expect(retries()).toEqual([]);
+  });
 });
 
 describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-10)', () => {
