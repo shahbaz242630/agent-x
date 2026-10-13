@@ -1805,7 +1805,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
     const properties = (alert: Mutable): Mutable => inside(alert, 'properties');
     const query = (text: string) => (alert: Mutable) => (criterion(alert).query = text);
     const CANCELS =
-      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log).by) == "agent"';
+      'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) == "spend_request.cancelled" | where tostring(parse_json(Log)["by"]) == "agent"';
     const PER_AGENT = 'summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId)';
     expect(brokenRules(without(AGENT_CANCELS_ALERT))).toEqual(['agent-cancels-alert']);
     for (const change of [

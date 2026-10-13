@@ -241,7 +241,7 @@ const DENIAL_SURGE_THRESHOLD = 10;
  */
 const AGENT_CANCEL_LINES = [
   'where tostring(parse_json(Log).event) == "spend_request.cancelled"',
-  'where tostring(parse_json(Log).by) == "agent"',
+  'where tostring(parse_json(Log)["by"]) == "agent"',
   'summarize Cancels = count() by Agent = tostring(parse_json(Log).agentId)',
 ] as const;
 
