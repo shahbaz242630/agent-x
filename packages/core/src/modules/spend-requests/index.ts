@@ -8,7 +8,8 @@
 // order reference becomes (decision 8); and the holdings check, comparing each
 // request's reservation and claim with its signed state (E1); a request
 // waiting for approval expired after 72 hours, or cancelled before hand-off,
-// its holdings released (D7, D8).
+// its holdings released (D7, D8), or rejected by a person with a reason
+// (Phase 3 B4a).
 export {
   askedText,
   BANK_REFERENCE_MOST,
@@ -39,11 +40,16 @@ export {
   type SpendRequestListed,
   type SpendRequestRecord,
 } from './infrastructure/decisions.ts';
+export { REJECT_REASON_MOST, rejectReason } from './domain/rejection.ts';
 export {
   type Canceller,
   cancelRequest,
   type Ended,
   expireRequest,
+  type Rejection,
+  rejectionOf,
+  type RejectionShown,
+  rejectRequest,
   requestsWaitingSince,
   WAITS_FOR_APPROVAL_MS,
 } from './infrastructure/endings.ts';

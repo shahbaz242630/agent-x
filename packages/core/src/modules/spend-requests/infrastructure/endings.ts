@@ -1,8 +1,9 @@
 // A spend request ended before hand-off, its capacity and order given back
-// (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decision 10; Phase 2 D7,
-// D8): a request waiting for approval 72 hours from its decision is EXPIRED;
-// one cancelled by a person, or by the agent that made it, before hand-off
-// (waiting, approved or ready) is CANCELLED.
+// (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decisions 10, Phase 3's 6;
+// Phase 2 D7, D8; Phase 3 B4a): a request waiting for approval 72 hours from
+// its decision is EXPIRED; one cancelled by a person, or by the agent that
+// made it, before hand-off (waiting, approved or ready) is CANCELLED; one a
+// person rejects while it waits is DENIED, with their reason.
 //
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
@@ -26,6 +27,7 @@ import type { Transaction } from 'kysely';
 
 import {
   actorEventsSince,
+  type AuditDetails,
   type AuditTables,
   type SignedChange,
   type SignedStates,
@@ -173,6 +175,76 @@ export async function cancelRequest(
   return { outcome: 'ended', request: { ...read.request, status: 'CANCELLED' } };
 }
 
+const REJECTED = 'spend_request.rejected';
+
+/** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
+export interface Rejection {
+  readonly userId: string;
+  /** As rejectReason keeps it. */
+  readonly reason: string;
+  readonly stepUp: AuditDetails;
+}
+
+/**
+ * Rejects the request, read for change in this transaction while it waits
+ * for approval: DENIED, its reservation and order claim released, recorded
+ * as the person's with their step-up and reason (`spend_request.rejected`).
+ * The reason goes in the event alone, never in `reason_codes`: those are the
+ * decision's (0039).
+ */
+export async function rejectRequest(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly id: string },
+  rejection: Rejection,
+  now: Date,
+): Promise<void> {
+  await endHolding(tx, states, keys, key, 'deny', now, {
+    actor: { type: 'user', id: rejection.userId },
+    action: REJECTED,
+    details: { ...rejection.stepUp, reason: rejection.reason },
+  });
+}
+
+/** How a request was rejected, as its signed event says: by whom, when, and why. */
+export interface RejectionShown {
+  readonly byUserId: string;
+  readonly at: Date;
+  readonly reason: string;
+}
+
+/**
+ * The request's reject, from its event in the log, each believed only whole
+ * (historyOf): none for one never rejected (a DENIED request is final, so
+ * at most one); tampered with, the alarm raised.
+ */
+export async function rejectionOf(
+  tx: Transaction<AuditTables>,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+): Promise<
+  | { readonly outcome: 'rejected'; readonly rejection: RejectionShown }
+  | { readonly outcome: 'none' }
+  | { readonly outcome: 'tampered' }
+> {
+  const history = await states.historyOf(tx, key.orgId, {
+    subjectTypes: [SPEND_REQUESTS.subject],
+    subjectId: key.id,
+    actions: [REJECTED],
+    limit: 1,
+  });
+  if (history.outcome !== 'read') return { outcome: 'tampered' };
+  const [found] = history.events;
+  if (found === undefined) return { outcome: 'none' };
+  const { actor, details } = found.event;
+  // Only rejectRequest records it, whole under the chain's MAC: a person's, with their reason as text.
+  return {
+    outcome: 'rejected',
+    rejection: { byUserId: actor.id, at: found.recordedAt, reason: String(details.reason) },
+  };
+}
+
 /**
  * The move and its release, in lock order: the reservation and claim locked
  * (11), the request moved and signed (the head, 12), then both released. The
@@ -187,7 +259,7 @@ async function endHolding(
   states: SignedStates,
   keys: KeyProvider,
   key: { readonly orgId: string; readonly id: string },
-  event: 'expire' | 'cancel',
+  event: 'expire' | 'cancel' | 'deny',
   at: Date,
   change: SignedChange,
 ): Promise<void> {
