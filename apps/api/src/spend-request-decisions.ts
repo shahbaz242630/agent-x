@@ -47,6 +47,7 @@ import {
   splitHeld,
 } from '@agentx/core/modules/limit-reservations';
 import { currencyAllowed, openMandateOfAgent, type PolicyVersionRecord } from '@agentx/core/modules/mandates';
+import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
 import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   decide,
@@ -81,14 +82,24 @@ import {
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
-import { MandateRefused, type MandateTables, policyRulesIn, versionIn } from './mandate-reads.ts';
+import {
+  MandateRefused,
+  type MandateTables,
+  policyRulesIn,
+  toldAdminsAndApprovers,
+  versionIn,
+} from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork } from './use-case-work.ts';
 
 /** The agent's write, as its idempotency keys name it. */
 export const DECIDE_OPERATION = 'spend-requests.create';
 
-export type DecisionTables = MandateTables & SpendRequestsTables & LimitReservationsTables & OrganizationsTables;
+export type DecisionTables = MandateTables &
+  SpendRequestsTables &
+  LimitReservationsTables &
+  OrganizationsTables &
+  NotificationsTables;
 type DecisionTx = DatabaseTransaction<DecisionTables>;
 
 /** The agent acting, as its key's check found it (D4r's access hook). */
@@ -291,12 +302,15 @@ export async function weigh(
 
 export function createSpendRequestDecisions({
   database,
+  outbox,
   keys,
   ids,
   clock,
   logger,
 }: {
   readonly database: Database<DecisionTables>;
+  /** Where a request waiting for approval is told, in its decision's own transaction (Phase 3 B2). */
+  readonly outbox: Outbox;
   readonly keys: KeyProvider;
   readonly ids: IdGenerator;
   readonly clock: Clock;
@@ -379,6 +393,10 @@ export function createSpendRequestDecisions({
       held = { month, reservedAt: now, payee: sealPayee(keys, { orgId, requestId, payeeKey: order.payeeKey }) };
     }
     await signRequest(tx, states, request, { type: 'agent', id: agent.id }, held);
+    // Every admin and approver is told it waits (partner decision 2, Phase 3); the email reads it as it is sent.
+    if (made.decision === 'REQUIRE_APPROVAL') {
+      await outbox.add(tx, toldAdminsAndApprovers(orgId, 'spend_request_waiting', requestId));
+    }
     return { id: requestId, decision: made.decision, reasons: made.reasons };
   }
 

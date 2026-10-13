@@ -16,6 +16,7 @@ import {
   type NotificationsTables,
   type Outbox,
   type ResetLinks,
+  type WaitingRequests,
 } from '@agentx/core/modules/notifications';
 import { systemClock } from '@agentx/core/shared-kernel';
 import type { Config } from '@agentx/platform/config';
@@ -78,6 +79,7 @@ export function noticeSenderFrom({
   listCountingContacts,
   contactAddress,
   resetLink,
+  waitingRequests,
   fetch,
   logger,
 }: {
@@ -93,6 +95,8 @@ export function noticeSenderFrom({
   readonly contactAddress: (orgId: string, contactId: string) => Promise<string | undefined>;
   /** A contact's link to confirm a reset, from its verified row (identity's resetLinkFor, B6-3b). */
   readonly resetLink: ResetLinks['linkFor'];
+  /** A spend request waiting for approval, read as its email is sent (Phase 3 B2). */
+  readonly waitingRequests: WaitingRequests;
   readonly fetch: OutboundFetch;
   readonly logger: Logger;
 }): NoticeSender | undefined {
@@ -115,6 +119,7 @@ export function noticeSenderFrom({
     }),
     contactAddresses: { addressOf: contactAddress },
     resetLinks: { linkFor: resetLink },
+    waitingRequests,
     audience: audienceFrom(listMembers, listContacts, listCountingContacts),
     logger,
   });

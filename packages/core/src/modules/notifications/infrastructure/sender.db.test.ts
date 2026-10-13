@@ -14,7 +14,7 @@ import { createTestDatabase, LogCapture, SequentialIds, type TestDatabase, testL
 import { sql } from 'kysely';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import type { NoticeMessage, ResetLink } from '../domain/messages.ts';
+import type { NoticeMessage, ResetLink, WaitingRequest } from '../domain/messages.ts';
 import type { Notice } from '../domain/notice.ts';
 import { createOutbox } from './outbox.ts';
 import {
@@ -25,6 +25,7 @@ import {
   createNoticeSender,
   type Notifier,
   type ResetLinks,
+  type WaitingRequests,
   type SendOutcome,
 } from './sender.ts';
 import type { NotificationsTables } from './tables.ts';
@@ -54,8 +55,9 @@ const MEMBERS: readonly string[] = [ADMIN, VIEWER];
 const APPROVER = '0199a0f0-0000-7000-8000-00000000b5b7';
 /** A mandate the notices are about (0036). */
 const MANDATE = '0199a0f0-0000-7000-8000-00000000b6b6';
-/** A spend request a notice is about (0045). */
+/** A spend request a notice is about (0045), and one decided before its email went (B2). */
 const REQUEST = '0199a0f0-0000-7000-8000-0000000003b3';
+const DECIDED = '0199a0f0-0000-7000-8000-0000000003b5';
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
   [APPROVER, 'approver@example.test'],
@@ -198,12 +200,34 @@ const aboutASupplier = (toContacts: boolean): Notice => ({
   aboutId: SUPPLIER,
 });
 
+/** The spend request waiting for approval that the notices name, as the spend-requests module reads it (B2). */
+const WAITING: WaitingRequest = {
+  amountMinor: 1_250_000n,
+  currency: 'AED',
+  supplierName: 'Gulf Office Supplies',
+  agentName: 'Procurement agent',
+  agentId: '0199a0f0-0000-7000-8000-0000000003b4',
+  consoleUrl: 'https://app.example.test',
+};
+
+const waitingRequests = (
+  lookup: (requestId: string) => WaitingRequest | undefined | Error = (requestId) =>
+    requestId === REQUEST ? WAITING : undefined,
+): WaitingRequests => ({
+  waitingOf: (orgId, requestId) => {
+    expect(orgId).toBe(ORG);
+    const found = lookup(requestId);
+    return found instanceof Error ? Promise.reject(found) : Promise.resolve(found);
+  },
+});
+
 function sender(
   service: Notifier,
   addresses: AddressBook = addressBook(),
   admins: Audience = audience(),
   contacts: ContactAddresses = contactAddresses(),
   links: ResetLinks = resetLinks(),
+  requests: WaitingRequests = waitingRequests(),
 ) {
   const capture = new LogCapture();
   const logger = testLogger(capture);
@@ -216,6 +240,7 @@ function sender(
       addresses,
       contactAddresses: contacts,
       resetLinks: links,
+      waitingRequests: requests,
       audience: admins,
       logger,
     }),
@@ -555,6 +580,67 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
     },
   );
 
+  it('B2 sends a waiting request with what it asks, read as it is sent, and its console address', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const waiting: Notice = {
+      orgId: ORG,
+      recipientUserId: null,
+      kind: 'spend_request_waiting',
+      membershipId: null,
+      role: null,
+      aboutId: REQUEST,
+    };
+    await app.transaction().execute((tx) => outbox.add(tx, [waiting]));
+    const { sent, service } = notifier();
+
+    await sender(service).run.run();
+
+    expect(sent).toHaveLength(2);
+    for (const { text } of sent) {
+      expect(text).toContain('Amount: AED 12,500.00');
+      expect(text).toContain('Supplier: Gulf Office Supplies');
+      expect(text).toContain(`AI agent: Procurement agent (ID ${WAITING.agentId})`);
+      expect(text).toContain('Agent X: https://app.example.test');
+    }
+  });
+
+  it('B2 tries a waiting request again when it cannot be read, and gives up once it no longer waits', async () => {
+    await sql`delete from notifications.outbox`.execute(app);
+    const about = (aboutId: string, recipientUserId: string): Notice => ({
+      orgId: ORG,
+      recipientUserId,
+      kind: 'spend_request_waiting',
+      membershipId: null,
+      role: null,
+      aboutId,
+    });
+    await app.transaction().execute((tx) => outbox.add(tx, [about(REQUEST, ADMIN), about(DECIDED, APPROVER)]));
+    const { sent, service } = notifier();
+
+    await sender(
+      service,
+      addressBook(),
+      audience(),
+      contactAddresses(),
+      resetLinks(),
+      waitingRequests((requestId) => (requestId === REQUEST ? new Error('unreadable') : undefined)),
+    ).run.run();
+
+    expect(sent).toEqual([]);
+    const rows = await app
+      .selectFrom('notifications.outbox')
+      .select(['recipient_user_id', 'sent_at', 'given_up_at', 'last_failure'])
+      .orderBy('recipient_user_id')
+      .execute();
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { recipient_user_id: ADMIN, sent_at: null, given_up_at: null, last_failure: 'request_unavailable' },
+        { recipient_user_id: APPROVER, sent_at: null, given_up_at: START, last_failure: 'request_not_waiting' },
+      ]),
+    );
+  });
+
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);
     await app.transaction().execute((tx) =>
@@ -659,6 +745,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       addresses: addressBook(),
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
+      waitingRequests: waitingRequests(),
       audience: audience(),
       logger: testLogger(),
     });
@@ -670,6 +757,7 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
       addresses: addressBook(),
       contactAddresses: contactAddresses(),
       resetLinks: resetLinks(),
+      waitingRequests: waitingRequests(),
       audience: audience(),
       logger: testLogger(capture),
     });

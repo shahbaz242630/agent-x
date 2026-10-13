@@ -26,6 +26,7 @@ import { MANDATE_VERSIONS, MANDATES, type PolicyRules, setPolicy } from '@agentx
 import { ORGANIZATIONS } from '@agentx/core/modules/organizations';
 import { releaseClaim, SPEND_REQUESTS, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { DAY_MS, HOUR_MS, money } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 import {
@@ -224,12 +225,29 @@ afterAll(async () => {
   await database.drop();
 });
 
+/** The organisation's notices that a request waits for approval (Phase 3 B2): whom they go to, and what about. */
+const waitingNotices = (org: string) =>
+  withTenant(app, org, (tx) =>
+    tx
+      .selectFrom('notifications.outbox')
+      .select(['recipient_user_id', 'about_id'])
+      .where('kind', '=', 'spend_request_waiting')
+      .execute(),
+  );
+
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-08T08:00:00Z'));
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
   simulations = createPolicySimulations({ database: app, keys, ids, clock, logger });
 });
 
@@ -299,6 +317,8 @@ describe('deciding a spend request and reserving it (D4)', () => {
         tx.selectFrom('limit_reservations.agent_zones').select('time_zone').execute(),
       ),
     ).toEqual([{ time_zone: 'Asia/Dubai' }]);
+    // Allowed at once: no one is told it waits.
+    expect(await waitingNotices(w.org)).toEqual([]);
   });
 
   it('sends one over the approval threshold for approval, its capacity held while it waits', async () => {
@@ -314,6 +334,8 @@ describe('deciding a spend request and reserving it (D4)', () => {
     const { reservation, claim } = await heldBy(w.org, request.id);
     expect(reservation).toMatchObject({ state: 'HELD', amount_minor: 1_000_000n });
     expect(claim).toMatchObject({ released_at: null });
+    // Every admin and approver is told it waits, in its decision's transaction (Phase 3 B2, partner decision 2).
+    expect(await waitingNotices(w.org)).toEqual([{ recipient_user_id: null, about_id: request.id }]);
   });
 
   it('denies one over the mandate’s own limit as REQUIRE_NEW_MANDATE, holding nothing (SEC-LIM-06)', async () => {
@@ -330,6 +352,7 @@ describe('deciding a spend request and reserving it (D4)', () => {
     expect(row).toMatchObject({ reason_codes: 'MANDATE_ORDER_LIMIT APPROVAL_THRESHOLD' });
     expect(reservation).toBeUndefined();
     expect(claim).toBeUndefined();
+    expect(await waitingNotices(w.org)).toEqual([]);
     // The order wasn't claimed, so it may be asked for again once the limit allows it.
     expect(decidedOf(await ask(acting, asking(w, { amount: AED(50_000n) }))).decision).toBe('ALLOW');
   });
