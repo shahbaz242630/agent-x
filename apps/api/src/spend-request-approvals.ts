@@ -34,8 +34,8 @@
 // agent (3) and the key it asked with (3a), found by the request's IDs alone
 // (an unlocked read); its mandate and policies (4), source (5), supplier (6),
 // and the month its capacity is held in (7) (the confirm's locks; the ask
-// reads them FOR SHARE and locks no month); the request (8); its reservation
-// and claim (11); the chain head (12).
+// reads them FOR SHARE and locks no month); the request (8); the chain head
+// (12). Its reservation and claim are judged, never locked (approveRequest).
 import { agentKeyOf, isLiveKey } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
@@ -210,7 +210,6 @@ export function createSpendRequestApprovals({
       key.outcome === 'found' &&
       isLiveKey(key.key, now) &&
       weighed.mandate !== null &&
-      weighed.mandate.id === request.mandateId &&
       weighed.mandate.versionId === against.mandateVersionId &&
       made.versions.organizationPolicy === against.organizationPolicyVersionId &&
       made.versions.mandatePolicy === against.mandatePolicyVersionId &&

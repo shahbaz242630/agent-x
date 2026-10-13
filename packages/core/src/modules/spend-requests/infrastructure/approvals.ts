@@ -7,17 +7,17 @@
 //
 // In the caller's transaction (withSignedStates' for the organisation), the
 // request read for change and verified (level 8): its reservation and claim
-// locked (11) and judged as the holdings check judges them, so nothing is
-// approved on capacity changed past the app (the alarm raised by the judging,
-// and nothing moved); then the move, signed, which takes the audit head (12).
+// judged as the holdings check judges them, so nothing is approved on
+// capacity changed past the app (the alarm raised by the judging, and nothing
+// moved); then the move, signed, which takes the audit head (12). They aren't
+// locked: the app changes them only under their request's lock, held here.
 import type { KeyProvider } from '@agentx/platform/keys';
 import type { Transaction } from 'kysely';
 
 import type { AuditDetails, AuditTables, SignedStates } from '../../audit/index.ts';
-import { type LimitReservationsTables, lockReservationsOf } from '../../limit-reservations/index.ts';
+import type { LimitReservationsTables } from '../../limit-reservations/index.ts';
 import { movedAsRead } from '../../../shared-kernel/index.ts';
 import { requestHoldingsWhole } from './holdings-check.ts';
-import { lockClaimsOf } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
 import type { SpendRequestsTables } from './tables.ts';
 
@@ -39,8 +39,6 @@ export async function approveRequest(
   key: { readonly orgId: string; readonly id: string },
   approval: Approval,
 ): Promise<'approved' | 'mismatch'> {
-  await lockReservationsOf(tx, key.id);
-  await lockClaimsOf(tx, key.id);
   if (!(await requestHoldingsWhole(tx, states, keys, key.orgId, key.id))) return 'mismatch';
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, 'approve', {
     actor: { type: 'user', id: approval.userId },

@@ -135,8 +135,8 @@ const freeze = (w: World) =>
     }),
   );
 
-/** The organisation's first policy, set past the use case: a monthly cap of AED 50,000, looser than the default. */
-const policySet = (w: World) => {
+/** A first policy, the organisation's or the mandate's, set past the use case: a monthly cap of AED 50,000. */
+const policySet = (w: World, mandateId: string | null) => {
   const rules: PolicyRules = {
     currency: 'AED',
     perOrderCap: null,
@@ -148,8 +148,8 @@ const policySet = (w: World) => {
     setPolicy(tx, states, {
       orgId: w.org,
       existing: null,
-      scope: 'organization',
-      mandateId: null,
+      scope: mandateId === null ? 'organization' : 'mandate',
+      mandateId,
       versionId: ids.next(),
       rules,
       madeBy: w.admin.membershipId,
@@ -188,7 +188,8 @@ async function detailsChanged(w: World, supplierId: string) {
 
 /** Each change since a request was decided that makes it another's to approve (SEC-LIM-10). */
 const CHANGES = {
-  'a policy set': (w: World) => policySet(w),
+  'the organisation’s policy set': (w: World) => policySet(w, null),
+  'the mandate’s policy set': (w: World, mandateId: string) => policySet(w, mandateId),
   'the mandate superseded': async (w: World, mandateId: string) => {
     const redrafted = await registry.redraft(
       w.admin,
@@ -484,6 +485,20 @@ describe('approving a spend request waiting for approval (B4b)', () => {
 
     expect(await confirming(w.admin, waiting.id, challengeId)).toEqual(refused(503, 'INTEGRITY_FAILED'));
     expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
+  });
+
+  it('refuses one whose agent key was tampered with as INTEGRITY_FAILED, not as changed (FX-TAMPER)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const owner = await tamperAsOwner(database, AGENT_KEYS, w.org);
+    try {
+      await owner.stripSeals(acting.keyId);
+    } finally {
+      await owner.end();
+    }
+
+    expect(await asking(w.admin, waiting.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
   it('refuses one whose reservation was changed past the app as INTEGRITY_FAILED, nothing moved', async () => {
