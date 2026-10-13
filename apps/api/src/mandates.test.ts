@@ -166,7 +166,7 @@ async function withMandates(answers: Answers, role: Role = 'admin') {
     },
     list: (orgId, page) => {
       calls.push({ kind: 'list', subject: { orgId, ...page } });
-      return Promise.resolve(answers.listed ?? { outcome: 'listed', mandates: [], next: null });
+      return Promise.resolve(answers.listed ?? { outcome: 'listed', mandates: [], next: null, unchecked: [] });
     },
     show: (orgId, mandateId) => {
       calls.push({ kind: 'show', subject: { orgId, mandateId } });
@@ -204,6 +204,9 @@ const TERMS = {
 };
 
 const DRAFTED: MandateWrite = { outcome: 'drafted', ...VIEW };
+
+/** A mandate whose events can't be checked now (Phase 3 A1b). */
+const STUCK = '0199a0f0-0000-7000-8000-0000000001b1';
 
 describe('POST /v1/mandates drafts a mandate (B2)', () => {
   it('answers 201 with the mandate, its terms read with the defaults: strict, split check on, no end, zone and window unset', async () => {
@@ -496,9 +499,16 @@ describe.each<{ move: MandateMove; status: string }>([
 describe('reading mandates (B2)', () => {
   const get = (url: string): InjectOptions => ({ method: 'GET', url, headers });
 
-  it('lists a page to any member, each with its purpose', async () => {
+  it('lists a page to any member, each with its purpose, and names a record that can’t be checked now (A1b)', async () => {
     const { app, calls } = await withMandates(
-      { listed: { outcome: 'listed', mandates: [{ ...VIEW.mandate, purpose: 'Office supplies' }], next: MANDATE_ID } },
+      {
+        listed: {
+          outcome: 'listed',
+          mandates: [{ ...VIEW.mandate, purpose: 'Office supplies' }],
+          next: MANDATE_ID,
+          unchecked: [STUCK],
+        },
+      },
       'viewer',
     );
     const reply = await app.inject(get('/v1/mandates?limit=1'));
@@ -516,6 +526,7 @@ describe('reading mandates (B2)', () => {
         },
       ],
       next: MANDATE_ID,
+      unchecked: [STUCK],
     });
     expect(calls[0]?.subject).toEqual({ orgId: ORG, after: null, limit: 1 });
   });

@@ -118,6 +118,18 @@ export type LatestSignedState =
     }
   | BrokenRead;
 
+/**
+ * An object latestSignedStates can't judge now: more than LATER_EVENTS_READ
+ * events about it since its newest signed one (latestSignedState's
+ * TooManyEventsAboutObject). Not a tamper sign (partner decision 5, Phase 3):
+ * a list leaves it out and says so, any other read is refused (A1b).
+ */
+interface BackloggedRead {
+  readonly kind: 'backlog';
+}
+
+const BACKLOGGED: BackloggedRead = Object.freeze({ kind: 'backlog' });
+
 /** An event to find: by its own ID, or as the one event about an object recorded once. */
 type EventToFind = { readonly eventId: string } | { readonly onlyAbout: AuditSubjectKey };
 
@@ -215,13 +227,16 @@ export interface AuditTrail {
    * latestSignedState for many objects of one type, in one statement: each
    * ID asked, in lower case, with its object's latest signed state, judged
    * alone as latestSignedState judges one. At most MOST_LATEST_READ objects.
+   * An object with more than LATER_EVENTS_READ events since its newest signed
+   * one is answered `backlog`, and the others read again without it (Phase 3
+   * A1b): its caller decides whether that refuses the whole read.
    */
   latestSignedStates(
     tx: AuditTransaction,
     orgId: string,
     type: string,
     ids: readonly string[],
-  ): Promise<ReadonlyMap<string, LatestSignedState>>;
+  ): Promise<ReadonlyMap<string, LatestSignedState | BackloggedRead>>;
   /**
    * The IDs of every object of this type the organisation's log holds any
    * event about, sealed or not, in order (a uuid, so lower case), after the ID
@@ -714,7 +729,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       orgId: string,
       type: string,
       ids: readonly string[],
-    ): Promise<ReadonlyMap<string, LatestSignedState>> {
+    ): Promise<ReadonlyMap<string, LatestSignedState | BackloggedRead>> {
       const problems = [
         ...subjectTypeProblems(type),
         ...(ids.every((id) => UUID.test(id)) ? [] : ['subject.id must be a UUID']),
@@ -727,29 +742,36 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
       if (asked.length === 0) return new Map();
       await assertTenant(tx, orgId);
       const chain = chainOf(orgId);
-      // Each object's newest signed event and every one after it, as latestSignedState reads one object's. Past
-      // the limit, some object has more than LATER_EVENTS_READ of them, and its own judgement below says so.
-      const rows = await eventsWithHead(
-        tx,
-        chain,
-        sql`e.subject_type = ${type} and e.subject_id = any(${asked}::uuid[])
-          and e.seq >= (
-            select pg_catalog.max(s.seq) from audit.events s
-            where s.org_id = ${chain.orgId} and s.subject_type = ${type} and s.subject_id = e.subject_id
-              and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
-          )`,
-        asked.length * (LATER_EVENTS_READ + 1),
-      );
-      return new Map(
-        asked.map((id) => [
-          id,
-          latestIn(
-            chain,
-            rows.filter((row) => row.subject_id === id),
-            rows[0],
-          ),
-        ]),
-      );
+      // Every object backlogged until judged: those still backlogged when the reads end stay so.
+      const judged = new Map<string, LatestSignedState | BackloggedRead>(asked.map((id) => [id, BACKLOGGED]));
+      let left = asked;
+      while (left.length > 0) {
+        // Each object's newest signed event and every one after it, as latestSignedState reads one object's. Past
+        // the limit, some object has more than LATER_EVENTS_READ of them, and its own judgement below says so.
+        const rows = await eventsWithHead(
+          tx,
+          chain,
+          sql`e.subject_type = ${type} and e.subject_id = any(${left}::uuid[])
+            and e.seq >= (
+              select pg_catalog.max(s.seq) from audit.events s
+              where s.org_id = ${chain.orgId} and s.subject_type = ${type} and s.subject_id = e.subject_id
+                and pg_catalog.strpos(s.details, ${HAS_STATE_SEAL}) > 0
+            )`,
+          left.length * (LATER_EVENTS_READ + 1),
+        );
+        const [first] = rows;
+        const rowsOf = (id: string) => rows.filter((row) => row.subject_id === id);
+        const backlogged = left.filter((id) => rowsOf(id).length > LATER_EVENTS_READ);
+        // A backlogged object's rows may have crowded out the others' (the limit is the statement's, in the
+        // chain's order), so each other is judged only from a read without it: never `none` for rows cut off.
+        // A chain past its head is judged as it is: every object broken.
+        if (backlogged.length === 0 || (first !== undefined && first.past_head !== null)) {
+          for (const id of left) judged.set(id, latestIn(chain, rowsOf(id), first));
+          break;
+        }
+        left = left.filter((id) => !backlogged.includes(id));
+      }
+      return judged;
     },
 
     async subjectIds(

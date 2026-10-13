@@ -84,6 +84,7 @@ import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writ
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
+  UNCHECKED,
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
@@ -143,6 +144,7 @@ const LIST_SCHEMA = {
       .object({
         agents: z.array(AGENT).describe('The agents, in order of ID.'),
         next: NEXT,
+        unchecked: UNCHECKED,
       })
       .describe('A page of agents, each as its signed state says.'),
   },
@@ -347,7 +349,7 @@ export function registerAgents(
         request.id,
       );
       if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return { agents: listed.agents.map(agentOf), next: listed.next };
+      return { agents: listed.agents.map(agentOf), next: listed.next, unchecked: [...listed.unchecked] };
     },
   );
 

@@ -84,7 +84,13 @@ export type MandateWrite =
   | Refused;
 
 type MandatesListed =
-  { readonly outcome: 'listed'; readonly mandates: readonly MandateShown[]; readonly next: string | null } | Refused;
+  | {
+      readonly outcome: 'listed';
+      readonly mandates: readonly MandateShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
+  | Refused;
 
 export interface MandateRegistry {
   draft(

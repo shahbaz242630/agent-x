@@ -924,13 +924,44 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       expect(many.get(NEVER)).toEqual({ kind: 'none' });
     });
 
-    it('throws past 1,000 events about any one object, however few the others have', async () => {
+    it('answers backlog past 1,000 events about one object, judging the others from a read without it (Phase 3 A1b)', async () => {
       await record(org, signed(org, 1, 'ACTIVE', OTHER_AGENT), signed(org, 1, 'ACTIVE'));
       await record(org, ...Array.from({ length: 999 }, () => unsigned(1)));
       expect((await latestOfMany([OTHER_AGENT, AGENT])).get(AGENT)).toMatchObject({ kind: 'signed', seq: 2n });
 
       await record(org, unsigned(1));
-      await expect(latestOfMany([OTHER_AGENT, AGENT])).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+      const many = await latestOfMany([OTHER_AGENT, AGENT]);
+      expect([...many.keys()]).toEqual([OTHER_AGENT, AGENT]);
+      expect(many.get(AGENT)).toEqual({ kind: 'backlog' });
+      expect(many.get(OTHER_AGENT)).toEqual(await latest(org, { type: 'agent', id: OTHER_AGENT }));
+      // One object alone still throws: decision 5 refuses the action.
+      await expect(latest(org)).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+    });
+
+    it("never lets one object's backlog crowd out another's newer signed state (Phase 3 A1b)", async () => {
+      // AGENT's events alone fill the statement's limit (two objects, 1,001 rows each) before OTHER_AGENT's.
+      await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 2001 }, () => unsigned(1)));
+      await record(org, signed(org, 4, 'SUSPENDED', OTHER_AGENT));
+
+      const many = await latestOfMany([AGENT, OTHER_AGENT]);
+      expect(many.get(AGENT)).toEqual({ kind: 'backlog' });
+      expect(many.get(OTHER_AGENT)).toMatchObject({ kind: 'signed', version: 4 });
+    });
+
+    it('calls every object broken, never backlogged, when a backlogged chain holds an event past its head', async () => {
+      await record(org, signed(org, 1, 'ACTIVE', OTHER_AGENT), signed(org, 1, 'ACTIVE'));
+      await record(org, ...Array.from({ length: 1000 }, () => unsigned(1)));
+      await tamper(
+        `insert into audit.events (org_id, seq, id, recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version)
+         select org_id, seq + 1, gen_random_uuid(), recorded_at, actor_type, actor_id, action, subject_type, subject_id,
+           subject_version, details, prev_hash, hash, mac, mac_key_version
+         from audit.events where org_id = $1 and seq = 1002`,
+      );
+
+      const many = await latestOfMany([OTHER_AGENT, AGENT]);
+      expect(many.get(AGENT)).toEqual({ kind: 'broken', seq: 1003n });
+      expect(many.get(OTHER_AGENT)).toEqual({ kind: 'broken', seq: 1003n });
     });
 
     it('calls every object broken, signed or not, when the chain holds an event past its head', async () => {

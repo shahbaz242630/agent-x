@@ -47,6 +47,7 @@ import {
   issuesOf,
   MANDATE_ID,
   NEXT,
+  UNCHECKED,
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
@@ -313,7 +314,11 @@ const LIST_SCHEMA = {
   querystring: pageQuery(MOST_MANDATES_A_PAGE),
   response: {
     200: z
-      .object({ mandates: z.array(MANDATE_LISTED).describe('The mandates, in order of ID.'), next: NEXT })
+      .object({
+        mandates: z.array(MANDATE_LISTED).describe('The mandates, in order of ID.'),
+        next: NEXT,
+        unchecked: UNCHECKED,
+      })
       .describe('A page of mandates, each as its signed state says.'),
   },
 };
@@ -529,6 +534,7 @@ export function registerMandates(
       return {
         mandates: listed.mandates.map((mandate) => ({ ...mandateBody(mandate), purpose: mandate.purpose })),
         next: listed.next,
+        unchecked: [...listed.unchecked],
       };
     },
   );

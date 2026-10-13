@@ -22,7 +22,13 @@ export interface SourcePage {
 }
 
 export type SourcesListed =
-  { readonly outcome: 'listed'; readonly sources: readonly SourceRecord[]; readonly next: string | null } | Refused;
+  | {
+      readonly outcome: 'listed';
+      readonly sources: readonly SourceRecord[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
+  | Refused;
 
 export type SourceShown = { readonly outcome: 'found'; readonly source: SourceRecord } | Refused;
 

@@ -133,7 +133,7 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
     },
     list: (orgId, page) => {
       calls.push({ kind: 'list', subject: { orgId, ...page } });
-      return Promise.resolve(answers.listed ?? { outcome: 'listed', agents: [], next: null });
+      return Promise.resolve(answers.listed ?? { outcome: 'listed', agents: [], next: null, unchecked: [] });
     },
     show: (orgId, agentId) => {
       calls.push({ kind: 'show', subject: { orgId, agentId } });
@@ -344,7 +344,7 @@ describe('POST /v1/agents/confirm registers the agent once signed in again (C1-2
 describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1-2)', () => {
   it('lists a page, asking the use case for the page named, 50 unless fewer are asked for', async () => {
     const { app, calls } = await withAgents(
-      { listed: { outcome: 'listed', agents: [AGENT], next: AGENT_ID } },
+      { listed: { outcome: 'listed', agents: [AGENT], next: AGENT_ID, unchecked: [] } },
       'viewer',
     );
 
@@ -352,7 +352,7 @@ describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1
     const next = await app.inject({ method: 'GET', url: `/v1/agents?after=${AGENT_ID}&limit=2`, headers });
 
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual({ agents: [AGENT_ANSWERED.agent], next: AGENT_ID });
+    expect(first.json()).toEqual({ agents: [AGENT_ANSWERED.agent], next: AGENT_ID, unchecked: [] });
     expect(next.statusCode).toBe(200);
     expect(calls.map((call) => call.subject)).toEqual([
       { orgId: ORG, after: null, limit: 50 },

@@ -83,6 +83,7 @@ import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writ
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
+  UNCHECKED,
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
@@ -260,7 +261,11 @@ const LIST_SCHEMA = {
   querystring: PAGE,
   response: {
     200: z
-      .object({ suppliers: z.array(SUPPLIER).describe('The suppliers, in order of ID.'), next: NEXT })
+      .object({
+        suppliers: z.array(SUPPLIER).describe('The suppliers, in order of ID.'),
+        next: NEXT,
+        unchecked: UNCHECKED,
+      })
       .describe('A page of suppliers, each as its signed state says.'),
   },
 };
@@ -656,6 +661,7 @@ export function registerSuppliers(
       return {
         suppliers: listed.suppliers.map((supplier) => supplierOf(supplier, supplier.displayName)),
         next: listed.next,
+        unchecked: [...listed.unchecked],
       };
     },
   );

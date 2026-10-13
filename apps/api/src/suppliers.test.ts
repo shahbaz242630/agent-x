@@ -461,12 +461,15 @@ describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
 describe('GET /v1/suppliers and /v1/suppliers/:id (E1-2)', () => {
   it('answers a page of suppliers, and where the next starts, passing the page asked for', async () => {
     const asked: Asked[] = [];
-    const app = await withSuppliers({ list: { outcome: 'listed', suppliers: [SHOWN], next: SUPPLIER_ID } }, asked);
+    const app = await withSuppliers(
+      { list: { outcome: 'listed', suppliers: [SHOWN], next: SUPPLIER_ID, unchecked: [] } },
+      asked,
+    );
 
     const response = await app.inject(get(`?after=${SUPPLIER_ID}&limit=10`));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ suppliers: [SUPPLIER_ANSWERED], next: SUPPLIER_ID });
+    expect(response.json()).toEqual({ suppliers: [SUPPLIER_ANSWERED], next: SUPPLIER_ID, unchecked: [] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: SUPPLIER_ID, limit: 10 } }]);
   });
 
@@ -1067,7 +1070,10 @@ describe('GET /v1/agent/suppliers: an agent sees the ID and name alone (E1-2, SE
   it('answers each verified supplier’s ID and name, and nothing else of it', async () => {
     const asked: Asked[] = [];
     const verified = { ...SHOWN, status: 'VERIFIED' as const };
-    const app = await withSuppliers({ list: { outcome: 'listed', suppliers: [verified], next: null } }, asked);
+    const app = await withSuppliers(
+      { list: { outcome: 'listed', suppliers: [verified], next: null, unchecked: [] } },
+      asked,
+    );
 
     const response = await app.inject(asAgent(AGENT_KEY));
 

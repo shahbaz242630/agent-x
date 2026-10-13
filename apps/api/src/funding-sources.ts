@@ -57,6 +57,7 @@ import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writ
 import {
   CHALLENGE_BODY_LIMIT,
   NEXT,
+  UNCHECKED,
   NOTHING,
   NOTHING_BODY_LIMIT,
   pageQuery,
@@ -189,7 +190,7 @@ const LIST_SCHEMA = {
   querystring: PAGE,
   response: {
     200: z
-      .object({ sources: z.array(SOURCE).describe('The sources, in order of ID.'), next: NEXT })
+      .object({ sources: z.array(SOURCE).describe('The sources, in order of ID.'), next: NEXT, unchecked: UNCHECKED })
       .describe('A page of sources, each as its signed state says.'),
   },
 };
@@ -305,7 +306,7 @@ export function registerFundingSources(
         request.id,
       );
       if (listed.outcome === 'refused') return answerRefusal(listed, request, reply);
-      return { sources: listed.sources.map(sourceOf), next: listed.next };
+      return { sources: listed.sources.map(sourceOf), next: listed.next, unchecked: [...listed.unchecked] };
     },
   );
 

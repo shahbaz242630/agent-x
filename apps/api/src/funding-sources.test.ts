@@ -352,22 +352,25 @@ const LAST_ID = '0199a0f0-0000-7000-8000-0000000000ff';
 describe('GET /v1/funding-sources lists the organisation’s sources (D2-4a)', () => {
   it('answers a page of sources as Agent X holds them, and where the next starts', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID } }, asked);
+    const { app } = await withLinks(
+      { list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID, unchecked: [] } },
+      asked,
+    );
 
     const response = await app.inject(read('/v1/funding-sources'));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID });
+    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID, unchecked: [] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: null, limit: 50 } }]);
   });
 
   it('passes the page asked for', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null } }, asked);
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null, unchecked: [] } }, asked);
 
     const response = await app.inject(read(`/v1/funding-sources?after=${LAST_ID}&limit=2`));
 
-    expect(response.json()).toEqual({ sources: [], next: null });
+    expect(response.json()).toEqual({ sources: [], next: null, unchecked: [] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: LAST_ID, limit: 2 } }]);
   });
 

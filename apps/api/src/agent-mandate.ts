@@ -106,6 +106,7 @@ export function createAgentMandates({
           outcome: 'listed' as const,
           sources: usable.filter((s) => from === undefined || s.id > from),
           next: null,
+          unchecked: [],
         };
       }),
   };
