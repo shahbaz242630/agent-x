@@ -165,4 +165,25 @@ describe('a spend request waiting for approval, as its email shows it (Phase 3 B
     );
     expect(await waitingOf(supplierTampered.w.org, second.id)).toBeUndefined();
   });
+
+  it('is none when the name its supplier goes by was changed past the app', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const owner = await database.connect('owner');
+    try {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await owner.query('begin');
+      await owner.query('alter table suppliers.supplier_versions disable trigger user');
+      await owner.query(
+        "update suppliers.supplier_versions set display_name = 'Pay me instead LLC' where supplier_id = $1",
+        [w.suppliers[0]],
+      );
+      await owner.query('alter table suppliers.supplier_versions enable trigger user');
+      await owner.query('commit');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await waitingOf(w.org, waiting.id)).toBeUndefined();
+  });
 });
