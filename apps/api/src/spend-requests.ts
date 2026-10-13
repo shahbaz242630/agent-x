@@ -37,6 +37,11 @@
 // signs in again with a passkey, and confirms at `…/reject/confirm` with the
 // same reason: 200, the request DENIED, its reservation and order claim
 // released. No agent key reaches either.
+//
+// The agent reads one of its own (B4c, partner S106) at
+// `GET /v1/agent/spend-requests/{id}`, with `requests:read`: as it stands
+// now, so it learns of an approval, a reject, a cancel or an expiry. One a
+// person rejected shows the one reason APPROVAL_REJECTED, never their words.
 import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
   askedText,
@@ -173,6 +178,16 @@ const AGENT_CANCEL_SCHEMA = {
   params: SPEND_REQUEST_ID,
   body: NOTHING,
   response: { 200: CANCELLED },
+};
+
+const AGENT_SHOW_SCHEMA = {
+  summary: 'One of your own spend requests, as it stands now',
+  params: SPEND_REQUEST_ID,
+  response: {
+    200: SPEND_REQUEST_SHOWN.describe(
+      'The request now: still waiting, approved, or ended (DENIED, EXPIRED, CANCELLED). One a person rejected is DENIED with the reason APPROVAL_REJECTED alone.',
+    ),
+  },
 };
 
 /** Every role reads the organisation's requests (Phase 3 B3), as its mandates and suppliers. */
@@ -478,6 +493,19 @@ export function registerSpendRequests(
       );
       if (isUnwritten(rejected)) return answerRefusal(rejected, request, reply);
       return reply.code(200).send(shown(rejected.request, 'member'));
+    },
+  );
+
+  routes.get(
+    '/v1/agent/spend-requests/:id',
+    { schema: AGENT_SHOW_SCHEMA, config: { access: ['agent'], agentScopes: ['requests:read'] } },
+    async (request, reply) => {
+      const { orgId, agentId } = agentOf(request);
+      const found = await need(reads).ofAgent(orgId, agentId, request.params.id, request.id);
+      if (found.outcome === 'refused') return answerRefusal(found, request, reply);
+      const shownToAgent = shown(found.request, 'agent');
+      // A person's reject, and nothing of why: the reasons the decision gave no longer explain where it stands.
+      return found.rejected ? { ...shownToAgent, reasons: reasonsOf(['APPROVAL_REJECTED']) } : shownToAgent;
     },
   );
 
