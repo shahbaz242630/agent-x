@@ -44,6 +44,27 @@ export interface ResetLink {
   readonly expiresAt: Date;
 }
 
+/**
+ * A spend request waiting for approval, as the sender reads it at send time
+ * from its verified records (Phase 3 B2, partner decision 2): what it asks
+ * and who asked, and the console's address. Never the agent's own words (its
+ * purpose), and nothing that decides (SEC-HA-11).
+ */
+export interface WaitingRequest {
+  readonly amountMinor: bigint;
+  readonly currency: string;
+  readonly supplierName: string;
+  readonly agentName: string;
+  readonly agentId: string;
+  readonly consoleUrl: string;
+}
+
+/** Minor units as an amount reads in an email: AED 12,500.00 (two decimals, ADR-006 §1's currencies). */
+export function amountText(minor: bigint, currency: string): string {
+  const whole = new Intl.NumberFormat('en-US').format(minor / 100n);
+  return `${currency} ${whole}.${(minor % 100n).toString().padStart(2, '0')}`;
+}
+
 /** A notice's subject and first line, from its role's name (a membership notice's) or nothing. */
 interface Wording {
   readonly subject: (role: string) => string;
@@ -310,6 +331,16 @@ function article(word: string): string {
   return /^[aeiou]/.test(word) ? 'an' : 'a';
 }
 
+/** The waiting request's own lines, between the email's first line and what to do. */
+function requestLines(request: WaitingRequest): string[] {
+  return [
+    `Amount: ${amountText(request.amountMinor, request.currency)}`,
+    `Supplier: ${request.supplierName}`,
+    `AI agent: ${request.agentName} (ID ${request.agentId})`,
+    `Agent X: ${request.consoleUrl}`,
+  ];
+}
+
 /** The email asking a registered contact to confirm a reset, with its link (B6-3b). */
 function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): NoticeMessage {
   return {
@@ -354,12 +385,21 @@ function whyTold(notice: ClaimedNotice): string {
  * confirm a reset takes its link, and no other notice takes one: either
  * mismatch is a bug, and throws.
  */
-export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink): NoticeMessage {
+export function messageFor(
+  notice: ClaimedNotice,
+  to: string,
+  link?: ResetLink,
+  request?: WaitingRequest,
+): NoticeMessage {
   if (notice.kind === RESET_LINK_KIND) {
     if (link === undefined) throw new RangeError("a reset's link notice is sent with its link");
     return linkMessage(notice, to, link);
   }
   if (link !== undefined) throw new RangeError("only a reset's link notice carries a link");
+  const waiting = notice.kind === 'spend_request_waiting';
+  if (waiting !== (request !== undefined)) {
+    throw new RangeError("a waiting request's notice, and only it, is sent with the request");
+  }
   const role = notice.role === null ? '' : ROLE_NAMES[notice.role];
   const wording = WORDING[notice.kind];
   const why = whyTold(notice);
@@ -370,6 +410,7 @@ export function messageFor(notice: ClaimedNotice, to: string, link?: ResetLink):
     text: [
       wording.firstLine(role),
       '',
+      ...(request === undefined ? [] : [...requestLines(request), '']),
       wording.check,
       '',
       `Organisation: ${notice.orgId}`,

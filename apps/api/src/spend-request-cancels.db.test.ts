@@ -12,6 +12,7 @@
 // The key answers its own replay. A cancel waiting on an expiry that holds
 // the request (forced) finds it expired.
 import { withSignedStates } from '@agentx/core/modules/audit';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   cancelRequest,
   checkHoldings,
@@ -132,7 +133,14 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
   cancels = createSpendRequestCancels({ database: app, keys, ids, clock, logger });
 });
 

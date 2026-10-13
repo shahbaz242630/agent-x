@@ -16,6 +16,7 @@ import {
   type SpendRequestsTables,
 } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -176,7 +177,14 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
 });
 
 describe('the holdings check (E1)', () => {

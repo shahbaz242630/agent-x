@@ -40,7 +40,7 @@
 import type { Logger } from '@agentx/platform/observability';
 import type { Kysely } from 'kysely';
 
-import { messageFor, type NoticeMessage, type ResetLink } from '../domain/messages.ts';
+import { messageFor, type NoticeMessage, type ResetLink, type WaitingRequest } from '../domain/messages.ts';
 import {
   type ClaimedNotice,
   isAboutAPerson,
@@ -88,6 +88,16 @@ export interface ResetLinks {
   linkFor(orgId: string, resetId: string, contactId: string): Promise<ResetLink | undefined>;
 }
 
+/** Finds a spend request waiting for approval, at send time (Phase 3 B2): the spend-requests', which the API wires. */
+export interface WaitingRequests {
+  /**
+   * The request as the email shows it; undefined when it no longer waits
+   * (approved, rejected, expired or cancelled since) or can't be believed.
+   * Throws if it can't be read.
+   */
+  waitingOf(orgId: string, requestId: string): Promise<WaitingRequest | undefined>;
+}
+
 /** An organisation's active admin, as their verified membership says. */
 export interface Admin {
   readonly userId: string;
@@ -125,6 +135,7 @@ export function createNoticeSender({
   addresses,
   contactAddresses,
   resetLinks,
+  waitingRequests,
   audience,
   logger,
 }: {
@@ -134,6 +145,7 @@ export function createNoticeSender({
   readonly addresses: AddressBook;
   readonly contactAddresses: ContactAddresses;
   readonly resetLinks: ResetLinks;
+  readonly waitingRequests: WaitingRequests;
   readonly audience: Audience;
   readonly logger: Logger;
 }): NoticeSender {
@@ -189,6 +201,47 @@ export function createNoticeSender({
     logger.info('notification.fanned_out', { noticeId: notice.id, kind: notice.kind, notices: written });
   };
 
+  /**
+   * What a notice is sent with, read at send time: a reset's link (B6-3b) or
+   * a waiting spend request (Phase 3 B2); undefined once that read has failed
+   * and the try is recorded as failed.
+   */
+  const extrasOf = async (
+    notice: ClaimedNotice,
+  ): Promise<{ readonly link?: ResetLink; readonly request?: WaitingRequest } | undefined> => {
+    if (notice.kind === RESET_LINK_KIND) {
+      let link: ResetLink | undefined;
+      try {
+        // The outbox writes a link notice to one contact, and about the reset, only.
+        link = await resetLinks.linkFor(notice.orgId, notice.aboutId ?? '', notice.recipientContactId ?? '');
+      } catch {
+        await failed(notice, 'link_unavailable', false);
+        return undefined;
+      }
+      if (link === undefined) {
+        await failed(notice, 'reset_closed', true);
+        return undefined;
+      }
+      return { link };
+    }
+    if (notice.kind === 'spend_request_waiting') {
+      let request: WaitingRequest | undefined;
+      try {
+        request = await waitingRequests.waitingOf(notice.orgId, notice.aboutId ?? '');
+      } catch {
+        await failed(notice, 'request_unavailable', false);
+        return undefined;
+      }
+      // Decided, expired or cancelled before its email went: nothing waits for anyone now.
+      if (request === undefined) {
+        await failed(notice, 'request_not_waiting', true);
+        return undefined;
+      }
+      return { request };
+    }
+    return {};
+  };
+
   /** Sends one notice to its recipient and records how it went. */
   const sendOne = async (notice: ClaimedNotice): Promise<void> => {
     let address: string | undefined;
@@ -205,23 +258,11 @@ export function createNoticeSender({
       await failed(notice, 'no_address', true);
       return;
     }
-    let link: ResetLink | undefined;
-    if (notice.kind === RESET_LINK_KIND) {
-      try {
-        // The outbox writes a link notice to one contact, and about the reset, only.
-        link = await resetLinks.linkFor(notice.orgId, notice.aboutId ?? '', notice.recipientContactId ?? '');
-      } catch {
-        await failed(notice, 'link_unavailable', false);
-        return;
-      }
-      if (link === undefined) {
-        await failed(notice, 'reset_closed', true);
-        return;
-      }
-    }
+    const extras = await extrasOf(notice);
+    if (extras === undefined) return;
     let sent: SendOutcome;
     try {
-      sent = await notifier.send(messageFor(notice, address, link));
+      sent = await notifier.send(messageFor(notice, address, extras.link, extras.request));
     } catch {
       await failed(notice, 'send_error', false);
       return;

@@ -3,7 +3,7 @@
 // sent by the API's sender through a notifier, to the address the login
 // service gives at send time. It depends on no other module: a module whose
 // change tells people (identity) calls it.
-export { messageFor, type NoticeMessage, type ResetLink } from './domain/messages.ts';
+export { messageFor, type NoticeMessage, type ResetLink, type WaitingRequest } from './domain/messages.ts';
 export { type AcsSettings, createAcsNotifier, EMAIL_API_VERSION } from './infrastructure/acs-notifier.ts';
 export {
   type ClaimedNotice,
@@ -36,6 +36,7 @@ export {
   type NoticeSender,
   NOTICES_A_RUN,
   type ResetLinks,
+  type WaitingRequests,
   type SendOutcome,
 } from './infrastructure/sender.ts';
 export type { NotificationsTables } from './infrastructure/tables.ts';

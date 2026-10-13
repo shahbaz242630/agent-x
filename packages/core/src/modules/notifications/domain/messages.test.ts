@@ -4,7 +4,7 @@
 // which confirms that reset only, and says so.
 import { describe, expect, it } from 'vitest';
 
-import { messageFor, type ResetLink } from './messages.ts';
+import { amountText, messageFor, type ResetLink, type WaitingRequest } from './messages.ts';
 import {
   AGENT_NOTICE_KINDS,
   type ClaimedNotice,
@@ -292,23 +292,63 @@ describe('a notice’s email (B5-1b)', () => {
     });
   });
 
-  describe('B1 a spend request waiting for approval (0045, Phase 3; SEC-HA-11)', () => {
+  describe('B1, B2 a spend request waiting for approval (0045, Phase 3; partner decision 2; SEC-HA-11)', () => {
     const request = '0199a0f0-0000-7000-8000-0000000003b2';
-    const message = messageFor(
-      { ...NOTICE, kind: 'spend_request_waiting', membershipId: null, role: null, aboutId: request },
-      'a@example.test',
-    );
+    const waitingNotice: ClaimedNotice = {
+      ...NOTICE,
+      kind: 'spend_request_waiting',
+      membershipId: null,
+      role: null,
+      aboutId: request,
+    };
+    const waiting: WaitingRequest = {
+      amountMinor: 1_234_567_805n,
+      currency: 'AED',
+      supplierName: 'Gulf Office Supplies',
+      agentName: 'Procurement agent',
+      agentId: '0199a0f0-0000-7000-8000-0000000003b4',
+      consoleUrl: 'https://app.example.test',
+    };
+    const message = messageFor(waitingNotice, 'a@example.test', undefined, waiting);
 
-    it('names the request by ID alone, told to admins and approvers', () => {
+    it('names the request, told to admins and approvers', () => {
       expect(message.subject).toBe("Agent X: an AI agent's spend request is waiting for approval");
       expect(message.text).toContain(`Spend request: ${request}`);
       expect(message.text).toContain("You're told because you're an admin or approver of this organisation.");
+    });
+
+    it('shows what it asks and who asked, and Agent X’s address, read as it is sent (B2)', () => {
+      expect(message.text).toContain(
+        [
+          'Amount: AED 12,345,678.05',
+          'Supplier: Gulf Office Supplies',
+          `AI agent: Procurement agent (ID ${waiting.agentId})`,
+          'Agent X: https://app.example.test',
+        ].join('\n'),
+      );
     });
 
     it('carries no approval power: no token, and says the decision is made signed in, with a passkey', () => {
       expect(`${message.subject} ${message.text}`).not.toMatch(/token|[?#]/i);
       expect(message.text).toContain('passkey');
       expect(message.text).toContain("This email can't approve or change anything.");
+    });
+
+    it('is sent with its request, and only it is', () => {
+      expect(() => messageFor(waitingNotice, 'a@example.test')).toThrow(RangeError);
+      expect(() =>
+        messageFor({ ...waitingNotice, kind: 'organization_frozen' }, 'a@example.test', undefined, waiting),
+      ).toThrow(RangeError);
+    });
+
+    it.each([
+      [0n, 'AED 0.00'],
+      [5n, 'AED 0.05'],
+      [100n, 'AED 1.00'],
+      [99_999n, 'AED 999.99'],
+      [100_000n, 'AED 1,000.00'],
+    ])('writes %s minor units as %s', (minor, text) => {
+      expect(amountText(minor, 'AED')).toBe(text);
     });
   });
 

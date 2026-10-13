@@ -14,6 +14,7 @@
 // organisation list that can't be read, logged as an error.
 import { createAuditTrail, withSignedStates } from '@agentx/core/modules/audit';
 import { checkHoldings, expireRequest, requestOf, SPEND_REQUESTS } from '@agentx/core/modules/spend-requests';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -88,7 +89,14 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
   expiryOf = (orgs, most) =>
     createRequestExpiry({
       list: orgs,

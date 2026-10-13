@@ -20,6 +20,7 @@ import { withSignedStates } from '@agentx/core/modules/audit';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { supplierOf, suspendSupplier } from '@agentx/core/modules/suppliers';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createDatabase, type Database, TRANSACTION_RETRIED, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -171,7 +172,14 @@ beforeEach(() => {
   capture = new LogCapture();
   const logger = testLogger(capture);
   registry = createMandateRegistry({ database: app, keys, ids, clock, logger });
-  decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger });
+  decisions = createSpendRequestDecisions({
+    database: app,
+    outbox: createOutbox({ ids, clock }),
+    keys,
+    ids,
+    clock,
+    logger,
+  });
 });
 
 describe('the deadlock suite (SEC-AV-04): each change racing the agent’s requests', () => {
@@ -342,7 +350,14 @@ describe('the model: random batches all at once (SEC-LIM-01, SEC-LIM-04, SEC-DP-
       fc.asyncProperty(fc.array(REQUEST, { minLength: 4, maxLength: 8 }), async (batch) => {
         // A log of this run's own, so a retry in one run never fails another.
         capture = new LogCapture();
-        decisions = createSpendRequestDecisions({ database: app, keys, ids, clock, logger: testLogger(capture) });
+        decisions = createSpendRequestDecisions({
+          database: app,
+          outbox: createOutbox({ ids, clock }),
+          keys,
+          ids,
+          clock,
+          logger: testLogger(capture),
+        });
         const { w, acting } = await ready();
         const agents = [acting, await shared.secondAgent(registry, w, TERMS)];
 

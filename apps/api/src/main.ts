@@ -125,6 +125,7 @@ import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
 import { createSupplierVerifications } from './supplier-verifications.ts';
 import { createSupplierPayees } from './supplier-payees.ts';
 import { createSupplierRegistry } from './supplier-registry.ts';
+import { createWaitingRequests } from './waiting-requests.ts';
 
 /** Every table the API reaches, module by module. */
 type ApiTables = PlatformControlsTables &
@@ -539,7 +540,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     agentMandates: createAgentMandates({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
-    spendRequestDecisions: createSpendRequestDecisions({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
+    spendRequestDecisions: createSpendRequestDecisions({
+      database,
+      outbox,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
     spendRequestCancels: createSpendRequestCancels({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     policySimulations: createPolicySimulations({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateMoves: createMandateMoves({
@@ -706,6 +714,14 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       { keys, ids: uuidV7Ids, logger },
       { publicOrigin: config.http.publicOrigin, clock: systemClock },
     ),
+    // A spend request waiting for approval, from its verified records, Agent X's address its link (Phase 3 B2).
+    waitingRequests: createWaitingRequests({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      logger,
+      publicOrigin: config.http.publicOrigin,
+    }),
     fetch: outboundFetch,
     logger,
   });
