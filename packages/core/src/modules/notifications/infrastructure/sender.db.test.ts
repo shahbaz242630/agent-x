@@ -54,6 +54,8 @@ const MEMBERS: readonly string[] = [ADMIN, VIEWER];
 const APPROVER = '0199a0f0-0000-7000-8000-00000000b5b7';
 /** A mandate the notices are about (0036). */
 const MANDATE = '0199a0f0-0000-7000-8000-00000000b6b6';
+/** A spend request a notice is about (0045). */
+const REQUEST = '0199a0f0-0000-7000-8000-0000000003b3';
 const ADDRESSES = new Map([
   [ADMIN, 'admin@example.test'],
   [APPROVER, 'approver@example.test'],
@@ -533,26 +535,25 @@ describe(`the notice sender (B5-1b, Postgres ${server.version})`, () => {
   });
 
   it.each([
-    ['organization_policy_changed', `Organisation: ${ORG}`],
-    ['mandate_policy_changed', `Mandate: ${MANDATE}`],
-  ] as const)('C3a sends %s to every active admin and approver, naming what it is about', async (kind, about) => {
-    await sql`delete from notifications.outbox`.execute(app);
-    const changed: Notice = {
-      orgId: ORG,
-      recipientUserId: null,
-      kind,
-      membershipId: null,
-      role: null,
-      aboutId: kind === 'organization_policy_changed' ? ORG : MANDATE,
-    };
-    await app.transaction().execute((tx) => outbox.add(tx, [changed]));
-    const { sent, service } = notifier();
+    ['organization_policy_changed', ORG, `Organisation: ${ORG}`],
+    ['mandate_policy_changed', MANDATE, `Mandate: ${MANDATE}`],
+    ['organization_frozen', ORG, `Organisation: ${ORG}`],
+    ['organization_unfrozen', ORG, `Organisation: ${ORG}`],
+    ['spend_request_waiting', REQUEST, `Spend request: ${REQUEST}`],
+  ] as const)(
+    'C3a, B1 sends %s to every active admin and approver, naming what it is about',
+    async (kind, aboutId, about) => {
+      await sql`delete from notifications.outbox`.execute(app);
+      const changed: Notice = { orgId: ORG, recipientUserId: null, kind, membershipId: null, role: null, aboutId };
+      await app.transaction().execute((tx) => outbox.add(tx, [changed]));
+      const { sent, service } = notifier();
 
-    await sender(service).run.run();
+      await sender(service).run.run();
 
-    expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'approver@example.test']);
-    expect(sent.every(({ text }) => text.includes(about))).toBe(true);
-  });
+      expect(sent.map(({ to }) => to).sort()).toEqual(['admin@example.test', 'approver@example.test']);
+      expect(sent.every(({ text }) => text.includes(about))).toBe(true);
+    },
+  );
 
   it('B3a tries a notice about a mandate again when its admins and approvers cannot be read', async () => {
     await sql`delete from notifications.outbox`.execute(app);

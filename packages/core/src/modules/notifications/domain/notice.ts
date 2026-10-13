@@ -65,8 +65,19 @@ export const MANDATE_NOTICE_KINDS = [
   'mandate_policy_changed',
 ] as const;
 
-/** The kinds about the organisation as a whole, `aboutId` its ID (0038): a change of its own policy, told to every admin and approver. */
-export const ORGANIZATION_NOTICE_KINDS = ['organization_policy_changed'] as const;
+/**
+ * The kinds about the organisation as a whole, `aboutId` its ID: a change of
+ * its own policy (0038), its freeze and unfreeze (0045), told to every admin
+ * and approver.
+ */
+const ORGANIZATION_NOTICE_KINDS = [
+  'organization_policy_changed',
+  'organization_frozen',
+  'organization_unfrozen',
+] as const;
+
+/** The kinds about a spend request, `aboutId` its ID (0045): one waiting for approval, told to every admin and approver (partner decision 2, S104). */
+const SPEND_REQUEST_NOTICE_KINDS = ['spend_request_waiting'] as const;
 
 export const NOTICE_KINDS = [
   ...MEMBERSHIP_NOTICE_KINDS,
@@ -78,6 +89,7 @@ export const NOTICE_KINDS = [
   ...AGENT_NOTICE_KINDS,
   ...MANDATE_NOTICE_KINDS,
   ...ORGANIZATION_NOTICE_KINDS,
+  ...SPEND_REQUEST_NOTICE_KINDS,
 ] as const;
 export type NoticeKind = (typeof NOTICE_KINDS)[number];
 
@@ -104,9 +116,13 @@ export const isAboutAMandate = (kind: NoticeKind): boolean => MANDATE_NOTICE_KIN
 export const isAboutTheOrganization = (kind: NoticeKind): boolean =>
   ORGANIZATION_NOTICE_KINDS.some((each) => each === kind);
 
-/** Whether a kind is told to every admin and approver: what lets an agent spend (0036, 0038). */
+/** Whether a kind is about a spend request, `aboutId` its ID (0045). */
+export const isAboutASpendRequest = (kind: NoticeKind): boolean =>
+  SPEND_REQUEST_NOTICE_KINDS.some((each) => each === kind);
+
+/** Whether a kind is told to every admin and approver: what lets an agent spend, and what waits on them (0036, 0038, 0045). */
 export const isToAdminsAndApprovers = (kind: NoticeKind): boolean =>
-  isAboutAMandate(kind) || isAboutTheOrganization(kind);
+  isAboutAMandate(kind) || isAboutTheOrganization(kind) || isAboutASpendRequest(kind);
 
 /** Whether a kind is about a membership, with its role; any other is about `aboutId`. */
 export const isAboutAMembership = (kind: NoticeKind): boolean => MEMBERSHIP_NOTICE_KINDS.some((each) => each === kind);
