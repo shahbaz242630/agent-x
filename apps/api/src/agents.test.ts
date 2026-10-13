@@ -215,6 +215,9 @@ const post = (path: string, payload: unknown, key = 'k-1'): InjectOptions => ({
 
 const ASKED = { name: 'Purchasing bot', scopes: ['requests:write', 'requests:read'] };
 
+/** A record whose events can't be checked now (Phase 3 A1b). */
+const STUCK = '0199a0f0-0000-7000-8000-0000000001b1';
+
 describe('POST /v1/agents asks a step-up to register an agent (C1-2)', () => {
   it('answers 202 with the step-up, passing the member, the key and what was asked', async () => {
     const { app, calls } = await withAgents({ write: { outcome: 'asked', stepUpChallengeId: CHALLENGE } });
@@ -344,7 +347,7 @@ describe('POST /v1/agents/confirm registers the agent once signed in again (C1-2
 describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1-2)', () => {
   it('lists a page, asking the use case for the page named, 50 unless fewer are asked for', async () => {
     const { app, calls } = await withAgents(
-      { listed: { outcome: 'listed', agents: [AGENT], next: AGENT_ID, unchecked: [] } },
+      { listed: { outcome: 'listed', agents: [AGENT], next: AGENT_ID, unchecked: [STUCK] } },
       'viewer',
     );
 
@@ -352,7 +355,7 @@ describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1
     const next = await app.inject({ method: 'GET', url: `/v1/agents?after=${AGENT_ID}&limit=2`, headers });
 
     expect(first.statusCode).toBe(200);
-    expect(first.json()).toEqual({ agents: [AGENT_ANSWERED.agent], next: AGENT_ID, unchecked: [] });
+    expect(first.json()).toEqual({ agents: [AGENT_ANSWERED.agent], next: AGENT_ID, unchecked: [STUCK] });
     expect(next.statusCode).toBe(200);
     expect(calls.map((call) => call.subject)).toEqual([
       { orgId: ORG, after: null, limit: 50 },

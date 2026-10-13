@@ -363,6 +363,9 @@ const unit = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
 const escaped = (text: string) =>
   text.replace(/[^]/gu, (c) => unit(c.charCodeAt(0)) + (c.length === 2 ? unit(c.charCodeAt(1)) : ''));
 
+/** A record whose events can't be checked now (Phase 3 A1b). */
+const STUCK = '0199a0f0-0000-7000-8000-0000000001b1';
+
 describe('POST /v1/suppliers adds a supplier, unverified (E1-2)', () => {
   it('answers 201 with the supplier, passing the admin, the key and the details as kept', async () => {
     const asked: Asked[] = [];
@@ -462,14 +465,14 @@ describe('GET /v1/suppliers and /v1/suppliers/:id (E1-2)', () => {
   it('answers a page of suppliers, and where the next starts, passing the page asked for', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers(
-      { list: { outcome: 'listed', suppliers: [SHOWN], next: SUPPLIER_ID, unchecked: [] } },
+      { list: { outcome: 'listed', suppliers: [SHOWN], next: SUPPLIER_ID, unchecked: [STUCK] } },
       asked,
     );
 
     const response = await app.inject(get(`?after=${SUPPLIER_ID}&limit=10`));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ suppliers: [SUPPLIER_ANSWERED], next: SUPPLIER_ID, unchecked: [] });
+    expect(response.json()).toEqual({ suppliers: [SUPPLIER_ANSWERED], next: SUPPLIER_ID, unchecked: [STUCK] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: SUPPLIER_ID, limit: 10 } }]);
   });
 
@@ -1071,7 +1074,7 @@ describe('GET /v1/agent/suppliers: an agent sees the ID and name alone (E1-2, SE
     const asked: Asked[] = [];
     const verified = { ...SHOWN, status: 'VERIFIED' as const };
     const app = await withSuppliers(
-      { list: { outcome: 'listed', suppliers: [verified], next: null, unchecked: [] } },
+      { list: { outcome: 'listed', suppliers: [verified], next: null, unchecked: [STUCK] } },
       asked,
     );
 

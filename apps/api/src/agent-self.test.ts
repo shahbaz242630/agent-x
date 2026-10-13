@@ -202,7 +202,7 @@ describe('GET /v1/agent/mandate: the mandate an agent acts under (B5, SEC-AG-05)
 describe('GET /v1/agent/funding-sources: the source its mandate names, the safe summary alone (D2-4a, B5)', () => {
   it('answers each source’s ID, currency, kind and hint, and nothing else of it', async () => {
     const { app, asked } = await withMandates({
-      listed: { outcome: 'listed', sources: [SOURCE], next: null, unchecked: [] },
+      listed: { outcome: 'listed', sources: [SOURCE], next: null, unchecked: ['0199a0f0-0000-7000-8000-0000000001b1'] },
     });
     const response = await app.inject(asAgent('/v1/agent/funding-sources?limit=10'));
 
