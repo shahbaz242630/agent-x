@@ -331,7 +331,6 @@ function article(word: string): string {
   return /^[aeiou]/.test(word) ? 'an' : 'a';
 }
 
-/** The email asking a registered contact to confirm a reset, with its link (B6-3b). */
 /** The waiting request's own lines, between the email's first line and what to do. */
 function requestLines(request: WaitingRequest): string[] {
   return [
@@ -342,6 +341,7 @@ function requestLines(request: WaitingRequest): string[] {
   ];
 }
 
+/** The email asking a registered contact to confirm a reset, with its link (B6-3b). */
 function linkMessage(notice: ClaimedNotice, to: string, link: ResetLink): NoticeMessage {
   return {
     id: notice.id,
