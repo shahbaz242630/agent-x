@@ -7,7 +7,7 @@
 // the request's agent and supplier are found by their IDs alone first. A record
 // that can't be believed raises its alarm through its read and sends nothing.
 // The agent's own words (its purpose) never go in an email.
-import { agentOf, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
+import { agentOf, type AgentShown, type AgentsTables, agentsShown } from '@agentx/core/modules/agents';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import type { WaitingRequest, WaitingRequests } from '@agentx/core/modules/notifications';
@@ -69,12 +69,13 @@ export function createWaitingRequests({
           ) {
             return undefined;
           }
-          const [shown] = await agentsShown(tx, orgId, [agent.agent]);
+          // One named agent asked, one shown (agentsShown throws for a missing row).
+          const [shown] = (await agentsShown(tx, orgId, [agent.agent])) as [AgentShown];
           return {
             amountMinor: request.amount.minor,
             currency: request.amount.currency,
             supplierName: version.version.displayName,
-            agentName: shown?.name ?? '',
+            agentName: shown.name,
             agentId: agent.agent.id,
             consoleUrl: publicOrigin,
           };

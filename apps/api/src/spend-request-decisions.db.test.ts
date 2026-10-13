@@ -226,11 +226,13 @@ afterAll(async () => {
 });
 
 /** The organisation's notices that a request waits for approval (Phase 3 B2): whom they go to, and what about. */
+// The outbox is global (0021, the sender works across organisations): no tenant wall filters it.
 const waitingNotices = (org: string) =>
   withTenant(app, org, (tx) =>
     tx
       .selectFrom('notifications.outbox')
       .select(['recipient_user_id', 'about_id'])
+      .where('org_id', '=', org)
       .where('kind', '=', 'spend_request_waiting')
       .execute(),
   );

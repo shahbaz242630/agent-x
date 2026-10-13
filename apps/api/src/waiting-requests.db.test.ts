@@ -2,7 +2,7 @@
 // read from its verified records as the email is sent, so one no longer
 // waiting sends nothing, and never with the agent's own words.
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createDatabase, type Database } from '@agentx/platform/db';
+import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import { createTestDatabase, FixedClock, SequentialIds, type TestDatabase, testLogger } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
@@ -111,5 +111,58 @@ describe('a spend request waiting for approval, as its email shows it (Phase 3 B
     expect(await waitingOf(w.org, waiting.id)).toBeUndefined();
     expect(await waitingOf(w.org, allowed.id)).toBeUndefined();
     expect(await waitingOf(w.org, ids.next())).toBeUndefined();
+  });
+
+  it('is none for another organisation’s request that waits', async () => {
+    const { w, acting } = await ready();
+    const other = await ready();
+    const waiting = await ask(acting, w);
+
+    expect(await waitingOf(other.w.org, waiting.id)).toBeUndefined();
+    expect(await waitingOf(w.org, waiting.id)).toBeDefined();
+  });
+
+  it('is none when the request was changed past the app: its seal no longer holds', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const owner = await database.connect('owner');
+    try {
+      await owner.query("select pg_catalog.set_config('app.org_id', $1, false)", [w.org]);
+      await owner.query('begin');
+      await owner.query('alter table spend_requests.requests disable trigger user');
+      await owner.query('update spend_requests.requests set amount_minor = amount_minor * 2 where id = $1', [
+        waiting.id,
+      ]);
+      await owner.query('alter table spend_requests.requests enable trigger user');
+      await owner.query('commit');
+    } finally {
+      await owner.end();
+    }
+
+    expect(await waitingOf(w.org, waiting.id)).toBeUndefined();
+  });
+
+  it('is none when its agent or its supplier was tampered with', async () => {
+    const agentTampered = await ready();
+    const first = await ask(agentTampered.acting, agentTampered.w);
+    await withTenant(app, agentTampered.w.org, (tx) =>
+      tx
+        .updateTable('agents.agents')
+        .set({ scopes: 'requests:read requests:write' })
+        .where('id', '=', agentTampered.acting.agentId)
+        .execute(),
+    );
+    expect(await waitingOf(agentTampered.w.org, first.id)).toBeUndefined();
+
+    const supplierTampered = await ready();
+    const second = await ask(supplierTampered.acting, supplierTampered.w);
+    await withTenant(app, supplierTampered.w.org, (tx) =>
+      tx
+        .updateTable('suppliers.suppliers')
+        .set({ cooling_off_until: clock.now() })
+        .where('id', '=', supplierTampered.w.suppliers[0] ?? '')
+        .execute(),
+    );
+    expect(await waitingOf(supplierTampered.w.org, second.id)).toBeUndefined();
   });
 });
