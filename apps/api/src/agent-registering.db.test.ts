@@ -457,6 +457,7 @@ describe('reading agents', () => {
       outcome: 'listed',
       agents: [],
       next: null,
+      unchecked: [],
     });
   });
 

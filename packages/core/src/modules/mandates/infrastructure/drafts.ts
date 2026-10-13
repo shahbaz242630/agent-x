@@ -458,7 +458,12 @@ export async function mandatesPage(
   orgId: string,
   page: PageAsked,
 ): Promise<
-  | { readonly outcome: 'listed'; readonly mandates: readonly MandateShown[]; readonly next: string | null }
+  | {
+      readonly outcome: 'listed';
+      readonly mandates: readonly MandateShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
   const listed = await verifiedPage(
@@ -489,7 +494,9 @@ export async function mandatesPage(
       return { outcome: 'shown', items };
     },
   );
-  return listed.outcome === 'tampered' ? listed : { outcome: 'listed', mandates: listed.items, next: listed.next };
+  return listed.outcome === 'tampered'
+    ? listed
+    : { outcome: 'listed', mandates: listed.items, next: listed.next, unchecked: listed.unchecked };
 }
 
 /** The most mandate versions an organisation may draft in any 24 hours: their records are never retired (the B8-1 lesson). */

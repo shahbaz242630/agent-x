@@ -78,7 +78,13 @@ export type RegistrationWrite =
 
 /** A page of agents, or a refusal. */
 export type AgentsListed =
-  { readonly outcome: 'listed'; readonly agents: readonly AgentShown[]; readonly next: string | null } | Refused;
+  | {
+      readonly outcome: 'listed';
+      readonly agents: readonly AgentShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
+  | Refused;
 
 /** One agent with its keys, or a refusal. */
 export type AgentFound = ({ readonly outcome: 'found' } & AgentWithKeys) | Refused;

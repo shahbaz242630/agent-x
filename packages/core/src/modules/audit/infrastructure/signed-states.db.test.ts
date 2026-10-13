@@ -29,7 +29,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, i
 
 import { defineStateMachine } from '../../../shared-kernel/index.ts';
 import { AuditEventRefused } from '../domain/event.ts';
-import { type AuditTrail, type AuditTransaction, createAuditTrail } from './audit-trail.ts';
+import { type AuditTrail, type AuditTransaction, createAuditTrail, TooManyEventsAboutObject } from './audit-trail.ts';
 import {
   createSignedStates,
   type SignedStateFailed,
@@ -38,6 +38,7 @@ import {
   type TamperSign,
 } from './signed-states.ts';
 import type { AuditTables } from './tables.ts';
+import { verifiedPage } from './verified-page.ts';
 
 const MACHINE = defineStateMachine({
   name: 'agent',
@@ -979,6 +980,77 @@ describe('many rows verified at once (verifiedStates; E1c)', () => {
       release();
     }
     expect(alarms()).toEqual([]);
+  });
+});
+
+describe('a row whose object has a backlog of events (Phase 3 A1b; partner decision 5)', () => {
+  /** 1,001 events about the agent since its newest signed one: more than one read takes. */
+  const backlog = (id: string) =>
+    withTenant(app, org, async (tx) => {
+      for (let added = 0; added < 1001; added += 1) {
+        await trail.record(tx, org, {
+          actor: { type: 'user', id: USER },
+          action: 'agent.renamed',
+          subject: { type: 'agent', id, version: 1 },
+          details: {},
+        });
+      }
+    });
+  const backlogLines = () => capture.lines().filter((line) => line.event === 'audit.backlog');
+
+  it('refuses the whole read through verifiedStates and verifyAll, as one read does, with no alarm', async () => {
+    const fine = await newAgent();
+    const stuck = await newAgent();
+    await backlog(stuck);
+
+    await expect(
+      withTenant(app, org, (tx) => states.verifiedStates(tx, AGENTS, org, [fine, stuck])),
+    ).rejects.toBeInstanceOf(TooManyEventsAboutObject);
+    await expect(withTenant(app, org, (tx) => states.verifyAll(tx, org, [AGENTS], 100))).rejects.toBeInstanceOf(
+      TooManyEventsAboutObject,
+    );
+    expect(alarms()).toEqual([]);
+    expect(found).toEqual([]);
+  });
+
+  it('answers backlog for that row alone in a page, logging it as an error, never an alarm', async () => {
+    const fine = await newAgent();
+    const stuck = await newAgent();
+    await backlog(stuck);
+
+    const checks = await withTenant(app, org, (tx) => states.pageStates(tx, AGENTS, org, [fine, stuck]));
+    expect(checks.get(stuck)).toEqual({ outcome: 'backlog' });
+    expect(checks.get(fine)).toMatchObject({ outcome: 'verified', version: 1 });
+    expect(backlogLines()).toEqual([
+      expect.objectContaining({ level: 'error', orgId: org, subjectType: 'agent', objectId: stuck }),
+    ]);
+    expect(alarms()).toEqual([]);
+    expect(found).toEqual([]);
+  });
+
+  it('raises a row’s own tamper alarm, never a backlog, when its row is unreadable too (A1b review)', async () => {
+    const stuck = await newAgent();
+    await backlog(stuck);
+    await tamper('update probe.agents set state_version = 0 where org_id = $1 and id = $2', stuck);
+
+    const checks = await withTenant(app, org, (tx) => states.pageStates(tx, AGENTS, org, [stuck]));
+    expect(checks.get(stuck)).toMatchObject({ outcome: 'tampered', sign: 'row' });
+    expect(alarms()).toEqual([expect.objectContaining({ reason: 'row', objectId: stuck })]);
+    expect(backlogLines()).toEqual([]);
+  });
+
+  it('leaves it out of a list’s page and names it, the rest listed (verifiedPage)', async () => {
+    const fine = await newAgent();
+    const stuck = await newAgent();
+    await backlog(stuck);
+
+    const page = await withTenant(app, org, (tx) =>
+      verifiedPage(tx, states, AGENTS, org, { after: null, limit: 10 }, { most: 10, rows: 'agents' }, (verified) => ({
+        outcome: 'shown',
+        items: verified.map(({ id }) => id),
+      })),
+    );
+    expect(page).toEqual({ outcome: 'listed', items: [fine], next: null, unchecked: [stuck] });
   });
 });
 

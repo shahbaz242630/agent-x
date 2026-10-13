@@ -987,7 +987,12 @@ export async function suppliersPage(
   orgId: string,
   page: PageAsked,
 ): Promise<
-  | { readonly outcome: 'listed'; readonly suppliers: readonly SupplierShown[]; readonly next: string | null }
+  | {
+      readonly outcome: 'listed';
+      readonly suppliers: readonly SupplierShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
   const listed = await verifiedPage(
@@ -1014,7 +1019,9 @@ export async function suppliersPage(
       return { outcome: 'shown', items };
     },
   );
-  return listed.outcome === 'tampered' ? listed : { outcome: 'listed', suppliers: listed.items, next: listed.next };
+  return listed.outcome === 'tampered'
+    ? listed
+    : { outcome: 'listed', suppliers: listed.items, next: listed.next, unchecked: listed.unchecked };
 }
 
 /**

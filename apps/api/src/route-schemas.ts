@@ -78,6 +78,13 @@ export const pageQuery = (most: number) =>
 
 export const NEXT = z.uuid().nullable().describe('The ID to ask the next page after; null at the end.');
 
+/** A team's list's records that can't be checked right now (Phase 3 A1b, partner decision 5): left out, named here. */
+export const UNCHECKED = z
+  .array(z.uuid())
+  .describe(
+    "The IDs of this page's records that can't be checked right now, so they are left out; the Agent X team has been alerted. Usually empty.",
+  );
+
 /** A decision's reasons, each a code with what it means: the request's answer and the simulator's. */
 export const REASONS = z
   .array(z.object({ code: z.string(), message: z.string() }))

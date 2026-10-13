@@ -242,7 +242,12 @@ export async function agentsPage(
   orgId: string,
   page: PageAsked,
 ): Promise<
-  | { readonly outcome: 'listed'; readonly agents: readonly AgentShown[]; readonly next: string | null }
+  | {
+      readonly outcome: 'listed';
+      readonly agents: readonly AgentShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
   | { readonly outcome: 'tampered'; readonly sign: TamperSign }
 > {
   const listed = await verifiedPage(
@@ -255,5 +260,10 @@ export async function agentsPage(
     (verified) => ({ outcome: 'shown', items: verified.map(({ id, state }) => agentFrom(id, state)) }),
   );
   if (listed.outcome === 'tampered') return listed;
-  return { outcome: 'listed', agents: await agentsShown(tx, orgId, listed.items), next: listed.next };
+  return {
+    outcome: 'listed',
+    agents: await agentsShown(tx, orgId, listed.items),
+    next: listed.next,
+    unchecked: listed.unchecked,
+  };
 }

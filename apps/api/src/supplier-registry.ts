@@ -66,7 +66,13 @@ export type SupplierAddWrite =
   | Refused;
 
 export type SuppliersListed =
-  { readonly outcome: 'listed'; readonly suppliers: readonly SupplierShown[]; readonly next: string | null } | Refused;
+  | {
+      readonly outcome: 'listed';
+      readonly suppliers: readonly SupplierShown[];
+      readonly next: string | null;
+      readonly unchecked: readonly string[];
+    }
+  | Refused;
 
 type ShowAnswer = ({ readonly outcome: 'found' } & SupplierView) | Refused;
 

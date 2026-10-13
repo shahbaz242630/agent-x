@@ -622,7 +622,7 @@ describe(`a page of an organisation's suppliers (E1-1, Postgres ${server.version
       await withSignedStates(app, org, services(), (tx, states) =>
         suppliersPage(tx, states, org, { after: null, limit: 10 }),
       ),
-    ).toEqual({ outcome: 'listed', suppliers: [], next: null });
+    ).toEqual({ outcome: 'listed', suppliers: [], next: null, unchecked: [] });
   });
 
   it.each([0, MOST_SUPPLIERS_A_PAGE + 1, 1.5])('refuses a page of %j, before any SQL runs', async (limit) => {

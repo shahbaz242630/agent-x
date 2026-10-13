@@ -145,6 +145,13 @@ export type StateCheck =
   VerifiedState | { readonly outcome: 'missing' } | { readonly outcome: 'tampered'; readonly sign: TamperSign };
 
 /**
+ * A page's row that can't be judged now (Phase 3 A1b, partner decision 5): its
+ * object has more events since its newest signed one than one read takes
+ * (BackloggedRead). Not a tamper sign; the page leaves it out and says so.
+ */
+export type PageCheck = StateCheck | { readonly outcome: 'backlog' };
+
+/**
  * A table verifyAll checks: all of it, or, for one whose rows only grow (a
  * spend request's, Phase 2 D1), its rows in `liveStatuses` alone: those that
  * can still act. One moved back to a live status is listed, so checked; an
@@ -301,7 +308,21 @@ export type HistoryCheck =
  * lists IDs: it answers every ID asked, so one missing is a bug, never a row
  * to believe.
  */
-export function checkOf(checks: ReadonlyMap<string, StateCheck>, id: string): StateCheck {
+/**
+ * The checks, every row judged: a backlogged one refuses them all as
+ * latestSignedState does one (TooManyEventsAboutObject; partner decision 5),
+ * for any read but a list's page.
+ */
+function whole(checks: ReadonlyMap<string, PageCheck>): ReadonlyMap<string, StateCheck> {
+  const judged = new Map<string, StateCheck>();
+  for (const [id, check] of checks) {
+    if (check.outcome === 'backlog') throw new TooManyEventsAboutObject();
+    judged.set(id, check);
+  }
+  return judged;
+}
+
+export function checkOf<Check extends PageCheck>(checks: ReadonlyMap<string, Check>, id: string): Check {
   const check = checks.get(id);
   if (check === undefined) throw new Error(`A row was asked for and not read: ${id}`);
   return check;
@@ -328,6 +349,17 @@ export interface SignedStates {
     orgId: string,
     ids: readonly string[],
   ): Promise<ReadonlyMap<string, StateCheck>>;
+  /**
+   * verifiedStates for a page of a list (verifiedPage): a row whose object
+   * has a backlog of events is answered `backlog` rather than refusing the
+   * whole page, which verifiedStates and verifyAll do (Phase 3 A1b).
+   */
+  pageStates(
+    tx: AuditTransaction,
+    table: SignedStateTable,
+    orgId: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, PageCheck>>;
   /**
    * Every object of these tables in the organisation, verified as
    * verifiedState does and locked `share`, for a decision that rests on
@@ -738,7 +770,7 @@ export function createSignedStates({
     orgId: string,
     ids: readonly string[],
     listed: boolean,
-  ): Promise<ReadonlyMap<string, StateCheck>> => {
+  ): Promise<ReadonlyMap<string, PageCheck>> => {
     notTheHold(table);
     const rows = heldIn(tx);
     const asked = [...new Set(ids.map((id) => id.toLowerCase()))];
@@ -750,7 +782,7 @@ export function createSignedStates({
       rows.set(name, { lock: held?.lock ?? 'share', ...(held?.from ? { from: held.from } : {}) });
     }
     const latest = await trail.latestSignedStates(tx, orgId, table.subject, asked);
-    const checks = new Map<string, StateCheck>();
+    const checks = new Map<string, PageCheck>();
     for (const id of asked) {
       const key = { orgId, id };
       const row = read.get(id);
@@ -758,16 +790,32 @@ export function createSignedStates({
       // Both reads answer every ID asked; one that didn't would be a bug, never a row to believe.
       if (row === undefined || last === undefined) throw new Error('A signed state was asked for and not read');
       // A row not found whole (missing, or unreadable: rare, and a tamper sign) is read again on its own, which
-      // judges it as verifiedState always does, a row created since it was read among them.
-      const check =
-        row.outcome === 'found' ? compare(table, key, row, last) : await verifiedState(tx, table, key, 'share');
+      // judges it as verifiedState always does, a row created since it was read among them: an unreadable row's
+      // alarm comes before its log is read, so a backlog never hides it (A1b review).
+      let check: PageCheck;
+      if (row.outcome !== 'found') check = await verifiedState(tx, table, key, 'share');
+      else if (last.kind === 'backlog') check = { outcome: 'backlog' };
+      else check = compare(table, key, row, last);
       checks.set(id, listed && check.outcome === 'missing' ? alarm(table.subject, key, 'deleted') : check);
     }
     return checks;
   };
 
-  const verifiedStates = (tx: AuditTransaction, table: SignedStateTable, orgId: string, ids: readonly string[]) =>
-    checksOf(tx, table, orgId, ids, false);
+  const verifiedStates = async (tx: AuditTransaction, table: SignedStateTable, orgId: string, ids: readonly string[]) =>
+    whole(await checksOf(tx, table, orgId, ids, false));
+
+  /** checksOf for a list's page: each backlogged row logged as an error, which the app-errors alert counts. */
+  const pageStates = async (tx: AuditTransaction, table: SignedStateTable, orgId: string, ids: readonly string[]) => {
+    const checks = await checksOf(tx, table, orgId, ids, false);
+    for (const [id, check] of checks) {
+      if (check.outcome === 'backlog') {
+        logger
+          .child({ orgId: orgId.toLowerCase() })
+          .error('audit.backlog', { subjectType: table.subject, objectId: id });
+      }
+    }
+    return checks;
+  };
 
   /**
    * Locks a row being created for change, once it is as the app inserts one:
@@ -970,7 +1018,7 @@ export function createSignedStates({
     const findings: TamperFinding[] = [];
     for (let start = 0; start < ids.length; start += MOST_SIGNED_ROWS_READ) {
       const batch = ids.slice(start, start + MOST_SIGNED_ROWS_READ);
-      const checks = await checksOf(tx, table, orgId, batch, true);
+      const checks = whole(await checksOf(tx, table, orgId, batch, true));
       for (const id of batch) {
         const check = checkOf(checks, id);
         if (check.outcome === 'tampered') {
@@ -1011,6 +1059,7 @@ export function createSignedStates({
     verifiedState,
 
     verifiedStates,
+    pageStates,
 
     mismatch(subjectType: string, key: SignedRowKey): void {
       alarm(subjectType, key, 'holding');

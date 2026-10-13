@@ -200,6 +200,9 @@ const post = (path: string, payload: unknown = {}, key = 'k-1'): InjectOptions =
   payload: JSON.stringify(payload),
 });
 
+/** A record whose events can't be checked now (Phase 3 A1b). */
+const STUCK = '0199a0f0-0000-7000-8000-0000000001b1';
+
 describe('POST /v1/funding-sources/link-sessions starts a link at the partner (D2-3b)', () => {
   it('answers 201 with the link and the partner’s page, passing the admin and the key', async () => {
     const { app, calls } = await withLinks({
@@ -352,22 +355,25 @@ const LAST_ID = '0199a0f0-0000-7000-8000-0000000000ff';
 describe('GET /v1/funding-sources lists the organisation’s sources (D2-4a)', () => {
   it('answers a page of sources as Agent X holds them, and where the next starts', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID } }, asked);
+    const { app } = await withLinks(
+      { list: { outcome: 'listed', sources: [SOURCE], next: LAST_ID, unchecked: [STUCK] } },
+      asked,
+    );
 
     const response = await app.inject(read('/v1/funding-sources'));
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID });
+    expect(response.json()).toEqual({ sources: [SOURCE_ANSWERED], next: LAST_ID, unchecked: [STUCK] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: null, limit: 50 } }]);
   });
 
   it('passes the page asked for', async () => {
     const asked: Asked[] = [];
-    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null } }, asked);
+    const { app } = await withLinks({ list: { outcome: 'listed', sources: [], next: null, unchecked: [] } }, asked);
 
     const response = await app.inject(read(`/v1/funding-sources?after=${LAST_ID}&limit=2`));
 
-    expect(response.json()).toEqual({ sources: [], next: null });
+    expect(response.json()).toEqual({ sources: [], next: null, unchecked: [] });
     expect(asked).toEqual([{ kind: 'list', orgId: ORG, page: { after: LAST_ID, limit: 2 } }]);
   });
 
