@@ -42,6 +42,12 @@ export interface OrderOf {
   readonly reference: string;
 }
 
+/** An order as an approval weighs it again (Phase 3 B4b): its own request's claim left out. */
+export interface OrderWeighed extends OrderOf {
+  /** The request whose claims aren't counted; none for a request still to be made. */
+  readonly except?: string | undefined;
+}
+
 type Claims = ExpressionBuilder<SpendRequestsTables, 'spend_requests.order_claims'>;
 
 /** By the same supplier, or by the same payee key where there is one. */
@@ -51,16 +57,17 @@ const onTheOrdersPayee = (order: OrderOf) => (where: Claims) =>
     : where.or([where('supplier_id', '=', order.supplierId), where('payee_key', '=', order.payeeKey)]);
 
 /**
- * The open claims on the order, in canonical form, on its supplier or payee;
- * the organisation's alone, by its tenant wall (withTenant).
+ * The open claims on the order, in canonical form, on its supplier or payee,
+ * but `except`'s; the organisation's alone, by its tenant wall (withTenant).
  */
-const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
+const openClaimsOn = (tx: ClaimsTransaction, order: OrderWeighed) =>
   tx
     .selectFrom('spend_requests.order_claims')
     .select('id')
     .where('released_at', 'is', null)
     .where('order_reference', '=', orderKeyOf(order.reference))
     .where(onTheOrdersPayee(order))
+    .where((where) => (order.except === undefined ? where.lit(true) : where('request_id', '<>', order.except)))
     .limit(1);
 
 /**
@@ -68,11 +75,12 @@ const openClaimsOn = (tx: ClaimsTransaction, order: OrderOf) =>
  * statement: `duplicate`, one claims it in canonical form (D3: refused);
  * `possible`, one in another form the rail would carry alike (decision 11a:
  * a person approves it). An order whose bank reference would be its
- * request's own ID is never a possible duplicate.
+ * request's own ID is never a possible duplicate. An approval's own claim is
+ * left out (`except`): a lookalike is another form, so never its own.
  */
 export async function claimsOn(
   tx: ClaimsTransaction,
-  order: OrderOf,
+  order: OrderWeighed,
 ): Promise<{ readonly duplicate: boolean; readonly possible: boolean }> {
   const bankKey = bankKeyOf(order.reference);
   const lookalikes = (bank: string) =>

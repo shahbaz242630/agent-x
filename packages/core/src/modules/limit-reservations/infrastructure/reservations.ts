@@ -49,6 +49,19 @@ export async function lockAgentMonth(
     .values({ org_id: orgId, agent_id: agentId, month, created_at: at })
     .onConflict((conflict) => conflict.doNothing())
     .execute();
+  return lockAgentPeriod(tx, { agentId, month });
+}
+
+/**
+ * The agent's `month`, a period it already has, locked FOR NO KEY UPDATE
+ * (level 7): an approval's, weighed in the month its request's capacity is
+ * held in (Phase 3 B4b), whatever month it is now. Throws for a month the
+ * agent has no period in (a reservation is only ever made in one).
+ */
+export async function lockAgentPeriod(
+  tx: ReservationsTransaction,
+  { agentId, month }: { agentId: string; month: string },
+): Promise<string> {
   await tx
     .selectFrom('limit_reservations.agent_periods')
     .select('month')
@@ -80,10 +93,17 @@ export async function agentMonth(
  * The agent's month's total in minor units of `currency`: every reservation
  * but a released one, under any of its mandates. One currency's alone, as a
  * cap is in one (G4: another's minor units would be counted as its own).
+ * `except` leaves one request's out: an approval weighs its request against
+ * the others, as its own amount is added by the engine (Phase 3 B4b).
  */
 export async function monthSpent(
   tx: ReservationsTransaction,
-  { agentId, month, currency }: { agentId: string; month: string; currency: string },
+  {
+    agentId,
+    month,
+    currency,
+    except,
+  }: { agentId: string; month: string; currency: string; except?: string | undefined },
 ): Promise<bigint> {
   const { spent } = await tx
     .selectFrom('limit_reservations.reservations')
@@ -92,6 +112,7 @@ export async function monthSpent(
     .where('month', '=', month)
     .where('currency', '=', currency)
     .where('state', '<>', 'RELEASED')
+    .where((where) => (except === undefined ? where.lit(true) : where('request_id', '<>', except)))
     .executeTakeFirstOrThrow();
   return BigInt(spent);
 }

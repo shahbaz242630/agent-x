@@ -38,6 +38,14 @@
 // same reason: 200, the request DENIED, its reservation and order claim
 // released. No agent key reaches either.
 //
+// Approving one (Phase 3 B4b; partner decisions 1 and 3;
+// spend-request-approvals.ts): an admin or finance approver asks at
+// `POST /v1/spend-requests/{id}/approve` (202, a step-up, once the request is
+// weighed again and found unchanged), signs in again with a passkey, and
+// confirms at `…/approve/confirm`: 200, the request APPROVED, weighed again
+// as it then stands, keeping its reservation and order claim. No agent key
+// reaches either (SEC-AG-07).
+//
 // The agent reads one of its own (B4c, partner S106) at
 // `GET /v1/agent/spend-requests/{id}`, with `requests:read`: as it stands
 // now, so it learns of an approval, a reject, a cancel or an expiry. One a
@@ -67,6 +75,7 @@ import { API_SCHEMAS } from './api-schemas.ts';
 import { answerAsked, answerRefusal, idempotentRequest } from './idempotent-writes.ts';
 import {
   AMOUNT,
+  CHALLENGE_BODY_LIMIT,
   issuesOf,
   NEXT,
   NOTHING,
@@ -74,6 +83,7 @@ import {
   pageQuery,
   REASONS,
   reasonsOf,
+  STEP_UP_CONFIRM,
   STEP_UP_SIGNED_IN,
   stepUpAsked,
   UNCHECKED,
@@ -84,6 +94,7 @@ import {
   CANCELLING_ROLES,
   type SpendRequestCancels,
 } from './spend-request-cancels.ts';
+import { APPROVE_CONFIRM_OPERATION, APPROVE_OPERATION, type SpendRequestApprovals } from './spend-request-approvals.ts';
 import { DECIDE_OPERATION, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import type { RequestShown, SpendRequestReads } from './spend-request-reads.ts';
 import {
@@ -348,6 +359,26 @@ const shown = (request: SpendRequestRecord, to: 'agent' | 'member') => {
   };
 };
 
+const APPROVE_SCHEMA = {
+  summary: 'Ask to approve a spend request waiting for approval',
+  params: SPEND_REQUEST_ID,
+  body: NOTHING,
+  response: {
+    202: stepUpAsked('SpendRequestApproveAsked', 'Approving a spend request, waiting for you to sign in again.'),
+  },
+};
+
+const APPROVE_CONFIRM_SCHEMA = {
+  summary: 'Approve a spend request, once signed in again for it',
+  params: SPEND_REQUEST_ID,
+  body: STEP_UP_CONFIRM,
+  response: {
+    200: SPEND_REQUEST_SHOWN.describe(
+      'The request as it now stands: APPROVED, weighed again as everything now stands, keeping its reservation and order claim.',
+    ),
+  },
+};
+
 export function registerSpendRequests(
   app: FastifyInstance,
   {
@@ -355,11 +386,13 @@ export function registerSpendRequests(
     cancels,
     reads,
     rejects,
+    approvals,
   }: {
     decisions: SpendRequestDecisions | undefined;
     cancels: SpendRequestCancels | undefined;
     reads: SpendRequestReads | undefined;
     rejects: SpendRequestRejects | undefined;
+    approvals: SpendRequestApprovals | undefined;
   },
 ): void {
   const routes = app.withTypeProvider<ZodTypeProvider>();
@@ -493,6 +526,46 @@ export function registerSpendRequests(
       );
       if (isUnwritten(rejected)) return answerRefusal(rejected, request, reply);
       return reply.code(200).send(shown(rejected.request, 'member'));
+    },
+  );
+
+  routes.post(
+    '/v1/spend-requests/:id/approve',
+    {
+      schema: APPROVE_SCHEMA,
+      bodyLimit: NOTHING_BODY_LIMIT,
+      config: { access: [...DECIDING_ROLES], operation: APPROVE_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const asked = await need(approvals).ask(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.id,
+      );
+      return answerAsked(asked, request, reply);
+    },
+  );
+
+  routes.post(
+    '/v1/spend-requests/:id/approve/confirm',
+    {
+      schema: APPROVE_CONFIRM_SCHEMA,
+      bodyLimit: CHALLENGE_BODY_LIMIT,
+      config: { access: [...DECIDING_ROLES], operation: APPROVE_CONFIRM_OPERATION },
+    },
+    async (request, reply) => {
+      const member = memberInSessionOf(request);
+      const approved = await need(approvals).confirm(
+        member,
+        idempotentRequest(request, member.orgId),
+        request.params.id,
+        request.body.stepUpChallengeId,
+        request.id,
+      );
+      if (isUnwritten(approved)) return answerRefusal(approved, request, reply);
+      return reply.code(200).send(shown(approved.request, 'member'));
     },
   );
 

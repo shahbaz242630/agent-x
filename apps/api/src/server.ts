@@ -76,6 +76,7 @@ import type { SpendRequestDecisions } from './spend-request-decisions.ts';
 import type { SpendRequestCancels } from './spend-request-cancels.ts';
 import type { SpendRequestReads } from './spend-request-reads.ts';
 import type { SpendRequestRejects } from './spend-request-rejects.ts';
+import type { SpendRequestApprovals } from './spend-request-approvals.ts';
 import { registerSpendRequests } from './spend-requests.ts';
 import { registerAgents } from './agents.ts';
 import type { FundingSourceChanges } from './funding-source-changes.ts';
@@ -171,6 +172,8 @@ export interface ServerOptions {
   readonly spendRequestReads?: SpendRequestReads | undefined;
   /** Rejecting spend requests waiting for approval (spend-request-rejects.ts); without it, no one reaches those routes. */
   readonly spendRequestRejects?: SpendRequestRejects | undefined;
+  /** Approving spend requests waiting for approval (spend-request-approvals.ts); without it, no one reaches those routes. */
+  readonly spendRequestApprovals?: SpendRequestApprovals | undefined;
   /** Adding and reading suppliers (supplier-registry.ts); without it, no one reaches those routes. */
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
@@ -344,6 +347,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
     cancels: options.spendRequestCancels,
     reads: options.spendRequestReads,
     rejects: options.spendRequestRejects,
+    approvals: options.spendRequestApprovals,
   });
   registerAgents(app, {
     registrations: options.agentRegistrations,

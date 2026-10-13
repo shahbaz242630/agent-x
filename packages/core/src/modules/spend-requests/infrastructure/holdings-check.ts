@@ -120,6 +120,20 @@ async function heldAsDecided(
   return new Map(decided.map(([id, details]) => [id, heldOf(details)]));
 }
 
+/**
+ * What one request's decision sealed of what it holds, read as the holdings
+ * check reads it (Phase 3 B4b: the month an approval weighs it in); null for
+ * a decision that sealed none, or a history that can't be believed (its
+ * alarm raised).
+ */
+export async function heldAsDecidedOf(
+  tx: HoldingsTransaction,
+  states: SignedStates,
+  key: { readonly orgId: string; readonly id: string },
+): Promise<HeldSealed | null> {
+  return (await heldAsDecided(tx, states, key.orgId, [key.id])).get(key.id.toLowerCase()) ?? null;
+}
+
 /** Groups rows by their request's ID. */
 function byRequest<Row extends { readonly requestId: string }>(rows: readonly Row[]): Map<string, Row[]> {
   const grouped = new Map<string, Row[]>();

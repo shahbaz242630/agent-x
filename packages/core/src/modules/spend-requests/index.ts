@@ -9,7 +9,7 @@
 // request's reservation and claim with its signed state (E1); a request
 // waiting for approval expired after 72 hours, or cancelled before hand-off,
 // its holdings released (D7, D8), or rejected by a person with a reason
-// (Phase 3 B4a).
+// (Phase 3 B4a), or approved by one, weighed again (B4b).
 export {
   askedText,
   BANK_REFERENCE_MOST,
@@ -25,10 +25,14 @@ export {
   checkHoldings,
   holdingsRecordChecks,
   type HoldingsChecked,
+  heldAsDecidedOf,
   MOST_CHECKED_A_PAGE,
 } from './infrastructure/holdings-check.ts';
 export type { HeldAs } from './domain/holdings.ts';
+export { type Approval, approveRequest } from './infrastructure/approvals.ts';
 export {
+  type DecidedAgainst,
+  decidedAgainst,
   holdsCapacity,
   insertRequest,
   MOST_REQUESTS_A_PAGE,
@@ -52,8 +56,9 @@ export {
   rejectRequest,
   requestsWaitingSince,
   WAITS_FOR_APPROVAL_MS,
+  waitedOut,
 } from './infrastructure/endings.ts';
-export { claimOrder, claimsOn, type OrderOf, releaseClaim } from './infrastructure/order-claims.ts';
+export { claimOrder, claimsOn, type OrderOf, type OrderWeighed, releaseClaim } from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';
 export type { SpendRequestsTables } from './infrastructure/tables.ts';

@@ -157,16 +157,30 @@ const believed = (read: { readonly outcome: string }): void => {
   if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
 };
 
+/** Level 2: the organisation, refused while frozen (ORG_FROZEN). */
+export async function notFrozen(tx: DecisionTx, states: SignedStates, orgId: string): Promise<void> {
+  // The organisation always exists while its requests can be made.
+  const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
+  if (organization.outcome !== 'verified') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+  if (organization.fields.get('status') === 'FROZEN') throw new MandateRefused(409, 'ORG_FROZEN');
+}
+
 /** Levels 2–3: the organisation not frozen, and the agent. */
 export async function agentIn(
   tx: DecisionTx,
   states: SignedStates,
   { orgId, agentId }: { readonly orgId: string; readonly agentId: string },
 ) {
-  // The organisation always exists while its requests can be made.
-  const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
-  if (organization.outcome !== 'verified') throw new MandateRefused(503, 'INTEGRITY_FAILED');
-  if (organization.fields.get('status') === 'FROZEN') throw new MandateRefused(409, 'ORG_FROZEN');
+  await notFrozen(tx, states, orgId);
+  return agentAlone(tx, states, { orgId, agentId });
+}
+
+/** Level 3: the agent, read FOR SHARE (an approval's, after the organisation and the member's membership: 2a). */
+export async function agentAlone(
+  tx: DecisionTx,
+  states: SignedStates,
+  { orgId, agentId }: { readonly orgId: string; readonly agentId: string },
+) {
   const agent = await agentOf(tx, states, { orgId, id: agentId }, 'share');
   believed(agent);
   // A key's check, or a mandate's own row, found it, and agents are never deleted (0019's grants).
@@ -216,6 +230,7 @@ async function payingIn(
   orgId: string,
   asked: SpendWeighed,
   supplierLock: 'share' | 'change',
+  except: string | undefined,
 ) {
   const source = await sourceOf(tx, states, { orgId, id: asked.fundingSourceId }, 'share');
   believed(source);
@@ -230,7 +245,7 @@ async function payingIn(
     payeeKey: supplier.supplier.payeeKey,
     reference: asked.orderReference,
   };
-  return { source, supplier: supplier.supplier, order, claims: await claimsOn(tx, order) };
+  return { source, supplier: supplier.supplier, order, claims: await claimsOn(tx, { ...order, except }) };
 }
 
 /** The policies in force for the agent's mandate, as the engine weighs them. */
@@ -244,7 +259,11 @@ export interface PoliciesWeighed {
  * agent's authority, the source and supplier, the agent's month and its
  * total. A decision locks the supplier and the month (`decides`, `monthOf`
  * locking it); the simulator only reads them, and `rules` lets it put
- * proposed policies in place of those in force.
+ * proposed policies in place of those in force. An approval weighs its
+ * request again (Phase 3 B4b) with `except` its ID: the month's total and the
+ * order's claims are the others' alone, as the engine adds its own amount
+ * again and its own claim is no duplicate of it. The split total still counts
+ * its own: over the threshold it only asks for an approval, which this is.
  */
 export async function weigh(
   tx: DecisionTx,
@@ -257,22 +276,32 @@ export async function weigh(
     decides,
     monthOf,
     rules = (inForce) => inForce,
+    except,
   }: {
     readonly now: Date;
     /** A decision's locks (true), or the simulator's reads (false). */
     readonly decides: boolean;
     readonly monthOf: (zoneIfNew: string) => Promise<string>;
     readonly rules?: (inForce: PoliciesWeighed, mandate: MandateWeighed | null) => PoliciesWeighed;
+    /** The request weighed again, whose own reservation and claim aren't counted. */
+    readonly except?: string | undefined;
   },
 ) {
   const { mandate, ...inForce } = await authorityIn(tx, states, orgId, agent.id);
   const { mandatePolicy, organizationPolicy } = rules(inForce, mandate);
-  const { source, supplier, order, claims } = await payingIn(tx, states, orgId, asked, decides ? 'change' : 'share');
+  const { source, supplier, order, claims } = await payingIn(
+    tx,
+    states,
+    orgId,
+    asked,
+    decides ? 'change' : 'share',
+    except,
+  );
   // 7: the agent's month, under a mandate: none without one, as nothing is then weighed against it.
   const month = mandate === null ? null : await monthOf(mandate.timeZone);
   // The currency weighed: the mandate's, as its limits are (a request in another is denied by decide).
   const currency = mandate?.perOrderLimit.currency ?? asked.amount.currency;
-  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month, currency });
+  const spent = month === null ? 0n : await monthSpent(tx, { agentId: agent.id, month, currency, except });
   // The split total, only where it is weighed: the mandate's split check on, for a supplier of the organisation's.
   const split =
     mandate?.splitCheck === true && supplier !== null

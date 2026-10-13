@@ -160,6 +160,10 @@ export const REASON_CODES = {
     'An earlier request to the same supplier that is still open, has an unknown outcome or was paid has an order reference the bank would carry the same way (as INV_22 and INV-22, or the same number in other digits), so this may be the same order: a person must approve it.',
   RATE_LIMITED:
     'Too many requests came from this client address, or from this signed-in person, in the last minute. Wait the number of seconds in the Retry-After header, then try again.',
+  REQUEST_CHANGED:
+    "Something the spend request was decided on has changed since (its mandate, a policy, the supplier, the funding source, the agent or the key it asked with), or it would no longer be allowed, so it can't be approved as it is. Reject it; the agent must ask again. Nothing was changed.",
+  REQUEST_EXPIRED:
+    'The spend request waited 72 hours for approval, so it has expired and can no longer be approved: its reservation and order claim were released. The agent must ask again.',
   REQUEST_NOT_CANCELLABLE:
     'The spend request has ended (denied or expired) or was handed off for payment already, so it can no longer be cancelled. Nothing was changed.',
   REQUEST_NOT_WAITING:
