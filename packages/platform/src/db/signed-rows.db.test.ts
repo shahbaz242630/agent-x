@@ -239,6 +239,17 @@ describe("listing a table's row IDs", () => {
   it('refuses an after that is not a UUID, before any SQL', async () => {
     await expect(ids(1, 'not-a-uuid')).rejects.toBeInstanceOf(RangeError);
   });
+
+  it('lists the newest first, going on below the one named (Phase 3 B3)', async () => {
+    const NEWEST_ORG = '0199a0f0-0000-7000-8000-00000000000d';
+    const newest = (limit: number, after: string | null) =>
+      withTenant(app, NEWEST_ORG, (tx) => signedRowIds(tx, GRANTS, NEWEST_ORG, limit, after, null, 'newest'));
+    const [first, second, third] = [await newGrant(NEWEST_ORG), await newGrant(NEWEST_ORG), await newGrant(NEWEST_ORG)];
+
+    expect(await newest(1, null)).toEqual([third, second]);
+    expect(await newest(5, third)).toEqual([second, first]);
+    expect(await newest(5, first)).toEqual([]);
+  });
 });
 
 describe('reading a time as canonical text', () => {

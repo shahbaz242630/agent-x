@@ -299,9 +299,11 @@ export async function readSignedRows<Schema>(
  * The IDs of the table's rows in the organisation, in order (Postgres gives a
  * uuid as text in lower case), after the row `after` (null from the start),
  * at most `limit` and one more, so the caller can tell a list cut short; only
- * rows in one of `statuses` when given. Locks nothing: each row is read again
- * through readSignedRow. Only in withTenant's transaction for the
- * organisation, like readSignedRow.
+ * rows in one of `statuses` when given. `newest` lists from the highest ID
+ * down, `after` then the row before which to go on (a time-ordered ID: the
+ * newest first, Phase 3 B3). Locks nothing: each row is read again through
+ * readSignedRow. Only in withTenant's transaction for the organisation, like
+ * readSignedRow.
  */
 export async function signedRowIds<Schema>(
   tx: Transaction<Schema>,
@@ -310,6 +312,7 @@ export async function signedRowIds<Schema>(
   limit: number,
   after: string | null = null,
   statuses: readonly string[] | null = null,
+  order: 'oldest' | 'newest' = 'oldest',
 ): Promise<string[]> {
   checkTable(table);
   if (!UUID.test(orgId) || (after !== null && !UUID.test(after)))
@@ -318,12 +321,13 @@ export async function signedRowIds<Schema>(
   // None at all would list nothing, which a caller would read as nothing to check.
   if (statuses?.length === 0) throw new RangeError('Rows are listed in at least one status');
   await assertTenant(tx, orgId);
+  const newest = order === 'newest';
   const { rows } = await sql<{ id: string }>`
     select target.id::text as id from ${sql.table(table.table)} as target
     where target.org_id = ${orgId}
-    ${after === null ? sql`` : sql`and target.id > ${after}`}
+    ${after === null ? sql`` : newest ? sql`and target.id < ${after}` : sql`and target.id > ${after}`}
     ${statuses === null ? sql`` : sql`and target.status = any(${[...statuses]}::text[])`}
-    order by target.id
+    ${newest ? sql`order by target.id desc` : sql`order by target.id`}
     limit ${limit + 1}
   `.execute(tx);
   return rows.map(({ id }) => id);
