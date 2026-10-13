@@ -948,6 +948,13 @@ describe("ADR-012 §2 an object's latest signed state, read from the log itself"
       expect(many.get(OTHER_AGENT)).toMatchObject({ kind: 'signed', version: 4 });
     });
 
+    it('counts only the type asked toward a backlog: another type with the same ID never makes one (A1b mutation pass)', async () => {
+      const keyRenamed = (): AuditEvent => ({ ...unsigned(1), subject: { type: 'agent_key', id: AGENT, version: 1 } });
+      await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 1001 }, keyRenamed));
+
+      expect((await latestOfMany([AGENT])).get(AGENT)).toMatchObject({ kind: 'signed', seq: 1n, version: 1 });
+    });
+
     it('answers backlog for each object that has one, for all when all have, and judges the rest (A1b review)', async () => {
       const THIRD = '0199a0f0-0000-7000-8000-0000000000a3';
       await record(org, signed(org, 1, 'ACTIVE'), ...Array.from({ length: 1001 }, () => unsigned(1)));
