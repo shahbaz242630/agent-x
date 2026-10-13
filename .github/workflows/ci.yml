@@ -225,7 +225,7 @@ jobs:
         run: node tooling/dast/scan.ts --stack
 
       - name: Software bill of materials for the image (CycloneDX)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: agentx-app:local
           format: cyclonedx-json
@@ -402,7 +402,7 @@ jobs:
           docker pull --quiet "${IMAGE}@${DIGEST}"
 
       - name: Software bill of materials for the pushed image (CycloneDX)
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ghcr.io/shahbaz242630/agent-x@${{ needs.image-publish.outputs.digest }}
           format: cyclonedx-json
