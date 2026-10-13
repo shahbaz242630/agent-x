@@ -259,11 +259,9 @@ export interface PoliciesWeighed {
  * agent's authority, the source and supplier, the agent's month and its
  * total. A decision locks the supplier and the month (`decides`, `monthOf`
  * locking it); the simulator only reads them, and `rules` lets it put
- * proposed policies in place of those in force. An approval weighs its
- * request again (Phase 3 B4b) with `except` its ID: the month's total and the
- * order's claims are the others' alone, as the engine adds its own amount
- * again and its own claim is no duplicate of it. The split total still counts
- * its own: over the threshold it only asks for an approval, which this is.
+ * proposed policies in place of those in force. `except`: an approval's own
+ * request (Phase 3 B4b), whose reservation and claim aren't counted; the split
+ * total still counts it, as over the threshold it only asks for an approval.
  */
 export async function weigh(
   tx: DecisionTx,

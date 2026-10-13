@@ -184,8 +184,9 @@ export function createSpendRequestApprovals({
           });
 
     const read = await requestOf(tx, states, { orgId, id: requestId }, decides ? 'change' : 'share');
-    if (read.outcome === 'missing') throw new MandateRefused(404, 'NOT_FOUND');
     if (read.outcome === 'tampered') throw new MandateRefused(503, 'INTEGRITY_FAILED');
+    // Its row was found above, and requests are never deleted (0039's grants).
+    if (read.outcome !== 'found') throw new Error(`A spend request found by its row is missing: ${requestId}`);
     const { request } = read;
     if (request.status !== 'APPROVAL_REQUIRED') throw new MandateRefused(409, 'REQUEST_NOT_WAITING');
     // Still waiting, its latest signed event is its decision, which its 72 hours run from (as expireRequest's).
