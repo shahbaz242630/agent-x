@@ -8,8 +8,10 @@
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FakeRail, RailUnavailable, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   confirmPayeeChange,
   payeeFingerprint,
@@ -55,7 +57,9 @@ type Tables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   AuditTables &
-  NotificationsTables;
+  NotificationsTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

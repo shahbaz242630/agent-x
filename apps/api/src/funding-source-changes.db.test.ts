@@ -14,6 +14,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabaseRecords,
@@ -23,6 +24,7 @@ import {
   type FinancialRailAdapter,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -56,7 +58,9 @@ type Tables = IdentityTables &
   FakePartnerTables &
   OrganizationsTables &
   DirectoryTables &
-  AuditTables;
+  AuditTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -153,6 +157,7 @@ const changesWith = (partner: FinancialRailAdapter | undefined) =>
     database: app,
     keys,
     ids,
+    clock,
     rail: partner,
     challenges: createStepUpChallenges({ ids, clock }),
     logger: testLogger(),
@@ -291,6 +296,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       database: app,
       keys,
       ids,
+      clock,
       rail: mixedUp,
       challenges: createStepUpChallenges({ ids, clock }),
       logger: testLogger(capture),
@@ -318,6 +324,7 @@ describe(`refreshing a source from the partner (D2-4a, Postgres ${server.version
       database: app,
       keys,
       ids,
+      clock,
       rail,
       challenges: createStepUpChallenges({ ids, clock }),
       logger: testLogger(capture),

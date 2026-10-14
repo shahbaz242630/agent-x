@@ -532,7 +532,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     fundingSourceReads: createFundingSourceReads({ database, keys, ids: uuidV7Ids, logger }),
-    fundingSourceChanges: createFundingSourceChanges({ database, keys, ids: uuidV7Ids, rail, challenges, logger }),
+    fundingSourceChanges: createFundingSourceChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      rail,
+      challenges,
+      logger,
+    }),
     mandateRegistry: createMandateRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     mandateAcceptance: createMandateAcceptance({
       database,
@@ -590,7 +598,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
       logger,
     }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
-    supplierChanges: createSupplierChanges({ database, keys, ids: uuidV7Ids, challenges, outbox, logger }),
+    supplierChanges: createSupplierChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
     supplierDetailsChanges: createSupplierDetailsChanges({
       database,
       keys,

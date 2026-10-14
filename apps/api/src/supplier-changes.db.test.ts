@@ -15,8 +15,9 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
+import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   addVersion,
   type SupplierDetails,
@@ -54,7 +55,9 @@ type Tables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   AuditTables &
-  NotificationsTables;
+  NotificationsTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -242,7 +245,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   clock = new FixedClock(new Date('2026-10-01T08:00:00Z'));
-  const services = { database: app, keys, ids, logger: testLogger() };
+  const services = { database: app, keys, ids, clock, logger: testLogger() };
   registry = createSupplierRegistry({ ...services, clock });
   changes = createSupplierChanges({ ...services, challenges: challenges(), outbox: createOutbox({ ids, clock }) });
 });

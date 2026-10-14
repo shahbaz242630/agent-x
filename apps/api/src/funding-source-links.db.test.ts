@@ -13,6 +13,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabaseRecords,
@@ -22,6 +23,7 @@ import {
   RailUnavailable,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
@@ -53,7 +55,9 @@ type Tables = IdentityTables &
   FakePartnerTables &
   OrganizationsTables &
   DirectoryTables &
-  AuditTables;
+  AuditTables &
+  LimitReservationsTables &
+  SpendRequestsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

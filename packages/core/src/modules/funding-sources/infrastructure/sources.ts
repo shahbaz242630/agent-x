@@ -350,6 +350,21 @@ function partnerChanged(source: SourceRecord, state: FundingSourceState): boolea
 }
 
 /**
+ * Whether the partner's answer ends the source (updateFromPartner): not
+ * older than the answer it holds, and gone for good, of one not ENDED
+ * already. Known before anything is signed, so a caller voids the source's
+ * pending requests first (Phase 3 C3, decision 7: an ended source always
+ * cancels).
+ */
+export function partnerEnds(source: SourceRecord, state: FundingSourceState): boolean {
+  return (
+    state.statusChangedAt >= source.partnerChangedAt &&
+    state.availability === 'UNAVAILABLE' &&
+    source.status !== 'ENDED'
+  );
+}
+
+/**
  * Brings the source up to the partner's latest answer, in the caller's
  * transaction, which read it with `change` (`found`): the fields the partner
  * sets, recorded only when one of them changed; and when the partner says it
@@ -378,7 +393,7 @@ export async function updateFromPartner(
       details: partnerDetails(state),
     });
   }
-  const ends = state.availability === 'UNAVAILABLE' && source.status !== 'ENDED';
+  const ends = partnerEnds(source, state);
   if (ends) {
     const ended = await states.changeStatus(tx, SOURCES, key, 'end', {
       actor,

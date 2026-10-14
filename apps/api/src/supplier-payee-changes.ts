@@ -17,7 +17,9 @@
 //   (the suppliers module's confirmPayeeChange), its cooling-off ending 24
 //   hours on (PAYEE_COOLING_OFF_MS), the step-up's evidence on its event,
 //   and `supplier_payee_changed` written for every active member and the
-//   registered contacts that count, in the same transaction. Another
+//   registered contacts that count, in the same transaction. Its pending
+//   requests are DENIED first (voidPendingOf, Phase 3 C3; decision 7: a new
+//   payee always cancels), a suspended supplier's paused ones too. Another
 //   supplier paid to that payee first is 0033's index refusing the key:
 //   everything rolled back, SUPPLIER_PAYEE_TAKEN, and the change left waiting
 //   for a withdrawal.
@@ -30,11 +32,13 @@
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
 // the supplier (6), its registration, then its versions (made once and never
 // locked for change, so read before the registration that names them
-// without a wait between them), the step-up challenge, the chain head with
-// the first event recorded, then the notices, new rows that wait on nothing.
+// without a wait between them), the step-up challenge, a confirmation's
+// pending requests (8) and their holdings (11), the chain head with the first
+// event recorded, then the notices, new rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import type { Outbox } from '@agentx/core/modules/notifications';
+import { voidPendingOf } from '@agentx/core/modules/spend-requests';
 import {
   confirmPayeeChange,
   isPayeeTaken,
@@ -170,6 +174,8 @@ export function createSupplierPayeeChanges({
             { action: PAYEE_APPROVE_OPERATION, changeHash: approvalHash(version.id) },
             { passkeyRequired: true },
           );
+          const braked = { supplierId: found.supplier.id };
+          await voidPendingOf(tx, states, keys, orgId, braked, 'SUPPLIER_CHANGED', clock.now());
           await confirmPayeeChange(
             tx,
             states,

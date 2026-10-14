@@ -6,7 +6,9 @@
 // and any payee change waiting as the partner described them (E2-2b): what
 // the call-back confirms (ADR-014 §3), never an account number.
 import type { SignedStates } from '@agentx/core/modules/audit';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { Notice, NotificationsTables } from '@agentx/core/modules/notifications';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   contactsOf,
   type NameCheck,
@@ -27,8 +29,16 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
-/** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
-export type SupplierTables = UseCaseTables & SuppliersTables & NotificationsTables;
+/**
+ * The tables the supplier use cases work on: the outbox too, for the notices
+ * a change writes (E2-2b), and the requests and holdings their brakes'
+ * cascades end (C3).
+ */
+export type SupplierTables = UseCaseTables &
+  SuppliersTables &
+  NotificationsTables &
+  SpendRequestsTables &
+  LimitReservationsTables;
 export type SupplierTx = DatabaseTransaction<SupplierTables>;
 
 /** Who is acting: a signed-in member, in the organisation the access hook verified. */

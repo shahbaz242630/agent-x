@@ -23,5 +23,6 @@ export {
   sourceOf,
   sourcesPage,
   updateFromPartner,
+  partnerEnds,
 } from './infrastructure/sources.ts';
 export type { FundingSourcesTables } from './infrastructure/tables.ts';
