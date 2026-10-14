@@ -258,7 +258,7 @@ describe('approving a spend request waiting for approval (B4b)', () => {
     expect(await reads.ofAgent(w.org, acting.agentId, waiting.id, CORRELATION)).toMatchObject({
       outcome: 'found',
       request: { status: 'APPROVED' },
-      rejected: false,
+      endedBecause: null,
     });
   });
 

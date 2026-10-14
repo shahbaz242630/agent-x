@@ -29,7 +29,7 @@ export const REASON_CODES = {
     "The member can't own an agent: they must be an active admin or developer of the organisation. Nothing was changed.",
   AGENT_OWNER_UNCHANGED: 'The member already owns the agent, so nothing was changed.',
   AGENT_SUSPENDED:
-    "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing was reserved.",
+    "The agent is suspended or revoked, so it can't request payments; a suspended one can again once an admin lifts its suspension. Nothing is held for the request.",
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
@@ -98,7 +98,7 @@ export const REASON_CODES = {
     "With what the agent has already spent or holds this month, this request is above the mandate's monthly limit, so it is refused and no approval can allow it. It needs a new mandate version with a higher limit, or capacity freeing up. Nothing was reserved.",
   MANDATE_NOT_ACTIVE: 'The mandate is not in force (ACTIVE), so there is nothing to suspend. Nothing was changed.',
   MANDATE_NOT_IN_FORCE:
-    'The agent has no mandate in force: none was accepted yet, or it is suspended, revoked or expired, or its end date has passed. So the request is refused. Nothing was reserved.',
+    'The agent has no mandate in force for this request: none was accepted yet, it is suspended, revoked or expired, its end date has passed, or a newer version replaced the one it was decided under. So the request is refused. Nothing is held for the request.',
   MANDATE_NOT_SUSPENDED: 'The mandate is not suspended, so there is no suspension to lift. Nothing was changed.',
   MANDATE_NOT_WAITING:
     'The version named is not the draft waiting for acceptance: none waits, or a newer draft replaced it. Look at the mandate again and accept the draft it shows. Nothing was changed.',
@@ -171,6 +171,8 @@ export const REASON_CODES = {
   REQUEST_NOT_WAITING:
     'The spend request is no longer waiting for approval: it was approved, rejected, cancelled or expired already, so it can no longer be approved or rejected. Nothing was changed.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
+  REQUEST_VOIDED:
+    'Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released. Ask again once what they name is in force, or at once if a new version replaced it.',
   RESET_ASKS_SPENT:
     "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once.",
   RESET_CLOSED:
@@ -190,7 +192,7 @@ export const REASON_CODES = {
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   SOURCE_NOT_USABLE:
-    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate can draw on it. Nothing was changed.",
+    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it.",
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_ADDS_SPENT:
@@ -215,7 +217,7 @@ export const REASON_CODES = {
   SUPPLIER_NOT_UNVERIFIED:
     'The supplier is verified or suspended, so there is nothing to verify. Nothing was changed. Look at the supplier again.',
   SUPPLIER_NOT_VERIFIED:
-    "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing was reserved.",
+    "The supplier is not one of the organisation's verified suppliers: it is unknown, not yet verified, or suspended. So the request is refused. Nothing is held for the request.",
   SUPPLIER_NO_CHANGE_WAITING:
     "No change of this supplier's bank details is waiting, so there is nothing to confirm or withdraw. Nothing was changed. Look at the supplier again.",
   SUPPLIER_NO_PAYEE:
