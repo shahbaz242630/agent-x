@@ -939,19 +939,36 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
   });
 
-  it('refuses a fresh start past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY, nothing voided', async () => {
+  /** A world whose agent has `count` requests to the first supplier standing, each small enough for every limit, which is then suspended to pause. */
+  const pendingAndSuspended = async (count: number) => {
     const { w, acting } = await ready();
-    // One more than a brake's batch of 20, each small enough to stand under every limit.
     const many = [];
-    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
     expect(many.every(({ status }) => status === 'APPROVED')).toBe(true);
     await supplierSuspended(w, 'pause');
-    const changes = createSupplierChanges(services());
-    const refused = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' };
+    return { w, many };
+  };
+  const freshStartAsked = (w: World) =>
+    createSupplierChanges(services()).reactivate(
+      w.admin,
+      keyed(w.admin, SUPPLIER_REACTIVATE),
+      supplierOfWorld(w),
+      'cancel',
+      CORRELATION,
+    );
 
-    expect(
-      await changes.reactivate(w.admin, keyed(w.admin, SUPPLIER_REACTIVATE), supplierOfWorld(w), 'cancel', CORRELATION),
-    ).toEqual(refused);
+  it('asks a fresh start with as many pending as one brake cancels at once (20)', async () => {
+    const { w } = await pendingAndSuspended(20);
+
+    expect((await freshStartAsked(w)).outcome).toBe('asked');
+  });
+
+  it('refuses a fresh start past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY; suspended to cancel, then it goes through', async () => {
+    const { w, many } = await pendingAndSuspended(21);
+
+    expect(await freshStartAsked(w)).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
+
     // Its pause made a cancel: the brake's batch now, the job the rest; then the fresh start goes through.
     await supplierSuspended(w, 'cancel');
     await job(w).run();
