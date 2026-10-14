@@ -242,9 +242,10 @@ export async function voidRequest(
 /**
  * How many pending requests a brake voids in its own transaction: the rest
  * are left to the request-voids job (5 minutes), meanwhile unable to be
- * approved or handed off under the stop. Kept small so the brake is quick.
+ * approved or handed off under the stop. Kept small so the brake is quick:
+ * each void is a dozen statements, made while the brake holds what it stops.
  */
-const MOST_VOIDED_BY_A_BRAKE = 50;
+const MOST_VOIDED_BY_A_BRAKE = 20;
 
 /** What a brake stops: an agent (its suspend) or a mandate (its suspend, revoke, expiry or supersede). */
 type Braked = { readonly agentId: string } | { readonly mandateId: string };

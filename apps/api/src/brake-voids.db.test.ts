@@ -11,12 +11,14 @@
 // in order of ID. A request tampered with is left, its alarm raised, and the
 // brake still holds. A brake queued behind an approval holding the request
 // (forced) voids it once approved (revoke-, supersede- and
-// suspend-during-approval).
+// suspend-during-approval); one queued behind a cancel leaves it cancelled,
+// as it does a request ended before it.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
 import {
   approveRequest,
+  cancelRequest,
   checkHoldings,
   type PendingChoice,
   requestOf,
@@ -360,5 +362,53 @@ describe('a brake queued behind an approval holding the request (forced)', () =>
     const actions = (await shared.eventsAbout(w.org, waiting.id, SPEND_REQUESTS.subject)).map(({ action }) => action);
     expect(actions.slice(-2)).toEqual(['spend_request.approved', 'spend_request.voided']);
     expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'RELEASED', released: true });
+  });
+
+  it('waits for a cancel holding the request, then leaves it cancelled and the kill switch still holds', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const key = { orgId: w.org, id: waiting.id };
+    const { promise: held, resolve: holding } = Promise.withResolvers<undefined>();
+    const { promise: gate, resolve: open } = Promise.withResolvers<undefined>();
+    const cancelling = signed(w, async (tx, states) => {
+      await requestOf(tx, states, key, 'change');
+      holding(undefined);
+      await gate;
+      return cancelRequest(tx, states, keys, key, { kind: 'user', userId: w.admin.userId }, clock.now());
+    });
+    await held;
+
+    const braking = within(20_000, suspended(w, 'cancel'), 'the kill switch');
+    await waitUntilQueued(database.as('admin'), 1);
+    open(undefined);
+
+    expect(await cancelling).toMatchObject({ outcome: 'ended' });
+    expect(await braking).toMatchObject({ outcome: 'changed' });
+    expect(await statusOf(w, waiting.id)).toBe('CANCELLED');
+    const actions = (await shared.eventsAbout(w.org, waiting.id, SPEND_REQUESTS.subject)).map(({ action }) => action);
+    expect(actions).not.toContain('spend_request.voided');
+  });
+});
+
+describe('what a brake leaves alone', () => {
+  it('a request already ended: cancelled, it stays so, and the brake holds', async () => {
+    const { w, acting } = await ready();
+    const cancelled = await ask(acting, w, { orderReference: 'INV-C' });
+    await signed(w, (tx, states) =>
+      cancelRequest(
+        tx,
+        states,
+        keys,
+        { orgId: w.org, id: cancelled.id },
+        { kind: 'user', userId: w.admin.userId },
+        clock.now(),
+      ),
+    );
+    const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+
+    expect(await suspended(w, 'cancel')).toMatchObject({ outcome: 'changed' });
+
+    expect(await statusOf(w, cancelled.id)).toBe('CANCELLED');
+    expect(await statusOf(w, waiting.id)).toBe('DENIED');
   });
 });
