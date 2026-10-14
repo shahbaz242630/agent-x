@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SignedStates } from '../../audit/index.ts';
-import { requestOf } from './decisions.ts';
+import { decidedAgainst, requestOf } from './decisions.ts';
 
 const KEY = { orgId: '0199a0f0-0000-7000-8000-000000000001', id: '0199A0F0-0000-7000-8000-0000000000D4' };
 
@@ -71,5 +71,27 @@ describe('a spend request read through its signed state', () => {
       await expect(read(reading({ ...FIELDS, ...bad }))).rejects.toThrow("a field that isn't one of its own");
     }
     await expect(read(reading({ ...FIELDS, reason_codes: 'NOT_A_REASON' }))).rejects.toThrow("a reason that isn't one");
+  });
+});
+
+describe('decidedAgainst', () => {
+  const stateOf = (fields: Readonly<Record<string, string | null>>) => ({
+    outcome: 'verified' as const,
+    version: 1,
+    eventId: '0199a0f0-0000-7000-8000-0000000000e1',
+    recordedAt: new Date(0),
+    fields: new Map(Object.entries(fields)),
+  });
+
+  it('names the key, mandate version and supplier version it was decided against, null for none', () => {
+    expect(decidedAgainst(stateOf({ agent_key_id: 'k', mandate_version_id: null, supplier_version_id: 's' }))).toEqual({
+      agentKeyId: 'k',
+      mandateVersionId: null,
+      supplierVersionId: 's',
+    });
+  });
+
+  it('throws for one that names no agent key, which 0039 makes a bug', () => {
+    expect(() => decidedAgainst(stateOf({ supplier_version_id: 's' }))).toThrow('names no agent key');
   });
 });

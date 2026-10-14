@@ -220,7 +220,12 @@ export function createSpendRequestApprovals({
       weighed.supplier.currentVersionId === against.supplierVersionId &&
       holdsCapacity(made.decision);
     if (!unchanged) throw new MandateRefused(409, 'REQUEST_CHANGED');
-    return read;
+    // The policies it is approved under, which may be newer than its decision's: kept with the approval.
+    const weighedUnder = {
+      organizationPolicyVersionId: made.versions.organizationPolicy,
+      mandatePolicyVersionId: made.versions.mandatePolicy,
+    };
+    return { read, weighedUnder };
   }
 
   /**
@@ -245,7 +250,7 @@ export function createSpendRequestApprovals({
   return {
     async ask(member, idempotent, requestId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
-        const read = await approvable(tx, states, member, requestId, false);
+        const { read } = await approvable(tx, states, member, requestId, false);
         return stepUps.ask(tx, member, {
           action: APPROVE_OPERATION,
           changeHash: approveHash(member.orgId, read.state.eventId),
@@ -258,7 +263,7 @@ export function createSpendRequestApprovals({
     async confirm(member, idempotent, requestId, stepUpChallengeId, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
-        const read = await approvable(tx, states, member, requestId, true);
+        const { read, weighedUnder } = await approvable(tx, states, member, requestId, true);
         const consumed = await stepUps.consumed(
           tx,
           member,
@@ -270,7 +275,7 @@ export function createSpendRequestApprovals({
         const key = { orgId: member.orgId, id: requestId };
         const approved = await approveRequest(tx, states, keys, key, {
           userId: member.userId,
-          stepUp: stepUpDetails(consumed),
+          stepUp: { ...stepUpDetails(consumed), ...weighedUnder },
         });
         // The judging raised the alarm: nothing is approved on holdings changed past the app.
         if (approved === 'mismatch') throw new MandateRefused(503, 'INTEGRITY_FAILED');

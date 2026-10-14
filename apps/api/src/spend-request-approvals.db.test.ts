@@ -307,6 +307,9 @@ describe('approving a spend request waiting for approval (B4b)', () => {
         stepUpChallengeId: challengeId,
         signedInAt: clock.now().toISOString(),
         methods: 'pwd user mfa',
+        // The policies it was weighed under: none set in this world.
+        organizationPolicyVersionId: null,
+        mandatePolicyVersionId: null,
       },
     });
     expect(last?.details.changeHash).toMatch(/^[0-9a-f]{64}$/);
@@ -387,6 +390,10 @@ describe('approving a spend request waiting for approval (B4b)', () => {
       await policySet(w, scope === null ? null : await mandateOf(w), 5_000_000n);
 
       expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+      // The approval keeps the version it was weighed under, newer than its decision's (none).
+      const details = (await eventsOf(w, waiting.id)).at(-1)?.details;
+      const weighed = scope === null ? details?.organizationPolicyVersionId : details?.mandatePolicyVersionId;
+      expect(weighed).toMatch(/^[0-9a-f-]{36}$/);
     },
   );
 
