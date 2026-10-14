@@ -61,14 +61,15 @@
 //
 // The admin's choice (Phase 3 decision 8, Rule Book §1.9): a start and a
 // pass-through each name what happens to the supplier's pending spend
-// requests if the registration unverifies it, cancel or pause, with no
+// requests once the partner confirms the new details, cancel or pause, with no
 // default, kept on the registration's events (suspensions.ts): on its start,
 // or on a further event when a start carrying on with one open chooses
 // otherwise; the newest holds. When a check (or a pass-through's Tx 2) keeps
 // a registered payee, cancel DENIES the supplier's pending requests first, in
 // the same transaction, before anything is signed (voidPendingOf), the
 // answer checked before (registeredFields), whatever the supplier's status
-// (C3c, partner S111); pause leaves them held. A VERIFIED supplier is
+// (C3c, partner S111), though for one stopped already only a cancel confirmed
+// under the words that said so (cancelsAtOnce); pause leaves them held. A VERIFIED supplier is
 // unverified, the unverify keeping the choice, so the request-voids job takes
 // any cancelled past the batch and leaves the paused while it is UNVERIFIED
 // (voidCauses). One suspended or unverified already with its requests paused
@@ -135,7 +136,7 @@ import {
   type SupplierTables,
   type SupplierTx,
 } from './supplier-work.ts';
-import { choiceIn, payeeCancelOverPause, payeeChoiceDetails } from './suspensions.ts';
+import { cancelsAtOnce, choiceIn, payeeCancelOverPause, payeeChoiceDetails } from './suspensions.ts';
 
 /** Starting a payee registration through the partner's form. */
 export const PAYEE_START_OPERATION = 'suppliers.payee.start';
@@ -242,10 +243,10 @@ export function createSupplierPayees({
 
   /**
    * The admin's choice for the registration's pending requests, its newest
-   * (decision 8), each event believed only whole: cancel for one started
-   * before the choice existed.
+   * (decision 8), as its event keeps it (choiceIn reads it, cancel for one
+   * started before the choice existed), each event believed only whole.
    */
-  const choiceOf = async (tx: SupplierTx, states: SignedStates, orgId: string, registrationId: string) => {
+  const chosenOf = async (tx: SupplierTx, states: SignedStates, orgId: string, registrationId: string) => {
     const history = await states.historyOf(tx, orgId, {
       subjectTypes: [BENEFICIARY_REGISTRATIONS.subject],
       subjectId: registrationId,
@@ -254,7 +255,7 @@ export function createSupplierPayees({
       newest: true,
     });
     if (history.outcome !== 'read') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    return choiceIn(history.events.at(-1)?.event.details);
+    return history.events.at(-1)?.event.details;
   };
 
   /** The supplier, then its registration, read (`share`) in a transaction of their own. */
@@ -337,23 +338,27 @@ export function createSupplierPayees({
     let read = taken ? undefined : await work.supplierIn(tx, states, supplierKey, 'change');
     // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
     const unverifies = read?.supplier.status === 'VERIFIED';
-    const choice = read === undefined ? undefined : await choiceOf(tx, states, orgId, found.registration.id);
-    // Decision 8: cancel DENIES its pending requests first, before anything is signed, whatever its status (C3c).
-    if (choice === 'cancel') {
+    const chosen = read === undefined ? undefined : await chosenOf(tx, states, orgId, found.registration.id);
+    // Decision 8: cancel DENIES its pending requests first, before anything is signed. Unverifying it, as choiceIn
+    // reads the choice; one stopped already, only a cancel confirmed under words that said so (C3c, cancelsAtOnce).
+    const cancels = read !== undefined && (unverifies ? choiceIn(chosen) === 'cancel' : cancelsAtOnce(chosen));
+    if (cancels) {
       await voidPendingOf(tx, states, keys, orgId, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now());
     }
     const registration = await recordRegistered(tx, states, registrationKey, found, { beneficiary, payee, actor });
-    if (read === undefined || choice === undefined) return;
+    if (read === undefined) return;
     // The unverify, or a cancel over a pause already in force, keeps the choice: the job takes any past the batch.
     if (unverifies) {
-      await unverifySupplier(tx, states, supplierKey, read, { actor, details: payeeChoiceDetails(choice) });
+      const details = payeeChoiceDetails(choiceIn(chosen));
+      await unverifySupplier(tx, states, supplierKey, read, { actor, details });
       read = await work.supplierIn(tx, states, supplierKey, 'change');
     } else if (
-      choice === 'cancel' &&
+      cancels &&
       (await payeeCancelOverPause(
         tx,
         states,
         { key: supplierKey, state: read.state, status: read.supplier.status },
+        chosen,
         actor,
       ))
     ) {
@@ -598,8 +603,8 @@ export function createSupplierPayees({
         route === 'hosted' ? await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner, route }) : null;
       const carried = open === null ? null : await registrationIn(tx, states, orgId, supplier.id, open, 'change');
       if (carried !== null && isOpen(carried.registration)) {
-        // The admin chose otherwise this time: the newer choice holds (choiceOf).
-        if ((await choiceOf(tx, states, orgId, carried.registration.id)) !== choice) {
+        // The admin chose otherwise this time: the newer choice holds (chosenOf).
+        if (choiceIn(await chosenOf(tx, states, orgId, carried.registration.id)) !== choice) {
           await states.record(
             tx,
             BENEFICIARY_REGISTRATIONS,

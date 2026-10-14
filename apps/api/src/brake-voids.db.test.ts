@@ -623,6 +623,14 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     });
   });
 
+  /** The change waiting for the world's first supplier withdrawn by its admin. */
+  const payeeWithdrawn = (w: World) =>
+    createSupplierPayeeChanges(services()).withdraw(
+      w.admin,
+      keyed(w.admin, PAYEE_WITHDRAW_OPERATION),
+      supplierOfWorld(w),
+      CORRELATION,
+    );
   /** Whether the supplier's stop in force, in `status`, still pauses its requests, as the request-voids job reads it. */
   const stillPaused = async (w: World, status: string) =>
     (await signed(w, (tx, states) => pausedOf(tx, states, w.org, [['supplier', supplierOfWorld(w), status]]))).has(
@@ -657,13 +665,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
     expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
-    const withdrawn = await createSupplierPayeeChanges(services()).withdraw(
-      w.admin,
-      keyed(w.admin, PAYEE_WITHDRAW_OPERATION),
-      supplierOfWorld(w),
-      CORRELATION,
-    );
-    expect(withdrawn.outcome).toBe('changed');
+    expect((await payeeWithdrawn(w)).outcome).toBe('changed');
     expect(await stillPaused(w, 'UNVERIFIED')).toBe(true);
     const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
 
@@ -699,6 +701,18 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     expect(await chosen(w)).toEqual([]);
   });
 
+  it('cancel on a supplier unverified to cancel already: its requests stay cancelled, nothing more recorded (C3c)', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    expect((await (await payeeRegistering(w, ['cancel']))()).outcome).toBe('checked');
+    expect((await payeeWithdrawn(w)).outcome).toBe('changed');
+
+    expect((await (await payeeRegistering(w, ['cancel']))()).outcome).toBe('checked');
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect(await chosen(w)).toEqual([]);
+  });
+
   it('pause: they stand through the job while it is unverified; withdrawn and verified again, they stand', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
@@ -707,13 +721,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
-    const withdrawn = await createSupplierPayeeChanges(services()).withdraw(
-      w.admin,
-      keyed(w.admin, PAYEE_WITHDRAW_OPERATION),
-      supplierOfWorld(w),
-      CORRELATION,
-    );
-    expect(withdrawn.outcome).toBe('changed');
+    expect((await payeeWithdrawn(w)).outcome).toBe('changed');
     await job(w).run();
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
     await shared.verified(w, supplierOfWorld(w));
