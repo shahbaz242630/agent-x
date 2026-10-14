@@ -40,7 +40,7 @@ export const isPendingChoice = (value: unknown): value is PendingChoice =>
 export type Pausable = 'agent' | 'mandate' | 'source' | 'supplier';
 
 /** The statuses each may be stopped in with its requests paused: a supplier unverified by a payee registration too. */
-const PAUSED_IN = {
+export const PAUSED_IN = {
   agent: ['SUSPENDED'],
   mandate: ['SUSPENDED'],
   source: ['SUSPENDED'],

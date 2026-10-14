@@ -76,7 +76,10 @@ type VoidTables = SpendRequestsTables &
   SuppliersTables;
 type VoidTx = DatabaseTransaction<VoidTables>;
 
-/** The pause in force's choice (PAUSE_EVENTS) for the object a candidate's column `idColumn` names, unverified: null for none. */
+/**
+ * The pause in force's choice (PAUSE_EVENTS) for the object a candidate's
+ * column `idColumn` names, unverified: null for none.
+ */
 const choiceOf = (events: { readonly type: string; readonly actions: readonly string[] }, idColumn: string) =>
   newestDetail({ ...events, idColumn, orgColumn: 'r.org_id', key: 'pendingRequests' });
 

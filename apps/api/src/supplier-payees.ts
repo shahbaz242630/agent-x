@@ -65,11 +65,14 @@
 // default, kept on the registration's events (suspensions.ts): on its start,
 // or on a further event when a start carrying on with one open chooses
 // otherwise; the newest holds. When a check (or a pass-through's Tx 2) keeps
-// a registered payee, cancel DENIES the supplier's pending requests first, in
-// the same transaction, before anything is signed (voidPendingOf); pause
-// leaves them held, the choice kept on the unverify, so the request-voids job
-// leaves them while it is UNVERIFIED (voidCauses). A registration started
-// before the choice existed names none and cancels.
+// a registered payee and so unverifies a VERIFIED supplier, cancel DENIES its
+// pending requests first, in the same transaction, before anything is signed
+// (voidPendingOf), the answer checked before (registeredFields); pause leaves
+// them held. Either way the unverify keeps the choice, so the request-voids
+// job takes any cancelled past the batch and leaves the paused while it is
+// UNVERIFIED (voidCauses). A supplier not VERIFIED isn't unverified, so the
+// choice changes nothing: its change confirmed cancels them (decision 7). A
+// registration started before the choice existed names none and cancels.
 //
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock (a
 // start's alone, for its budget: the supplier's row, read for change by a
@@ -103,6 +106,7 @@ import {
   recordFailed,
   recordLost,
   recordRegistered,
+  registeredFields,
   registrationOf,
   type RegistrationRecord,
   type RegistrationRoute,
@@ -129,7 +133,7 @@ import {
   type SupplierTables,
   type SupplierTx,
 } from './supplier-work.ts';
-import { payeeChoiceDetails } from './suspensions.ts';
+import { choiceIn, payeeChoiceDetails } from './suspensions.ts';
 
 /** Starting a payee registration through the partner's form. */
 export const PAYEE_START_OPERATION = 'suppliers.payee.start';
@@ -248,7 +252,7 @@ export function createSupplierPayees({
       newest: true,
     });
     if (history.outcome !== 'read') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
-    return history.events.at(-1)?.event.details.pendingRequests === 'pause' ? 'pause' : 'cancel';
+    return choiceIn(history.events.at(-1)?.event.details);
   };
 
   /** The supplier, then its registration, read (`share`) in a transaction of their own. */
@@ -324,20 +328,22 @@ export function createSupplierPayees({
     // The early word: the index refuses the key again at the confirmation, whoever takes it first.
     const holder = payee.key === null ? null : await supplierWithPayeeKey(tx, orgId, payee.key);
     const taken = holder !== null && holder !== supplierId;
-    const choice = await choiceOf(tx, states, orgId, found.registration.id);
-    // Cancel (decision 8): the supplier's pending requests DENIED before anything is signed, whatever its status.
-    if (!taken && choice === 'cancel') {
+    const registrationKey = { orgId, id: found.registration.id };
+    // The answer checked first, as recordRegistered checks it: one refused cancels nothing (C3b's review).
+    registeredFields(registrationKey, found, { beneficiary, payee });
+    // Read again, held for change already: recordRegistered changes the registration alone.
+    let read = taken ? undefined : await work.supplierIn(tx, states, supplierKey, 'change');
+    // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
+    const unverifies = read?.supplier.status === 'VERIFIED';
+    const choice = unverifies ? await choiceOf(tx, states, orgId, found.registration.id) : undefined;
+    // Decision 8, only when this unverifies it (as the admin was told): cancel DENIES its pending requests first,
+    // before anything is signed; the unverify keeps the choice, so the request-voids job takes any past the batch.
+    if (choice === 'cancel') {
       await voidPendingOf(tx, states, keys, orgId, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now());
     }
-    const registration = await recordRegistered(tx, states, { orgId, id: found.registration.id }, found, {
-      beneficiary,
-      payee,
-      actor,
-    });
-    if (taken) return;
-    // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
-    let read = await work.supplierIn(tx, states, supplierKey, 'change');
-    if (read.supplier.status === 'VERIFIED') {
+    const registration = await recordRegistered(tx, states, registrationKey, found, { beneficiary, payee, actor });
+    if (read === undefined) return;
+    if (choice !== undefined) {
       await unverifySupplier(tx, states, supplierKey, read, { actor, details: payeeChoiceDetails(choice) });
       read = await work.supplierIn(tx, states, supplierKey, 'change');
     }
@@ -536,7 +542,7 @@ export function createSupplierPayees({
         fingerprint,
       });
     } catch (error) {
-      // Thrown before anything is written (payeeKeyOf, recordRegistered), so the registration's state still holds.
+      // Thrown before anything is written (payeeKeyOf, registeredFields), so the registration's state still holds.
       if (!(error instanceof AccountNumberLeak || error instanceof UnusablePayeeIdentity)) throw error;
       logger.child({ correlationId }).error('suppliers.partner_answer_refused', { registrationId: key.id });
       await recordFailed(tx, states, key, found, { reason: 'unknown', actor });

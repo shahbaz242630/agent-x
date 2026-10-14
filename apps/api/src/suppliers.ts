@@ -447,8 +447,8 @@ const REGISTRATION = z
  * The most a pass-through's body may be: a name as an add's (at most 800
  * UTF-16 units sent decomposed, each a 6-byte escape) and an IBAN of at most
  * 64 ASCII characters, each escaped too, and the admin's choice (decision 8),
- * with room to spare. Fastify refuses
- * a body past it before the schema is read (the B8-3 lesson).
+ * with room to spare. Fastify refuses a body past it before the schema is
+ * read (the B8-3 lesson).
  */
 const PASS_THROUGH_BODY_LIMIT = 6144;
 

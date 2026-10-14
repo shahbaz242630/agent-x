@@ -27,7 +27,12 @@
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createFakeRail, type SourceLookup, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
+import {
+  createFakeRail,
+  type FinancialRailAdapter,
+  type SourceLookup,
+  SANDBOX_ACCOUNTS,
+} from '@agentx/core/modules/providers';
 import {
   approveRequest,
   cancelRequest,
@@ -37,6 +42,7 @@ import {
   SPEND_REQUESTS,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
+import { supplierOf } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -224,15 +230,21 @@ async function detailsChanging(w: World): Promise<Press> {
     );
 }
 
+/** The fake partner the test's payees are registered with: one a test, so a payee key taken is seen as taken. */
+let payeeRail: ReturnType<typeof createFakeRail>;
+
 /**
- * A new payee registered for the world's first supplier through the fake
- * partner's form, the admin choosing each of `choices` in turn on a start
- * (a second start carries on with the one open), its form filled in and
- * then checked: the change left waiting. The check, to call.
+ * A new payee registered for the supplier (the world's first unless named)
+ * through the fake partner's form, the admin choosing each of `choices` in
+ * turn on a start (a second start carries on with the one open), its form
+ * filled in and then checked: the change left waiting. The check, to call.
  */
-async function payeeRegistering(w: World, ...choices: PendingChoice[]): Promise<Press> {
-  const supplierId = w.suppliers[0] ?? '';
-  const rail = createFakeRail({ clock, ids });
+async function payeeRegistering(
+  w: World,
+  choices: readonly PendingChoice[],
+  supplierId = w.suppliers[0] ?? '',
+  rail: FinancialRailAdapter = payeeRail,
+): Promise<Press> {
   const payees = createSupplierPayees({ ...services(), rail, partner: 'fake' });
   let started: Awaited<ReturnType<typeof payees.start>> | undefined;
   for (const choice of choices) {
@@ -240,14 +252,13 @@ async function payeeRegistering(w: World, ...choices: PendingChoice[]): Promise<
   }
   if (started?.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   const iban = SANDBOX_ACCOUNTS[0]?.AccountIdentifiers.find((each) => each.SchemeName === 'IBAN')?.Identification;
-  await rail.bank.fillForm(w.org, started.form?.url ?? '', { name: 'Gulf Office Supplies LLC', iban: iban ?? '' });
+  await payeeRail.bank.fillForm(w.org, started.form?.url ?? '', { name: 'Gulf Office Supplies LLC', iban: iban ?? '' });
   const { id } = started.registration;
   return () => payees.check(w.admin, keyed(w.admin, PAYEE_CHECK_OPERATION), supplierId, id, CORRELATION);
 }
 
-/** The change waiting for the world's first supplier: its confirmation asked and stepped up with a passkey: its confirm, to call. */
-async function payeeConfirming(w: World): Promise<Press> {
-  const supplierId = w.suppliers[0] ?? '';
+/** The change waiting for the supplier (the world's first unless named): its confirmation asked and stepped up with a passkey: its confirm, to call. */
+async function payeeConfirming(w: World, supplierId = w.suppliers[0] ?? ''): Promise<Press> {
   const changes = createSupplierPayeeChanges(services());
   const challengeId = askedFor(
     await changes.approve(w.admin, keyed(w.admin, PAYEE_APPROVE_OPERATION), supplierId, CORRELATION),
@@ -266,7 +277,7 @@ async function payeeConfirming(w: World): Promise<Press> {
 /** A new payee for the world's first supplier, paused first by its suspend and by its registration: its confirm, to call. */
 async function payeeChanging(w: World): Promise<Press> {
   await supplierSuspended(w, 'pause');
-  expect((await (await payeeRegistering(w, 'pause'))()).outcome).toBe('checked');
+  expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
   return payeeConfirming(w);
 }
 
@@ -432,6 +443,7 @@ beforeEach(() => {
   const challenges = createStepUpChallenges({ ids, clock });
   agents = createAgentChanges({ database: app, keys, ids, clock, challenges, outbox, logger: logger() });
   moves = createMandateMoves({ database: app, keys, ids, clock, challenges, outbox, logger: logger() });
+  payeeRail = createFakeRail({ clock, ids });
 });
 
 describe('the brakes void their own pending requests in their transaction (C2b)', () => {
@@ -597,7 +609,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     const { w, acting } = await ready();
     const { approved, waiting, elsewhere } = await pendingOf(w, acting);
     const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
-    const check = await payeeRegistering(w, 'cancel');
+    const check = await payeeRegistering(w, ['cancel']);
 
     expect((await check()).outcome).toBe('checked');
 
@@ -614,7 +626,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
 
-    expect((await (await payeeRegistering(w, 'pause'))()).outcome).toBe('checked');
+    expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
     await job(w).run();
 
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
@@ -635,7 +647,7 @@ describe('a payee registration’s choice for the supplier’s pending requests 
   it('pause: the change confirmed voids them, as a new payee always does', async () => {
     const { w, acting } = await ready();
     const { approved, waiting } = await pendingOf(w, acting);
-    expect((await (await payeeRegistering(w, 'pause'))()).outcome).toBe('checked');
+    expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
     const confirm = await payeeConfirming(w);
     const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
 
@@ -645,16 +657,57 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     await voidedBefore(w, [approved, waiting], 'SUPPLIER_CHANGED', changed);
   });
 
+  it('cancel: a payee key another supplier is paid to unverifies nothing, so voids nothing', async () => {
+    const { w, acting } = await ready();
+    const [first, second] = w.suppliers;
+    // The second supplier paid to the account first.
+    expect((await (await payeeRegistering(w, ['cancel'], second))()).outcome).toBe('checked');
+    expect((await (await payeeConfirming(w, second))()).outcome).toBe('changed');
+    const approved = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-A' });
+    const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+
+    await (
+      await payeeRegistering(w, ['cancel'], first)
+    )();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    const shown = await signed(w, (tx, states) => supplierOf(tx, states, { orgId: w.org, id: first ?? '' }, 'share'));
+    expect(shown).toMatchObject({ outcome: 'found', supplier: { status: 'VERIFIED' } });
+  });
+
+  it('cancel: an answer refused for an account number in its hint cancels nothing (C3b’s review)', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    const leaky: FinancialRailAdapter = {
+      ...payeeRail,
+      getBeneficiaryState: async (ref) => {
+        const answer = await payeeRail.getBeneficiaryState(ref);
+        if (answer.kind !== 'registered') return answer;
+        return { ...answer, beneficiary: { ...answer.beneficiary, hint: 'AE070331234567890123456' } };
+      },
+    };
+
+    await (
+      await payeeRegistering(w, ['cancel'], w.suppliers[0], leaky)
+    )();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    const shown = await signed(w, (tx, states) =>
+      supplierOf(tx, states, { orgId: w.org, id: w.suppliers[0] ?? '' }, 'share'),
+    );
+    expect(shown).toMatchObject({ outcome: 'found', supplier: { status: 'VERIFIED' } });
+  });
+
   it('a start carrying on with the one open: the newer choice holds, either way', async () => {
     const first = await ready();
     const one = await pendingOf(first.w, first.acting);
-    expect((await (await payeeRegistering(first.w, 'cancel', 'pause'))()).outcome).toBe('checked');
+    expect((await (await payeeRegistering(first.w, ['cancel', 'pause']))()).outcome).toBe('checked');
     await job(first.w).run();
     for (const request of [one.approved, one.waiting]) expect(await statusOf(first.w, request.id)).toBe(request.status);
 
     const second = await ready();
     const two = await pendingOf(second.w, second.acting);
-    expect((await (await payeeRegistering(second.w, 'pause', 'cancel'))()).outcome).toBe('checked');
+    expect((await (await payeeRegistering(second.w, ['pause', 'cancel']))()).outcome).toBe('checked');
     for (const request of [two.approved, two.waiting]) expect(await statusOf(second.w, request.id)).toBe('DENIED');
   });
 });

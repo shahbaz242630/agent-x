@@ -25,7 +25,13 @@
 // cancels): an old pause never comes back after the supplier is verified
 // again.
 import { AGENTS } from '@agentx/core/modules/agents';
-import type { AuditActor, AuditTransaction, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
+import type {
+  AuditActor,
+  AuditDetails,
+  AuditTransaction,
+  SignedStates,
+  VerifiedState,
+} from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { type Pausable, PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
@@ -87,6 +93,15 @@ export const PAYEE_PENDING_REQUESTS = z
 export const payeeChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: PAYEE_STATEMENT_VERSION }) as const;
 
+/**
+ * The choice an event keeps (choiceDetails, payeeChoiceDetails), or none
+ * (an event from before the choice existed, or a move that names none, as a
+ * reactivation): only a pause recorded holds the requests, anything else
+ * cancels, as the PRD's rule did.
+ */
+export const choiceIn = (details: AuditDetails | undefined): PendingChoice =>
+  details?.pendingRequests === 'pause' ? 'pause' : 'cancel';
+
 /** The choice as a suspend's event keeps it, with the statement confirmed. */
 export const choiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: STATEMENT_VERSION }) as const;
@@ -147,7 +162,7 @@ export async function pausedOf(
       newest: true,
     });
     if (history.outcome !== 'read') throw new Error(`A suspension's history can't be believed: ${id}`);
-    if (history.events.at(-1)?.event.details.pendingRequests === 'pause') paused.add(which);
+    if (choiceIn(history.events.at(-1)?.event.details) === 'pause') paused.add(which);
   }
   return paused;
 }
