@@ -5,6 +5,7 @@
 // holds and the agent's month.
 import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
 import { AGENTS } from '@agentx/core/modules/agents';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
 import { requestOf, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
@@ -223,6 +224,14 @@ export function spendWorld({
         await suspendSupplier(tx, states, key, found, { actor: OPERATOR });
       }),
     'the source suspended by the partner': (w: World) => shared.partnerSays(w, { availability: 'SUSPENDED' }),
+    'the source suspended by the organisation': (w: World) =>
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, SOURCES, { orgId: w.org, id: w.source }, 'suspend', {
+          actor: OPERATOR,
+          action: 'funding_source.suspended',
+          details: {},
+        }),
+      ),
     'the agent suspended': (w: World) =>
       signed(w, (tx, states) =>
         states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {

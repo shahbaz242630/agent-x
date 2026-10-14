@@ -74,6 +74,7 @@ const CAUSES: Readonly<Record<keyof typeof STOPS, string>> = {
   'the supplier’s details changed': 'SUPPLIER_CHANGED',
   'the supplier suspended': 'SUPPLIER_NOT_VERIFIED',
   'the source suspended by the partner': 'SOURCE_NOT_USABLE',
+  'the source suspended by the organisation': 'SOURCE_NOT_USABLE',
   'the agent suspended': 'AGENT_SUSPENDED',
 };
 
@@ -325,9 +326,12 @@ describe('pending spend requests voided once their authority no longer stands (C
     expect(await voiding(ids.next())).toEqual({ outcome: 'missing' });
     expect(await voiding(cancelled.id)).toMatchObject({ outcome: 'not_open', request: { status: 'CANCELLED' } });
     expect(await voiding(waiting.id)).toEqual({ outcome: 'standing' });
-    await expect(voiding(waiting.id, { ...named, supplierId: w.suppliers[1] ?? '' })).rejects.toThrow(
-      "judged by another's authority",
-    );
+    // Each of what it names read for another: the agent's, the mandate's, the source's or the supplier's.
+    for (const field of ['agentId', 'mandateId', 'fundingSourceId', 'supplierId'] as const) {
+      await expect(voiding(waiting.id, { ...named, [field]: ids.next() })).rejects.toThrow(
+        "judged by another's authority",
+      );
+    }
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 });
