@@ -108,6 +108,41 @@ export const REACTIVATE_BODY = z
 export const reactivationChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: REACTIVATE_STATEMENT_VERSION }) as const;
 
+/**
+ * The words an organisation's freeze is confirmed with (decision 10, D1), by
+ * version, as STATEMENTS: the console's confirm (decision 11) shows them.
+ */
+const FREEZE_STATEMENTS = {
+  cancel:
+    'Every spend request of the organisation waiting for approval, approved or ready is cancelled now and the money ' +
+    'held for it freed. This can’t be undone: the agents ask again once it is unfrozen.',
+  pause:
+    'Its spend requests are held as they are: none can be approved or paid while it is frozen, and they stand again ' +
+    'once it is unfrozen. Requests waiting for approval still expire after 72 hours.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of FREEZE_STATEMENTS each event names: raised with any change to their words. */
+const FREEZE_STATEMENT_VERSION = 1;
+
+/** A freeze's body: the admin's choice, and their confirmation (decision 11: the console's are-you-sure). */
+export const FREEZE_BODY = z
+  .strictObject({
+    pendingRequests: z
+      .enum(PENDING_CHOICES)
+      .describe(
+        'What happens to the organisation’s pending spend requests, chosen by the admin freezing; there is no ' +
+          `default. \`cancel\`: ${FREEZE_STATEMENTS.cancel} \`pause\`: ${FREEZE_STATEMENTS.pause}`,
+      ),
+    confirmed: z
+      .literal(true)
+      .describe('The admin confirmed the freeze, shown what it does: no request is decided or approved while frozen.'),
+  })
+  .describe('The freezing admin’s choice and confirmation.');
+
+/** The choice as a freeze's event keeps it, with the statement confirmed. */
+export const freezeChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: FREEZE_STATEMENT_VERSION }) as const;
+
 /** The most a body holding a choice alone may be (a suspend's, a payee start's), with room to spare. */
 export const CHOICE_BODY_LIMIT = 64;
 
@@ -233,9 +268,10 @@ export async function pausedOf(
 }
 
 /**
- * Suspends again one SUSPENDED already, read for change (`state`), with the
- * member's `choice`: a pause made a cancel is recorded, as `actor`'s; the
- * same choice left as it is; `refused` for a cancel made a pause.
+ * Suspends again one SUSPENDED already (an organisation: FROZEN), read for
+ * change (`state`), with the member's `choice`: a pause made a cancel is
+ * recorded, as `actor`'s, with `details` (a suspend's words unless named);
+ * the same choice left as it is; `refused` for a cancel made a pause.
  */
 export async function chosenAgain(
   tx: AuditTransaction,
@@ -248,19 +284,14 @@ export async function chosenAgain(
   },
   choice: PendingChoice,
   actor: AuditActor,
+  details: AuditDetails = choiceDetails(choice),
 ): Promise<'as_is' | 'refused'> {
   const { which, table, key, state } = subject;
-  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id, 'SUSPENDED']])).has(which);
+  const stoppedIn = which === 'organization' ? 'FROZEN' : 'SUSPENDED';
+  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id, stoppedIn]])).has(which);
   if (!paused) return choice === 'cancel' ? 'as_is' : 'refused';
   if (choice === 'cancel') {
-    await states.record(
-      tx,
-      table,
-      key,
-      state,
-      {},
-      { actor, action: SUSPENDS[which].action, details: choiceDetails(choice) },
-    );
+    await states.record(tx, table, key, state, {}, { actor, action: SUSPENDS[which].action, details });
   }
   return 'as_is';
 }
