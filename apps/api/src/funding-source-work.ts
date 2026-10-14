@@ -14,8 +14,7 @@ import type { Logger } from '@agentx/platform/observability';
 import { refused } from './refused.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
-/** The tables the funding-source use cases work on. */
-/** The sources' tables, with the requests and holdings a suspend's cascade ends (C3). */
+/** The tables the funding-source use cases work on: the requests and holdings a suspend's or an end's cascade ends too (C3). */
 export type FundingSourceTables = UseCaseTables & FundingSourcesTables & SpendRequestsTables & LimitReservationsTables;
 export type FundingSourceTx = DatabaseTransaction<FundingSourceTables>;
 

@@ -6,8 +6,6 @@
 // back to UNVERIFIED, everyone told; and verifying it again then holds to
 // the new phone's 30 days and keeps its enterer apart (E3-2a). The routes'
 // answers are suppliers.test.ts.
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createHash } from 'node:crypto';
 
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
@@ -20,9 +18,11 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   addSupplier,
   addVersion,

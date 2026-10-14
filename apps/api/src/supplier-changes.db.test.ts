@@ -3,7 +3,6 @@
 // step-up, through the use case the routes call, on the real migrated schema,
 // as the app role. A supplier comes back VERIFIED only if nothing changed
 // while it was suspended. The routes' answers are suppliers.test.ts.
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createHash } from 'node:crypto';
 
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
@@ -16,6 +15,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import type { PendingChoice, SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {

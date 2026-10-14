@@ -11,7 +11,10 @@
 //   outside any transaction; then, in one, the key claimed, the admin read
 //   again, the source read for change and the answer recorded (only what
 //   changed, and never an answer older than the one it holds). An ENDED
-//   source is answered as it stands, the partner not asked.
+//   source is answered as it stands, the partner not asked. An answer that
+//   ends the source (unknown to the partner, or gone for good: partnerEnds)
+//   first DENIES its pending requests in the same transaction (voidPendingOf,
+//   Phase 3 C3; decision 7: an ended source always cancels).
 // - `suspend` (`funding-sources.suspend`, D2-4b): the business's own brake on
 //   the source, one click and no step-up (ADR-014 §8: the instant brakes are
 //   never behind step-up), for an admin or a finance approver. The key
@@ -23,8 +26,7 @@
 //   decision 7, suspensions.ts), kept on the event. On cancel they are
 //   DENIED in the same transaction, before its move (voidPendingOf, Phase 3
 //   C3), pressed again too, so a pause made a cancel voids them; the
-//   request-voids job takes any past the batch, and a source's the partner
-//   ends (a refresh can't know before its move that it will end it).
+//   request-voids job takes any past the batch.
 //   Agent X's own suspension for limits in another currency pauses them:
 //   nobody on the team chose it, and the bank puts it right.
 // - `reactivate` (`funding-sources.reactivate`, D2-4b): gives the source its
@@ -38,11 +40,13 @@
 //   event. The partner's own word still decides whether it may fund.
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
-// the source (5), a suspend's pending requests (8) and their holdings (11),
+// the source (5), a suspend's or an end's pending requests (8) and their
+// holdings (11),
 // the step-up challenge, the chain head last.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import {
   endUnknownToPartner,
+  partnerEnds,
   SOURCES,
   type SourceRecord,
   updateFromPartner,
@@ -226,6 +230,10 @@ export function createFundingSourceChanges({
           return { status: 200, resourceId: sourceId };
         }
         if (lookup === undefined || found.source.status === 'ENDED') return { status: 200, resourceId: sourceId };
+        if (lookup.kind === 'not_found' || partnerEnds(found.source, lookup.source)) {
+          const braked = { fundingSourceId: sourceId };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SOURCE_NOT_USABLE', clock.now());
+        }
         if (lookup.kind === 'not_found') await endUnknownToPartner(tx, states, key, found, actor);
         else await updateFromPartner(tx, states, key, found, { state: lookup.source, actor });
         return { status: 200, resourceId: sourceId };

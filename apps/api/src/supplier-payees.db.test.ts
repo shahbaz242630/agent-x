@@ -5,13 +5,13 @@
 // is asked; Tx 2 keeps only the partner's server-to-server answer, and puts
 // the new version in waiting, the supplier still paying the version it paid.
 // The routes' answers are suppliers.test.ts.
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { addMembership, type IdentityTables, type Role, userForSubject } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FakeRail, RailUnavailable, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import {
   confirmPayeeChange,
   payeeFingerprint,

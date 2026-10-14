@@ -15,11 +15,13 @@
 // as it does a request ended before it. C3: the source's suspend and the
 // supplier's on cancel, its new details and its new payee made current (the
 // last two always cancel, decision 7, a paused supplier's requests too) void
-// theirs as well; a source's brake voids every agent's requests it funds.
+// theirs as well, and so does a refresh that ends the source (gone for good,
+// or unknown to the partner); a source's brake voids every agent's requests
+// it funds. Each void comes before the brake's first event.
 import { withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { createOutbox } from '@agentx/core/modules/notifications';
-import { createFakeRail, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
+import { createFakeRail, type SourceLookup, SANDBOX_ACCOUNTS } from '@agentx/core/modules/providers';
 import {
   approveRequest,
   cancelRequest,
@@ -44,7 +46,11 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import { type AgentChanges, createAgentChanges, SUSPEND_OPERATION } from './agent-changes.ts';
-import { createFundingSourceChanges, SUSPEND_OPERATION as SOURCE_SUSPEND } from './funding-source-changes.ts';
+import {
+  createFundingSourceChanges,
+  REFRESH_OPERATION,
+  SUSPEND_OPERATION as SOURCE_SUSPEND,
+} from './funding-source-changes.ts';
 import { ACCEPT_CONFIRM_OPERATION, ACCEPT_OPERATION, createMandateAcceptance } from './mandate-acceptance.ts';
 import { createMandateExpiry } from './mandate-expiry.ts';
 import { createMandateMoves, type MandateMove, type MandateMoves, MOVE_OPERATIONS } from './mandate-moves.ts';
@@ -170,6 +176,13 @@ const sourceSuspended = (w: World, choice: PendingChoice) =>
     CORRELATION,
   );
 
+/** The world's source refreshed through its use case, the partner answering `answer` of it. */
+const refreshed = (w: World, answer: (now: Date) => SourceLookup) => () =>
+  createFundingSourceChanges({
+    ...services(),
+    rail: { ...createFakeRail({ clock, ids }), getSourceState: () => Promise.resolve(answer(clock.now())) },
+  }).refresh(w.admin, keyed(w.admin, REFRESH_OPERATION), w.source, CORRELATION);
+
 /** The world's first supplier suspended through its use case, with `choice`. */
 const supplierSuspended = (w: World, choice: PendingChoice) =>
   createSupplierChanges(services()).suspend(
@@ -279,6 +292,24 @@ const BRAKES = {
     spares: false,
     ready: (w: World) => Promise.resolve<Press>(() => sourceSuspended(w, 'cancel')),
   },
+  'the source ended by the partner (a refresh: consent gone for good)': {
+    cause: 'SOURCE_NOT_USABLE',
+    subject: 'funding_source',
+    spares: false,
+    ready: (w: World) =>
+      Promise.resolve<Press>(
+        refreshed(w, (now) => ({
+          kind: 'found',
+          source: { ...w.state, availability: 'UNAVAILABLE', consentStatus: 'Revoked', statusChangedAt: now },
+        })),
+      ),
+  },
+  'the source unknown to the partner (a refresh)': {
+    cause: 'SOURCE_NOT_USABLE',
+    subject: 'funding_source',
+    spares: false,
+    ready: (w: World) => Promise.resolve<Press>(refreshed(w, () => ({ kind: 'not_found' }))),
+  },
   'the supplier suspended to cancel': {
     cause: 'SUPPLIER_NOT_VERIFIED',
     subject: 'supplier',
@@ -317,6 +348,20 @@ const newestSeq = (w: World, subjectType: string, subjectId: string) =>
       .where('subject_type', '=', subjectType)
       .where('subject_id', '=', subjectId)
       .orderBy('seq', 'desc')
+      .executeTakeFirstOrThrow();
+    return seq;
+  });
+
+/** The sequence of the first event about the object after `after`, in the organisation's chain. */
+const firstSeqAfter = (w: World, subjectType: string, subjectId: string, after: bigint) =>
+  withTenant(app, w.org, async (tx) => {
+    const { seq } = await tx
+      .selectFrom('audit.events')
+      .select('seq')
+      .where('subject_type', '=', subjectType)
+      .where('subject_id', '=', subjectId)
+      .where('seq', '>', after)
+      .orderBy('seq')
       .executeTakeFirstOrThrow();
     return seq;
   });
@@ -376,17 +421,19 @@ beforeEach(() => {
 
 describe('the brakes void their own pending requests in their transaction (C2b)', () => {
   it.each(Object.keys(BRAKES) as Brake[])(
-    'voids the waiting and the approved once %s, before its own event: DENIED with its cause, holdings released',
+    'voids the waiting and the approved once %s, before its first event: DENIED with its cause, holdings released',
     async (what) => {
       const { w, acting } = await ready();
       const mandateId = await mandateIdOf(w);
       const { approved, waiting, elsewhere } = await pendingOf(w, acting);
       const brake = BRAKES[what];
       const press = await brake.ready(w, mandateId);
+      const subjectId = SUBJECT_IDS[brake.subject](w, mandateId);
+      const before = await newestSeq(w, brake.subject, subjectId);
 
       expect(PRESSED).toContain((await press()).outcome);
 
-      const braked = await newestSeq(w, brake.subject, SUBJECT_IDS[brake.subject](w, mandateId));
+      const braked = await firstSeqAfter(w, brake.subject, subjectId, before);
       await voidedBefore(w, [approved, waiting], brake.cause, braked);
       expect(await statusOf(w, elsewhere.id)).toBe(brake.spares ? 'APPROVED' : 'DENIED');
       expect(await spentOf(w, acting)).toBe(0n);

@@ -254,7 +254,7 @@ const MOST_VOIDED_BY_A_BRAKE = 20;
 /**
  * What a brake stops: an agent (its suspend), a mandate (its suspend, revoke,
  * expiry or supersede), a funding source (its suspend) or a supplier (its
- * suspend, unverify, or new details or payee; C3).
+ * suspend, or its new details or payee made current; C3).
  */
 type Braked =
   | { readonly agentId: string }

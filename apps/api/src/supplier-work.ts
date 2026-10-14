@@ -29,8 +29,11 @@ import type { Logger } from '@agentx/platform/observability';
 import type { Refused } from './refused.ts';
 import { createUseCaseWork, type Member, UseCaseRefused, type UseCaseTables, type Written } from './use-case-work.ts';
 
-/** The tables the supplier use cases work on: the outbox too, for the notices a change writes (E2-2b). */
-/** The suppliers' tables, with the requests and holdings their brakes' cascades end (C3). */
+/**
+ * The tables the supplier use cases work on: the outbox too, for the notices
+ * a change writes (E2-2b), and the requests and holdings their brakes'
+ * cascades end (C3).
+ */
 export type SupplierTables = UseCaseTables &
   SuppliersTables &
   NotificationsTables &

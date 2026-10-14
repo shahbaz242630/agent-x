@@ -4,8 +4,6 @@
 // fake partner over its own records in the same database, as staging runs
 // it. Each source is linked as D2-3 links it: started, approved at the fake
 // bank, confirmed. The routes' answers are funding-sources.test.ts.
-import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, SOURCES, type SourceRecord } from '@agentx/core/modules/funding-sources';
@@ -16,6 +14,7 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import {
   createDatabaseRecords,
@@ -25,6 +24,7 @@ import {
   type FinancialRailAdapter,
   USUAL_CONTROLS,
 } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { createDatabase, type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
 import { createKeyProvider, PURPOSES } from '@agentx/platform/keys';
 import {
