@@ -23,7 +23,11 @@
 // supplier is the choice on the move that unverified it, its newest
 // `supplier.unverify` or `supplier.reactivate` (which names none, so
 // cancels): an old pause never comes back after the supplier is verified
-// again.
+// again. Cancel chosen for a supplier already stopped with its requests
+// paused, suspended or unverified (C3c, partner S111), under the words that
+// said so (cancelsAtOnce), is recorded over the pause as a further event of its own (`supplier.pending_requests_chosen`,
+// read wherever the pause is), the signed state unchanged, as chosenAgain
+// records a suspend's.
 import { AGENTS } from '@agentx/core/modules/agents';
 import type {
   AuditActor,
@@ -75,23 +79,40 @@ const PAYEE_STATEMENTS = {
   pause:
     'Once the partner confirms the new bank details, its requests are held as they are: none can be approved or paid ' +
     'while the supplier is unverified. Confirming the new details cancels them; withdrawing the change, they stand ' +
-    'again once the supplier is verified again. Requests waiting for approval still expire after 72 hours.',
+    'again once the supplier is verified again. A supplier already suspended or unverified keeps the choice it was ' +
+    'stopped with. Requests waiting for approval still expire after 72 hours.',
 } as const satisfies Record<PendingChoice, string>;
 
-/** The version of PAYEE_STATEMENTS each event names: raised with any change to their words. */
-const PAYEE_STATEMENT_VERSION = 1;
+/** The version of PAYEE_STATEMENTS each event names: raised with any change to their words (2: cancel always, C3c). */
+const PAYEE_STATEMENT_VERSION = 2;
 
 /** A payee registration's choice, as its body names it (decision 8). */
 export const PAYEE_PENDING_REQUESTS = z
   .enum(PENDING_CHOICES)
   .describe(
-    'What happens to the supplier’s pending spend requests if this registration unverifies it, confirmed by the ' +
-      `admin registering; there is no default. \`cancel\`: ${PAYEE_STATEMENTS.cancel} \`pause\`: ${PAYEE_STATEMENTS.pause}`,
+    'What happens to the supplier’s pending spend requests once the partner confirms the new bank details, ' +
+      'confirmed by the admin registering; there is no default. ' +
+      `\`cancel\`: ${PAYEE_STATEMENTS.cancel} \`pause\`: ${PAYEE_STATEMENTS.pause}`,
   );
+
+/** A payee registration's cancel recorded over a supplier's pause (C3c): read wherever the pause is (PAUSE_EVENTS). */
+const PAYEE_CANCEL = 'supplier.pending_requests_chosen';
 
 /** The choice as a payee registration's events keep it, with the statement confirmed. */
 export const payeeChoiceDetails = (choice: PendingChoice) =>
   ({ pendingRequests: choice, pendingStatementVersion: PAYEE_STATEMENT_VERSION }) as const;
+
+/** The first PAYEE_STATEMENTS whose cancel said it acts whatever the supplier's status (C3c). */
+const CANCELS_AT_ONCE_FROM = 2;
+
+/**
+ * Whether a payee registration's choice, as its event keeps it, cancels the
+ * requests of a supplier already stopped (C3c): only a cancel confirmed under
+ * words that said so. None (a registration from before the choice), or one
+ * confirmed before, leaves the stop's own choice as it is (Rule Book §1.9).
+ */
+export const cancelsAtOnce = (details: AuditDetails | undefined): boolean =>
+  details?.pendingRequests === 'cancel' && Number(details.pendingStatementVersion) >= CANCELS_AT_ONCE_FROM;
 
 /**
  * The choice an event keeps (choiceDetails, payeeChoiceDetails), or none
@@ -126,15 +147,16 @@ const suspends = (which: Pausable): PauseEvents => ({ type: SUSPENDS[which].type
  * For each status a pause may hold each in (as voidCauses has it), the
  * events whose newest holds the pause in force: its suspends; a supplier
  * UNVERIFIED, its unverifying moves, an unverify or a reactivation (which
- * names no choice, so cancels).
+ * names no choice, so cancels); a supplier's either way, a payee
+ * registration's cancel over its pause (C3c).
  */
 export const PAUSE_EVENTS: Readonly<Record<Pausable, Readonly<Record<string, PauseEvents>>>> = {
   agent: { SUSPENDED: suspends('agent') },
   mandate: { SUSPENDED: suspends('mandate') },
   source: { SUSPENDED: suspends('source') },
   supplier: {
-    SUSPENDED: suspends('supplier'),
-    UNVERIFIED: { type: SUPPLIERS.subject, actions: ['supplier.unverify', 'supplier.reactivate'] },
+    SUSPENDED: { type: SUPPLIERS.subject, actions: [SUSPENDS.supplier.action, PAYEE_CANCEL] },
+    UNVERIFIED: { type: SUPPLIERS.subject, actions: ['supplier.unverify', 'supplier.reactivate', PAYEE_CANCEL] },
   },
 };
 
@@ -198,4 +220,40 @@ export async function chosenAgain(
     );
   }
   return 'as_is';
+}
+
+/**
+ * A payee registration's cancel over a supplier, read for change (`state`),
+ * stopped in `status` with its requests paused (C3c): recorded as `actor`'s,
+ * the signed state unchanged, with the version of the words the admin
+ * confirmed (`chosen`, the registration's), so the stop in force cancels and
+ * the request-voids job takes any past the batch. True when recorded; false
+ * for a supplier no pause holds.
+ */
+export async function payeeCancelOverPause(
+  tx: AuditTransaction,
+  states: SignedStates,
+  supplier: {
+    readonly key: { readonly orgId: string; readonly id: string };
+    readonly state: VerifiedState;
+    readonly status: string;
+  },
+  chosen: AuditDetails | undefined,
+  actor: AuditActor,
+): Promise<boolean> {
+  const { key, state, status } = supplier;
+  if (!(await pausedOf(tx, states, key.orgId, [['supplier', key.id, status]])).has('supplier')) return false;
+  await states.record(
+    tx,
+    SUPPLIERS,
+    key,
+    state,
+    {},
+    {
+      actor,
+      action: PAYEE_CANCEL,
+      details: { pendingRequests: 'cancel', pendingStatementVersion: chosen?.pendingStatementVersion ?? null },
+    },
+  );
+  return true;
 }
