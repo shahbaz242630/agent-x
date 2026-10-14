@@ -650,6 +650,21 @@ describe('a voided request as the team and the agent read it (C2b)', () => {
 });
 
 describe('what a brake leaves alone', () => {
+  it('a partner’s answer older than the one the source holds: it ends nothing, so voids nothing', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    const stale = new Date(w.state.statusChangedAt.getTime() - HOUR_MS);
+
+    expect(
+      await refreshed(w, () => ({
+        kind: 'found',
+        source: { ...w.state, availability: 'UNAVAILABLE', consentStatus: 'Revoked', statusChangedAt: stale },
+      }))(),
+    ).toMatchObject({ outcome: 'changed', source: { status: 'ACTIVE' } });
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
   it('a request already ended: cancelled, it stays so, and the brake holds', async () => {
     const { w, acting } = await ready();
     const cancelled = await ask(acting, w, { orderReference: 'INV-C' });
