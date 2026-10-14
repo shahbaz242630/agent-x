@@ -153,7 +153,7 @@ async function suspendable(
 ): Promise<void> {
   if (mandate.status === 'ACTIVE') return;
   if (mandate.status !== 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
-  const paused = (await pausedOf(tx, states, orgId, [['mandate', mandate.id]])).has('mandate');
+  const paused = (await pausedOf(tx, states, orgId, [['mandate', mandate.id, 'SUSPENDED']])).has('mandate');
   if (!paused && choice === 'pause') throw new MandateRefused(409, 'PENDING_REQUESTS_CANCELLED');
   // Suspended again only to make its pause a cancel.
   if (!paused || choice === 'pause') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');

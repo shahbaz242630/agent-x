@@ -93,7 +93,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
-import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
+import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /**
  * The most a registration's body may be: a name of 100 characters, each
@@ -421,7 +421,7 @@ export function registerAgents(
     '/v1/agents/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: SUSPEND_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {

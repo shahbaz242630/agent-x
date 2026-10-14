@@ -59,10 +59,23 @@
 //    first's change waiting (SUPPLIER_CHANGE_WAITING) and leaves its own open,
 //    inert at the partner, as a check does.
 //
+// The admin's choice (Phase 3 decision 8, Rule Book §1.9): a start and a
+// pass-through each name what happens to the supplier's pending spend
+// requests if the registration unverifies it, cancel or pause, with no
+// default, kept on the registration's events (suspensions.ts): on its start,
+// or on a further event when a start carrying on with one open chooses
+// otherwise; the newest holds. When a check (or a pass-through's Tx 2) keeps
+// a registered payee, cancel DENIES the supplier's pending requests first, in
+// the same transaction, before anything is signed (voidPendingOf); pause
+// leaves them held, the choice kept on the unverify, so the request-voids job
+// leaves them while it is UNVERIFIED (voidCauses). A registration started
+// before the choice existed names none and cancels.
+//
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock (a
 // start's alone, for its budget: the supplier's row, read for change by a
 // check, serialises the rest), the member's membership (2a), the supplier
-// (6), its registration; the chain
+// (6), its registration; on cancel, the supplier's pending requests (8) and
+// their holdings (11); the chain
 // head with the first event recorded, after which only new version rows are
 // written, which wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
@@ -74,8 +87,10 @@ import {
   type PayeeDetails,
   type RailCapabilities,
 } from '@agentx/core/modules/providers';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import {
   addVersion,
+  BENEFICIARY_REGISTRATIONS,
   contactsOf,
   MOST_PAYEE_REGISTRATIONS_A_DAY,
   nextVersionNumber,
@@ -114,6 +129,7 @@ import {
   type SupplierTables,
   type SupplierTx,
 } from './supplier-work.ts';
+import { payeeChoiceDetails } from './suspensions.ts';
 
 /** Starting a payee registration through the partner's form. */
 export const PAYEE_START_OPERATION = 'suppliers.payee.start';
@@ -143,6 +159,11 @@ export type PayeeWrite =
 /** A payee write not done: a refusal, or its key's outcome. */
 type PayeeRefusal = { readonly outcome: 'conflict' } | { readonly outcome: 'busy' } | Refused;
 
+/** A registration's start (startRegistration), whose details hold the admin's first choice (decision 8). */
+const REGISTRATION_STARTED = 'beneficiary_registration.started';
+/** A further choice, when a start carries on with one open and the admin chose otherwise. */
+const CHOSEN = 'beneficiary_registration.pending_requests_chosen';
+
 const ROUTE_NOT_OFFERED: Refused = { outcome: 'refused', status: 409, code: 'PAYEE_ROUTE_NOT_OFFERED' };
 
 export interface SupplierPayees {
@@ -150,6 +171,7 @@ export interface SupplierPayees {
     member: SupplierMember,
     idempotent: IdempotentRequest,
     supplierId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<PayeeWrite>;
   check(
@@ -164,6 +186,7 @@ export interface SupplierPayees {
     idempotent: IdempotentRequest,
     supplierId: string,
     payee: PayeeDetails,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<PayeeWrite>;
 }
@@ -209,6 +232,23 @@ export function createSupplierPayees({
     if (read.outcome === 'tampered') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
     if (read.outcome === 'missing') throw new SupplierRefused(404, 'NOT_FOUND');
     return read;
+  };
+
+  /**
+   * The admin's choice for the registration's pending requests, its newest
+   * (decision 8), each event believed only whole: cancel for one started
+   * before the choice existed.
+   */
+  const choiceOf = async (tx: SupplierTx, states: SignedStates, orgId: string, registrationId: string) => {
+    const history = await states.historyOf(tx, orgId, {
+      subjectTypes: [BENEFICIARY_REGISTRATIONS.subject],
+      subjectId: registrationId,
+      actions: [REGISTRATION_STARTED, CHOSEN],
+      limit: 1,
+      newest: true,
+    });
+    if (history.outcome !== 'read') throw new SupplierRefused(503, 'INTEGRITY_FAILED');
+    return history.events.at(-1)?.event.details.pendingRequests === 'pause' ? 'pause' : 'cancel';
   };
 
   /** The supplier, then its registration, read (`share`) in a transaction of their own. */
@@ -283,16 +323,22 @@ export function createSupplierPayees({
     const payee = payeeKeyOf(payeeKeySource(offer, found.registration.route), beneficiary, fingerprint);
     // The early word: the index refuses the key again at the confirmation, whoever takes it first.
     const holder = payee.key === null ? null : await supplierWithPayeeKey(tx, orgId, payee.key);
+    const taken = holder !== null && holder !== supplierId;
+    const choice = await choiceOf(tx, states, orgId, found.registration.id);
+    // Cancel (decision 8): the supplier's pending requests DENIED before anything is signed, whatever its status.
+    if (!taken && choice === 'cancel') {
+      await voidPendingOf(tx, states, keys, orgId, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now());
+    }
     const registration = await recordRegistered(tx, states, { orgId, id: found.registration.id }, found, {
       beneficiary,
       payee,
       actor,
     });
-    if (holder !== null && holder !== supplierId) return;
+    if (taken) return;
     // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
     let read = await work.supplierIn(tx, states, supplierKey, 'change');
     if (read.supplier.status === 'VERIFIED') {
-      await unverifySupplier(tx, states, supplierKey, read, { actor });
+      await unverifySupplier(tx, states, supplierKey, read, { actor, details: payeeChoiceDetails(choice) });
       read = await work.supplierIn(tx, states, supplierKey, 'change');
     }
     const current = await work.versionIn(tx, states, orgId, supplierId, read.supplier.currentVersionId);
@@ -520,6 +566,7 @@ export function createSupplierPayees({
     idempotent: IdempotentRequest,
     supplierId: string,
     route: RegistrationRoute,
+    choice: PendingChoice,
     correlationId: string,
   ): Promise<RegistrationRecord | PayeeRefusal> => {
     const done = await write(member, idempotent, correlationId, async (tx, states) => {
@@ -531,8 +578,24 @@ export function createSupplierPayees({
       // One open at a time for a supplier's form: a start carries on with it, starting nothing new.
       const open =
         route === 'hosted' ? await openRegistrationOf(tx, orgId, { supplierId: supplier.id, partner, route }) : null;
-      if (open !== null && isOpen((await registrationIn(tx, states, orgId, supplier.id, open, 'share')).registration)) {
-        return { status: 201, resourceId: open };
+      const carried = open === null ? null : await registrationIn(tx, states, orgId, supplier.id, open, 'change');
+      if (carried !== null && isOpen(carried.registration)) {
+        // The admin chose otherwise this time: the newer choice holds (choiceOf).
+        if ((await choiceOf(tx, states, orgId, carried.registration.id)) !== choice) {
+          await states.record(
+            tx,
+            BENEFICIARY_REGISTRATIONS,
+            { orgId, id: carried.registration.id },
+            carried.state,
+            {},
+            {
+              actor: { type: 'user', id: member.userId },
+              action: CHOSEN,
+              details: payeeChoiceDetails(choice),
+            },
+          );
+        }
+        return { status: 201, resourceId: carried.registration.id };
       }
       await withinBudget(tx, orgId);
       const id = ids.next();
@@ -546,6 +609,7 @@ export function createSupplierPayees({
         startedBy: admin.id,
         createdAt: clock.now(),
         actor: { type: 'user', id: member.userId },
+        details: payeeChoiceDetails(choice),
       });
       return { status: 201, resourceId: id };
     });
@@ -605,22 +669,22 @@ export function createSupplierPayees({
   };
 
   return {
-    async start(member, idempotent, supplierId, correlationId) {
+    async start(member, idempotent, supplierId, pendingRequests, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
       const offer = await offering(rail, 'hosted');
       if ('outcome' in offer) return offer;
-      const registration = await opened(member, idempotent, supplierId, 'hosted', correlationId);
+      const registration = await opened(member, idempotent, supplierId, 'hosted', pendingRequests, correlationId);
       if ('outcome' in registration) return registration;
       const form = await askAfterStart(rail, member, supplierId, registration, correlationId);
       if (form !== null && 'outcome' in form) return form;
       return answer('started', member, supplierId, registration.id, form, correlationId);
     },
 
-    async passThrough(member, idempotent, supplierId, payee, correlationId) {
+    async passThrough(member, idempotent, supplierId, payee, pendingRequests, correlationId) {
       if (rail === undefined) return PARTNER_UNAVAILABLE;
       const offer = await offering(rail, 'pass_through');
       if ('outcome' in offer) return offer;
-      const registration = await opened(member, idempotent, supplierId, 'pass_through', correlationId);
+      const registration = await opened(member, idempotent, supplierId, 'pass_through', pendingRequests, correlationId);
       if ('outcome' in registration) return registration;
       const refused = await passedThrough(rail, offer, member, registration, payee, correlationId);
       if (refused !== null) return refused;

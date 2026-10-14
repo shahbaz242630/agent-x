@@ -64,7 +64,7 @@ import {
   STEP_UP_CONFIRM,
   stepUpAsked,
 } from './route-schemas.ts';
-import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
+import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /** Every member may see the organisation's mandates. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -509,7 +509,7 @@ export function registerMandates(
       `/v1/mandates/:id/${move}`,
       {
         schema: schemas.ask,
-        bodyLimit: SUSPEND_BODY_LIMIT,
+        bodyLimit: CHOICE_BODY_LIMIT,
         config: { access: [...MOVING_ROLES], operation: MOVE_OPERATIONS[move].ask },
       },
       async (request, reply) => {

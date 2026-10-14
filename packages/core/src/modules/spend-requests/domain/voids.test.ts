@@ -103,6 +103,8 @@ describe('voidCauses', () => {
     ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
     ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],
     ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }],
+    // Decision 8: a payee registration's unverify, its requests paused by the registering admin.
+    ['the supplier unverified', 'supplier', { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } }],
   ] as const)(
     'finds none for %s suspended with its requests paused, and only its own pause counts',
     (_what, which, change: Partial<AuthorityNow>) => {
@@ -131,17 +133,17 @@ describe('voidCauses', () => {
       'SOURCE_NOT_USABLE',
     ],
     [
-      'the supplier unverified',
-      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } },
-      'SUPPLIER_NOT_VERIFIED',
-    ],
-    [
       'the supplier’s details changed while paused',
       { supplier: { status: 'SUSPENDED', currentVersionId: 'sv2' } },
       'SUPPLIER_CHANGED',
     ],
+    [
+      'the supplier’s new payee made current while paused unverified',
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2' } },
+      'SUPPLIER_CHANGED',
+    ],
   ] as const)(
-    'still finds %s, whatever is paused: a pause holds only a suspension',
+    'still finds %s, whatever is paused: a pause holds only its own stop',
     (_what, change: Partial<AuthorityNow>, cause) => {
       expect(voidCauses(DECIDED, { ...STANDING, ...change, paused: EVERY_PAUSED })).toEqual([cause]);
     },
