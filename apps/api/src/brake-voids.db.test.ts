@@ -1056,6 +1056,20 @@ describe('freezing the organisation: the admin chooses cancel or pause; unfreezi
     expect(await told(w)).toEqual([{ kind: 'organization_frozen' }]);
   });
 
+  it('refuses an approver: FORBIDDEN, neither frozen nor unfrozen (any admin, and only an admin)', async () => {
+    const { w } = await ready();
+    const approver = await shared.member(w.org, 'approver');
+    const changes = createOrganizationChanges(services());
+    const forbidden = { outcome: 'refused', status: 403, code: 'FORBIDDEN' };
+
+    expect(await changes.freeze(approver, keyed(approver, FREEZE_OPERATION), 'pause', CORRELATION)).toEqual(forbidden);
+    expect(await freezes(w)).toEqual([]);
+    await frozen(w, 'pause');
+    expect(await changes.unfreeze(approver, keyed(approver, UNFREEZE_OPERATION), 'All clear', CORRELATION)).toEqual(
+      forbidden,
+    );
+  });
+
   it('refuses an unfreeze of an organisation not frozen: ORG_NOT_FROZEN', async () => {
     const { w } = await ready();
 
@@ -1078,6 +1092,24 @@ describe('freezing the organisation: the admin chooses cancel or pause; unfreezi
       code: 'STEP_UP_FAILED',
     });
   });
+
+  it('a freeze to cancel with more left than one batch: the unfreeze refused PENDING_REQUESTS_TOO_MANY, still frozen; once the job ends them, it goes through', async () => {
+    const { w, acting } = await ready();
+    // 41: the freeze's batch of 20 voids, and 21 are left, past the unfreeze's own.
+    const many = [];
+    for (let each = 0; each < 41; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await frozen(w, 'cancel');
+    const changes = createOrganizationChanges(services());
+    const tooMany = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' };
+
+    expect(await changes.unfreeze(w.admin, keyed(w.admin, UNFREEZE_OPERATION), 'All clear', CORRELATION)).toEqual(
+      tooMany,
+    );
+    expect(await freezes(w)).toHaveLength(1);
+    await job(w).run();
+    expect(await unfrozen(w, 'All clear')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
 
   it('a freeze to cancel past the batch: the unfreeze voids those left, before its event', async () => {
     const { w, acting } = await ready();

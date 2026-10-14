@@ -2,7 +2,8 @@
 // outcome of the use case, and refusing a body that doesn't choose, confirm
 // or give a reason before it runs. Who reaches them is the access hook's
 // (role-matrix.test.ts); what the use case does in the database is
-// organization-changes.db.test.ts.
+// brake-voids.db.test.ts (its freezing describe) and
+// spend-request-approvals.db.test.ts.
 import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdempotentRequest } from '@agentx/platform/db';

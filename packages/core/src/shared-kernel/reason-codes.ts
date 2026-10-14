@@ -144,7 +144,7 @@ export const REASON_CODES = {
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   PENDING_REQUESTS_CANCELLED:
-    "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed.",
+    "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
     'More pending requests are left to cancel than one move cancels at once, so nothing was changed. If its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel; wait a few minutes while they are cancelled, then try again.',
   POLICY_CHANGES_SPENT:
