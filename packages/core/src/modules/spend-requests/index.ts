@@ -9,7 +9,8 @@
 // request's reservation and claim with its signed state (E1); a request
 // waiting for approval expired after 72 hours, or cancelled before hand-off,
 // its holdings released (D7, D8), or rejected by a person with a reason
-// (Phase 3 B4a), or approved by one, weighed again (B4b).
+// (Phase 3 B4a), or approved by one, weighed again (B4b); and one whose
+// authority no longer stands voided, its holdings released (C1).
 export {
   askedText,
   BANK_REFERENCE_MOST,
@@ -55,9 +56,13 @@ export {
   type RejectionShown,
   rejectRequest,
   requestsWaitingSince,
+  type SubjectsNamed,
+  type Voided,
+  voidRequest,
   WAITS_FOR_APPROVAL_MS,
   waitedOut,
 } from './infrastructure/endings.ts';
+export { type AuthorityNow, PENDING_STATUSES } from './domain/voids.ts';
 export { claimOrder, claimsOn, type OrderOf, type OrderWeighed, releaseClaim } from './infrastructure/order-claims.ts';
 export { sealPayee } from './infrastructure/payee-seal.ts';
 export { SPEND_REQUESTS } from './infrastructure/requests.ts';

@@ -113,6 +113,7 @@ import { createMandateMoves } from './mandate-moves.ts';
 import { createPolicyChanges } from './policy-changes.ts';
 import { createMandateRegistry } from './mandate-registry.ts';
 import { createRequestExpiry, REQUEST_EXPIRY_EVERY_MS } from './request-expiry.ts';
+import { createRequestVoids, REQUEST_VOIDS_EVERY_MS } from './request-voids.ts';
 import { createRowSweep, scheduleRowSweep, type SweptRows } from './row-sweep.ts';
 import { createRetentionSweep, scheduleRetentionSweep } from './retention-sweep.ts';
 import { createSecurityRecorder, type SecurityRecorder } from './security-recorder.ts';
@@ -815,6 +816,18 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     REQUEST_EXPIRY_EVERY_MS,
   );
+  // Pending spend requests whose authority no longer stands voided, their holdings released (Phase 3 C1), on a timer of its own.
+  const requestVoiding = scheduleRuns(
+    createRequestVoids({
+      list: () => listedOrganizations(database),
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      logger,
+    }),
+    REQUEST_VOIDS_EVERY_MS,
+  );
   // The minute's counts, on a timer of their own (B2-5b); the last are written as the API stops.
   const recording = scheduleRuns(recorder, RECORD_EVERY_MS);
   onStopSignals(
@@ -837,6 +850,7 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
           historyChecking.stop(),
           holdingsChecking.stop(),
           requestExpiring.stop(),
+          requestVoiding.stop(),
           recording.stop(),
         ]);
       },
