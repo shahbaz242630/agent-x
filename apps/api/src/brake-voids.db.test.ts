@@ -40,7 +40,6 @@ import {
   type PendingChoice,
   requestOf,
   SPEND_REQUESTS,
-  voidEveryPendingOf,
   voidPendingOf,
 } from '@agentx/core/modules/spend-requests';
 import { supplierOf } from '@agentx/core/modules/suppliers';
@@ -940,17 +939,24 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
   });
 
-  it('voids every page until one voids nothing (voidEveryPendingOf)', async () => {
+  it('refuses a fresh start past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY, nothing voided', async () => {
     const { w, acting } = await ready();
-    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+    // One more than a brake's batch of 20, each small enough to stand under every limit.
+    const many = [];
+    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    expect(many.every(({ status }) => status === 'APPROVED')).toBe(true);
+    await supplierSuspended(w, 'pause');
+    const changes = createSupplierChanges(services());
+    const refused = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' };
 
-    const voided = await signed(w, (tx, states) =>
-      voidEveryPendingOf(tx, states, keys, w.org, { agentId: w.agent }, 'AGENT_SUSPENDED', clock.now(), 1),
-    );
-
-    expect(voided).toBe(2);
-    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
-    expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
+    expect(
+      await changes.reactivate(w.admin, keyed(w.admin, SUPPLIER_REACTIVATE), supplierOfWorld(w), 'cancel', CORRELATION),
+    ).toEqual(refused);
+    // Its pause made a cancel: the brake's batch now, the job the rest; then the fresh start goes through.
+    await supplierSuspended(w, 'cancel');
+    await job(w).run();
+    expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 });
 

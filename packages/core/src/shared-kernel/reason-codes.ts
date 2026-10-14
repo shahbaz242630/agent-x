@@ -144,6 +144,8 @@ export const REASON_CODES = {
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   PENDING_REQUESTS_CANCELLED:
     "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed.",
+  PENDING_REQUESTS_TOO_MANY:
+    'More requests to this supplier are pending than a fresh start cancels at once, so it was not reactivated. Suspend it again choosing cancel if it isn’t already, wait a few minutes while they are cancelled, then reactivate it. Nothing was changed.',
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:

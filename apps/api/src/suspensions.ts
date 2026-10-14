@@ -82,9 +82,10 @@ const REACTIVATE_STATEMENTS = {
     'A fresh start: every request to this supplier waiting for approval, approved or ready is cancelled now and ' +
     'the money held for it freed. This can’t be undone: the agent asks again.',
   pause:
-    'Un-pause: its held requests stand again, at once if it comes back verified; if its details changed while it ' +
-    'was suspended, it comes back unverified and they stay held until a second person verifies it again. Requests ' +
-    'waiting for approval still expire after 72 hours. Not offered when its suspension cancelled them.',
+    'Un-pause: its held requests stand again, at once if it comes back verified. If it comes back unverified (never ' +
+    'verified, or new bank details still waiting), they stay held until a second person verifies it again; its new ' +
+    'details made current cancel them. Requests waiting for approval still expire after 72 hours. Not offered when ' +
+    'its suspension cancelled them.',
 } as const satisfies Record<PendingChoice, string>;
 
 /** The version of REACTIVATE_STATEMENTS each event names: raised with any change to their words. */

@@ -323,29 +323,23 @@ export async function voidPendingOf(
 }
 
 /**
- * voidPendingOf, page after page, until a page voids nothing: for a move
- * that leaves none for the request-voids job (a supplier's fresh start back
- * VERIFIED, Phase 3 decision 9). Each page voids at least one more, so it
- * ends; a request that can't be believed is left as it is, inert, as there.
- * How many were voided.
+ * Whether more of what a brake stops are pending than voidPendingOf voids
+ * at once (a supplier's fresh start back VERIFIED, Phase 3 decision 9,
+ * which leaves none for the request-voids job), by their rows alone: a
+ * request tampered with counts too.
  */
-export async function voidEveryPendingOf(
-  tx: EndingsTransaction,
-  states: SignedStates,
-  keys: KeyProvider,
-  orgId: string,
-  braked: Braked,
-  cause: ReasonCode,
-  now: Date,
-  most = MOST_VOIDED_BY_A_BRAKE,
-): Promise<number> {
-  let total = 0;
-  let voided: number;
-  do {
-    voided = await voidPendingOf(tx, states, keys, orgId, braked, cause, now, most);
-    total += voided;
-  } while (voided > 0);
-  return total;
+export async function pendingPastABrake(tx: EndingsTransaction, orgId: string, braked: Braked): Promise<boolean> {
+  const { column, id } = brakedColumn(braked);
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone; nothing moves on it
+    .selectFrom(SPEND_REQUESTS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('status', 'in', PENDING_STATUSES)
+    .where(column, '=', id)
+    .limit(MOST_VOIDED_BY_A_BRAKE + 1)
+    .execute();
+  return rows.length > MOST_VOIDED_BY_A_BRAKE;
 }
 
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
