@@ -256,7 +256,7 @@ const HOLDINGS_CHECK_FAILED_LINES = 'where tostring(parse_json(Log).event) == "h
 
 /** An integrity job that skipped a whole run, its organisation list unread (Phase 2 E2c): nothing checked or expired that run. */
 const INTEGRITY_RUN_FAILED_LINES =
-  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed")';
+  'where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed")';
 
 /**
  * Where a diagnostic setting could send logs other than a workspace: a storage

@@ -1946,7 +1946,7 @@ describe('SEC-OPS-09 each rule can fail', () => {
       (alert: Mutable) =>
         (criterion(alert).query =
           `${table} | where tostring(parse_json(Log).event) in (${events}) | summarize Events = count()`);
-    const JOBS = ['hold_history', 'holdings_check', 'mandate_expiry', 'request_expiry'].map(
+    const JOBS = ['hold_history', 'holdings_check', 'mandate_expiry', 'request_expiry', 'request_void'].map(
       (job) => `"${job}.run_failed"`,
     );
     const EVERY_JOB = JOBS.join(', ');
