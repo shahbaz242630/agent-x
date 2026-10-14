@@ -1010,12 +1010,12 @@ describe('freezing the organisation: the admin chooses cancel or pause; unfreezi
         .execute(),
     );
   /** The world's organisation unfrozen by its admin with `reason`, stepped up with a passkey; `confirmedWith` at the confirm. */
-  const unfrozen = async (w: World, reason: string, confirmedWith = reason) => {
+  const unfrozen = async (w: World, reason: string, confirmedWith = reason, amr?: readonly string[]) => {
     const changes = createOrganizationChanges(services());
     const challengeId = askedFor(
       await changes.unfreeze(w.admin, keyed(w.admin, UNFREEZE_OPERATION), reason, CORRELATION),
     );
-    await stepUp(w.admin, challengeId);
+    await stepUp(w.admin, challengeId, amr);
     return changes.unfreezeConfirm(
       w.admin,
       keyed(w.admin, UNFREEZE_CONFIRM_OPERATION),
@@ -1081,6 +1081,16 @@ describe('freezing the organisation: the admin chooses cancel or pause; unfreezi
         CORRELATION,
       ),
     ).toEqual({ outcome: 'refused', status: 409, code: 'ORG_NOT_FROZEN' });
+  });
+
+  it('refuses a step-up signed in with an app code: STEP_UP_FAILED (a passkey, SEC-HA-12)', async () => {
+    const { w } = await ready();
+    await frozen(w, 'pause');
+
+    expect(await unfrozen(w, 'All clear', 'All clear', ['pwd', 'otp', 'mfa'])).toMatchObject({
+      outcome: 'refused',
+      code: 'STEP_UP_FAILED',
+    });
   });
 
   it('refuses a confirm with another reason than the step-up was asked for: STEP_UP_FAILED, still frozen', async () => {
