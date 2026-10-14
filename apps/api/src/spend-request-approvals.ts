@@ -11,11 +11,15 @@
 // - in the month its capacity is held in (sealed with its decision), not the
 //   month it is now: a request decided on the 31st and approved on the 1st
 //   is counted where its money already sits;
-// - the agent's mandate, the two policies and the supplier must be the
-//   versions it was decided against, the key it asked with still live, and
-//   the engine must still say ALLOW or REQUIRE_APPROVAL (an approver may
-//   approve over the threshold, never past a DENY or REQUIRE_NEW_MANDATE):
-//   otherwise REQUEST_CHANGED (409), for the agent to ask again (SEC-LIM-10);
+// - the agent's mandate and the supplier must be the versions it was decided
+//   against (a new mandate is new terms, a new supplier version new payee
+//   details), the key it asked with not revoked, and the engine, under the
+//   policies as they now are, must still say ALLOW or REQUIRE_APPROVAL (an
+//   approver may approve over the threshold, never past a DENY or
+//   REQUIRE_NEW_MANDATE): otherwise REQUEST_CHANGED (409), for the agent to
+//   ask again (SEC-LIM-10). Routine changes don't void it: a policy changed
+//   since is weighed as it now is, and a key rotated out (expired, not
+//   revoked) still stands behind what it asked;
 // - one past its 72 hours, that the expiry job hasn't reached yet, is
 //   refused (REQUEST_EXPIRED, 409) and then expired at once, its reservation
 //   and claim released (SEC-LIM-12), in a transaction of its own.
@@ -36,7 +40,7 @@
 // and the month its capacity is held in (7) (the confirm's locks; the ask
 // reads them FOR SHARE and locks no month); the request (8); the chain head
 // (12). Its reservation and claim are judged, never locked (approveRequest).
-import { agentKeyOf, isLiveKey } from '@agentx/core/modules/agents';
+import { agentKeyOf } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { lockAgentPeriod } from '@agentx/core/modules/limit-reservations';
@@ -209,11 +213,9 @@ export function createSpendRequestApprovals({
     const made = decide(weighed.input);
     const unchanged =
       key.outcome === 'found' &&
-      isLiveKey(key.key, now) &&
+      key.key.status !== 'REVOKED' &&
       weighed.mandate !== null &&
       weighed.mandate.versionId === against.mandateVersionId &&
-      made.versions.organizationPolicy === against.organizationPolicyVersionId &&
-      made.versions.mandatePolicy === against.mandatePolicyVersionId &&
       weighed.supplier !== null &&
       weighed.supplier.currentVersionId === against.supplierVersionId &&
       holdsCapacity(made.decision);
