@@ -372,7 +372,7 @@
                   {
                     "type": "string",
                     "const": "PENDING_REQUESTS_CANCELLED",
-                    "description": "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed."
+                    "description": "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed."
                   },
                   {
                     "type": "string",
