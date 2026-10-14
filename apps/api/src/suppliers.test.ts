@@ -8,6 +8,7 @@
 // supplier-payees.db.test.ts and supplier-payee-changes.db.test.ts.
 import type { AcceptedKey } from '@agentx/core/modules/agents';
 import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type {
   RegistrationRecord,
   SupplierDetails,
@@ -187,6 +188,7 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly stepUpChallengeId?: string;
+      readonly pendingRequests?: PendingChoice;
     }
   | {
       readonly kind: 'payeeApprove' | 'payeeApproveConfirm' | 'payeeWithdraw';
@@ -258,13 +260,16 @@ async function withSuppliers(
     },
   };
   const change =
-    (kind: 'suspend' | 'reactivate' | 'payeeApprove' | 'payeeWithdraw') =>
+    (kind: 'reactivate' | 'payeeApprove' | 'payeeWithdraw') =>
     (member: object, keyed: IdempotentRequest, supplierId: string): Promise<SupplierChangeWrite> => {
       asked.push({ kind, member, keyed, supplierId });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     };
   const changes: SupplierChanges = {
-    suspend: change('suspend'),
+    suspend: (member, keyed, supplierId, pendingRequests) => {
+      asked.push({ kind: 'suspend', member, keyed, supplierId, pendingRequests });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
     reactivate: change('reactivate'),
     reactivateConfirm: (member, keyed, supplierId, stepUpChallengeId) => {
       asked.push({ kind: 'reactivateConfirm', member, keyed, supplierId, stepUpChallengeId });
@@ -500,7 +505,7 @@ describe('GET /v1/suppliers and /v1/suppliers/:id (E1-2)', () => {
     };
     const app = await withSuppliers({ change: { outcome: 'changed', ...waiting } });
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/suspend`));
+    const response = await app.inject(post(`/${SUPPLIER_ID}/suspend`, { pendingRequests: 'pause' }));
 
     expect(response.json()).toMatchObject({ changeWaiting: true, coolingOffUntil: '2026-10-02T08:00:00.000Z' });
   });
@@ -518,30 +523,38 @@ describe('GET /v1/suppliers and /v1/suppliers/:id (E1-2)', () => {
 });
 
 describe('POST /v1/suppliers/:id/suspend: the brake (E1-2)', () => {
-  it('answers 200 with the supplier, SUSPENDED, passing the member and the key', async () => {
-    const asked: Asked[] = [];
-    const suspended = { ...VIEW, supplier: { ...SUPPLIER, status: 'SUSPENDED' as const } };
-    const app = await withSuppliers({ change: { outcome: 'changed', ...suspended } }, asked);
+  it.each(['cancel', 'pause'] as const)(
+    'answers 200 with the supplier, SUSPENDED, passing the member, the key and the choice: %s',
+    async (pendingRequests) => {
+      const asked: Asked[] = [];
+      const suspended = { ...VIEW, supplier: { ...SUPPLIER, status: 'SUSPENDED' as const } };
+      const app = await withSuppliers({ change: { outcome: 'changed', ...suspended } }, asked);
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/suspend`));
+      const response = await app.inject(post(`/${SUPPLIER_ID}/suspend`, { pendingRequests }));
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ ...DETAILS_ANSWERED, status: 'SUSPENDED' });
-    expect(asked).toEqual([
-      {
-        kind: 'suspend',
-        member: MEMBER,
-        keyed: expect.objectContaining({ operation: 'suppliers.suspend' }) as unknown,
-        supplierId: SUPPLIER_ID,
-      },
-    ]);
-  });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ...DETAILS_ANSWERED, status: 'SUSPENDED' });
+      expect(asked).toEqual([
+        {
+          kind: 'suspend',
+          member: MEMBER,
+          keyed: expect.objectContaining({ operation: 'suppliers.suspend' }) as unknown,
+          supplierId: SUPPLIER_ID,
+          pendingRequests,
+        },
+      ]);
+    },
+  );
 
-  it('refuses any body, before the use case runs', async () => {
+  it.each([
+    ['no choice: there is no default', {}],
+    ['a choice of its own', { pendingRequests: 'keep' }],
+    ['more than its choice', { pendingRequests: 'pause', reason: 'x' }],
+  ])('refuses %s, before the use case runs', async (_what, body) => {
     const asked: Asked[] = [];
     const app = await withSuppliers({}, asked);
 
-    expect((await app.inject(post(`/${SUPPLIER_ID}/suspend`, { reason: 'x' }))).statusCode).toBe(400);
+    expect((await app.inject(post(`/${SUPPLIER_ID}/suspend`, body))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
 });

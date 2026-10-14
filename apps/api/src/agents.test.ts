@@ -142,8 +142,8 @@ async function withAgents(answers: Answers, role: Role = 'developer') {
   };
   const changed = () => Promise.resolve(answers.change ?? { outcome: 'busy' as const });
   const changes: AgentChanges = {
-    suspend: (member, keyed, agentId) => {
-      calls.push({ kind: 'suspend', member, keyed, subject: agentId });
+    suspend: (member, keyed, agentId, pendingRequests) => {
+      calls.push({ kind: 'suspend', member, keyed, subject: [agentId, pendingRequests] });
       return changed();
     },
     reactivate: (member, keyed, agentId) => {
@@ -398,20 +398,20 @@ describe('GET /v1/agents and /v1/agents/:id read the organisation’s agents (C1
 describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)', () => {
   const SUSPENDED = { ...AGENT, status: 'SUSPENDED' as const };
 
-  it('suspends with no body at all, or an empty one, answering 200 with the agent as the change left it', async () => {
+  it('suspends with its pending requests cancelled or paused, as chosen, answering 200 with the agent as the change left it', async () => {
     const { app, calls } = await withAgents({
       change: { outcome: 'changed', agent: { agent: SUSPENDED, keys: [KEY] } },
     });
 
-    const bare = await app.inject(change('/suspend'));
-    const empty = await app.inject(change('/suspend', {}));
+    const cancelled = await app.inject(change('/suspend', { pendingRequests: 'cancel' }));
+    const paused = await app.inject(change('/suspend', { pendingRequests: 'pause' }));
 
-    expect(bare.statusCode).toBe(200);
-    expect(bare.json()).toEqual({ ...AGENT_ANSWERED, agent: { ...AGENT_ANSWERED.agent, status: 'SUSPENDED' } });
-    expect(empty.statusCode).toBe(200);
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toEqual({ ...AGENT_ANSWERED, agent: { ...AGENT_ANSWERED.agent, status: 'SUSPENDED' } });
+    expect(paused.statusCode).toBe(200);
     expect(calls.map(({ kind, subject, keyed }) => [kind, subject, keyed?.operation])).toEqual([
-      ['suspend', AGENT_ID, 'agents.suspend'],
-      ['suspend', AGENT_ID, 'agents.suspend'],
+      ['suspend', [AGENT_ID, 'cancel'], 'agents.suspend'],
+      ['suspend', [AGENT_ID, 'pause'], 'agents.suspend'],
     ]);
   });
 
@@ -440,11 +440,17 @@ describe('POST /v1/agents/:id/suspend, the kill switch, and reactivating (C1-3)'
   });
 
   it.each<[string, InjectOptions]>([
-    ['a suspension with a body', change('/suspend', { reason: 'lost' })],
+    ['a suspension with no choice: there is no default', change('/suspend')],
+    ['a suspension with an empty body', change('/suspend', {})],
+    ['a suspension with a choice of its own', change('/suspend', { pendingRequests: 'keep' })],
+    ['a suspension with more than its choice', change('/suspend', { pendingRequests: 'pause', reason: 'lost' })],
     ['a reactivation with a body', change('/reactivate', { now: true })],
     ['a confirm with no step-up', change('/reactivate/confirm', {})],
     ['a confirm with a step-up that isn’t an ID', change('/reactivate/confirm', { stepUpChallengeId: 'c-1' })],
-    ['an agent that isn’t an ID', { ...change('/suspend'), url: '/v1/agents/not-an-id/suspend' }],
+    [
+      'an agent that isn’t an ID',
+      { ...change('/suspend', { pendingRequests: 'cancel' }), url: '/v1/agents/not-an-id/suspend' },
+    ],
   ])('refuses %s with 400, never reaching the use case', async (_, request) => {
     const { app, calls } = await withAgents({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, 'admin');
 

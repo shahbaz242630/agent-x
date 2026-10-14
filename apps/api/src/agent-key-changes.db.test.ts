@@ -787,7 +787,7 @@ describe('a handover replaces the agent’s keys (the partner’s decision on th
     const admin = await member(org, 'admin');
     const key = await agentWithKey(org, await member(org, 'developer'));
     const agentChanges = handing();
-    await agentChanges.suspend(admin, keyed(admin, 'agents.suspend', key.agentId), key.agentId, CORRELATION);
+    await agentChanges.suspend(admin, keyed(admin, 'agents.suspend', key.agentId), key.agentId, 'pause', CORRELATION);
 
     const done = await handedOver(admin, key.agentId, admin.membershipId);
 

@@ -275,7 +275,7 @@ export interface AuditTrail {
    * head in one statement: a history a decision rests on (who granted a
    * member's role, ADR-012 §1; when a supplier was last verified, E3-2a).
    * Past `limit` events it throws
-   * TooManyEventsToRead. An event deleted from the history is the chain's
+   * TooManyEventsToRead, unless `newest` asks for the latest alone. An event deleted from the history is the chain's
    * check's and anchor's to find, as for any read of the log. Only in
    * withTenant's transaction for that organisation, like `verify`.
    */
@@ -293,6 +293,12 @@ export interface HistoryToRead {
   readonly subjectIds?: readonly string[];
   readonly actions?: readonly string[];
   readonly limit: number;
+  /**
+   * Only the newest `limit` events, still in chain order, and never
+   * TooManyEventsToRead: for a read that rests on the latest alone, such as
+   * the suspension a subject is under now (Phase 3 decision 7).
+   */
+  readonly newest?: true;
 }
 
 /**
@@ -381,13 +387,16 @@ async function eventsWithHead(
   which: RawBuilder<unknown>,
   limit: number,
   each?: readonly string[],
+  newest = false,
 ): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  // The oldest events first, or the newest (HistoryToRead.newest); either way handed back in chain order, below.
+  const order = newest ? sql`order by e.seq desc` : sql`order by e.seq`;
   const picked =
     each === undefined
-      ? sql`select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} order by e.seq limit ${limit}`
+      ? sql`select e.* from audit.events e where e.org_id = ${chain.orgId} and ${which} ${order} limit ${limit}`
       : sql`select e.* from pg_catalog.unnest(${each}::uuid[]) as a (id) cross join lateral (
           select e.* from audit.events e
-          where e.org_id = ${chain.orgId} and e.subject_id = a.id and ${which} order by e.seq limit ${limit}
+          where e.org_id = ${chain.orgId} and e.subject_id = a.id and ${which} ${order} limit ${limit}
         ) as e`;
   const { rows } = await sql<Record<string, unknown>>`
     select h.org_id is not null as has_head, h.seq as head_seq, h.hash as head_hash, h.mac as head_mac,
@@ -845,7 +854,7 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
     },
 
     async recordedEvents(tx: AuditTransaction, orgId: string, find: HistoryToRead): Promise<RecordedEventsCheck> {
-      const { subjectTypes, actions, limit } = find;
+      const { subjectTypes, actions, limit, newest = false } = find;
       const objects = objectsToRead(find);
       if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError('The limit is a whole number from 1');
       await assertTenant(tx, orgId);
@@ -858,7 +867,8 @@ export function createAuditTrail({ keys, ids }: { readonly keys: KeyProvider; re
         ],
         sql` and `,
       );
-      const rows = await eventsWithHead(tx, chain, which, limit + 1);
+      // One past the limit tells a history cut short; the newest alone are never more than asked.
+      const rows = await eventsWithHead(tx, chain, which, newest ? limit : limit + 1, undefined, newest);
       const [first] = rows;
       const past = first?.past_head;
       if (typeof past === 'bigint') return brokenAt(past);

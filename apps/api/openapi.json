@@ -366,6 +366,11 @@
                   },
                   {
                     "type": "string",
+                    "const": "PENDING_REQUESTS_CANCELLED",
+                    "description": "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed."
+                  },
+                  {
+                    "type": "string",
                     "const": "POLICY_CHANGES_SPENT",
                     "description": "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once."
                   },
@@ -8147,22 +8152,26 @@
     "/v1/agents/{id}/suspend": {
       "post": {
         "operationId": "agents.suspend",
-        "summary": "Suspend an agent: the kill switch, at once and with no step-up",
+        "summary": "Suspend an agent: the kill switch, at once and with no step-up, its pending requests cancelled or paused",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "pendingRequests"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -9832,22 +9841,26 @@
     "/v1/funding-sources/{id}/suspend": {
       "post": {
         "operationId": "funding-sources.suspend",
-        "summary": "Suspend a bank account: the brake, at once and with no step-up",
+        "summary": "Suspend a bank account: the brake, at once and with no step-up, its pending requests cancelled or paused",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "pendingRequests"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -10584,22 +10597,26 @@
     "/v1/suppliers/{id}/suspend": {
       "post": {
         "operationId": "suppliers.suspend",
-        "summary": "Suspend a supplier: the brake, at once and with no step-up",
+        "summary": "Suspend a supplier: the brake, at once and with no step-up, its pending requests cancelled or paused",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "pendingRequests"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -12834,16 +12851,20 @@
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "pendingRequests"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -12934,10 +12955,18 @@
                     "type": "string",
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
                 },
                 "required": [
-                  "stepUpChallengeId"
+                  "stepUpChallengeId",
+                  "pendingRequests"
                 ],
                 "additionalProperties": false
               }

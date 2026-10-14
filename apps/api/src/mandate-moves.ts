@@ -18,9 +18,15 @@
 //   expired), a draft never accepted included. A suspended mandate keeps its
 //   waiting draft, accepted only once it is resumed (B3); a revoked one keeps
 //   it too, never to be accepted (0035).
-// - Phase 3 adds the cascade in the same transaction (PRD §4.2): every request
-//   of the mandate awaiting approval or hand-off DENIED, its approval
-//   cancelled and its reservation released.
+// - A suspend names what happens to the mandate's pending requests, cancel
+//   or pause (Phase 3 decision 7, suspensions.ts): the ask binds the choice
+//   into its challenge, so the step-up confirms that choice alone, and the
+//   move's event keeps it. A suspended mandate whose suspension paused its
+//   requests may be suspended again to cancel them, recorded as a further
+//   suspend event with its signed state unchanged; a pause over a cancel is
+//   PENDING_REQUESTS_CANCELLED (suspensions.ts' chosenAgain, for the
+//   one-click brakes). The request-voids job voids them on cancel, and
+//   on any revoke or expiry; Phase 3 C2b voids them in the same transaction.
 //
 // Lock order (ADR-006 §6): the idempotency key, the session's challenges (0b,
 // confirm only), the admin's membership (2a), the mandate (4), the version in
@@ -31,6 +37,7 @@ import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { isEnded, MANDATES } from '@agentx/core/modules/mandates';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -47,11 +54,17 @@ import {
   viewIn,
 } from './mandate-reads.ts';
 import type { Refused } from './refused.ts';
+import { choiceDetails, pausedOf, SUSPENDS } from './suspensions.ts';
 import { createStepUps, createUseCaseWork, movedAsRead, type SessionMember } from './use-case-work.ts';
 
 /** The moves, by the state machine's events (MANDATE). */
 export const MANDATE_MOVES = ['suspend', 'resume', 'revoke'] as const;
 export type MandateMove = (typeof MANDATE_MOVES)[number];
+
+/** A move as asked: a suspend with the suspender's choice for the mandate's pending requests (decision 7). */
+export type MoveChosen =
+  | { readonly move: 'suspend'; readonly pendingRequests: PendingChoice }
+  | { readonly move: Exclude<MandateMove, 'suspend'> };
 
 /** Each move's operations: the ask, which the step-up challenge names as its action too, and its confirm. */
 export const MOVE_OPERATIONS = {
@@ -62,7 +75,7 @@ export const MOVE_OPERATIONS = {
 
 /** What each move records, and whom it tells (0036). */
 const MOVED = {
-  suspend: { action: 'mandate.suspended', notice: 'mandate_suspended' },
+  suspend: { action: SUSPENDS.mandate.action, notice: 'mandate_suspended' },
   resume: { action: 'mandate.resumed', notice: 'mandate_resumed' },
   revoke: { action: 'mandate.revoked', notice: 'mandate_revoked' },
 } as const satisfies Record<MandateMove, { action: string; notice: NoticeKind }>;
@@ -87,14 +100,14 @@ export interface MandateMoves {
     member: SessionMember,
     idempotent: IdempotentRequest,
     mandateId: string,
-    move: MandateMove,
+    chosen: MoveChosen,
     correlationId: string,
   ): Promise<MoveAsked>;
   confirm(
     member: SessionMember,
     idempotent: IdempotentRequest,
     mandateId: string,
-    move: MandateMove,
+    chosen: MoveChosen,
     stepUpChallengeId: string,
     correlationId: string,
   ): Promise<MandateMoved>;
@@ -102,13 +115,41 @@ export interface MandateMoves {
 
 /**
  * The move's SHA-256: the organisation and the mandate's latest event, IDs in
- * lower case. That event is the mandate's own, read from its signed state, so
- * it names the mandate as it stood when asked: any change to it since makes
- * the step-up another change's. The move itself is the challenge's action,
- * which its consume checks (B4's mutation pass: naming it here too was dead).
+ * lower case, and a suspend's choice. That event is the mandate's own, read
+ * from its signed state, so it names the mandate as it stood when asked: any
+ * change to it since makes the step-up another change's; so does another
+ * choice. The move itself is the challenge's action, which its consume
+ * checks (B4's mutation pass: naming it here too was dead).
  */
-const moveHash = (orgId: string, mandateEvent: string): Buffer =>
-  changeHashOf([orgId.toLowerCase(), mandateEvent.toLowerCase()]);
+const moveHash = (orgId: string, mandateEvent: string, chosen: MoveChosen): Buffer =>
+  changeHashOf([
+    orgId.toLowerCase(),
+    mandateEvent.toLowerCase(),
+    ...(chosen.move === 'suspend' ? [chosen.pendingRequests] : []),
+  ]);
+
+/** What the move's event keeps beside its step-up: a suspend's choice. */
+const chosenDetails = (chosen: MoveChosen) => (chosen.move === 'suspend' ? choiceDetails(chosen.pendingRequests) : {});
+
+/**
+ * Refused unless the mandate may be suspended with `choice`: ACTIVE; or
+ * SUSPENDED with its requests paused, to cancel them (decision 7). A pause
+ * over a cancel is PENDING_REQUESTS_CANCELLED.
+ */
+async function suspendable(
+  tx: MandateTx,
+  states: SignedStates,
+  orgId: string,
+  mandate: { readonly id: string; readonly status: string },
+  choice: PendingChoice,
+): Promise<void> {
+  if (mandate.status === 'ACTIVE') return;
+  if (mandate.status !== 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
+  const paused = (await pausedOf(tx, states, orgId, [['mandate', mandate.id]])).has('mandate');
+  if (!paused && choice === 'pause') throw new MandateRefused(409, 'PENDING_REQUESTS_CANCELLED');
+  // Suspended again only to make its pause a cancel.
+  if (!paused || choice === 'pause') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
+}
 
 export function createMandateMoves({
   database,
@@ -136,15 +177,15 @@ export function createMandateMoves({
     states: SignedStates,
     orgId: string,
     mandateId: string,
-    move: MandateMove,
+    chosen: MoveChosen,
     lock: 'share' | 'change',
   ) => {
     const read = await mandateIn(tx, states, orgId, mandateId, lock);
     const { mandate } = read;
-    if (move === 'revoke') {
+    if (chosen.move === 'revoke') {
       if (isEnded(mandate.status)) throw new MandateRefused(409, 'MANDATE_ENDED');
-    } else if (move === 'suspend') {
-      if (mandate.status !== 'ACTIVE') throw new MandateRefused(409, 'MANDATE_NOT_ACTIVE');
+    } else if (chosen.move === 'suspend') {
+      await suspendable(tx, states, orgId, mandate, chosen.pendingRequests);
     } else {
       if (mandate.status !== 'SUSPENDED') throw new MandateRefused(409, 'MANDATE_NOT_SUSPENDED');
       // 0035's a_status_on_its_versions keeps a version in force on a SUSPENDED mandate.
@@ -156,41 +197,49 @@ export function createMandateMoves({
   };
 
   return {
-    async ask(member, idempotent, mandateId, move, correlationId) {
+    async ask(member, idempotent, mandateId, chosen, correlationId) {
+      const { move } = chosen;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, MOVING_ROLES);
-        const read = await movable(tx, states, member.orgId, mandateId, move, 'share');
+        const read = await movable(tx, states, member.orgId, mandateId, chosen, 'share');
         return stepUps.ask(tx, member, {
           action: MOVE_OPERATIONS[move].ask,
-          changeHash: moveHash(member.orgId, read.state.eventId),
+          changeHash: moveHash(member.orgId, read.state.eventId, chosen),
         });
       });
       if (isUnwritten(done)) return done;
       return { outcome: 'asked', stepUpChallengeId: done.result.resourceId };
     },
 
-    async confirm(member, idempotent, mandateId, move, stepUpChallengeId, correlationId) {
+    async confirm(member, idempotent, mandateId, chosen, stepUpChallengeId, correlationId) {
+      const { move } = chosen;
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, MOVING_ROLES);
-        const read = await movable(tx, states, member.orgId, mandateId, move, 'change');
+        const read = await movable(tx, states, member.orgId, mandateId, chosen, 'change');
         const consumed = await stepUps.consumed(
           tx,
           member,
           held,
           stepUpChallengeId,
-          { action: MOVE_OPERATIONS[move].ask, changeHash: moveHash(member.orgId, read.state.eventId) },
+          { action: MOVE_OPERATIONS[move].ask, changeHash: moveHash(member.orgId, read.state.eventId, chosen) },
           { passkeyRequired: true },
         );
         const { id } = read.mandate;
-        movedAsRead(
-          await states.changeStatus(tx, MANDATES, { orgId: member.orgId, id }, move, {
-            actor: { type: 'user', id: member.userId },
-            action: MOVED[move].action,
-            details: stepUpDetails(consumed),
-          }),
-          `a mandate read as able to ${move} didn't`,
-        );
+        const change = {
+          actor: { type: 'user' as const, id: member.userId },
+          action: MOVED[move].action,
+          details: { ...stepUpDetails(consumed), ...chosenDetails(chosen) },
+        };
+        if (read.mandate.status === 'SUSPENDED' && move === 'suspend') {
+          // Its pause made a cancel (movable): the suspension recorded again, the mandate as it stands.
+          await states.record(tx, MANDATES, { orgId: member.orgId, id }, read.state, {}, change);
+        } else {
+          movedAsRead(
+            await states.changeStatus(tx, MANDATES, { orgId: member.orgId, id }, move, change),
+            `a mandate read as able to ${move} didn't`,
+          );
+        }
         await outbox.add(tx, toldAdminsAndApprovers(member.orgId, MOVED[move].notice, id));
         return { status: 200, resourceId: id };
       });

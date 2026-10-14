@@ -13,8 +13,9 @@
 //   key itself, `axk_<keyId>_<secret>`, shown this once (null on a retry of the
 //   same write: only its MAC is kept).
 // - `POST /v1/agents/:id/suspend`: the kill switch (C1-3), at once and with no
-//   step-up: 200 with the agent, SUSPENDED; one suspended already is answered
-//   as it is. Admins and developers.
+//   step-up, with `pendingRequests`, `cancel` or `pause`, required (Phase 3
+//   decision 7): 200 with the agent, SUSPENDED; one suspended already is
+//   answered as it is. Admins and developers.
 // - `POST /v1/agents/:id/reactivate`, then `…/reactivate/confirm` with the
 //   step-up's ID (C1-3): an admin gives a suspended agent its authority back,
 //   signing in again with a passkey: 202 with the step-up, then 200 with the
@@ -92,6 +93,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
+import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
 
 /**
  * The most a registration's body may be: a name of 100 characters, each
@@ -198,9 +200,9 @@ const STEP_UP_ASKED = stepUpAsked(
 );
 
 const SUSPEND_SCHEMA = {
-  summary: 'Suspend an agent: the kill switch, at once and with no step-up',
+  summary: 'Suspend an agent: the kill switch, at once and with no step-up, its pending requests cancelled or paused',
   params: AGENT_ID,
-  body: NOTHING,
+  body: SUSPEND_BODY,
   response: { 200: AGENT_CHANGED },
 };
 
@@ -419,7 +421,7 @@ export function registerAgents(
     '/v1/agents/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: SUSPEND_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {
@@ -428,6 +430,7 @@ export function registerAgents(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerChange(written, request, reply);

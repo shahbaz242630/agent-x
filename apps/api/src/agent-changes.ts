@@ -7,11 +7,12 @@
 //   (ADR-014 §8: the instant brakes are never behind step-up). The key
 //   claimed first; the member read again, active and an admin or developer;
 //   the agent read for change; then ACTIVE > SUSPENDED, recorded as the
-//   member's. An agent suspended already is left as it is, and answered: a
-//   brake pressed twice is not an error. None of its keys works while it is
-//   suspended (C2 reads the agent's status on every request). Phase 3 adds
-//   the cascade in the same transaction: its pending requests denied, their
-//   approvals cancelled, their reservations released (ADR-012 §5).
+//   member's, with what the member chose for its pending requests, cancel or
+//   pause (Phase 3 decision 7, suspensions.ts). An agent suspended already is
+//   left as it is, and answered: a brake pressed twice is not an error. None
+//   of its keys works while it is suspended (C2 reads the agent's status on
+//   every request). Its requests are voided by the request-voids job when
+//   the choice was cancel; Phase 3 C2b voids them in the same transaction.
 // - `reactivate` (`agents.reactivate`): gives the agent its authority back,
 //   so an admin's, with step-up (a passkey, SEC-HA-12). The ask: the key
 //   claimed first; the admin read again; the agent, SUSPENDED
@@ -68,6 +69,7 @@ import {
   stepUpDetails,
 } from '@agentx/core/modules/identity';
 import type { Notice, Outbox } from '@agentx/core/modules/notifications';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -83,6 +85,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
+import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
@@ -124,6 +127,7 @@ export interface AgentChanges {
     member: AgentMember,
     idempotent: IdempotentRequest,
     agentId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<AgentChangeWrite>;
   reactivate(
@@ -260,17 +264,27 @@ export function createAgentChanges({
   };
 
   return {
-    async suspend(member, idempotent, agentId, correlationId) {
+    async suspend(member, idempotent, agentId, pendingRequests, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const read = await agentToChange(tx, states, member.orgId, agentId);
-        // Pressed twice: already stopped, and answered as it is.
-        if (read.agent.status === 'ACTIVE') {
+        // Pressed twice: already stopped, and answered as it is, unless the choice changes (chosenAgain).
+        if (read.agent.status !== 'ACTIVE') {
+          const key = { orgId: member.orgId, id: read.agent.id };
+          const again = await chosenAgain(
+            tx,
+            states,
+            { which: 'agent', table: AGENTS, key, state: read.state },
+            pendingRequests,
+            { type: 'user', id: member.userId },
+          );
+          if (again === 'refused') throw new AgentRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        } else {
           movedAsRead(
             await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
               actor: { type: 'user', id: member.userId },
-              action: 'agent.suspended',
-              details: {},
+              action: SUSPENDS.agent.action,
+              details: choiceDetails(pendingRequests),
             }),
             "an agent read as ACTIVE didn't suspend",
           );

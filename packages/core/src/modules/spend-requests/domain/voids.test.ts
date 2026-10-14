@@ -1,19 +1,24 @@
-// Why a pending spend request is void (Phase 3 C1): none while everything it
-// was decided under stands; each brake its own cause, in the engine's order;
-// several at once all kept; a supplier not found unverified, with no version
-// to compare.
+// Why a pending spend request is void (Phase 3 C1, decision 7): none while
+// everything it was decided under stands; each brake its own cause, in the
+// engine's order; several at once all kept; a supplier not found unverified,
+// with no version to compare; a suspension that pauses voids nothing, and
+// pauses only a suspension; the bank's own suspension never voids, consent
+// it ended always does.
 import { describe, expect, it } from 'vitest';
 
-import { type AuthorityNow, type DecidedUnder, voidCauses } from './voids.ts';
+import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from './voids.ts';
 
 const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplierVersionId: 'sv1' };
 
 const STANDING: AuthorityNow = {
   agentStatus: 'ACTIVE',
   mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
-  sourceMayFund: true,
+  source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1' },
+  paused: new Set(),
 };
+
+const EVERY_PAUSED: ReadonlySet<Pausable> = new Set(['agent', 'mandate', 'source', 'supplier']);
 
 describe('voidCauses', () => {
   it('finds none while everything it was decided under stands', () => {
@@ -26,8 +31,32 @@ describe('voidCauses', () => {
     ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate superseded', { mandate: { status: 'ACTIVE', currentVersionId: 'mv2' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],
-    ['the source unable to fund', { sourceMayFund: false }, 'SOURCE_NOT_USABLE'],
+    [
+      'the source suspended',
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source ended',
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source’s consent past',
+      { source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: true } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source’s consent ended by the bank',
+      { source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
     ['the supplier suspended', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }, 'SUPPLIER_NOT_VERIFIED'],
+    [
+      'the supplier unverified',
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } },
+      'SUPPLIER_NOT_VERIFIED',
+    ],
     [
       'the supplier’s details changed',
       { supplier: { status: 'VERIFIED', currentVersionId: 'sv2' } },
@@ -47,8 +76,9 @@ describe('voidCauses', () => {
       voidCauses(DECIDED, {
         agentStatus: 'SUSPENDED',
         mandate: null,
-        sourceMayFund: false,
+        source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false },
         supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2' },
+        paused: new Set(),
       }),
     ).toEqual([
       'AGENT_SUSPENDED',
@@ -58,4 +88,62 @@ describe('voidCauses', () => {
       'SUPPLIER_CHANGED',
     ]);
   });
+
+  it('finds none for the bank’s own suspension of the source, and one once the bank ends its consent, paused or not', () => {
+    const bank = (availability: string) => ({
+      ...STANDING,
+      source: { status: 'ACTIVE', availability, consentPast: false },
+    });
+    expect(voidCauses(DECIDED, bank('SUSPENDED'))).toEqual([]);
+    expect(voidCauses(DECIDED, { ...bank('UNAVAILABLE'), paused: EVERY_PAUSED })).toEqual(['SOURCE_NOT_USABLE']);
+  });
+
+  it.each([
+    ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
+    ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
+    ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],
+    ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }],
+  ] as const)(
+    'finds none for %s suspended with its requests paused, and only its own pause counts',
+    (_what, which, change: Partial<AuthorityNow>) => {
+      expect(voidCauses(DECIDED, { ...STANDING, ...change, paused: new Set([which]) })).toEqual([]);
+      const others = new Set([...EVERY_PAUSED].filter((each) => each !== which));
+      expect(voidCauses(DECIDED, { ...STANDING, ...change, paused: others })).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
+    ['the mandate expired', { mandate: { status: 'EXPIRED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
+    [
+      'the mandate superseded while paused',
+      { mandate: { status: 'SUSPENDED', currentVersionId: 'mv2' } },
+      'MANDATE_NOT_IN_FORCE',
+    ],
+    [
+      'the source ended',
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source’s consent past while paused',
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: true } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the supplier unverified',
+      { supplier: { status: 'UNVERIFIED', currentVersionId: 'sv1' } },
+      'SUPPLIER_NOT_VERIFIED',
+    ],
+    [
+      'the supplier’s details changed while paused',
+      { supplier: { status: 'SUSPENDED', currentVersionId: 'sv2' } },
+      'SUPPLIER_CHANGED',
+    ],
+  ] as const)(
+    'still finds %s, whatever is paused: a pause holds only a suspension',
+    (_what, change: Partial<AuthorityNow>, cause) => {
+      expect(voidCauses(DECIDED, { ...STANDING, ...change, paused: EVERY_PAUSED })).toEqual([cause]);
+    },
+  );
 });

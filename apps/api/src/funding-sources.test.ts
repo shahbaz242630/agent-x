@@ -5,6 +5,7 @@
 // funding-source-changes.db.test.ts.
 import type { LinkRecord, SourceRecord } from '@agentx/core/modules/funding-sources';
 import type { LiveSession, MembershipCheck } from '@agentx/core/modules/identity';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdempotentRequest } from '@agentx/platform/db';
 import type { InjectOptions } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -124,6 +125,7 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly sourceId: string;
       readonly stepUpChallengeId?: string;
+      readonly pendingRequests?: PendingChoice;
     };
 
 /** A server whose use cases answer `start`, `confirm`, the reads and `refresh`. */
@@ -154,8 +156,8 @@ async function withLinks(
       asked.push({ kind: 'refresh', member, keyed, sourceId });
       return Promise.resolve(answers.refresh ?? { outcome: 'busy' });
     },
-    suspend: (member, keyed, sourceId) => {
-      asked.push({ kind: 'suspend', member, keyed, sourceId });
+    suspend: (member, keyed, sourceId, pendingRequests) => {
+      asked.push({ kind: 'suspend', member, keyed, sourceId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
     reactivate: (member, keyed, sourceId) => {
@@ -486,30 +488,38 @@ const CHALLENGE_ID = '0199a0f0-0000-7000-8000-0000000000c1';
 const IN_SESSION = { ...LINKING, sessionId: LIVE.sessionId };
 
 describe('POST /v1/funding-sources/:id/suspend: the brake (D2-4b)', () => {
-  it('answers 200 with the source, SUSPENDED, passing the member and the key', async () => {
-    const asked: Asked[] = [];
-    const suspended: SourceRecord = { ...SOURCE, status: 'SUSPENDED' };
-    const { app } = await withLinks({ change: { outcome: 'changed', source: suspended } }, asked);
+  it.each(['cancel', 'pause'] as const)(
+    'answers 200 with the source, SUSPENDED, passing the member, the key and the choice: %s',
+    async (pendingRequests) => {
+      const asked: Asked[] = [];
+      const suspended: SourceRecord = { ...SOURCE, status: 'SUSPENDED' };
+      const { app } = await withLinks({ change: { outcome: 'changed', source: suspended } }, asked);
 
-    const response = await app.inject(change('suspend'));
+      const response = await app.inject(change('suspend', { pendingRequests }));
 
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ ...SOURCE_ANSWERED, status: 'SUSPENDED' });
-    expect(asked).toEqual([
-      {
-        kind: 'suspend',
-        member: LINKING,
-        keyed: expect.objectContaining({ orgId: ORG, operation: 'funding-sources.suspend' }) as unknown,
-        sourceId: SOURCE_ID,
-      },
-    ]);
-  });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ...SOURCE_ANSWERED, status: 'SUSPENDED' });
+      expect(asked).toEqual([
+        {
+          kind: 'suspend',
+          member: LINKING,
+          keyed: expect.objectContaining({ orgId: ORG, operation: 'funding-sources.suspend' }) as unknown,
+          sourceId: SOURCE_ID,
+          pendingRequests,
+        },
+      ]);
+    },
+  );
 
-  it('refuses any body, before the use case runs', async () => {
+  it.each([
+    ['no choice: there is no default', {}],
+    ['a choice of its own', { pendingRequests: 'keep' }],
+    ['more than its choice', { pendingRequests: 'pause', status: 'SUSPENDED' }],
+  ])('refuses %s, before the use case runs', async (_what, body) => {
     const asked: Asked[] = [];
     const { app } = await withLinks({}, asked);
 
-    expect((await app.inject(change('suspend', { status: 'SUSPENDED' }))).statusCode).toBe(400);
+    expect((await app.inject(change('suspend', body))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
 });

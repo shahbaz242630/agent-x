@@ -8,9 +8,10 @@
 // - `GET /v1/suppliers?after=&limit=` and `/v1/suppliers/:id`: the suppliers
 //   as Agent X holds them, each verified against its signed state; one with
 //   its contacts. Every member.
-// - `POST /v1/suppliers/:id/suspend`: the brake, at once and with no step-up:
-//   200 with the supplier, SUSPENDED; one suspended already is answered as it
-//   is. Admins and finance approvers.
+// - `POST /v1/suppliers/:id/suspend`: the brake, at once and with no step-up,
+//   with `pendingRequests`, `cancel` or `pause`, required (Phase 3 decision
+//   7): 200 with the supplier, SUSPENDED; one suspended already is answered
+//   as it is. Admins and finance approvers.
 // - `POST /v1/suppliers/:id/reactivate`, then `…/reactivate/confirm` with the
 //   step-up's ID once signed in again (a passkey): 202 with the step-up, then
 //   200 with the supplier, VERIFIED again only if nothing changed while it
@@ -91,6 +92,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
+import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -310,9 +312,9 @@ const DETAILS_CONFIRM_SCHEMA = {
 };
 
 const SUSPEND_SCHEMA = {
-  summary: 'Suspend a supplier: the brake, at once and with no step-up',
+  summary: 'Suspend a supplier: the brake, at once and with no step-up, its pending requests cancelled or paused',
   params: SUPPLIER_ID,
-  body: NOTHING,
+  body: SUSPEND_BODY,
   response: { 200: SUPPLIER_CHANGED },
 };
 
@@ -681,7 +683,7 @@ export function registerSuppliers(
     '/v1/suppliers/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: SUSPEND_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {
@@ -690,6 +692,7 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerChange(written, request, reply);
