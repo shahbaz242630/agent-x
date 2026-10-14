@@ -13,9 +13,14 @@
 //   7): 200 with the supplier, SUSPENDED; one suspended already is answered
 //   as it is. Admins and finance approvers.
 // - `POST /v1/suppliers/:id/reactivate`, then `…/reactivate/confirm` with the
-//   step-up's ID once signed in again (a passkey): 202 with the step-up, then
-//   200 with the supplier, VERIFIED again only if nothing changed while it
-//   was suspended. 409 SUPPLIER_NOT_SUSPENDED otherwise. Admins.
+//   step-up's ID once signed in again (a passkey), each with
+//   `pendingRequests`, `cancel` (a fresh start) or `pause` (an un-pause),
+//   required (Phase 3 decision 9): 202 with the step-up, then 200 with the
+//   supplier, VERIFIED again only if nothing changed while it was suspended.
+//   409 SUPPLIER_NOT_SUSPENDED otherwise; 409 PENDING_REQUESTS_CANCELLED for
+//   an un-pause when its suspension cancelled them; 409
+//   PENDING_REQUESTS_TOO_MANY for a fresh start past what one brake cancels at
+//   once (suspend it again to cancel, then reactivate). Admins.
 // - `POST /v1/suppliers/:id/payee-registrations`: starts registering the
 //   supplier's bank details with the payment partner, through the partner's
 //   own form: 201 with the registration and the form to send the admin to.
@@ -93,7 +98,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
-import { PAYEE_PENDING_REQUESTS, SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
+import { PAYEE_PENDING_REQUESTS, REACTIVATE_BODY, SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -320,9 +325,9 @@ const SUSPEND_SCHEMA = {
 };
 
 const REACTIVATE_SCHEMA = {
-  summary: 'Ask to reactivate a suspended supplier',
+  summary: 'Ask to reactivate a suspended supplier, its held requests cancelled or un-paused',
   params: SUPPLIER_ID,
-  body: NOTHING,
+  body: REACTIVATE_BODY,
   response: {
     202: stepUpAsked('SupplierReactivationAsked', 'Reactivating a supplier, waiting for the admin to sign in again.'),
   },
@@ -331,7 +336,9 @@ const REACTIVATE_SCHEMA = {
 const REACTIVATE_CONFIRM_SCHEMA = {
   summary: 'Reactivate the supplier, once signed in again for it',
   params: SUPPLIER_ID,
-  body: STEP_UP_CONFIRM,
+  body: STEP_UP_CONFIRM.extend(REACTIVATE_BODY.shape).describe(
+    'The step-up signed in again for, and the choice it was asked with.',
+  ),
   response: { 200: SUPPLIER_CHANGED },
 };
 
@@ -752,7 +759,7 @@ export function registerSuppliers(
     '/v1/suppliers/:id/reactivate',
     {
       schema: REACTIVATE_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...REACTIVATING_ROLES], operation: REACTIVATE_OPERATION },
     },
     async (request, reply) => {
@@ -761,6 +768,7 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerChange(written, request, reply);
@@ -780,7 +788,7 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
-        request.body.stepUpChallengeId,
+        request.body,
         request.id,
       );
       return answerChange(written, request, reply);

@@ -322,6 +322,26 @@ export async function voidPendingOf(
   return pending.length;
 }
 
+/**
+ * Whether more of what a brake stops are pending than voidPendingOf voids
+ * at once (a supplier's fresh start back VERIFIED, Phase 3 decision 9,
+ * which leaves none for the request-voids job), by their rows alone: a
+ * request tampered with counts too.
+ */
+export async function pendingPastABrake(tx: EndingsTransaction, orgId: string, braked: Braked): Promise<boolean> {
+  const { column, id } = brakedColumn(braked);
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a count alone; nothing moves on it
+    .selectFrom(SPEND_REQUESTS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('status', 'in', PENDING_STATUSES)
+    .where(column, '=', id)
+    .limit(MOST_VOIDED_BY_A_BRAKE + 1)
+    .execute();
+  return rows.length > MOST_VOIDED_BY_A_BRAKE;
+}
+
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
 export interface Rejection {
   readonly userId: string;

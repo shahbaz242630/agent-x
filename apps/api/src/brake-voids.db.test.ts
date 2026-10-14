@@ -72,7 +72,12 @@ import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend
 import { createSpendRequestReads } from './spend-request-reads.ts';
 import { createRequestVoids } from './request-voids.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
-import { createSupplierChanges, SUSPEND_OPERATION as SUPPLIER_SUSPEND } from './supplier-changes.ts';
+import {
+  createSupplierChanges,
+  REACTIVATE_CONFIRM_OPERATION as SUPPLIER_REACTIVATE_CONFIRM,
+  REACTIVATE_OPERATION as SUPPLIER_REACTIVATE,
+  SUSPEND_OPERATION as SUPPLIER_SUSPEND,
+} from './supplier-changes.ts';
 import { createSupplierDetailsChanges, DETAILS_CONFIRM_OPERATION, DETAILS_OPERATION } from './supplier-details.ts';
 import {
   createSupplierPayeeChanges,
@@ -274,6 +279,15 @@ async function payeeConfirming(w: World, supplierId = w.suppliers[0] ?? ''): Pro
       CORRELATION,
     );
 }
+
+/** The change waiting for the world's first supplier withdrawn by its admin. */
+const payeeWithdrawn = (w: World) =>
+  createSupplierPayeeChanges(services()).withdraw(
+    w.admin,
+    keyed(w.admin, PAYEE_WITHDRAW_OPERATION),
+    w.suppliers[0] ?? '',
+    CORRELATION,
+  );
 
 /** A new payee for the world's first supplier, paused first by its suspend and by its registration: its confirm, to call. */
 async function payeeChanging(w: World): Promise<Press> {
@@ -623,14 +637,6 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     });
   });
 
-  /** The change waiting for the world's first supplier withdrawn by its admin. */
-  const payeeWithdrawn = (w: World) =>
-    createSupplierPayeeChanges(services()).withdraw(
-      w.admin,
-      keyed(w.admin, PAYEE_WITHDRAW_OPERATION),
-      supplierOfWorld(w),
-      CORRELATION,
-    );
   /** Whether the supplier's stop in force, in `status`, still pauses its requests, as the request-voids job reads it. */
   const stillPaused = async (w: World, status: string) =>
     (await signed(w, (tx, states) => pausedOf(tx, states, w.org, [['supplier', supplierOfWorld(w), status]]))).has(
@@ -805,6 +811,169 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     const two = await pendingOf(second.w, second.acting);
     expect((await (await payeeRegistering(second.w, ['pause', 'cancel']))()).outcome).toBe('checked');
     for (const request of [two.approved, two.waiting]) expect(await statusOf(second.w, request.id)).toBe('DENIED');
+  });
+});
+
+describe('reactivating a suspended supplier: a fresh start or an un-pause (decision 9, C3d)', () => {
+  const supplierOfWorld = (w: World) => w.suppliers[0] ?? '';
+  const job = (w: World) =>
+    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
+  /** The world's first supplier reactivated by its admin with `choice`, stepped up with a passkey. */
+  const reactivated = async (w: World, choice: PendingChoice) => {
+    const changes = createSupplierChanges(services());
+    const asked = await changes.reactivate(
+      w.admin,
+      keyed(w.admin, SUPPLIER_REACTIVATE),
+      supplierOfWorld(w),
+      choice,
+      CORRELATION,
+    );
+    const challengeId = askedFor(asked);
+    await stepUp(w.admin, challengeId);
+    return changes.reactivateConfirm(
+      w.admin,
+      keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
+      supplierOfWorld(w),
+      { stepUpChallengeId: challengeId, pendingRequests: choice },
+      CORRELATION,
+    );
+  };
+  const reactivation = async (w: World) =>
+    (await shared.eventsAbout(w.org, supplierOfWorld(w), 'supplier')).findLast(({ action }) =>
+      action.startsWith('supplier.reactivate'),
+    );
+
+  it('a fresh start back VERIFIED: every request voided before its event, the choice kept', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+    await supplierSuspended(w, 'pause');
+    const before = await newestSeq(w, 'supplier', supplierOfWorld(w));
+
+    expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+
+    const moved = await firstSeqAfter(w, 'supplier', supplierOfWorld(w), before);
+    await voidedBefore(w, [approved, waiting], 'SUPPLIER_NOT_VERIFIED', moved);
+    expect(await statusOf(w, elsewhere.id)).toBe('APPROVED');
+    expect(await reactivation(w)).toMatchObject({
+      action: 'supplier.reactivate_verified',
+      details: { pendingRequests: 'cancel', pendingStatementVersion: 1 },
+    });
+  });
+
+  it('an un-pause back VERIFIED: its requests stand again at once, through the job', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await supplierSuspended(w, 'pause');
+
+    expect(await reactivated(w, 'pause')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  it('an un-pause back UNVERIFIED (paused by a payee change, then suspended): held until verified again, then they stand', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
+    await supplierSuspended(w, 'pause');
+
+    expect(await reactivated(w, 'pause')).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
+    await job(w).run();
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+    expect(await reactivation(w)).toMatchObject({
+      action: 'supplier.reactivate',
+      details: { pendingRequests: 'pause' },
+    });
+
+    expect((await payeeWithdrawn(w)).outcome).toBe('changed');
+    await shared.verified(w, supplierOfWorld(w));
+    await job(w).run();
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  it('a fresh start back UNVERIFIED: voided at once', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    expect((await (await payeeRegistering(w, ['pause']))()).outcome).toBe('checked');
+    await supplierSuspended(w, 'pause');
+
+    expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'UNVERIFIED' } });
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
+  it('refuses an un-pause when its suspension cancelled them: PENDING_REQUESTS_CANCELLED, at the ask', async () => {
+    const { w } = await ready();
+    await supplierSuspended(w, 'cancel');
+
+    expect(
+      await createSupplierChanges(services()).reactivate(
+        w.admin,
+        keyed(w.admin, SUPPLIER_REACTIVATE),
+        supplierOfWorld(w),
+        'pause',
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' });
+  });
+
+  it('refuses a confirm with another choice than the step-up was asked for: STEP_UP_FAILED, nothing voided', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await supplierSuspended(w, 'pause');
+    const changes = createSupplierChanges(services());
+    const challengeId = askedFor(
+      await changes.reactivate(w.admin, keyed(w.admin, SUPPLIER_REACTIVATE), supplierOfWorld(w), 'pause', CORRELATION),
+    );
+    await stepUp(w.admin, challengeId);
+
+    expect(
+      await changes.reactivateConfirm(
+        w.admin,
+        keyed(w.admin, SUPPLIER_REACTIVATE_CONFIRM),
+        supplierOfWorld(w),
+        { stepUpChallengeId: challengeId, pendingRequests: 'cancel' },
+        CORRELATION,
+      ),
+    ).toMatchObject({ outcome: 'refused', code: 'STEP_UP_FAILED' });
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe(request.status);
+  });
+
+  /** A world whose agent has `count` requests to the first supplier standing, each small enough for every limit, which is then suspended to pause. */
+  const pendingAndSuspended = async (count: number) => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < count; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    expect(many.every(({ status }) => status === 'APPROVED')).toBe(true);
+    await supplierSuspended(w, 'pause');
+    return { w, many };
+  };
+  const freshStartAsked = (w: World) =>
+    createSupplierChanges(services()).reactivate(
+      w.admin,
+      keyed(w.admin, SUPPLIER_REACTIVATE),
+      supplierOfWorld(w),
+      'cancel',
+      CORRELATION,
+    );
+
+  it('asks a fresh start with as many pending as one brake cancels at once (20)', async () => {
+    const { w } = await pendingAndSuspended(20);
+
+    expect((await freshStartAsked(w)).outcome).toBe('asked');
+  });
+
+  it('refuses a fresh start past what one brake cancels at once: PENDING_REQUESTS_TOO_MANY; suspended to cancel, then it goes through', async () => {
+    const { w, many } = await pendingAndSuspended(21);
+
+    expect(await freshStartAsked(w)).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('APPROVED');
+
+    // Its pause made a cancel: the brake's batch now, the job the rest; then the fresh start goes through.
+    await supplierSuspended(w, 'cancel');
+    await job(w).run();
+    expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 });
 

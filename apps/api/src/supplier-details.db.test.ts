@@ -411,7 +411,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
     await changes.suspend(admin, keyed(admin, SUSPEND_OPERATION), supplierId, 'pause', CORRELATION);
 
     expect(await changed(alice, supplierId, NEW_PHONE)).toMatchObject({ supplier: { status: 'SUSPENDED' } });
-    const asked = await changes.reactivate(admin, keyed(admin, REACTIVATE_OPERATION), supplierId, CORRELATION);
+    const asked = await changes.reactivate(admin, keyed(admin, REACTIVATE_OPERATION), supplierId, 'pause', CORRELATION);
     if (asked.outcome !== 'asked') throw new Error('not asked');
     await stepUp(admin, asked.stepUpChallengeId);
     expect(
@@ -419,7 +419,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
         admin,
         keyed(admin, REACTIVATE_CONFIRM_OPERATION),
         supplierId,
-        asked.stepUpChallengeId,
+        { stepUpChallengeId: asked.stepUpChallengeId, pendingRequests: 'pause' },
         CORRELATION,
       ),
     ).toMatchObject({ supplier: { status: 'UNVERIFIED', verifiedBy: null } });

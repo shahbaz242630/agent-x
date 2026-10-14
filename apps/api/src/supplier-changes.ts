@@ -14,27 +14,36 @@
 //   answered as it is: a brake pressed twice is not an error. A suspended
 //   supplier is shown to no agent.
 // - `reactivate` (`suppliers.reactivate`): gives the supplier its place back,
-//   so an admin's, with a passkey step-up (partner, S69; SEC-HA-12). The ask:
-//   the key claimed first; the admin read again; the supplier, SUSPENDED
-//   (SUPPLIER_NOT_SUSPENDED otherwise); a challenge bound to the event that
-//   suspended it, so it lifts exactly that suspension. The confirm, with the
-//   challenge: the same reads, the challenge consumed, then back VERIFIED
-//   only if nothing changed while it was suspended (the suppliers module's
+//   so an admin's, with a passkey step-up (partner, S69; SEC-HA-12), and the
+//   admin's choice for its held requests (Phase 3 decision 9, partner S112,
+//   suspensions.ts): a fresh start (cancel) or an un-pause (pause), the
+//   latter refused (PENDING_REQUESTS_CANCELLED) when the suspension in force
+//   cancelled them. The ask: the key claimed first; the admin read again; the
+//   supplier, SUSPENDED (SUPPLIER_NOT_SUSPENDED otherwise); a challenge bound
+//   to the event that suspended it and to the choice, so it lifts exactly
+//   that suspension that way. The confirm, with the challenge and the same
+//   choice: the same reads, the challenge consumed; on a fresh start every
+//   pending request DENIED, refused at the ask and the confirm
+//   (PENDING_REQUESTS_TOO_MANY) past what one brake voids, as one coming back
+//   VERIFIED is never looked at by the request-voids job; then back VERIFIED only if
+//   nothing changed while it was suspended (the suppliers module's
 //   reactivateSupplier), otherwise UNVERIFIED with its verification cleared,
-//   the step-up's evidence on its events.
+//   its requests held while it is if un-paused, the step-up's evidence and
+//   the choice on its events.
 // Each is told to every active member and the counting contacts
 // (`supplier_suspended`, `supplier_reactivated`; partner S69, E3-2b), in the
 // same transaction; a brake pressed twice tells no one twice.
 //
 // Lock order (ADR-006 §6): the idempotency key, the member's membership (2a),
 // the supplier (6), its version, a suspend's pending requests (8) and their
-// holdings (11), the step-up challenge, the chain head, then the notices, new
+// holdings (11), a reactivation's after its step-up challenge is consumed,
+// the chain head, then the notices, new
 // rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { reactivateSupplier, SUPPLIERS, suspendSupplier } from '@agentx/core/modules/suppliers';
 import type { Outbox } from '@agentx/core/modules/notifications';
-import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
+import { pendingPastABrake, type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -50,7 +59,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
-import { choiceDetails, chosenAgain } from './suspensions.ts';
+import { choiceDetails, chosenAgain, pausedOf, reactivationChoiceDetails } from './suspensions.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** The brake on a supplier. */
@@ -77,25 +86,27 @@ export interface SupplierChanges {
     member: SessionMember,
     idempotent: IdempotentRequest,
     supplierId: string,
+    pendingRequests: PendingChoice,
     correlationId: string,
   ): Promise<SupplierChangeWrite>;
   reactivateConfirm(
     member: SessionMember,
     idempotent: IdempotentRequest,
     supplierId: string,
-    stepUpChallengeId: string,
+    confirmed: { readonly stepUpChallengeId: string; readonly pendingRequests: PendingChoice },
     correlationId: string,
   ): Promise<SupplierChangeWrite>;
 }
 
 /**
  * The pending change's SHA-256: the event that suspended the supplier, its ID
- * in lower case. That event is the supplier's own, read from its signed state
- * inside the organisation's walls, so it names the organisation, the supplier
- * and exactly this suspension.
+ * in lower case, and the admin's choice. That event is the supplier's own,
+ * read from its signed state inside the organisation's walls, so it names the
+ * organisation, the supplier and exactly this suspension; another choice
+ * makes the step-up another change's (decision 9).
  */
-const reactivationHash = (suspendedBy: string): Buffer =>
-  changeHashOf([REACTIVATE_OPERATION, suspendedBy.toLowerCase()]);
+const reactivationHash = (suspendedBy: string, choice: PendingChoice): Buffer =>
+  changeHashOf([REACTIVATE_OPERATION, suspendedBy.toLowerCase(), choice]);
 
 export function createSupplierChanges({
   database,
@@ -117,10 +128,28 @@ export function createSupplierChanges({
   const work = createSupplierWork({ database, keys, ids, logger });
   const stepUps = createStepUps({ challenges, Refusal: SupplierRefused });
 
-  /** A suspended supplier, read for change, and the event that suspended it: SUPPLIER_NOT_SUSPENDED otherwise. */
-  const suspended = async (tx: SupplierTx, states: SignedStates, orgId: string, supplierId: string) => {
+  /**
+   * A suspended supplier, read for change, and the event that suspended it:
+   * SUPPLIER_NOT_SUSPENDED otherwise; PENDING_REQUESTS_CANCELLED for an
+   * un-pause when its suspension in force cancelled them; for a fresh start,
+   * PENDING_REQUESTS_TOO_MANY past what one brake voids, as back VERIFIED
+   * the request-voids job would never look at those left (decision 9).
+   */
+  const suspended = async (
+    tx: SupplierTx,
+    states: SignedStates,
+    orgId: string,
+    supplierId: string,
+    choice: PendingChoice,
+  ) => {
     const found = await work.supplierIn(tx, states, { orgId, id: supplierId }, 'change');
     if (found.supplier.status !== 'SUSPENDED') throw new SupplierRefused(409, 'SUPPLIER_NOT_SUSPENDED');
+    if (choice === 'pause') {
+      const paused = await pausedOf(tx, states, orgId, [['supplier', supplierId, 'SUSPENDED']]);
+      if (!paused.has('supplier')) throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
+    } else if (await pendingPastABrake(tx, orgId, { supplierId })) {
+      throw new SupplierRefused(409, 'PENDING_REQUESTS_TOO_MANY');
+    }
     return { found, suspendedBy: found.state.eventId };
   };
 
@@ -156,31 +185,39 @@ export function createSupplierChanges({
       return work.changedAfter(member.orgId, correlationId, done);
     },
 
-    async reactivate(member, idempotent, supplierId, correlationId) {
+    async reactivate(member, idempotent, supplierId, pendingRequests, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const { suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
-        return stepUps.ask(tx, member, { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) });
+        const { suspendedBy } = await suspended(tx, states, member.orgId, supplierId, pendingRequests);
+        return stepUps.ask(tx, member, {
+          action: REACTIVATE_OPERATION,
+          changeHash: reactivationHash(suspendedBy, pendingRequests),
+        });
       });
       return work.askedAfter(done);
     },
 
-    async reactivateConfirm(member, idempotent, supplierId, stepUpChallengeId, correlationId) {
+    async reactivateConfirm(member, idempotent, supplierId, { stepUpChallengeId, pendingRequests }, correlationId) {
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         const held = await challenges.hold(tx, member.sessionId);
         await work.memberIn(tx, states, member, REACTIVATING_ROLES);
-        const { found, suspendedBy } = await suspended(tx, states, member.orgId, supplierId);
+        const { found, suspendedBy } = await suspended(tx, states, member.orgId, supplierId, pendingRequests);
         const consumed = await stepUps.consumed(
           tx,
           member,
           held,
           stepUpChallengeId,
-          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy) },
+          { action: REACTIVATE_OPERATION, changeHash: reactivationHash(suspendedBy, pendingRequests) },
           { passkeyRequired: true },
         );
+        if (pendingRequests === 'cancel') {
+          // Every one, as `suspended` found no more than one brake voids (one tampered with is left, inert).
+          const braked = { supplierId: found.supplier.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'SUPPLIER_NOT_VERIFIED', clock.now());
+        }
         await reactivateSupplier(tx, states, { orgId: member.orgId, id: found.supplier.id }, found, {
           actor: { type: 'user', id: member.userId },
-          details: stepUpDetails(consumed),
+          details: { ...stepUpDetails(consumed), ...reactivationChoiceDetails(pendingRequests) },
         });
         await outbox.add(tx, toldEveryone(member.orgId, found.supplier.id, 'supplier_reactivated'));
         return { status: 200, resourceId: found.supplier.id };
