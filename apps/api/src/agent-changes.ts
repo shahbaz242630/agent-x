@@ -11,8 +11,10 @@
 //   pause (Phase 3 decision 7, suspensions.ts). An agent suspended already is
 //   left as it is, and answered: a brake pressed twice is not an error. None
 //   of its keys works while it is suspended (C2 reads the agent's status on
-//   every request). Its requests are voided by the request-voids job when
-//   the choice was cancel; Phase 3 C2b voids them in the same transaction.
+//   every request). On cancel, its pending requests are DENIED in the same
+//   transaction, before its move (voidPendingOf, Phase 3 C2b), pressed again
+//   too, so a pause made a cancel (or one the batch's bound left) voids them;
+//   the request-voids job takes any past the batch.
 // - `reactivate` (`agents.reactivate`): gives the agent its authority back,
 //   so an admin's, with step-up (a passkey, SEC-HA-12). The ask: the key
 //   claimed first; the admin read again; the agent, SUSPENDED
@@ -49,7 +51,8 @@
 //
 // Lock order (ADR-006 §6): the idempotency key, the issue lock (a handover's
 // confirm), the members' memberships (2a, in order of ID), the agent (3), its
-// keys (3a, in order of ID), the step-up challenge, the chain head last.
+// keys (3a, in order of ID), a suspend's pending requests (8) and their
+// holdings (11), the step-up challenge, the chain head last.
 import {
   AGENT_KEYS,
   agentKeysOf,
@@ -69,7 +72,7 @@ import {
   stepUpDetails,
 } from '@agentx/core/modules/identity';
 import type { Notice, Outbox } from '@agentx/core/modules/notifications';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -268,6 +271,10 @@ export function createAgentChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const read = await agentToChange(tx, states, member.orgId, agentId);
+        if (pendingRequests === 'cancel') {
+          const braked = { agentId: read.agent.id };
+          await voidPendingOf(tx, states, keys, member.orgId, braked, 'AGENT_SUSPENDED', clock.now());
+        }
         // Pressed twice: already stopped, and answered as it is, unless the choice changes (chosenAgain).
         if (read.agent.status !== 'ACTIVE') {
           const key = { orgId: member.orgId, id: read.agent.id };

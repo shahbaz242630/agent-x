@@ -11,24 +11,21 @@ import {
   agentOf,
   AGENTS,
   agentKeyText,
-  type AgentsTables,
   createAgentKeyCheck,
   handAgentOver,
   keySecretMessage,
   parseAgentKey,
   type Scope,
 } from '@agentx/core/modules/agents';
-import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
+import { withSignedStates } from '@agentx/core/modules/audit';
 import {
   addMembership,
   createSessions,
   createStepUpChallenges,
-  type IdentityTables,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
-import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { DAY_MS, HOUR_MS } from '@agentx/core/shared-kernel';
 import { createDatabase, type Database, type IdempotentRequest, lockName, withTenant } from '@agentx/platform/db';
@@ -62,9 +59,9 @@ import {
   ROTATE_CONFIRM_OPERATION,
   ROTATE_OPERATION,
 } from './agent-key-changes.ts';
-import type { AgentMember } from './agent-writes.ts';
+import type { AgentMember, AgentTables } from './agent-writes.ts';
 
-type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
+type Tables = AgentTables & OrganizationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

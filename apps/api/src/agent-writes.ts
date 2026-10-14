@@ -21,7 +21,9 @@ import {
 } from '@agentx/core/modules/agents';
 import type { AuditActor, AuditDetails, SignedStates } from '@agentx/core/modules/audit';
 import type { Role } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { DAY_MS, type IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database, DatabaseTransaction, IdempotentRequest } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -36,7 +38,12 @@ import {
 } from './use-case-work.ts';
 
 /** The tables the agents' use cases work on. */
-export type AgentTables = UseCaseTables & AgentsTables & NotificationsTables;
+/** The agents' tables, with the requests and holdings a suspend's cascade ends (C2b). */
+export type AgentTables = UseCaseTables &
+  AgentsTables &
+  NotificationsTables &
+  SpendRequestsTables &
+  LimitReservationsTables;
 /** The organisation's transaction, on those tables. */
 export type AgentTx = DatabaseTransaction<AgentTables>;
 

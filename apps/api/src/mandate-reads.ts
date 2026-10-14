@@ -9,6 +9,7 @@
 import type { AgentsTables } from '@agentx/core/modules/agents';
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { type FundingSourcesTables, type SourceRecord, sourceOf } from '@agentx/core/modules/funding-sources';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import {
   type ConsentAllows,
   consentCheck,
@@ -22,6 +23,7 @@ import {
   policyVersionOf,
 } from '@agentx/core/modules/mandates';
 import type { Notice, NoticeKind } from '@agentx/core/modules/notifications';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import type { SuppliersTables } from '@agentx/core/modules/suppliers';
 import { monthlyCapOf, type MonthlyCapFrom } from '@agentx/core/modules/policies';
 import { compare, type Money, money } from '@agentx/core/shared-kernel';
@@ -29,7 +31,14 @@ import type { DatabaseTransaction } from '@agentx/platform/db';
 
 import { UseCaseRefused, type UseCaseTables } from './use-case-work.ts';
 
-export type MandateTables = UseCaseTables & MandatesTables & AgentsTables & FundingSourcesTables & SuppliersTables;
+/** The mandates' tables, with the requests and holdings a brake's cascade ends (C2b). */
+export type MandateTables = UseCaseTables &
+  MandatesTables &
+  AgentsTables &
+  FundingSourcesTables &
+  SuppliersTables &
+  SpendRequestsTables &
+  LimitReservationsTables;
 export type MandateTx = DatabaseTransaction<MandateTables>;
 
 /** The mandates' UseCaseRefused: the only refusal their work answers. */

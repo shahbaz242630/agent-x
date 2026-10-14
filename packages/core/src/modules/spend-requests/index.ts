@@ -58,6 +58,7 @@ export {
   requestsWaitingSince,
   type SubjectsNamed,
   type Voided,
+  voidPendingOf,
   voidRequest,
   WAITS_FOR_APPROVAL_MS,
   waitedOut,

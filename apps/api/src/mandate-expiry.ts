@@ -16,14 +16,16 @@
 //
 // The job is the record, not the brake: a spend checks the version's end
 // itself (SEC-AG-12), so the minutes before the job reaches a mandate
-// authorise nothing. Phase 3 adds the cascade in the same transaction
-// (PRD §4.2).
+// authorise nothing. Its pending requests are DENIED in the same
+// transaction, before the move (PRD §4.2; voidPendingOf, Phase 3 C2b); the
+// request-voids job takes any past the batch.
 //
 // A run never throws: each failure is logged, naming the organisation and
 // mandate, and the run goes on to the next.
 import { type SignedStatesServices, withSignedStates } from '@agentx/core/modules/audit';
 import { isEnded, MANDATES, mandatesPastTheirEnd } from '@agentx/core/modules/mandates';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import { voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import type { Database } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -75,7 +77,9 @@ export function createMandateExpiry({
       const { mandate } = await mandateIn(tx, states, orgId, id, 'change');
       if (isEnded(mandate.status) || mandate.currentVersionId === null) return false;
       const current = await versionIn(tx, states, orgId, id, mandate.currentVersionId);
-      if (current.endsAt === null || current.endsAt > clock.now()) return false;
+      const now = clock.now();
+      if (current.endsAt === null || current.endsAt > now) return false;
+      await voidPendingOf(tx, states, keys, orgId, { mandateId: id }, 'MANDATE_NOT_IN_FORCE', now);
       movedAsRead(
         await states.changeStatus(tx, MANDATES, { orgId, id }, 'expire', {
           actor: ACTOR,
