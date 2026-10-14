@@ -4,13 +4,22 @@
 // through decideAndReserve; and reads of where a request stands, what it
 // holds and the agent's month.
 import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
-import { withSignedStates } from '@agentx/core/modules/audit';
+import { AGENTS } from '@agentx/core/modules/agents';
+import { SOURCES } from '@agentx/core/modules/funding-sources';
+import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
 import { requestOf, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
-import { type Database, withTenant } from '@agentx/platform/db';
+import {
+  changeDetails,
+  nextVersionNumber,
+  supplierOf,
+  suspendSupplier,
+  versionOf,
+} from '@agentx/core/modules/suppliers';
+import { type Database, type DatabaseTransaction, withTenant } from '@agentx/platform/db';
 
-import type { MandateRegistry } from './mandate-registry.ts';
-import { AED, mandateWorld, type MandateWorldTables, type World } from './mandate-world.helper.test.ts';
+import { type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
+import { AED, keys, mandateWorld, type MandateWorldTables, OPERATOR, type World } from './mandate-world.helper.test.ts';
 import {
   type AgentActing,
   DECIDE_OPERATION,
@@ -149,5 +158,89 @@ export function spendWorld({
       return monthSpent(tx, { agentId: acting.agentId, month, currency: 'AED' });
     });
 
-  return { ...shared, ready, ask, statusOf, holdingsOf, spentOf };
+  /** A change past the use cases, signed, as each brake or edit would make it, in the organisation's transaction. */
+  const signed = <T>(
+    w: World,
+    change: (tx: DatabaseTransaction<SpendWorldTables>, states: SignedStates) => Promise<T>,
+  ) => withSignedStates(app(), w.org, shared.quiet(), change);
+
+  /** The agent's mandate in force: the world's only one. */
+  const mandateIdOf = (w: World) =>
+    withTenant(app(), w.org, async (tx) => {
+      const { id } = await tx.selectFrom('mandates.mandates').select('id').executeTakeFirstOrThrow();
+      return id;
+    });
+
+  /** The supplier's details changed (a new version), then verified again: only its version differs. */
+  async function detailsChanged(w: World, supplierId: string) {
+    await signed(w, async (tx, states) => {
+      const found = await supplierOf(tx, states, { orgId: w.org, id: supplierId }, 'change');
+      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+      const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
+      if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
+      await changeDetails(tx, states, keys, { orgId: w.org, id: supplierId }, found, {
+        orgId: w.org,
+        id: ids.next(),
+        supplierId,
+        version: await nextVersionNumber(tx, w.org, supplierId),
+        supplier: {
+          displayName: 'Gulf Office Supplies Trading LLC',
+          contacts: { phone: '+971501234567', email: null, tradeLicence: null },
+          source: { kind: 'registry', ref: 'DED-123456' },
+        },
+        enteredBy: ids.next(),
+        enteredAt: clock().now(),
+        actor: OPERATOR,
+        follows: current.version,
+      });
+    });
+    await shared.verified(w, supplierId);
+  }
+
+  /**
+   * Each brake on what a request was decided under, made past its use case as
+   * its route would, on the agent's mandate in force and the first supplier:
+   * after each, the request's authority no longer stands (B4b, C1).
+   */
+  const STOPS = {
+    'the mandate superseded': async (w: World, mandateId: string) => {
+      const redrafted = await registry().redraft(
+        w.admin,
+        shared.keyed(w.admin, REDRAFT_OPERATION),
+        mandateId,
+        shared.termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) }),
+        CORRELATION,
+      );
+      if (redrafted.outcome !== 'drafted') throw new Error(`not drafted: ${redrafted.outcome}`);
+      await shared.acceptedPastTheUseCase(w, mandateId);
+    },
+    'the mandate suspended': (w: World, mandateId: string) => shared.movedPastTheUseCase(w, mandateId, 'suspend'),
+    'the supplier’s details changed': (w: World) => detailsChanged(w, w.suppliers[0] ?? ''),
+    'the supplier suspended': (w: World) =>
+      signed(w, async (tx, states) => {
+        const key = { orgId: w.org, id: w.suppliers[0] ?? '' };
+        const found = await supplierOf(tx, states, key, 'change');
+        if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+        await suspendSupplier(tx, states, key, found, { actor: OPERATOR });
+      }),
+    'the source suspended by the partner': (w: World) => shared.partnerSays(w, { availability: 'SUSPENDED' }),
+    'the source suspended by the organisation': (w: World) =>
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, SOURCES, { orgId: w.org, id: w.source }, 'suspend', {
+          actor: OPERATOR,
+          action: 'funding_source.suspended',
+          details: {},
+        }),
+      ),
+    'the agent suspended': (w: World) =>
+      signed(w, (tx, states) =>
+        states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
+          actor: OPERATOR,
+          action: 'agent.suspended',
+          details: {},
+        }),
+      ),
+  } as const;
+
+  return { ...shared, ready, ask, statusOf, holdingsOf, spentOf, signed, mandateIdOf, STOPS };
 }

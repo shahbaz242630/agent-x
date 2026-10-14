@@ -1,9 +1,10 @@
 // A spend request ended before hand-off, its capacity and order given back
 // (PRD §4.2; ADR-006 §6, §10–§11; BR-09; partner decisions 10, Phase 3's 6;
-// Phase 2 D7, D8; Phase 3 B4a): a request waiting for approval 72 hours from
-// its decision is EXPIRED; one cancelled by a person, or by the agent that
-// made it, before hand-off (waiting, approved or ready) is CANCELLED; one a
-// person rejects while it waits is DENIED, with their reason.
+// Phase 2 D7, D8; Phase 3 B4a, C1): a request waiting for approval 72 hours
+// from its decision is EXPIRED; one cancelled by a person, or by the agent
+// that made it, before hand-off (waiting, approved or ready) is CANCELLED; one
+// a person rejects while it waits is DENIED, with their reason; and one whose
+// authority no longer stands (voidCauses) is DENIED, with its causes.
 //
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
@@ -38,9 +39,10 @@ import {
   lockReservationsOf,
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
-import { DAY_MS, movedAsRead } from '../../../shared-kernel/index.ts';
+import { DAY_MS, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
-import { requestOf, type SpendRequestRecord } from './decisions.ts';
+import { type AuthorityNow, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
+import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
 import { requestHoldingsWhole } from './holdings-check.ts';
 import { lockClaimsOf, releaseClaim } from './order-claims.ts';
 import { SPEND_REQUESTS } from './requests.ts';
@@ -177,6 +179,62 @@ export async function cancelRequest(
     details: by.kind === 'agent' ? { agentKeyId: by.agentKeyId } : {},
   });
   return { outcome: 'ended', request: { ...read.request, status: 'CANCELLED' } };
+}
+
+/** The agent, mandate, source and supplier a request names, as its row named them to the caller who read them. */
+export interface SubjectsNamed {
+  readonly agentId: string;
+  readonly mandateId: string | null;
+  readonly fundingSourceId: string;
+  readonly supplierId: string;
+}
+
+/** What came of voiding a request: void, its holdings released; still standing; or as an ending's. */
+export type Voided =
+  | { readonly outcome: 'voided'; readonly request: SpendRequestRecord; readonly causes: readonly ReasonCode[] }
+  | { readonly outcome: 'standing' }
+  | Extract<Ended, { readonly outcome: 'not_open' | 'missing' | 'tampered' }>;
+
+/**
+ * Denies the request if it is still pending (waiting, approved or ready) and
+ * the authority it was decided under no longer stands (voidCauses), releasing
+ * its reservation and order claim, recorded as the API's with the causes
+ * (`spend_request.voided`). `authority`: its agent, mandate, source and
+ * supplier as they now stand, read by the caller through their signed states
+ * before this, in ADR-006's order (levels 3–6); `named`, the IDs it read them
+ * by, which must be the request's own.
+ */
+export async function voidRequest(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  key: { readonly orgId: string; readonly id: string },
+  { named, authority }: { readonly named: SubjectsNamed; readonly authority: AuthorityNow },
+  now: Date,
+): Promise<Voided> {
+  const read = await requestOf(tx, states, key, 'change');
+  if (read.outcome !== 'found') return read;
+  const { request } = read;
+  if (!(PENDING_STATUSES as readonly string[]).includes(request.status)) return { outcome: 'not_open', request };
+  // The caller read them by the request's row, which its verified state has just vouched for, and a request's
+  // agent, mandate, source and supplier never change: another's is a bug.
+  if (
+    request.agentId !== named.agentId ||
+    request.mandateId !== named.mandateId ||
+    request.fundingSourceId !== named.fundingSourceId ||
+    request.supplierId !== named.supplierId
+  ) {
+    throw new Error(`A spend request was judged by another's authority: ${key.id}`);
+  }
+  const against = decidedAgainst(read.state);
+  const causes = voidCauses({ mandateId: request.mandateId, ...against }, authority);
+  if (causes.length === 0) return { outcome: 'standing' };
+  await endHolding(tx, states, keys, key, 'deny', now, {
+    actor: ACTOR,
+    action: 'spend_request.voided',
+    details: { causes: causes.join(',') },
+  });
+  return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
 }
 
 const REJECTED = 'spend_request.rejected';

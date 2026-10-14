@@ -22,8 +22,8 @@
 // replay. Forced: an approval waiting on a cancel or an expiry holding the
 // request finds it no longer waiting, and one waiting on a mandate's revoke
 // finds it changed (revoke-during-approval).
-import { AGENT_KEYS, AGENTS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
-import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
+import { AGENT_KEYS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
+import type { SignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
 import { createOutbox } from '@agentx/core/modules/notifications';
@@ -36,13 +36,6 @@ import {
   SPEND_REQUESTS,
   type SpendRequestRecord,
 } from '@agentx/core/modules/spend-requests';
-import {
-  changeDetails,
-  nextVersionNumber,
-  supplierOf,
-  suspendSupplier,
-  versionOf,
-} from '@agentx/core/modules/suppliers';
 import { HOUR_MS } from '@agentx/core/shared-kernel';
 import {
   createDatabase,
@@ -64,7 +57,7 @@ import {
 } from '@agentx/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { createMandateRegistry, type MandateRegistry, REDRAFT_OPERATION } from './mandate-registry.ts';
+import { createMandateRegistry, type MandateRegistry } from './mandate-registry.ts';
 import { AED, askedFor, keys, type Member, OPERATOR, refused, type World } from './mandate-world.helper.test.ts';
 import {
   APPROVE_CONFIRM_OPERATION,
@@ -98,7 +91,7 @@ const shared = spendWorld({
   registry: () => registry,
   decisions: () => decisions,
 });
-const { quiet, ready, ask, statusOf, holdingsOf, spentOf, member, keyed, stepUp, eventsAbout } = shared;
+const { ready, ask, statusOf, holdingsOf, spentOf, member, keyed, stepUp, eventsAbout } = shared;
 
 const asking = (who: Member, requestId: string) =>
   approvals.ask(who, keyed(who, APPROVE_OPERATION), requestId, CORRELATION);
@@ -123,9 +116,7 @@ const eventsOf = (w: World, id: string) => eventsAbout(w.org, id, SPEND_REQUESTS
 
 type Signing = (tx: DatabaseTransaction<SpendWorldTables>, states: SignedStates) => Promise<unknown>;
 
-/** A change past the use cases, signed, as each brake or edit would make it, in the organisation's transaction. */
-const signed = <T>(w: World, change: (...args: Parameters<Signing>) => Promise<T>) =>
-  withSignedStates(app, w.org, quiet(), change);
+const { signed } = shared;
 
 const freeze = (w: World) =>
   signed(w, (tx, states) =>
@@ -161,66 +152,12 @@ const policySet = (w: World, mandateId: string | null, cap: bigint) => {
   );
 };
 
-/** The supplier's details changed (a new version), then verified again: only its version differs. */
-async function detailsChanged(w: World, supplierId: string) {
-  await signed(w, async (tx, states) => {
-    const found = await supplierOf(tx, states, { orgId: w.org, id: supplierId }, 'change');
-    if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
-    const current = await versionOf(tx, states, { orgId: w.org, id: found.supplier.currentVersionId }, supplierId);
-    if (current.outcome !== 'found') throw new Error(`no version: ${current.outcome}`);
-    await changeDetails(tx, states, keys, { orgId: w.org, id: supplierId }, found, {
-      orgId: w.org,
-      id: ids.next(),
-      supplierId,
-      version: await nextVersionNumber(tx, w.org, supplierId),
-      supplier: {
-        displayName: 'Gulf Office Supplies Trading LLC',
-        contacts: { phone: '+971501234567', email: null, tradeLicence: null },
-        source: { kind: 'registry', ref: 'DED-123456' },
-      },
-      enteredBy: ids.next(),
-      enteredAt: clock.now(),
-      actor: OPERATOR,
-      follows: current.version,
-    });
-  });
-  await shared.verified(w, supplierId);
-}
-
 /** Each change since a request was decided that makes it another's to approve (SEC-LIM-10). */
 const CHANGES = {
   // AED 1,000 a month, below the AED 2,000 it asks.
   'the organisation’s policy tightened past it': (w: World) => policySet(w, null, 100_000n),
   'the mandate’s policy tightened past it': (w: World, mandateId: string) => policySet(w, mandateId, 100_000n),
-  'the mandate superseded': async (w: World, mandateId: string) => {
-    const redrafted = await registry.redraft(
-      w.admin,
-      keyed(w.admin, REDRAFT_OPERATION),
-      mandateId,
-      shared.termsOf(w, { purpose: 'Office supplies, renewed', approvalThreshold: AED(100_000n) }),
-      CORRELATION,
-    );
-    expect(redrafted.outcome).toBe('drafted');
-    await shared.acceptedPastTheUseCase(w, mandateId);
-  },
-  'the mandate suspended': (w: World, mandateId: string) => shared.movedPastTheUseCase(w, mandateId, 'suspend'),
-  'the supplier’s details changed': (w: World) => detailsChanged(w, w.suppliers[0] ?? ''),
-  'the supplier suspended': (w: World) =>
-    signed(w, async (tx, states) => {
-      const key = { orgId: w.org, id: w.suppliers[0] ?? '' };
-      const found = await supplierOf(tx, states, key, 'change');
-      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
-      await suspendSupplier(tx, states, key, found, { actor: OPERATOR });
-    }),
-  'the source suspended by the partner': (w: World) => shared.partnerSays(w, { availability: 'SUSPENDED' }),
-  'the agent suspended': (w: World) =>
-    signed(w, (tx, states) =>
-      states.changeStatus(tx, AGENTS, { orgId: w.org, id: w.agent }, 'suspend', {
-        actor: OPERATOR,
-        action: 'agent.suspended',
-        details: {},
-      }),
-    ),
+  ...shared.STOPS,
   'the key it asked with revoked': (w: World, _mandateId: string, keyId: string) =>
     signed(w, (tx, states) =>
       states.changeStatus(tx, AGENT_KEYS, { orgId: w.org, id: keyId }, 'revoke', {
@@ -231,12 +168,7 @@ const CHANGES = {
     ),
 } as const;
 
-/** The agent's mandate in force: the world's only one. */
-const mandateOf = (w: World) =>
-  withTenant(app, w.org, async (tx) => {
-    const { id } = await tx.selectFrom('mandates.mandates').select('id').executeTakeFirstOrThrow();
-    return id;
-  });
+const { mandateIdOf: mandateOf } = shared;
 
 /** The months the agent's reservations sit in, oldest first. */
 const monthsOf = (w: World) =>
