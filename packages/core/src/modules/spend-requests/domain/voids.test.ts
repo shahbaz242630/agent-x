@@ -1,4 +1,4 @@
-// Why a pending spend request is void (Phase 3 C1, decision 7): none while
+// Why a pending spend request is void (Phase 3 C1, decisions 7 and 10): none while
 // everything it was decided under stands; each brake its own cause, in the
 // engine's order; several at once all kept; a supplier not found unverified,
 // with no version to compare; a suspension that pauses voids nothing, and
@@ -11,6 +11,7 @@ import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from 
 const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplierVersionId: 'sv1' };
 
 const STANDING: AuthorityNow = {
+  organizationStatus: 'ACTIVE',
   agentStatus: 'ACTIVE',
   mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
   source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
@@ -18,7 +19,7 @@ const STANDING: AuthorityNow = {
   paused: new Set(),
 };
 
-const EVERY_PAUSED: ReadonlySet<Pausable> = new Set(['agent', 'mandate', 'source', 'supplier']);
+const EVERY_PAUSED: ReadonlySet<Pausable> = new Set(['organization', 'agent', 'mandate', 'source', 'supplier']);
 
 describe('voidCauses', () => {
   it('finds none while everything it was decided under stands', () => {
@@ -26,6 +27,7 @@ describe('voidCauses', () => {
   });
 
   it.each([
+    ['the organisation frozen', { organizationStatus: 'FROZEN' }, 'ORG_FROZEN'],
     ['the agent suspended', { agentStatus: 'SUSPENDED' }, 'AGENT_SUSPENDED'],
     ['the mandate suspended', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
@@ -74,6 +76,7 @@ describe('voidCauses', () => {
   it('keeps every cause at once, in the engine’s order', () => {
     expect(
       voidCauses(DECIDED, {
+        organizationStatus: 'FROZEN',
         agentStatus: 'SUSPENDED',
         mandate: null,
         source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false },
@@ -81,6 +84,7 @@ describe('voidCauses', () => {
         paused: new Set(),
       }),
     ).toEqual([
+      'ORG_FROZEN',
       'AGENT_SUSPENDED',
       'MANDATE_NOT_IN_FORCE',
       'SOURCE_NOT_USABLE',
@@ -99,6 +103,7 @@ describe('voidCauses', () => {
   });
 
   it.each([
+    ['the organisation', 'organization', { organizationStatus: 'FROZEN' }],
     ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
     ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
     ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],

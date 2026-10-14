@@ -85,6 +85,12 @@ import {
   PAYEE_APPROVE_OPERATION,
   PAYEE_WITHDRAW_OPERATION,
 } from './supplier-payee-changes.ts';
+import {
+  createOrganizationChanges,
+  FREEZE_OPERATION,
+  UNFREEZE_CONFIRM_OPERATION,
+  UNFREEZE_OPERATION,
+} from './organization-changes.ts';
 import { createSupplierPayees, PAYEE_CHECK_OPERATION, PAYEE_START_OPERATION } from './supplier-payees.ts';
 import { pausedOf } from './suspensions.ts';
 
@@ -203,6 +209,10 @@ const refreshed = (w: World, answer: (now: Date) => SourceLookup) => () =>
     rail: { ...createFakeRail({ clock, ids }), getSourceState: () => Promise.resolve(answer(clock.now())) },
   }).refresh(w.admin, keyed(w.admin, REFRESH_OPERATION), w.source, CORRELATION);
 
+/** The world's organisation frozen through its use case by its admin, with `choice`. */
+const frozen = (w: World, choice: PendingChoice) =>
+  createOrganizationChanges(services()).freeze(w.admin, keyed(w.admin, FREEZE_OPERATION), choice, CORRELATION);
+
 /** The world's first supplier suspended through its use case, with `choice`. */
 const supplierSuspended = (w: World, choice: PendingChoice) =>
   createSupplierChanges(services()).suspend(
@@ -303,6 +313,12 @@ async function payeeChanging(w: World): Promise<Press> {
  * the same source, stands.
  */
 const BRAKES = {
+  'the organisation frozen to cancel (D1)': {
+    cause: 'ORG_FROZEN',
+    subject: 'organization',
+    spares: false,
+    ready: (w: World) => Promise.resolve<Press>(() => frozen(w, 'cancel')),
+  },
   'the agent suspended to cancel (the kill switch)': {
     cause: 'AGENT_SUSPENDED',
     subject: 'agent',
@@ -374,6 +390,7 @@ type Brake = keyof typeof BRAKES;
 
 /** The ID of what the brake stops, in the world. */
 const SUBJECT_IDS = {
+  organization: (w: World) => w.org,
   agent: (w: World) => w.agent,
   mandate: (_: World, mandateId: string) => mandateId,
   funding_source: (w: World) => w.source,
@@ -973,6 +990,156 @@ describe('reactivating a suspended supplier: a fresh start or an un-pause (decis
     await supplierSuspended(w, 'cancel');
     await job(w).run();
     expect(await reactivated(w, 'cancel')).toMatchObject({ supplier: { status: 'VERIFIED' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+});
+
+describe('freezing the organisation: the admin chooses cancel or pause; unfreezing with a passkey and a reason (D1)', () => {
+  const job = (w: World) =>
+    createRequestVoids({ list: () => Promise.resolve([w.org]), database: app, keys, ids, clock, logger: logger() });
+  const freezes = async (w: World) =>
+    (await shared.eventsAbout(w.org, w.org, 'organization')).filter(({ action }) => action === 'organization.freeze');
+  const told = (w: World) =>
+    withTenant(app, w.org, (tx) =>
+      tx
+        .selectFrom('notifications.outbox')
+        .select('kind')
+        .where('org_id', '=', w.org)
+        .where('kind', 'in', ['organization_frozen', 'organization_unfrozen'])
+        .orderBy('created_at')
+        .execute(),
+    );
+  /** The world's organisation unfrozen by its admin with `reason`, stepped up with a passkey; `confirmedWith` at the confirm. */
+  const unfrozen = async (w: World, reason: string, confirmedWith = reason, amr?: readonly string[]) => {
+    const changes = createOrganizationChanges(services());
+    const challengeId = askedFor(
+      await changes.unfreeze(w.admin, keyed(w.admin, UNFREEZE_OPERATION), reason, CORRELATION),
+    );
+    await stepUp(w.admin, challengeId, amr);
+    return changes.unfreezeConfirm(
+      w.admin,
+      keyed(w.admin, UNFREEZE_CONFIRM_OPERATION),
+      { stepUpChallengeId: challengeId, reason: confirmedWith },
+      CORRELATION,
+    );
+  };
+
+  it('pause: nothing voided, the job leaves them; unfrozen, they stand again, the reason and step-up on its event', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting, elsewhere } = await pendingOf(w, acting);
+
+    expect(await frozen(w, 'pause')).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
+    await job(w).run();
+    for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
+    expect(await freezes(w)).toMatchObject([{ details: { pendingRequests: 'pause', pendingStatementVersion: 1 } }]);
+
+    expect(await unfrozen(w, 'All clear')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    await job(w).run();
+    for (const request of [approved, waiting, elsewhere]) expect(await statusOf(w, request.id)).toBe(request.status);
+    const unfreeze = (await shared.eventsAbout(w.org, w.org, 'organization')).at(-1);
+    expect(unfreeze).toMatchObject({ action: 'organization.unfreeze', details: { reason: 'All clear' } });
+    expect(unfreeze?.details).toHaveProperty('stepUpChallengeId');
+    expect(await told(w)).toEqual([{ kind: 'organization_frozen' }, { kind: 'organization_unfrozen' }]);
+  });
+
+  it('a pause made a cancel voids them; a cancel can’t be made a pause; pressed twice tells no one twice', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    await frozen(w, 'pause');
+
+    expect(await frozen(w, 'cancel')).toMatchObject({ outcome: 'changed', organization: { status: 'FROZEN' } });
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+    expect((await freezes(w)).map(({ details }) => details.pendingRequests)).toEqual(['pause', 'cancel']);
+    expect(await frozen(w, 'pause')).toEqual({ outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_CANCELLED' });
+    expect(await frozen(w, 'cancel')).toMatchObject({ outcome: 'changed' });
+    expect(await told(w)).toEqual([{ kind: 'organization_frozen' }]);
+  });
+
+  it('refuses an approver: FORBIDDEN, neither frozen nor unfrozen (any admin, and only an admin)', async () => {
+    const { w } = await ready();
+    const approver = await shared.member(w.org, 'approver');
+    const changes = createOrganizationChanges(services());
+    const forbidden = { outcome: 'refused', status: 403, code: 'FORBIDDEN' };
+
+    expect(await changes.freeze(approver, keyed(approver, FREEZE_OPERATION), 'pause', CORRELATION)).toEqual(forbidden);
+    expect(await freezes(w)).toEqual([]);
+    await frozen(w, 'pause');
+    expect(await changes.unfreeze(approver, keyed(approver, UNFREEZE_OPERATION), 'All clear', CORRELATION)).toEqual(
+      forbidden,
+    );
+  });
+
+  it('refuses an unfreeze of an organisation not frozen: ORG_NOT_FROZEN', async () => {
+    const { w } = await ready();
+
+    expect(
+      await createOrganizationChanges(services()).unfreeze(
+        w.admin,
+        keyed(w.admin, UNFREEZE_OPERATION),
+        'All clear',
+        CORRELATION,
+      ),
+    ).toEqual({ outcome: 'refused', status: 409, code: 'ORG_NOT_FROZEN' });
+  });
+
+  it('refuses a step-up signed in with an app code: STEP_UP_FAILED (a passkey, SEC-HA-12)', async () => {
+    const { w } = await ready();
+    await frozen(w, 'pause');
+
+    expect(await unfrozen(w, 'All clear', 'All clear', ['pwd', 'otp', 'mfa'])).toMatchObject({
+      outcome: 'refused',
+      code: 'STEP_UP_FAILED',
+    });
+  });
+
+  it('refuses a confirm with another reason than the step-up was asked for: STEP_UP_FAILED, still frozen', async () => {
+    const { w } = await ready();
+    await frozen(w, 'pause');
+
+    expect(await unfrozen(w, 'All clear', 'Something else')).toMatchObject({
+      outcome: 'refused',
+      code: 'STEP_UP_FAILED',
+    });
+  });
+
+  it('a freeze to cancel with more left than one batch: the unfreeze refused PENDING_REQUESTS_TOO_MANY, still frozen; once the job ends them, it goes through', async () => {
+    const { w, acting } = await ready();
+    // 41: the freeze's batch of 20 voids, and 21 are left, past the unfreeze's own.
+    const many = [];
+    for (let each = 0; each < 41; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await frozen(w, 'cancel');
+    const changes = createOrganizationChanges(services());
+    const tooMany = { outcome: 'refused', status: 409, code: 'PENDING_REQUESTS_TOO_MANY' };
+
+    expect(await changes.unfreeze(w.admin, keyed(w.admin, UNFREEZE_OPERATION), 'All clear', CORRELATION)).toEqual(
+      tooMany,
+    );
+    expect(await freezes(w)).toHaveLength(1);
+    await job(w).run();
+    expect(await unfrozen(w, 'All clear')).toMatchObject({ organization: { status: 'ACTIVE' } });
+    for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
+  }, 60_000);
+
+  it('a freeze to cancel past the batch: the unfreeze voids those left, before its event', async () => {
+    const { w, acting } = await ready();
+    const many = [];
+    for (let each = 0; each < 21; each += 1) many.push(await ask(acting, w, { amount: AED(1_000n) }));
+    await frozen(w, 'cancel');
+    expect(
+      (await Promise.all(many.map(({ id }) => statusOf(w, id)))).filter((status) => status === 'DENIED'),
+    ).toHaveLength(20);
+    const before = await newestSeq(w, 'organization', w.org);
+
+    expect(await unfrozen(w, 'All clear')).toMatchObject({ organization: { status: 'ACTIVE' } });
+
+    const left = many.at(-1);
+    await voidedBefore(
+      w,
+      left === undefined ? [] : [left],
+      'ORG_FROZEN',
+      await firstSeqAfter(w, 'organization', w.org, before),
+    );
     for (const request of many) expect(await statusOf(w, request.id)).toBe('DENIED');
   });
 });

@@ -1,14 +1,14 @@
 // Why a pending spend request is void (PRD §4.2, §11; BR-09, BR-11; Phase 3
-// C1; partner decisions 4 and 7): the authority it was decided under no
-// longer stands. Its agent suspended, its mandate no longer in force or
+// C1; partner decisions 4, 7 and 10): the authority it was decided under no
+// longer stands. Its organisation frozen, its agent suspended, its mandate no longer in force or
 // superseded (a new version accepted), its source unable to fund, or its
 // supplier no longer verified or its details changed (a new version). Not the
 // limits or the policies: an approval weighs those again (B4b), and a request
 // already approved keeps its place under them.
 //
-// A suspension is the suspender's choice (decision 7): one that cancels voids
-// as any stop does; one that pauses voids nothing, its requests standing
-// again on resume. The bank's own suspension of a source (its availability
+// A suspension is the suspender's choice (decision 7), and so is a freeze
+// (decision 10, D1): one that cancels voids as any stop does; one that pauses
+// voids nothing, its requests standing again on resume or unfreeze. The bank's own suspension of a source (its availability
 // SUSPENDED) pauses, by the same decision: nobody on the team chose it.
 // Consent the bank ended (revoked, expired, consumed or rejected: its
 // availability UNAVAILABLE) or past its end, a revoke, an expiry, a
@@ -36,11 +36,12 @@ export type PendingChoice = (typeof PENDING_CHOICES)[number];
 export const isPendingChoice = (value: unknown): value is PendingChoice =>
   (PENDING_CHOICES as readonly unknown[]).includes(value);
 
-/** What a request's authority is made of, each of which may be suspended with its requests paused. */
-export type Pausable = 'agent' | 'mandate' | 'source' | 'supplier';
+/** What a request's authority is made of, each of which may be stopped with its requests paused. */
+export type Pausable = 'organization' | 'agent' | 'mandate' | 'source' | 'supplier';
 
 /** The statuses each may be stopped in with its requests paused: a supplier unverified by a payee registration too. */
 export const PAUSED_IN = {
+  organization: ['FROZEN'],
   agent: ['SUSPENDED'],
   mandate: ['SUSPENDED'],
   source: ['SUSPENDED'],
@@ -56,12 +57,13 @@ export interface DecidedUnder {
 
 /** The authority behind it as it now stands, each read through its signed state: none for one not found. */
 export interface AuthorityNow {
+  readonly organizationStatus: string;
   readonly agentStatus: string;
   readonly mandate: { readonly status: string; readonly currentVersionId: string | null } | null;
   /** Its own status, the bank's word on it (its availability), and whether its consent has run out. */
   readonly source: { readonly status: string; readonly availability: string; readonly consentPast: boolean };
   readonly supplier: { readonly status: string; readonly currentVersionId: string } | null;
-  /** Those stopped with their requests paused, as the suspension (or a supplier's unverify) in force chose. */
+  /** Those stopped with their requests paused, as the freeze, suspension (or a supplier's unverify) in force chose. */
   readonly paused: ReadonlySet<Pausable>;
 }
 
@@ -71,6 +73,7 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly R
   const stopped = (status: string, standing: string, which: Pausable) =>
     status !== standing && !((PAUSED_IN[which] as readonly string[]).includes(status) && now.paused.has(which));
   const causes: ReasonCode[] = [];
+  if (stopped(now.organizationStatus, 'ACTIVE', 'organization')) causes.push('ORG_FROZEN');
   if (stopped(now.agentStatus, 'ACTIVE', 'agent')) causes.push('AGENT_SUSPENDED');
   const { mandate, source, supplier } = now;
   if (

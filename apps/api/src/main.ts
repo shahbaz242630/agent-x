@@ -123,6 +123,7 @@ import { IDP_EVENTS_EVERY_MS, idpEventCopierFrom } from './idp-events.ts';
 import { NOTICES_EVERY_MS, noticeSenderFrom } from './notices.ts';
 import { buildServer } from './server.ts';
 import { recordStart } from './start-record.ts';
+import { createOrganizationChanges } from './organization-changes.ts';
 import { createSupplierChanges } from './supplier-changes.ts';
 import { createSupplierDetailsChanges } from './supplier-details.ts';
 import { createSupplierPayeeChanges } from './supplier-payee-changes.ts';
@@ -599,6 +600,15 @@ export async function runApi(host: ApiProcess, options: RunOptions): Promise<Fas
     }),
     supplierRegistry: createSupplierRegistry({ database, keys, ids: uuidV7Ids, clock: systemClock, logger }),
     supplierChanges: createSupplierChanges({
+      database,
+      keys,
+      ids: uuidV7Ids,
+      clock: systemClock,
+      challenges,
+      outbox,
+      logger,
+    }),
+    organizationChanges: createOrganizationChanges({
       database,
       keys,
       ids: uuidV7Ids,

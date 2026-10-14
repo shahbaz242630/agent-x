@@ -84,6 +84,8 @@ import type { FundingSourceLinks } from './funding-source-links.ts';
 import type { FundingSourceReads } from './funding-source-reads.ts';
 import { registerFakeBank } from './fake-bank.ts';
 import { registerFundingSources } from './funding-sources.ts';
+import type { OrganizationChanges } from './organization-changes.ts';
+import { registerOrganization } from './organization.ts';
 import type { SupplierChanges } from './supplier-changes.ts';
 import type { SupplierDetailsChanges } from './supplier-details.ts';
 import type { SupplierPayeeChanges } from './supplier-payee-changes.ts';
@@ -178,6 +180,8 @@ export interface ServerOptions {
   readonly supplierRegistry?: SupplierRegistry | undefined;
   /** Suspending and reactivating suppliers (supplier-changes.ts); without it, no one reaches those routes. */
   readonly supplierChanges?: SupplierChanges | undefined;
+  /** Freezing and unfreezing the organisation (organization-changes.ts); without it, no one reaches those routes. */
+  readonly organizationChanges?: OrganizationChanges | undefined;
   /** Registering suppliers' bank details with the partner (supplier-payees.ts); without it, no one reaches those routes. */
   readonly supplierPayees?: SupplierPayees | undefined;
   /** Confirming or withdrawing a supplier's payee change waiting (supplier-payee-changes.ts); without it, no one reaches those routes. */
@@ -339,6 +343,7 @@ export async function buildServer(options: ServerOptions): Promise<FastifyInstan
   registerMembers(app, options.listMembers);
   registerMemberChanges(app, options.membershipChanges);
   registerIntegrityHold(app, { investigations: options.holdInvestigations, clearings: options.holdClearings });
+  registerOrganization(app, { changes: options.organizationChanges });
   registerRegisteredContacts(app, { listContacts: options.listContacts, changes: options.contactChanges });
   registerFactorResets(app, { changes: options.resetChanges, confirmations: options.contactConfirmations });
   registerAgentSelf(app, { mandates: options.agentMandates });

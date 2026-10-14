@@ -1,23 +1,24 @@
 // Pending spend requests voided once their authority no longer stands (PRD
 // §4.2, §11; BR-09, BR-11; ADR-006 §10; Phase 3 C1): the API's job, on a
 // timer of its own, denying each request waiting, approved or ready whose
-// agent is suspended, whose mandate is no longer in force or superseded,
+// organisation is frozen, whose agent is suspended, whose mandate is no longer in force or superseded,
 // whose source can't fund, or whose supplier is no longer verified or has
 // new details (voidCauses), a suspension only when it was chosen to cancel
 // (decision 7: one that pauses, or the bank's own, voids nothing; consent the
-// bank ended always does), and a supplier's unverify only when its payee
+// bank ended always does), a freeze only when it was chosen to cancel
+// (decision 10), and a supplier's unverify only when its payee
 // registration was chosen to cancel (decision 8), recorded as the API's with its causes, its
 // reservation and order claim released in the same transaction. The brakes
 // void their own requests as they stop (C2); this finds the rest, and any a
 // brake left past its batch.
 //
 // For each organisation the directory lists, the candidates are found by
-// their rows (pending, 0046's index, joined to their agent's, mandate's,
-// source's and supplier's rows), a page at a time, each page after the last,
+// their rows (pending, 0046's index, joined to their organisation's, agent's,
+// mandate's, source's and supplier's rows), a page at a time, each page after the last,
 // so requests refused on every run (tampered with) can't fill a page and keep
 // the rest; then each in a transaction of its own, in ADR-006's lock order:
-// its agent, mandate, source and supplier read through their signed states
-// (levels 3–6, share), then the request itself (`voidRequest`: 8, 11, 12),
+// its organisation, agent, mandate, source and supplier read through their
+// signed states (levels 2–6, share), then the request itself (`voidRequest`: 8, 11, 12),
 // judged by what those say, and by the suspension in force of each one
 // suspended (pausedOf). A row that only looks stopped is left standing.
 //
@@ -42,6 +43,7 @@ import {
 import type { DirectoryTables } from '@agentx/core/modules/directory';
 import { type FundingSourcesTables, sourceOf } from '@agentx/core/modules/funding-sources';
 import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
+import { ORGANIZATIONS, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
 import {
   type AuthorityNow,
@@ -73,7 +75,8 @@ type VoidTables = SpendRequestsTables &
   DirectoryTables &
   MandatesTables &
   FundingSourcesTables &
-  SuppliersTables;
+  SuppliersTables &
+  OrganizationsTables;
 type VoidTx = DatabaseTransaction<VoidTables>;
 
 /**
@@ -99,6 +102,10 @@ async function stoppedByTheirRows(
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- IDs alone, each judged through its signed states before anything moves
     .selectFrom('spend_requests.requests as r')
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
+    .innerJoin('organizations.organizations as o', (join) =>
+      join.onRef('o.org_id', '=', 'r.org_id').onRef('o.id', '=', 'r.org_id'),
+    )
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
     .innerJoin('agents.agents as a', (join) => join.onRef('a.org_id', '=', 'r.org_id').onRef('a.id', '=', 'r.agent_id'))
     // eslint-disable-next-line agentx/authority-tables-through-signed-state -- a candidate's row alone, judged through its signed state before anything moves
     .innerJoin('mandates.mandates as m', (join) =>
@@ -119,7 +126,7 @@ async function stoppedByTheirRows(
     .where((where) => {
       /** Not `standing`, unless stopped by a stop (PAUSE_EVENTS) whose newest event, unverified, paused its requests. */
       const looksStopped = (
-        status: 'a.status' | 'm.status' | 's.status' | 'p.status',
+        status: 'o.status' | 'a.status' | 'm.status' | 's.status' | 'p.status',
         standing: string,
         which: Pausable,
         idColumn: string,
@@ -136,6 +143,7 @@ async function stoppedByTheirRows(
           ),
         ]);
       return where.or([
+        looksStopped('o.status', 'ACTIVE', 'organization', 'o.id'),
         looksStopped('a.status', 'ACTIVE', 'agent', 'a.id'),
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
@@ -211,6 +219,7 @@ export function createRequestVoids({
     const { orgId } = key;
     const named = await namedBy(tx, orgId, key.id);
     const now = clock.now();
+    const organization = await states.verifiedState(tx, ORGANIZATIONS, { orgId, id: orgId }, 'share');
     const agent = await agentOf(tx, states, { orgId, id: named.agentId }, 'share');
     const mandate = await mandateOf(tx, states, { orgId, id: named.mandateId }, 'share');
     const source = await sourceOf(tx, states, { orgId, id: named.fundingSourceId }, 'share');
@@ -218,6 +227,7 @@ export function createRequestVoids({
     // Nothing is judged on what can't be believed (each read tampered with has raised its own alarm) or isn't
     // there (each held by the request's foreign keys, 0039, and never deleted): the run logs it and goes on.
     if (
+      organization.outcome !== 'verified' ||
       agent.outcome !== 'found' ||
       mandate.outcome !== 'found' ||
       source.outcome !== 'found' ||
@@ -225,8 +235,10 @@ export function createRequestVoids({
     ) {
       throw new Error(`What a pending request names can't be believed: ${key.id}`);
     }
+    const organizationStatus = String(organization.fields.get('status'));
     const stopped = (
       [
+        ['organization', { id: orgId, status: organizationStatus }],
         ['agent', agent.agent],
         ['mandate', mandate.mandate],
         ['source', source.source],
@@ -234,6 +246,7 @@ export function createRequestVoids({
       ] as const
     ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
     const authority: AuthorityNow = {
+      organizationStatus,
       agentStatus: agent.agent.status,
       mandate: mandate.mandate,
       source: {

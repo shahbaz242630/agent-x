@@ -124,7 +124,8 @@ export const REASON_CODES = {
   ORGANIZATION_INVALID:
     'This address acts in one organisation, so the request must name it in an AgentX-Organization header, by its ID. This one named none, or not an ID, so it is refused.',
   ORG_FROZEN:
-    'The organisation is frozen, so no new request is accepted. This refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
+    'The organisation is frozen: while it is, no request is decided or approved, and a freeze chosen to cancel ends those pending. A refusal is temporary: the same idempotency key can be used again once the freeze is lifted.',
+  ORG_NOT_FROZEN: 'The organisation is not frozen, so there is nothing to unfreeze. Nothing was changed.',
   ORIGIN_REFUSED:
     "A browser request that changes something must come from Agent X's own web address, and this one didn't, so it is refused.",
   OWN_MEMBERSHIP:
@@ -143,9 +144,9 @@ export const REASON_CODES = {
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
   PENDING_REQUESTS_CANCELLED:
-    "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed.",
+    "It is already suspended or frozen with its pending requests cancelled, which can't be undone, so they can't be paused or kept now. Nothing was changed.",
   PENDING_REQUESTS_TOO_MANY:
-    'More requests to this supplier are pending than a fresh start cancels at once, so it was not reactivated. Suspend it again choosing cancel if it isn’t already, wait a few minutes while they are cancelled, then reactivate it. Nothing was changed.',
+    'More pending requests are left to cancel than one move cancels at once, so nothing was changed. If its suspension or freeze doesn’t cancel them yet, suspend or freeze it again choosing cancel; wait a few minutes while they are cancelled, then try again.',
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:

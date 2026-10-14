@@ -13,7 +13,8 @@
 // revoked) is REQUEST_CHANGED (SEC-LIM-10), while routine changes (a looser
 // policy, its key rotated out) leave it approvable; past its 72 hours REQUEST_EXPIRED, and then
 // expired, its holdings released (SEC-LIM-12); a frozen organisation
-// ORG_FROZEN (decision 3). A developer or viewer is FORBIDDEN, and a role
+// ORG_FROZEN (decision 3), one unfrozen past the app INTEGRITY_FAILED and held
+// (SEC-DB-08). A developer or viewer is FORBIDDEN, and a role
 // raised past the app INTEGRITY_FAILED (SEC-DB-06). Approved twice, rejected
 // or cancelled is REQUEST_NOT_WAITING; another organisation's or none is
 // NOT_FOUND; a request tampered with, or holdings changed past the app,
@@ -383,6 +384,20 @@ describe('approving a spend request waiting for approval (B4b)', () => {
 
     expect(await confirming(w.admin, waiting.id, challengeId)).toEqual(refused(409, 'ORG_FROZEN'));
     expect(await asking(w.admin, waiting.id)).toEqual(refused(409, 'ORG_FROZEN'));
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
+
+  it('refuses it on an organisation unfrozen past the app as INTEGRITY_FAILED, its hold set (SEC-DB-08, D1)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    await freeze(w);
+    await database
+      .as('admin')
+      .query(`update organizations.organizations set status = 'ACTIVE' where org_id = $1`, [w.org]);
+
+    expect(await asking(w.admin, waiting.id)).toEqual(refused(503, 'INTEGRITY_FAILED'));
+    const hold = await signed(w, (tx, states) => states.holdRecord(tx, w.org));
+    expect(hold).toMatchObject({ outcome: 'held' });
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
   });
 
