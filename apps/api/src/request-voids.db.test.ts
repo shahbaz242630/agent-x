@@ -222,7 +222,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       ]);
       expect(await holdingsOf(w, waiting.id)).toMatchObject({ released: false });
       expect(await spentOf(w, acting)).toBe(held);
-      // Left out by the job's own query: not judged, and found standing, every run.
+      // Left out by the job's own query, or judged and found standing: either way nothing moves.
       expect(lines('request_void.voided')).toEqual([]);
       expect(lines('request_void.failed')).toEqual([]);
 
@@ -346,6 +346,16 @@ describe('pending spend requests voided once their authority no longer stands (C
       action: 'spend_request.voided',
       details: { causes: 'MANDATE_NOT_IN_FORCE' },
     });
+  });
+
+  it('voids one the moment its source’s bank consent ends, not a moment later: SOURCE_NOT_USABLE', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    clock.advanceBy(w.state.consentExpiresAt.getTime() - clock.now().getTime());
+
+    await voidsOf(only(w)).run();
+
+    expect(await statusOf(w, waiting.id)).toBe('DENIED');
   });
 
   it('voids one whose source’s bank consent has passed: SOURCE_NOT_USABLE', async () => {

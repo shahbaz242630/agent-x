@@ -132,8 +132,7 @@ async function stoppedByTheirRows(
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
         looksStopped('s.status', 'ACTIVE', 'source', 's.id'),
-        // The bank's suspension pauses (decision 7); any other word of its but ACTIVE ends the consent.
-        where('s.availability', 'not in', ['ACTIVE', 'SUSPENDED']),
+        // The bank's availability needs no filter: its end (UNAVAILABLE) ends the source too (updateFromPartner).
         where('s.consent_expires_at', '<=', now),
         looksStopped('p.status', 'VERIFIED', 'supplier', 'p.id'),
         where('p.current_version_id', 'is distinct from', where.ref('r.supplier_version_id')),
