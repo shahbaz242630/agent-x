@@ -22,7 +22,7 @@ import {
   cancelRequest,
   checkHoldings,
   expireRequest,
-  rejectionOf,
+  denialOf,
   requestOf,
   SPEND_REQUESTS,
   type SpendRequestRecord,
@@ -270,7 +270,7 @@ describe('rejecting a spend request waiting for approval (B4a)', () => {
     }
 
     const read = await withSignedStates(app, w.org, quiet(), (tx, states) =>
-      rejectionOf(tx, states, { orgId: w.org, id: waiting.id }),
+      denialOf(tx, states, { orgId: w.org, id: waiting.id }),
     );
     expect(read).toEqual({ outcome: 'tampered' });
     expect(await confirming(w.admin, waiting.id, challengeId, REASON, key)).toEqual(refused(503, 'INTEGRITY_FAILED'));
@@ -364,16 +364,16 @@ describe('the agent reads its own request after a reject (B4c)', () => {
     expect(await reads().ofAgent(w.org, acting.agentId, waiting.id, CORRELATION)).toMatchObject({
       outcome: 'found',
       request: { id: waiting.id, status: 'DENIED' },
-      rejected: true,
+      endedBecause: ['APPROVAL_REJECTED'],
     });
     expect(await reads().ofAgent(w.org, acting.agentId, denied.id, CORRELATION)).toMatchObject({
       outcome: 'found',
       request: { status: 'DENIED' },
-      rejected: false,
+      endedBecause: null,
     });
     expect(await reads().ofAgent(w.org, acting.agentId, allowed.id, CORRELATION)).toMatchObject({
       request: { status: 'APPROVED' },
-      rejected: false,
+      endedBecause: null,
     });
   });
 

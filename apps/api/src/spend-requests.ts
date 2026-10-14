@@ -29,7 +29,8 @@
 // oldest first, and `GET /v1/spend-requests/{id}` in full. Each names the
 // agent and supplier by ID and name, and only the full one carries the
 // agent's own words, apart and labelled as its (SEC-AG-08, -10), and, for
-// one rejected, the reject: who, when and why.
+// one rejected, the reject: who, when and why; for one voided, the void:
+// when, and its causes (C2b).
 //
 // Rejecting one waiting for approval (Phase 3 B4a; partner decisions 1, 3, 6;
 // spend-request-rejects.ts): an admin or finance approver asks at
@@ -49,7 +50,8 @@
 // The agent reads one of its own (B4c, partner S106) at
 // `GET /v1/agent/spend-requests/{id}`, with `requests:read`: as it stands
 // now, so it learns of an approval, a reject, a cancel or an expiry. One a
-// person rejected shows the one reason APPROVAL_REJECTED, never their words.
+// person rejected shows the one reason APPROVAL_REJECTED, never their words;
+// one voided shows REQUEST_VOIDED, then each cause (C2b).
 import { DECISIONS, reasonsShownToAgent } from '@agentx/core/modules/policies';
 import {
   askedText,
@@ -196,7 +198,7 @@ const AGENT_SHOW_SCHEMA = {
   params: SPEND_REQUEST_ID,
   response: {
     200: SPEND_REQUEST_SHOWN.describe(
-      'The request now: still waiting, approved, or ended (DENIED, EXPIRED, CANCELLED). One a person rejected is DENIED with the reason APPROVAL_REJECTED alone.',
+      'The request now: still waiting, approved, or ended (DENIED, EXPIRED, CANCELLED). One a person rejected is DENIED with the reason APPROVAL_REJECTED alone. One voided (what it was decided under stopped before it was paid) is DENIED with REQUEST_VOIDED, then each cause.',
     ),
   },
 };
@@ -257,6 +259,17 @@ const SPEND_REQUEST_DETAILS = SPEND_REQUEST_LISTED.extend({
     })
     .nullable()
     .describe('For one a person rejected: who, when and why. Otherwise null.'),
+  voiding: z
+    .object({
+      at: z.iso.datetime().describe('When, as its signed record says.'),
+      reasons: REASONS.describe(
+        'Why: what it was decided under that stopped (its agent, mandate, funding source or supplier).',
+      ),
+    })
+    .nullable()
+    .describe(
+      'For one voided, its holdings released, because what it was decided under stopped before it was paid: when and why. Otherwise null.',
+    ),
 }).register(API_SCHEMAS, { id: 'SpendRequestDetails', description: 'A spend request in full, as the team sees it.' });
 
 const LIST_SCHEMA = {
@@ -429,11 +442,12 @@ export function registerSpendRequests(
       const found = await need(reads).show(orgId, request.params.id, request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       const { purpose, orderReference } = found.shown.request;
-      const { rejection } = found;
+      const { rejection, voiding } = found;
       return {
         ...listed(found.shown),
         agentWrote: { purpose, orderReference },
         rejection: rejection === null ? null : { ...rejection, at: rejection.at.toISOString() },
+        voiding: voiding === null ? null : { at: voiding.at.toISOString(), reasons: reasonsOf(voiding.causes) },
       };
     },
   );
@@ -577,8 +591,8 @@ export function registerSpendRequests(
       const found = await need(reads).ofAgent(orgId, agentId, request.params.id, request.id);
       if (found.outcome === 'refused') return answerRefusal(found, request, reply);
       const shownToAgent = shown(found.request, 'agent');
-      // A person's reject, and nothing of why: the reasons the decision gave no longer explain where it stands.
-      return found.rejected ? { ...shownToAgent, reasons: reasonsOf(['APPROVAL_REJECTED']) } : shownToAgent;
+      // Ended by a person or a brake: the reasons the decision gave no longer explain where it stands.
+      return found.endedBecause === null ? shownToAgent : { ...shownToAgent, reasons: reasonsOf(found.endedBecause) };
     },
   );
 

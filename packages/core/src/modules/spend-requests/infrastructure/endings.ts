@@ -41,7 +41,7 @@ import {
   lockReservationsOf,
   releaseReservationsOf,
 } from '../../limit-reservations/index.ts';
-import { DAY_MS, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
+import { DAY_MS, isReasonCode, movedAsRead, type ReasonCode } from '../../../shared-kernel/index.ts';
 import { SPEND_REQUEST } from '../domain/spend-request.ts';
 import { type AuthorityNow, PENDING_STATUSES, voidCauses } from '../domain/voids.ts';
 import { decidedAgainst, requestOf, type SpendRequestRecord } from './decisions.ts';
@@ -67,6 +67,10 @@ export const waitedOut = (decidedAt: Date, now: Date): boolean =>
 const MOST_AGENT_CANCELS_A_DAY = 10;
 
 const ACTOR = { type: 'system', id: 'api' } as const;
+
+const REJECTED = 'spend_request.rejected';
+/** A request's void, by the job or a brake: the API's, with its causes. */
+const VOIDED = 'spend_request.voided';
 
 /**
  * What came of ending a request: ended, its holdings released; already moved
@@ -233,7 +237,7 @@ export async function voidRequest(
   if (causes.length === 0) return { outcome: 'standing' };
   await endHolding(tx, states, keys, key, 'deny', now, {
     actor: ACTOR,
-    action: 'spend_request.voided',
+    action: VOIDED,
     details: { causes: causes.join(',') },
   });
   return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
@@ -296,14 +300,12 @@ export async function voidPendingOf(
   for (const id of pending) {
     await endHolding(tx, states, keys, { orgId, id }, 'deny', now, {
       actor: ACTOR,
-      action: 'spend_request.voided',
+      action: VOIDED,
       details: { causes: cause },
     });
   }
   return pending.length;
 }
-
-const REJECTED = 'spend_request.rejected';
 
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
 export interface Rejection {
@@ -342,30 +344,43 @@ export interface RejectionShown {
   readonly reason: string;
 }
 
+/** How a request was voided, as its signed event says: when, and why (C1, C2). */
+export interface VoidingShown {
+  readonly at: Date;
+  readonly causes: readonly ReasonCode[];
+}
+
 /**
- * The request's reject, from its event in the log, each believed only whole
- * (historyOf): none for one never rejected (a DENIED request is final, so
- * at most one); tampered with, the alarm raised.
+ * Why a DENIED request ended after its decision, from its event in the log,
+ * each believed only whole (historyOf): a person's reject, or a void; none
+ * for one denied by its decision (a DENIED request is final, so at most one
+ * of them); tampered with, the alarm raised.
  */
-export async function rejectionOf(
+export async function denialOf(
   tx: Transaction<AuditTables>,
   states: SignedStates,
   key: { readonly orgId: string; readonly id: string },
 ): Promise<
   | { readonly outcome: 'rejected'; readonly rejection: RejectionShown }
+  | { readonly outcome: 'voided'; readonly voiding: VoidingShown }
   | { readonly outcome: 'none' }
   | { readonly outcome: 'tampered' }
 > {
   const history = await states.historyOf(tx, key.orgId, {
     subjectTypes: [SPEND_REQUESTS.subject],
     subjectId: key.id,
-    actions: [REJECTED],
+    actions: [REJECTED, VOIDED],
     limit: 1,
   });
   if (history.outcome !== 'read') return { outcome: 'tampered' };
   const [found] = history.events;
   if (found === undefined) return { outcome: 'none' };
-  const { actor, details } = found.event;
+  const { actor, action, details } = found.event;
+  if (action === VOIDED) {
+    // Only voidRequest and voidPendingOf record it, whole under the chain's MAC: registered codes, comma-joined.
+    const causes = String(details.causes).split(',').filter(isReasonCode);
+    return { outcome: 'voided', voiding: { at: found.recordedAt, causes } };
+  }
   // Only rejectRequest records it, whole under the chain's MAC: a person's, with their reason as text.
   return {
     outcome: 'rejected',
