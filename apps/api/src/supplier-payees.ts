@@ -65,13 +65,15 @@
 // default, kept on the registration's events (suspensions.ts): on its start,
 // or on a further event when a start carrying on with one open chooses
 // otherwise; the newest holds. When a check (or a pass-through's Tx 2) keeps
-// a registered payee and so unverifies a VERIFIED supplier, cancel DENIES its
-// pending requests first, in the same transaction, before anything is signed
-// (voidPendingOf), the answer checked before (registeredFields); pause leaves
-// them held. Either way the unverify keeps the choice, so the request-voids
-// job takes any cancelled past the batch and leaves the paused while it is
-// UNVERIFIED (voidCauses). A supplier not VERIFIED isn't unverified, so the
-// choice changes nothing: its change confirmed cancels them (decision 7). A
+// a registered payee, cancel DENIES the supplier's pending requests first, in
+// the same transaction, before anything is signed (voidPendingOf), the
+// answer checked before (registeredFields), whatever the supplier's status
+// (C3c, partner S111); pause leaves them held. A VERIFIED supplier is
+// unverified, the unverify keeping the choice, so the request-voids job takes
+// any cancelled past the batch and leaves the paused while it is UNVERIFIED
+// (voidCauses). One suspended or unverified already with its requests paused
+// has the cancel recorded over its pause (payeeCancelOverPause), for the job
+// the same way; a pause there leaves its stop's own choice as it is. A
 // registration started before the choice existed names none and cancels.
 //
 // Lock order (ADR-006 §6): the idempotency key, the payee-change lock (a
@@ -133,7 +135,7 @@ import {
   type SupplierTables,
   type SupplierTx,
 } from './supplier-work.ts';
-import { choiceIn, payeeChoiceDetails } from './suspensions.ts';
+import { choiceIn, payeeCancelOverPause, payeeChoiceDetails } from './suspensions.ts';
 
 /** Starting a payee registration through the partner's form. */
 export const PAYEE_START_OPERATION = 'suppliers.payee.start';
@@ -335,16 +337,26 @@ export function createSupplierPayees({
     let read = taken ? undefined : await work.supplierIn(tx, states, supplierKey, 'change');
     // VERIFIED only on the version verified with nothing waiting (0032): a payee change is verified again (E3).
     const unverifies = read?.supplier.status === 'VERIFIED';
-    const choice = unverifies ? await choiceOf(tx, states, orgId, found.registration.id) : undefined;
-    // Decision 8, only when this unverifies it (as the admin was told): cancel DENIES its pending requests first,
-    // before anything is signed; the unverify keeps the choice, so the request-voids job takes any past the batch.
+    const choice = read === undefined ? undefined : await choiceOf(tx, states, orgId, found.registration.id);
+    // Decision 8: cancel DENIES its pending requests first, before anything is signed, whatever its status (C3c).
     if (choice === 'cancel') {
       await voidPendingOf(tx, states, keys, orgId, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now());
     }
     const registration = await recordRegistered(tx, states, registrationKey, found, { beneficiary, payee, actor });
-    if (read === undefined) return;
-    if (choice !== undefined) {
+    if (read === undefined || choice === undefined) return;
+    // The unverify, or a cancel over a pause already in force, keeps the choice: the job takes any past the batch.
+    if (unverifies) {
       await unverifySupplier(tx, states, supplierKey, read, { actor, details: payeeChoiceDetails(choice) });
+      read = await work.supplierIn(tx, states, supplierKey, 'change');
+    } else if (
+      choice === 'cancel' &&
+      (await payeeCancelOverPause(
+        tx,
+        states,
+        { key: supplierKey, state: read.state, status: read.supplier.status },
+        actor,
+      ))
+    ) {
       read = await work.supplierIn(tx, states, supplierKey, 'change');
     }
     const current = await work.versionIn(tx, states, orgId, supplierId, read.supplier.currentVersionId);
