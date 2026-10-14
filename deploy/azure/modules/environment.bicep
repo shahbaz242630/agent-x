@@ -382,7 +382,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
   kind: 'LogAlert'
   properties: {
     displayName: 'Integrity jobs: a run failed'
-    description: 'SEV-2. The holdings check, the hold-history check, mandate expiry or request expiry could not read the organisation list and skipped a whole run: nothing was checked or expired until a run passes. Runbook: Incident-Response-Playbook.md section O.'
+    description: 'SEV-2. The holdings check, the hold-history check, mandate expiry, request expiry or request voids could not read the organisation list and skipped a whole run: nothing was checked or expired until a run passes. Runbook: Incident-Response-Playbook.md section O.'
     severity: 2
     enabled: true
     scopes: [workspaceId]
@@ -393,7 +393,7 @@ resource integrityRunsAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' 
     criteria: {
       allOf: [
         {
-          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed") | summarize Events = count()'
+          query: 'ContainerAppConsoleLogs | where tostring(parse_json(Log).event) in ("hold_history.run_failed", "holdings_check.run_failed", "mandate_expiry.run_failed", "request_expiry.run_failed", "request_void.run_failed") | summarize Events = count()'
           timeAggregation: 'Total'
           metricMeasureColumn: 'Events'
           operator: 'GreaterThan'
