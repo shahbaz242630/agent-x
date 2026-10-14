@@ -657,6 +657,17 @@ describe('a payee registration’s choice for the supplier’s pending requests 
     await voidedBefore(w, [approved, waiting], 'SUPPLIER_CHANGED', changed);
   });
 
+  it('a stop that names no choice (one from before the choice existed) cancels: the job voids them', async () => {
+    const { w, acting } = await ready();
+    const { approved, waiting } = await pendingOf(w, acting);
+    // Suspended past the use case, as before C2a: its event names no choice.
+    await shared.STOPS['the supplier suspended'](w);
+
+    await job(w).run();
+
+    for (const request of [approved, waiting]) expect(await statusOf(w, request.id)).toBe('DENIED');
+  });
+
   it('cancel: a payee key another supplier is paid to unverifies nothing, so voids nothing', async () => {
     const { w, acting } = await ready();
     const [first, second] = w.suppliers;
