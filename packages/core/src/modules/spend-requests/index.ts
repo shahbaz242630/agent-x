@@ -59,6 +59,7 @@ export {
   type SubjectsNamed,
   type Voided,
   type VoidingShown,
+  voidEveryPendingOf,
   voidPendingOf,
   voidRequest,
   WAITS_FOR_APPROVAL_MS,

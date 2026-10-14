@@ -322,6 +322,32 @@ export async function voidPendingOf(
   return pending.length;
 }
 
+/**
+ * voidPendingOf, page after page, until a page voids nothing: for a move
+ * that leaves none for the request-voids job (a supplier's fresh start back
+ * VERIFIED, Phase 3 decision 9). Each page voids at least one more, so it
+ * ends; a request that can't be believed is left as it is, inert, as there.
+ * How many were voided.
+ */
+export async function voidEveryPendingOf(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  braked: Braked,
+  cause: ReasonCode,
+  now: Date,
+  most = MOST_VOIDED_BY_A_BRAKE,
+): Promise<number> {
+  let total = 0;
+  let voided: number;
+  do {
+    voided = await voidPendingOf(tx, states, keys, orgId, braked, cause, now, most);
+    total += voided;
+  } while (voided > 0);
+  return total;
+}
+
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
 export interface Rejection {
   readonly userId: string;

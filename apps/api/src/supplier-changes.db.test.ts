@@ -195,10 +195,16 @@ const changedDetails = (org: string, id: string, enteredBy: string) =>
 
 const suspend = (who: SessionMember, id: string, key?: string, choice: PendingChoice = 'cancel') =>
   changes.suspend(who, keyed(who, SUSPEND_OPERATION, key), id, choice, CORRELATION);
-const reactivate = (who: SessionMember, id: string) =>
-  changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), id, CORRELATION);
-const confirm = (who: SessionMember, id: string, challengeId: string) =>
-  changes.reactivateConfirm(who, keyed(who, REACTIVATE_CONFIRM_OPERATION), id, challengeId, CORRELATION);
+const reactivate = (who: SessionMember, id: string, choice: PendingChoice = 'cancel') =>
+  changes.reactivate(who, keyed(who, REACTIVATE_OPERATION), id, choice, CORRELATION);
+const confirm = (who: SessionMember, id: string, challengeId: string, choice: PendingChoice = 'cancel') =>
+  changes.reactivateConfirm(
+    who,
+    keyed(who, REACTIVATE_CONFIRM_OPERATION),
+    id,
+    { stepUpChallengeId: challengeId, pendingRequests: choice },
+    CORRELATION,
+  );
 
 /** The member signs in again for the challenge: its evidence recorded, as the step-up's return does. */
 const stepUp = (who: SessionMember, challengeId: string, amr: readonly string[] = PASSKEY) =>

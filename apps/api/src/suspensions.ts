@@ -21,13 +21,19 @@
 // question, in its own words: a verified supplier it unverifies keeps its
 // requests paused or cancels them. The pause in force for an UNVERIFIED
 // supplier is the choice on the move that unverified it, its newest
-// `supplier.unverify` or `supplier.reactivate` (which names none, so
-// cancels): an old pause never comes back after the supplier is verified
-// again. Cancel chosen for a supplier already stopped with its requests
-// paused, suspended or unverified (C3c, partner S111), under the words that
-// said so (cancelsAtOnce), is recorded over the pause as a further event of its own (`supplier.pending_requests_chosen`,
-// read wherever the pause is), the signed state unchanged, as chosenAgain
-// records a suspend's.
+// `supplier.unverify` or `supplier.reactivate`: an old pause never comes
+// back after the supplier is verified again. Cancel chosen for a supplier
+// already stopped with its requests paused, suspended or unverified (C3c,
+// partner S111), under the words that said so (cancelsAtOnce), is recorded
+// over the pause as a further event of its own
+// (`supplier.pending_requests_chosen`, read wherever the pause is), the
+// signed state unchanged, as chosenAgain records a suspend's.
+//
+// Reactivating a suspended supplier (decision 9, partner S112, C3d) asks the
+// admin too: a fresh start (cancel) or an un-pause (pause), kept on the
+// reactivation's event, so one coming back UNVERIFIED keeps its requests held
+// until it is verified again. One reactivated before the choice names none
+// and cancels.
 import { AGENTS } from '@agentx/core/modules/agents';
 import type {
   AuditActor,
@@ -66,6 +72,39 @@ const PENDING_REQUESTS = z
 
 /** A suspend's body: its choice alone. */
 export const SUSPEND_BODY = z.strictObject({ pendingRequests: PENDING_REQUESTS }).describe('The suspender’s choice.');
+
+/**
+ * The words a supplier's reactivation is confirmed with (decision 9, C3d),
+ * by version, as STATEMENTS: a fresh start cancels, an un-pause keeps them.
+ */
+const REACTIVATE_STATEMENTS = {
+  cancel:
+    'A fresh start: every request to this supplier waiting for approval, approved or ready is cancelled now and ' +
+    'the money held for it freed. This can’t be undone: the agent asks again.',
+  pause:
+    'Un-pause: its held requests stand again, at once if it comes back verified; if its details changed while it ' +
+    'was suspended, it comes back unverified and they stay held until a second person verifies it again. Requests ' +
+    'waiting for approval still expire after 72 hours. Not offered when its suspension cancelled them.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of REACTIVATE_STATEMENTS each event names: raised with any change to their words. */
+const REACTIVATE_STATEMENT_VERSION = 1;
+
+/** A supplier's reactivation: the reactivator's choice alone (decision 9). */
+export const REACTIVATE_BODY = z
+  .strictObject({
+    pendingRequests: z
+      .enum(PENDING_CHOICES)
+      .describe(
+        'What happens to the supplier’s held spend requests, confirmed by the admin reactivating; there is no ' +
+          `default. \`cancel\`: ${REACTIVATE_STATEMENTS.cancel} \`pause\`: ${REACTIVATE_STATEMENTS.pause}`,
+      ),
+  })
+  .describe('The reactivator’s choice.');
+
+/** The choice as a reactivation's event keeps it, with the statement confirmed: read for an UNVERIFIED one's pause. */
+export const reactivationChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: REACTIVATE_STATEMENT_VERSION }) as const;
 
 /** The most a body holding a choice alone may be (a suspend's, a payee start's), with room to spare. */
 export const CHOICE_BODY_LIMIT = 64;

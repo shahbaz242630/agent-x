@@ -262,7 +262,7 @@ async function withSuppliers(
     },
   };
   const change =
-    (kind: 'reactivate' | 'payeeApprove' | 'payeeWithdraw') =>
+    (kind: 'payeeApprove' | 'payeeWithdraw') =>
     (member: object, keyed: IdempotentRequest, supplierId: string): Promise<SupplierChangeWrite> => {
       asked.push({ kind, member, keyed, supplierId });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
@@ -272,9 +272,12 @@ async function withSuppliers(
       asked.push({ kind: 'suspend', member, keyed, supplierId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
-    reactivate: change('reactivate'),
-    reactivateConfirm: (member, keyed, supplierId, stepUpChallengeId) => {
-      asked.push({ kind: 'reactivateConfirm', member, keyed, supplierId, stepUpChallengeId });
+    reactivate: (member, keyed, supplierId, pendingRequests) => {
+      asked.push({ kind: 'reactivate', member, keyed, supplierId, pendingRequests });
+      return Promise.resolve(answers.change ?? { outcome: 'busy' });
+    },
+    reactivateConfirm: (member, keyed, supplierId, { stepUpChallengeId, pendingRequests }) => {
+      asked.push({ kind: 'reactivateConfirm', member, keyed, supplierId, stepUpChallengeId, pendingRequests });
       return Promise.resolve(answers.change ?? { outcome: 'busy' });
     },
   };
@@ -566,18 +569,22 @@ describe('POST /v1/suppliers/:id/reactivate, then /confirm, with a step-up (E1-2
     const asked: Asked[] = [];
     const app = await withSuppliers({ change: { outcome: 'asked', stepUpChallengeId: CHALLENGE } }, asked);
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/reactivate`));
+    const response = await app.inject(post(`/${SUPPLIER_ID}/reactivate`, { pendingRequests: 'pause' }));
 
     expect(response.statusCode).toBe(202);
     expect(response.json()).toEqual({ stepUpChallengeId: CHALLENGE });
-    expect(asked).toMatchObject([{ kind: 'reactivate', member: { ...MEMBER, sessionId: LIVE.sessionId } }]);
+    expect(asked).toMatchObject([
+      { kind: 'reactivate', member: { ...MEMBER, sessionId: LIVE.sessionId }, pendingRequests: 'pause' },
+    ]);
   });
 
   it('answers the confirm 200 with the supplier, passing the step-up', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({ change: { outcome: 'changed', ...VIEW } }, asked);
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE, pendingRequests: 'cancel' }),
+    );
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(DETAILS_ANSWERED);
@@ -588,6 +595,7 @@ describe('POST /v1/suppliers/:id/reactivate, then /confirm, with a step-up (E1-2
         keyed: { operation: 'suppliers.reactivate.confirm' },
         supplierId: SUPPLIER_ID,
         stepUpChallengeId: CHALLENGE,
+        pendingRequests: 'cancel',
       },
     ]);
   });
@@ -599,7 +607,9 @@ describe('POST /v1/suppliers/:id/reactivate, then /confirm, with a step-up (E1-2
   ] as const)('answers %i %s as the use case refuses', async (status, code) => {
     const app = await withSuppliers({ change: { outcome: 'refused', status, code } });
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE }));
+    const response = await app.inject(
+      post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE, pendingRequests: 'cancel' }),
+    );
 
     expect(response.statusCode).toBe(status);
     expect(response.json()).toMatchObject({ error: { code } });
@@ -608,22 +618,29 @@ describe('POST /v1/suppliers/:id/reactivate, then /confirm, with a step-up (E1-2
   it('answers a key reused for another request as the idempotency store says', async () => {
     const app = await withSuppliers({ change: { outcome: 'conflict' } });
 
-    expect((await app.inject(post(`/${SUPPLIER_ID}/reactivate`))).json()).toMatchObject({
+    expect((await app.inject(post(`/${SUPPLIER_ID}/reactivate`, { pendingRequests: 'cancel' }))).json()).toMatchObject({
       error: { code: 'IDEMPOTENCY_KEY_REUSED' },
     });
   });
 
-  it('refuses a confirm without a step-up’s ID, or with more, before the use case runs', async () => {
-    const asked: Asked[] = [];
-    const app = await withSuppliers({}, asked);
+  it.each([
+    ['/reactivate', {}],
+    ['/reactivate', { pendingRequests: 'resume' }],
+    ['/reactivate', { pendingRequests: 'cancel', more: 1 }],
+    ['/reactivate/confirm', {}],
+    ['/reactivate/confirm', { stepUpChallengeId: CHALLENGE }],
+    ['/reactivate/confirm', { pendingRequests: 'cancel' }],
+    ['/reactivate/confirm', { stepUpChallengeId: CHALLENGE, pendingRequests: 'cancel', more: 1 }],
+  ])(
+    'refuses %s with %j (no choice, no step-up, or more) before the use case runs (decision 9)',
+    async (path, body) => {
+      const asked: Asked[] = [];
+      const app = await withSuppliers({}, asked);
 
-    expect((await app.inject(post(`/${SUPPLIER_ID}/reactivate/confirm`, {}))).statusCode).toBe(400);
-    expect(
-      (await app.inject(post(`/${SUPPLIER_ID}/reactivate/confirm`, { stepUpChallengeId: CHALLENGE, more: 1 })))
-        .statusCode,
-    ).toBe(400);
-    expect(asked).toEqual([]);
-  });
+      expect((await app.inject(post(`/${SUPPLIER_ID}${path}`, body))).statusCode).toBe(400);
+      expect(asked).toEqual([]);
+    },
+  );
 });
 
 describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee through the partner’s form (E2-2a)', () => {
