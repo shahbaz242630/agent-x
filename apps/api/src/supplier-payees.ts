@@ -341,7 +341,7 @@ export function createSupplierPayees({
     const chosen = read === undefined ? undefined : await chosenOf(tx, states, orgId, found.registration.id);
     // Decision 8: cancel DENIES its pending requests first, before anything is signed. Unverifying it, as choiceIn
     // reads the choice; one stopped already, only a cancel confirmed under words that said so (C3c, cancelsAtOnce).
-    const cancels = read !== undefined && (unverifies ? choiceIn(chosen) === 'cancel' : cancelsAtOnce(chosen));
+    const cancels = unverifies ? choiceIn(chosen) === 'cancel' : cancelsAtOnce(chosen);
     if (cancels) {
       await voidPendingOf(tx, states, keys, orgId, { supplierId }, 'SUPPLIER_NOT_VERIFIED', clock.now());
     }
