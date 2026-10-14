@@ -7,8 +7,8 @@ import type { FixedClock, SequentialIds, TestDatabase } from '@agentx/testing';
 import { AGENTS } from '@agentx/core/modules/agents';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
-import { type LimitReservationsTables, monthSpent } from '@agentx/core/modules/limit-reservations';
-import { requestOf, type SpendRequestsTables } from '@agentx/core/modules/spend-requests';
+import { monthSpent } from '@agentx/core/modules/limit-reservations';
+import { requestOf } from '@agentx/core/modules/spend-requests';
 import {
   changeDetails,
   nextVersionNumber,
@@ -27,7 +27,7 @@ import {
   type SpendRequestDecisions,
 } from './spend-request-decisions.ts';
 
-export type SpendWorldTables = MandateWorldTables & SpendRequestsTables & LimitReservationsTables;
+export type SpendWorldTables = MandateWorldTables;
 
 /**
  * The request's claim or reservation released, or its reservation's amount

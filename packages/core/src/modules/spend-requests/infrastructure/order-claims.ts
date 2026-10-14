@@ -142,12 +142,15 @@ export async function claimOrder(
   return 'taken';
 }
 
-/** Locks the request's claims FOR NO KEY UPDATE (level 11), before its move takes the audit head (D7, D8). */
-export async function lockClaimsOf(tx: ClaimsTransaction, requestId: string): Promise<void> {
+/**
+ * Locks the requests' claims FOR NO KEY UPDATE (level 11), in one statement
+ * in order of ID (at least one asked), before their moves take the audit head (D7, D8, C2).
+ */
+export async function lockClaimsOf(tx: ClaimsTransaction, requestIds: readonly string[]): Promise<void> {
   await tx
     .selectFrom('spend_requests.order_claims')
     .select('id')
-    .where('request_id', '=', requestId)
+    .where('request_id', 'in', requestIds)
     .orderBy('id')
     .forNoKeyUpdate()
     .execute();

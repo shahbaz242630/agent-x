@@ -240,12 +240,15 @@ export async function reserve(tx: ReservationsTransaction, reservation: NewReser
     .execute();
 }
 
-/** Locks the request's reservations FOR NO KEY UPDATE (level 11), before its move takes the audit head. */
-export async function lockReservationsOf(tx: ReservationsTransaction, requestId: string): Promise<void> {
+/**
+ * Locks the requests' reservations FOR NO KEY UPDATE (level 11), in one
+ * statement in order of ID (at least one asked), before their moves take the audit head.
+ */
+export async function lockReservationsOf(tx: ReservationsTransaction, requestIds: readonly string[]): Promise<void> {
   await tx
     .selectFrom('limit_reservations.reservations')
     .select('id')
-    .where('request_id', '=', requestId)
+    .where('request_id', 'in', requestIds)
     .orderBy('id')
     .forNoKeyUpdate()
     .execute();

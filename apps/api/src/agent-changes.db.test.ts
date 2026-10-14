@@ -5,20 +5,18 @@
 // as the app role. The routes' answers are agents.test.ts.
 import { createHash } from 'node:crypto';
 
-import { addAgent, type AgentsTables } from '@agentx/core/modules/agents';
-import { type AuditTables, withSignedStates } from '@agentx/core/modules/audit';
-import type { DirectoryTables } from '@agentx/core/modules/directory';
+import { addAgent } from '@agentx/core/modules/agents';
+import { withSignedStates } from '@agentx/core/modules/audit';
 import {
   addMembership,
   createSessions,
   createStepUpChallenges,
-  type IdentityTables,
   memberOf,
   MEMBERSHIPS,
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
-import { createOutbox, type NotificationsTables } from '@agentx/core/modules/notifications';
+import { createOutbox } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import {
@@ -51,9 +49,9 @@ import {
   REACTIVATE_OPERATION,
   SUSPEND_OPERATION,
 } from './agent-changes.ts';
-import type { AgentMember } from './agent-writes.ts';
+import type { AgentMember, AgentTables } from './agent-writes.ts';
 
-type Tables = IdentityTables & AgentsTables & OrganizationsTables & DirectoryTables & AuditTables & NotificationsTables;
+type Tables = AgentTables & OrganizationsTables;
 
 const server = inject('postgres');
 let database: TestDatabase;

@@ -4,7 +4,9 @@
 // from its decision is EXPIRED; one cancelled by a person, or by the agent
 // that made it, before hand-off (waiting, approved or ready) is CANCELLED; one
 // a person rejects while it waits is DENIED, with their reason; and one whose
-// authority no longer stands (voidCauses) is DENIED, with its causes.
+// authority no longer stands (voidCauses) is DENIED, with its causes, by the
+// job one at a time (voidRequest), or by the brake that stops it, a batch in
+// the brake's own transaction (voidPendingOf, C2).
 //
 // In the caller's transaction (withSignedStates' for the organisation), in
 // ADR-006's lock order: the request read for change and verified (level 8);
@@ -237,6 +239,69 @@ export async function voidRequest(
   return { outcome: 'voided', request: { ...request, status: 'DENIED' }, causes };
 }
 
+/**
+ * How many pending requests a brake voids in its own transaction: the rest
+ * are left to the request-voids job (5 minutes), meanwhile unable to be
+ * approved or handed off under the stop. Kept small so the brake is quick.
+ */
+const MOST_VOIDED_BY_A_BRAKE = 50;
+
+/** What a brake stops: an agent (its suspend) or a mandate (its suspend, revoke, expiry or supersede). */
+type Braked = { readonly agentId: string } | { readonly mandateId: string };
+
+/**
+ * A brake's own cascade (PRD §4.2; ADR-006 §6 "Cascades"; Phase 3 C2): the
+ * pending requests (waiting, approved or ready) of what it stops DENIED, with
+ * `cause`, their reservations and order claims released, recorded as the
+ * API's (`spend_request.voided`, as voidRequest records it). The caller holds
+ * what it stops for change and calls this before its own signed move: the
+ * requests, at most `most` of them, are found and locked in one statement in
+ * order of ID after that lock (8), each verified, then all their holdings
+ * locked in one statement each (11), and only then is each moved (the head,
+ * 12). A request whose signed state can't be believed (its alarm raised) is
+ * left as it is: the brake still holds. How many were voided.
+ */
+export async function voidPendingOf(
+  tx: EndingsTransaction,
+  states: SignedStates,
+  keys: KeyProvider,
+  orgId: string,
+  braked: Braked,
+  cause: ReasonCode,
+  now: Date,
+  most = MOST_VOIDED_BY_A_BRAKE,
+): Promise<number> {
+  const rows = await tx
+    // eslint-disable-next-line agentx/authority-tables-through-signed-state -- the batch's IDs, locked; each verified below before it moves
+    .selectFrom(SPEND_REQUESTS.table)
+    .select('id')
+    .where('org_id', '=', orgId)
+    .where('status', 'in', PENDING_STATUSES)
+    .where((where) =>
+      'agentId' in braked ? where('agent_id', '=', braked.agentId) : where('mandate_id', '=', braked.mandateId),
+    )
+    .orderBy('id')
+    .limit(most)
+    .forNoKeyUpdate()
+    .execute();
+  const pending: string[] = [];
+  for (const { id } of rows) {
+    // Locked as pending, so one found is pending: its verified state is its row's.
+    if ((await requestOf(tx, states, { orgId, id }, 'change')).outcome === 'found') pending.push(id);
+  }
+  if (pending.length === 0) return 0;
+  await lockReservationsOf(tx, pending);
+  await lockClaimsOf(tx, pending);
+  for (const id of pending) {
+    await endHolding(tx, states, keys, { orgId, id }, 'deny', now, {
+      actor: ACTOR,
+      action: 'spend_request.voided',
+      details: { causes: cause },
+    });
+  }
+  return pending.length;
+}
+
 const REJECTED = 'spend_request.rejected';
 
 /** A person's reject (partner decisions 1 and 6): who, why, and the step-up they proved it with. */
@@ -325,8 +390,8 @@ async function endHolding(
   at: Date,
   change: SignedChange,
 ): Promise<void> {
-  await lockReservationsOf(tx, key.id);
-  await lockClaimsOf(tx, key.id);
+  await lockReservationsOf(tx, [key.id]);
+  await lockClaimsOf(tx, [key.id]);
   // A mismatch is alarmed by the judging itself.
   await requestHoldingsWhole(tx, states, keys, key.orgId, key.id);
   const moved = await states.changeStatus(tx, SPEND_REQUESTS, key, event, change);

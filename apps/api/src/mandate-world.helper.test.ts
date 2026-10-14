@@ -26,10 +26,12 @@ import {
   type Role,
   userForSubject,
 } from '@agentx/core/modules/identity';
+import type { LimitReservationsTables } from '@agentx/core/modules/limit-reservations';
 import { acceptDraft, mandateOf, MANDATES, type MandatesTables } from '@agentx/core/modules/mandates';
 import type { NotificationsTables } from '@agentx/core/modules/notifications';
 import { createOrganization, type OrganizationsTables } from '@agentx/core/modules/organizations';
 import { createFakeRail, type FundingSourceState } from '@agentx/core/modules/providers';
+import type { SpendRequestsTables } from '@agentx/core/modules/spend-requests';
 import { addSupplier, supplierOf, type SuppliersTables, verifySupplier } from '@agentx/core/modules/suppliers';
 import { DAY_MS, money } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, withTenant } from '@agentx/platform/db';
@@ -47,7 +49,9 @@ export type MandateWorldTables = IdentityTables &
   OrganizationsTables &
   DirectoryTables &
   NotificationsTables &
-  AuditTables;
+  AuditTables &
+  SpendRequestsTables &
+  LimitReservationsTables;
 
 export const keys = createKeyProvider(
   Object.fromEntries(

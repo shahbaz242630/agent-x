@@ -25,19 +25,23 @@
 //   requests may be suspended again to cancel them, recorded as a further
 //   suspend event with its signed state unchanged; a pause over a cancel is
 //   PENDING_REQUESTS_CANCELLED (suspensions.ts' chosenAgain, for the
-//   one-click brakes). The request-voids job voids them on cancel, and
-//   on any revoke or expiry; Phase 3 C2b voids them in the same transaction.
+//   one-click brakes).
+// - A revoke, and a suspend on cancel, DENY the mandate's pending requests
+//   in the confirm's transaction, before the move (voidPendingOf, Phase 3
+//   C2b): a pause made a cancel too. The request-voids job takes any past
+//   the batch.
 //
 // Lock order (ADR-006 §6): the idempotency key, the session's challenges (0b,
 // confirm only), the admin's membership (2a), the mandate (4), the version in
-// force (a resume's, read), the challenge consumed, the chain head last. The
-// agent (3) is not read: none of these moves needs it active, and a
-// suspended agent can't spend whatever its mandate says.
+// force (a resume's, read), the challenge consumed, the mandate's pending
+// requests (8) and their holdings (11), the chain head last. The agent (3) is
+// not read: none of these moves needs it active, and a suspended agent can't
+// spend whatever its mandate says.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
 import { isEnded, MANDATES } from '@agentx/core/modules/mandates';
 import type { NoticeKind, NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
-import type { PendingChoice } from '@agentx/core/modules/spend-requests';
+import { type PendingChoice, voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -127,6 +131,10 @@ const moveHash = (orgId: string, mandateEvent: string, chosen: MoveChosen): Buff
     mandateEvent.toLowerCase(),
     ...(chosen.move === 'suspend' ? [chosen.pendingRequests] : []),
   ]);
+
+/** Whether the move ends the mandate's pending requests: a revoke, or a suspend that cancels them (decision 7). */
+const cancels = (chosen: MoveChosen): boolean =>
+  chosen.move === 'revoke' || (chosen.move === 'suspend' && chosen.pendingRequests === 'cancel');
 
 /** What the move's event keeps beside its step-up: a suspend's choice. */
 const chosenDetails = (chosen: MoveChosen) => (chosen.move === 'suspend' ? choiceDetails(chosen.pendingRequests) : {});
@@ -226,6 +234,9 @@ export function createMandateMoves({
           { passkeyRequired: true },
         );
         const { id } = read.mandate;
+        if (cancels(chosen)) {
+          await voidPendingOf(tx, states, keys, member.orgId, { mandateId: id }, 'MANDATE_NOT_IN_FORCE', clock.now());
+        }
         const change = {
           actor: { type: 'user' as const, id: member.userId },
           action: MOVED[move].action,

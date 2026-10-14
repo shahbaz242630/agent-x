@@ -10,7 +10,10 @@
 //   step-up consumed, then the draft made the version in force (ACTIVE, for a
 //   first) with the step-up's evidence and the terms hash on its event,
 //   and every admin and approver told (0036, partner S86), in the same
-//   transaction.
+//   transaction. A version it supersedes ends its pending requests there
+//   too, before the move (Phase 3 decision 4; voidPendingOf, C2b): the agent
+//   asks again under the new terms. The request-voids job takes any past
+//   the batch.
 // - The checks: the agent active (AGENT_NOT_ACTIVE); every mandate of the
 //   agent verified (B2's open-mandate query trusts the row's status, S89
 //   review); this one neither ended (MANDATE_ENDED) nor suspended
@@ -23,7 +26,8 @@
 // Lock order (ADR-006 §6): the idempotency key, the session's challenges
 // (0b, confirm only), the admin's membership (2a), the agent (3), the
 // agent's mandates in order of ID (4) and the draft, the source (5), the
-// challenge consumed, the chain head last.
+// challenge consumed, the mandate's pending requests (8) and their holdings
+// (11), the chain head last.
 import { agentOf } from '@agentx/core/modules/agents';
 import type { SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import { mayFund } from '@agentx/core/modules/funding-sources';
@@ -38,6 +42,7 @@ import {
   mandatesOfAgent,
 } from '@agentx/core/modules/mandates';
 import type { NotificationsTables, Outbox } from '@agentx/core/modules/notifications';
+import { voidPendingOf } from '@agentx/core/modules/spend-requests';
 import type { Clock, IdGenerator } from '@agentx/core/shared-kernel';
 import { type Database, type IdempotentRequest, isUnwritten } from '@agentx/platform/db';
 import type { KeyProvider } from '@agentx/platform/keys';
@@ -219,6 +224,9 @@ export function createMandateAcceptance({
           { action: ACCEPT_OPERATION, changeHash: acceptanceHash(member.orgId, read.state.eventId, read.draft) },
           { passkeyRequired: true },
         );
+        // Only a version in force has requests decided under it: a first acceptance finds none.
+        const braked = { mandateId: read.mandate.id };
+        await voidPendingOf(tx, states, keys, member.orgId, braked, 'MANDATE_NOT_IN_FORCE', clock.now());
         await acceptDraft(tx, states, read, {
           orgId: member.orgId,
           versionId: read.draft.id,
