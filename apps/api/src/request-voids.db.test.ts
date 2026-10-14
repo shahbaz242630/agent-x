@@ -27,6 +27,7 @@ import {
   type AuthorityNow,
   cancelRequest,
   checkHoldings,
+  denialOf,
   type Pausable,
   type PendingChoice,
   SPEND_REQUESTS,
@@ -552,5 +553,23 @@ describe('pending spend requests voided once their authority no longer stands (C
       );
     }
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+  });
+});
+
+describe('a void with several causes, as its record is read (C2b)', () => {
+  it('reads each cause back, in the engine’s order', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const mandateId = await mandateIdOf(w);
+    await STOPS['the mandate suspended'](w, mandateId);
+    await STOPS['the agent suspended'](w);
+
+    await voidsOf(only(w)).run();
+
+    const denial = await signed(w, (tx, states) => denialOf(tx, states, { orgId: w.org, id: waiting.id }));
+    expect(denial).toMatchObject({
+      outcome: 'voided',
+      voiding: { causes: ['AGENT_SUSPENDED', 'MANDATE_NOT_IN_FORCE'] },
+    });
   });
 });

@@ -67,7 +67,7 @@
                   {
                     "type": "string",
                     "const": "AGENT_SUSPENDED",
-                    "description": "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing is held for the request."
+                    "description": "The agent is suspended or revoked, so it can't request payments; a suspended one can again once an admin lifts its suspension. Nothing is held for the request."
                   },
                   {
                     "type": "string",
@@ -442,7 +442,7 @@
                   {
                     "type": "string",
                     "const": "REQUEST_VOIDED",
-                    "description": "Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released; ask again once that is in force again."
+                    "description": "Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released. Ask again once what they name is in force, or at once if a new version replaced it."
                   },
                   {
                     "type": "string",
@@ -497,7 +497,7 @@
                   {
                     "type": "string",
                     "const": "SOURCE_NOT_USABLE",
-                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it."
+                    "description": "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it."
                   },
                   {
                     "type": "string",

@@ -29,7 +29,7 @@ export const REASON_CODES = {
     "The member can't own an agent: they must be an active admin or developer of the organisation. Nothing was changed.",
   AGENT_OWNER_UNCHANGED: 'The member already owns the agent, so nothing was changed.',
   AGENT_SUSPENDED:
-    "The agent is suspended, so it can't request payments until an admin lifts its suspension. Nothing is held for the request.",
+    "The agent is suspended or revoked, so it can't request payments; a suspended one can again once an admin lifts its suspension. Nothing is held for the request.",
   AGGREGATE_THRESHOLD:
     "Together with the same supplier's other open or paid requests in the aggregation window, this request crosses the approval threshold, so a person must approve it.",
   ALREADY_A_MEMBER:
@@ -172,7 +172,7 @@ export const REASON_CODES = {
     'The spend request is no longer waiting for approval: it was approved, rejected, cancelled or expired already, so it can no longer be approved or rejected. Nothing was changed.',
   REQUEST_TIMEOUT: 'The request took too long to arrive, so it is refused. Send it again.',
   REQUEST_VOIDED:
-    'Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released; ask again once that is in force again.',
+    'Something this request was decided under stopped before it was paid (the reasons after this one say what), so it will not be paid. Its reservation was released. Ask again once what they name is in force, or at once if a new version replaced it.',
   RESET_ASKS_SPENT:
     "The organisation's admins have asked for as many resets as they may in 24 hours, so this one wasn't asked for. Try again tomorrow; if no one at the organisation asked for them, tell its admins at once.",
   RESET_CLOSED:
@@ -192,7 +192,7 @@ export const REASON_CODES = {
   SOURCE_NOT_SUSPENDED:
     'The bank account is active, or ended for good, so there is no suspension to lift. Nothing was changed. An ended one needs a new link.',
   SOURCE_NOT_USABLE:
-    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it.",
+    "The funding source can't fund payments now: it is suspended, unavailable or ended, or its bank consent has expired. No mandate or request can draw on it. Nothing was changed, and nothing is held for a request on it.",
   STEP_UP_FAILED:
     "Signing in again couldn't confirm this change, so it wasn't confirmed. Start the change again, then sign in again as the same person, with your second factor: your passkey, if you're an admin or a finance approver.",
   SUPPLIER_ADDS_SPENT:

@@ -148,13 +148,13 @@ export async function requestInOrder(
  * decision denied.
  */
 async function denialIn(tx: ReadTx, states: SignedStates, orgId: string, request: SpendRequestRecord): Promise<Denial> {
-  const none = { rejection: null, voiding: null };
-  if (request.status !== 'DENIED') return none;
+  if (request.status !== 'DENIED') return { rejection: null, voiding: null };
   const denial = await denialOf(tx, states, { orgId, id: request.id });
   if (denial.outcome === 'tampered') throw new RequestReadRefused(503, 'INTEGRITY_FAILED');
-  if (denial.outcome === 'rejected') return { ...none, rejection: denial.rejection };
-  if (denial.outcome === 'voided') return { ...none, voiding: denial.voiding };
-  return none;
+  return {
+    rejection: denial.outcome === 'rejected' ? denial.rejection : null,
+    voiding: denial.outcome === 'voided' ? denial.voiding : null,
+  };
 }
 
 /** What the agent is told of a denial: a reject alone, never why; a void with its causes. */
