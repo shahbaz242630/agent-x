@@ -8,10 +8,11 @@
 //
 // A suspension is the suspender's choice (decision 7): one that cancels voids
 // as any stop does; one that pauses voids nothing, its requests standing
-// again on resume. The bank's own suspension of a source (its availability)
-// pauses, by the same decision: nobody on the team chose it. Expired consent,
-// a revoke, an expiry, a supersede, an ended source and a supplier no longer
-// verified always void.
+// again on resume. The bank's own suspension of a source (its availability
+// SUSPENDED) pauses, by the same decision: nobody on the team chose it.
+// Consent the bank ended (revoked, expired, consumed or rejected: its
+// availability UNAVAILABLE) or past its end, a revoke, an expiry, a
+// supersede, an ended source and a supplier no longer verified always void.
 //
 // Each cause found is kept with the void, in the order the engine checks
 // them; none and the request stands.
@@ -46,8 +47,8 @@ export interface DecidedUnder {
 export interface AuthorityNow {
   readonly agentStatus: string;
   readonly mandate: { readonly status: string; readonly currentVersionId: string | null } | null;
-  /** Its own status, and whether its consent has run out; the bank's availability never voids. */
-  readonly source: { readonly status: string; readonly consentPast: boolean };
+  /** Its own status, the bank's word on it (its availability), and whether its consent has run out. */
+  readonly source: { readonly status: string; readonly availability: string; readonly consentPast: boolean };
   readonly supplier: { readonly status: string; readonly currentVersionId: string } | null;
   /** Those suspended with their requests paused, as the suspension in force chose. */
   readonly paused: ReadonlySet<Pausable>;
@@ -69,7 +70,9 @@ export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly R
   ) {
     causes.push('MANDATE_NOT_IN_FORCE');
   }
-  if (stopped(source.status, 'ACTIVE', 'source') || source.consentPast) causes.push('SOURCE_NOT_USABLE');
+  // The bank's suspension pauses; any other word of its but ACTIVE ends the consent.
+  const bankEnded = source.availability !== 'ACTIVE' && source.availability !== 'SUSPENDED';
+  if (stopped(source.status, 'ACTIVE', 'source') || bankEnded || source.consentPast) causes.push('SOURCE_NOT_USABLE');
   if (supplier === null || stopped(supplier.status, 'VERIFIED', 'supplier')) causes.push('SUPPLIER_NOT_VERIFIED');
   if (supplier !== null && supplier.currentVersionId !== decided.supplierVersionId) causes.push('SUPPLIER_CHANGED');
   return causes;

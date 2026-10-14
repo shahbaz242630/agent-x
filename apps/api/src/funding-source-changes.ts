@@ -61,7 +61,7 @@ import {
   PARTNER_UNAVAILABLE,
 } from './funding-source-work.ts';
 import type { Refused } from './refused.ts';
-import { choiceDetails, SUSPENDS } from './suspensions.ts';
+import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type SessionMember, type Written } from './use-case-work.ts';
 
 /** Asking the partner how a source stands now. */
@@ -231,8 +231,19 @@ export function createFundingSourceChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: sourceId };
-        const { source } = await work.sourceIn(tx, states, key, 'change');
-        // Pressed twice, or on a source already ended: stopped already, and answered as it is.
+        const { source, state } = await work.sourceIn(tx, states, key, 'change');
+        // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
+        if (source.status === 'SUSPENDED') {
+          const again = await chosenAgain(
+            tx,
+            states,
+            { which: 'source', table: SOURCES, key, state },
+            pendingRequests,
+            { type: 'user', id: member.userId },
+          );
+          if (again === 'refused') throw new FundingSourceRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        }
+        // On a source already ended, answered as it is.
         if (source.status === 'ACTIVE') {
           movedAsRead(
             await states.changeStatus(tx, SOURCES, key, 'suspend', {

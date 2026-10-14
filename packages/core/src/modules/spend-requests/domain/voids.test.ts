@@ -2,7 +2,8 @@
 // everything it was decided under stands; each brake its own cause, in the
 // engine's order; several at once all kept; a supplier not found unverified,
 // with no version to compare; a suspension that pauses voids nothing, and
-// pauses only a suspension; the bank's own suspension never voids.
+// pauses only a suspension; the bank's own suspension never voids, consent
+// it ended always does.
 import { describe, expect, it } from 'vitest';
 
 import { type AuthorityNow, type DecidedUnder, type Pausable, voidCauses } from './voids.ts';
@@ -12,7 +13,7 @@ const DECIDED: DecidedUnder = { mandateId: 'm', mandateVersionId: 'mv1', supplie
 const STANDING: AuthorityNow = {
   agentStatus: 'ACTIVE',
   mandate: { status: 'ACTIVE', currentVersionId: 'mv1' },
-  source: { status: 'ACTIVE', consentPast: false },
+  source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
   supplier: { status: 'VERIFIED', currentVersionId: 'sv1' },
   paused: new Set(),
 };
@@ -30,9 +31,26 @@ describe('voidCauses', () => {
     ['the mandate revoked', { mandate: { status: 'REVOKED', currentVersionId: 'mv1' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate superseded', { mandate: { status: 'ACTIVE', currentVersionId: 'mv2' } }, 'MANDATE_NOT_IN_FORCE'],
     ['the mandate not found', { mandate: null }, 'MANDATE_NOT_IN_FORCE'],
-    ['the source suspended', { source: { status: 'SUSPENDED', consentPast: false } }, 'SOURCE_NOT_USABLE'],
-    ['the source ended', { source: { status: 'ENDED', consentPast: false } }, 'SOURCE_NOT_USABLE'],
-    ['the source’s consent past', { source: { status: 'ACTIVE', consentPast: true } }, 'SOURCE_NOT_USABLE'],
+    [
+      'the source suspended',
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source ended',
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source’s consent past',
+      { source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: true } },
+      'SOURCE_NOT_USABLE',
+    ],
+    [
+      'the source’s consent ended by the bank',
+      { source: { status: 'ACTIVE', availability: 'UNAVAILABLE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
     ['the supplier suspended', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }, 'SUPPLIER_NOT_VERIFIED'],
     [
       'the supplier unverified',
@@ -58,7 +76,7 @@ describe('voidCauses', () => {
       voidCauses(DECIDED, {
         agentStatus: 'SUSPENDED',
         mandate: null,
-        source: { status: 'SUSPENDED', consentPast: false },
+        source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false },
         supplier: { status: 'UNVERIFIED', currentVersionId: 'sv2' },
         paused: new Set(),
       }),
@@ -71,10 +89,19 @@ describe('voidCauses', () => {
     ]);
   });
 
+  it('finds none for the bank’s own suspension of the source, and one once the bank ends its consent, paused or not', () => {
+    const bank = (availability: string) => ({
+      ...STANDING,
+      source: { status: 'ACTIVE', availability, consentPast: false },
+    });
+    expect(voidCauses(DECIDED, bank('SUSPENDED'))).toEqual([]);
+    expect(voidCauses(DECIDED, { ...bank('UNAVAILABLE'), paused: EVERY_PAUSED })).toEqual(['SOURCE_NOT_USABLE']);
+  });
+
   it.each([
     ['the agent', 'agent', { agentStatus: 'SUSPENDED' }],
     ['the mandate', 'mandate', { mandate: { status: 'SUSPENDED', currentVersionId: 'mv1' } }],
-    ['the source', 'source', { source: { status: 'SUSPENDED', consentPast: false } }],
+    ['the source', 'source', { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: false } }],
     ['the supplier', 'supplier', { supplier: { status: 'SUSPENDED', currentVersionId: 'sv1' } }],
   ] as const)(
     'finds none for %s suspended with its requests paused, and only its own pause counts',
@@ -93,10 +120,14 @@ describe('voidCauses', () => {
       { mandate: { status: 'SUSPENDED', currentVersionId: 'mv2' } },
       'MANDATE_NOT_IN_FORCE',
     ],
-    ['the source ended', { source: { status: 'ENDED', consentPast: false } }, 'SOURCE_NOT_USABLE'],
+    [
+      'the source ended',
+      { source: { status: 'ENDED', availability: 'ACTIVE', consentPast: false } },
+      'SOURCE_NOT_USABLE',
+    ],
     [
       'the source’s consent past while paused',
-      { source: { status: 'SUSPENDED', consentPast: true } },
+      { source: { status: 'SUSPENDED', availability: 'ACTIVE', consentPast: true } },
       'SOURCE_NOT_USABLE',
     ],
     [

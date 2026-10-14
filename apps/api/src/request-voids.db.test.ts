@@ -32,7 +32,7 @@ import {
   SPEND_REQUESTS,
   voidRequest,
 } from '@agentx/core/modules/spend-requests';
-import { SUPPLIERS } from '@agentx/core/modules/suppliers';
+import { SUPPLIERS, supplierOf } from '@agentx/core/modules/suppliers';
 import { createDatabase, type Database, withTenant } from '@agentx/platform/db';
 import {
   createTestDatabase,
@@ -52,7 +52,7 @@ import { AED, keys, OPERATOR, type World } from './mandate-world.helper.test.ts'
 import { createRequestVoids, type RequestVoids } from './request-voids.ts';
 import { createSpendRequestDecisions, type SpendRequestDecisions } from './spend-request-decisions.ts';
 import { spendWorld, type SpendWorldTables } from './spend-world.helper.test.ts';
-import { choiceDetails, SUSPENDS } from './suspensions.ts';
+import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 
 const server = inject('postgres');
 let database: TestDatabase;
@@ -274,6 +274,32 @@ describe('pending spend requests voided once their authority no longer stands (C
     expect(await statusOf(w, another.id)).toBe('APPROVAL_REQUIRED');
   });
 
+  it('voids the requests of a pause made a cancel by suspending again (chosenAgain, decision 7)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    const mandateId = await mandateIdOf(w);
+    await moved(w, mandateId, 'supplier', 'pause');
+    await voidsOf(only(w)).run();
+    expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
+
+    const key = { orgId: w.org, id: idOf(w, mandateId, 'supplier') };
+    const again = await signed(w, async (tx, states) => {
+      const read = await supplierOf(tx, states, key, 'change');
+      if (read.outcome !== 'found') throw new Error(`not found: ${read.outcome}`);
+      return chosenAgain(
+        tx,
+        states,
+        { which: 'supplier', table: SUPPLIERS, key, state: read.state },
+        'cancel',
+        OPERATOR,
+      );
+    });
+    await voidsOf(only(w)).run();
+
+    expect(again).toBe('as_is');
+    expect(await statusOf(w, waiting.id)).toBe('DENIED');
+  });
+
   it('voids nothing once the bank suspends the source itself: it pauses, as nobody on the team chose it (decision 7)', async () => {
     const { w, acting } = await ready();
     const waiting = await ask(acting, w);
@@ -284,6 +310,27 @@ describe('pending spend requests voided once their authority no longer stands (C
     expect(await statusOf(w, waiting.id)).toBe('APPROVAL_REQUIRED');
     expect(lines('request_void.voided')).toEqual([]);
   });
+
+  it.each(['Revoked', 'Expired'] as const)(
+    'voids the approved and the waiting once the bank says the consent is %s: it ended, however the source stands (decision 7)',
+    async (consentStatus) => {
+      const { w, acting } = await ready();
+      const approved = await ask(acting, w, { amount: AED(50_000n), orderReference: 'INV-A' });
+      const waiting = await ask(acting, w, { orderReference: 'INV-W' });
+      await shared.partnerSays(w, { availability: 'UNAVAILABLE', consentStatus });
+
+      await voidsOf(only(w)).run();
+
+      for (const request of [approved, waiting]) {
+        expect(await statusOf(w, request.id)).toBe('DENIED');
+        const events = await shared.eventsAbout(w.org, request.id, SPEND_REQUESTS.subject);
+        expect(events.at(-1)).toMatchObject({
+          action: 'spend_request.voided',
+          details: { causes: 'SOURCE_NOT_USABLE' },
+        });
+      }
+    },
+  );
 
   it('still voids a paused one once something else stops it: the mandate superseded under a paused agent', async () => {
     const { w, acting } = await ready();
@@ -475,7 +522,7 @@ describe('pending spend requests voided once their authority no longer stands (C
       return {
         agentStatus: 'ACTIVE',
         mandate: { status: 'ACTIVE', currentVersionId: row.mandate_version_id },
-        source: { status: 'ACTIVE', consentPast: false },
+        source: { status: 'ACTIVE', availability: 'ACTIVE', consentPast: false },
         supplier: { status: 'VERIFIED', currentVersionId: row.supplier_version_id ?? '' },
         paused: new Set(),
       } satisfies AuthorityNow;

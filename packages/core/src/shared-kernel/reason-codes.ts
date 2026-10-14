@@ -142,6 +142,8 @@ export const REASON_CODES = {
   PAYEE_ROUTE_NOT_OFFERED:
     "The payment partner doesn't take a supplier's bank details this way, so nothing was started. Use the other way it offers.",
   PAYLOAD_TOO_LARGE: 'The request body is larger than this address accepts, so it is refused.',
+  PENDING_REQUESTS_CANCELLED:
+    "It is already suspended with its pending requests cancelled, which can't be undone, so they can't be paused now. Nothing was changed.",
   POLICY_CHANGES_SPENT:
     "The organisation has changed its policies as many times as it may in 24 hours, so this change wasn't made. Try again tomorrow; if no one at the organisation made these changes, tell its admins at once.",
   POLICY_CURRENCY_REFUSED:

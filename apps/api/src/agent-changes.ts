@@ -85,7 +85,7 @@ import {
   createAgentWork,
 } from './agent-writes.ts';
 import type { Refused } from './refused.ts';
-import { choiceDetails, SUSPENDS } from './suspensions.ts';
+import { choiceDetails, chosenAgain, SUSPENDS } from './suspensions.ts';
 import { createStepUps, movedAsRead, type Written } from './use-case-work.ts';
 
 /** Suspending an agent: the kill switch. */
@@ -268,8 +268,18 @@ export function createAgentChanges({
       const done = await work.write(member, idempotent, correlationId, async (tx, states) => {
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const read = await agentToChange(tx, states, member.orgId, agentId);
-        // Pressed twice: already stopped, and answered as it is.
-        if (read.agent.status === 'ACTIVE') {
+        // Pressed twice: already stopped, and answered as it is, unless the choice changes (chosenAgain).
+        if (read.agent.status !== 'ACTIVE') {
+          const key = { orgId: member.orgId, id: read.agent.id };
+          const again = await chosenAgain(
+            tx,
+            states,
+            { which: 'agent', table: AGENTS, key, state: read.state },
+            pendingRequests,
+            { type: 'user', id: member.userId },
+          );
+          if (again === 'refused') throw new AgentRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        } else {
           movedAsRead(
             await states.changeStatus(tx, AGENTS, { orgId: member.orgId, id: read.agent.id }, 'suspend', {
               actor: { type: 'user', id: member.userId },

@@ -227,6 +227,28 @@ describe(`suspending a source: the brake, with no step-up (D2-4b, Postgres ${ser
     },
   );
 
+  it('makes a pause a cancel when suspended again with cancel; refuses a pause over a cancel (decision 7)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const source = await linked(admin);
+    changedOf(await suspend(admin, source.id, undefined, 'pause'));
+
+    changedOf(await suspend(admin, source.id, undefined, 'cancel'));
+
+    const events = await eventsAbout(org, source.id);
+    expect(events.map((event) => event.action)).toEqual([
+      'funding_source.linked',
+      'funding_source.suspended',
+      'funding_source.suspended',
+    ]);
+    expect(JSON.parse(String(events.at(-1)?.details))).toMatchObject({ pendingRequests: 'cancel' });
+    expect(await suspend(admin, source.id, undefined, 'pause')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'PENDING_REQUESTS_CANCELLED',
+    });
+  });
+
   it('pressed twice, or on an ended source, is answered as it is, recording nothing more', async () => {
     const org = await organization();
     const admin = await member(org, 'admin');

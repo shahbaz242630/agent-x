@@ -29,7 +29,7 @@
 // the notices, new rows that wait on nothing.
 import type { SignedStates } from '@agentx/core/modules/audit';
 import { changeHashOf, type StepUpChallenges, stepUpDetails } from '@agentx/core/modules/identity';
-import { reactivateSupplier, suspendSupplier } from '@agentx/core/modules/suppliers';
+import { reactivateSupplier, SUPPLIERS, suspendSupplier } from '@agentx/core/modules/suppliers';
 import type { Outbox } from '@agentx/core/modules/notifications';
 import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import type { IdGenerator } from '@agentx/core/shared-kernel';
@@ -47,7 +47,7 @@ import {
   type SupplierTx,
   toldEveryone,
 } from './supplier-work.ts';
-import { choiceDetails } from './suspensions.ts';
+import { choiceDetails, chosenAgain } from './suspensions.ts';
 import { createStepUps } from './use-case-work.ts';
 
 /** The brake on a supplier. */
@@ -125,8 +125,17 @@ export function createSupplierChanges({
         await work.memberIn(tx, states, member, SUSPENDING_ROLES);
         const key = { orgId: member.orgId, id: supplierId };
         const found = await work.supplierIn(tx, states, key, 'change');
-        // Pressed twice: stopped already, and answered as it is.
-        if (found.supplier.status !== 'SUSPENDED') {
+        // Pressed twice: stopped already, and answered as it is, unless the choice changes (chosenAgain).
+        if (found.supplier.status === 'SUSPENDED') {
+          const again = await chosenAgain(
+            tx,
+            states,
+            { which: 'supplier', table: SUPPLIERS, key, state: found.state },
+            pendingRequests,
+            { type: 'user', id: member.userId },
+          );
+          if (again === 'refused') throw new SupplierRefused(409, 'PENDING_REQUESTS_CANCELLED');
+        } else {
           await suspendSupplier(tx, states, key, found, {
             actor: { type: 'user', id: member.userId },
             details: choiceDetails(pendingRequests),

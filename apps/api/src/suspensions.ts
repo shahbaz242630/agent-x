@@ -10,12 +10,19 @@
 // SUSPENDED status, verified, was put there by a suspend, and a resume in
 // between is always followed by another. One recorded before the choice
 // existed names none and cancels, as the PRD's rule did.
+//
+// Suspending one suspended already (chosenAgain): the same choice, or a cancel
+// over a cancel, is answered as it is (a brake pressed twice); a cancel over a
+// pause is recorded as a further suspend event, the subject's signed state
+// unchanged, so the newest suspension cancels; a pause over a cancel is
+// refused (PENDING_REQUESTS_CANCELLED): a cancel can't be undone.
 import { AGENTS } from '@agentx/core/modules/agents';
-import type { AuditTransaction, SignedStates } from '@agentx/core/modules/audit';
+import type { AuditActor, AuditTransaction, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { type Pausable, PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
 import { SUPPLIERS } from '@agentx/core/modules/suppliers';
+import type { SignedStateTable } from '@agentx/platform/db';
 import { z } from 'zod';
 
 /** The words each choice is confirmed with, by version: the console's confirm shows them, the event keeps the version. */
@@ -82,4 +89,37 @@ export async function pausedOf(
     if (history.events.at(-1)?.event.details.pendingRequests === 'pause') paused.add(which);
   }
   return paused;
+}
+
+/**
+ * Suspends again one SUSPENDED already, read for change (`state`), with the
+ * member's `choice`: a pause made a cancel is recorded, as `actor`'s; the
+ * same choice left as it is; `refused` for a cancel made a pause.
+ */
+export async function chosenAgain(
+  tx: AuditTransaction,
+  states: SignedStates,
+  subject: {
+    readonly which: Pausable;
+    readonly table: SignedStateTable;
+    readonly key: { readonly orgId: string; readonly id: string };
+    readonly state: VerifiedState;
+  },
+  choice: PendingChoice,
+  actor: AuditActor,
+): Promise<'as_is' | 'refused'> {
+  const { which, table, key, state } = subject;
+  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id]])).has(which);
+  if (!paused) return choice === 'cancel' ? 'as_is' : 'refused';
+  if (choice === 'cancel') {
+    await states.record(
+      tx,
+      table,
+      key,
+      state,
+      {},
+      { actor, action: SUSPENDS[which].action, details: choiceDetails(choice) },
+    );
+  }
+  return 'as_is';
 }

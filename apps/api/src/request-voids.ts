@@ -4,7 +4,8 @@
 // agent is suspended, whose mandate is no longer in force or superseded,
 // whose source can't fund, or whose supplier is no longer verified or has
 // new details (voidCauses), a suspension only when it was chosen to cancel
-// (decision 7: one that pauses, or the bank's own, voids nothing), recorded as the API's with its causes, its
+// (decision 7: one that pauses, or the bank's own, voids nothing; consent the
+// bank ended always does), recorded as the API's with its causes, its
 // reservation and order claim released in the same transaction. The brakes
 // void their own requests as they stop (C2); this finds the rest, and any a
 // brake left past its batch.
@@ -131,6 +132,8 @@ async function stoppedByTheirRows(
         looksStopped('m.status', 'ACTIVE', 'mandate', 'm.id'),
         where('m.current_version_id', 'is distinct from', where.ref('r.mandate_version_id')),
         looksStopped('s.status', 'ACTIVE', 'source', 's.id'),
+        // The bank's suspension pauses (decision 7); any other word of its but ACTIVE ends the consent.
+        where('s.availability', 'not in', ['ACTIVE', 'SUSPENDED']),
         where('s.consent_expires_at', '<=', now),
         looksStopped('p.status', 'VERIFIED', 'supplier', 'p.id'),
         where('p.current_version_id', 'is distinct from', where.ref('r.supplier_version_id')),
@@ -226,7 +229,11 @@ export function createRequestVoids({
     const authority: AuthorityNow = {
       agentStatus: agent.agent.status,
       mandate: mandate.mandate,
-      source: { status: source.source.status, consentPast: source.source.consentExpiresAt <= now },
+      source: {
+        status: source.source.status,
+        availability: source.source.availability,
+        consentPast: source.source.consentExpiresAt <= now,
+      },
       supplier: supplier.supplier,
       paused: await pausedOf(
         tx,

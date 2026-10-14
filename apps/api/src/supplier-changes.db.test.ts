@@ -299,6 +299,25 @@ describe(`suspending a supplier: the brake, with no step-up (E1-2, Postgres ${se
     expect(await noticesOf(org)).toHaveLength(2);
   });
 
+  it('makes a pause a cancel when suspended again with cancel; refuses a pause over a cancel (decision 7)', async () => {
+    const org = await organization();
+    const admin = await member(org, 'admin');
+    const id = await added(admin);
+    changedOf(await suspend(admin, id, undefined, 'pause'));
+
+    changedOf(await suspend(admin, id, undefined, 'cancel'));
+
+    expect(await actions(org, id)).toEqual(['supplier.added', 'supplier.suspend', 'supplier.suspend']);
+    expect(JSON.parse(String((await eventsAbout(org, id)).at(-1)?.details))).toMatchObject({
+      pendingRequests: 'cancel',
+    });
+    expect(await suspend(admin, id, undefined, 'pause')).toEqual({
+      outcome: 'refused',
+      status: 409,
+      code: 'PENDING_REQUESTS_CANCELLED',
+    });
+  });
+
   it('refuses a developer or a viewer: FORBIDDEN, the supplier left as it was', async () => {
     const org = await organization();
     const id = await added(await member(org, 'admin'));

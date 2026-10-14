@@ -255,6 +255,30 @@ describe('suspending, resuming and revoking a mandate (B4)', () => {
     });
   });
 
+  it('makes a pause a cancel when suspended again with cancel, with a passkey; refuses any other suspend of a suspended one (decision 7)', async () => {
+    const w = await world();
+    const id = await active(w);
+    const suspendAs = async (choice: PendingChoice) => {
+      const asked = await ask(w.admin, id, 'suspend', choice);
+      if (asked.outcome !== 'asked') return asked;
+      await stepUp(w.admin, asked.stepUpChallengeId);
+      return confirm(w.admin, id, 'suspend', asked.stepUpChallengeId, undefined, choice);
+    };
+    movedOf(await suspendAs('pause'));
+    expect(await ask(w.admin, id, 'suspend', 'pause')).toEqual(refused(409, 'MANDATE_NOT_ACTIVE'));
+
+    expect(movedOf(await suspendAs('cancel')).mandate.status).toBe('SUSPENDED');
+    const events = await eventsAbout(w.org, id);
+    expect(events.slice(-2).map(({ action, details }) => [action, details.pendingRequests])).toEqual([
+      ['mandate.suspended', 'pause'],
+      ['mandate.suspended', 'cancel'],
+    ]);
+    expect(events.at(-1)?.details).toMatchObject({ methods: PASSKEY.join(' ') });
+    expect(await ask(w.admin, id, 'suspend', 'pause')).toEqual(refused(409, 'PENDING_REQUESTS_CANCELLED'));
+    expect(await ask(w.admin, id, 'suspend', 'cancel')).toEqual(refused(409, 'MANDATE_NOT_ACTIVE'));
+    expect(movedOf(await moved(w, id, 'resume')).mandate.status).toBe('ACTIVE');
+  });
+
   it('refuses a step-up asked before the mandate changed: STEP_UP_FAILED, for the mandate as it stood', async () => {
     const w = await world();
     const id = await active(w);
