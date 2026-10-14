@@ -86,10 +86,10 @@ type OrganizationTables = UseCaseTables &
 type OrganizationTx = DatabaseTransaction<OrganizationTables>;
 
 /** The organisation's UseCaseRefused: the only refusal its work answers. */
-export class OrganizationRefused extends UseCaseRefused {}
+class OrganizationRefused extends UseCaseRefused {}
 
 /** The organisation as a change leaves it. */
-export interface OrganizationShown {
+interface OrganizationShown {
   readonly id: string;
   readonly status: string;
 }
