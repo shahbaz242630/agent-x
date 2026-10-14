@@ -159,7 +159,7 @@ async function added(admin: SupplierMember, details = DETAILS): Promise<string> 
 }
 
 const start = (who: SupplierMember, supplierId: string, key?: string, using = payees) =>
-  using.start(who, keyed(who, PAYEE_START_OPERATION, key), supplierId, CORRELATION);
+  using.start(who, keyed(who, PAYEE_START_OPERATION, key), supplierId, 'cancel', CORRELATION);
 const check = (who: SupplierMember, supplierId: string, registrationId: string, key?: string, using = payees) =>
   using.check(who, keyed(who, PAYEE_CHECK_OPERATION, key), supplierId, registrationId, CORRELATION);
 
@@ -171,7 +171,7 @@ const passThrough = (
 ) => {
   const payee = { name: 'Jasmine AI FZ-LLC', iban };
   const request = { ...keyed(who, PAYEE_PASS_THROUGH_OPERATION, key), payload: JSON.stringify({ supplierId, payee }) };
-  return using.passThrough(who, request, supplierId, payee, CORRELATION);
+  return using.passThrough(who, request, supplierId, payee, 'cancel', CORRELATION);
 };
 
 const answered = (write: PayeeWrite, outcome: 'started' | 'checked' | 'waiting') => {

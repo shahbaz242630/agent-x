@@ -43,6 +43,9 @@ import { createSupplierRegistry } from './supplier-registry.ts';
 import type { SupplierTables } from './supplier-work.ts';
 
 const server = inject('postgres');
+
+/** The admin's choice for the supplier's pending requests (decision 8): none are pending here. */
+const CANCEL = { pendingRequests: 'cancel' } as const;
 let database: TestDatabase;
 // The tables the use cases work on; the scan reads every table as the admin.
 let app: Database<SupplierTables & OrganizationsTables & FakePartnerTables>;
@@ -234,7 +237,7 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
     try {
       // The partner's form, filled in with the IBAN in groups and lower case, then checked.
       const byForm = await supplierOf(api);
-      const started = await sent(api, org, `/v1/suppliers/${byForm}/payee-registrations`, {});
+      const started = await sent(api, org, `/v1/suppliers/${byForm}/payee-registrations`, CANCEL);
       expect(started.statusCode).toBe(201);
       const { id, form } = started.json<{ id: string; form: { url: string } }>();
       const filled = await sent(api, org, '/v1/fake-bank/payee-forms', {
@@ -250,6 +253,7 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
       const passed = await sent(api, org, `/v1/suppliers/${await supplierOf(api)}/payee-registrations/pass-through`, {
         name: 'Jasmine AI FZ-LLC',
         iban: grouped(PASSED),
+        ...CANCEL,
       });
       expect(passed.json()).toMatchObject({ status: 'REGISTERED' });
 
@@ -259,9 +263,10 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
         const at = await sent(api, org, `/v1/suppliers/${fresh}/payee-registrations/pass-through`, {
           name: 'Gulf',
           iban,
+          ...CANCEL,
         });
         expect(at.json()).toMatchObject({ error: { code: 'BAD_REQUEST' } });
-        const open = await sent(api, org, `/v1/suppliers/${fresh}/payee-registrations`, {});
+        const open = await sent(api, org, `/v1/suppliers/${fresh}/payee-registrations`, CANCEL);
         const url = open.json<{ form: { url: string } }>().form.url;
         const bank = await sent(api, org, '/v1/fake-bank/payee-forms', { url, name: 'Gulf', iban });
         expect(bank.json()).toMatchObject({ error: { code: 'BANK_FORM_REFUSED' } });
@@ -284,7 +289,7 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
     });
     try {
       const afterLoss = await supplierOf(losing);
-      const body = { name: 'Jasmine AI FZ-LLC', iban: AFTER_LOSS };
+      const body = { name: 'Jasmine AI FZ-LLC', iban: AFTER_LOSS, ...CANCEL };
       const url = `/v1/suppliers/${afterLoss}/payee-registrations/pass-through`;
       expect((await sent(losing, org, url, body, 'after-loss')).statusCode).toBe(503);
       expect((await sent(losing, org, url, body, 'after-loss')).json()).toMatchObject({ status: 'REGISTERED' });
@@ -302,7 +307,9 @@ describe(`SEC-PAY-05 a supplier's bank details, kept nowhere (E2-2c, Postgres ${
     });
     try {
       const url = `/v1/suppliers/${await supplierOf(failing)}/payee-registrations/pass-through`;
-      expect((await sent(failing, org, url, { name: 'Jasmine AI FZ-LLC', iban: AT_FAILURE })).statusCode).toBe(500);
+      expect(
+        (await sent(failing, org, url, { name: 'Jasmine AI FZ-LLC', iban: AT_FAILURE, ...CANCEL })).statusCode,
+      ).toBe(500);
     } finally {
       await failing.close();
     }

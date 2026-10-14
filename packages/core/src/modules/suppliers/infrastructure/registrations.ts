@@ -290,6 +290,41 @@ async function move(
 }
 
 /**
+ * recordRegistered's checks of the partner's registered payee, before any
+ * SQL runs: the answer names this organisation and this registration, which
+ * may be registered (RangeError otherwise), and neither the hint nor a
+ * partner's identity holds an account number (AccountNumberLeak, never
+ * naming it, ADR-014 §3). Gives the fields it records. A caller that must
+ * act before the record (the pending requests a payee change cancels, Phase
+ * 3 C3b) checks first, so nothing it does stands for an answer refused.
+ */
+export function registeredFields(
+  key: RegistrationKey,
+  found: FoundRegistration,
+  { beneficiary, payee }: { readonly beneficiary: BeneficiaryState; readonly payee: PayeeKey },
+) {
+  const { registration } = found;
+  // A reference is accepted only from the partner's answer for this registration of this organisation (SEC-PAY-08).
+  if (
+    beneficiary.organizationId.toLowerCase() !== key.orgId.toLowerCase() ||
+    beneficiary.registrationId.toLowerCase() !== registration.id
+  ) {
+    throw new RangeError("The partner's answer is for another registration");
+  }
+  mayMove(registration, 'registered');
+  return {
+    beneficiary_ref: beneficiary.beneficiaryRef,
+    // A partner's identity (no key version) is checked here too, whoever built the key; our fingerprint is a MAC.
+    payee_key: payee.key !== null && payee.keyVersion === null ? noAccountNumberIn(payee.key) : payee.key,
+    payee_key_version: payee.keyVersion,
+    name_check: beneficiary.nameCheck,
+    masked_name: beneficiary.maskedName,
+    payee_hint: noAccountNumberIn(beneficiary.hint),
+    registered_at: beneficiary.registeredAt,
+  };
+}
+
+/**
  * Records the partner's registered payee (Tx 2), in the caller's transaction,
  * which read the registration with `change` (`found`): the reference, the
  * payee key (payeeKeyOf's, from the partner's one source), the name check,
@@ -298,7 +333,7 @@ async function move(
  * and the registration must be one that may be registered, or it is refused
  * (RangeError); a hint holding an account number is refused too
  * (AccountNumberLeak, never naming it, ADR-014 §3); each before any SQL
- * runs. Gives the registration as it now stands.
+ * runs (registeredFields). Gives the registration as it now stands.
  */
 export async function recordRegistered(
   tx: RegistrationsTransaction,
@@ -312,24 +347,7 @@ export async function recordRegistered(
   }: RegistrationChange & { readonly beneficiary: BeneficiaryState; readonly payee: PayeeKey },
 ): Promise<RegistrationRecord> {
   const { registration } = found;
-  // A reference is accepted only from the partner's answer for this registration of this organisation (SEC-PAY-08).
-  if (
-    beneficiary.organizationId.toLowerCase() !== key.orgId.toLowerCase() ||
-    beneficiary.registrationId.toLowerCase() !== registration.id
-  ) {
-    throw new RangeError("The partner's answer is for another registration");
-  }
-  mayMove(registration, 'registered');
-  const ended = {
-    beneficiary_ref: beneficiary.beneficiaryRef,
-    // A partner's identity (no key version) is checked here too, whoever built the key; our fingerprint is a MAC.
-    payee_key: payee.key !== null && payee.keyVersion === null ? noAccountNumberIn(payee.key) : payee.key,
-    payee_key_version: payee.keyVersion,
-    name_check: beneficiary.nameCheck,
-    masked_name: beneficiary.maskedName,
-    payee_hint: noAccountNumberIn(beneficiary.hint),
-    registered_at: beneficiary.registeredAt,
-  };
+  const ended = registeredFields(key, found, { beneficiary, payee });
   // The fields first: 0033's `registered_with_its_reference` holds a REGISTERED row to them.
   await states.record(tx, BENEFICIARY_REGISTRATIONS, key, found.state, ended, {
     actor: change.actor,

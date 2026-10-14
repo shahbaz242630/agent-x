@@ -16,8 +16,22 @@
 // pause is recorded as a further suspend event, the subject's signed state
 // unchanged, so the newest suspension cancels; a pause over a cancel is
 // refused (PENDING_REQUESTS_CANCELLED): a cancel can't be undone.
+//
+// A payee registration (decision 8, S111) asks the registering admin the same
+// question, in its own words: a verified supplier it unverifies keeps its
+// requests paused or cancels them. The pause in force for an UNVERIFIED
+// supplier is the choice on the move that unverified it, its newest
+// `supplier.unverify` or `supplier.reactivate` (which names none, so
+// cancels): an old pause never comes back after the supplier is verified
+// again.
 import { AGENTS } from '@agentx/core/modules/agents';
-import type { AuditActor, AuditTransaction, SignedStates, VerifiedState } from '@agentx/core/modules/audit';
+import type {
+  AuditActor,
+  AuditDetails,
+  AuditTransaction,
+  SignedStates,
+  VerifiedState,
+} from '@agentx/core/modules/audit';
 import { SOURCES } from '@agentx/core/modules/funding-sources';
 import { MANDATES } from '@agentx/core/modules/mandates';
 import { type Pausable, PENDING_CHOICES, type PendingChoice } from '@agentx/core/modules/spend-requests';
@@ -49,8 +63,44 @@ const PENDING_REQUESTS = z
 /** A suspend's body: its choice alone. */
 export const SUSPEND_BODY = z.strictObject({ pendingRequests: PENDING_REQUESTS }).describe('The suspender’s choice.');
 
-/** The most a suspend's body may be: its choice, with room to spare. */
-export const SUSPEND_BODY_LIMIT = 64;
+/** The most a body holding a choice alone may be (a suspend's, a payee start's), with room to spare. */
+export const CHOICE_BODY_LIMIT = 64;
+
+/** The words a payee registration's choice is confirmed with (decision 8), by version, as STATEMENTS. */
+const PAYEE_STATEMENTS = {
+  cancel:
+    'Once the partner confirms the new bank details, every request to this supplier waiting for approval, approved ' +
+    'or ready is cancelled and the money held for it freed. This can’t be undone: the agent asks again once the ' +
+    'supplier is verified again.',
+  pause:
+    'Once the partner confirms the new bank details, its requests are held as they are: none can be approved or paid ' +
+    'while the supplier is unverified. Confirming the new details cancels them; withdrawing the change, they stand ' +
+    'again once the supplier is verified again. Requests waiting for approval still expire after 72 hours.',
+} as const satisfies Record<PendingChoice, string>;
+
+/** The version of PAYEE_STATEMENTS each event names: raised with any change to their words. */
+const PAYEE_STATEMENT_VERSION = 1;
+
+/** A payee registration's choice, as its body names it (decision 8). */
+export const PAYEE_PENDING_REQUESTS = z
+  .enum(PENDING_CHOICES)
+  .describe(
+    'What happens to the supplier’s pending spend requests if this registration unverifies it, confirmed by the ' +
+      `admin registering; there is no default. \`cancel\`: ${PAYEE_STATEMENTS.cancel} \`pause\`: ${PAYEE_STATEMENTS.pause}`,
+  );
+
+/** The choice as a payee registration's events keep it, with the statement confirmed. */
+export const payeeChoiceDetails = (choice: PendingChoice) =>
+  ({ pendingRequests: choice, pendingStatementVersion: PAYEE_STATEMENT_VERSION }) as const;
+
+/**
+ * The choice an event keeps (choiceDetails, payeeChoiceDetails), or none
+ * (an event from before the choice existed, or a move that names none, as a
+ * reactivation): only a pause recorded holds the requests, anything else
+ * cancels, as the PRD's rule did.
+ */
+export const choiceIn = (details: AuditDetails | undefined): PendingChoice =>
+  details?.pendingRequests === 'pause' ? 'pause' : 'cancel';
 
 /** The choice as a suspend's event keeps it, with the statement confirmed. */
 export const choiceDetails = (choice: PendingChoice) =>
@@ -64,29 +114,55 @@ export const SUSPENDS = {
   supplier: { type: SUPPLIERS.subject, action: 'supplier.suspend' },
 } as const satisfies Record<Pausable, { type: string; action: string }>;
 
+/** Where a pause's choice is kept: the newest of `actions` about an object of `type`. */
+interface PauseEvents {
+  readonly type: string;
+  readonly actions: readonly string[];
+}
+
+const suspends = (which: Pausable): PauseEvents => ({ type: SUSPENDS[which].type, actions: [SUSPENDS[which].action] });
+
 /**
- * Of those SUSPENDED (each with its ID), the ones whose suspension in force
- * paused its requests, read from the log, each event believed only whole.
- * Throws for a history that can't be believed (its alarm already raised).
+ * For each status a pause may hold each in (as voidCauses has it), the
+ * events whose newest holds the pause in force: its suspends; a supplier
+ * UNVERIFIED, its unverifying moves, an unverify or a reactivation (which
+ * names no choice, so cancels).
+ */
+export const PAUSE_EVENTS: Readonly<Record<Pausable, Readonly<Record<string, PauseEvents>>>> = {
+  agent: { SUSPENDED: suspends('agent') },
+  mandate: { SUSPENDED: suspends('mandate') },
+  source: { SUSPENDED: suspends('source') },
+  supplier: {
+    SUSPENDED: suspends('supplier'),
+    UNVERIFIED: { type: SUPPLIERS.subject, actions: ['supplier.unverify', 'supplier.reactivate'] },
+  },
+};
+
+/**
+ * Of those stopped (each with its ID and status), the ones whose stop in
+ * force paused its requests (PAUSE_EVENTS), read from the log, each event
+ * believed only whole. Throws for a history that can't be believed (its
+ * alarm already raised).
  */
 export async function pausedOf(
   tx: AuditTransaction,
   states: SignedStates,
   orgId: string,
-  suspended: readonly (readonly [Pausable, string])[],
+  stopped: readonly (readonly [Pausable, string, string])[],
 ): Promise<ReadonlySet<Pausable>> {
   const paused = new Set<Pausable>();
-  for (const [which, id] of suspended) {
-    const { type, action } = SUSPENDS[which];
+  for (const [which, id, status] of stopped) {
+    const events = PAUSE_EVENTS[which][status];
+    if (events === undefined) continue;
     const history = await states.historyOf(tx, orgId, {
-      subjectTypes: [type],
+      subjectTypes: [events.type],
       subjectId: id,
-      actions: [action],
+      actions: events.actions,
       limit: 1,
       newest: true,
     });
     if (history.outcome !== 'read') throw new Error(`A suspension's history can't be believed: ${id}`);
-    if (history.events.at(-1)?.event.details.pendingRequests === 'pause') paused.add(which);
+    if (choiceIn(history.events.at(-1)?.event.details) === 'pause') paused.add(which);
   }
   return paused;
 }
@@ -109,7 +185,7 @@ export async function chosenAgain(
   actor: AuditActor,
 ): Promise<'as_is' | 'refused'> {
   const { which, table, key, state } = subject;
-  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id]])).has(which);
+  const paused = (await pausedOf(tx, states, key.orgId, [[which, key.id, 'SUSPENDED']])).has(which);
   if (!paused) return choice === 'cancel' ? 'as_is' : 'refused';
   if (choice === 'cancel') {
     await states.record(

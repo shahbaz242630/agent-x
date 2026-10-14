@@ -57,6 +57,7 @@
 // can't be verified. The use cases are supplier-registry.ts,
 // supplier-changes.ts and supplier-payees.ts.
 import type { PayeeDetails } from '@agentx/core/modules/providers';
+import type { PendingChoice } from '@agentx/core/modules/spend-requests';
 import { visibleName } from '@agentx/core/shared-kernel';
 import {
   CALL_NOTE_MOST,
@@ -92,7 +93,7 @@ import {
   STEP_UP_SIGNED_IN,
   stepUpAsked,
 } from './route-schemas.ts';
-import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
+import { PAYEE_PENDING_REQUESTS, SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 import {
   REACTIVATE_CONFIRM_OPERATION,
   REACTIVATE_OPERATION,
@@ -445,8 +446,9 @@ const REGISTRATION = z
 /**
  * The most a pass-through's body may be: a name as an add's (at most 800
  * UTF-16 units sent decomposed, each a 6-byte escape) and an IBAN of at most
- * 64 ASCII characters, each escaped too, with room to spare. Fastify refuses
- * a body past it before the schema is read (the B8-3 lesson).
+ * 64 ASCII characters, each escaped too, and the admin's choice (decision 8),
+ * with room to spare. Fastify refuses a body past it before the schema is
+ * read (the B8-3 lesson).
  */
 const PASS_THROUGH_BODY_LIMIT = 6144;
 
@@ -468,17 +470,19 @@ const PASSED = z
       .string()
       .max(64)
       .describe('The account’s UAE IBAN, spaces allowed: passed to the payment partner, never kept or logged.'),
+    pendingRequests: PAYEE_PENDING_REQUESTS,
   })
-  .transform((body, context): PayeeDetails => {
+  .transform((body, context): { readonly payee: PayeeDetails; readonly pendingRequests: PendingChoice } => {
     const name = visibleName(body.name, SUPPLIER_NAME_MOST);
     const iban = ibanOrNull(body.iban);
     // The messages never name what was sent.
     const problems =
       iban === null ? [...name.problems, 'The IBAN must be a UAE IBAN with valid check digits.'] : name.problems;
     for (const message of problems) context.addIssue({ code: 'custom', message });
-    return iban === null || problems.length > 0 ? z.NEVER : { name: name.name, iban };
+    if (iban === null || problems.length > 0) return z.NEVER;
+    return { payee: { name: name.name, iban }, pendingRequests: body.pendingRequests };
   })
-  .describe('The supplier’s bank details, for the partner alone.');
+  .describe('The supplier’s bank details, for the partner alone, and the admin’s choice for its pending requests.');
 
 const PAYEE_PASS_THROUGH_SCHEMA = {
   summary: 'Register a supplier’s bank details with the payment partner, passed through within this request',
@@ -487,10 +491,15 @@ const PAYEE_PASS_THROUGH_SCHEMA = {
   response: { 201: REGISTRATION.describe('The registration, as the partner answered it.') },
 };
 
+/** A start's body: the admin's choice for the supplier's pending requests alone (decision 8). */
+const PAYEE_START_BODY = z
+  .strictObject({ pendingRequests: PAYEE_PENDING_REQUESTS })
+  .describe('The admin’s choice for the supplier’s pending requests.');
+
 const PAYEE_START_SCHEMA = {
   summary: 'Start registering a supplier’s bank details with the payment partner, through its own form',
   params: SUPPLIER_ID,
-  body: NOTHING,
+  body: PAYEE_START_BODY,
   response: { 201: REGISTRATION.describe('The registration, started, with the partner’s form.') },
 };
 
@@ -683,7 +692,7 @@ export function registerSuppliers(
     '/v1/suppliers/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: SUSPEND_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {
@@ -782,7 +791,7 @@ export function registerSuppliers(
     '/v1/suppliers/:id/payee-registrations',
     {
       schema: PAYEE_START_SCHEMA,
-      bodyLimit: NOTHING_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...REGISTERING_ROLES], operation: PAYEE_START_OPERATION },
     },
     async (request, reply) => {
@@ -791,6 +800,7 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
+        request.body.pendingRequests,
         request.id,
       );
       return answerPayee(written, request, reply);
@@ -810,7 +820,8 @@ export function registerSuppliers(
         member,
         idempotentRequest(request, member.orgId),
         request.params.id,
-        request.body,
+        request.body.payee,
+        request.body.pendingRequests,
         request.id,
       );
       return answerPayee(written, request, reply);

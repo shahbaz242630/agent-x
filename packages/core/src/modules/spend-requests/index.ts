@@ -67,6 +67,7 @@ export {
 export {
   type AuthorityNow,
   isPendingChoice,
+  PAUSED_IN,
   type Pausable,
   PENDING_CHOICES,
   PENDING_STATUSES,

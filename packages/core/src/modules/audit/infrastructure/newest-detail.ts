@@ -1,5 +1,5 @@
-// One detail of an object's newest event of one action, as a query's
-// expression, unverified (Phase 3 C2a): a candidate's filter alone, never a
+// One detail of an object's newest event of the actions named, as a query's
+// expression, unverified (Phase 3 C2a, C3b): a candidate's filter alone, never a
 // decision. A caller believes what it then acts on only through the
 // verified read (SignedStates.historyOf, `newest`). 0005's
 // `events_by_subject` index finds the object's events newest first. The
@@ -8,7 +8,7 @@
 import { type RawBuilder, sql } from 'kysely';
 
 /**
- * The text of `key` in the details of the newest `action` event about the
+ * The text of `key` in the details of the newest event of `actions` about the
  * object of `type` whose ID is the column `idColumn`, in the organisation
  * the column `orgColumn` names; null for none.
  */
@@ -16,16 +16,16 @@ export const newestDetail = ({
   type,
   idColumn,
   orgColumn,
-  action,
+  actions,
   key,
 }: {
   readonly type: string;
   readonly idColumn: string;
   readonly orgColumn: string;
-  readonly action: string;
+  readonly actions: readonly string[];
   readonly key: string;
 }): RawBuilder<string | null> =>
   sql<string | null>`(select (e.details::jsonb) ->> ${key}::text from audit.events e
     where e.org_id = ${sql.ref(orgColumn)} and e.subject_type = ${type} and e.subject_id = ${sql.ref(idColumn)}
-      and e.action = ${action}
+      and e.action = any(${actions}::text[])
     order by e.seq desc limit 1)`;

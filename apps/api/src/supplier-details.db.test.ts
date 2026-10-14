@@ -204,7 +204,7 @@ async function payable(adminPerson: Person): Promise<string> {
   const added = await registry.add(admin, keyed(admin, ADD_OPERATION), DETAILS, CORRELATION);
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
-  const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
+  const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name: HOLDER, iban: ibanOf(JASMINE) });
   const checked = await payees.check(
@@ -384,7 +384,7 @@ describe(`changing a supplier's details, with an admin's passkey (E3-2b, Postgre
 
     expect(await changed(alice, supplierId, DETAILS)).toEqual(refusedWith('SUPPLIER_DETAILS_UNCHANGED', 409));
     expect(await changed(bob, supplierId, NEW_PHONE)).toEqual(refusedWith('FORBIDDEN', 403));
-    const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
+    const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
     if (started.outcome !== 'started') throw new Error('not started');
     await rail.bank.fillForm(org, started.form?.url ?? '', { name: HOLDER, iban: ibanOf(OTHER) });
     await payees.check(admin, keyed(admin, PAYEE_CHECK_OPERATION), supplierId, started.registration.id, CORRELATION);

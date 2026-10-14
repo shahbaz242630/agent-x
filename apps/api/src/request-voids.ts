@@ -5,7 +5,8 @@
 // whose source can't fund, or whose supplier is no longer verified or has
 // new details (voidCauses), a suspension only when it was chosen to cancel
 // (decision 7: one that pauses, or the bank's own, voids nothing; consent the
-// bank ended always does), recorded as the API's with its causes, its
+// bank ended always does), and a supplier's unverify only when its payee
+// registration was chosen to cancel (decision 8), recorded as the API's with its causes, its
 // reservation and order claim released in the same transaction. The brakes
 // void their own requests as they stop (C2); this finds the rest, and any a
 // brake left past its batch.
@@ -20,8 +21,9 @@
 // judged by what those say, and by the suspension in force of each one
 // suspended (pausedOf). A row that only looks stopped is left standing.
 //
-// The candidates leave out a subject suspended with its requests paused, by
-// its newest suspend event read in the query, unverified: a filter alone, so
+// The candidates leave out a subject stopped with its requests paused, by
+// its newest suspend event (a supplier UNVERIFIED: its newest unverifying
+// move, PAUSE_EVENTS) read in the query, unverified: a filter alone, so
 // paused requests aren't judged again every run. An event tampered with to
 // read as a pause hides its requests until the chain's check finds it, as a
 // row tampered back to ACTIVE does; nothing can be approved or handed off
@@ -43,6 +45,7 @@ import type { LimitReservationsTables } from '@agentx/core/modules/limit-reserva
 import { mandateOf, type MandatesTables } from '@agentx/core/modules/mandates';
 import {
   type AuthorityNow,
+  type Pausable,
   PENDING_STATUSES,
   type SpendRequestsTables,
   type Voided,
@@ -55,7 +58,7 @@ import type { KeyProvider } from '@agentx/platform/keys';
 import type { Logger } from '@agentx/platform/observability';
 
 import { eachOrganisation, expireInPages } from './expiry-pages.ts';
-import { pausedOf, SUSPENDS } from './suspensions.ts';
+import { PAUSE_EVENTS, pausedOf } from './suspensions.ts';
 
 /** How often pending requests are looked over, once the last run has ended: a request a brake left is voided within this. */
 export const REQUEST_VOIDS_EVERY_MS = 5 * 60_000;
@@ -73,9 +76,12 @@ type VoidTables = SpendRequestsTables &
   SuppliersTables;
 type VoidTx = DatabaseTransaction<VoidTables>;
 
-/** The newest suspend's choice for the object a candidate's column `idColumn` names, unverified: null for none. */
-const choiceOf = (which: keyof typeof SUSPENDS, idColumn: string) =>
-  newestDetail({ ...SUSPENDS[which], idColumn, orgColumn: 'r.org_id', key: 'pendingRequests' });
+/**
+ * The pause in force's choice (PAUSE_EVENTS) for the object a candidate's
+ * column `idColumn` names, unverified: null for none.
+ */
+const choiceOf = (events: { readonly type: string; readonly actions: readonly string[] }, idColumn: string) =>
+  newestDetail({ ...events, idColumn, orgColumn: 'r.org_id', key: 'pendingRequests' });
 
 /**
  * The IDs of the organisation's pending requests whose rows look stopped, in
@@ -111,20 +117,22 @@ async function stoppedByTheirRows(
     .where('r.status', 'in', PENDING_STATUSES)
     .where((where) => (after === undefined ? where.lit(true) : where('r.id', '>', after)))
     .where((where) => {
-      /** Not `standing`, unless SUSPENDED by a suspension whose newest event, unverified, paused its requests. */
+      /** Not `standing`, unless stopped by a stop (PAUSE_EVENTS) whose newest event, unverified, paused its requests. */
       const looksStopped = (
         status: 'a.status' | 'm.status' | 's.status' | 'p.status',
         standing: string,
-        which: keyof typeof SUSPENDS,
+        which: Pausable,
         idColumn: string,
       ) =>
         where.and([
           where(status, '<>', standing),
-          where.not(
-            where.and([
-              where(status, '=', 'SUSPENDED'),
-              where(where.fn.coalesce(choiceOf(which, idColumn), where.val('cancel')), '=', 'pause'),
-            ]),
+          ...Object.entries(PAUSE_EVENTS[which]).map(([stopped, events]) =>
+            where.not(
+              where.and([
+                where(status, '=', stopped),
+                where(where.fn.coalesce(choiceOf(events, idColumn), where.val('cancel')), '=', 'pause'),
+              ]),
+            ),
           ),
         ]);
       return where.or([
@@ -217,14 +225,14 @@ export function createRequestVoids({
     ) {
       throw new Error(`What a pending request names can't be believed: ${key.id}`);
     }
-    const suspended = (
+    const stopped = (
       [
         ['agent', agent.agent],
         ['mandate', mandate.mandate],
         ['source', source.source],
         ['supplier', supplier.supplier],
       ] as const
-    ).filter(([, { status }]) => status === 'SUSPENDED');
+    ).filter(([which, { status }]) => PAUSE_EVENTS[which][status] !== undefined);
     const authority: AuthorityNow = {
       agentStatus: agent.agent.status,
       mandate: mandate.mandate,
@@ -238,7 +246,7 @@ export function createRequestVoids({
         tx,
         states,
         orgId,
-        suspended.map(([which, { id }]) => [which, id] as const),
+        stopped.map(([which, { id, status }]) => [which, id, status] as const),
       ),
     };
     return voidRequest(tx, states, keys, key, { named, authority }, now);

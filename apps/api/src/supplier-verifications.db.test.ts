@@ -208,7 +208,7 @@ async function payable(
   if (added.outcome !== 'added') throw new Error(`not added: ${JSON.stringify(added)}`);
   const supplierId = added.supplier.id;
   await afterAdd?.(supplierId);
-  const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION);
+  const started = await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION);
   if (started.outcome !== 'started') throw new Error(`not started: ${JSON.stringify(started)}`);
   await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name, iban: ibanOf(account) });
   const checked = await payees.check(

@@ -12,7 +12,10 @@
 // SUSPENDED) pauses, by the same decision: nobody on the team chose it.
 // Consent the bank ended (revoked, expired, consumed or rejected: its
 // availability UNAVAILABLE) or past its end, a revoke, an expiry, a
-// supersede, an ended source and a supplier no longer verified always void.
+// supersede, an ended source and a supplier no longer verified always void,
+// but for one a payee registration unverified with its requests paused, as the
+// registering admin chose (decision 8): its requests stand again once it is
+// verified again, and a new payee made current voids them (a new version).
 //
 // Each cause found is kept with the void, in the order the engine checks
 // them; none and the request stands.
@@ -36,6 +39,14 @@ export const isPendingChoice = (value: unknown): value is PendingChoice =>
 /** What a request's authority is made of, each of which may be suspended with its requests paused. */
 export type Pausable = 'agent' | 'mandate' | 'source' | 'supplier';
 
+/** The statuses each may be stopped in with its requests paused: a supplier unverified by a payee registration too. */
+export const PAUSED_IN = {
+  agent: ['SUSPENDED'],
+  mandate: ['SUSPENDED'],
+  source: ['SUSPENDED'],
+  supplier: ['SUSPENDED', 'UNVERIFIED'],
+} as const satisfies Record<Pausable, readonly string[]>;
+
 /** What a request was decided under, as its signed state names it. */
 export interface DecidedUnder {
   readonly mandateId: string | null;
@@ -50,15 +61,15 @@ export interface AuthorityNow {
   /** Its own status, the bank's word on it (its availability), and whether its consent has run out. */
   readonly source: { readonly status: string; readonly availability: string; readonly consentPast: boolean };
   readonly supplier: { readonly status: string; readonly currentVersionId: string } | null;
-  /** Those suspended with their requests paused, as the suspension in force chose. */
+  /** Those stopped with their requests paused, as the suspension (or a supplier's unverify) in force chose. */
   readonly paused: ReadonlySet<Pausable>;
 }
 
 /** Why the request is void, the engine's order; empty while its authority stands. */
 export function voidCauses(decided: DecidedUnder, now: AuthorityNow): readonly ReasonCode[] {
-  // Stopped: not as it must be, unless suspended with its requests paused.
+  // Stopped: not as it must be, unless stopped with its requests paused.
   const stopped = (status: string, standing: string, which: Pausable) =>
-    status !== standing && !(status === 'SUSPENDED' && now.paused.has(which));
+    status !== standing && !((PAUSED_IN[which] as readonly string[]).includes(status) && now.paused.has(which));
   const causes: ReasonCode[] = [];
   if (stopped(now.agentStatus, 'ACTIVE', 'agent')) causes.push('AGENT_SUSPENDED');
   const { mandate, source, supplier } = now;

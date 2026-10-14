@@ -11207,16 +11207,20 @@
           "content": {
             "application/json": {
               "schema": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "null"
+                "type": "object",
+                "properties": {
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
-                ]
+                },
+                "required": [
+                  "pendingRequests"
+                ],
+                "additionalProperties": false
               }
             }
           }
@@ -11309,11 +11313,19 @@
                   "iban": {
                     "type": "string",
                     "maxLength": 64
+                  },
+                  "pendingRequests": {
+                    "type": "string",
+                    "enum": [
+                      "cancel",
+                      "pause"
+                    ]
                   }
                 },
                 "required": [
                   "name",
-                  "iban"
+                  "iban",
+                  "pendingRequests"
                 ],
                 "additionalProperties": false
               }

@@ -65,7 +65,7 @@ import {
   STEP_UP_CONFIRM,
   stepUpAsked,
 } from './route-schemas.ts';
-import { SUSPEND_BODY, SUSPEND_BODY_LIMIT } from './suspensions.ts';
+import { SUSPEND_BODY, CHOICE_BODY_LIMIT } from './suspensions.ts';
 
 /** Every member may see the organisation's sources. */
 const READING_ROLES = ['admin', 'approver', 'developer', 'viewer'] as const;
@@ -346,7 +346,7 @@ export function registerFundingSources(
     '/v1/funding-sources/:id/suspend',
     {
       schema: SUSPEND_SCHEMA,
-      bodyLimit: SUSPEND_BODY_LIMIT,
+      bodyLimit: CHOICE_BODY_LIMIT,
       config: { access: [...SUSPENDING_ROLES], operation: SUSPEND_OPERATION },
     },
     async (request, reply) => {

@@ -1339,26 +1339,28 @@ describe('a history read whole (recordedEvents; ADR-012 §1, E3-1)', () => {
     expect(await newest(1)).toEqual({ kind: 'broken', seq: 4n });
   });
 
-  it('gives an object’s newest detail of one action to a query, unverified, null for none (newestDetail, C2a)', async () => {
+  it('gives an object’s newest detail of the actions named to a query, unverified, null for none (newestDetail, C2a, C3b)', async () => {
     await record(
       org,
       { ...about('supplier', 1), action: 'supplier.suspend', details: { pendingRequests: 'pause' } },
       { ...about('supplier', 2), action: 'supplier.suspend', details: { pendingRequests: 'cancel' } },
       { ...about('supplier', 3), action: 'supplier.reactivate', details: { pendingRequests: 'pause' } },
     );
-    const detail = (orgId: string, action: string) =>
+    const detail = (orgId: string, ...actions: string[]) =>
       withTenant(app, orgId, (tx) =>
         sql<{ found: string | null }>`select ${newestDetail({
           type: 'supplier',
           idColumn: 'o.id',
           orgColumn: 'o.org_id',
-          action,
+          actions,
           key: 'pendingRequests',
         })} as found from (values (${orgId}::uuid, ${USER}::uuid)) as o (org_id, id)`.execute(tx),
       );
 
     expect((await detail(org, 'supplier.suspend')).rows).toEqual([{ found: 'cancel' }]);
     expect((await detail(org, 'supplier.unknown')).rows).toEqual([{ found: null }]);
+    // The newest of several actions (C3b): the reactivate, after the suspends.
+    expect((await detail(org, 'supplier.suspend', 'supplier.reactivate')).rows).toEqual([{ found: 'pause' }]);
   });
 
   it('is broken at an event edited past the app', async () => {

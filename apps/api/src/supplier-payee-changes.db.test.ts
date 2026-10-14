@@ -162,7 +162,7 @@ const answered = (write: PayeeWrite, outcome: 'started' | 'checked') => {
 /** A registration started by the admin, its form filled in with the account, and checked: the change waiting (E2-2a). */
 async function waiting(admin: SessionMember, supplierId: string, iban = ibanOf(JASMINE)) {
   const started = answered(
-    await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, CORRELATION),
+    await payees.start(admin, keyed(admin, PAYEE_START_OPERATION), supplierId, 'cancel', CORRELATION),
     'started',
   );
   await rail.bank.fillForm(admin.orgId, started.form?.url ?? '', { name: 'Jasmine AI FZ-LLC', iban });

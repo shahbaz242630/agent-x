@@ -203,6 +203,7 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly registrationId?: string;
+      readonly pendingRequests?: string;
     }
   | {
       readonly kind: 'payeePassThrough';
@@ -210,6 +211,7 @@ type Asked =
       readonly keyed: IdempotentRequest;
       readonly supplierId: string;
       readonly payee: object;
+      readonly pendingRequests: string;
     }
   | {
       readonly kind: 'details' | 'detailsConfirm';
@@ -277,16 +279,16 @@ async function withSuppliers(
     },
   };
   const payees: SupplierPayees = {
-    start: (member, keyed, supplierId) => {
-      asked.push({ kind: 'payeeStart', member, keyed, supplierId });
+    start: (member, keyed, supplierId, pendingRequests) => {
+      asked.push({ kind: 'payeeStart', member, keyed, supplierId, pendingRequests });
       return Promise.resolve(answers.payee ?? { outcome: 'busy' });
     },
     check: (member, keyed, supplierId, registrationId) => {
       asked.push({ kind: 'payeeCheck', member, keyed, supplierId, registrationId });
       return Promise.resolve(answers.payee ?? { outcome: 'busy' });
     },
-    passThrough: (member, keyed, supplierId, payee) => {
-      asked.push({ kind: 'payeePassThrough', member, keyed, supplierId, payee });
+    passThrough: (member, keyed, supplierId, payee, pendingRequests) => {
+      asked.push({ kind: 'payeePassThrough', member, keyed, supplierId, payee, pendingRequests });
       return Promise.resolve(answers.payee ?? { outcome: 'busy' });
     },
   };
@@ -629,7 +631,7 @@ describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee th
     const asked: Asked[] = [];
     const app = await withSuppliers({ payee: { outcome: 'started', registration: REGISTRATION, form: FORM } }, asked);
 
-    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`));
+    const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { pendingRequests: 'pause' }));
 
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual(REGISTRATION_ANSWERED);
@@ -639,6 +641,7 @@ describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee th
         member: MEMBER,
         keyed: expect.objectContaining({ operation: 'suppliers.payee.start' }) as unknown,
         supplierId: SUPPLIER_ID,
+        pendingRequests: 'pause',
       },
     ]);
   });
@@ -696,16 +699,21 @@ describe('POST /v1/suppliers/:id/payee-registrations, then …/check: a payee th
     expect(refusal.json()).toMatchObject({ error: { code: 'SUPPLIER_PAYEE_TAKEN' } });
 
     const reused = await withSuppliers({ payee: { outcome: 'conflict' } });
-    expect((await reused.inject(post(`/${SUPPLIER_ID}/payee-registrations`))).json()).toMatchObject({
+    expect(
+      (await reused.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { pendingRequests: 'cancel' }))).json(),
+    ).toMatchObject({
       error: { code: 'IDEMPOTENCY_KEY_REUSED' },
     });
   });
 
-  it('refuses any body, or a registration that isn’t an ID, before the use case runs', async () => {
+  it('refuses a start with no choice or another body, or a registration that isn’t an ID, before the use case runs', async () => {
     const asked: Asked[] = [];
     const app = await withSuppliers({}, asked);
 
-    expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, { iban: 'AE07' }))).statusCode).toBe(400);
+    // Decision 8: the choice has no default.
+    for (const body of [{}, { pendingRequests: 'later' }, { pendingRequests: 'cancel', iban: 'AE07' }]) {
+      expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations`, body))).statusCode).toBe(400);
+    }
     expect((await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/not-an-id/check`))).statusCode).toBe(400);
     expect(asked).toEqual([]);
   });
@@ -728,6 +736,7 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
       post(`/${SUPPLIER_ID}/payee-registrations/pass-through`, {
         name: 'Jasmine AI FZ-LLC',
         iban: iban.toLowerCase().replace(/(.{4})/g, '$1 '),
+        pendingRequests: 'cancel',
       }),
     );
 
@@ -741,6 +750,7 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
         keyed: expect.objectContaining({ operation: 'suppliers.payee.pass-through' }) as unknown,
         supplierId: SUPPLIER_ID,
         payee: { name: 'Jasmine AI FZ-LLC', iban },
+        pendingRequests: 'cancel',
       },
     ]);
   });
@@ -760,7 +770,7 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
 
       const response = await app.inject({
         ...post(`/${SUPPLIER_ID}/payee-registrations/pass-through`),
-        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}"}`,
+        payload: `{"name":"${escaped(name)}","iban":"${escaped(spaced)}","pendingRequests":"${escaped('cancel')}"}`,
       });
 
       expect(response.statusCode).toBe(201);
@@ -774,13 +784,16 @@ describe('POST /v1/suppliers/:id/payee-registrations/pass-through: the details p
     const wrongDigits = `AE08${iban.slice(4)}`;
 
     for (const body of [
-      { name: 'Jasmine AI FZ-LLC', iban: wrongDigits },
-      { name: 'Jasmine AI FZ-LLC', iban: `GB82WEST12345698765432` },
-      { name: '   ', iban },
-      { name: 'Jasmine AI FZ-LLC', iban, also: 'x' },
-      { name: 'Jasmine AI FZ-LLC' },
+      { name: 'Jasmine AI FZ-LLC', iban: wrongDigits, pendingRequests: 'cancel' },
+      { name: 'Jasmine AI FZ-LLC', iban: `GB82WEST12345698765432`, pendingRequests: 'cancel' },
+      { name: '   ', iban, pendingRequests: 'cancel' },
+      { name: 'Jasmine AI FZ-LLC', iban, pendingRequests: 'cancel', also: 'x' },
+      { name: 'Jasmine AI FZ-LLC', pendingRequests: 'cancel' },
       // A valid IBAN, spaced past the 64 its body limit is reckoned on.
-      { name: 'Jasmine AI FZ-LLC', iban: iban.padEnd(65, ' ') },
+      { name: 'Jasmine AI FZ-LLC', iban: iban.padEnd(65, ' '), pendingRequests: 'cancel' },
+      // Decision 8: the choice has no default.
+      { name: 'Jasmine AI FZ-LLC', iban },
+      { name: 'Jasmine AI FZ-LLC', iban, pendingRequests: 'later' },
     ]) {
       const response = await app.inject(post(`/${SUPPLIER_ID}/payee-registrations/pass-through`, body));
       expect(response.statusCode).toBe(400);

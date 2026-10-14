@@ -94,6 +94,7 @@ export {
   recordFailed,
   recordLost,
   recordRegistered,
+  registeredFields,
   type RegistrationCheck,
   registrationOf,
   type RegistrationRecord,
