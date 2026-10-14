@@ -162,14 +162,13 @@ export interface SpendRequestRecord {
 /**
  * What a request was decided against, by the versions its signed state names
  * (Phase 3 B4b): an approval weighs it again and refuses it if any is no
- * longer the one in force. Null for none (no mandate, no policy, or a
- * supplier not the organisation's).
+ * longer the one in force. Null for none (no mandate, or a supplier not the
+ * organisation's). Not the policies: an approval weighs it under them as they
+ * now are.
  */
 export interface DecidedAgainst {
   readonly agentKeyId: string;
   readonly mandateVersionId: string | null;
-  readonly organizationPolicyVersionId: string | null;
-  readonly mandatePolicyVersionId: string | null;
   readonly supplierVersionId: string | null;
 }
 
@@ -182,8 +181,6 @@ export function decidedAgainst(state: VerifiedState): DecidedAgainst {
   return {
     agentKeyId,
     mandateVersionId: field('mandate_version_id'),
-    organizationPolicyVersionId: field('organization_policy_version_id'),
-    mandatePolicyVersionId: field('mandate_policy_version_id'),
     supplierVersionId: field('supplier_version_id'),
   };
 }

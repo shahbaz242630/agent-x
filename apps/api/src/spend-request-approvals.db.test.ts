@@ -8,9 +8,10 @@
 // monthly cap is approved, its own order no duplicate of itself), in the
 // month its capacity is held in (one decided before midnight on the 31st is
 // approved after it, the new month's spending aside). Anything it was decided
-// on changed since (a policy, the mandate superseded or suspended, the
-// supplier's details or status, the source, the agent, its key) is
-// REQUEST_CHANGED (SEC-LIM-10); past its 72 hours REQUEST_EXPIRED, and then
+// on changed since (a policy tightened past it, the mandate superseded or
+// suspended, the supplier's details or status, the source, the agent, its key
+// revoked) is REQUEST_CHANGED (SEC-LIM-10), while routine changes (a looser
+// policy, its key rotated out) leave it approvable; past its 72 hours REQUEST_EXPIRED, and then
 // expired, its holdings released (SEC-LIM-12); a frozen organisation
 // ORG_FROZEN (decision 3). A developer or viewer is FORBIDDEN, and a role
 // raised past the app INTEGRITY_FAILED (SEC-DB-06). Approved twice, rejected
@@ -21,7 +22,7 @@
 // replay. Forced: an approval waiting on a cancel or an expiry holding the
 // request finds it no longer waiting, and one waiting on a mandate's revoke
 // finds it changed (revoke-during-approval).
-import { AGENT_KEYS, AGENTS } from '@agentx/core/modules/agents';
+import { AGENT_KEYS, AGENTS, agentKeyOf, bringKeyExpiryForward } from '@agentx/core/modules/agents';
 import { type SignedStates, withSignedStates } from '@agentx/core/modules/audit';
 import { createStepUpChallenges } from '@agentx/core/modules/identity';
 import { MANDATES, type PolicyRules, setPolicy } from '@agentx/core/modules/mandates';
@@ -135,12 +136,12 @@ const freeze = (w: World) =>
     }),
   );
 
-/** A first policy, the organisation's or the mandate's, set past the use case: a monthly cap of AED 50,000. */
-const policySet = (w: World, mandateId: string | null) => {
+/** A first policy, the organisation's or the mandate's, set past the use case: a monthly cap of `cap` minor units. */
+const policySet = (w: World, mandateId: string | null, cap: bigint) => {
   const rules: PolicyRules = {
     currency: 'AED',
     perOrderCap: null,
-    monthlyCap: AED(5_000_000n),
+    monthlyCap: AED(cap),
     approvalThreshold: null,
     supplierIds: null,
   };
@@ -188,8 +189,9 @@ async function detailsChanged(w: World, supplierId: string) {
 
 /** Each change since a request was decided that makes it another's to approve (SEC-LIM-10). */
 const CHANGES = {
-  'the organisation’s policy set': (w: World) => policySet(w, null),
-  'the mandate’s policy set': (w: World, mandateId: string) => policySet(w, mandateId),
+  // AED 1,000 a month, below the AED 2,000 it asks.
+  'the organisation’s policy tightened past it': (w: World) => policySet(w, null, 100_000n),
+  'the mandate’s policy tightened past it': (w: World, mandateId: string) => policySet(w, mandateId, 100_000n),
   'the mandate superseded': async (w: World, mandateId: string) => {
     const redrafted = await registry.redraft(
       w.admin,
@@ -305,6 +307,9 @@ describe('approving a spend request waiting for approval (B4b)', () => {
         stepUpChallengeId: challengeId,
         signedInAt: clock.now().toISOString(),
         methods: 'pwd user mfa',
+        // The policies it was weighed under: none set in this world.
+        organizationPolicyVersionId: null,
+        mandatePolicyVersionId: null,
       },
     });
     expect(last?.details.changeHash).toMatch(/^[0-9a-f]{64}$/);
@@ -375,6 +380,45 @@ describe('approving a spend request waiting for approval (B4b)', () => {
       expect(await holdingsOf(w, waiting.id)).toEqual({ reservation: 'HELD', released: false });
     },
   );
+
+  it.each([null, 'mandate'] as const)(
+    'approves it under a looser policy set since (%s scope; the organisation’s if null): weighed as it now is',
+    async (scope) => {
+      const { w, acting } = await ready();
+      const waiting = await ask(acting, w);
+      // AED 50,000 a month, past the mandate's own cap.
+      await policySet(w, scope === null ? null : await mandateOf(w), 5_000_000n);
+
+      expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+      // The approval keeps the version it was weighed under, newer than its decision's (none).
+      const details = (await eventsOf(w, waiting.id)).at(-1)?.details;
+      const weighed = scope === null ? details?.organizationPolicyVersionId : details?.mandatePolicyVersionId;
+      expect(weighed).toMatch(/^[0-9a-f-]{36}$/);
+    },
+  );
+
+  it('approves it once the key it asked with is rotated out (expired, not revoked)', async () => {
+    const { w, acting } = await ready();
+    const waiting = await ask(acting, w);
+    // What a rotation's overlap ending leaves: the old key ACTIVE, its expiry passed.
+    await signed(w, async (tx, states) => {
+      const found = await agentKeyOf(tx, states, { orgId: w.org, id: acting.keyId }, 'change');
+      if (found.outcome !== 'found') throw new Error(`not found: ${found.outcome}`);
+      await bringKeyExpiryForward(tx, states, {
+        orgId: w.org,
+        key: found.key,
+        state: found.state,
+        // A key expires after it was made (0027's check): a minute on, then the clock past it.
+        expiresAt: new Date(clock.now().getTime() + 60_000),
+        actor: OPERATOR,
+        action: 'agent_key.rotated',
+        details: {},
+      });
+    });
+    clock.advanceBy(2 * 60_000);
+
+    expect(requestOfAnswer(await approved(w.admin, waiting.id)).status).toBe('APPROVED');
+  });
 
   it('refuses one past its 72 hours as REQUEST_EXPIRED, then expires it, its holdings released (SEC-LIM-12)', async () => {
     const { w, acting } = await ready();

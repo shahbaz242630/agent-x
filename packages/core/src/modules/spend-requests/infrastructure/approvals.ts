@@ -24,6 +24,7 @@ import type { SpendRequestsTables } from './tables.ts';
 /** A person's approval (partner decision 1): who, and the step-up they proved it with. */
 export interface Approval {
   readonly userId: string;
+  /** The step-up's evidence, with the policy versions the API weighed it under. */
   readonly stepUp: AuditDetails;
 }
 
