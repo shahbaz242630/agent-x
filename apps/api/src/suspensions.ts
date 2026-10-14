@@ -228,7 +228,6 @@ export async function payeeCancelOverPause(
   actor: AuditActor,
 ): Promise<boolean> {
   const { key, state, status } = supplier;
-  if (PAUSE_EVENTS.supplier[status] === undefined) return false;
   if (!(await pausedOf(tx, states, key.orgId, [['supplier', key.id, status]])).has('supplier')) return false;
   await states.record(
     tx,
